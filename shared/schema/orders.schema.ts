@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -63,11 +63,14 @@ export type ShipmentStatus = typeof shipmentStatusEnum[number];
 // ORDERS
 // ============================================
 
-export const orders = pgTable("orders", {
+export const wmsSchema = pgSchema("wms");
+
+export const orders = wmsSchema.table("orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // ===== MULTI-CHANNEL LINKAGE =====
   // Links to source raw tables (shopify_orders, ebay_orders, etc.) for full order data
+  omsFulfillmentOrderId: varchar("oms_fulfillment_order_id", { length: 128 }),
   channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
   source: varchar("source", { length: 20 }).notNull().default("shopify"), // shopify, ebay, amazon, etsy, manual, api
   externalOrderId: varchar("external_order_id", { length: 100 }), // External system's order ID
@@ -96,7 +99,7 @@ export const orders = pgTable("orders", {
 
   // ===== WAREHOUSE OPERATIONS =====
   warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }), // Which warehouse fulfills this order
-  priority: varchar("priority", { length: 20 }).notNull().default("normal"), // rush, high, normal
+  priority: integer("priority").notNull().default(100), // Numerical priority: higher is better
   warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
   heldAt: timestamp("held_at"),
@@ -118,8 +121,6 @@ export const orders = pgTable("orders", {
   metadata: jsonb("metadata"), // Extra data from external sources
 
   // ===== DISPLAY (legacy, for order cards) =====
-  totalAmount: text("total_amount"),
-  currency: varchar("currency", { length: 3 }).default("USD"),
   legacyOrderId: varchar("legacy_order_id", { length: 100 }), // Legacy order ID from external systems
 
   // ===== TIMESTAMPS =====
@@ -153,12 +154,13 @@ export type Order = typeof orders.$inferSelect;
 // ORDER ITEMS
 // ============================================
 
-export const orderItems = pgTable("order_items", {
+export const orderItems = wmsSchema.table("order_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
 
   // ===== CHANNEL LINKAGE =====
   // Links to source raw tables for full line item data (pricing, properties, etc.)
+  omsOrderLineId: integer("oms_order_line_id"),
   shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }), // Legacy
   sourceItemId: varchar("source_item_id", { length: 100 }), // ID in source table for JOIN lookups
 
@@ -168,11 +170,6 @@ export const orderItems = pgTable("order_items", {
   name: text("name").notNull(),
   imageUrl: text("image_url"),
   barcode: varchar("barcode", { length: 100 }), // For scanner matching
-
-  // ===== FINANCIALS (from channel) =====
-  priceCents: integer("price_cents"), // Sale price per unit
-  discountCents: integer("discount_cents").default(0), // Per-unit discount
-  totalPriceCents: integer("total_price_cents"), // Line total after discount
 
   // ===== QUANTITIES =====
   quantity: integer("quantity").notNull(),
@@ -200,11 +197,25 @@ export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;
 export type OrderItem = typeof orderItems.$inferSelect;
 
 // ============================================
+// WMS SHADOW TABLES (Namespace wms.*) [ALIASED]
+// ============================================
+
+export const wmsOrders = orders;
+export const insertWmsOrderSchema = insertOrderSchema;
+export type InsertWmsOrder = InsertOrder;
+export type WmsOrder = Order;
+
+export const wmsOrderItems = orderItems;
+export const insertWmsOrderItemSchema = insertOrderItemSchema;
+export type InsertWmsOrderItem = InsertOrderItem;
+export type WmsOrderItem = OrderItem;
+
+// ============================================
 // PICKING LOGS (Audit Trail)
 // ============================================
 
 // Picking logs table for full audit trail
-export const pickingLogs = pgTable("picking_logs", {
+export const pickingLogs = wmsSchema.table("picking_logs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // When
@@ -264,32 +275,7 @@ export const insertPickingLogSchema = createInsertSchema(pickingLogs).omit({
 export type InsertPickingLog = z.infer<typeof insertPickingLogSchema>;
 export type PickingLog = typeof pickingLogs.$inferSelect;
 
-// ============================================
-// FULFILLMENT ROUTING RULES
-// ============================================
 
-// Fulfillment routing rules — determines which warehouse fulfills an order
-// Evaluated by priority (highest first), first match wins
-export const fulfillmentRoutingRules = pgTable("fulfillment_routing_rules", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  channelId: integer("channel_id").references(() => channels.id, { onDelete: "cascade" }), // NULL = applies to all channels
-  matchType: varchar("match_type", { length: 20 }).notNull(), // location_id, sku_prefix, tag, country, default
-  matchValue: varchar("match_value", { length: 255 }), // The value to match against (NULL for 'default' type)
-  warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id, { onDelete: "cascade" }),
-  priority: integer("priority").notNull().default(0), // Higher = evaluated first
-  isActive: integer("is_active").notNull().default(1),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
-
-export const insertFulfillmentRoutingRuleSchema = createInsertSchema(fulfillmentRoutingRules).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-});
-
-export type InsertFulfillmentRoutingRule = z.infer<typeof insertFulfillmentRoutingRuleSchema>;
-export type FulfillmentRoutingRule = typeof fulfillmentRoutingRules.$inferSelect;
 
 // ============================================
 // COMBINED ORDER GROUPS
@@ -340,7 +326,7 @@ export type CombinedOrderGroup = typeof combinedOrderGroups.$inferSelect;
 // ============================================
 
 // Shipments - tracks fulfillment from warehouse through carrier delivery
-export const outboundShipments = pgTable("outbound_shipments", {
+export const outboundShipments = wmsSchema.table("outbound_shipments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   orderId: integer("order_id").references(() => orders.id),
   channelId: integer("channel_id").references(() => channels.id),
@@ -372,13 +358,16 @@ export type InsertOutboundShipment = z.infer<typeof insertOutboundShipmentSchema
 export type OutboundShipment = typeof outboundShipments.$inferSelect;
 
 // Shipment items - individual items within a shipment
-export const outboundShipmentItems = pgTable("outbound_shipment_items", {
+export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   shipmentId: integer("shipment_id").notNull().references(() => outboundShipments.id, { onDelete: "cascade" }),
   orderItemId: integer("order_item_id").references(() => orderItems.id),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   qty: integer("qty").notNull().default(1),
   fromLocationId: integer("from_location_id").references(() => warehouseLocations.id), // which bin it was picked from
+  boxId: varchar("box_id", { length: 100 }), // WMS Cartonization assigned box
+  weightOz: integer("weight_oz"), // Actual picked weight
+  trackingId: varchar("tracking_id", { length: 200 }), // Package tracking num if split into multiple tracking nums
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -390,59 +379,4 @@ export const insertOutboundShipmentItemSchema = createInsertSchema(outboundShipm
 export type InsertOutboundShipmentItem = z.infer<typeof insertOutboundShipmentItemSchema>;
 export type OutboundShipmentItem = typeof outboundShipmentItems.$inferSelect;
 
-// ============================================================================
-// ORDER ITEM COSTS — COGS per shipment (Phase 6, schema defined now)
-// ============================================================================
 
-export const orderItemCosts = pgTable("order_item_costs", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
-  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
-  inventoryLotId: integer("inventory_lot_id").notNull(), // FK to inventory_lots (cross-domain, enforced at DB level)
-  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
-  qty: integer("qty").notNull(), // Units from this lot
-  unitCostCents: doublePrecision("unit_cost_cents").notNull(), // From lot
-  totalCostCents: doublePrecision("total_cost_cents").notNull(), // qty * unit_cost
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
-
-export const insertOrderItemCostSchema = createInsertSchema(orderItemCosts).omit({
-  id: true,
-  createdAt: true,
-});
-
-export type InsertOrderItemCost = z.infer<typeof insertOrderItemCostSchema>;
-export type OrderItemCost = typeof orderItemCosts.$inferSelect;
-
-// ============================================================================
-// ORDER ITEM FINANCIALS — Contribution profit per shipped line item (Phase 7)
-// ============================================================================
-
-export const orderItemFinancials = pgTable("order_item_financials", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
-  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
-  productId: integer("product_id").references(() => products.id, { onDelete: "set null" }),
-  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
-  sku: varchar("sku", { length: 100 }), // Cached for fast queries
-  productName: text("product_name"), // Cached
-  qtyShipped: integer("qty_shipped").notNull(),
-  revenueCents: bigint("revenue_cents", { mode: "number" }).notNull(), // From order_items.total_price_cents
-  cogsCents: bigint("cogs_cents", { mode: "number" }).notNull(), // From SUM(order_item_costs.total_cost_cents)
-  grossProfitCents: bigint("gross_profit_cents", { mode: "number" }).notNull(), // revenue - cogs
-  marginPercent: numeric("margin_percent", { precision: 5, scale: 2 }), // (profit / revenue) * 100
-  avgSellingPriceCents: doublePrecision("avg_selling_price_cents"), // revenue / qty
-  avgUnitCostCents: doublePrecision("avg_unit_cost_cents"), // cogs / qty
-  vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }), // Which vendor supplied (from lot's PO)
-  channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
-  shippedAt: timestamp("shipped_at").notNull(), // When fulfilled
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
-
-export const insertOrderItemFinancialSchema = createInsertSchema(orderItemFinancials).omit({
-  id: true,
-  createdAt: true,
-});
-
-export type InsertOrderItemFinancial = z.infer<typeof insertOrderItemFinancialSchema>;
-export type OrderItemFinancial = typeof orderItemFinancials.$inferSelect;

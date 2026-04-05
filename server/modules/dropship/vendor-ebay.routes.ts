@@ -457,7 +457,7 @@ export function registerVendorEbayRoutes(app: Express): void {
             // Fetch product data from Card Shellz catalog
             const prodResult = await client.query(
               `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id
-               FROM products WHERE id = $1 AND is_active = true`,
+               FROM catalog.products WHERE id = $1 AND is_active = true`,
               [productId],
             );
             if (prodResult.rows.length === 0) {
@@ -480,7 +480,7 @@ export function registerVendorEbayRoutes(app: Express): void {
 
             // Fetch images
             const imgResult = await client.query(
-              `SELECT url FROM product_assets WHERE product_id = $1 ORDER BY position ASC`,
+              `SELECT url FROM catalog.product_assets WHERE product_id = $1 ORDER BY position ASC`,
               [productId],
             );
             const imageUrls = imgResult.rows

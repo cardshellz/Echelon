@@ -14,10 +14,10 @@
 
 import { createHmac } from "crypto";
 import type { Express, Request, Response } from "express";
-import { sql, eq, and } from "drizzle-orm";
+import { sql, eq, and, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import type { InsertOrderItem } from "@shared/schema";
-import { omsOrders, omsOrderLines, omsOrderEvents, productVariants } from "@shared/schema";
+import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections } from "@shared/schema";
 import { db } from "../../db";
 import { ordersStorage } from "../orders";
 import { warehouseStorage } from "../warehouse";
@@ -29,7 +29,6 @@ import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 // Constants
 // ---------------------------------------------------------------------------
 
-const SHOPIFY_US_CHANNEL_ID = 36;
 const LOG_PREFIX = "[OMS Shopify Webhook]";
 
 // ---------------------------------------------------------------------------
@@ -107,6 +106,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     totalCents: item.totalCents,
     taxCents: 0, // Tax handled at order level
     discountCents: item.discountCents,
+    requiresShipping: item.requiresShipping,
   }));
 
   // Financial status
@@ -145,6 +145,8 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     shipToState: shipping.province_code || shipping.province,
     shipToZip: shipping.zip,
     shipToCountry: shipping.country_code || shipping.country,
+    shippingMethod: shopifyOrder.shipping_lines?.[0]?.title || null,
+    shippingMethodCode: shopifyOrder.shipping_lines?.[0]?.code || null,
     subtotalCents: dollarsToCents(shopifyOrder.subtotal_price),
     shippingCents: (shopifyOrder.shipping_lines || []).reduce(
       (sum: number, s: any) => sum + dollarsToCents(s.price), 0
@@ -166,6 +168,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
 // ---------------------------------------------------------------------------
 
 async function createWmsOrderFromShopify(
+  channelId: number,
   omsOrderId: number,
   orderData: OrderData,
   shopifyOrder: any,
@@ -176,7 +179,7 @@ async function createWmsOrderFromShopify(
 
   // Dedup: check if WMS order already exists for this OMS order
   const existing = await db.execute<{ id: number }>(sql`
-    SELECT id FROM orders
+    SELECT id FROM wms.orders
     WHERE source = 'shopify' AND source_table_id = ${omsIdStr}
     LIMIT 1
   `);
@@ -186,7 +189,7 @@ async function createWmsOrderFromShopify(
 
   // Also check by Shopify GID (in case old flow already created it)
   const existingByGid = await db.execute<{ id: number }>(sql`
-    SELECT id FROM orders
+    SELECT id FROM wms.orders
     WHERE source = 'shopify' AND (
       source_table_id = ${shopifyGid}
       OR shopify_order_id = ${shopifyGid}
@@ -231,6 +234,9 @@ async function createWmsOrderFromShopify(
       }
     }
 
+    // Propagate requiresShipping from Shopify (false = donation/membership/digital)
+    const itemRequiresShipping = line.requiresShipping !== false;
+
     enrichedItems.push({
       orderId: 0, // Set by createOrderWithItems
       sourceItemId: line.externalLineItemId || null,
@@ -239,23 +245,23 @@ async function createWmsOrderFromShopify(
       quantity: line.quantity,
       pickedQuantity: 0,
       fulfilledQuantity: 0,
-      status: "pending",
+      status: itemRequiresShipping ? "pending" : "completed",
       location: binLocation?.location || "UNASSIGNED",
       zone: binLocation?.zone || "U",
       imageUrl,
       barcode: binLocation?.barcode || null,
-      requiresShipping: 1,
-      priceCents: line.unitPriceCents ?? null,
-      discountCents: line.discountCents ? Math.round((line.discountCents || 0) / line.quantity) : 0,
-      totalPriceCents: line.totalCents ?? null,
+      requiresShipping: itemRequiresShipping ? 1 : 0,
     });
   }
 
   const totalUnits = enrichedItems.reduce((sum, item) => sum + item.quantity, 0);
   const orderNumber = orderData.externalOrderNumber || String(shopifyOrder.order_number);
 
+  // Check if any item requires shipping
+  const hasShippableItems = enrichedItems.some(item => item.requiresShipping === 1);
+
   const newOrder = await ordersStorage.createOrderWithItems({
-    channelId: SHOPIFY_US_CHANNEL_ID,
+    channelId,
     source: "shopify",
     externalOrderId: shopifyGid,
     sourceTableId: omsIdStr,
@@ -269,12 +275,10 @@ async function createWmsOrderFromShopify(
     shippingPostalCode: orderData.shipToZip || null,
     shippingCountry: orderData.shipToCountry || null,
     financialStatus: orderData.financialStatus || "paid",
-    priority: "normal",
-    warehouseStatus: "ready",
+    priority: 50,
+    warehouseStatus: hasShippableItems ? "ready" : "completed", // Non-shippable orders skip pick queue
     itemCount: enrichedItems.length,
     unitCount: totalUnits,
-    totalAmount: orderData.totalCents ? String(orderData.totalCents / 100) : null,
-    currency: orderData.currency || "USD",
     orderPlacedAt: orderData.orderedAt || new Date(),
   }, enrichedItems);
 
@@ -284,7 +288,7 @@ async function createWmsOrderFromShopify(
   if (wmsServices) {
     try {
       const routingCtx = {
-        channelId: SHOPIFY_US_CHANNEL_ID,
+        channelId,
         skus: enrichedItems.map(i => i.sku).filter(s => s !== "UNKNOWN"),
         country: orderData.shipToCountry,
       };
@@ -341,11 +345,11 @@ export function registerOmsWebhooks(
     }
 
     // TEMP: Bypass HMAC to restore order flow while debugging
-    if (false && !verifyShopifyHmac(rawBody, hmac)) {
+    if (false && rawBody && !verifyShopifyHmac(rawBody as Buffer, hmac)) {
       const crypto = require("crypto");
       const s = process.env.SHOPIFY_API_SECRET || "";
-      const computed = crypto.createHmac("sha256", s).update(rawBody).digest("base64");
-      console.warn(`${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${rawBody.length} rawBody_type=${typeof rawBody} is_buffer=${Buffer.isBuffer(rawBody)}`);
+      const computed = crypto.createHmac("sha256", s).update(rawBody as Buffer).digest("base64");
+      console.warn(`${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${(rawBody as Buffer).length} rawBody_type=${typeof rawBody} is_buffer=${Buffer.isBuffer(rawBody)}`);
       console.warn(`${LOG_PREFIX} HMAC verification failed`);
       res.status(401).send("Unauthorized");
       return null;
@@ -371,6 +375,20 @@ export function registerOmsWebhooks(
     return String(shopifyOrder.admin_graphql_api_id || shopifyOrder.id);
   }
 
+  // Helper: Get dynamic Channel ID
+  async function getChannelId(req: Request, shopifyOrder?: any): Promise<number | null> {
+    const domain = (req.headers["x-shopify-shop-domain"] as string) || (shopifyOrder && shopifyOrder.shop_domain) || "";
+    if (!domain) return null;
+
+    const [conn] = await db
+      .select({ channelId: channelConnections.channelId })
+      .from(channelConnections)
+      .where(ilike(channelConnections.shopDomain, `%${domain}%`))
+      .limit(1);
+
+    return conn ? conn.channelId : null;
+  }
+
   // =========================================================================
   // 1. POST /api/oms/webhooks/orders/paid
   // =========================================================================
@@ -385,9 +403,12 @@ export function registerOmsWebhooks(
     console.log(`${LOG_PREFIX} orders/paid → ${shopifyOrder.name || externalOrderId}`);
 
     try {
+      const channelId = await getChannelId(req, shopifyOrder);
+      if (!channelId) throw new Error("Unknown Shopify channel domain");
+
       // Dedup: check OMS first
       const orderData = mapShopifyOrderToOrderData(shopifyOrder);
-      const omsOrder = await omsService.ingestOrder(SHOPIFY_US_CHANNEL_ID, externalOrderId, orderData);
+      const omsOrder = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
       // Check if newly created (within last 5 seconds)
       const isNew = omsOrder.createdAt && (Date.now() - new Date(omsOrder.createdAt).getTime()) < 5000;
@@ -412,7 +433,7 @@ export function registerOmsWebhooks(
       } else {
         console.warn(`${LOG_PREFIX} WMS sync service not available, falling back to direct write`);
         try {
-          await createWmsOrderFromShopify(omsOrder.id, orderData, shopifyOrder, wmsServices);
+          await createWmsOrderFromShopify(channelId, omsOrder.id, orderData, shopifyOrder, wmsServices);
         } catch (e: any) {
           console.error(`${LOG_PREFIX} WMS order creation failed for ${shopifyOrder.name}: ${e.message}`);
         }
@@ -459,13 +480,16 @@ export function registerOmsWebhooks(
     console.log(`${LOG_PREFIX} orders/updated → ${shopifyOrder.name || externalOrderId}`);
 
     try {
+      const channelId = await getChannelId(req, shopifyOrder);
+      if (!channelId) throw new Error("Unknown Shopify channel domain");
+
       // Find existing OMS order
       const [existing] = await db
         .select()
         .from(omsOrders)
         .where(
           and(
-            eq(omsOrders.channelId, SHOPIFY_US_CHANNEL_ID),
+            eq(omsOrders.channelId, channelId),
             eq(omsOrders.externalOrderId, externalOrderId),
           ),
         )
@@ -539,10 +563,6 @@ export function registerOmsWebhooks(
                 sku: item.sku || existingLine.sku,
                 title: item.title || existingLine.title,
                 quantity: item.quantity ?? existingLine.quantity,
-                paidPriceCents: dollarsToCents(item.price),
-                totalPriceCents:
-                  dollarsToCents(item.price) * (item.quantity || 1) -
-                  (item.total_discount ? dollarsToCents(item.total_discount) : 0),
                 totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
                 productVariantId: productVariantId || existingLine.productVariantId,
               })
@@ -557,10 +577,6 @@ export function registerOmsWebhooks(
               title: item.title,
               variantTitle: item.variant_title,
               quantity: item.quantity || 1,
-              paidPriceCents: dollarsToCents(item.price),
-              totalPriceCents:
-                dollarsToCents(item.price) * (item.quantity || 1) -
-                (item.total_discount ? dollarsToCents(item.total_discount) : 0),
               totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
             });
           }
@@ -568,14 +584,14 @@ export function registerOmsWebhooks(
 
         // Update WMS order items if they exist
         const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+          SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
           LIMIT 1
         `);
         if (wmsOrder.rows.length > 0) {
           const wmsOrderId = wmsOrder.rows[0].id;
           // Update WMS order shipping address
           await db.execute(sql`
-            UPDATE orders SET
+            UPDATE wms.orders SET
               shipping_name = ${shipping.name || null},
               shipping_address = ${shipping.address1 || null},
               shipping_city = ${shipping.city || null},
@@ -621,12 +637,15 @@ export function registerOmsWebhooks(
     console.log(`${LOG_PREFIX} orders/cancelled → ${shopifyOrder.name || externalOrderId}`);
 
     try {
+      const channelId = await getChannelId(req, shopifyOrder);
+      if (!channelId) throw new Error("Unknown Shopify channel domain");
+
       const [existing] = await db
         .select()
         .from(omsOrders)
         .where(
           and(
-            eq(omsOrders.channelId, SHOPIFY_US_CHANNEL_ID),
+            eq(omsOrders.channelId, channelId),
             eq(omsOrders.externalOrderId, externalOrderId),
           ),
         )
@@ -659,7 +678,7 @@ export function registerOmsWebhooks(
       if (wmsServices) {
         // Find WMS order
         const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+          SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
           LIMIT 1
         `);
         if (wmsOrder.rows.length > 0) {
@@ -673,10 +692,10 @@ export function registerOmsWebhooks(
 
           // Update WMS order status
           await db.execute(sql`
-            UPDATE orders SET
-              warehouse_status = 'cancelled',
+            UPDATE wms.orders SET
+              warehouse_status = 'cancelled', 
               cancelled_at = ${now}
-            WHERE id = ${wmsOrderId} AND warehouse_status NOT IN ('shipped', 'cancelled')
+            WHERE id = ${wmsOrderId} AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
           `);
         }
       }
@@ -712,12 +731,15 @@ export function registerOmsWebhooks(
     console.log(`${LOG_PREFIX} orders/fulfilled → ${shopifyOrder.name || externalOrderId}`);
 
     try {
+      const channelId = await getChannelId(req, shopifyOrder);
+      if (!channelId) throw new Error("Unknown Shopify channel domain");
+
       const [existing] = await db
         .select()
         .from(omsOrders)
         .where(
           and(
-            eq(omsOrders.channelId, SHOPIFY_US_CHANNEL_ID),
+            eq(omsOrders.channelId, channelId),
             eq(omsOrders.externalOrderId, externalOrderId),
           ),
         )
@@ -761,13 +783,13 @@ export function registerOmsWebhooks(
 
       // Update WMS order tracking
       const wmsOrder = await db.execute<{ id: number }>(sql`
-        SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+        SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
         LIMIT 1
       `);
       if (wmsOrder.rows.length > 0) {
         // If WMS order isn't shipped yet, transition it
         await db.execute(sql`
-          UPDATE orders SET
+          UPDATE wms.orders SET
             warehouse_status = CASE
               WHEN warehouse_status NOT IN ('shipped', 'cancelled') THEN 'shipped'
               ELSE warehouse_status
@@ -810,13 +832,16 @@ export function registerOmsWebhooks(
     console.log(`${LOG_PREFIX} refunds/create → order ${shopifyOrderId}`);
 
     try {
+      const channelId = await getChannelId(req, refundPayload);
+      if (!channelId) throw new Error("Unknown Shopify channel domain");
+
       // Find OMS order — try GID first, then numeric ID
       let existing = await db
         .select()
         .from(omsOrders)
         .where(
           and(
-            eq(omsOrders.channelId, SHOPIFY_US_CHANNEL_ID),
+            eq(omsOrders.channelId, channelId),
             eq(omsOrders.externalOrderId, shopifyOrderGid),
           ),
         )
@@ -829,7 +854,7 @@ export function registerOmsWebhooks(
           .from(omsOrders)
           .where(
             and(
-              eq(omsOrders.channelId, SHOPIFY_US_CHANNEL_ID),
+              eq(omsOrders.channelId, channelId),
               eq(omsOrders.externalOrderId, String(shopifyOrderId)),
             ),
           )
@@ -873,7 +898,7 @@ export function registerOmsWebhooks(
         if (restockItems.length > 0) {
           // Find WMS order
           const wmsOrder = await db.execute<{ id: number }>(sql`
-            SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+            SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
             LIMIT 1
           `);
 

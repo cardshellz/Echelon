@@ -139,7 +139,7 @@ export function AspectEditor({
       for (const [name, value] of Object.entries(localValues)) {
         if (!value) continue;
         const aspect = aspects.find((a) => a.name === name);
-        if (aspect?.mode === "SELECTION_ONLY" && aspect.values?.length > 0) {
+        if (aspect?.mode === "SELECTION_ONLY" && aspect.values && aspect.values.length > 0) {
           if (!aspect.values.includes(value)) {
             invalid.push(`"${name}" value "${value}" is not allowed for this category`);
           }

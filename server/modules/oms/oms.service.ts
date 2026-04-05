@@ -32,12 +32,15 @@ export interface OrderData {
   shipToState?: string;
   shipToZip?: string;
   shipToCountry?: string;
+  shippingMethod?: string | null;
+  shippingMethodCode?: string | null;
   subtotalCents?: number;
   shippingCents?: number;
   taxCents?: number;
   discountCents?: number;
   totalCents?: number;
   currency?: string;
+  taxExempt?: boolean;
   rawPayload?: unknown;
   notes?: string;
   tags?: string[];
@@ -48,14 +51,24 @@ export interface OrderData {
 export interface LineItemData {
   externalLineItemId?: string;
   externalProductId?: string | null;
-  sku?: string;
+  sku?: string | null;
   title?: string;
-  variantTitle?: string;
+  variantTitle?: string | null;
   quantity: number;
   paidPriceCents?: number;
   totalCents?: number;
   taxCents?: number;
   discountCents?: number;
+  planDiscountCents?: number;
+  couponDiscountCents?: number;
+  taxable?: boolean;
+  requiresShipping?: boolean;
+  fulfillableQuantity?: number | null;
+  fulfillmentService?: string | null;
+  properties?: any | null;
+  compareAtPriceCents?: number | null;
+  taxLines?: any | null;
+  discountAllocations?: any | null;
 }
 
 export interface OmsOrderWithLines extends OmsOrder {
@@ -102,14 +115,18 @@ export function createOmsService(db: any, reservationService?: any) {
       if (existingLines.length === 0 && data.lineItems.length > 0) {
         for (const item of data.lineItems) {
           let productVariantId: number | null = null;
+          let variantCompareAtPrice = null;
 
           if (item.sku) {
             const [variant] = await db
-              .select({ id: productVariants.id })
+              .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
               .from(productVariants)
               .where(eq(productVariants.sku, item.sku.toUpperCase()))
               .limit(1);
-            if (variant) productVariantId = variant.id;
+            if (variant) {
+              productVariantId = variant.id;
+              variantCompareAtPrice = variant.compareAtPriceCents;
+            }
           }
 
           await db.insert(omsOrderLines).values({
@@ -124,6 +141,16 @@ export function createOmsService(db: any, reservationService?: any) {
             paidPriceCents: item.paidPriceCents || 0,
             totalPriceCents: item.totalCents || 0,
             totalDiscountCents: item.discountCents || 0,
+            planDiscountCents: item.planDiscountCents || 0,
+            couponDiscountCents: item.couponDiscountCents || 0,
+            taxable: item.taxable ?? true,
+            requiresShipping: item.requiresShipping ?? true,
+            fulfillableQuantity: item.fulfillableQuantity ?? null,
+            fulfillmentService: item.fulfillmentService ?? null,
+            properties: item.properties ?? null,
+            compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,            
+            taxLines: item.taxLines ?? null,
+            discountAllocations: item.discountAllocations ?? null,
             orderNumber: data.externalOrderNumber || null,
           } satisfies InsertOmsOrderLine);
         }
@@ -159,9 +186,12 @@ export function createOmsService(db: any, reservationService?: any) {
         discountCents: data.discountCents || 0,
         totalCents: data.totalCents || 0,
         currency: data.currency || "USD",
+        taxExempt: data.taxExempt || false,
         rawPayload: data.rawPayload as any,
         notes: data.notes,
         tags: data.tags ? JSON.stringify(data.tags) : null,
+        shippingMethod: data.shippingMethod || null,
+        shippingMethodCode: data.shippingMethodCode || null,
         orderedAt: data.orderedAt,
       } satisfies InsertOmsOrder)
       .returning();
@@ -169,14 +199,18 @@ export function createOmsService(db: any, reservationService?: any) {
     // Insert line items with SKU → product_variant lookup
     for (const item of data.lineItems) {
       let productVariantId: number | null = null;
+      let variantCompareAtPrice = null;
 
       if (item.sku) {
         const [variant] = await db
-          .select({ id: productVariants.id })
+          .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
           .from(productVariants)
           .where(eq(productVariants.sku, item.sku.toUpperCase()))
           .limit(1);
-        if (variant) productVariantId = variant.id;
+        if (variant) {
+          productVariantId = variant.id;
+          variantCompareAtPrice = variant.compareAtPriceCents;
+        }
       }
 
       await db.insert(omsOrderLines).values({
@@ -191,6 +225,16 @@ export function createOmsService(db: any, reservationService?: any) {
         paidPriceCents: item.paidPriceCents || 0,
         totalPriceCents: item.totalCents || 0,
         totalDiscountCents: item.discountCents || 0,
+        planDiscountCents: item.planDiscountCents || 0,
+        couponDiscountCents: item.couponDiscountCents || 0,
+        taxable: item.taxable ?? true,
+        requiresShipping: item.requiresShipping ?? true,
+        fulfillableQuantity: item.fulfillableQuantity ?? null,
+        fulfillmentService: item.fulfillmentService ?? null,
+        properties: item.properties ?? null,
+        compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,            
+        taxLines: item.taxLines ?? null,
+        discountAllocations: item.discountAllocations ?? null,
         orderNumber: data.externalOrderNumber || null,
       } satisfies InsertOmsOrderLine);
     }
@@ -236,10 +280,16 @@ export function createOmsService(db: any, reservationService?: any) {
 
     let reserved = 0;
     const failed: string[] = [];
+    const skipped: string[] = [];
 
     for (const line of lines) {
+      if (!line.requiresShipping) {
+        skipped.push(line.sku || "UNSHIPPABLE");
+        continue;
+      }
+
       if (!line.productVariantId) {
-        failed.push(line.sku || "UNKNOWN");
+        skipped.push(line.sku || "UNMAPPED");
         continue;
       }
 
@@ -288,7 +338,7 @@ export function createOmsService(db: any, reservationService?: any) {
     await db.insert(omsOrderEvents).values({
       orderId,
       eventType: "inventory_reserved",
-      details: { reserved, failed },
+      details: { reserved, failed, skipped },
     });
 
     return { reserved, failed };

@@ -705,10 +705,15 @@ class CatalogBackfillService {
       variantIdMap.set(Number(m.shopifyVariantId), m.echelonVariantId);
     }
 
-    // Delete existing assets and recreate (full refresh)
-    await this.db
-      .delete(productAssets)
-      .where(eq(productAssets.productId, productId));
+    // Safety Check: Do not wipe Echelon's images if they already exist. Echelon is the source of truth.
+    const existingAssets = await this.db.select().from(productAssets).where(eq(productAssets.productId, productId));
+    if (existingAssets.length > 0) {
+      return;
+    }
+
+    if (shopifyProduct.images.length === 0) {
+      return;
+    }
 
     for (const image of shopifyProduct.images) {
       // Determine variant linkage

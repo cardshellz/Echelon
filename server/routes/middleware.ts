@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { hasPermission } from "../modules/identity/rbac";
+import { hasPermission } from "../modules/identity";
 import multer from "multer";
 
 export const upload = multer({ storage: multer.memoryStorage() });

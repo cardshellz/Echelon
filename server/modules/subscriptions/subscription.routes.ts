@@ -1,7 +1,7 @@
 // subscription.routes.ts — Admin API routes for subscription management
 import type { Express, Request, Response } from "express";
-import * as storage from "./subscription.storage";
-import * as service from "./subscription.service";
+import * as storage from "./infrastructure/subscription.repository";
+import * as service from "./application/subscription.use-cases";
 import { createSellingPlanGroup, listSellingPlanGroups, registerSubscriptionWebhooks } from "./selling-plan.service";
 import { processDueBillings } from "./subscription.scheduler";
 
@@ -62,7 +62,7 @@ export function registerSubscriptionRoutes(app: Express): void {
     try {
       const id = parseInt(req.params.id);
       const reason = req.body?.reason || "Admin cancelled";
-      await service.cancelSubscription(id, reason);
+      await service.cancelSubscriptionUseCase(id, reason);
       res.json({ success: true });
     } catch (err: any) {
       console.error("[SubRoutes] Cancel error:", err.message);
@@ -76,7 +76,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       const id = parseInt(req.params.id);
       const newPlanId = req.body?.plan_id;
       if (!newPlanId) return res.status(400).json({ error: "plan_id required" });
-      await service.changePlan(id, newPlanId);
+      await service.changePlanUseCase(id, newPlanId);
       res.json({ success: true });
     } catch (err: any) {
       console.error("[SubRoutes] Change plan error:", err.message);
@@ -88,7 +88,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   app.post("/api/subscriptions/:id/retry-billing", async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
-      const result = await service.retryBilling(id);
+      const result = await service.retryBillingUseCase(id);
       res.json(result);
     } catch (err: any) {
       console.error("[SubRoutes] Retry billing error:", err.message);
@@ -101,7 +101,7 @@ export function registerSubscriptionRoutes(app: Express): void {
     try {
       const id = parseInt(req.params.id);
       const paused = req.body?.paused !== false; // default to true
-      await service.pauseSubscription(id, paused);
+      await service.pauseSubscriptionUseCase(id, paused);
       res.json({ success: true, paused });
     } catch (err: any) {
       console.error("[SubRoutes] Pause error:", err.message);
@@ -124,9 +124,9 @@ export function registerSubscriptionRoutes(app: Express): void {
   app.put("/api/subscriptions/plans/:id", async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
-      const { name, tier, billing_interval, price_cents, includes_dropship, is_active } = req.body;
+      const { name, tier, billing_interval, price_cents, includes_dropship, is_active, priority_modifier } = req.body;
       await storage.updatePlanDetails(id, {
-        name, tier, billing_interval, price_cents, includes_dropship, is_active,
+        name, tier, billing_interval, price_cents, includes_dropship, is_active, priority_modifier,
       });
       res.json({ success: true });
     } catch (err: any) {
@@ -185,8 +185,9 @@ export function registerSubscriptionRoutes(app: Express): void {
   app.post("/api/membership/register-webhooks", async (req: Request, res: Response) => {
     try {
       const baseUrl = req.body?.base_url || `https://${req.headers.host}`;
-      const registered = await registerSubscriptionWebhooks(baseUrl);
-      res.json({ registered });
+      // const registered = await registerSubscriptionWebhooks(baseUrl);
+      // res.json({ registered });
+      res.json({ registered: ["disabled - handled by shellz-club-app"] });
     } catch (err: any) {
       console.error("[SubRoutes] Webhook registration error:", err.message);
       res.status(500).json({ error: err.message });

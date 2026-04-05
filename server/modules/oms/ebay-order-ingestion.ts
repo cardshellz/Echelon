@@ -109,19 +109,15 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     // Subtotal = sum of product costs (no shipping/tax)
     subtotalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value),
     // Shipping = deliveryCost - deliveryDiscount (net shipping the buyer paid)
-    shippingCents: Math.max(0,
-      dollarsToCents(pricingSummary?.deliveryCost?.value) +
-      dollarsToCents(pricingSummary?.deliveryDiscount?.value) // deliveryDiscount is negative
-    ),
+    shippingCents: dollarsToCents(pricingSummary?.deliveryCost?.value),
     // Tax: eBay collects and remits — we never see this money. Omit from OMS totals.
     // Raw tax data preserved in raw_payload for reference.
     taxCents: 0,
-    // Discounts: product discounts + delivery discount
-    discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value) +
-      Math.abs(dollarsToCents(pricingSummary?.deliveryDiscount?.value)),
+    // Discounts: product discounts
+    discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value),
     // Total: subtotal + net shipping (no tax — eBay handles it)
     totalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value) +
-      Math.max(0, dollarsToCents(pricingSummary?.deliveryCost?.value) + dollarsToCents(pricingSummary?.deliveryDiscount?.value)),
+      dollarsToCents(pricingSummary?.deliveryCost?.value),
     currency: pricingSummary?.total?.currency || "USD",
     rawPayload: ebayOrder as unknown,
     orderedAt: new Date(ebayOrder.creationDate),
@@ -168,7 +164,7 @@ async function createWmsOrderFromEbay(
 
   // Dedup: check if WMS order already exists for this OMS order
   const existing = await db.execute<{ id: number }>(sql`
-    SELECT id FROM orders
+    SELECT id FROM wms.orders
     WHERE source = 'ebay' AND source_table_id = ${omsIdStr}
     LIMIT 1
   `);
@@ -223,9 +219,6 @@ async function createWmsOrderFromEbay(
       imageUrl,
       barcode: binLocation?.barcode || null,
       requiresShipping: 1,
-      priceCents: line.unitPriceCents ?? null,
-      discountCents: line.discountCents ? Math.round((line.discountCents || 0) / line.quantity) : 0,
-      totalPriceCents: line.totalCents ?? null,
     });
   }
 
@@ -249,12 +242,10 @@ async function createWmsOrderFromEbay(
     shippingPostalCode: orderData.shipToZip || null,
     shippingCountry: orderData.shipToCountry || null,
     financialStatus: orderData.financialStatus || "paid",
-    priority: "normal",
+    priority: 50,
     warehouseStatus,
     itemCount: enrichedItems.length,
     unitCount: totalUnits,
-    totalAmount: orderData.totalCents ? String(orderData.totalCents / 100) : null,
-    currency: orderData.currency || "USD",
     orderPlacedAt: orderData.orderedAt || new Date(),
   }, enrichedItems);
 
@@ -378,11 +369,11 @@ export async function pollEbayOrders(
               `);
               // Release WMS reservation
               try {
-                const wmsOrder = await db.execute(sql`SELECT id FROM orders WHERE source_table_id = ${String(result.id)} LIMIT 1`);
+                const wmsOrder = await db.execute(sql`SELECT id FROM wms.orders WHERE source_table_id = ${String(result.id)} LIMIT 1`);
                 if (wmsOrder.rows.length > 0) {
                   await db.execute(sql`
-                    UPDATE orders SET warehouse_status = 'cancelled', cancelled_at = NOW()
-                    WHERE id = ${wmsOrder.rows[0].id} AND warehouse_status NOT IN ('shipped', 'cancelled')
+                    UPDATE wms.orders SET warehouse_status = 'cancelled', cancelled_at = NOW()
+                    WHERE id = ${wmsOrder.rows[0].id} AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
                   `);
                 }
               } catch (e: any) {

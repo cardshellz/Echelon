@@ -8,13 +8,13 @@
  */
 
 // Storage
-export { type IInventoryStorage, inventoryMethods } from "./inventory.storage";
-export { type IReplenishmentStorage, replenishmentMethods } from "./replenishment.storage";
-export { type ICycleCountStorage, cycleCountMethods } from "./cycle-counts.storage";
+export { type IInventoryStorage, inventoryMethods } from "./infrastructure/inventory.repository";
+export { type IReplenishmentStorage, replenishmentMethods } from "./infrastructure/replenishment.repository";
+export { type ICycleCountStorage, cycleCountMethods } from "./infrastructure/cycle-count.repository";
 
-import { type IInventoryStorage, inventoryMethods } from "./inventory.storage";
-import { type IReplenishmentStorage, replenishmentMethods } from "./replenishment.storage";
-import { type ICycleCountStorage, cycleCountMethods } from "./cycle-counts.storage";
+import { type IInventoryStorage, inventoryMethods } from "./infrastructure/inventory.repository";
+import { type IReplenishmentStorage, replenishmentMethods } from "./infrastructure/replenishment.repository";
+import { type ICycleCountStorage, cycleCountMethods } from "./infrastructure/cycle-count.repository";
 
 export type InventoryModuleStorage = IInventoryStorage & IReplenishmentStorage & ICycleCountStorage;
 export const inventoryStorage: InventoryModuleStorage = {
@@ -23,22 +23,20 @@ export const inventoryStorage: InventoryModuleStorage = {
   ...cycleCountMethods,
 };
 
+// Use Cases (Replaces core.service and source.service)
+export { InventoryUseCases } from "./application/inventory.use-cases";
+
 // Services
-export { createInventoryCoreService } from "./core.service";
 export { createInventoryAtpService } from "./atp.service";
-export { createInventoryLotService } from "./lots.service";
+export { createInventoryLotService, InventoryLotService } from "./lots.service";
 export { createInventoryAlertService } from "./alerts.service";
-export { createInventorySourceService } from "./source.service";
-export { createReplenishmentService } from "./replen.service";
-export { createCycleCountService } from "./cycle-count.service";
-export { createBreakAssemblyService } from "./break-assembly.service";
-export { createCOGSService } from "./cogs.service";
-export type { COGSService } from "./cogs.service";
+// Application Layer (Use Cases)
+export { createReplenishmentService, ReplenishmentUseCases as ReplenishmentService } from "./application/replenishment.use-cases";
+export { createCycleCountService, CycleCountUseCases as CycleCountService } from "./application/cycle-count.use-cases";
+export { createBreakAssemblyService, BreakAssemblyUseCases as BreakAssemblyService } from "./application/break-assembly.use-cases";
+export { createCOGSService, COGSService } from "./cogs.service";
 
 // Service types
-export type { InventoryCoreService } from "./core.service";
-export type { InventoryLotService } from "./lots.service";
 export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "./atp.service";
-export type { BreakResult, AssembleResult, ConversionPreview } from "./break-assembly.service";
-export type { SyncResult as InventorySourceSyncResult } from "./source.service";
-export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "./cycle-count.service";
+export type { BreakResult, AssembleResult, ConversionPreview } from "./application/break-assembly.use-cases";
+export type { CycleCountUseCases, CycleCountError, ApproveResult, BulkApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "./application/cycle-count.use-cases";

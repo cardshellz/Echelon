@@ -23,6 +23,7 @@ export interface NormalizedLineItem {
   discountCents: number;
   planDiscountCents: number;
   couponDiscountCents: number;
+  requiresShipping: boolean;
 }
 
 function dollarsToCents(value: string | number | undefined | null): number {
@@ -101,6 +102,7 @@ export function normalizeShopifyLineItem(
     discountCents: totalDiscountCents,
     planDiscountCents,
     couponDiscountCents,
+    requiresShipping: item.requires_shipping !== false, // Shopify defaults to true
   };
 }
 

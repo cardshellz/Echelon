@@ -20,6 +20,10 @@ export const pool = new Pool({
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
 });
 
+pool.on("connect", (client) => {
+  client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms').catch(console.error);
+});
+
 export const db = drizzle(pool, { schema });
 
 // Run startup migrations to ensure schema is up to date
@@ -170,13 +174,13 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_product_line_id ON channel_product_lines(product_line_id)`);
     // Seed default product line
     await client.query(`
-      INSERT INTO product_lines (code, name, description, sort_order)
+      INSERT INTO catalog.product_lines (code, name, description, sort_order)
       VALUES ('TRADING_CARD_SUPPLIES', 'Trading Card Supplies', 'Card sleeves, toploaders, boxes, and accessories', 0)
       ON CONFLICT (code) DO NOTHING
     `);
     // Assign all existing products to default line (idempotent)
     await client.query(`
-      INSERT INTO product_line_products (product_line_id, product_id)
+      INSERT INTO catalog.product_line_products (product_line_id, product_id)
       SELECT pl.id, p.id FROM product_lines pl, products p
       WHERE pl.code = 'TRADING_CARD_SUPPLIES'
         AND NOT EXISTS (SELECT 1 FROM product_line_products plp WHERE plp.product_line_id = pl.id AND plp.product_id = p.id)
@@ -241,7 +245,7 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     // Seed product types (idempotent)
     await client.query(`
-      INSERT INTO product_types (slug, name, sort_order) VALUES
+      INSERT INTO catalog.product_types (slug, name, sort_order) VALUES
         ('toploaders', 'Toploaders', 1),
         ('easy-glide-sleeves', 'Easy Glide Soft Sleeves', 2),
         ('magnetic-holders', 'Magnetic Holders', 3),

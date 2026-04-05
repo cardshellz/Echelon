@@ -1,0 +1,1785 @@
+/**
+ * CycleCountService — Inventory reconciliation through physical bin counting.
+ *
+ * Extracted from routes.ts to follow the service extraction pattern used by
+ * picking and order-combining services.
+ *
+ * Workflow: draft → initialize (snapshot bins) → count items → approve/reject
+ * variances → complete.
+ *
+ * Key concepts:
+ *   - SKU mismatch pairs: when a counter finds a different SKU than expected,
+ *     two linked items are created (expected_missing + unexpected_found).
+ *   - Auto-approve tolerance: small variances can be auto-committed.
+ *   - Bin reconciliation: after approval, product_locations (bin assignments)
+ *     are synced with physical reality.
+ */
+
+import { sql, eq, and } from "drizzle-orm";
+import type { CycleCountItem, InsertCycleCount, CycleCount } from "@shared/schema";
+
+// ---------------------------------------------------------------------------
+// Dependency interfaces (minimal — only methods actually called)
+// ---------------------------------------------------------------------------
+
+type DrizzleDb = {
+  select: (...args: any[]) => any;
+  insert: (...args: any[]) => any;
+  update: (...args: any[]) => any;
+  delete: (...args: any[]) => any;
+  execute: (...args: any[]) => any;
+};
+
+import { InventoryUseCases } from "./inventory.use-cases";
+
+type ChannelSync = {
+  queueSyncAfterInventoryChange(variantId: number): Promise<void>;
+};
+
+type Replenishment = {
+  checkAndTriggerAfterPick(variantId: number, locationId: number): Promise<any>;
+  checkReplenForLocation(warehouseLocationId: number): Promise<void>;
+};
+
+type Reservation = {
+  reallocateOrphaned(productVariantId: number, warehouseLocationId: number, userId?: string): Promise<any>;
+};
+
+type Storage = {
+  // Cycle counts
+  getAllCycleCounts(): Promise<CycleCount[]>;
+  getCycleCountById(id: number): Promise<CycleCount | undefined>;
+  createCycleCount(data: InsertCycleCount): Promise<CycleCount>;
+  updateCycleCount(id: number, updates: Partial<InsertCycleCount>): Promise<CycleCount | null>;
+  deleteCycleCount(id: number): Promise<boolean>;
+  // Cycle count items
+  getCycleCountItems(cycleCountId: number): Promise<CycleCountItem[]>;
+  getCycleCountItemById(id: number): Promise<CycleCountItem | undefined>;
+  updateCycleCountItem(id: number, updates: Partial<any>): Promise<CycleCountItem | null>;
+  deleteCycleCountItem(id: number): Promise<boolean>;
+  bulkCreateCycleCountItems(items: any[]): Promise<CycleCountItem[]>;
+  // Warehouse locations
+  getAllWarehouseLocations(): Promise<any[]>;
+  getWarehouseLocationById(id: number): Promise<any | undefined>;
+  // Product locations (bin assignments)
+  getProductLocationByComposite(productId: number, warehouseLocationId: number): Promise<any | undefined>;
+  deleteProductLocation(id: number): Promise<boolean>;
+  createProductLocation(data: any): Promise<any>;
+  getProductById(id: number): Promise<any | undefined>;
+  // Products & variants
+  getProductVariantBySku(sku: string): Promise<any | undefined>;
+  getProductVariantById(id: number): Promise<any | undefined>;
+  getProductById(id: number): Promise<any | undefined>;
+  getProductBySku(sku: string): Promise<any | undefined>;
+  createProduct(data: any): Promise<any>;
+  createProductVariant(data: any): Promise<any>;
+  // Settings
+  getSetting(key: string): Promise<string | null>;
+};
+
+// ---------------------------------------------------------------------------
+// Error class
+// ---------------------------------------------------------------------------
+
+export class CycleCountError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 400,
+  ) {
+    super(message);
+    this.name = "CycleCountError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Result types
+// ---------------------------------------------------------------------------
+
+export interface ApprovalAdjustment {
+  sku: string | null;
+  type: string | null;
+  qtyChange: number;
+  locationId: number;
+}
+
+export interface ApproveResult {
+  success: boolean;
+  adjustmentsMade: ApprovalAdjustment[];
+  linkedItemsApproved: number;
+}
+
+export interface BulkApproveResult {
+  success: boolean;
+  approved: number;
+  skipped: number;
+  adjustmentsMade: number;
+  transfersMade: number;
+  errors?: string[];
+  negativeGuarded?: string[];
+}
+
+// --- Reconciliation preview types ---
+
+export interface TransferSuggestion {
+  productVariantId: number;
+  sku: string;
+  fromLocationId: number;
+  fromLocationCode: string;
+  toLocationId: number;
+  toLocationCode: string;
+  qty: number;
+}
+
+export interface ReconciliationItem {
+  itemId: number;
+  warehouseLocationId: number;
+  locationCode: string;
+  productVariantId: number | null;
+  sku: string | null;
+  countedQty: number;
+  systemQtyCurrent: number;         // LIVE current qty (not stale snapshot)
+  systemQtyAtCount: number;         // original expected qty at count time
+  realTimeVariance: number;         // countedQty - systemQtyCurrent
+  staleVariance: number;            // countedQty - systemQtyAtCount (old method)
+  isStale: boolean;                 // inventory changed since count
+  staleTransactions: { type: string; qty: number; at: string }[];
+  transferQty: number;              // portion matched to a transfer
+  transferPartner: string | null;   // location code of transfer partner
+  netAdjustment: number;            // realTimeVariance - transferQty effect
+  wouldGoNegative: boolean;         // applying netAdjustment would create negative
+  status: string;
+  action: "apply" | "skip" | "recount" | "transfer"; // recommended action
+}
+
+export interface ReconciliationPreview {
+  items: ReconciliationItem[];
+  transfers: TransferSuggestion[];
+  staleCount: number;
+  negativeGuardCount: number;
+  totalAdjustments: number;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+export class CycleCountUseCases {
+  constructor(
+    private db: DrizzleDb,
+    private inventoryUseCases: InventoryUseCases,
+    private channelSync: ChannelSync,
+    private replenishment: Replenishment,
+    private storage: Storage,
+    private reservation: Reservation | null = null,
+  ) {}
+
+  // =========================================================================
+  // Private helpers
+  // =========================================================================
+
+  /**
+   * After cycle count approval, sync product_locations (bin assignments)
+   * to match physical reality. Only acts on pick-type locations.
+   */
+  private async reconcileBinAssignment(item: CycleCountItem): Promise<void> {
+    if (!item.varianceType) return;
+
+    const loc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+    if (!loc || loc.isPickable !== 1) return;
+
+    // EXPECTED_MISSING: old SKU no longer in this bin → remove assignment
+    if (item.mismatchType === "expected_missing") {
+      if (!item.productId) return;
+      const existing = await this.storage.getProductLocationByComposite(item.productId, item.warehouseLocationId);
+      if (existing) await this.storage.deleteProductLocation(existing.id);
+      return;
+    }
+
+    // UNEXPECTED_FOUND or standalone UNEXPECTED_ITEM: new SKU lives here → create assignment
+    // Guard: only create assignment if the item was actually counted with qty > 0
+    if ((item.mismatchType === "unexpected_found" && (item.countedQty ?? 0) > 0) ||
+        (item.varianceType === "unexpected_item" && !item.mismatchType)) {
+      if (!item.productId) return;
+      const existing = await this.storage.getProductLocationByComposite(item.productId, item.warehouseLocationId);
+      if (existing) return; // idempotent
+
+      const product = await this.storage.getProductById(item.productId);
+      if (!product) return;
+
+      await this.storage.createProductLocation({
+        productId: item.productId,
+        sku: item.countedSku?.toUpperCase() || product.sku || null,
+        name: product.name || item.countedSku || "Unknown",
+        location: loc.code,
+        zone: loc.zone || "U",
+        warehouseLocationId: item.warehouseLocationId,
+        isPrimary: 1,
+        status: "active",
+      });
+    }
+    // quantity_over, quantity_under: no bin assignment changes needed
+  }
+
+  /**
+   * Compute bin-level stats from cycle count items.
+   * A bin is "counted" if at least one item is not pending.
+   * A bin has a "variance" if counted AND has any item with varianceType.
+   */
+  private computeBinStats(items: { warehouseLocationId: number; status: string; varianceType: string | null }[]) {
+    const bins = new Map<number, typeof items>();
+    for (const item of items) {
+      const arr = bins.get(item.warehouseLocationId);
+      if (arr) arr.push(item);
+      else bins.set(item.warehouseLocationId, [item]);
+    }
+    let countedBins = 0;
+    let varianceBins = 0;
+    for (const binItems of bins.values()) {
+      const allPending = binItems.every((i: any) => i.status === "pending");
+      if (!allPending) countedBins++;
+      if (!allPending && binItems.some((i: any) => i.varianceType)) varianceBins++;
+    }
+    return { countedBins, varianceCount: varianceBins };
+  }
+
+  /**
+   * Lookup product_variants and products by SKU (case-insensitive).
+   */
+  private async lookupVariantAndProductBySku(sku: string): Promise<{ productVariantId: number | null; productId: number | null }> {
+    const variantResult = await this.db.execute(sql`
+      SELECT id FROM product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
+    `);
+    const productVariantId = variantResult.rows[0]?.id || null;
+
+    const productResult = await this.db.execute(sql`
+      SELECT id FROM products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
+    `);
+    const productId = productResult.rows[0]?.id || null;
+
+    return { productVariantId, productId };
+  }
+
+  /**
+   * Clean up mismatch linked items when re-counting or resetting.
+   * Deletes forward-linked and reverse-linked items that aren't approved.
+   */
+  private async cleanupMismatchLinks(itemId: number, item: CycleCountItem): Promise<void> {
+    // Delete forward-linked item
+    if (item.relatedItemId) {
+      const linkedItem = await this.storage.getCycleCountItemById(item.relatedItemId);
+      if (linkedItem && linkedItem.status !== "approved") {
+        await this.storage.deleteCycleCountItem(item.relatedItemId);
+      }
+    }
+    // Delete reverse-linked items
+    const reverseResult = await this.db.execute(sql`
+      SELECT id, status FROM cycle_count_items
+      WHERE related_item_id = ${itemId} AND status != 'approved'
+    `);
+    for (const rev of reverseResult.rows) {
+      await this.storage.deleteCycleCountItem(rev.id);
+    }
+  }
+
+  /**
+   * Core approval logic for a single item. Shared by approveVariance and bulkApprove.
+   * 
+   * CRITICAL FIX: Uses REAL-TIME inventory qty (not stale snapshot) to compute variance.
+   * NEVER uses allowNegative: true. If applying the adjustment would go negative,
+   * the item is flagged for investigation instead.
+   * 
+   * Returns the adjustment info if inventory was changed, or null if skipped/guarded.
+   */
+  private async approveItemCore(
+    item: CycleCountItem,
+    reasonCode: string,
+    notes: string | undefined,
+    approvedBy: string | undefined,
+  ): Promise<{ adjustment: ApprovalAdjustment | null; negativeGuarded: boolean }> {
+    let adjustment: ApprovalAdjustment | null = null;
+    let negativeGuarded = false;
+
+    // Apply inventory adjustment if item has a variant and counted qty
+    if (item.productVariantId && item.countedQty !== null) {
+      // READ CURRENT (real-time) inventory — NOT the stale snapshot
+      const currentLevelResult = await this.db.execute(sql`
+        SELECT COALESCE(variant_qty, 0) as variant_qty
+        FROM inventory_levels
+        WHERE product_variant_id = ${item.productVariantId}
+          AND warehouse_location_id = ${item.warehouseLocationId}
+      `);
+      const currentQty = (currentLevelResult.rows[0] as any)?.variant_qty ?? 0;
+
+      // Compute REAL-TIME variance
+      const realTimeVariance = item.countedQty - currentQty;
+
+      if (realTimeVariance !== 0) {
+        // NEGATIVE GUARD: never allow adjustment that would result in negative inventory
+        if (realTimeVariance < 0 && currentQty + realTimeVariance < 0) {
+          console.warn(
+            `[CYCLE COUNT] NEGATIVE GUARD: variant=${item.productVariantId} loc=${item.warehouseLocationId} ` +
+            `current=${currentQty} delta=${realTimeVariance} would result in ${currentQty + realTimeVariance}. ` +
+            `Flagging for investigation instead of applying.`
+          );
+          negativeGuarded = true;
+          await this.storage.updateCycleCountItem(item.id, {
+            status: "investigate",
+            varianceNotes: `${item.varianceNotes || ''}\n[NEGATIVE GUARD] Adjustment of ${realTimeVariance} would result in negative inventory (current: ${currentQty}). Flagged for manual investigation.`.trim(),
+          });
+          return { adjustment: null, negativeGuarded: true };
+        }
+
+        console.log(
+          `[CYCLE COUNT] Real-time adjustment: variant=${item.productVariantId} loc=${item.warehouseLocationId} ` +
+          `staleExpected=${item.expectedQty} current=${currentQty} counted=${item.countedQty} ` +
+          `staleVariance=${item.varianceQty} realTimeVariance=${realTimeVariance} sku=${item.expectedSku || item.countedSku}`
+        );
+
+        await this.inventoryUseCases.adjustInventory({
+          productVariantId: item.productVariantId,
+          warehouseLocationId: item.warehouseLocationId,
+          qtyDelta: realTimeVariance,
+          reason: `Cycle count adjustment (real-time): ${item.expectedSku || item.countedSku}. Current=${currentQty}, counted=${item.countedQty}. ${notes || ''}`.trim(),
+          cycleCountId: item.cycleCountId,
+          userId: approvedBy,
+          // NEVER allowNegative — the guard above already prevents it
+        });
+        console.log(`[CYCLE COUNT] Real-time adjustment applied successfully`);
+        adjustment = {
+          sku: item.expectedSku || item.countedSku,
+          type: item.mismatchType || item.varianceType,
+          qtyChange: realTimeVariance,
+          locationId: item.warehouseLocationId,
+        };
+      } else {
+        console.log(
+          `[CYCLE COUNT] No adjustment needed: variant=${item.productVariantId} loc=${item.warehouseLocationId} ` +
+          `current=${currentQty} counted=${item.countedQty} (real-time variance=0)`
+        );
+      }
+
+      // After negative adjustments, check for orphaned reservations and re-allocate
+      if (realTimeVariance < 0 && this.reservation) {
+        try {
+          const realloc = await this.reservation.reallocateOrphaned(
+            item.productVariantId,
+            item.warehouseLocationId,
+            approvedBy,
+          );
+          if (realloc.released > 0) {
+            console.log(
+              `[CYCLE COUNT] Orphaned reservation cleanup: released=${realloc.released} ` +
+                `reallocated=${realloc.reallocated} failed=${realloc.failed}`,
+            );
+          }
+        } catch (err) {
+          // Non-fatal — inventory adjustment already succeeded
+          console.warn(
+            `[CYCLE COUNT] Orphaned reservation re-allocation failed (non-fatal):`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    } else {
+      console.warn(`[CYCLE COUNT] SKIPPED adjustment for item ${item.id}: productVariantId=${item.productVariantId} countedQty=${item.countedQty} sku=${item.expectedSku || item.countedSku}`);
+    }
+
+    // Mark as approved
+    await this.storage.updateCycleCountItem(item.id, {
+      status: "approved",
+      approvedBy,
+      approvedAt: new Date(),
+      varianceReason: reasonCode,
+    });
+    await this.reconcileBinAssignment(item);
+
+    return { adjustment, negativeGuarded };
+  }
+
+  /**
+   * Fire channel sync + replen checks for adjustments (fire-and-forget).
+   */
+  private async firePostApprovalSideEffects(adjustments: ApprovalAdjustment[]): Promise<void> {
+    if (adjustments.length === 0) return;
+
+    // Channel sync for all adjusted variants
+    const syncedVariants = new Set<number>();
+    for (const adj of adjustments) {
+      if (!adj.sku) continue;
+      const variant = await this.storage.getProductVariantBySku(adj.sku);
+      if (variant && !syncedVariants.has(variant.id)) {
+        syncedVariants.add(variant.id);
+        this.channelSync.queueSyncAfterInventoryChange(variant.id).catch((err: any) =>
+          console.warn(`[ChannelSync] Post-cycle-count sync failed for ${adj.sku}:`, err)
+        );
+      }
+    }
+
+    const replenLocations = new Set<number>();
+    for (const adj of adjustments) {
+      if (adj.qtyChange < 0) replenLocations.add(adj.locationId);
+    }
+    for (const locId of replenLocations) {
+      this.replenishment.checkReplenForLocation(locId).catch((err: any) =>
+        console.warn(`[Replen] Post-cycle-count check failed for loc ${locId}:`, err)
+      );
+    }
+  }
+
+  /**
+   * Refresh bin stats on the cycle count header after any item change.
+   */
+  private async refreshBinStats(cycleCountId: number): Promise<void> {
+    const cycleCount = await this.storage.getCycleCountById(cycleCountId);
+    if (cycleCount) {
+      const allItems = await this.storage.getCycleCountItems(cycleCountId);
+      const binStats = this.computeBinStats(allItems);
+      await this.storage.updateCycleCount(cycleCountId, binStats);
+    }
+  }
+
+  /**
+   * Clear cycle count freeze from all locations frozen by this count.
+   */
+  private async unfreezeLocations(cycleCountId: number): Promise<void> {
+    await this.db.execute(sql`
+      UPDATE warehouse_locations
+      SET cycle_count_freeze_id = NULL, updated_at = NOW()
+      WHERE cycle_count_freeze_id = ${cycleCountId}
+    `);
+  }
+
+  // =========================================================================
+  // Public methods
+  // =========================================================================
+
+  async getAll(): Promise<CycleCount[]> {
+    return this.storage.getAllCycleCounts();
+  }
+
+  async getById(id: number) {
+    const cycleCount = await this.storage.getCycleCountById(id);
+    if (!cycleCount) throw new CycleCountError("Cycle count not found", 404);
+
+    const items = await this.storage.getCycleCountItems(id);
+
+    // Enrich items with location details
+    const enrichedItems = await Promise.all(items.map(async (item) => {
+      const location = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+      return { ...item, locationCode: location?.code, zone: location?.zone };
+    }));
+
+    return { ...cycleCount, items: enrichedItems };
+  }
+
+  async getVarianceSummary(id: number) {
+    const items = await this.storage.getCycleCountItems(id);
+
+    const variantMap = new Map<number, { sku: string; productVariantId: number; locations: any[]; totalVariance: number }>();
+
+    for (const item of items) {
+      if (!item.varianceType || !item.productVariantId) continue;
+
+      const sku = item.expectedSku || item.countedSku || "Unknown";
+      const existing = variantMap.get(item.productVariantId);
+      const location = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+
+      const locEntry = {
+        locationId: item.warehouseLocationId,
+        locationCode: location?.code || "?",
+        zone: location?.zone,
+        varianceQty: item.varianceQty ?? 0,
+        varianceType: item.varianceType,
+        mismatchType: item.mismatchType,
+        status: item.status,
+        itemId: item.id,
+      };
+
+      if (existing) {
+        existing.locations.push(locEntry);
+        existing.totalVariance += item.varianceQty ?? 0;
+      } else {
+        variantMap.set(item.productVariantId, {
+          sku,
+          productVariantId: item.productVariantId,
+          locations: [locEntry],
+          totalVariance: item.varianceQty ?? 0,
+        });
+      }
+    }
+
+    const skuSummaries = Array.from(variantMap.values()).map(entry => ({
+      ...entry,
+      netVariance: entry.totalVariance,
+      classification: entry.totalVariance === 0
+        ? "misplacement"
+        : entry.totalVariance > 0
+          ? "surplus"
+          : "shortage",
+    }));
+
+    return { skuSummaries };
+  }
+
+  async create(data: { name: string; description?: string; warehouseId?: number; zoneFilter?: string; aisleFilter?: string; locationTypeFilter?: string; binTypeFilter?: string; locationCodes?: string }, createdBy?: string) {
+    if (!data.name) throw new CycleCountError("Name is required");
+
+    return this.storage.createCycleCount({
+      name: data.name,
+      description: data.description,
+      warehouseId: data.warehouseId || null,
+      zoneFilter: data.zoneFilter || null,
+      aisleFilter: data.aisleFilter || null,
+      locationTypeFilter: data.locationTypeFilter || null,
+      binTypeFilter: data.binTypeFilter || null,
+      locationCodes: data.locationCodes || null,
+      status: "draft",
+      createdBy,
+    } as any);
+  }
+
+  async initialize(id: number) {
+    const cycleCount = await this.storage.getCycleCountById(id);
+    if (!cycleCount) throw new CycleCountError("Cycle count not found", 404);
+    if (cycleCount.status !== "draft") throw new CycleCountError("Can only initialize draft cycle counts");
+
+    // Filter locations by cycle count scope
+    let locations = await this.storage.getAllWarehouseLocations();
+    if (cycleCount.zoneFilter) {
+      locations = locations.filter((l: any) => l.zone === cycleCount.zoneFilter);
+    }
+    if ((cycleCount as any).aisleFilter) {
+      locations = locations.filter((l: any) => l.aisle === (cycleCount as any).aisleFilter);
+    }
+    if (cycleCount.warehouseId) {
+      locations = locations.filter((l: any) => l.warehouseId === cycleCount.warehouseId);
+    }
+    if (cycleCount.locationTypeFilter) {
+      const allowedTypes = cycleCount.locationTypeFilter.split(",").map((t: string) => t.trim());
+      locations = locations.filter((l: any) => allowedTypes.includes(l.locationType));
+    }
+    if (cycleCount.binTypeFilter) {
+      const allowedBinTypes = cycleCount.binTypeFilter.split(",").map((t: string) => t.trim());
+      locations = locations.filter((l: any) => allowedBinTypes.includes(l.binType));
+    }
+    if ((cycleCount as any).locationCodes) {
+      const codes = (cycleCount as any).locationCodes.split(",").map((c: string) => c.trim().toUpperCase());
+      locations = locations.filter((l: any) => codes.includes(l.code.toUpperCase()));
+    }
+
+    // Snapshot current inventory for each location
+    const items: any[] = [];
+    for (const location of locations) {
+      const result = await this.db.execute(sql`
+        -- Assigned bins: always include even if qty=0 (verify the assignment)
+        SELECT
+          pv.id as product_variant_id,
+          COALESCE(il.variant_qty, 0) as variant_qty,
+          pv.product_id as product_id,
+          pv.sku as sku,
+          1 as is_assigned
+        FROM product_locations pl
+        JOIN product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
+        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
+          AND il.warehouse_location_id = ${location.id}
+        WHERE pl.warehouse_location_id = ${location.id}
+
+        UNION
+
+        -- Unassigned bins with stock > 0: stray inventory — flag for investigation
+        SELECT
+          il.product_variant_id,
+          il.variant_qty,
+          p.id as product_id,
+          COALESCE(pv.sku, p.sku) as sku,
+          0 as is_assigned
+        FROM inventory_levels il
+        LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
+        LEFT JOIN products p ON pv.product_id = p.id
+        WHERE il.warehouse_location_id = ${location.id}
+          AND il.variant_qty > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM product_locations pl2
+            JOIN product_variants pv2 ON UPPER(pv2.sku) = UPPER(pl2.sku)
+            WHERE pl2.warehouse_location_id = ${location.id}
+              AND pv2.id = il.product_variant_id
+          )
+      `);
+
+      if (result.rows.length > 0) {
+        for (const row of result.rows) {
+          if (row.is_assigned) {
+            // Assigned bin: expected = assignment, count against it normally
+            items.push({
+              cycleCountId: id,
+              warehouseLocationId: location.id,
+              productVariantId: row.product_variant_id,
+              productId: row.product_id,
+              expectedSku: row.sku,
+              expectedQty: row.variant_qty,
+              status: "pending",
+            });
+          } else if (location.isPickable) {
+            // Pickable bin with unassigned inventory — stray, flag for investigation
+            items.push({
+              cycleCountId: id,
+              warehouseLocationId: location.id,
+              productVariantId: row.product_variant_id,
+              productId: row.product_id,
+              expectedSku: row.sku,
+              expectedQty: row.variant_qty,
+              mismatchType: "unexpected_found",
+              varianceType: "unexpected_item",
+              requiresApproval: 1,
+              varianceNotes: "Not assigned to this bin",
+              status: "pending",
+            });
+          } else {
+            // Reserve/bulk/non-pickable bin — no assignment concept, count everything normally
+            items.push({
+              cycleCountId: id,
+              warehouseLocationId: location.id,
+              productVariantId: row.product_variant_id,
+              productId: row.product_id,
+              expectedSku: row.sku,
+              expectedQty: row.variant_qty,
+              status: "pending",
+            });
+          }
+        }
+      } else {
+        // Empty bin — still create item to verify it's empty
+        items.push({
+          cycleCountId: id,
+          warehouseLocationId: location.id,
+          productVariantId: null,
+          productId: null,
+          expectedSku: null,
+          expectedQty: 0,
+          status: "pending",
+        });
+      }
+    }
+
+    if (items.length > 0) {
+      await this.storage.bulkCreateCycleCountItems(items);
+    }
+
+    // Soft-freeze all in-scope locations — picks/reservations/replen will skip them
+    const locationIds = locations.map(l => l.id);
+    if (locationIds.length > 0) {
+      const chunkSize = 500;
+      for (let i = 0; i < locationIds.length; i += chunkSize) {
+        const chunk = locationIds.slice(i, i + chunkSize);
+        await this.db.execute(sql`
+          UPDATE warehouse_locations
+          SET cycle_count_freeze_id = ${id}, updated_at = NOW()
+          WHERE id IN (${sql.join(chunk.map((cid: number) => sql`${cid}`), sql`, `)})
+            AND cycle_count_freeze_id IS NULL
+        `);
+      }
+    }
+
+    await this.storage.updateCycleCount(id, {
+      status: "in_progress",
+      totalBins: locations.length,
+      countedBins: 0,
+      startedAt: new Date(),
+    });
+
+    return { success: true, binsCreated: locations.length, itemsCreated: items.length };
+  }
+
+  async recordCount(
+    id: number,
+    itemId: number,
+    params: { countedSku?: string; countedQty: number; notes?: string },
+    userId?: string,
+  ) {
+    const countedSku = params.countedSku?.trim() || null;
+    const { countedQty, notes } = params;
+
+    // Guard: reject obviously wrong counts (e.g. barcode scanned into count field)
+    const MAX_COUNT = 10_000;
+    if (countedQty < 0 || countedQty > MAX_COUNT) {
+      throw new CycleCountError(
+        `Count ${countedQty} is outside the valid range (0–${MAX_COUNT}). ` +
+        `If a barcode was scanned, clear it and type the actual quantity.`,
+        400,
+      );
+    }
+
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+
+    // Clean up existing mismatch pairs when re-counting
+    if (item.status !== "pending" && (item.relatedItemId || item.mismatchType)) {
+      await this.cleanupMismatchLinks(itemId, item);
+      await this.storage.updateCycleCountItem(itemId, {
+        mismatchType: null,
+        relatedItemId: null,
+      });
+      Object.assign(item, { mismatchType: null, relatedItemId: null });
+    }
+
+    const varianceQty = (countedQty ?? 0) - (item.expectedQty ?? 0);
+    let varianceType: string | null = null;
+    let createdFoundItem = false;
+
+    // Only treat different SKUs as mismatch for pick locations.
+    // Reserve/staging locations hold changing inventory — SKU differences are normal quantity variances.
+    const warehouseLoc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+    const isPickLocation = warehouseLoc?.isPickable === 1;
+
+    const isSkuMismatch = isPickLocation
+      && countedSku && item.expectedSku
+      && countedSku.toUpperCase() !== item.expectedSku.toUpperCase();
+
+    if (isSkuMismatch) {
+      // SKU MISMATCH: create two linked items with "unexpected_sku" variance type
+      varianceType = "unexpected_sku";
+
+      // Mark original as expected_missing
+      await this.storage.updateCycleCountItem(itemId, {
+        countedSku: null,
+        countedQty: 0,
+        varianceQty: -(item.expectedQty ?? 0),
+        varianceType: "unexpected_sku",
+        varianceNotes: `Expected ${item.expectedSku} not found. Different SKU (${countedSku}) was in bin. ${notes || ''}`.trim(),
+        status: "variance",
+        requiresApproval: 1,
+        mismatchType: "expected_missing",
+        countedBy: userId,
+        countedAt: new Date(),
+      });
+
+      // Lookup variant + product for the found SKU
+      const { productVariantId: foundProductVariantId, productId: foundProductId } =
+        await this.lookupVariantAndProductBySku(countedSku!);
+
+      // Create new item for the FOUND product
+      const foundItemResult = await this.db.execute(sql`
+        INSERT INTO cycle_count_items (
+          cycle_count_id, warehouse_location_id, product_variant_id, product_id,
+          expected_sku, expected_qty, counted_sku, counted_qty,
+          variance_qty, variance_type, variance_notes, status,
+          requires_approval, mismatch_type, related_item_id,
+          counted_by, counted_at, created_at
+        ) VALUES (
+          ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundProductVariantId}, ${foundProductId},
+          NULL, 0, ${countedSku}, ${countedQty},
+          ${countedQty}, 'unexpected_sku', ${`Found in bin where ${item.expectedSku} was expected. ${notes || ''}`.trim()}, 'variance',
+          1, 'unexpected_found', ${itemId},
+          ${userId}, NOW(), NOW()
+        ) RETURNING id
+      `);
+
+      const foundItemId = foundItemResult.rows[0]?.id;
+      if (foundItemId) {
+        await this.storage.updateCycleCountItem(itemId, { relatedItemId: foundItemId });
+        createdFoundItem = true;
+      }
+
+    } else if (countedQty > 0 && !item.expectedSku) {
+      // Unexpected item in empty bin
+      varianceType = "unexpected_item";
+
+      let foundProductVariantId: number | null = null;
+      let foundProductId: number | null = null;
+      if (countedSku) {
+        const lookup = await this.lookupVariantAndProductBySku(countedSku);
+        foundProductVariantId = lookup.productVariantId;
+        foundProductId = lookup.productId;
+      }
+
+      await this.storage.updateCycleCountItem(itemId, {
+        countedSku: countedSku || null,
+        countedQty,
+        varianceQty,
+        varianceType,
+        varianceNotes: notes || null,
+        status: "variance",
+        requiresApproval: isPickLocation ? 1 : 0, // Reserve bins: auto-approvable, no assignment impact
+        mismatchType: isPickLocation ? "unexpected_found" : null,
+        ...(foundProductVariantId && { productVariantId: foundProductVariantId }),
+        ...(foundProductId && { productId: foundProductId }),
+        countedBy: userId,
+        countedAt: new Date(),
+      });
+
+    } else {
+      // Normal count (same SKU or empty bin)
+      if (item.mismatchType === "unexpected_found" && countedQty === 0) {
+        // Stray SKU counted to zero — product was removed from unassigned bin
+        varianceType = "stray_removed";
+      } else if (varianceQty > 0) varianceType = "quantity_over";
+      else if (varianceQty < 0) varianceType = "quantity_under";
+
+      // Configurable tolerance and threshold
+      const toleranceSetting = await this.storage.getSetting("cycle_count_auto_approve_tolerance");
+      const thresholdSetting = await this.storage.getSetting("cycle_count_approval_threshold");
+      const autoApproveTolerance = parseInt(toleranceSetting || "0", 10);
+      const approvalThreshold = parseInt(thresholdSetting || "10", 10);
+
+      const absVariance = Math.abs(varianceQty);
+      const withinTolerance = autoApproveTolerance > 0 && absVariance > 0 && absVariance <= autoApproveTolerance;
+      const requiresApproval = absVariance > approvalThreshold;
+
+      if (withinTolerance && varianceType && item.productVariantId) {
+        // Auto-approve: apply adjustment immediately using CURRENT qty
+        // Read current system qty to compute real-time variance
+        const autoResult = await this.db.execute(sql`
+          SELECT COALESCE(variant_qty, 0) as variant_qty
+          FROM inventory_levels
+          WHERE product_variant_id = ${item.productVariantId}
+            AND warehouse_location_id = ${item.warehouseLocationId}
+        `);
+        const autoCurrentQty = (autoResult.rows[0] as any)?.variant_qty ?? 0;
+        const autoRealTimeVariance = countedQty - autoCurrentQty;
+        
+        // Only apply if real-time variance won't go negative
+        if (autoRealTimeVariance < 0 && autoCurrentQty + autoRealTimeVariance < 0) {
+          console.warn(`[CYCLE COUNT] Auto-approve blocked by negative guard: current=${autoCurrentQty} variance=${autoRealTimeVariance}`);
+          // Fall through to regular variance status instead of auto-approving
+        } else if (autoRealTimeVariance !== 0) {
+          await this.inventoryUseCases.adjustInventory({
+            productVariantId: item.productVariantId,
+            warehouseLocationId: item.warehouseLocationId,
+            qtyDelta: autoRealTimeVariance,
+            reason: `Cycle count auto-approved (within tolerance ±${autoApproveTolerance}): ${item.expectedSku || countedSku}. Current=${autoCurrentQty}, counted=${countedQty}`,
+            cycleCountId: item.cycleCountId,
+            userId,
+            // NEVER allowNegative — guard above prevents it
+          });
+
+          await this.storage.updateCycleCountItem(itemId, {
+            countedSku: countedSku || null,
+            countedQty,
+            varianceQty,
+            varianceType,
+            varianceNotes: notes || null,
+            status: "approved",
+            varianceReason: "within_tolerance",
+            requiresApproval: 0,
+            approvedBy: userId,
+            approvedAt: new Date(),
+            countedBy: userId,
+            countedAt: new Date(),
+          });
+          await this.reconcileBinAssignment({ ...item, varianceType, mismatchType: item.mismatchType } as CycleCountItem);
+        } else {
+          // Real-time variance is 0 — auto-resolve
+          await this.storage.updateCycleCountItem(itemId, {
+            countedSku: countedSku || null,
+            countedQty,
+            varianceQty,
+            varianceType,
+            varianceNotes: notes || null,
+            status: "approved",
+            varianceReason: "within_tolerance",
+            requiresApproval: 0,
+            approvedBy: userId,
+            approvedAt: new Date(),
+            countedBy: userId,
+            countedAt: new Date(),
+          });
+          await this.reconcileBinAssignment({ ...item, varianceType, mismatchType: item.mismatchType } as CycleCountItem);
+        }
+      } else {
+        await this.storage.updateCycleCountItem(itemId, {
+          countedSku: countedSku || null,
+          countedQty,
+          varianceQty,
+          varianceType,
+          varianceNotes: notes || null,
+          status: varianceType ? "variance" : "counted",
+          requiresApproval: requiresApproval ? 1 : 0,
+          countedBy: userId,
+          countedAt: new Date(),
+        });
+      }
+    }
+
+    // Refresh bin stats
+    await this.refreshBinStats(item.cycleCountId);
+
+    return {
+      success: true,
+      varianceType,
+      varianceQty,
+      requiresApproval: true,
+      skuMismatch: !!isSkuMismatch,
+      createdFoundItem,
+    };
+  }
+
+  async resetItem(id: number, itemId: number) {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.status === "approved" || item.status === "adjusted") {
+      throw new CycleCountError("Cannot reset an approved/adjusted item");
+    }
+
+    // Clean up linked mismatch items
+    await this.cleanupMismatchLinks(itemId, item);
+
+    // Reset to pending
+    await this.storage.updateCycleCountItem(itemId, {
+      countedSku: null,
+      countedQty: null,
+      varianceQty: null,
+      varianceType: null,
+      varianceNotes: null,
+      varianceReason: null,
+      mismatchType: null,
+      relatedItemId: null,
+      requiresApproval: 0,
+      countedBy: null,
+      countedAt: null,
+      status: "pending",
+    });
+
+    await this.refreshBinStats(item.cycleCountId);
+    return { success: true };
+  }
+
+  async investigateItem(id: number, itemId: number, notes?: string) {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.status === "approved" || item.status === "adjusted") {
+      throw new CycleCountError("Cannot investigate an already approved item");
+    }
+
+    await this.storage.updateCycleCountItem(itemId, {
+      status: "investigate",
+      varianceNotes: notes ? `${item.varianceNotes || ''}\n[Investigation] ${notes}`.trim() : item.varianceNotes,
+    });
+
+    await this.refreshBinStats(item.cycleCountId);
+    return { success: true };
+  }
+
+  /**
+   * Resolve a variance item by recording a transfer from the item's location
+   * to a destination. Updates expectedQty, recalculates variance, and
+   * auto-resolves if variance becomes 0.
+   */
+  async resolveWithTransfer(
+    cycleCountId: number,
+    itemId: number,
+    params: {
+      destinationLocationId: number;
+      qty: number;
+      notes?: string;
+    },
+    userId?: string,
+  ): Promise<{
+    success: boolean;
+    transferredQty: number;
+    newExpectedQty: number;
+    newVarianceQty: number;
+    autoResolved: boolean;
+  }> {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.cycleCountId !== cycleCountId) {
+      throw new CycleCountError("Item does not belong to this cycle count");
+    }
+    if (item.status !== "investigate" && item.status !== "variance") {
+      throw new CycleCountError("Item must be in 'investigate' or 'variance' status to resolve with transfer");
+    }
+    if (!item.productVariantId) {
+      throw new CycleCountError("Item must have a linked product variant for transfer");
+    }
+    if (params.qty <= 0) {
+      throw new CycleCountError("Transfer quantity must be positive");
+    }
+    if (params.destinationLocationId === item.warehouseLocationId) {
+      throw new CycleCountError("Destination must be different from source");
+    }
+
+    // Look up destination location code for notes
+    const destLoc = await this.storage.getWarehouseLocationById(params.destinationLocationId);
+    const destCode = destLoc?.code || String(params.destinationLocationId);
+
+    // Execute the transfer via inventory core
+    const transferNotes = `Cycle count #${cycleCountId} transfer resolution: ${item.expectedSku || 'unknown'} x ${params.qty} → ${destCode}. ${params.notes || ''}`.trim();
+
+    await this.inventoryUseCases.transfer({
+      productVariantId: item.productVariantId,
+      fromLocationId: item.warehouseLocationId,
+      toLocationId: params.destinationLocationId,
+      qty: params.qty,
+      userId,
+      notes: transferNotes,
+    });
+
+    // Update expectedQty: the transfer reduced system qty at this location
+    const newExpectedQty = (item.expectedQty ?? 0) - params.qty;
+    const newVarianceQty = (item.countedQty ?? 0) - newExpectedQty;
+    const autoResolved = newVarianceQty === 0;
+
+    const noteEntry = `[Transfer] ${params.qty} units → ${destCode}${params.notes ? ': ' + params.notes : ''}`;
+    const updatedNotes = item.varianceNotes
+      ? `${item.varianceNotes}\n${noteEntry}`
+      : noteEntry;
+
+    const updateData: Record<string, any> = {
+      expectedQty: newExpectedQty,
+      varianceQty: newVarianceQty,
+      varianceNotes: updatedNotes,
+    };
+
+    if (autoResolved) {
+      updateData.varianceType = null;
+      updateData.status = "resolved";
+      updateData.varianceReason = "transfer_resolution";
+      updateData.resolvedBy = userId;
+      updateData.resolvedAt = new Date();
+    } else {
+      // Update variance type based on new variance direction
+      updateData.varianceType = newVarianceQty > 0 ? "quantity_over" : "quantity_under";
+    }
+
+    await this.storage.updateCycleCountItem(itemId, updateData);
+
+    // Refresh bin stats
+    await this.refreshBinStats(cycleCountId);
+
+    // Fire channel sync for the transferred variant
+    this.channelSync.queueSyncAfterInventoryChange(item.productVariantId).catch(() => {});
+
+    return {
+      success: true,
+      transferredQty: params.qty,
+      newExpectedQty,
+      newVarianceQty,
+      autoResolved,
+    };
+  }
+
+  /**
+   * Sync a cycle count item's expected qty from current inventory levels.
+   * Call after an external transfer has moved stock — updates expectedQty,
+   * recalculates variance, and auto-resolves if variance reaches zero.
+   */
+  async syncExpectedFromInventory(
+    cycleCountId: number,
+    itemId: number,
+    userId?: string,
+  ): Promise<{ success: boolean; newExpectedQty: number; newVarianceQty: number; autoResolved: boolean }> {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.cycleCountId !== cycleCountId) {
+      throw new CycleCountError("Item does not belong to this cycle count");
+    }
+    if (!item.productVariantId) {
+      throw new CycleCountError("Item has no linked product variant");
+    }
+
+    // Read current system inventory at this location
+    const result = await this.db.execute(sql`
+      SELECT COALESCE(variant_qty, 0) as variant_qty
+      FROM inventory_levels
+      WHERE product_variant_id = ${item.productVariantId}
+        AND warehouse_location_id = ${item.warehouseLocationId}
+    `);
+    const currentQty = (result.rows[0] as any)?.variant_qty ?? 0;
+    const newVarianceQty = (item.countedQty ?? 0) - currentQty;
+    const autoResolved = newVarianceQty === 0;
+
+    const updateData: Record<string, any> = {
+      expectedQty: currentQty,
+      varianceQty: newVarianceQty,
+    };
+
+    if (autoResolved) {
+      updateData.varianceType = null;
+      updateData.status = "resolved";
+      updateData.varianceReason = "transfer_resolution";
+      updateData.resolvedBy = userId;
+      updateData.resolvedAt = new Date();
+      const note = "[Auto-resolved] Expected qty synced after transfer";
+      updateData.varianceNotes = item.varianceNotes ? `${item.varianceNotes}\n${note}` : note;
+    } else {
+      updateData.varianceType = newVarianceQty > 0 ? "quantity_over" : "quantity_under";
+    }
+
+    await this.storage.updateCycleCountItem(itemId, updateData);
+    await this.refreshBinStats(cycleCountId);
+
+    return { success: true, newExpectedQty: currentQty, newVarianceQty, autoResolved };
+  }
+
+  /**
+   * Resolve a variance item without applying any inventory adjustment.
+   * Use when a transfer already fixed the issue, or investigation determined
+   * no adjustment is needed.
+   */
+  async resolveItem(
+    cycleCountId: number,
+    itemId: number,
+    params: {
+      reasonCode: string;
+      notes?: string;
+    },
+    userId?: string,
+  ): Promise<{ success: boolean }> {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.cycleCountId !== cycleCountId) {
+      throw new CycleCountError("Item does not belong to this cycle count");
+    }
+    if (item.status === "approved" || item.status === "adjusted" || item.status === "resolved") {
+      throw new CycleCountError("Item is already in a terminal status");
+    }
+
+    const noteEntry = `[Resolved without adjustment] ${params.reasonCode}${params.notes ? ': ' + params.notes : ''}`;
+    const updatedNotes = item.varianceNotes
+      ? `${item.varianceNotes}\n${noteEntry}`
+      : noteEntry;
+
+    await this.storage.updateCycleCountItem(itemId, {
+      status: "resolved",
+      varianceReason: params.reasonCode,
+      varianceNotes: updatedNotes,
+      resolvedBy: userId,
+      resolvedAt: new Date(),
+    });
+
+    // Update resolved/approved count on cycle count header
+    const allItems = await this.storage.getCycleCountItems(cycleCountId);
+    const resolvedOrApproved = allItems.filter(i =>
+      i.status === "approved" || i.status === "adjusted" || i.status === "resolved"
+    ).length;
+    await this.storage.updateCycleCount(cycleCountId, { approvedVariances: resolvedOrApproved });
+
+    await this.refreshBinStats(cycleCountId);
+
+    return { success: true };
+  }
+
+  async addFoundItem(
+    id: number,
+    params: { sku: string; quantity: number; warehouseLocationId: number; notes?: string },
+    userId?: string,
+  ) {
+    const sku = params.sku?.trim() || null;
+    if (!sku || params.quantity === undefined || !params.warehouseLocationId) {
+      throw new CycleCountError("SKU, quantity, and location are required");
+    }
+
+    const cycleCount = await this.storage.getCycleCountById(id);
+    if (!cycleCount) throw new CycleCountError("Cycle count not found", 404);
+    if (cycleCount.status !== "in_progress") {
+      throw new CycleCountError("Can only add items to in-progress cycle counts");
+    }
+
+    const { productVariantId, productId } = await this.lookupVariantAndProductBySku(sku);
+
+    const result = await this.db.execute(sql`
+      INSERT INTO cycle_count_items (
+        cycle_count_id, warehouse_location_id, product_variant_id, product_id,
+        expected_sku, expected_qty, counted_sku, counted_qty,
+        variance_qty, variance_type, variance_notes, status,
+        requires_approval, mismatch_type,
+        counted_by, counted_at, created_at
+      ) VALUES (
+        ${id}, ${params.warehouseLocationId}, ${productVariantId}, ${productId},
+        NULL, 0, ${sku}, ${params.quantity},
+        ${params.quantity}, 'unexpected_item', ${params.notes || `Unexpected item found during count: ${sku} x ${params.quantity}`}, 'variance',
+        1, 'unexpected_found',
+        ${userId}, NOW(), NOW()
+      ) RETURNING id
+    `);
+
+    await this.refreshBinStats(id);
+
+    return {
+      success: true,
+      itemId: result.rows[0]?.id,
+      message: `Added unexpected item: ${sku} x ${params.quantity}`,
+    };
+  }
+
+  async approveVariance(
+    id: number,
+    itemId: number,
+    params: { reasonCode: string; notes?: string; approvedBy?: string },
+  ): Promise<ApproveResult> {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (!item.varianceType) throw new CycleCountError("No variance to approve");
+
+    const adjustmentsMade: ApprovalAdjustment[] = [];
+    const { reasonCode, notes, approvedBy } = params;
+
+    // Approve the primary item
+    const { adjustment: adj, negativeGuarded: ng } = await this.approveItemCore(item, reasonCode, notes, approvedBy);
+    if (adj) adjustmentsMade.push(adj);
+
+    let linkedItemsApproved = 0;
+
+    // Forward link: approve related item
+    if (item.relatedItemId && !ng) {
+      const relatedItem = await this.storage.getCycleCountItemById(item.relatedItemId);
+      if (relatedItem && relatedItem.status !== "approved") {
+        const { adjustment: relAdj } = await this.approveItemCore(relatedItem, reasonCode, notes, approvedBy);
+        if (relAdj) adjustmentsMade.push(relAdj);
+        linkedItemsApproved++;
+      }
+    }
+
+    // Reverse link: approve any item pointing TO this one
+    if (!ng) {
+      const reverseResult = await this.db.execute(sql`
+        SELECT id FROM cycle_count_items
+        WHERE related_item_id = ${itemId}
+        AND status != 'approved'
+        LIMIT 1
+      `);
+
+      if (reverseResult.rows.length > 0) {
+        const reverseItem = await this.storage.getCycleCountItemById(reverseResult.rows[0].id);
+        if (reverseItem && reverseItem.status !== "approved") {
+          const { adjustment: revAdj } = await this.approveItemCore(reverseItem, reasonCode, notes, approvedBy);
+          if (revAdj) adjustmentsMade.push(revAdj);
+          linkedItemsApproved++;
+        }
+      }
+    }
+
+    // Update approved count on cycle count header
+    const allItems = await this.storage.getCycleCountItems(item.cycleCountId);
+    const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
+    await this.storage.updateCycleCount(item.cycleCountId, { approvedVariances: approvedCount });
+
+    // Fire channel sync + replen (fire-and-forget)
+    await this.firePostApprovalSideEffects(adjustmentsMade);
+
+    return { success: true, adjustmentsMade, linkedItemsApproved };
+  }
+
+  async bulkApprove(
+    cycleCountId: number,
+    params: { itemIds: number[]; reasonCode: string; notes?: string; approvedBy?: string },
+  ): Promise<BulkApproveResult> {
+    const { itemIds, reasonCode, notes, approvedBy } = params;
+
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      throw new CycleCountError("itemIds array is required");
+    }
+    if (!reasonCode) {
+      throw new CycleCountError("reasonCode is required");
+    }
+
+    let approved = 0;
+    let skipped = 0;
+    let adjustmentCount = 0;
+    let transferCount = 0;
+    const errors: string[] = [];
+    const negativeGuardedItems: string[] = [];
+    const processedIds = new Set<number>();
+    const allAdjustments: ApprovalAdjustment[] = [];
+
+    // --- Smart Transfer Detection ---
+    // Before applying individual variances, detect likely transfers
+    const allItems = await this.storage.getCycleCountItems(cycleCountId);
+    const itemsToApprove = allItems.filter(i => itemIds.includes(i.id));
+    const transferSuggestions = await this.detectTransfers(itemsToApprove);
+
+    // Apply detected transfers first
+    for (const transfer of transferSuggestions) {
+      try {
+        const fromLoc = await this.storage.getWarehouseLocationById(transfer.fromLocationId);
+        const toLoc = await this.storage.getWarehouseLocationById(transfer.toLocationId);
+        
+        // Verify source has enough qty for transfer
+        const { inventoryLevels } = await import("@shared/schema");
+        const [sourceLevel] = await this.db.select().from(inventoryLevels)
+          .where(and(eq(inventoryLevels.productVariantId, transfer.productVariantId), eq(inventoryLevels.warehouseLocationId, transfer.fromLocationId))).limit(1);
+        if (sourceLevel && sourceLevel.variantQty >= transfer.qty) {
+          await this.inventoryUseCases.transfer({
+            productVariantId: transfer.productVariantId,
+            fromLocationId: transfer.fromLocationId,
+            toLocationId: transfer.toLocationId,
+            qty: transfer.qty,
+            userId: approvedBy,
+            notes: `Cycle count #${cycleCountId} auto-detected transfer: ${transfer.sku} x ${transfer.qty} from ${fromLoc?.code || transfer.fromLocationId} to ${toLoc?.code || transfer.toLocationId}`,
+          });
+          transferCount++;
+          console.log(`[CYCLE COUNT] Auto-transfer: ${transfer.sku} x ${transfer.qty} from ${fromLoc?.code} to ${toLoc?.code}`);
+        } else {
+          console.warn(`[CYCLE COUNT] Transfer skipped — insufficient qty at source: ${transfer.sku} needs ${transfer.qty}, has ${sourceLevel?.variantQty ?? 0}`);
+        }
+      } catch (e: any) {
+        console.warn(`[CYCLE COUNT] Transfer failed (non-fatal): ${e.message}`);
+      }
+    }
+
+    // Now approve individual items with REAL-TIME variance
+    for (const rawId of itemIds) {
+      const itemId = parseInt(String(rawId));
+      if (isNaN(itemId) || processedIds.has(itemId)) continue;
+      processedIds.add(itemId);
+
+      try {
+        const item = await this.storage.getCycleCountItemById(itemId);
+        if (!item || item.cycleCountId !== cycleCountId) { skipped++; continue; }
+        if (item.status === "approved" || item.status === "adjusted") { skipped++; continue; }
+        if (!item.varianceType) { skipped++; continue; }
+
+        // Approve primary item (uses real-time qty)
+        console.log(`[CYCLE COUNT] bulkApprove item ${itemId}: sku=${item.expectedSku || item.countedSku} varianceQty=${item.varianceQty} varianceType=${item.varianceType} pvId=${item.productVariantId}`);
+        const { adjustment: adj, negativeGuarded } = await this.approveItemCore(item, reasonCode, notes, approvedBy);
+        if (adj) { allAdjustments.push(adj); adjustmentCount++; }
+        if (negativeGuarded) {
+          negativeGuardedItems.push(`${item.expectedSku || item.countedSku} @ loc:${item.warehouseLocationId}`);
+        } else {
+          approved++;
+        }
+
+        // Handle linked items (mismatch pairs)
+        if (!negativeGuarded) {
+          const linkedIds: number[] = [];
+          if (item.relatedItemId) linkedIds.push(item.relatedItemId);
+          const reverseResult = await this.db.execute(sql`
+            SELECT id FROM cycle_count_items
+            WHERE related_item_id = ${itemId} AND status != 'approved'
+          `);
+          for (const row of reverseResult.rows) {
+            linkedIds.push(row.id);
+          }
+
+          for (const linkedId of linkedIds) {
+            if (processedIds.has(linkedId)) continue;
+            processedIds.add(linkedId);
+
+            const linked = await this.storage.getCycleCountItemById(linkedId);
+            if (!linked || linked.status === "approved") continue;
+
+            const { adjustment: linkAdj } = await this.approveItemCore(linked, reasonCode, notes, approvedBy);
+            if (linkAdj) { allAdjustments.push(linkAdj); adjustmentCount++; }
+            approved++;
+          }
+        }
+      } catch (e: any) {
+        errors.push(`Item ${itemId}: ${e.message}`);
+      }
+    }
+
+    // Update cycle count approved count
+    const finalItems = await this.storage.getCycleCountItems(cycleCountId);
+    const approvedCount = finalItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
+    await this.storage.updateCycleCount(cycleCountId, { approvedVariances: approvedCount });
+
+    // BUG FIX: Fire channel sync + replen for ALL adjustments (was missing channelSync)
+    await this.firePostApprovalSideEffects(allAdjustments);
+
+    return {
+      success: true,
+      approved,
+      skipped,
+      adjustmentsMade: adjustmentCount,
+      transfersMade: transferCount,
+      errors: errors.length > 0 ? errors : undefined,
+      negativeGuarded: negativeGuardedItems.length > 0 ? negativeGuardedItems : undefined,
+    };
+  }
+
+  async createVariant(cycleCountId: number, itemId: number) {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Cycle count item not found", 404);
+    if (item.cycleCountId !== cycleCountId) {
+      throw new CycleCountError("Item does not belong to this cycle count");
+    }
+
+    const sku = item.countedSku?.trim();
+    if (!sku) throw new CycleCountError("Item has no counted SKU to create a variant from");
+
+    // Already linked — idempotent return
+    if (item.productVariantId) {
+      const existingVariant = await this.storage.getProductVariantById(item.productVariantId);
+      const product = existingVariant ? await this.storage.getProductById(existingVariant.productId) : null;
+      return {
+        item,
+        product: product ? { id: product.id, sku: product.sku, name: product.name } : null,
+        variant: existingVariant ? { id: existingVariant.id, sku: existingVariant.sku, name: existingVariant.name, unitsPerVariant: existingVariant.unitsPerVariant } : null,
+        alreadyExisted: true,
+        siblingItemsLinked: 0,
+      };
+    }
+
+    // Race condition check: variant may now exist
+    const existingVariant = await this.storage.getProductVariantBySku(sku.toUpperCase());
+    if (existingVariant) {
+      await this.storage.updateCycleCountItem(itemId, { productVariantId: existingVariant.id });
+      const product = await this.storage.getProductById(existingVariant.productId);
+      return {
+        item: await this.storage.getCycleCountItemById(itemId),
+        product: product ? { id: product.id, sku: product.sku, name: product.name } : null,
+        variant: { id: existingVariant.id, sku: existingVariant.sku, name: existingVariant.name, unitsPerVariant: existingVariant.unitsPerVariant },
+        alreadyExisted: true,
+        siblingItemsLinked: 0,
+      };
+    }
+
+    // Parse SKU pattern (P=Pack, B=Box, C=Case)
+    const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
+    const match = sku.match(variantPattern);
+
+    let baseSku: string;
+    let unitsPerVariant: number;
+    let hierarchyLevel: number;
+    let variantName: string;
+
+    if (match) {
+      baseSku = match[1].toUpperCase();
+      const variantType = match[2].toUpperCase();
+      unitsPerVariant = parseInt(match[3], 10);
+      hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
+      const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
+      variantName = `${typeName} of ${unitsPerVariant}`;
+    } else {
+      baseSku = sku.toUpperCase();
+      unitsPerVariant = 1;
+      hierarchyLevel = 1;
+      variantName = "Each";
+    }
+
+    // Find or create parent product
+    let product = await this.storage.getProductBySku(baseSku);
+    if (!product) {
+      product = await this.storage.createProduct({
+        sku: baseSku,
+        name: baseSku,
+        baseUnit: "EA",
+      });
+      console.log(`[CycleCount] Created product ${product.id} for base SKU ${baseSku}`);
+    }
+
+    // Create variant
+    const variant = await this.storage.createProductVariant({
+      productId: product.id,
+      sku: sku.toUpperCase(),
+      name: variantName,
+      unitsPerVariant,
+      hierarchyLevel,
+    });
+    console.log(`[CycleCount] Created variant ${variant.id} (${variant.sku}) under product ${product.id}`);
+
+    // Link to this cycle count item
+    await this.storage.updateCycleCountItem(itemId, { productVariantId: variant.id });
+
+    // Auto-link siblings with same unknown SKU
+    const allItems = await this.storage.getCycleCountItems(cycleCountId);
+    const siblings = allItems.filter(i =>
+      i.id !== itemId &&
+      i.countedSku?.toUpperCase() === sku.toUpperCase() &&
+      !i.productVariantId
+    );
+    for (const sibling of siblings) {
+      await this.storage.updateCycleCountItem(sibling.id, { productVariantId: variant.id });
+    }
+
+    return {
+      item: await this.storage.getCycleCountItemById(itemId),
+      product: { id: product.id, sku: product.sku, name: product.name },
+      variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
+      alreadyExisted: false,
+      siblingItemsLinked: siblings.length,
+    };
+  }
+
+  /**
+   * Detect likely transfers: same SKU lost at one location, gained at another.
+   * Groups by productVariantId, matches losses to gains (largest match first).
+   */
+  private async detectTransfers(items: CycleCountItem[]): Promise<TransferSuggestion[]> {
+    const transfers: TransferSuggestion[] = [];
+    
+    // Group by productVariantId
+    const byVariant = new Map<number, CycleCountItem[]>();
+    for (const item of items) {
+      if (!item.productVariantId || item.countedQty === null) continue;
+      const arr = byVariant.get(item.productVariantId) || [];
+      arr.push(item);
+      byVariant.set(item.productVariantId, arr);
+    }
+
+    for (const [variantId, variantItems] of byVariant) {
+      if (variantItems.length < 2) continue;
+
+      // Get current qtys for real-time variance
+      const withCurrentQty = await Promise.all(variantItems.map(async (item) => {
+        const result = await this.db.execute(sql`
+          SELECT COALESCE(variant_qty, 0) as variant_qty
+          FROM inventory_levels
+          WHERE product_variant_id = ${variantId}
+            AND warehouse_location_id = ${item.warehouseLocationId}
+        `);
+        const currentQty = (result.rows[0] as any)?.variant_qty ?? 0;
+        const loc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+        return {
+          item,
+          currentQty,
+          realTimeVariance: (item.countedQty ?? 0) - currentQty,
+          locationCode: loc?.code || String(item.warehouseLocationId),
+        };
+      }));
+
+      // Split into losses (negative variance) and gains (positive variance)
+      const losses = withCurrentQty.filter(w => w.realTimeVariance < 0)
+        .sort((a, b) => a.realTimeVariance - b.realTimeVariance); // most negative first
+      const gains = withCurrentQty.filter(w => w.realTimeVariance > 0)
+        .sort((a, b) => b.realTimeVariance - a.realTimeVariance); // most positive first
+
+      if (losses.length === 0 || gains.length === 0) continue;
+
+      // Match losses to gains
+      const remainingLoss = losses.map(l => ({ ...l, remaining: Math.abs(l.realTimeVariance) }));
+      const remainingGain = gains.map(g => ({ ...g, remaining: g.realTimeVariance }));
+
+      for (const loss of remainingLoss) {
+        for (const gain of remainingGain) {
+          if (loss.remaining <= 0 || gain.remaining <= 0) continue;
+          const qty = Math.min(loss.remaining, gain.remaining);
+          const sku = loss.item.expectedSku || loss.item.countedSku || "Unknown";
+          transfers.push({
+            productVariantId: variantId,
+            sku,
+            fromLocationId: loss.item.warehouseLocationId,
+            fromLocationCode: loss.locationCode,
+            toLocationId: gain.item.warehouseLocationId,
+            toLocationCode: gain.locationCode,
+            qty,
+          });
+          loss.remaining -= qty;
+          gain.remaining -= qty;
+        }
+      }
+    }
+
+    return transfers;
+  }
+
+  /**
+   * Generate a reconciliation preview for a cycle count.
+   * Shows real-time variance, stale count warnings, and transfer suggestions.
+   * Does NOT modify any data — purely read-only.
+   */
+  async getReconciliationPreview(id: number): Promise<ReconciliationPreview> {
+    const cycleCount = await this.storage.getCycleCountById(id);
+    if (!cycleCount) throw new CycleCountError("Cycle count not found", 404);
+
+    const items = await this.storage.getCycleCountItems(id);
+    const countedItems = items.filter(i => i.countedQty !== null && i.productVariantId);
+
+    // Detect transfers
+    const transfers = await this.detectTransfers(countedItems);
+    
+    // Build transfer map: how much of each item's variance is explained by transfers
+    const transferMap = new Map<string, { qty: number; partner: string }>();
+    for (const t of transfers) {
+      // Source (loss side): transfer reduces the negative variance
+      const fromKey = `${t.productVariantId}:${t.fromLocationId}`;
+      const existing = transferMap.get(fromKey);
+      transferMap.set(fromKey, {
+        qty: (existing?.qty ?? 0) + t.qty,
+        partner: t.toLocationCode,
+      });
+      // Dest (gain side): transfer explains the positive variance
+      const toKey = `${t.productVariantId}:${t.toLocationId}`;
+      const existingTo = transferMap.get(toKey);
+      transferMap.set(toKey, {
+        qty: (existingTo?.qty ?? 0) + t.qty,
+        partner: t.fromLocationCode,
+      });
+    }
+
+    const reconciliationItems: ReconciliationItem[] = [];
+    let staleCount = 0;
+    let negativeGuardCount = 0;
+
+    for (const item of items) {
+      const loc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+      const locationCode = loc?.code || String(item.warehouseLocationId);
+
+      if (!item.productVariantId || item.countedQty === null) {
+        // No variant or not yet counted — include with current info
+        reconciliationItems.push({
+          itemId: item.id,
+          warehouseLocationId: item.warehouseLocationId,
+          locationCode,
+          productVariantId: item.productVariantId,
+          sku: item.expectedSku || item.countedSku,
+          countedQty: item.countedQty ?? 0,
+          systemQtyCurrent: item.expectedQty,
+          systemQtyAtCount: item.expectedQty,
+          realTimeVariance: 0,
+          staleVariance: item.varianceQty ?? 0,
+          isStale: false,
+          staleTransactions: [],
+          transferQty: 0,
+          transferPartner: null,
+          netAdjustment: 0,
+          wouldGoNegative: false,
+          status: item.status,
+          action: item.status === "pending" ? "skip" : "apply",
+        });
+        continue;
+      }
+
+      // Get CURRENT system qty
+      const currentResult = await this.db.execute(sql`
+        SELECT COALESCE(variant_qty, 0) as variant_qty
+        FROM inventory_levels
+        WHERE product_variant_id = ${item.productVariantId}
+          AND warehouse_location_id = ${item.warehouseLocationId}
+      `);
+      const systemQtyCurrent = (currentResult.rows[0] as any)?.variant_qty ?? 0;
+      const realTimeVariance = (item.countedQty ?? 0) - systemQtyCurrent;
+      const staleVariance = item.varianceQty ?? 0;
+
+      // Detect stale: check for transactions after count was recorded
+      const countedAt = item.countedAt || cycleCount.startedAt;
+      let staleTransactions: { type: string; qty: number; at: string }[] = [];
+      let isStale = false;
+
+      if (countedAt) {
+        const txResult = await this.db.execute(sql`
+          SELECT transaction_type, variant_qty_delta, created_at
+          FROM inventory_transactions
+          WHERE product_variant_id = ${item.productVariantId}
+            AND (from_location_id = ${item.warehouseLocationId} OR to_location_id = ${item.warehouseLocationId})
+            AND created_at > ${countedAt}
+            AND cycle_count_id IS DISTINCT FROM ${id}
+          ORDER BY created_at ASC
+          LIMIT 10
+        `);
+        staleTransactions = txResult.rows.map((r: any) => ({
+          type: r.transaction_type,
+          qty: r.variant_qty_delta,
+          at: r.created_at,
+        }));
+        isStale = staleTransactions.length > 0;
+        if (isStale) staleCount++;
+      }
+
+      // Transfer info
+      const transferKey = `${item.productVariantId}:${item.warehouseLocationId}`;
+      const transferInfo = transferMap.get(transferKey);
+      const transferQty = transferInfo?.qty ?? 0;
+      const transferPartner = transferInfo?.partner ?? null;
+
+      // Net adjustment = real-time variance adjusted for transfer
+      // If this item had a loss of -47 and transfer explains 34 of it, net = -13
+      let netAdjustment = realTimeVariance;
+      if (realTimeVariance < 0 && transferQty > 0) {
+        netAdjustment = realTimeVariance + transferQty; // e.g., -47 + 34 = -13
+      } else if (realTimeVariance > 0 && transferQty > 0) {
+        netAdjustment = realTimeVariance - transferQty; // e.g., +34 - 34 = 0
+      }
+
+      const wouldGoNegative = netAdjustment < 0 && systemQtyCurrent + netAdjustment < 0;
+      if (wouldGoNegative) negativeGuardCount++;
+
+      // Determine recommended action
+      let action: ReconciliationItem["action"] = "apply";
+      if (item.status === "approved" || item.status === "resolved") {
+        action = "skip";
+      } else if (isStale) {
+        action = "recount";
+      } else if (wouldGoNegative) {
+        action = "skip";
+      }
+
+      reconciliationItems.push({
+        itemId: item.id,
+        warehouseLocationId: item.warehouseLocationId,
+        locationCode,
+        productVariantId: item.productVariantId,
+        sku: item.expectedSku || item.countedSku,
+        countedQty: item.countedQty ?? 0,
+        systemQtyCurrent,
+        systemQtyAtCount: item.expectedQty,
+        realTimeVariance,
+        staleVariance,
+        isStale,
+        staleTransactions,
+        transferQty,
+        transferPartner,
+        netAdjustment,
+        wouldGoNegative,
+        status: item.status,
+        action,
+      });
+    }
+
+    return {
+      items: reconciliationItems,
+      transfers,
+      staleCount,
+      negativeGuardCount,
+      totalAdjustments: reconciliationItems.filter(i => i.action === "apply" && i.realTimeVariance !== 0).length,
+    };
+  }
+
+  async complete(id: number) {
+    const cycleCount = await this.storage.getCycleCountById(id);
+    if (!cycleCount) throw new CycleCountError("Cycle count not found", 404);
+
+    const items = await this.storage.getCycleCountItems(id);
+    const pendingItems = items.filter(i => i.status === "pending");
+    if (pendingItems.length > 0) {
+      throw new CycleCountError(`${pendingItems.length} items still pending`);
+    }
+
+    const investigatingItems = items.filter(i => i.status === "investigate");
+    if (investigatingItems.length > 0) {
+      throw new CycleCountError(`${investigatingItems.length} items still under investigation`);
+    }
+
+    const unapprovedVariances = items.filter(i =>
+      i.varianceType && i.status !== "approved" && i.status !== "adjusted" && i.status !== "resolved"
+    );
+    if (unapprovedVariances.length > 0) {
+      throw new CycleCountError(`${unapprovedVariances.length} variances not approved/resolved`);
+    }
+
+    await this.storage.updateCycleCount(id, {
+      status: "completed",
+      completedAt: new Date(),
+    });
+
+    // Unfreeze all locations that were frozen by this cycle count
+    await this.unfreezeLocations(id);
+
+    return { success: true };
+  }
+
+  async delete(id: number) {
+    // Unfreeze locations before cascade delete removes the FK reference
+    await this.unfreezeLocations(id);
+    const deleted = await this.storage.deleteCycleCount(id);
+    if (!deleted) throw new CycleCountError("Cycle count not found", 404);
+    return { success: true };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function createCycleCountService(
+  db: any,
+  inventoryUseCases: any,
+  channelSync: any,
+  replenishment: any,
+  storage: any,
+  reservation: any = null,
+): CycleCountUseCases {
+  return new CycleCountUseCases(db, inventoryUseCases, channelSync, replenishment, storage, reservation);
+}
+
+export type { CycleCountUseCases as CycleCountService };

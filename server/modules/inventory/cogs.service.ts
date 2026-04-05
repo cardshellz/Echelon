@@ -615,7 +615,7 @@ export class COGSService {
     const result = await this.db.execute(sql`
       SELECT DISTINCT o.id, o.order_number, olc.unit_cost_cents, olc.qty_consumed, olc.total_cost_cents
       FROM order_line_costs olc
-      JOIN orders o ON o.id = olc.order_id
+      JOIN wms.orders o ON o.id = olc.order_id
       WHERE olc.lot_id = ${lotId}
       ORDER BY o.id DESC
     `);

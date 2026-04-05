@@ -150,8 +150,8 @@ class InventoryAlertService {
       JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.picked_qty > 0
         AND NOT EXISTS (
-          SELECT 1 FROM order_items oi
-          JOIN orders o ON o.id = oi.order_id
+          SELECT 1 FROM wms.order_items oi
+          JOIN wms.orders o ON o.id = oi.order_id
           WHERE oi.sku = pv.sku
             AND o.warehouse_status IN ('ready', 'in_progress', 'packed')
         )

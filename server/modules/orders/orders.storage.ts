@@ -1,19 +1,19 @@
 import {
-  type Order,
-  type InsertOrder,
-  type OrderItem,
-  type InsertOrderItem,
+  type WmsOrder as Order,
+  type InsertWmsOrder as InsertOrder,
+  type WmsOrderItem as OrderItem,
+  type InsertWmsOrderItem as InsertOrderItem,
   type OrderStatus,
   type ItemStatus,
-  orders,
-  orderItems,
+  wmsOrders as orders,
+  wmsOrderItems as orderItems,
   outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 
 export interface IOrderStorage {
-  getOrderByShopifyId(shopifyOrderId: string): Promise<Order | undefined>;
+  getOrderByExternalId(externalOrderId: string): Promise<Order | undefined>;
   getOrderById(id: number): Promise<Order | undefined>;
   getOrdersWithItems(status?: OrderStatus[]): Promise<(Order & { items: OrderItem[] })[]>;
   getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]>;
@@ -25,7 +25,7 @@ export interface IOrderStorage {
   updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
-  setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order | null>;
+  setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null>;
 
   getOrderItems(orderId: number): Promise<OrderItem[]>;
   getOrderItemById(itemId: number): Promise<OrderItem | undefined>;
@@ -33,8 +33,8 @@ export interface IOrderStorage {
   updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number, postPickStatus?: string): Promise<Order | null>;
 
-  updateItemFulfilledQuantity(shopifyLineItemId: string, additionalQty: number): Promise<OrderItem | null>;
-  getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined>;
+  updateItemFulfilledQuantity(shopifyLineItemId: number, additionalQty: number): Promise<OrderItem | null>;
+  getOrderItemByShopifyLineId(shopifyLineItemId: number): Promise<OrderItem | undefined>;
   areAllItemsFulfilled(orderId: number): Promise<boolean>;
 
   getOrderByOrderNumber(orderNumber: string): Promise<Order | undefined>;
@@ -42,13 +42,12 @@ export interface IOrderStorage {
   getExceptionOrders(): Promise<(Order & { items: OrderItem[] })[]>;
   resolveException(orderId: number, resolution: string, resolvedBy: string, notes?: string): Promise<Order | null>;
 
-  // Shopify raw-table queries (used by sync routes)
-  getUnfulfilledShopifyRawOrders(): Promise<{
-    id: string;
+  // OMS raw-table queries (used by sync routes)
+  getUnfulfilledOmsOrders(): Promise<{
+    id: string; // Will be oms_orders.id
+    external_order_id: string;
     order_number: string;
-    legacy_order_id: string | null;
-    member_id: string | null;
-    shopify_customer_id: string | null;
+    channel_id: number;
     order_date: Date | null;
     financial_status: string | null;
     fulfillment_status: string | null;
@@ -56,34 +55,32 @@ export interface IOrderStorage {
     currency: string | null;
     note: string | null;
     tags: string[] | null;
-    discount_codes: any | null;
     created_at: Date | null;
     customer_name: string | null;
     customer_email: string | null;
-    shipping_name: string | null;
-    shipping_address1: string | null;
-    shipping_address2: string | null;
-    shipping_city: string | null;
-    shipping_state: string | null;
-    shipping_postal_code: string | null;
-    shipping_country: string | null;
-    cancelled_at: Date | null;
+    ship_to_name: string | null;
+    ship_to_address1: string | null;
+    ship_to_address2: string | null;
+    ship_to_city: string | null;
+    ship_to_state: string | null;
+    ship_to_zip: string | null;
+    ship_to_country: string | null;
   }[]>;
-  getShopifyRawOrderItems(orderId: string): Promise<{
+  getOmsOrderItems(orderId: string): Promise<{
     id: string;
-    shopify_line_item_id: string;
+    external_line_item_id: string;
     sku: string | null;
-    name: string | null;
-    title: string | null;
+    title: string;
+    variant_title: string | null;
     quantity: number;
     fulfillable_quantity: number | null;
     fulfillment_status: string | null;
     requires_shipping: boolean | null;
   }[]>;
   syncFulfilledStatusesFromShopify(): Promise<void>;
-  backfillOrdersFromShopifyRaw(): Promise<{ updated: number }>;
+  backfillOrdersFromOms(): Promise<{ updated: number }>;
   countOrdersMissingShippingData(): Promise<number>;
-  updateShopifyRawOrderCustomer(orderId: string, data: {
+  updateOmsRawOrderCustomer(orderId: string, data: {
     customerName: string;
     customerEmail: string | null;
     shippingName: string | null;
@@ -94,7 +91,7 @@ export interface IOrderStorage {
     shippingPostalCode: string | null;
     shippingCountry: string | null;
   }): Promise<number>;
-  countShopifyRawOrdersMissingCustomerName(): Promise<number>;
+  countOmsRawOrdersMissingCustomerName(): Promise<number>;
 
   // Diagnostic/admin queries
   debugPickingQueue(): Promise<any[]>;
@@ -110,8 +107,8 @@ export interface IOrderStorage {
 }
 
 export const orderMethods: IOrderStorage = {
-  async getOrderByShopifyId(shopifyOrderId: string): Promise<Order | undefined> {
-    const result = await db.select().from(orders).where(eq(orders.shopifyOrderId, shopifyOrderId));
+  async getOrderByExternalId(externalOrderId: string): Promise<Order | undefined> {
+    const result = await db.select().from(orders).where(eq(orders.externalOrderId, externalOrderId));
     return result[0];
   },
 
@@ -139,13 +136,20 @@ export const orderMethods: IOrderStorage = {
     }
     
     const orderIds = orderList.map(o => o.id);
-    const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
+    if (orderIds.length === 0) return [];
     
-    const itemsByOrderId = new Map<number, OrderItem[]>();
-    for (const item of allItems) {
-      const existing = itemsByOrderId.get(item.orderId) || [];
+    const idList = sql.join(orderIds.map(id => sql`${id}`), sql`, `);
+    const allItems = await db.execute(sql`
+      SELECT * FROM wms.order_items 
+      WHERE order_id IN (${idList})
+    `);
+    
+    const itemsByOrderId = new Map<number, any[]>();
+    for (const item of allItems.rows) {
+      const orderId = (item as any).wms_order_id as number;
+      const existing = itemsByOrderId.get(orderId) || [];
       existing.push(item);
-      itemsByOrderId.set(item.orderId, existing);
+      itemsByOrderId.set(orderId, existing);
     }
     
     return orderList.map(order => ({
@@ -155,19 +159,24 @@ export const orderMethods: IOrderStorage = {
   },
 
   async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
     const orderList = await db.execute(sql`
       SELECT o.*
-      FROM orders o
+      FROM wms.orders o
+      LEFT JOIN echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
           -- Ready/in_progress orders: show in pick queue
           o.warehouse_status IN ('ready', 'in_progress')
           -- Completed orders: show for 24 hours in done queue
-          OR (o.warehouse_status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
+          OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours')
         )
-      ORDER BY COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
+      ORDER BY
+        o.on_hold ASC,           -- Held orders sink to the bottom
+        CASE WHEN o.priority >= 9999 THEN 1 ELSE 0 END DESC, -- Bumped orders always float to top
+        CASE WHEN s.value = 'true' THEN 0 ELSE o.priority END DESC, -- Bypass standard priority scoring if FIFO enabled
+        o.sla_due_at ASC NULLS LAST,
+        COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
     
     const orderRows = (orderList.rows as any[]).map((row: any) => ({
@@ -176,7 +185,6 @@ export const orderMethods: IOrderStorage = {
       source: row.source,
       externalOrderId: row.external_order_id,
       sourceTableId: row.source_table_id,
-      shopifyOrderId: row.shopify_order_id,
       orderNumber: row.order_number,
       customerName: row.customer_name,
       customerEmail: row.customer_email,
@@ -217,12 +225,50 @@ export const orderMethods: IOrderStorage = {
       return [];
     }
     
-    const orderIds = orderRows.map(o => o.id);
-    const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
+    const orderIds = orderRows.map((o: any) => o.id);
+    const idList = sql.join(orderIds.map((id: number) => sql`${id}`), sql`, `);
+    const allItemsResult = await db.execute(sql`
+      SELECT * FROM wms.order_items 
+      WHERE order_id IN (${idList})
+    `);
     
-    const skusMissingImages = [...new Set(
+    // Map wms.order_items columns to expected structure
+    const allItems: any[] = allItemsResult.rows.map((row: any) => ({
+      id: row.id,
+      orderId: row.order_id,
+      omsOrderLineId: row.oms_order_line_id,
+      productId: row.product_id,
+      sku: row.sku,
+      name: row.name,
+      title: row.name,
+      barcode: row.barcode,
+      quantity: row.quantity,
+      pickedQuantity: row.picked_quantity,
+      fulfilledQuantity: row.fulfilled_quantity,
+      requiresShipping: row.requires_shipping,
+      status: row.status,
+      location: row.location,
+      zone: row.zone,
+      shortReason: row.short_reason,
+      pickedAt: row.picked_at,
+      imageUrl: row.image_url,
+      // Fields not in wms schema — default values for compatibility
+      price: null,
+      taxable: null,
+      fulfillmentStatus: null,
+      assignedPickerId: null,
+      pickerName: null,
+      locationId: null,
+      locationPath: null,
+      binLocation: row.location,
+      notes: null,
+      sourceTableId: null,
+      externalOrderItemId: null,
+    }));
+    
+    const skusMissingImages = Array.from(new Set(
       allItems.filter(item => !item.imageUrl && item.sku).map(item => item.sku!.toUpperCase())
-    )];
+    ));
 
     const imageMap = new Map<string, string>();
     if (skusMissingImages.length > 0) {
@@ -233,12 +279,16 @@ export const orderMethods: IOrderStorage = {
             SELECT pl.sku, pl.image_url FROM product_locations pl
             WHERE UPPER(pl.sku) IN (${imageSkuList}) AND pl.image_url IS NOT NULL
             UNION ALL
-            SELECT pv.sku, COALESCE(pva.url, pa.url) as image_url
-            FROM product_variants pv
-            LEFT JOIN product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
-            LEFT JOIN product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
+            SELECT pv.sku, 
+              COALESCE(
+                CASE WHEN pva.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pva.id || '/file' ELSE pva.url END,
+                CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END
+              ) as image_url
+            FROM catalog.product_variants pv
+            LEFT JOIN catalog.product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
+            LEFT JOIN catalog.product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
             WHERE UPPER(pv.sku) IN (${imageSkuList})
-              AND COALESCE(pva.url, pa.url) IS NOT NULL
+              AND (pva.id IS NOT NULL OR pa.id IS NOT NULL)
           ) sub
         `);
         for (const row of imageResults.rows) {
@@ -251,9 +301,9 @@ export const orderMethods: IOrderStorage = {
       }
     }
     
-    const skusMissingBarcodes = [...new Set(
+    const skusMissingBarcodes = Array.from(new Set(
       allItems.filter(item => !item.barcode && item.sku).map(item => item.sku!.toUpperCase())
-    )];
+    ));
 
     const barcodeMap = new Map<string, string>();
     if (skusMissingBarcodes.length > 0) {
@@ -261,7 +311,7 @@ export const orderMethods: IOrderStorage = {
         const barcodeSkuList = sql.join(skusMissingBarcodes.map(s => sql`${s}`), sql`, `);
         const barcodeResults = await db.execute<{ sku: string; barcode: string }>(sql`
           SELECT UPPER(pv.sku) as sku, pv.barcode
-          FROM product_variants pv
+          FROM catalog.product_variants pv
           WHERE UPPER(pv.sku) IN (${barcodeSkuList})
             AND pv.barcode IS NOT NULL
         `);
@@ -306,11 +356,11 @@ export const orderMethods: IOrderStorage = {
           const fixedStatus = hasShort ? "exception" : "completed";
           try {
             await db.execute(
-              sql`UPDATE orders SET warehouse_status = ${fixedStatus}, completed_at = NOW() WHERE id = ${order.id}`
+              sql`UPDATE wms.orders SET warehouse_status = ${fixedStatus}, completed_at = NOW() WHERE id = ${order.id}`
             );
             const nonShippablePending = items.filter(i => i.requiresShipping !== 1 && i.status === "pending");
             for (const item of nonShippablePending) {
-              await db.execute(sql`UPDATE order_items SET status = 'completed' WHERE id = ${item.id}`);
+              await db.execute(sql`UPDATE wms.order_items SET status = 'completed' WHERE id = ${item.id}`);
               item.status = "completed";
             }
             order.warehouseStatus = fixedStatus;
@@ -329,10 +379,10 @@ export const orderMethods: IOrderStorage = {
   },
 
   async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order> {
-    if (order.shopifyOrderId) {
-      const existingByShopifyId = await this.getOrderByShopifyId(order.shopifyOrderId);
+    if (order.externalOrderId) {
+      const existingByShopifyId = await this.getOrderByExternalId(order.externalOrderId);
       if (existingByShopifyId) {
-        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by shopifyOrderId: ${order.shopifyOrderId}`);
+        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by externalOrderId: ${order.externalOrderId}`);
         return existingByShopifyId;
       }
     }
@@ -350,10 +400,13 @@ export const orderMethods: IOrderStorage = {
     }).returning();
     
     if (items.length > 0) {
-      const itemsWithOrderId = items.map(item => ({
-        ...item,
-        orderId: newOrder.id,
-      }));
+      const itemsWithOrderId = items.map((item: any) => {
+        const { orderId, ...rest } = item;
+        return {
+          ...rest,
+          orderId: newOrder.id,
+        };
+      });
       await db.insert(orderItems).values(itemsWithOrderId);
     }
     
@@ -498,7 +551,7 @@ export const orderMethods: IOrderStorage = {
 
     if (status === "shipped" || status === "completed" || status === "cancelled") {
       await db.execute(sql`
-        UPDATE order_items SET status = 'completed'
+        UPDATE wms.order_items SET status = 'completed'
         WHERE order_id = ${orderId}
           AND status NOT IN ('completed', 'short')
       `);
@@ -633,24 +686,26 @@ export const orderMethods: IOrderStorage = {
     return result[0] || null;
   },
 
-  async setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order | null> {
+  async setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null> {
+    const finalPriority = priority === "reset" ? 100 : priority;
     const result = await db
       .update(orders)
-      .set({ priority })
+      .set({ priority: finalPriority })
       .where(eq(orders.id, orderId))
       .returning();
     return result[0] || null;
   },
 
-  async getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined> {
+
+  async getOrderItemByShopifyLineId(shopifyLineItemId: number): Promise<OrderItem | undefined> {
     const result = await db
       .select()
       .from(orderItems)
-      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId));
+      .where(eq(orderItems.shopifyLineItemId, String(shopifyLineItemId)));
     return result[0];
   },
 
-  async updateItemFulfilledQuantity(shopifyLineItemId: string, additionalQty: number): Promise<OrderItem | null> {
+  async updateItemFulfilledQuantity(shopifyLineItemId: number, additionalQty: number): Promise<OrderItem | null> {
     const item = await this.getOrderItemByShopifyLineId(shopifyLineItemId);
     if (!item) return null;
     
@@ -662,7 +717,7 @@ export const orderMethods: IOrderStorage = {
     const result = await db
       .update(orderItems)
       .set({ fulfilledQuantity: newFulfilledQty })
-      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId))
+      .where(eq(orderItems.shopifyLineItemId, String(shopifyLineItemId)))
       .returning();
     
     return result[0] || null;
@@ -680,7 +735,7 @@ export const orderMethods: IOrderStorage = {
       .select()
       .from(orders)
       .where(eq(orders.warehouseStatus, "exception"))
-      .orderBy(desc(orders.exceptionAt));
+      .orderBy(desc(orders.heldAt));
     
     const result: (Order & { items: OrderItem[] })[] = [];
     for (const order of exceptionOrders) {
@@ -737,13 +792,12 @@ export const orderMethods: IOrderStorage = {
 
   // Shopify raw-table queries (used by sync routes)
 
-  async getUnfulfilledShopifyRawOrders() {
+  async getUnfulfilledOmsOrders() {
     const result = await db.execute<{
-      id: string;
+      id: string; // Will be oms_orders.id
+      external_order_id: string;
       order_number: string;
-      legacy_order_id: string | null;
-      member_id: string | null;
-      shopify_customer_id: string | null;
+      channel_id: number;
       order_date: Date | null;
       financial_status: string | null;
       fulfillment_status: string | null;
@@ -751,75 +805,81 @@ export const orderMethods: IOrderStorage = {
       currency: string | null;
       note: string | null;
       tags: string[] | null;
-      discount_codes: any | null;
       created_at: Date | null;
       customer_name: string | null;
       customer_email: string | null;
-      shipping_name: string | null;
-      shipping_address1: string | null;
-      shipping_address2: string | null;
-      shipping_city: string | null;
-      shipping_state: string | null;
-      shipping_postal_code: string | null;
-      shipping_country: string | null;
-      cancelled_at: Date | null;
+      ship_to_name: string | null;
+      ship_to_address1: string | null;
+      ship_to_address2: string | null;
+      ship_to_city: string | null;
+      ship_to_state: string | null;
+      ship_to_zip: string | null;
+      ship_to_country: string | null;
     }>(sql`
       SELECT
         oms.id::text as id,
+        oms.external_order_id,
         oms.external_order_number as order_number,
-        NULL as legacy_order_id,
-        NULL as member_id,
-        NULL as shopify_customer_id,
+        oms.channel_id,
         oms.ordered_at as order_date,
         oms.financial_status,
         oms.fulfillment_status,
         oms.total_cents as total_price_cents,
         oms.currency,
         oms.notes as note,
-        oms.tags::text[] as tags,
-        NULL as discount_codes,
+        oms.tags,
         oms.created_at,
         oms.customer_name,
         oms.customer_email,
-        oms.ship_to_name as shipping_name,
-        oms.ship_to_address1 as shipping_address1,
-        oms.ship_to_address2 as shipping_address2,
-        oms.ship_to_city as shipping_city,
-        oms.ship_to_state as shipping_state,
-        oms.ship_to_zip as shipping_postal_code,
-        oms.ship_to_country as shipping_country,
-        oms.cancelled_at
+        oms.ship_to_name,
+        oms.ship_to_address1,
+        oms.ship_to_address2,
+        oms.ship_to_city,
+        oms.ship_to_state,
+        oms.ship_to_zip,
+        oms.ship_to_country
       FROM oms_orders oms
       WHERE oms.fulfillment_status IS NULL
          OR oms.fulfillment_status = 'unfulfilled'
          OR oms.fulfillment_status = 'partial'
+         OR oms.fulfillment_status = 'pending'
       ORDER BY oms.ordered_at DESC
     `);
     return result.rows;
   },
 
-  async getShopifyRawOrderItems(orderId: string) {
+  async getOmsOrderItems(omsOrderId: string) {
     const result = await db.execute<{
       id: string;
-      shopify_line_item_id: string;
+      external_line_item_id: string;
       sku: string | null;
-      name: string | null;
-      title: string | null;
+      title: string;
+      variant_title: string | null;
       quantity: number;
       fulfillable_quantity: number | null;
       fulfillment_status: string | null;
       requires_shipping: boolean | null;
     }>(sql`
-      SELECT * FROM shopify_order_items
-      WHERE order_id = ${orderId}
+      SELECT
+        ol.id::text as id,
+        ol.external_line_item_id,
+        ol.sku,
+        ol.title,
+        ol.variant_title,
+        ol.quantity,
+        ol.fulfillable_quantity,
+        ol.fulfillment_status,
+        ol.requires_shipping
+      FROM oms_order_lines ol
+      WHERE ol.order_id = ${omsOrderId}
     `);
     return result.rows;
   },
 
   async syncFulfilledStatusesFromShopify() {
-    // 1. Update ORDERS status to 'completed' where OMS shows fulfilled/shipped
+    // 1. Update wms.orders status to 'completed' where OMS shows fulfilled/shipped
     await db.execute(sql`
-      UPDATE orders o SET
+      UPDATE wms.orders o SET
         status = 'completed',
         completed_at = COALESCE(o.completed_at, NOW())
       FROM oms_orders oms
@@ -828,9 +888,9 @@ export const orderMethods: IOrderStorage = {
         AND o.warehouse_status != 'completed'
     `);
 
-    // 2. Update ORDER_ITEMS to 'completed' with full picked_quantity where OMS line item is fulfilled
+    // 2. Update wms.order_items to 'completed' with full picked_quantity where OMS line item is fulfilled
     await db.execute(sql`
-      UPDATE order_items oi SET
+      UPDATE wms.order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
@@ -842,11 +902,11 @@ export const orderMethods: IOrderStorage = {
 
     // 3. Also update items where the parent ORDER is fulfilled in OMS
     await db.execute(sql`
-      UPDATE order_items oi SET
+      UPDATE wms.order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
-      FROM orders o
+      FROM wms.orders o
       INNER JOIN oms_orders oms ON o.order_number = oms.external_order_number
       WHERE oi.order_id = o.id
         AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
@@ -855,7 +915,7 @@ export const orderMethods: IOrderStorage = {
 
     // 4. Handle partial fulfillments - update items individually from OMS line items
     await db.execute(sql`
-      UPDATE order_items oi SET
+      UPDATE wms.order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
@@ -866,9 +926,9 @@ export const orderMethods: IOrderStorage = {
     `);
   },
 
-  async backfillOrdersFromShopifyRaw(): Promise<{ updated: number }> {
+  async backfillOrdersFromOms(): Promise<{ updated: number }> {
     const result = await db.execute(sql`
-      UPDATE orders o SET
+      UPDATE wms.orders o SET
         customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
         customer_email = COALESCE(oms.customer_email, o.customer_email),
         shipping_address = COALESCE(oms.ship_to_address1, o.shipping_address),
@@ -885,15 +945,15 @@ export const orderMethods: IOrderStorage = {
 
   async countOrdersMissingShippingData(): Promise<number> {
     const result = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM orders
-      WHERE source = 'shopify'
-        AND shopify_order_id IS NOT NULL
+      SELECT COUNT(*) as count FROM wms.orders
+      WHERE source = 'oms'
+        AND source_table_id IS NOT NULL
         AND (shipping_address IS NULL OR shipping_city IS NULL)
     `);
     return parseInt(result.rows[0]?.count || '0', 10);
   },
 
-  async updateShopifyRawOrderCustomer(orderId: string, data: {
+  async updateOmsRawOrderCustomer(orderId: string, data: {
     customerName: string;
     customerEmail: string | null;
     shippingName: string | null;
@@ -905,24 +965,24 @@ export const orderMethods: IOrderStorage = {
     shippingCountry: string | null;
   }): Promise<number> {
     const result = await db.execute(sql`
-      UPDATE shopify_orders SET
+      UPDATE oms_orders SET
         customer_name = ${data.customerName},
         customer_email = ${data.customerEmail},
-        shipping_name = ${data.shippingName},
-        shipping_address1 = ${data.shippingAddress1},
-        shipping_address2 = ${data.shippingAddress2},
-        shipping_city = ${data.shippingCity},
-        shipping_state = ${data.shippingState},
-        shipping_postal_code = ${data.shippingPostalCode},
-        shipping_country = ${data.shippingCountry}
+        ship_to_name = ${data.shippingName},
+        ship_to_address1 = ${data.shippingAddress1},
+        ship_to_address2 = ${data.shippingAddress2},
+        ship_to_city = ${data.shippingCity},
+        ship_to_state = ${data.shippingState},
+        ship_to_zip = ${data.shippingPostalCode},
+        ship_to_country = ${data.shippingCountry}
       WHERE id = ${orderId}
     `);
     return result.rowCount || 0;
   },
 
-  async countShopifyRawOrdersMissingCustomerName(): Promise<number> {
+  async countOmsRawOrdersMissingCustomerName(): Promise<number> {
     const result = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM shopify_orders WHERE customer_name IS NULL
+      SELECT COUNT(*) as count FROM oms_orders WHERE customer_name IS NULL
     `);
     return parseInt(result.rows[0]?.count || '0', 10);
   },
@@ -933,8 +993,8 @@ export const orderMethods: IOrderStorage = {
     const result = await db.execute(`
       SELECT o.id as order_id, o.warehouse_status, o.order_number,
              oi.id as item_id, oi.sku, oi.requires_shipping
-      FROM orders o
-      LEFT JOIN order_items oi ON oi.order_id = o.id
+      FROM wms.orders o
+      LEFT JOIN wms.order_items oi ON oi.order_id = o.id
       WHERE o.warehouse_status IN ('ready', 'in_progress')
       LIMIT 5
     `);
@@ -945,13 +1005,13 @@ export const orderMethods: IOrderStorage = {
     const result = await db.execute(sql`
       SELECT oi.id, oi.order_id, oi.sku, oi.name, oi.status, oi.quantity,
              oi.picked_quantity, oi.requires_shipping, oi.location
-      FROM order_items oi
-      JOIN orders o ON o.id = oi.order_id
+      FROM wms.order_items oi
+      JOIN wms.orders o ON o.id = oi.order_id
       WHERE o.order_number = ${orderNumber}
     `);
     const orderResult = await db.execute(sql`
       SELECT id, order_number, item_count, unit_count, picked_count, warehouse_status
-      FROM orders WHERE order_number = ${orderNumber}
+      FROM wms.orders WHERE order_number = ${orderNumber}
     `);
     return { order: (orderResult.rows as any[])[0], items: result.rows as any[] };
   },
@@ -960,9 +1020,9 @@ export const orderMethods: IOrderStorage = {
     const result = await db.execute(sql`
       SELECT o.id, o.order_number, o.item_count, o.unit_count, o.picked_count,
              o.warehouse_status,
-             (SELECT SUM(oi.picked_quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_picked_sum,
-             (SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_unit_sum
-      FROM orders o
+             (SELECT SUM(oi.picked_quantity) FROM wms.order_items oi WHERE oi.order_id = o.id) as actual_picked_sum,
+             (SELECT SUM(oi.quantity) FROM wms.order_items oi WHERE oi.order_id = o.id) as actual_unit_sum
+      FROM wms.orders o
       WHERE o.picked_count > o.unit_count
         AND o.warehouse_status NOT IN ('cancelled')
       ORDER BY o.picked_count - o.unit_count DESC
@@ -973,7 +1033,7 @@ export const orderMethods: IOrderStorage = {
 
   async fixOrderCounts(): Promise<number> {
     const result = await db.execute(sql`
-      UPDATE orders o
+      UPDATE wms.orders o
       SET
         item_count = sub.actual_item_count,
         unit_count = sub.actual_unit_count,
@@ -984,7 +1044,7 @@ export const orderMethods: IOrderStorage = {
           COUNT(*) as actual_item_count,
           COALESCE(SUM(oi.quantity), 0) as actual_unit_count,
           COALESCE(SUM(CASE WHEN oi.requires_shipping = 1 THEN oi.picked_quantity ELSE 0 END), 0) as actual_picked_count
-        FROM order_items oi
+        FROM wms.order_items oi
         GROUP BY oi.order_id
       ) sub
       WHERE o.id = sub.order_id
@@ -998,10 +1058,10 @@ export const orderMethods: IOrderStorage = {
   async getStuckInProgressOrders(): Promise<any[]> {
     const result = await db.execute(sql`
       SELECT o.id, o.order_number, o.warehouse_status, o.item_count,
-        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1) as shippable_count,
-        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status IN ('completed', 'short')) as shippable_done_count,
-        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status = 'short') as short_count
-      FROM orders o
+        (SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1) as shippable_count,
+        (SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status IN ('completed', 'short')) as shippable_done_count,
+        (SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status = 'short') as short_count
+      FROM wms.orders o
       WHERE o.warehouse_status = 'in_progress'
     `);
     return result.rows as any[];
@@ -1009,7 +1069,7 @@ export const orderMethods: IOrderStorage = {
 
   async transitionStuckOrder(orderId: number, newStatus: string): Promise<void> {
     await db.execute(sql`
-      UPDATE orders
+      UPDATE wms.orders
       SET warehouse_status = ${newStatus}, completed_at = NOW()
       WHERE id = ${orderId}
     `);
@@ -1017,7 +1077,7 @@ export const orderMethods: IOrderStorage = {
 
   async completeNonShippableItems(orderId: number): Promise<void> {
     await db.execute(sql`
-      UPDATE order_items
+      UPDATE wms.order_items
       SET status = 'completed'
       WHERE order_id = ${orderId} AND requires_shipping = 0 AND status = 'pending'
     `);
@@ -1050,8 +1110,8 @@ export const orderMethods: IOrderStorage = {
   async getPendingOrderItemsForSku(sku: string): Promise<{ id: number; location: string | null; zone: string | null }[]> {
     const result = await db.execute(sql`
       SELECT oi.id, oi.location, oi.zone
-      FROM order_items oi
-      JOIN orders o ON oi.order_id = o.id
+      FROM wms.order_items oi
+      JOIN wms.orders o ON oi.order_id = o.id
       WHERE UPPER(oi.sku) = ${sku.toUpperCase()}
         AND oi.status = 'pending'
         AND o.warehouse_status IN ('ready', 'in_progress')

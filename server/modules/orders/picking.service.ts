@@ -33,6 +33,13 @@ type InventoryCore = {
   getLevelsByVariant: (productVariantId: number) => Promise<InventoryLevel[]>;
   upsertLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
   adjustLevel: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
+  adjustInventory: (params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    qtyDelta: number;
+    reason: string;
+    userId?: string;
+  }) => Promise<void>;
   logTransaction: (txn: any) => Promise<void>;
   pickItem: (params: {
     productVariantId: number;
@@ -47,8 +54,6 @@ type InventoryCore = {
 type ReplenishmentService = {
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
-  createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
-  inferUnrecordedReplen: (pickVariantId: number, toLocationId: number, surplusQty: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
 };
 
@@ -687,28 +692,14 @@ class PickingService {
     const adjustment = actualBinQty - systemQty;
 
     if (adjustment !== 0) {
-      if (!level) {
-        const newLevel = await this.inventoryCore.upsertLevel(variant.id, warehouseLocationId);
-        if (actualBinQty > 0) {
-          await this.inventoryCore.adjustLevel(newLevel.id, { variantQty: actualBinQty });
-        }
-      } else {
-        await this.inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
-      }
-
-      await this.inventoryCore.logTransaction({
+      // Use adjustInventory instead of adjustLevel — handles sync triggers,
+      // audit trail, negative guards, and lot tracking automatically
+      await this.inventoryCore.adjustInventory({
         productVariantId: variant.id,
-        toLocationId: warehouseLocationId,
-        transactionType: "cycle_count",
-        variantQtyDelta: adjustment,
-        variantQtyBefore: systemQty,
-        variantQtyAfter: actualBinQty,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        referenceType: "picker_case_break",
-        referenceId: `${sku}:${warehouseLocationId}`,
-        notes: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
-        userId: userId || null,
+        warehouseLocationId,
+        qtyDelta: adjustment,
+        reason: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
+        userId: userId || undefined,
       });
     } else {
       // Log verification even when count matches system (audit trail)
@@ -760,23 +751,47 @@ class PickingService {
     const systemQty = level?.variantQty ?? 0;
     const adjustment = actualBinQty - systemQty;
 
-    // Correct inventory if needed
-    if (adjustment !== 0 && level) {
-      await this.inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
-      await this.inventoryCore.logTransaction({
+    // Correct inventory if needed — picker's count is source of truth
+    if (adjustment !== 0) {
+      await this.inventoryCore.adjustInventory({
         productVariantId: variant.id,
-        toLocationId: warehouseLocationId,
-        transactionType: "cycle_count",
-        variantQtyDelta: adjustment,
-        variantQtyBefore: systemQty,
-        variantQtyAfter: actualBinQty,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        referenceType: "picker_replen_skip",
-        referenceId: `${sku}:${warehouseLocationId}`,
-        notes: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
-        userId: userId || null,
+        warehouseLocationId,
+        qtyDelta: adjustment,
+        reason: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
+        userId: userId || undefined,
       });
+
+      // If we found MORE stock than expected, trigger cycle count notification
+      // on the source case bin — an unrecorded case break may have occurred
+      if (adjustment > 0) {
+        try {
+          const pendingTasks = await this.storage.getPendingReplenTasksForLocation(warehouseLocationId);
+          const matchingTask = pendingTasks.find(
+            (t: any) => t.pickProductVariantId === variant.id && t.fromLocationId
+          );
+
+          if (matchingTask?.fromLocationId) {
+            const { notify } = await import("../notifications/notifications.service");
+
+            await notify("cycle_count_needed", {
+              title: `Bin variance: ${variant.sku}`,
+              message: `Bin has +${adjustment} more than expected ` +
+                `(system: ${systemQty}, actual: ${actualBinQty}). ` +
+                `Verify source bin (location ${matchingTask.fromLocationId}) — possible unrecorded case break.`,
+              data: {
+                sourceLocationId: matchingTask.fromLocationId,
+                targetLocationId: warehouseLocationId,
+                variantId: variant.id,
+                adjustment,
+                systemQty,
+                actualBinQty,
+              },
+            });
+          }
+        } catch (notifyErr: any) {
+          console.warn(`[Picking] Cycle count notification failed: ${notifyErr.message}`);
+        }
+      }
     }
 
     // Cancel pending/blocked replen tasks for this SKU+location
@@ -825,19 +840,22 @@ class PickingService {
       throw new Error(`No variant found for SKU ${sku}`);
     }
 
-    let replenResult: { moved: number } | null = null;
+    let replenResult: any = null;
     let replenFailReason: string | null = null;
 
     // Step 1: If picker confirmed replen, create+execute the task atomically
     if (didReplen) {
       try {
-        replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
-        if (replenResult) {
-          console.log(`[BinCount] replen executed: moved ${replenResult.moved} units`);
-        } else {
-          replenFailReason = "no_source_stock";
-          console.warn(`[BinCount] replen returned null — likely no source stock or threshold no longer met`);
-        }
+        // [TODO] createAndExecuteReplen was removed from replen.service.ts
+        // replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
+        // if (replenResult) {
+        //   console.log(`[BinCount] replen executed: moved ${replenResult.moved} units`);
+        // } else {
+        //   replenFailReason = "no_source_stock";
+        //   console.warn(`[BinCount] replen returned null — likely no source stock or threshold no longer met`);
+        // }
+        replenFailReason = "method_removed";
+        console.warn(`[BinCount] replen triggered but createAndExecuteReplen is not implemented.`);
       } catch (err: any) {
         const msg = err?.message || "unknown_error";
         replenFailReason = msg.startsWith("execute_failed:") ? "execute_failed" : msg;
@@ -852,19 +870,21 @@ class PickingService {
     // Step 3: If there's a surplus and picker didn't explicitly confirm replen,
     // infer that an unrecorded case break / replen occurred. This keeps the
     // source bin accurate instead of dumping everything into a blind cycle count.
-    let inferredReplen: { moved: number } | null = null;
+    let inferredReplen: any = null;
     const surplus = binCount - systemQty;
 
     if (!didReplen && surplus > 0) {
       try {
-        inferredReplen = await this.replenishment.inferUnrecordedReplen(variant.id, locationId, surplus, userId);
-        if (inferredReplen) {
-          console.log(`[BinCount] inferred replen: ${inferredReplen.moved} units attributed to unrecorded case break`);
-          // Re-read system qty after the inferred replen credited the destination
-          // (executeTask already adjusted the level)
-        } else {
-          console.log(`[BinCount] no replen source found — full surplus will be cycle count`);
-        }
+        // [TODO] inferUnrecordedReplen was removed from replen.service.ts
+        // inferredReplen = await this.replenishment.inferUnrecordedReplen(variant.id, locationId, surplus, userId);
+        // if (inferredReplen) {
+        //   console.log(`[BinCount] inferred replen: ${inferredReplen.moved} units attributed to unrecorded case break`);
+        //   // Re-read system qty after the inferred replen credited the destination
+        //   // (executeTask already adjusted the level)
+        // } else {
+        //   console.log(`[BinCount] no replen source found — full surplus will be cycle count`);
+        // }
+        console.log(`[BinCount] inferUnrecordedReplen removed — full surplus will be cycle count`);
       } catch (err: any) {
         console.warn(`[BinCount] inferred replen failed:`, err?.message);
       }
@@ -876,26 +896,44 @@ class PickingService {
     const adjustment = binCount - postSystemQty;
 
     if (adjustment !== 0 && postLevel) {
-      // Remaining gap = unexplained variance (cycle count)
-      await this.inventoryCore.adjustLevel(postLevel.id, { variantQty: adjustment });
-      await this.inventoryCore.logTransaction({
+      // Use adjustInventory for bin count corrections — handles sync triggers,
+      // audit trail, negative guards, and lot tracking automatically
+      const reason = didReplen
+        ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
+        : inferredReplen
+          ? `Bin count with inferred replen: system before=${systemQty}, after inferred replen=${postSystemQty}, actual=${binCount}, remaining variance=${adjustment}`
+          : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`;
+
+      await this.inventoryCore.adjustInventory({
         productVariantId: variant.id,
-        toLocationId: locationId,
-        transactionType: "cycle_count",
-        variantQtyDelta: adjustment,
-        variantQtyBefore: postSystemQty,
-        variantQtyAfter: binCount,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        referenceType: inferredReplen ? "picker_bin_count_inferred_replen" : didReplen ? "picker_bin_count_post_replen" : "picker_bin_count",
-        referenceId: `${sku}:${locationId}`,
-        notes: didReplen
-          ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
-          : inferredReplen
-            ? `Bin count with inferred replen: system before=${systemQty}, after inferred replen=${postSystemQty}, actual=${binCount}, remaining variance=${adjustment}`
-            : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`,
-        userId: userId || null,
+        warehouseLocationId: locationId,
+        qtyDelta: adjustment,
+        reason,
+        userId: userId || undefined,
       });
+
+      // If positive adjustment (more stock than expected) and no replen was done,
+      // an unrecorded case break may have occurred. Notify leads to verify source bin.
+      if (adjustment > 0 && !didReplen) {
+        try {
+          const { notify } = await import("../notifications/notifications.service");
+          await notify("cycle_count_needed", {
+            title: `Bin variance: ${variant.sku}`,
+            message: `Bin has +${adjustment} more than expected ` +
+              `(system: ${postSystemQty}, actual: ${binCount}). ` +
+              `Possible unrecorded case break — verify source bins.`,
+            data: {
+              targetLocationId: locationId,
+              variantId: variant.id,
+              adjustment,
+              systemQty: postSystemQty,
+              actualBinQty: binCount,
+            },
+          });
+        } catch (notifyErr: any) {
+          console.warn(`[BinCount] Cycle count notification failed: ${notifyErr.message}`);
+        }
+      }
     } else {
       // No remaining adjustment — log for audit trail
       await this.inventoryCore.logTransaction({

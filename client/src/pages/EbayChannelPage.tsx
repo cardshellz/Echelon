@@ -69,6 +69,7 @@ import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
 import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { PushProgressModal } from "@/components/ebay/PushProgressModal";
+import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
 
 // ============================================================================
 // Types
@@ -524,6 +525,7 @@ export default function EbayChannelPage() {
 
   // ---- Push to eBay (SSE-based with progress modal) ----
   const [pushModalOpen, setPushModalOpen] = useState(false);
+  const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [pushProductIds, setPushProductIds] = useState<number[]>([]);
 
   const handlePushAll = () => {
@@ -545,30 +547,9 @@ export default function EbayChannelPage() {
   };
 
   // ---- Sync All Listings ----
-  const syncAllMutation = useMutation({
-    mutationFn: async () => {
-      const resp = await apiRequest("POST", "/api/ebay/listings/sync-all");
-      return resp.json();
-    },
-    onSuccess: (data: any) => {
-      const { synced, priceChanges, qtyChanges, policyChanges, errors } = data;
-      const changes: string[] = [];
-      if (priceChanges > 0) changes.push(`${priceChanges} price update${priceChanges !== 1 ? "s" : ""}`);
-      if (qtyChanges > 0) changes.push(`${qtyChanges} quantity update${qtyChanges !== 1 ? "s" : ""}`);
-      if (policyChanges > 0) changes.push(`${policyChanges} policy update${policyChanges !== 1 ? "s" : ""}`);
-      const changeStr = changes.length > 0 ? `: ${changes.join(", ")}` : "";
-      toast({
-        title: "Sync Complete",
-        description: `Synced ${synced} listing${synced !== 1 ? "s" : ""}${changeStr}${errors > 0 ? ` (${errors} error${errors !== 1 ? "s" : ""})` : ""}`,
-        variant: errors > 0 ? "destructive" : undefined,
-      });
-      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Sync Failed", description: err.message, variant: "destructive" });
-    },
-  });
+  const handleSyncAll = () => {
+    setSyncModalOpen(true);
+  };
 
   // ---- Sync Single Product ----
   const [syncingProductIds, setSyncingProductIds] = useState<Set<number>>(new Set());
@@ -594,7 +575,10 @@ export default function EbayChannelPage() {
     },
     onError: (err: Error, productId: number) => {
       setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
-      toast({ title: "Sync Failed", description: err.message, variant: "destructive" });
+      const raw = err.message || "Unknown error";
+      const isHtml = raw.includes("<!DOCTYPE") || raw.includes("<html");
+      const description = isHtml ? "eBay server returned an error page. Check server logs." : raw.length > 200 ? raw.substring(0, 200) + "…" : raw;
+      toast({ title: "Sync Failed", description, variant: "destructive" });
     },
   });
 
@@ -619,7 +603,10 @@ export default function EbayChannelPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
     },
     onError: (err: Error) => {
-      toast({ title: "Verification Failed", description: err.message, variant: "destructive" });
+      const raw = err.message || "Unknown error";
+      const isHtml = raw.includes("<!DOCTYPE") || raw.includes("<html");
+      const description = isHtml ? "eBay server returned an error page. Check server logs." : raw.length > 200 ? raw.substring(0, 200) + "…" : raw;
+      toast({ title: "Verification Failed", description, variant: "destructive" });
     },
   });
 
@@ -1660,14 +1647,10 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={feedCounts.listed === 0 || syncAllMutation.isPending}
-                onClick={() => syncAllMutation.mutate()}
+                disabled={feedCounts.listed === 0}
+                onClick={handleSyncAll}
               >
-                {syncAllMutation.isPending ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4 mr-2" />
-                )}
+                <RefreshCw className="h-4 w-4 mr-2" />
                 Sync All ({feedCounts.listed})
               </Button>
               <Button
@@ -2506,6 +2489,12 @@ export default function EbayChannelPage() {
       <ProductTypeManager
         open={productTypeManagerOpen}
         onOpenChange={setProductTypeManagerOpen}
+      />
+
+      {/* Sync Progress Modal (SSE-based) */}
+      <SyncProgressModal
+        open={syncModalOpen}
+        onClose={() => setSyncModalOpen(false)}
       />
 
       {/* Push Progress Modal (SSE-based) */}

@@ -8,8 +8,110 @@ const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...in
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../modules/integrations/shopify";
 import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
+import crypto from "crypto";
 
 export function registerShopifyRoutes(app: Express) {
+
+  // -----------------------------------------------------------------------
+  // GET /api/shopify/oauth/install — Start OAuth flow (redirect to Shopify consent)
+  // Usage: visit https://your-app.herokuapp.com/api/shopify/oauth/install
+  // -----------------------------------------------------------------------
+  app.get("/api/shopify/oauth/install", (_req: Request, res: Response) => {
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || "card-shellz";
+    const apiKey = process.env.SHOPIFY_API_KEY;
+    const redirectUri = process.env.SHOPIFY_OAUTH_REDIRECT_URI ||
+      `https://cardshellz-echelon-f21ea7da3008.herokuapp.com/api/shopify/oauth/callback`;
+
+    if (!apiKey) {
+      return res.status(500).send("SHOPIFY_API_KEY not set");
+    }
+
+    const shop = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+    const scopes = [
+      "read_products", "write_products",
+      "read_inventory", "write_inventory",
+      "read_orders", "write_orders",
+      "read_fulfillments", "write_fulfillments",
+      "read_shipping",
+      "read_locations",
+    ].join(",");
+
+    const state = crypto.randomBytes(16).toString("hex");
+    const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${apiKey}&scope=${scopes}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+    res.redirect(installUrl);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/shopify/oauth/callback — Handle OAuth callback from Shopify
+  // Exchanges auth code for access token and saves to channel_connections
+  // -----------------------------------------------------------------------
+  app.get("/api/shopify/oauth/callback", async (req: Request, res: Response) => {
+    try {
+      const { code, shop, state, hmac } = req.query as Record<string, string>;
+
+      if (!code || !shop) {
+        return res.status(400).send("Missing code or shop parameter");
+      }
+
+      const apiKey = process.env.SHOPIFY_API_KEY;
+      const apiSecret = process.env.SHOPIFY_API_SECRET;
+
+      if (!apiKey || !apiSecret) {
+        return res.status(500).send("SHOPIFY_API_KEY or SHOPIFY_API_SECRET not set");
+      }
+
+      // Exchange code for access token
+      const tokenRes = await fetch(`https://${shop}/admin/oauth/access_token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: apiKey, client_secret: apiSecret, code }),
+      });
+
+      if (!tokenRes.ok) {
+        const err = await tokenRes.text();
+        console.error("[Shopify OAuth] Token exchange failed:", err);
+        return res.status(400).send(`Token exchange failed: ${err}`);
+      }
+
+      const tokenData = await tokenRes.json() as { access_token: string; scope: string };
+      const accessToken = tokenData.access_token;
+
+      console.log(`[Shopify OAuth] Got new access token for ${shop}, scopes: ${tokenData.scope}`);
+
+      // Save to channel_connections for the Shopify channel (id=36)
+      // Find channel by shop domain
+      const conn = await storage.getChannelConnectionByShopDomain(shop);
+      if (conn) {
+        // Update existing connection
+        await (storage as any).updateChannelConnectionToken?.(conn.channelId, accessToken) ||
+          console.log(`[Shopify OAuth] No updateChannelConnectionToken method — update manually`);
+      }
+
+      // Also update env-level token via direct DB update
+      const { db } = await import("../db");
+      const { channelConnections } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+
+      await (db as any)
+        .update(channelConnections)
+        .set({ accessToken, updatedAt: new Date() })
+        .where(eq(channelConnections.channelId, 36));
+
+      console.log(`[Shopify OAuth] ✅ Access token saved for channel 36 (${shop})`);
+
+      res.send(`
+        <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+          <h2>✅ Shopify OAuth Complete</h2>
+          <p>Access token saved for <strong>${shop}</strong></p>
+          <p>Scopes: <code>${tokenData.scope}</code></p>
+          <p>You can close this tab.</p>
+        </body></html>
+      `);
+    } catch (err: any) {
+      console.error("[Shopify OAuth] Callback error:", err.message);
+      res.status(500).send(`OAuth error: ${err.message}`);
+    }
+  });
   const {
     productImport,
   } = app.locals.services;
@@ -52,33 +154,32 @@ export function registerShopifyRoutes(app: Express) {
     }
   });
 
-  // Sync from shopify_orders/shopify_order_items tables to operational orders/order_items
-  // This reads from the raw Shopify tables and extracts operational subset
-  app.post("/api/shopify/sync-from-raw-tables", async (req, res) => {
+  // Sync from oms_orders/oms_order_lines tables to operational orders/order_items
+  // This reads from the unified OMS Hub and extracts the WMS operational subset
+  app.post("/api/orders/sync-from-oms", async (req, res) => {
     try {
-      console.log("Starting sync from shopify_orders to operational orders...");
+      console.log("Starting sync from oms_orders to operational WMS orders...");
       
-      // Get default Shopify channel for linking orders
       const allChannels = await storage.getAllChannels();
       const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
-      const shopifyChannelId = shopifyChannel?.id || null;
+      const defaultChannelId = shopifyChannel?.id || null;
       
-      // Fetch unfulfilled orders from shopify_orders table
-      const rawOrderRows = await storage.getUnfulfilledShopifyRawOrders();
+      // Fetch unfulfilled orders from oms_orders table
+      const rawOrderRows = await storage.getUnfulfilledOmsOrders();
       
       let created = 0;
       let skipped = 0;
       
       for (const rawOrder of rawOrderRows) {
-        // Check if order already exists in operational table
-        const existingOrder = await storage.getOrderByShopifyId(rawOrder.id);
+        // Check if order already exists in operational table (using oms_orders.id as sourceTableId)
+        const existingOrder = await storage.getOrderByExternalId(rawOrder.external_order_id || rawOrder.id);
         if (existingOrder) {
           skipped++;
           continue;
         }
         
-        // Fetch ALL line items for this order from shopify_order_items (including requires_shipping flag)
-        const rawItemRows = await storage.getShopifyRawOrderItems(rawOrder.id);
+        // Fetch ALL line items for this order from oms_order_lines (including requires_shipping flag)
+        const rawItemRows = await storage.getOmsOrderItems(rawOrder.id);
 
         // Skip if no items at all
         if (rawItemRows.length === 0) {
@@ -108,7 +209,6 @@ export function registerShopifyRoutes(app: Express) {
         for (const item of unfulfilledItems) {
           const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
           
-          // Look up image from product_locations first (best source), then products/product_variants
           let itemImageUrl = binLocation?.imageUrl || null;
           if (!itemImageUrl && item.sku) {
             itemImageUrl = await storage.getItemImageUrlBySku(item.sku);
@@ -116,10 +216,10 @@ export function registerShopifyRoutes(app: Express) {
           
           enrichedItems.push({
             orderId: 0,
-            shopifyLineItemId: item.shopify_line_item_id,
-            sourceItemId: item.id, // Links to shopify_order_items.id
+            shopifyLineItemId: item.external_line_item_id, // Keep field name for legacy compatibility
+            sourceItemId: item.id, // Links to oms_order_lines.id
             sku: item.sku || 'UNKNOWN',
-            name: item.name || item.title || 'Unknown Item',
+            name: item.title || item.variant_title || 'Unknown Item',
             quantity: item.fulfillable_quantity || item.quantity,
             pickedQuantity: 0,
             fulfilledQuantity: 0,
@@ -132,31 +232,28 @@ export function registerShopifyRoutes(app: Express) {
           });
         }
         
-        // Create operational order using customer/shipping data from shopify_orders
+        // Create operational order using customer/shipping data from oms_orders
         await storage.createOrderWithItems({
-          shopifyOrderId: rawOrder.id,
-          externalOrderId: rawOrder.id,
-          sourceTableId: rawOrder.id, // Links to shopify_orders.id for JOINs
-          channelId: shopifyChannelId,
-          source: "shopify",
+          shopifyOrderId: rawOrder.external_order_id,
+          externalOrderId: rawOrder.external_order_id || rawOrder.id,
+          sourceTableId: rawOrder.id, // Links to oms_orders.id for JOINs
+          channelId: rawOrder.channel_id || defaultChannelId,
+          source: "oms", // Updated to reflect it comes from the unified hub
           orderNumber: rawOrder.order_number,
-          customerName: rawOrder.customer_name || rawOrder.shipping_name || rawOrder.order_number,
+          customerName: rawOrder.customer_name || rawOrder.ship_to_name || rawOrder.order_number,
           customerEmail: rawOrder.customer_email,
-          shippingName: rawOrder.shipping_name,
-          shippingAddress: rawOrder.shipping_address1,
-          shippingCity: rawOrder.shipping_city,
-          shippingState: rawOrder.shipping_state,
-          shippingPostalCode: rawOrder.shipping_postal_code,
-          shippingCountry: rawOrder.shipping_country,
+          shippingName: rawOrder.ship_to_name,
+          shippingAddress: rawOrder.ship_to_address1,
+          shippingCity: rawOrder.ship_to_city,
+          shippingState: rawOrder.ship_to_state,
+          shippingPostalCode: rawOrder.ship_to_zip,
+          shippingCountry: rawOrder.ship_to_country,
           financialStatus: rawOrder.financial_status,
           shopifyFulfillmentStatus: rawOrder.fulfillment_status,
-          cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
-          priority: "normal",
-          warehouseStatus: rawOrder.cancelled_at ? "cancelled" : (hasShippableItems ? "ready" : "completed"),
+          priority: 100,
+          warehouseStatus: hasShippableItems ? "ready" : "completed",
           itemCount: enrichedItems.length,
           unitCount: totalUnits,
-          totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
-          currency: rawOrder.currency,
           shopifyCreatedAt: rawOrder.order_date || rawOrder.created_at || undefined,
           orderPlacedAt: rawOrder.order_date || rawOrder.created_at || undefined,
         }, enrichedItems);
@@ -195,29 +292,30 @@ export function registerShopifyRoutes(app: Express) {
     }
   });
 
-  // Backfill operational orders table with customer data from shopify_orders
+  // Backfill operational orders table with customer data from oms_orders
   // Uses efficient UPDATE FROM JOIN to process thousands of orders at once
-  app.post("/api/shopify/backfill-orders-from-raw", async (req, res) => {
+  app.post("/api/orders/backfill-orders-from-oms", async (req, res) => {
     try {
-      console.log("Starting backfill of operational orders from shopify_orders...");
+      console.log("Starting backfill of operational orders from oms_orders...");
       const startTime = Date.now();
-
-      const { updated } = await storage.backfillOrdersFromShopifyRaw();
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      
+      const result = await storage.backfillOrdersFromOms();
+      
+      const elapsed = Date.now() - startTime;
+      console.log(`Backfill complete in ${elapsed}ms. Updated ${result.updated} orders.`);
 
       // Count remaining (orders that couldn't be matched)
       const remaining = await storage.countOrdersMissingShippingData();
       
-      console.log(`Backfill complete: ${updated} updated, ${remaining} remaining, ${elapsed}s`);
       
       res.json({ 
         success: true, 
-        updated,
+        updated: result.updated,
         remaining,
-        elapsed: `${elapsed}s`,
+        elapsed: `${elapsed}ms`,
         message: remaining > 0 
-          ? `Updated ${updated} orders. ${remaining} orders could not be matched to shopify_orders.`
-          : `All ${updated} orders backfilled!`
+          ? `Updated ${result.updated} orders. ${remaining} orders could not be matched to oms_orders.`
+          : `All ${result.updated} orders backfilled!`
       });
     } catch (error) {
       console.error("Error backfilling orders:", error);
@@ -299,7 +397,7 @@ export function registerShopifyRoutes(app: Express) {
           const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
           const shipping = shopifyOrder.shipping_address || {};
           
-          const result = await storage.updateShopifyRawOrderCustomer(orderId, {
+          const result = await storage.updateOmsRawOrderCustomer(orderId, {
             customerName: customerName || 'Unknown',
             customerEmail,
             shippingName: shipping.name || null,
@@ -334,7 +432,7 @@ export function registerShopifyRoutes(app: Express) {
       const elapsed = Math.round((Date.now() - startTime) / 1000);
       
       // Count remaining orders
-      const remaining = await storage.countShopifyRawOrdersMissingCustomerName();
+      const remaining = await storage.countOmsRawOrdersMissingCustomerName();
       
       const finished = !pageInfo;
       console.log(`Backfill: ${pagesProcessed} pages, ${totalUpdated} updated, ${totalSkipped} not in DB, ${remaining} remaining, ${elapsed}s`);
@@ -396,7 +494,7 @@ export function registerShopifyRoutes(app: Express) {
     const activeOrders = allOrders.filter(o => 
       o.warehouseStatus !== "shipped" && 
       o.warehouseStatus !== "cancelled" && 
-      o.shopifyOrderId
+      o.externalOrderId
     );
     
     console.log(`Fulfillment sync: ${activeOrders.length} active orders to check (not shipped/cancelled, have Shopify ID)`);
@@ -407,8 +505,8 @@ export function registerShopifyRoutes(app: Express) {
     
     // Get their Shopify IDs
     const shopifyOrderIds = activeOrders
-      .filter(o => o.shopifyOrderId)
-      .map(o => o.shopifyOrderId!);
+      .filter(o => o.externalOrderId)
+      .map(o => o.externalOrderId!);
     
     if (shopifyOrderIds.length === 0) {
       return { shipped: 0, cancelled: 0, checked: 0 };
@@ -423,13 +521,13 @@ export function registerShopifyRoutes(app: Express) {
     let cancelled = 0;
     
     for (const status of fulfillmentStatuses) {
-      const order = activeOrders.find(o => o.shopifyOrderId === status.shopifyOrderId);
+      const order = activeOrders.find(o => o.externalOrderId === status.shopifyOrderId);
       if (!order) {
         console.log(`Fulfillment sync: No local order found for Shopify ID ${status.shopifyOrderId}`);
         continue;
       }
       
-      console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.shopifyOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
+      console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.externalOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
       
       // If FULLY fulfilled in Shopify (all line items), mark as shipped
       // For partial fulfillments, we rely on webhooks to track individual line items
@@ -673,7 +771,7 @@ export function registerShopifyRoutes(app: Express) {
     lineItems: Array<{ id: number; quantity: number }>,
     source: string
   ): Promise<boolean> {
-    const order = await storage.getOrderByShopifyId(shopifyOrderId);
+    const order = await storage.getOrderByExternalId(shopifyOrderId);
     if (!order) {
       console.log(`Fulfillment ${source}: No order found for Shopify ID ${shopifyOrderId}`);
       return false;
@@ -690,7 +788,7 @@ export function registerShopifyRoutes(app: Express) {
       const shopifyLineItemId = String(lineItem.id);
       const fulfilledQty = lineItem.quantity;
       
-      const updated = await storage.updateItemFulfilledQuantity(shopifyLineItemId, fulfilledQty);
+      const updated = await storage.updateItemFulfilledQuantity(Number(shopifyLineItemId), fulfilledQty);
       if (updated) {
         itemsUpdated++;
         console.log(`Fulfillment ${source}: Updated line item ${shopifyLineItemId} +${fulfilledQty} fulfilled (now ${updated.fulfilledQuantity}/${updated.quantity})`);
@@ -713,9 +811,8 @@ export function registerShopifyRoutes(app: Express) {
     }
   }
   
-  // Helper to check order fulfillment status from Shopify (used by sync, not webhooks)
   async function checkOrderFulfillmentFromShopify(shopifyOrderId: string, source: string): Promise<void> {
-    const order = await storage.getOrderByShopifyId(shopifyOrderId);
+    const order = await storage.getOrderByExternalId(shopifyOrderId);
     if (!order || order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
       return;
     }

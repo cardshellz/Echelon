@@ -193,7 +193,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
       try {
         const idList = productIds.map((id: number) => parseInt(String(id), 10)).filter((id: number) => !isNaN(id));
         await client.query(
-          `UPDATE products SET product_type = $1, updated_at = NOW() WHERE id = ANY($2::int[])`,
+          `UPDATE catalog.products SET product_type = $1, updated_at = NOW() WHERE id = ANY($2::int[])`,
           [typeValue, idList]
         );
         res.json({ success: true, updated: idList.length, productType: typeValue });

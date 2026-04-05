@@ -157,7 +157,11 @@ export class EbayAuthService {
     });
 
     if (!response.ok) {
-      const errorBody = await response.text();
+      const rawBody = await response.text();
+      const isHtml = rawBody.trimStart().startsWith("<");
+      const errorBody = isHtml
+        ? `HTTP ${response.status} (server returned HTML error page)`
+        : rawBody.substring(0, 300);
       throw new Error(
         `eBay token exchange failed (${response.status}): ${errorBody}`,
       );
@@ -215,7 +219,12 @@ export class EbayAuthService {
     });
 
     if (!response.ok) {
-      const errorBody = await response.text();
+      const rawBody = await response.text();
+      // Strip HTML and truncate to avoid dumping full error pages into error messages
+      const isHtml = rawBody.trimStart().startsWith("<");
+      const errorBody = isHtml
+        ? `HTTP ${response.status} (server returned HTML error page)`
+        : rawBody.substring(0, 300);
       // If refresh token is invalid/expired, we need human intervention
       if (response.status === 400 || response.status === 401) {
         throw new Error(

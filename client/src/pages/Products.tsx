@@ -21,15 +21,8 @@ import {
   Filter,
   ChevronRight,
   Image as ImageIcon,
-  MoreVertical,
   Plus
 } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 
 interface ProductVariant {
@@ -443,6 +436,7 @@ export default function Products() {
                       <Badge variant={product.isActive ? "default" : "secondary"}>
                         {product.isActive ? "Active" : "Inactive"}
                       </Badge>
+
                     </TableCell>
                     <TableCell className="hidden lg:table-cell">
                       <Switch

@@ -12,14 +12,14 @@
 import { db } from "../../db";
 import { sql, eq, and } from "drizzle-orm";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
-import { orders as wmsOrders, orderItems } from "@shared/schema";
-import type { InsertOrder, InsertOrderItem } from "@shared/schema";
+import { wmsOrders, wmsOrderItems } from "@shared/schema";
+import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
 
 interface WmsSyncServices {
-  inventoryCore: ServiceRegistry["inventoryCore"];
-  reservation: ServiceRegistry["reservation"];
-  fulfillmentRouter: ServiceRegistry["fulfillmentRouter"];
+  inventoryCore: any;
+  reservation: any;
+  fulfillmentRouter: any;
 }
 
 export class WmsSyncService {
@@ -44,7 +44,7 @@ export class WmsSyncService {
         .from(wmsOrders)
         .where(
           and(
-            eq(wmsOrders.sourceTableId, String(omsOrderId)),
+            eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
             eq(wmsOrders.source, 'oms') // Distinguish from legacy shopify orders
           )
         )
@@ -79,14 +79,19 @@ export class WmsSyncService {
         return null;
       }
 
-      // 3. Map OMS → WMS order fields
-      const warehouseStatus = this.determineWarehouseStatus(omsOrder);
-      const priority = this.determinePriority(omsOrder);
+      // 3. Check if order has any shippable items
+      const hasShippableItems = omsLines.some(line => line.requiresShipping !== false);
 
-      const wmsOrderData: InsertOrder = {
+      // 4. Map OMS → WMS order fields
+      const warehouseStatus = hasShippableItems
+        ? this.determineWarehouseStatus(omsOrder)
+        : "completed"; // Pure digital/donation/membership → skip pick queue
+      const priority = await this.determinePriority(omsOrder);
+
+      const wmsOrderData: InsertWmsOrder = {
         channelId: omsOrder.channelId,
         source: "oms", // Mark as coming from OMS layer
-        sourceTableId: String(omsOrderId), // Link back to oms_orders for dedup
+        omsFulfillmentOrderId: String(omsOrderId), // Link back to oms_orders for dedup
         externalOrderId: omsOrder.externalOrderId,
         orderNumber: omsOrder.externalOrderNumber || `OMS-${omsOrderId}`,
         customerName: omsOrder.customerName || omsOrder.shipToName || `Order ${omsOrderId}`,
@@ -97,19 +102,15 @@ export class WmsSyncService {
         shippingState: omsOrder.shipToState || null,
         shippingPostalCode: omsOrder.shipToZip || null,
         shippingCountry: omsOrder.shipToCountry || "US",
-        financialStatus: omsOrder.financialStatus || "paid",
         priority,
         warehouseStatus,
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
-        totalAmount: omsOrder.totalCents ? String(omsOrder.totalCents / 100) : null,
-        currency: omsOrder.currency || "USD",
         orderPlacedAt: omsOrder.orderedAt,
-        shopifyCreatedAt: omsOrder.orderedAt, // Legacy field, use ordered_at
       };
 
       // 4. Map line items
-      const wmsLineItems: InsertOrderItem[] = [];
+      const wmsLineItems: InsertWmsOrderItem[] = [];
 
       for (const line of omsLines) {
         // Resolve product_variant_id and bin location from catalog
@@ -124,21 +125,22 @@ export class WmsSyncService {
           }
         }
 
+        // Propagate requiresShipping from OMS (false = donation/membership/digital)
+        const itemRequiresShipping = line.requiresShipping !== false;
+
         wmsLineItems.push({
           orderId: 0, // Will be set by createOrderWithItems
-          sourceItemId: line.externalLineItemId || null,
+          omsOrderLineId: line.id,
           sku: line.sku || "UNKNOWN",
           name: line.title || "Unknown Item",
           quantity: line.quantity || 0,
-          pickedQuantity: 0,
-          fulfilledQuantity: 0,
-          status: "pending",
+          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          status: itemRequiresShipping ? "pending" : "completed",
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
-          productVariantId: variantId,
-          priceCents: line.paidPriceCents || null,
-          discountCents: line.totalDiscountCents || 0,
-          totalPriceCents: line.totalPriceCents || null,
+          productId: variantId, // Temporary mapping to satisfy schema
+          requiresShipping: itemRequiresShipping ? 1 : 0,
         });
       }
 
@@ -186,12 +188,63 @@ export class WmsSyncService {
   }
 
   /**
-   * Determine order priority
-   * Future: Check member tier, product type, SLA requirements
+   * Determine WMS priority via Composite Score:
+   * WMS Priority = (Shipping Speed Base) + (Plan Tier Modifier)
+   * Higher score = higher priority in the pick queue.
+   * WMS "Bump" override uses 9999; "Hold" uses -1.
    */
-  private determinePriority(omsOrder: typeof omsOrders.$inferSelect): string {
-    // Future enhancement: member tier lookup, express shipping detection
-    return "normal";
+  private async determinePriority(omsOrder: typeof omsOrders.$inferSelect): Promise<number> {
+    // 1. Shipping Speed Base — higher base = picked sooner
+    let base = 100; // Standard shipping
+    if (omsOrder.shippingMethod) {
+      const shippingStr = omsOrder.shippingMethod.toLowerCase();
+      if (
+        shippingStr.includes("overnight") ||
+        shippingStr.includes("next day")
+      ) {
+        base = 500; // Overnight: very urgent
+      } else if (
+        shippingStr.includes("express") ||
+        shippingStr.includes("2-day") ||
+        shippingStr.includes("priority")
+      ) {
+        base = 300; // Express: elevated
+      }
+    }
+
+    // 2. Dynamic Tier Modifier from Hub's Plans Table (additive boost)
+    let modifier = 0; // Default: no membership boost
+
+    try {
+      const result = await db.execute(sql`
+        SELECT p.priority_modifier
+        FROM membership.plans p
+        INNER JOIN membership.member_subscriptions ms ON p.id = ms.plan_id
+        INNER JOIN membership.members m ON ms.member_id = m.id
+        WHERE (m.email = ${omsOrder.customerEmail} OR m.shopify_customer_id = ${omsOrder.rawPayload ? (omsOrder.rawPayload as any).customer?.id : null})
+          AND ms.status = 'active'
+        LIMIT 1
+      `);
+
+      if (result.rows.length > 0) {
+        modifier = Number(result.rows[0].priority_modifier);
+      } else if (omsOrder.memberTier) {
+        const planResult = await db.execute(sql`
+          SELECT priority_modifier FROM membership.plans
+          WHERE LOWER(name) = LOWER(${omsOrder.memberTier})
+             OR id = ${omsOrder.memberTier}
+          LIMIT 1
+        `);
+        if (planResult.rows.length > 0) {
+          modifier = Number(planResult.rows[0].priority_modifier);
+        }
+      }
+    } catch (err) {
+      console.warn(`[WMS Sync] Failed to fetch priority modifier for order ${omsOrder.id}:`, err);
+    }
+
+    // Higher = Better: base + modifier. Leads can manually set 9999 (Bump) or -1 (Hold).
+    return base + modifier;
   }
 
   /**
@@ -222,7 +275,7 @@ export class WmsSyncService {
       SELECT oo.id 
       FROM oms_orders oo
       WHERE NOT EXISTS (
-        SELECT 1 FROM orders o
+        SELECT 1 FROM wms.orders o
         WHERE o.source_table_id = oo.id::text
           AND o.source = 'oms'
       )

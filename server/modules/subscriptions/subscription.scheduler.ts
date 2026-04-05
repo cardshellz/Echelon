@@ -1,7 +1,7 @@
 // subscription.scheduler.ts — Daily billing scheduler (cron)
 // Critical: Shopify does NOT auto-bill. We must trigger billing.
-import * as storage from "./subscription.storage";
-import { createBillingAttempt } from "./subscription.service";
+import * as storage from "./infrastructure/subscription.repository";
+import { createBillingAttempt } from "./infrastructure/shopify.adapter";
 
 const BATCH_DELAY_MS = 500; // 500ms between billing attempts to respect rate limits
 
@@ -39,7 +39,7 @@ export async function processDueBillings(): Promise<{ processed: number; succeed
       await createBillingAttempt(
         sub.shopify_subscription_contract_gid,
         idempotencyKey,
-        new Date(originTime)
+        new Date(originTime).toISOString()
       );
 
       // Billing attempt created — result comes back via webhook

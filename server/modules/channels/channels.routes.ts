@@ -18,6 +18,9 @@ import {
   productVariants,
   eq, and, inArray, isNull, sql,
 } from "../../storage/base";
+import { pool } from "../../db";
+import { channelConnections } from "@shared/schema";
+import { ShopifyAdapter } from "./adapters/shopify.adapter";
 
 export function registerChannelRoutes(app: Express) {
 
@@ -166,7 +169,6 @@ export function registerChannelRoutes(app: Express) {
     channelId: z.number().optional().nullable(),
     source: z.enum(["shopify", "ebay", "amazon", "etsy", "manual", "api"]).default("manual"),
     priority: z.enum(["rush", "high", "normal"]).default("normal"),
-    totalAmount: z.string().optional(),
     currency: z.string().default("USD"),
     shippingAddress: z.string().optional(),
     shippingCity: z.string().optional(),
@@ -204,7 +206,6 @@ export function registerChannelRoutes(app: Express) {
         channelId: data.channelId || null,
         source: data.source,
         priority: data.priority,
-        totalAmount: data.totalAmount || null,
         currency: data.currency,
         shippingAddress: data.shippingAddress || null,
         shippingCity: data.shippingCity || null,
@@ -304,8 +305,8 @@ export function registerChannelRoutes(app: Express) {
         }, 0);
         if (itemsSubtotal > 0) financials.subtotalCents = itemsSubtotal;
       }
-      if (financials.totalCents == null && order.totalAmount) {
-        financials.totalCents = Math.round(parseFloat(order.totalAmount) * 100);
+      if (financials.totalCents == null) {
+        // totalAmount is no longer accessible on WMS orders
       }
       if (financials.discountCents == null) {
         const itemDiscounts = items.reduce((s: number, i: any) => s + ((i.discountCents || 0) * i.quantity), 0);
@@ -807,45 +808,226 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Push product to all active channels
-  app.post("/api/channel-push/product/:productId", requirePermission("channels", "edit"), async (req, res) => {
+  // ⛔ PRODUCT PUSH DISABLED — all three push endpoints return 403.
+  // The push feature is not production-ready and has caused data loss
+  // (deleted images, created phantom products, set listings to draft).
+  // To re-enable, restore the original handlers from git history.
+
+  // Push product to all active channels — DISABLED
+  app.post("/api/channel-push/product/:productId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
+  });
+
+  // Push product to specific channel — DISABLED
+  app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
+  });
+
+  // Push all products to a channel (bulk) — DISABLED
+  app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
+  });
+
+
+  // GET debug: check image push credentials + show first product without making any changes
+  app.get("/api/channel-push/images/:channelId/debug", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services;
-      const productId = parseInt(req.params.productId);
-      const results = await channelProductPush.pushProductToAllChannels(productId);
-      res.json({ success: true, results });
-    } catch (error) {
-      console.error("Error pushing product:", error);
-      res.status(500).json({ error: "Failed to push product" });
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id,
+            COUNT(pa.id) AS asset_count,
+            MIN(pa.url) AS sample_url
+          FROM products p
+          JOIN product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, p.shopify_product_id
+          LIMIT 3
+        `);
+
+        // Check channel_connections credentials
+        const connCheck = await client.query(`
+          SELECT channel_id, shop_domain,
+            CASE WHEN access_token IS NOT NULL AND access_token != '' THEN 'SET' ELSE 'EMPTY' END AS access_token_status,
+            LENGTH(access_token) AS token_length
+          FROM channel_connections WHERE channel_id = 36
+        `);
+
+        const totalResult = await client.query(`SELECT COUNT(*) FROM catalog.product_assets WHERE url LIKE 'https://%'`);
+        const prodWithShopifyId = await client.query(`SELECT COUNT(*) FROM catalog.products WHERE shopify_product_id IS NOT NULL`);
+
+        // Check channel_listings for fresh Shopify IDs
+        const listingsCheck = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id AS products_shopify_id, cl.external_product_id AS listings_shopify_id
+          FROM products p
+          LEFT JOIN (
+            SELECT DISTINCT ON (pv.product_id) pv.product_id, cl2.external_product_id
+            FROM channel_listings cl2
+            JOIN product_variants pv ON pv.id = cl2.product_variant_id
+            WHERE cl2.channel_id = 36 AND cl2.external_product_id IS NOT NULL
+            ORDER BY pv.product_id ASC, cl2.id DESC
+          ) cl ON cl.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL
+          LIMIT 5
+        `);
+
+        res.json({
+          envVarsSet: { shopDomain: !!shopDomain, accessToken: !!accessToken },
+          shopDomainValue: shopDomain || "NOT SET",
+          totalAssets: parseInt(totalResult.rows[0].count),
+          productsWithShopifyId: parseInt(prodWithShopifyId.rows[0].count),
+          sampleProducts: result.rows,
+          channelCredentials: connCheck.rows,
+          shopifyIdComparison: listingsCheck.rows,
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  // Push product to specific channel
-  app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (req, res) => {
+  // POST test: push images for ONE product and return full Shopify response
+  app.post("/api/channel-push/images/:channelId/test", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services;
-      const productId = parseInt(req.params.productId);
-      const channelId = parseInt(req.params.channelId);
-      const result = await channelProductPush.pushProduct(productId, channelId);
-      res.json(result);
-    } catch (error) {
-      console.error("Error pushing product to channel:", error);
-      res.status(500).json({ error: "Failed to push product" });
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+      if (!shopDomain || !accessToken) return res.status(500).json({ error: "SHOPIFY_SHOP_DOMAIN or SHOPIFY_ACCESS_TOKEN not set" });
+
+      const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+      const baseUrl = `https://${domain}/admin/api/2024-01`;
+      const headers = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id,
+            json_agg(json_build_object('url', pa.url, 'position', pa.position) ORDER BY pa.position ASC) AS assets
+          FROM products p
+          JOIN product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, p.shopify_product_id
+          LIMIT 1
+        `);
+
+        if (result.rows.length === 0) return res.json({ error: "No products with shopify_product_id and assets found" });
+
+        const row = result.rows[0];
+        const images = (row.assets as any[]).filter((a: any) => a.url).map((a: any, i: number) => ({ src: a.url, position: i + 1 }));
+
+        const shopifyUrl = `${baseUrl}/products/${row.shopify_product_id}.json`;
+        const payload = { product: { id: Number(row.shopify_product_id), images } };
+
+        const resp = await fetch(shopifyUrl, { method: "PUT", headers, body: JSON.stringify(payload) });
+        const body = await resp.text();
+
+        res.json({
+          productId: row.id,
+          productName: row.name,
+          shopifyProductId: row.shopify_product_id,
+          shopifyUrl,
+          imageCount: images.length,
+          shopifyStatus: resp.status,
+          shopifyResponse: body.substring(0, 1000),
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  // Push all products to a channel (bulk)
-  app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (req, res) => {
+  // Push images only to Shopify — uses ShopifyAdapter.pushImagesOnly (same credential path as orchestrator)
+  app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services;
       const channelId = parseInt(req.params.channelId);
-      const result = await channelProductPush.pushAllProducts(channelId);
-      res.json(result);
-    } catch (error) {
-      console.error("Error bulk pushing products:", error);
-      res.status(500).json({ error: "Failed to push products" });
+      const adapter = new ShopifyAdapter(db);
+
+      // Respond immediately — image push takes too long for a synchronous request
+      res.json({ status: "started", message: "Image push started in background. Check Heroku logs for progress." });
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT
+            p.id AS product_id, p.name,
+            COALESCE(cl_data.shopify_product_id, p.shopify_product_id) AS shopify_product_id,
+            json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text, 'file_data', encode(pa.file_data, 'base64'), 'mime_type', pa.mime_type) ORDER BY pa.position ASC) AS assets
+          FROM products p
+          JOIN product_assets pa ON pa.product_id = p.id
+          LEFT JOIN (
+            SELECT DISTINCT ON (pv.product_id)
+              pv.product_id,
+              cl.external_product_id AS shopify_product_id
+            FROM channel_listings cl
+            JOIN product_variants pv ON pv.id = cl.product_variant_id
+            WHERE cl.channel_id = $1 AND cl.external_product_id IS NOT NULL
+            ORDER BY pv.product_id ASC, cl.id DESC
+          ) cl_data ON cl_data.product_id = p.id
+          WHERE pa.url IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, cl_data.shopify_product_id, p.shopify_product_id
+          ORDER BY p.id ASC
+        `, [channelId]);
+
+        const rows = result.rows.filter((r: any) => r.shopify_product_id);
+        if (rows.length === 0) {
+          return res.json({ total: 0, updated: 0, skipped: 0, errors: 0, message: "No products with Shopify IDs and assets" });
+        }
+
+        let updated = 0, skipped = 0, errors = 0;
+        const errorDetails: string[] = [];
+        const BATCH = 5;
+
+        for (let i = 0; i < rows.length; i += BATCH) {
+          const batch = rows.slice(i, i + BATCH);
+          const batchResults = await Promise.allSettled(batch.map(async (row: any) => {
+            const images = (row.assets as any[])
+              .filter((a: any) => a.url)
+              .map((a: any, idx: number) => ({ url: a.url, altText: a.alt || null, position: idx, fileData: a.file_data || null, mimeType: a.mime_type || null }));
+            if (images.length === 0) return "skipped";
+            await adapter.pushImagesOnly(channelId, row.shopify_product_id, images);
+            return "updated";
+          }));
+
+          for (const r of batchResults) {
+            if (r.status === "fulfilled") {
+              r.value === "skipped" ? skipped++ : updated++;
+            } else {
+              errors++;
+              errorDetails.push(r.reason?.message?.substring(0, 200) || "unknown");
+            }
+          }
+          if (i + BATCH < rows.length) await new Promise((r) => setTimeout(r, 200));
+        }
+
+        console.log(`[ImagePush] Complete: ${updated} updated, ${skipped} skipped, ${errors} errors`);
+        // Send result only if not already responded (background mode)
+        if (!res.headersSent) {
+          res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 5) });
+        }
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      console.error("[ImagePush] Error:", error);
+      if (!res.headersSent) res.status(500).json({ error: error?.message || "Failed to push images" });
     }
   });
+  
 
   // Get channel sync status for a product
   app.get("/api/products/:productId/channel-status", requirePermission("channels", "view"), async (req, res) => {
@@ -2018,8 +2200,8 @@ export function registerChannelRoutes(app: Express) {
       const lookbackDays = 90;
       const result: any = await db.execute(sql`
         SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
+        FROM wms.order_items oi
+        JOIN wms.orders o ON o.id = oi.order_id
         JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE pv.product_id = ${productId}
           AND o.cancelled_at IS NULL

@@ -1,0 +1,32 @@
+[
+  {
+    "name": "Hobby Shop Lite",
+    "shopify_product_id": null,
+    "shopify_variant_id": null
+  },
+  {
+    "name": "Hobby Shop",
+    "shopify_product_id": null,
+    "shopify_variant_id": null
+  },
+  {
+    "name": "Hobby Shop International",
+    "shopify_product_id": null,
+    "shopify_variant_id": null
+  },
+  {
+    "name": ".core",
+    "shopify_product_id": null,
+    "shopify_variant_id": null
+  },
+  {
+    "name": ".ops",
+    "shopify_product_id": null,
+    "shopify_variant_id": null
+  },
+  {
+    "name": ".club",
+    "shopify_product_id": "10898153373855",
+    "shopify_variant_id": "62736270655647"
+  }
+]

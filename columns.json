@@ -1,0 +1,122 @@
+[
+  {
+    "column_name": "id",
+    "data_type": "character varying"
+  },
+  {
+    "column_name": "order_id",
+    "data_type": "character varying"
+  },
+  {
+    "column_name": "shopify_line_item_id",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shopify_variant_id",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shopify_product_id",
+    "data_type": "text"
+  },
+  {
+    "column_name": "sku",
+    "data_type": "text"
+  },
+  {
+    "column_name": "title",
+    "data_type": "text"
+  },
+  {
+    "column_name": "quantity",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "paid_price_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "total_price_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "discount_allocations",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "taxable",
+    "data_type": "boolean"
+  },
+  {
+    "column_name": "tax_lines",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "vendor",
+    "data_type": "text"
+  },
+  {
+    "column_name": "requires_shipping",
+    "data_type": "boolean"
+  },
+  {
+    "column_name": "gift_card",
+    "data_type": "boolean"
+  },
+  {
+    "column_name": "fulfillment_status",
+    "data_type": "text"
+  },
+  {
+    "column_name": "total_discount_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "order_number",
+    "data_type": "text"
+  },
+  {
+    "column_name": "created_at",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "updated_at",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "plan_discount_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "coupon_discount_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "variant_title",
+    "data_type": "text"
+  },
+  {
+    "column_name": "name",
+    "data_type": "text"
+  },
+  {
+    "column_name": "product_exists",
+    "data_type": "boolean"
+  },
+  {
+    "column_name": "fulfillable_quantity",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "fulfillment_service",
+    "data_type": "text"
+  },
+  {
+    "column_name": "properties",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "compare_at_price_cents",
+    "data_type": "integer"
+  }
+]

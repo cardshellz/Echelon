@@ -1,11 +1,13 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, boolean, doublePrecision, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, boolean, doublePrecision, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+
+export const catalogSchema = pgSchema("catalog");
 
 // ============================================================================
 // PRODUCT TYPES - Canonical product classification
 // ============================================================================
-export const productTypes = pgTable("product_types", {
+export const productTypes = catalogSchema.table("product_types", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   slug: varchar("slug", { length: 50 }).notNull().unique(),
   name: varchar("name", { length: 100 }).notNull(),
@@ -25,7 +27,7 @@ export type ProductType = typeof productTypes.$inferSelect;
 // ============================================================================
 // PRODUCTS - Master product catalog (source of truth for product identity)
 // ============================================================================
-export const products = pgTable("products", {
+export const products = catalogSchema.table("products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   sku: varchar("sku", { length: 100 }), // Base SKU for the product family
   name: text("name").notNull(),
@@ -71,7 +73,7 @@ export type Product = typeof products.$inferSelect;
 // ============================================================================
 // PRODUCT VARIANTS - Sellable/purchasable SKUs with pack sizes
 // ============================================================================
-export const productVariants = pgTable("product_variants", {
+export const productVariants = catalogSchema.table("product_variants", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productId: integer("product_id").notNull().references(() => products.id),
   sku: varchar("sku", { length: 100 }),
@@ -128,7 +130,7 @@ export type UomVariant = ProductVariant;
 // Distinct from Shopify collections (customer-facing merchandising).
 // ============================================
 
-export const productLines = pgTable("product_lines", {
+export const productLines = catalogSchema.table("product_lines", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 50 }).notNull().unique(),
   name: varchar("name", { length: 100 }).notNull(),
@@ -149,7 +151,7 @@ export type InsertProductLine = z.infer<typeof insertProductLineSchema>;
 export type ProductLine = typeof productLines.$inferSelect;
 
 // Many-to-many: products → product lines
-export const productLineProducts = pgTable("product_line_products", {
+export const productLineProducts = catalogSchema.table("product_line_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productLineId: integer("product_line_id").notNull().references(() => productLines.id, { onDelete: "cascade" }),
   productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
@@ -166,12 +168,12 @@ export type ProductLineProduct = typeof productLineProducts.$inferSelect;
 
 // Product assets - master media library (images, videos, documents)
 // productVariantId NULL = product-level asset, non-NULL = variant-specific asset
-export const productAssets = pgTable("product_assets", {
+export const productAssets = catalogSchema.table("product_assets", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }), // NULL = product-level, set = variant-specific
   assetType: varchar("asset_type", { length: 20 }).notNull().default("image"), // image, video, document
-  url: text("url").notNull(),
+  url: text("url"), // External URL (nullable for file-only assets)
   altText: varchar("alt_text", { length: 500 }),
   position: integer("position").notNull().default(0), // Sort order
   isPrimary: integer("is_primary").notNull().default(0), // 1 = main image
@@ -179,6 +181,7 @@ export const productAssets = pgTable("product_assets", {
   height: integer("height"),
   fileSize: integer("file_size"), // Bytes
   mimeType: varchar("mime_type", { length: 100 }),
+  storageType: varchar("storage_type", { length: 20 }).notNull().default("url"), // 'url' | 'file' | 'both'
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

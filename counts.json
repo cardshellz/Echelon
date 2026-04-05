@@ -1,0 +1,29 @@
+[
+  {
+    "table": "products",
+    "error": "relation \"public.products\" does not exist"
+  },
+  {
+    "table": "product_variants",
+    "error": "relation \"public.product_variants\" does not exist"
+  },
+  {
+    "table": "product_assets",
+    "error": "relation \"public.product_assets\" does not exist"
+  },
+  {
+    "table": "orders",
+    "legacyCount": 54567,
+    "newCount": 54572
+  },
+  {
+    "table": "order_items",
+    "legacyCount": 150840,
+    "newCount": 150867
+  },
+  {
+    "table": "oms_orders",
+    "legacyCount": 0,
+    "newCount": 34317
+  }
+]

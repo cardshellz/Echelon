@@ -534,7 +534,7 @@ export class EbayAdapter implements IChannelAdapter {
     }
 
     // Extract order ID from notification
-    const orderData = payload.notification?.data as EbayOrderConfirmationData;
+    const orderData = (payload.notification?.data as unknown) as EbayOrderConfirmationData;
     if (!orderData?.orderId) {
       console.warn(
         `[EbayAdapter] Order notification missing orderId`,

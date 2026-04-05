@@ -1,5 +1,9 @@
 import type { Express } from "express";
+import { db } from "../../db";
+import { sql, eq } from "drizzle-orm";
+import { productAssets } from "@shared/schema";
 import { catalogStorage } from "../catalog";
+import { createImageSyncService } from "./image-sync.service";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
@@ -9,7 +13,7 @@ const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...c
 import { requirePermission } from "../../routes/middleware";
 import { syncPickQueueForSku } from "../orders";
 
-export function registerProductRoutes(app: Express) {
+export async function registerProductRoutes(app: Express) {
   // ============================================================================
   // Products API (Master Catalog)
   // ============================================================================
@@ -277,14 +281,19 @@ export function registerProductRoutes(app: Express) {
                 });
               }
 
-              await inventoryCore.skuCorrectionTransfer({
-                sourceVariantId: v.id,
-                targetVariantId: transferToVariantId,
+              await inventoryCore.adjustInventory({
+                productVariantId: v.id,
                 warehouseLocationId: level.warehouseLocationId,
-                qty: level.variantQty,
-                batchId,
+                qtyDelta: -level.variantQty,
+                reason: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer) [Batch: ${batchId}]`,
                 userId,
-                notes: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer)`,
+              });
+              await inventoryCore.adjustInventory({
+                productVariantId: transferToVariantId,
+                warehouseLocationId: level.warehouseLocationId,
+                qtyDelta: level.variantQty,
+                reason: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer) [Batch: ${batchId}]`,
+                userId,
               });
               inventoryTransferred += level.variantQty;
             }
@@ -415,9 +424,28 @@ export function registerProductRoutes(app: Express) {
   app.post("/api/products/:id/assets", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const productId = parseInt(req.params.id);
+
+      // Check if this product already has images — if not, auto-set as primary
+      const existingAssets = await db
+        .select({ id: productAssets.id })
+        .from(productAssets)
+        .where(eq(productAssets.productId, productId))
+        .limit(1);
+
+      const isPrimary = existingAssets.length === 0 ? 1 : (req.body.isPrimary ? 1 : 0);
+
+      // If setting as primary, unset existing primary
+      if (isPrimary && existingAssets.length > 0) {
+        await db
+          .update(productAssets)
+          .set({ isPrimary: 0 })
+          .where(eq(productAssets.productId, productId));
+      }
+
       const asset = await storage.createProductAsset({
         ...req.body,
         productId,
+        isPrimary,
       });
       res.status(201).json(asset);
     } catch (error) {
@@ -440,7 +468,7 @@ export function registerProductRoutes(app: Express) {
     }
   });
 
-  app.delete("/api/product-assets/:id", requirePermission("inventory", "delete"), async (req, res) => {
+  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const success = await storage.deleteProductAsset(id);
@@ -707,14 +735,19 @@ export function registerProductRoutes(app: Express) {
                 error: `Cannot transfer: ${level.reservedQty} reserved units. Fulfill or cancel those orders first.`,
               });
             }
-            await inventoryCore.skuCorrectionTransfer({
-              sourceVariantId: id,
-              targetVariantId: transferToVariantId,
+            await inventoryCore.adjustInventory({
+              productVariantId: id,
               warehouseLocationId: level.warehouseLocationId,
-              qty: level.variantQty,
-              batchId,
+              qtyDelta: -level.variantQty,
+              reason: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer) [Batch: ${batchId}]`,
               userId,
-              notes: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer)`,
+            });
+            await inventoryCore.adjustInventory({
+              productVariantId: transferToVariantId,
+              warehouseLocationId: level.warehouseLocationId,
+              qtyDelta: level.variantQty,
+              reason: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer) [Batch: ${batchId}]`,
+              userId,
             });
             inventoryTransferred += level.variantQty;
           }
@@ -970,6 +1003,373 @@ export function registerProductRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error exporting bin assignments:", error);
       res.status(500).json({ error: "Failed to export bin assignments" });
+    }
+  });
+
+  // ============================================================================
+  // PRODUCT ASSET UPLOAD (file storage)
+  // ============================================================================
+
+  const multer = (await import("multer")).default;
+  const assetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
+
+  /**
+   * POST /api/product-assets/upload
+   * Upload an image file and store it in the database.
+   * Accepts multipart form: file, productId, productVariantId (optional), altText, isPrimary, position
+   */
+  app.post("/api/product-assets/upload", requirePermission("inventory", "edit"), assetUpload.single("file"), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file provided" });
+      }
+
+      const { productId, productVariantId, altText, isPrimary, position } = req.body;
+
+      if (!productId) {
+        return res.status(400).json({ error: "productId is required" });
+      }
+
+      // Validate file type
+      const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+      if (!allowedTypes.includes(req.file.mimetype)) {
+        return res.status(400).json({ error: `Invalid file type: ${req.file.mimetype}. Allowed: ${allowedTypes.join(", ")}` });
+      }
+
+      // If setting as primary, unset existing primary
+      if (isPrimary === "true" || isPrimary === "1") {
+        await db.execute(sql`
+          UPDATE catalog.product_assets SET is_primary = 0
+          WHERE product_id = ${parseInt(productId)}
+            ${productVariantId ? sql`AND product_variant_id = ${parseInt(productVariantId)}` : sql`AND product_variant_id IS NULL`}
+        `);
+      }
+
+      const [asset] = await db
+        .insert(productAssets)
+        .values({
+          productId: parseInt(productId),
+          productVariantId: productVariantId ? parseInt(productVariantId) : null,
+          assetType: "image",
+          url: null,
+          altText: altText || null,
+          position: position ? parseInt(position) : 0,
+          isPrimary: (isPrimary === "true" || isPrimary === "1") ? 1 : 0,
+          fileSize: req.file.size,
+          mimeType: req.file.mimetype,
+          storageType: "file",
+        })
+        .returning();
+
+      // Store the actual file data
+      await db.execute(sql`
+        UPDATE catalog.product_assets SET file_data = ${req.file.buffer} WHERE id = ${asset.id}
+      `);
+
+      console.log(`[Assets] Uploaded file for product ${productId}: ${req.file.originalname} (${req.file.size} bytes)`);
+
+      res.json({
+        ...asset,
+        // Don't return file_data in the response — too large
+        fileUrl: `/api/product-assets/${asset.id}/file`,
+      });
+    } catch (error: any) {
+      console.error("Error uploading asset:", error);
+      res.status(500).json({ error: "Failed to upload asset" });
+    }
+  });
+
+  /**
+   * GET /api/product-assets/:id/file
+   * Serve a stored image file from the database.
+   */
+  app.get("/api/product-assets/:id/file", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const result = await db.execute(sql`
+        SELECT file_data, mime_type, alt_text FROM product_assets WHERE id = ${id}
+      `);
+
+      if (!result.rows.length || !result.rows[0].file_data) {
+        return res.status(404).json({ error: "File not found" });
+      }
+
+      const row = result.rows[0] as any;
+      res.set("Content-Type", row.mime_type || "image/jpeg");
+      res.set("Cache-Control", "public, max-age=86400"); // Cache 24h
+      if (row.alt_text) {
+        res.set("Content-Disposition", `inline; filename="${row.alt_text || "image"}"`);
+      }
+      res.send(row.file_data);
+    } catch (error: any) {
+      console.error("Error serving asset file:", error);
+      res.status(500).json({ error: "Failed to serve file" });
+    }
+  });
+
+  /**
+   * GET /api/product-assets/:id
+   * Get asset metadata (without file data).
+   */
+  app.get("/api/product-assets/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [asset] = await db
+        .select()
+        .from(productAssets)
+        .where(eq(productAssets.id, id))
+        .limit(1);
+
+      if (!asset) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+
+      res.json({
+        ...asset,
+        fileUrl: ((asset as any).storageType === "file" || (asset as any).storageType === "both")
+          ? `/api/product-assets/${asset.id}/file`
+          : asset.url,
+      });
+    } catch (error: any) {
+      console.error("Error getting asset:", error);
+      res.status(500).json({ error: "Failed to get asset" });
+    }
+  });
+
+  /**
+   * DELETE /api/product-assets/:id
+   * Delete an asset (both URL reference and stored file).
+   */
+  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [deleted] = await db
+        .delete(productAssets)
+        .where(eq(productAssets.id, id))
+        .returning();
+
+      if (!deleted) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+
+      console.log(`[Assets] Deleted asset ${id} for product ${deleted.productId}`);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting asset:", error);
+      res.status(500).json({ error: "Failed to delete asset" });
+    }
+  });
+
+  /**
+   * POST /api/product-assets/store-url
+   * Store an external URL as an asset (e.g., from eBay image pull).
+   * Body: { productId, productVariantId, url, altText, isPrimary, position }
+   * Optionally downloads and caches the file locally.
+   */
+  app.post("/api/product-assets/store-url", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productId, productVariantId, url, altText, isPrimary, position, cacheLocally } = req.body;
+
+      if (!productId || !url) {
+        return res.status(400).json({ error: "productId and url are required" });
+      }
+
+      // If setting as primary, unset existing primary
+      if (isPrimary) {
+        await db.execute(sql`
+          UPDATE catalog.product_assets SET is_primary = 0
+          WHERE product_id = ${productId}
+            ${productVariantId ? sql`AND product_variant_id = ${productVariantId}` : sql`AND product_variant_id IS NULL`}
+        `);
+      }
+
+      let fileBuffer: Buffer | null = null;
+      let mimeType: string | null = null;
+      let fileSize: number | null = null;
+
+      // Optionally download and cache the file
+      if (cacheLocally) {
+        try {
+          const response = await fetch(url);
+          if (response.ok) {
+            const arrayBuf = await response.arrayBuffer();
+            fileBuffer = Buffer.from(arrayBuf);
+            mimeType = response.headers.get("content-type") || "image/jpeg";
+            fileSize = fileBuffer.length;
+          }
+        } catch (fetchErr: any) {
+          console.warn(`[Assets] Failed to cache file from ${url}: ${fetchErr.message}`);
+          // Continue with URL-only storage
+        }
+      }
+
+      const storageType: string = fileBuffer ? "both" : "url";
+
+      const [asset] = await db
+        .insert(productAssets)
+        .values({
+          productId,
+          productVariantId: productVariantId || null,
+          assetType: "image",
+          url,
+          altText: altText || null,
+          position: position || 0,
+          isPrimary: isPrimary ? 1 : 0,
+          fileSize,
+          mimeType,
+          storageType,
+        })
+        .returning();
+
+      if (fileBuffer) {
+        await db.execute(sql`
+          UPDATE catalog.product_assets SET file_data = ${fileBuffer} WHERE id = ${asset.id}
+        `);
+      }
+
+      console.log(`[Assets] Stored URL for product ${productId}: ${url} (storage: ${storageType})`);
+
+      res.json({
+        ...asset,
+        fileUrl: storageType === "both" || storageType === "file"
+          ? `/api/product-assets/${asset.id}/file`
+          : asset.url,
+      });
+    } catch (error: any) {
+      console.error("Error storing URL asset:", error);
+      res.status(500).json({ error: "Failed to store URL asset" });
+    }
+  });
+
+  // ============================================================================
+  // IMAGE SYNC — Pull/Push between Echelon and channels
+  // ============================================================================
+
+  const imageSync = createImageSyncService();
+
+  /**
+   * POST /api/images/pull/ebay
+   * Pull images from eBay listings into Echelon catalog.
+   * Body: { productIds?: number[] } — optional filter to specific products
+   */
+  app.post("/api/images/pull/ebay", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      console.log(`[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+
+      // Get eBay access token to use Browse API (much more reliable than scraping)
+      let ebayAccessToken: string | undefined;
+      try {
+        const { EbayAuthService, createEbayAuthConfig } = await import("../channels/adapters/ebay/ebay-auth.service");
+        const config = createEbayAuthConfig();
+        const authService = new EbayAuthService(db as any, config);
+        ebayAccessToken = await authService.getAccessToken(67);
+        console.log(`[ImageSync] Got eBay access token (${ebayAccessToken?.substring(0, 10)}...)`);
+      } catch (authErr: any) {
+        console.warn(`[ImageSync] Could not get eBay token, falling back to scraping: ${authErr.message}`);
+      }
+
+      // Respond immediately — processing 90+ products takes too long for a single request
+      res.json({ status: "started", message: "eBay image pull started in background. Check Heroku logs for progress." });
+
+      // Run in background
+      imageSync.pullFromEbay(productIds, ebayAccessToken).then((results) => {
+        const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
+        const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+        console.log(`[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors`);
+        results.filter(r => r.errors.length > 0).forEach(r => {
+          console.log(`[ImageSync]   ${r.sku}: errors=${JSON.stringify(r.errors)}`);
+        });
+      }).catch((err) => {
+        console.error("[ImageSync] pullFromEbay background error:", err.message);
+      });
+    } catch (error: any) {
+      console.error("Error pulling eBay images:", error);
+      res.status(500).json({ error: error.message || "Failed to pull eBay images" });
+    }
+  });
+
+  /**
+   * POST /api/images/pull/shopify
+   * Pull images from Shopify products into Echelon catalog.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/pull/shopify", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      if (!shopDomain || !accessToken) {
+        return res.status(500).json({ error: "Shopify credentials not configured" });
+      }
+
+      console.log(`[ImageSync] Pulling images from Shopify${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      const results = await imageSync.pullFromShopify(shopDomain, accessToken, productIds);
+      const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
+      const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+      res.json({ results, summary: { products: results.length, imagesAdded: totalAdded, errors: totalErrors } });
+    } catch (error: any) {
+      console.error("Error pulling Shopify images:", error);
+      res.status(500).json({ error: error.message || "Failed to pull Shopify images" });
+    }
+  });
+
+  /**
+   * POST /api/images/push/shopify
+   * Push Echelon catalog images to Shopify.
+   * Body: { productIds?: number[] }
+   */
+  /**
+   * POST /api/images/push/shopify
+   * Push Echelon catalog images to Shopify.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/push/shopify", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      if (!shopDomain || !accessToken) {
+        return res.status(500).json({ error: "Shopify credentials not configured" });
+      }
+
+      console.log(`[ImageSync] === PUSH STARTED ===`);
+      console.log(`[ImageSync] Domain: ${shopDomain}`);
+      console.log(`[ImageSync] Token prefix: ${accessToken.substring(0, 10)}...`);
+      console.log(`[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}`);
+
+      const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
+      const totalPushed = results.reduce((sum, r) => sum + r.imagesPushed, 0);
+      const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+
+      console.log(`[ImageSync] === RESULT: ${totalPushed} pushed, ${totalErrors} errors ===`);
+      for (const r of results) {
+        console.log(`[ImageSync]   ${r.sku}: pushed=${r.imagesPushed}, errors=${JSON.stringify(r.errors)}`);
+      }
+
+      res.json({ results, summary: { products: results.length, imagesPushed: totalPushed, errors: totalErrors } });
+    } catch (error: any) {
+      console.error("[ImageSync] === FATAL ERROR ===", error.message, error.stack);
+      res.status(500).json({ error: error.message || "Failed to push images to Shopify" });
+    }
+  });
+
+  /**
+   * POST /api/images/push/ebay
+   * Push Echelon catalog images to eBay listings.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/push/ebay", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      console.log(`[ImageSync] Pushing images to eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      const results = await imageSync.pushToEbay("", productIds);
+      res.json({ results });
+    } catch (error: any) {
+      console.error("Error pushing images to eBay:", error);
+      res.status(500).json({ error: error.message || "Failed to push images to eBay" });
     }
   });
 }

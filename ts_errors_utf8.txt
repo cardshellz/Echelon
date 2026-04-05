@@ -1,0 +1,38 @@
+﻿client/src/pages/vendor/VendorWallet.tsx(20,10): error TS2305: Module '"@/components/ui/checkbox"' has no exported member 'Switch'.
+server/modules/channels/source-lock.service.ts(135,9): error TS2322: Type '{}' is not assignable to type 'boolean'.
+server/modules/inventory/inventory.routes.ts(935,36): error TS2339: Property 'targetLocationId' does not exist on type 'BreakResult'.
+server/modules/inventory/inventory.routes.ts(2047,61): error TS2339: Property 'lastSyncError' does not exist on type '{ status: string; message: string; }'.
+server/modules/inventory/inventory.routes.ts(2077,46): error TS2339: Property 'lastSyncError' does not exist on type '{ status: string; }'.
+server/modules/oms/ebay-order-ingestion.ts(114,38): error TS2551: Property 'deliveryDiscount' does not exist on type '{ priceSubtotal: EbayAmount; deliveryCost: EbayAmount; tax?: EbayAmount | undefined; total: EbayAmount; priceDiscount?: EbayAmount | undefined; }'. Did you mean 'deliveryCost'?
+server/modules/oms/ebay-order-ingestion.ts(121,47): error TS2551: Property 'deliveryDiscount' does not exist on type '{ priceSubtotal: EbayAmount; deliveryCost: EbayAmount; tax?: EbayAmount | undefined; total: EbayAmount; priceDiscount?: EbayAmount | undefined; }'. Did you mean 'deliveryCost'?
+server/modules/oms/ebay-order-ingestion.ts(124,104): error TS2551: Property 'deliveryDiscount' does not exist on type '{ priceSubtotal: EbayAmount; deliveryCost: EbayAmount; tax?: EbayAmount | undefined; total: EbayAmount; priceDiscount?: EbayAmount | undefined; }'. Did you mean 'deliveryCost'?
+server/modules/oms/ebay-order-ingestion.ts(226,24): error TS2339: Property 'unitPriceCents' does not exist on type 'LineItemData'.
+server/modules/oms/mc-push.ts(53,22): error TS2339: Property 'unitPriceCents' does not exist on type '{ id: number; orderId: number; productVariantId: number | null; externalLineItemId: string | null; externalProductId: string | null; sku: string | null; title: string | null; variantTitle: string | null; ... 21 more ...; updatedAt: Date | null; }'.
+server/modules/oms/member-tier-enrichment.ts(88,12): error TS2769: No overload matches this call.
+  Overload 1 of 3, '(left: PgColumn<{ name: "member_tier"; tableName: "oms_orders"; dataType: "string"; columnType: "PgVarchar"; data: string; driverParam: string; notNull: false; hasDefault: false; isPrimaryKey: false; isAutoincrement: false; ... 4 more ...; generated: undefined; }, {}, { ...; }>, right: string | SQLWrapper): SQL<...>', gave the following error.
+    Argument of type 'null' is not assignable to parameter of type 'string | SQLWrapper'.
+  Overload 2 of 3, '(left: Aliased<null>, right: SQLWrapper | null): SQL<unknown>', gave the following error.
+    Argument of type 'PgColumn<{ name: "member_tier"; tableName: "oms_orders"; dataType: "string"; columnType: "PgVarchar"; data: string; driverParam: string; notNull: false; hasDefault: false; isPrimaryKey: false; isAutoincrement: false; ... 4 more ...; generated: undefined; }, {}, { ...; }>' is not assignable to parameter of type 'Aliased<null>'.
+      Type 'PgColumn<{ name: "member_tier"; tableName: "oms_orders"; dataType: "string"; columnType: "PgVarchar"; data: string; driverParam: string; notNull: false; hasDefault: false; isPrimaryKey: false; isAutoincrement: false; ... 4 more ...; generated: undefined; }, {}, { ...; }>' is missing the following properties from type 'Aliased<null>': sql, fieldAlias
+  Overload 3 of 3, '(left: never, right: unknown): SQL<unknown>', gave the following error.
+    Argument of type 'PgColumn<{ name: "member_tier"; tableName: "oms_orders"; dataType: "string"; columnType: "PgVarchar"; data: string; driverParam: string; notNull: false; hasDefault: false; isPrimaryKey: false; isAutoincrement: false; ... 4 more ...; generated: undefined; }, {}, { ...; }>' is not assignable to parameter of type 'never'.
+server/modules/oms/oms-webhooks.ts(346,48): error TS2345: Argument of type 'Buffer | undefined' is not assignable to parameter of type 'Buffer'.
+  Type 'undefined' is not assignable to type 'Buffer'.
+server/modules/oms/oms-webhooks.ts(350,158): error TS18048: 'rawBody' is possibly 'undefined'.
+server/modules/oms/shipstation.service.ts(153,26): error TS2339: Property 'unitPriceCents' does not exist on type '{ id: number; name: string | null; createdAt: Date; updatedAt: Date | null; orderNumber: string | null; orderId: number; sku: string | null; totalPriceCents: number; quantity: number; ... 20 more ...; properties: unknown; }'.
+server/modules/oms/shipstation.service.ts(329,42): error TS2347: Untyped function calls may not accept type arguments.
+server/modules/orders/fulfillment.service.ts(12,3): error TS2305: Module '"@shared/schema"' has no exported member 'Shipment'.
+server/modules/orders/fulfillment.service.ts(13,3): error TS2305: Module '"@shared/schema"' has no exported member 'InsertShipment'.
+server/modules/orders/fulfillment.service.ts(14,3): error TS2305: Module '"@shared/schema"' has no exported member 'ShipmentItem'.
+server/modules/orders/fulfillment.service.ts(15,3): error TS2305: Module '"@shared/schema"' has no exported member 'InsertShipmentItem'.
+server/modules/orders/picking.routes.ts(7,43): error TS2305: Module '"@shared/schema"' has no exported member 'shipments'.
+server/modules/orders/returns.service.ts(5,3): error TS2305: Module '"@shared/schema"' has no exported member 'shipments'.
+server/modules/orders/returns.service.ts(6,3): error TS2305: Module '"@shared/schema"' has no exported member 'shipmentItems'.
+server/modules/procurement/procurement.storage.ts(33,8): error TS2305: Module '"../../storage/base"' has no exported member 'ShipmentCost'.
+server/modules/procurement/procurement.storage.ts(34,8): error TS2305: Module '"../../storage/base"' has no exported member 'InsertShipmentCost'.
+server/modules/procurement/procurement.storage.ts(35,8): error TS2724: '"../../storage/base"' has no exported member named 'InsertShipmentCostAllocation'. Did you mean 'InsertApPaymentAllocation'?
+server/modules/procurement/shipment-tracking.service.ts(17,3): error TS2305: Module '"@shared/schema"' has no exported member 'ShipmentCost'.
+server/modules/procurement/shipment-tracking.service.ts(18,3): error TS2305: Module '"@shared/schema"' has no exported member 'InsertShipmentCost'.
+server/modules/procurement/shipment-tracking.service.ts(19,3): error TS2724: '"@shared/schema"' has no exported member named 'InsertShipmentCostAllocation'. Did you mean 'InsertApPaymentAllocation'?
+server/services/index.ts(84,59): error TS2345: Argument of type 'ReplenishmentService' is not assignable to parameter of type 'ReplenishmentService'.
+  Property 'inferUnrecordedReplen' is missing in type 'ReplenishmentService' but required in type 'ReplenishmentService'.

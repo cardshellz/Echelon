@@ -4,7 +4,7 @@ import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
 const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
-import { orders, orderItems, pickingLogs, shipments } from "@shared/schema";
+import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";
 import Papa from "papaparse";
 
@@ -273,11 +273,14 @@ export function registerPickingRoutes(app: Express) {
   app.post("/api/picking/replen/cancel", requireAuth, async (req, res) => {
     try {
       const { replenishment } = req.app.locals.services;
-      const { taskId } = req.body;
+      const { taskId, actualCount } = req.body;
       if (!taskId) {
         return res.status(400).json({ error: "taskId is required" });
       }
-      await replenishment.cancelPickerReplen(taskId);
+      if (actualCount === undefined || actualCount === null || typeof actualCount !== "number") {
+        return res.status(400).json({ error: "actualCount (number) is required — the picker must enter the actual bin count" });
+      }
+      await replenishment.cancelPickerReplen(taskId, actualCount, req.session.user?.id);
       res.json({ success: true });
     } catch (error: any) {
       console.error("Error cancelling replen:", error);
@@ -402,26 +405,29 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Set order priority (admin/lead only)
+  // Accepts a numeric priority value: 9999 = Bump to Top, -1 = Hold, 100 = Normal (SLA reset)
   app.post("/api/orders/:id/priority", async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
-      
+
       const id = parseInt(req.params.id);
       const { priority } = req.body;
-      
-      if (!priority || !["rush", "high", "normal"].includes(priority)) {
-        return res.status(400).json({ error: "Invalid priority. Must be rush, high, or normal" });
+
+      if (priority === undefined || priority === null || (priority !== "reset" && (typeof priority !== "number" || !Number.isInteger(priority)))) {
+        return res.status(400).json({ error: "Invalid priority. Must be an integer or 'reset'" });
       }
-      
+
       const orderBefore = await storage.getOrderById(id);
       const order = await storage.setOrderPriority(id, priority);
-      
+
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
-      
+
+      const label = priority === "reset" ? "reset to SLA priority" : (priority >= 9999 ? "bumped to top" : priority < 0 ? "held" : `set to ${priority}`);
+
       // Log the priority change (non-blocking)
       storage.createPickingLog({
         actionType: "priority_changed",
@@ -432,11 +438,11 @@ export function registerPickingRoutes(app: Express) {
         orderNumber: order.orderNumber,
         orderStatusBefore: orderBefore?.warehouseStatus,
         orderStatusAfter: order.warehouseStatus,
-        reason: `Priority changed from ${orderBefore?.priority || 'normal'} to ${priority}`,
+        reason: `Priority ${label} (was ${orderBefore?.priority ?? "unknown"})`,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log priority_changed:", err.message));
-      
+
       res.json(order);
     } catch (error) {
       console.error("Error setting priority:", error);
@@ -740,10 +746,10 @@ export function registerPickingRoutes(app: Express) {
           new Date(completeLog.timestamp).getTime() - new Date(claimLog.timestamp).getTime() : null,
         totalItemsPicked: itemPicks.length,
         shortedItems: logs.filter(l => l.actionType === "item_shorted").length,
-        queueWaitMs: order.shopifyCreatedAt && claimLog ? 
-          new Date(claimLog.timestamp).getTime() - new Date(order.shopifyCreatedAt).getTime() : null,
-        c2pMs: order.shopifyCreatedAt && completeLog ?
-          new Date(completeLog.timestamp).getTime() - new Date(order.shopifyCreatedAt).getTime() : null,
+        queueWaitMs: order.orderPlacedAt && claimLog ? 
+          new Date(claimLog.timestamp).getTime() - new Date(order.orderPlacedAt).getTime() : null,
+        c2pMs: order.orderPlacedAt && completeLog ?
+          new Date(completeLog.timestamp).getTime() - new Date(order.orderPlacedAt).getTime() : null,
       };
       
       res.json({ order, logs, metrics });
@@ -992,26 +998,7 @@ export function registerPickingRoutes(app: Express) {
         storage.getOrderHistoryCount(filters)
       ]);
       
-      const channelIds = Array.from(new Set(orders.map(o => o.channelId).filter(Boolean))) as number[];
-      const channelMap = new Map<number, { name: string; provider: string }>();
-      
-      for (const channelId of channelIds) {
-        const channel = await storage.getChannelById(channelId);
-        if (channel) {
-          channelMap.set(channelId, { name: channel.name, provider: channel.provider });
-        }
-      }
-      
-      const ordersWithChannel = orders.map(order => {
-        const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
-        return {
-          ...order,
-          channelName: channelInfo?.name || null,
-          channelProvider: channelInfo?.provider || order.source || null,
-        };
-      });
-      
-      res.json({ orders: ordersWithChannel, total });
+      res.json({ orders, total });
     } catch (error) {
       console.error("Error fetching order history:", error);
       res.status(500).json({ error: "Failed to fetch order history" });
@@ -1064,18 +1051,19 @@ export function registerPickingRoutes(app: Express) {
       
       const orders = await storage.getOrderHistory(filters);
       
-      const csvData = orders.map(order => ({
-        orderNumber: order.orderNumber,
-        customerName: order.customerName,
-        status: order.warehouseStatus,
-        priority: order.priority,
-        itemCount: order.itemCount,
-        pickedCount: order.pickedCount,
-        picker: order.pickerName || 'N/A',
-        createdAt: order.createdAt?.toISOString() || '',
-        completedAt: order.completedAt?.toISOString() || '',
-        shopifyOrderId: order.shopifyOrderId,
-      }));
+      const csvData = orders.map((order: any) => {
+        const totalItems = order.items?.reduce((sum: number, line: any) => sum + line.quantity, 0) || 0;
+        return {
+          orderNumber: order.externalOrderNumber,
+          customerName: order.customerName,
+          status: order.status,
+          financialStatus: order.financialStatus,
+          fulfillmentStatus: order.fulfillmentStatus,
+          itemCount: totalItems,
+          totalCents: order.totalCents,
+          orderedAt: order.orderedAt?.toISOString() || '',
+        };
+      });
       
       const csv = Papa.unparse(csvData);
       

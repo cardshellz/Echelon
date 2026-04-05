@@ -30,9 +30,9 @@ import {
   type InsertInboundShipment,
   type InboundShipmentLine,
   type InsertInboundShipmentLine,
-  type ShipmentCost,
-  type InsertShipmentCost,
-  type InsertShipmentCostAllocation,
+  type InboundFreightCost,
+  type InsertInboundFreightCost,
+  type InsertInboundFreightAllocation,
   type InsertLandedCostSnapshot,
   type InboundShipmentStatusHistory,
   vendors,
@@ -138,15 +138,15 @@ export interface IProcurementStorage {
   bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
   updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null>;
   deleteInboundShipmentLine(id: number): Promise<boolean>;
-  getShipmentCosts(inboundShipmentId: number): Promise<ShipmentCost[]>;
-  getShipmentCostById(id: number): Promise<ShipmentCost | undefined>;
-  createShipmentCost(data: InsertShipmentCost): Promise<ShipmentCost>;
-  updateShipmentCost(id: number, updates: Partial<InsertShipmentCost>): Promise<ShipmentCost | null>;
-  deleteShipmentCost(id: number): Promise<boolean>;
-  getShipmentCostAllocations(shipmentCostId: number): Promise<any[]>;
+  getInboundFreightCosts(inboundShipmentId: number): Promise<InboundFreightCost[]>;
+  getInboundFreightCostById(id: number): Promise<InboundFreightCost | undefined>;
+  createInboundFreightCost(data: InsertInboundFreightCost): Promise<InboundFreightCost>;
+  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>): Promise<InboundFreightCost | null>;
+  deleteInboundFreightCost(id: number): Promise<boolean>;
+  getInboundFreightCostAllocations(inboundFreightCostId: number): Promise<any[]>;
   getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]>;
-  createShipmentCostAllocation(data: InsertShipmentCostAllocation): Promise<any>;
-  bulkCreateShipmentCostAllocations(allocations: InsertShipmentCostAllocation[]): Promise<any[]>;
+  createInboundFreightCostAllocation(data: InsertInboundFreightAllocation): Promise<any>;
+  bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[]): Promise<any[]>;
   deleteAllocationsForShipment(inboundShipmentId: number): Promise<void>;
   getLandedCostSnapshots(inboundShipmentLineId: number): Promise<any[]>;
   getLandedCostSnapshotByPoLine(purchaseOrderLineId: number): Promise<any>;
@@ -769,50 +769,50 @@ export const procurementMethods: IProcurementStorage = {
     return result.length > 0;
   },
 
-  async getShipmentCosts(inboundShipmentId: number): Promise<ShipmentCost[]> {
+  async getInboundFreightCosts(inboundShipmentId: number): Promise<InboundFreightCost[]> {
     return await db.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.inboundShipmentId, inboundShipmentId));
   },
 
-  async getShipmentCostById(id: number): Promise<ShipmentCost | undefined> {
+  async getInboundFreightCostById(id: number): Promise<InboundFreightCost | undefined> {
     const result = await db.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).limit(1);
     return result[0];
   },
 
-  async createShipmentCost(data: InsertShipmentCost): Promise<ShipmentCost> {
+  async createInboundFreightCost(data: InsertInboundFreightCost): Promise<InboundFreightCost> {
     const result = await db.insert(inboundFreightCosts).values(data as any).returning();
     return result[0];
   },
 
-  async updateShipmentCost(id: number, updates: Partial<InsertShipmentCost>): Promise<ShipmentCost | null> {
+  async updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>): Promise<InboundFreightCost | null> {
     const result = await db.update(inboundFreightCosts).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundFreightCosts.id, id)).returning();
     return result[0] || null;
   },
 
-  async deleteShipmentCost(id: number): Promise<boolean> {
+  async deleteInboundFreightCost(id: number): Promise<boolean> {
     const result = await db.delete(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).returning();
     return result.length > 0;
   },
 
-  async getShipmentCostAllocations(shipmentCostId: number): Promise<any[]> {
-    return await db.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.shipmentCostId, shipmentCostId));
+  async getInboundFreightCostAllocations(inboundFreightCostId: number): Promise<any[]> {
+    return await db.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.shipmentCostId, inboundFreightCostId));
   },
 
   async getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]> {
     return await db.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.inboundShipmentLineId, inboundShipmentLineId));
   },
 
-  async createShipmentCostAllocation(data: InsertShipmentCostAllocation): Promise<any> {
+  async createInboundFreightCostAllocation(data: InsertInboundFreightAllocation): Promise<any> {
     const result = await db.insert(inboundFreightAllocations).values(data as any).returning();
     return result[0];
   },
 
-  async bulkCreateShipmentCostAllocations(allocations: InsertShipmentCostAllocation[]): Promise<any[]> {
+  async bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[]): Promise<any[]> {
     if (allocations.length === 0) return [];
     return await db.insert(inboundFreightAllocations).values(allocations as any).returning();
   },
 
   async deleteAllocationsForShipment(inboundShipmentId: number): Promise<void> {
-    const costs = await this.getShipmentCosts(inboundShipmentId);
+    const costs = await this.getInboundFreightCosts(inboundShipmentId);
     if (costs.length > 0) {
       await db.delete(inboundFreightAllocations).where(inArray(inboundFreightAllocations.shipmentCostId, costs.map(c => c.id)));
     }
@@ -914,8 +914,8 @@ export const procurementMethods: IProcurementStorage = {
       LEFT JOIN (
         SELECT pv.product_id,
                SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
+        FROM wms.order_items oi
+        JOIN wms.orders o ON o.id = oi.order_id
         JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'
@@ -967,8 +967,8 @@ export const procurementMethods: IProcurementStorage = {
           ELSE 0
         END AS margin_percent,
         COUNT(DISTINCT oi.id) AS line_count
-      FROM orders o
-      JOIN order_items oi ON oi.order_id = o.id
+      FROM wms.orders o
+      JOIN wms.order_items oi ON oi.order_id = o.id
       LEFT JOIN (
         SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
         FROM order_item_costs
@@ -1000,7 +1000,7 @@ export const procurementMethods: IProcurementStorage = {
         END AS margin_percent,
         pv.last_cost_cents,
         pv.avg_cost_cents
-      FROM order_items oi
+      FROM wms.order_items oi
       JOIN product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
       JOIN products p ON p.id = pv.product_id
       LEFT JOIN (

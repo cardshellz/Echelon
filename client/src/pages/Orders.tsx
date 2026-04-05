@@ -28,6 +28,10 @@ import {
   ArrowLeft,
   Box,
   DollarSign,
+  ChevronsUp,
+  MinusCircle,
+  RotateCcw,
+  Gauge,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -106,7 +110,7 @@ interface Order {
   channel: Channel | null;
   warehouseId: number | null;
   warehouseStatus: string;
-  priority: string;
+  priority: number;
   itemCount: number;
   unitCount: number;
   pickedCount: number;
@@ -228,6 +232,89 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
   );
 }
 
+// --- Priority Control Card (Lead/Admin only) ---
+
+function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdated: () => void }) {
+  const { toast } = useToast();
+  const { data: authData } = useQuery<{ user: { id: string; role: string; username: string } }>({
+    queryKey: ["/api/auth/me"],
+    queryFn: async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      if (!res.ok) return null;
+      return res.json();
+    },
+  });
+
+  const permissions = (authData as any)?.permissions || (authData as any)?.user?.permissions || {};
+  const isAuthorized = authData?.user?.role === "admin" || permissions?.orders?.includes("override_priority");
+  if (!isAuthorized) return null;
+
+  const isBumped = order.priority >= 9999;
+  const isHeld = order.priority < 0;
+
+  const setPriority = async (priority: number | "reset", label: string) => {
+    try {
+      const res = await fetch(`/api/orders/${order.id}/priority`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ priority }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed");
+      }
+      toast({ title: "Priority updated", description: `Order ${order.orderNumber} ${label}` });
+      onUpdated();
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    }
+  };
+
+  return (
+    <Card className="border-amber-200 bg-amber-50/50">
+      <CardContent className="p-4">
+        <h4 className="text-sm font-semibold flex items-center gap-2 mb-3">
+          <Gauge className="h-4 w-4 text-amber-600" />
+          Priority Control
+          <span className="ml-auto text-xs font-mono text-muted-foreground">Score: {order.priority}</span>
+        </h4>
+        <div className="flex flex-col gap-2">
+          <Button
+            size="sm"
+            variant={isBumped ? "default" : "outline"}
+            className={cn("w-full justify-start gap-2", isBumped && "bg-red-500 hover:bg-red-600 text-white border-red-500")}
+            onClick={() => isBumped ? setPriority("reset", "reset to normal") : setPriority(9999, "bumped to top")}
+          >
+            <ChevronsUp className="h-4 w-4" />
+            {isBumped ? "Remove Bump" : "Bump to Top"}
+          </Button>
+          <Button
+            size="sm"
+            variant={isHeld ? "destructive" : "outline"}
+            className="w-full justify-start gap-2"
+            onClick={() => isHeld ? setPriority("reset", "released from hold") : setPriority(-1, "held")}
+          >
+            <MinusCircle className="h-4 w-4" />
+            {isHeld ? "Release Hold" : "Hold Order"}
+          </Button>
+          {(isBumped || isHeld) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="w-full justify-start gap-2 text-muted-foreground"
+              onClick={() => setPriority("reset", "reset to SLA priority")}
+            >
+              <RotateCcw className="h-4 w-4" />
+              Reset to SLA Priority
+            </Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // --- Order Detail Panel ---
 
 interface OrderFinancials {
@@ -264,7 +351,7 @@ const financialStatusColors: Record<string, string> = {
 };
 
 function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () => void }) {
-  const { data: order, isLoading } = useQuery<OrderDetail>({
+  const { data: order, isLoading, refetch } = useQuery<OrderDetail>({
     queryKey: ["/api/wms/orders", orderId, "detail"],
     queryFn: async () => {
       const res = await fetch(`/api/wms/orders/${orderId}`, { credentials: "include" });
@@ -348,10 +435,14 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
                 {order.financialStatus.replace("_", " ")}
               </Badge>
             )}
-            {order.priority !== "normal" && (
-              <Badge className={cn("text-xs", priorityColors[order.priority])}>
-                {order.priority.toUpperCase()}
-              </Badge>
+            {order.priority >= 9999 && (
+              <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>
+            )}
+            {order.priority < 0 && (
+              <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>
+            )}
+            {order.priority >= 300 && order.priority < 9999 && (
+              <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>
             )}
             {order.onHold === 1 && <Badge variant="destructive" className="text-xs">ON HOLD</Badge>}
             {order.batchId && (
@@ -386,6 +477,9 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
           </div>
         </CardContent>
       </Card>
+
+      {/* Priority Management — Lead/Admin only */}
+      <PriorityControlCard order={order} onUpdated={() => refetch()} />
 
       {/* Customer & Shipping */}
       <Card>
@@ -1163,11 +1257,9 @@ export default function Orders() {
                                 <Badge className="bg-indigo-600 text-white text-xs">
                                   {order.combinedOrders.length} Orders Combined
                                 </Badge>
-                                {order.priority !== "normal" && (
-                                  <Badge className={cn("text-xs", priorityColors[order.priority])}>
-                                    {order.priority.toUpperCase()}
-                                  </Badge>
-                                )}
+                                {order.priority >= 9999 && <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>}
+                                {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
+                                {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
                                   {order.warehouseStatus.replace("_", " ")}
                                 </Badge>
@@ -1194,11 +1286,9 @@ export default function Orders() {
                                 {order.source === "manual" && (
                                   <Badge variant="outline" className="text-xs">Manual</Badge>
                                 )}
-                                {order.priority !== "normal" && (
-                                  <Badge className={cn("text-xs", priorityColors[order.priority])}>
-                                    {order.priority.toUpperCase()}
-                                  </Badge>
-                                )}
+                                {order.priority >= 9999 && <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>}
+                                {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
+                                {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
                                   {order.warehouseStatus === "awaiting_3pl" ? "3PL" : order.warehouseStatus.replace("_", " ")}
                                 </Badge>

@@ -127,16 +127,17 @@ class SourceLockService {
 
     const configMap = new Map(configs.map((c: SourceLockConfig) => [c.fieldType, c.isLocked === 1]));
 
-    const result = {} as Record<SourceLockFieldType, boolean>;
+    const result: Record<string, boolean> = {};
     for (const fieldType of sourceLockFieldTypeEnum) {
       if (ALWAYS_LOCKED_FIELDS.has(fieldType)) {
         result[fieldType] = true;
       } else {
+        // @ts-expect-error fallback boolean mapping
         result[fieldType] = configMap.get(fieldType) ?? DEFAULT_LOCK_STATE[fieldType];
       }
     }
 
-    return result;
+    return result as Record<SourceLockFieldType, boolean>;
   }
 
   /**

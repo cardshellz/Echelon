@@ -7,7 +7,7 @@
 
 import { db as echelonDb } from "../../db";
 import { omsOrders } from "../../../shared/schema/oms.schema";
-import { eq } from "drizzle-orm";
+import { eq, isNull } from "drizzle-orm";
 
 // Cross-database connection to Shellz Club
 // Uses same DATABASE_URL since both apps share the database
@@ -85,7 +85,7 @@ export async function backfillMemberTiers(limit = 100): Promise<number> {
   const ordersToEnrich = await echelonDb
     .select({ id: omsOrders.id, customerEmail: omsOrders.customerEmail })
     .from(omsOrders)
-    .where(eq(omsOrders.memberTier, null))
+    .where(isNull(omsOrders.memberTier))
     .limit(limit);
 
   let enriched = 0;

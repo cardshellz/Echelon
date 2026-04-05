@@ -3,6 +3,7 @@ import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
+import InlineCaseBreakDialog from "@/components/operations/InlineCaseBreakDialog";
 import BinHistorySheet from "@/components/operations/BinHistorySheet";
 import { useAuth } from "@/lib/auth";
 import {
@@ -403,14 +404,16 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
 }
 
 // Per-bin breakdown for a single descendant variant in the fungible pool
-function FungibleLocationRows({ variantId, sku, parentUnitsPerVariant, childUnitsPerVariant, canEdit, warehouses, warehouseId }: {
+function FungibleLocationRows({ variantId, sku, sourceSku, parentUnitsPerVariant, childUnitsPerVariant, canEdit, warehouses, warehouseId, onCaseBreak }: {
   variantId: number;
   sku: string;
+  sourceSku: string;
   parentUnitsPerVariant: number;
   childUnitsPerVariant: number;
   canEdit: boolean;
   warehouses: Warehouse[];
   warehouseId?: number | null;
+  onCaseBreak?: (fromLocationId: number, fromLocationCode: string, sourceVariantId: number, sourceSku: string, pickVariantId: number, pickSku: string, conversionRatio: number) => void;
 }) {
   const locationUrl = warehouseId
     ? `/api/inventory/variants/${variantId}/locations?warehouseId=${warehouseId}`
@@ -454,7 +457,33 @@ function FungibleLocationRows({ variantId, sku, parentUnitsPerVariant, childUnit
             <TableCell className={`text-right font-mono ${isNegative ? "text-red-500" : "text-blue-600"}`}>
               {converted.toLocaleString()} <span className="text-[10px] opacity-60">{sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
             </TableCell>
-            {canEdit && <TableCell></TableCell>}
+            {canEdit && (
+              <TableCell className="text-right">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 text-xs px-2 border-blue-200 hover:bg-blue-50 text-blue-700 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/20"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (onCaseBreak && locLevel.location?.id) {
+                      // pass source (case) and pick (pack) info
+                      onCaseBreak(
+                        locLevel.location.id,
+                        locLevel.location.code,
+                        variantId,
+                        sourceSku,   // The specific case SKU string
+                        0,           // pickVariantId (filled by Inventory container map later using 'sku')
+                        sku,         // The Pack/Child SKU string
+                        ratio
+                      );
+                    }
+                  }}
+                >
+                  <Boxes className="h-3 w-3 mr-1" />
+                  Break Case
+                </Button>
+              </TableCell>
+            )}
           </TableRow>
         );
       })}
@@ -481,8 +510,19 @@ export default function Inventory() {
     binTypes: [] as string[],
     zone: "",
   });
+  const [caseBreakDialog, setCaseBreakDialog] = useState<{
+    open: boolean;
+    fromLocationId?: number;
+    fromLocationCode?: string;
+    sourceVariantId?: number;
+    sourceSku?: string;
+    pickVariantId?: number;
+    pickSku?: string;
+    conversionRatio?: number;
+  }>({ open: false });
+
   const [exporting, setExporting] = useState(false);
-  
+
   const locationTypeOptions = [
     { value: "pick", label: "Pick" },
     { value: "reserve", label: "Reserve" },
@@ -615,6 +655,13 @@ export default function Inventory() {
     },
     staleTime: 30_000,
   });
+
+  // Compute lookup for Variant ID by SKU to back-fill pickVariantId (the pack) inside Fungible pool rows
+  const skuMap = useMemo(() => {
+    const map = new Map<string, number>();
+    variantLevels.forEach((v) => map.set(v.sku, v.variantId));
+    return map;
+  }, [variantLevels]);
 
   // Bin-centric inventory view
   const { data: binInventory = [], isLoading: loadingBinInventory } = useQuery<BinInventory[]>({
@@ -1590,11 +1637,24 @@ export default function Inventory() {
                                         <FungibleLocationRows
                                           variantId={desc.variantId}
                                           sku={level.sku}
+                                          sourceSku={desc.sku}
                                           parentUnitsPerVariant={level.unitsPerVariant}
                                           childUnitsPerVariant={desc.unitsPerVariant}
                                           canEdit={canEdit}
                                           warehouses={warehouses}
                                           warehouseId={selectedWarehouseId}
+                                          onCaseBreak={(fromLocId, fromLocCode, srcVarId, srcSku, pickVarId, pickSku, ratio) => {
+                                             setCaseBreakDialog({
+                                               open: true,
+                                               fromLocationId: fromLocId,
+                                               fromLocationCode: fromLocCode,
+                                               sourceVariantId: srcVarId,
+                                               sourceSku: srcSku,
+                                               pickVariantId: pickVarId || skuMap.get(pickSku) || 0,
+                                               pickSku: pickSku,
+                                               conversionRatio: ratio,
+                                             });
+                                          }}
                                         />
                                       </React.Fragment>
                                     ))}
@@ -2606,6 +2666,18 @@ export default function Inventory() {
         onOpenChange={(open) => setHistorySheet((prev) => ({ ...prev, open }))}
         locationId={historySheet.locationId}
         locationCode={historySheet.locationCode}
+      />
+
+      <InlineCaseBreakDialog
+        open={caseBreakDialog.open}
+        onOpenChange={(open) => setCaseBreakDialog((prev) => ({ ...prev, open }))}
+        defaultFromLocationId={caseBreakDialog.fromLocationId}
+        defaultFromLocationCode={caseBreakDialog.fromLocationCode}
+        sourceVariantId={caseBreakDialog.sourceVariantId}
+        sourceSku={caseBreakDialog.sourceSku}
+        pickVariantId={caseBreakDialog.pickVariantId}
+        pickSku={caseBreakDialog.pickSku}
+        conversionRatio={caseBreakDialog.conversionRatio}
       />
     </div>
   );

@@ -47,6 +47,8 @@ interface ShopifyApiOrder {
   subtotal_price: string;
   total_tax: string;
   total_discounts: string;
+  taxes_included: boolean;
+  tax_exempt: boolean;
   note: string | null;
   tags: string;
   customer: {
@@ -110,7 +112,6 @@ let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 let isRunning = false;
 
 // Services injected at startup
-let syncSingleOrderFn: ((shopifyOrderId: string) => Promise<boolean>) | null = null;
 let omsService: OmsService | null = null;
 
 // ---------------------------------------------------------------------------
@@ -251,7 +252,7 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       total_price_cents, subtotal_price_cents, total_shipping_cents,
       total_tax_cents, total_discounts_cents,
       currency, order_date, financial_status, fulfillment_status,
-      cancelled_at, shop_domain, source_name
+      cancelled_at, shop_domain, source_name, tax_exempt
     ) VALUES (
       ${shopifyId},
       ${order.name || `#${order.order_number}`},
@@ -274,7 +275,8 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       ${order.fulfillment_status || null},
       ${order.cancelled_at ? new Date(order.cancelled_at) : null},
       ${null},
-      ${order.source_name || "web"}
+      ${order.source_name || "web"},
+      ${order.tax_exempt || false}
     )
     ON CONFLICT (id) DO NOTHING
   `);
@@ -363,8 +365,8 @@ async function runReconciliation(): Promise<ReconciliationResult> {
   const startTime = Date.now();
 
   try {
-    if (!syncSingleOrderFn) {
-      throw new Error("syncSingleOrder not initialized — call initReconciliation first");
+    if (!omsService) {
+      throw new Error("omsService not initialized — call initReconciliation first");
     }
 
     const lastCheck = await getLastCheckTime();
@@ -383,7 +385,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     // Batch-check which orders already exist in WMS
     const shopifyIds = shopifyOrders.map((o) => String(o.id));
     const existingWms = await db.execute<{ source_table_id: string }>(sql`
-      SELECT source_table_id FROM orders
+      SELECT source_table_id FROM wms.orders
       WHERE source_table_id = ANY(${sql.raw(`ARRAY[${shopifyIds.map(id => `'${id}'`).join(',')}]`)})
     `);
     const existingSet = new Set(existingWms.rows.map((r) => r.source_table_id));
@@ -411,22 +413,17 @@ async function runReconciliation(): Promise<ReconciliationResult> {
         // Step 1: Ensure shopify_orders + shopify_order_items rows exist
         const shopifyRowId = await ensureShopifyOrderRow(order);
 
-        // Step 2: Sync to WMS via existing pipeline
-        const wasCreated = await syncSingleOrderFn(shopifyRowId);
-
-        if (wasCreated) {
-          result.reconciled++;
-          const source = order.source_name || "unknown";
-          result.details.push(`${order.name} (${source})`);
-
-          // Step 3: Bridge to OMS (non-blocking)
-          if (omsService) {
-            try {
-              const { bridgeShopifyOrderToOms } = require("../oms/shopify-bridge");
-              await bridgeShopifyOrderToOms(db, omsService, shopifyRowId);
-            } catch (err: any) {
-              console.error(`[RECONCILE] OMS bridge failed for ${order.name}: ${err.message}`);
-            }
+        // Step 2: Bridge to OMS
+        if (omsService) {
+          try {
+            const { bridgeShopifyOrderToOms } = require("../oms/shopify-bridge");
+            await bridgeShopifyOrderToOms(db, omsService, shopifyRowId);
+            result.reconciled++;
+            const source = order.source_name || "unknown";
+            result.details.push(`${order.name} (${source})`);
+          } catch (err: any) {
+            result.failed++;
+            console.error(`[RECONCILE] OMS bridge failed for ${order.name}: ${err.message}`);
           }
         } else {
           result.skipped++;
@@ -468,10 +465,8 @@ async function runReconciliation(): Promise<ReconciliationResult> {
  * Must be called before startShopifyReconciliation().
  */
 export function initReconciliation(
-  syncFn: (shopifyOrderId: string) => Promise<boolean>,
   oms?: OmsService,
 ) {
-  syncSingleOrderFn = syncFn;
   omsService = oms || null;
 }
 

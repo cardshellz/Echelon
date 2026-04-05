@@ -4,7 +4,11 @@
  */
 import { Pool } from 'pg';
 import { readFileSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {

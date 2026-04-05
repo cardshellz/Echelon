@@ -138,8 +138,8 @@ export function createChannelProductPushService(db: any) {
         gtin: v.gtin || null,
         mpn: v.mpn || null,
         weight: vo?.weightOverride || null,
-        price: pr?.price ?? null,
-        compareAtPrice: pr?.compareAtPrice ?? null,
+        price: pr?.price ?? v.priceCents ?? null,
+        compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
         shopifyVariantId: v.shopifyVariantId,
         isListed: vo ? vo.isListed === 1 : true,
       };
@@ -206,6 +206,17 @@ export function createChannelProductPushService(db: any) {
     }
 
     if (channel.provider === "shopify") {
+      // Validate: all listed variants must have a price
+      const missingPrice = resolved.variants.filter((v) => v.isListed && (v.price == null || v.price < 0));
+      if (missingPrice.length > 0) {
+        const skus = missingPrice.map((v) => v.sku || v.name).join(", ");
+        return {
+          productId,
+          channelId,
+          status: "error",
+          error: `Cannot push to Shopify — missing price on variant${missingPrice.length > 1 ? "s" : ""}: ${skus}. Set prices in the product variants.`,
+        };
+      }
       return await pushToShopify(resolved, channelId);
     }
 
@@ -310,6 +321,26 @@ export function createChannelProductPushService(db: any) {
           });
         }
 
+        // Ensure channel feeds exist for all listed variants (in case they were added after initial push)
+        for (const variant of resolved.variants) {
+          if (!variant.isListed) continue;
+          const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
+          if (existingFeed) {
+            if (existingFeed.isActive !== 1) await storage.reactivateChannelFeed(existingFeed.id);
+          } else {
+            const shopifyVariantId = variant.shopifyVariantId || null;
+            await storage.createChannelFeedDirect({
+              channelId,
+              productVariantId: variant.id,
+              channelType: "shopify",
+              channelVariantId: shopifyVariantId || variant.sku || String(variant.id),
+              channelProductId: externalProductId,
+              channelSku: variant.sku || null,
+              isActive: 1,
+            });
+          }
+        }
+
         // Update product lastPushedAt
         await storage.updateProduct(resolved.productId, {
           lastPushedAt: new Date(),
@@ -332,21 +363,41 @@ export function createChannelProductPushService(db: any) {
 
         const newExternalProductId = String(shopifyProduct.id);
 
-        // Create channel listings for all variants
+        // Create channel listings + channel feeds for all variants
         for (const variant of resolved.variants) {
           const shopifyVariant = shopifyProduct.variants?.find(
             (sv: any) => sv.sku === variant.sku,
           );
           if (shopifyVariant) {
+            const shopifyVariantId = String(shopifyVariant.id);
+
             await storage.upsertChannelListing({
               channelId,
               productVariantId: variant.id,
               externalProductId: newExternalProductId,
-              externalVariantId: String(shopifyVariant.id),
+              externalVariantId: shopifyVariantId,
               externalSku: variant.sku,
               syncStatus: "synced",
               lastSyncedAt: new Date(),
             });
+
+            // Ensure channel feed exists so inventory sync picks this variant up
+            const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
+            if (existingFeed) {
+              if (existingFeed.isActive !== 1) {
+                await storage.reactivateChannelFeed(existingFeed.id);
+              }
+            } else {
+              await storage.createChannelFeedDirect({
+                channelId,
+                productVariantId: variant.id,
+                channelType: "shopify",
+                channelVariantId: shopifyVariantId,
+                channelProductId: newExternalProductId,
+                channelSku: variant.sku || null,
+                isActive: 1,
+              });
+            }
           }
         }
 
@@ -422,6 +473,7 @@ export function createChannelProductPushService(db: any) {
     resolved: ResolvedChannelProduct,
   ): Promise<any> {
     const payload = buildShopifyProductPayload(resolved);
+    delete (payload as any).images; // Safety Omission: Never push images to Shopify during an update to prevent wiping.
 
     const url = `https://${shopDomain}/admin/api/${apiVersion}/products/${externalProductId}.json`;
     const response = await fetch(url, {
@@ -443,29 +495,38 @@ export function createChannelProductPushService(db: any) {
   }
 
   function buildShopifyProductPayload(resolved: ResolvedChannelProduct) {
-    const variants = resolved.variants
-      .filter((v) => v.isListed)
-      .map((v) => {
-        const variant: any = {
-          sku: v.sku,
-          title: v.name,
-          barcode: v.barcode || v.gtin, // Prefer barcode, fall back to GTIN
-        };
-        if (v.price != null) {
-          variant.price = (v.price / 100).toFixed(2);
-        }
-        if (v.compareAtPrice != null) {
-          variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
-        }
-        if (v.weight != null) {
-          variant.weight = v.weight;
-          variant.weight_unit = "g";
-        }
-        if (v.shopifyVariantId) {
-          variant.id = Number(v.shopifyVariantId);
-        }
-        return variant;
-      });
+    const listedVariants = resolved.variants.filter((v) => v.isListed);
+
+    // Shopify requires options on the product and option1/option2 on variants.
+    // If there's only one variant and its name matches the product title, use "Default Title".
+    const isSingleDefaultVariant =
+      listedVariants.length === 1 &&
+      (!listedVariants[0].name || listedVariants[0].name === "Default Title");
+
+    const productOptions = isSingleDefaultVariant
+      ? [{ name: "Title" }]
+      : [{ name: "Variant" }];
+
+    const variants = listedVariants.map((v) => {
+      const variant: any = {
+        sku: v.sku,
+        // Shopify REST API uses option1/option2/option3, NOT title
+        option1: isSingleDefaultVariant ? "Default Title" : (v.name || v.sku || "Default"),
+        barcode: v.barcode || v.gtin || undefined,
+        price: (v.price! / 100).toFixed(2),
+      };
+      if (v.compareAtPrice != null) {
+        variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
+      }
+      if (v.weight != null) {
+        variant.weight = v.weight;
+        variant.weight_unit = "g";
+      }
+      if (v.shopifyVariantId) {
+        variant.id = Number(v.shopifyVariantId);
+      }
+      return variant;
+    });
 
     const images = resolved.images.map((img) => {
       const image: any = {
@@ -478,15 +539,26 @@ export function createChannelProductPushService(db: any) {
       return image;
     });
 
-    return {
+    const payload: Record<string, any> = {
       title: resolved.title,
       body_html: resolved.description || "",
       product_type: resolved.category || "",
       tags: resolved.tags?.join(", ") || "",
-      status: resolved.status === "active" ? "active" : "draft",
+      // Status is managed in Shopify directly — only sync to archived if archived in Echelon
+      ...(resolved.status === "archived" ? { status: "archived" } : {}),
+      // Only include options on new products — updating options on existing products
+      // renames them in Shopify and can corrupt variant structure
+      ...(resolved.variants.every((v) => !v.shopifyVariantId) ? { options: productOptions } : {}),
       variants,
-      images,
     };
+
+    // IMPORTANT: Never send images in a regular product sync.
+    // Images are managed exclusively via the dedicated Push Images button
+    // which downloads and uploads as base64. Sending src URLs here would
+    // either wipe Shopify's images (empty array) or send eBay/CDN URLs
+    // that Shopify silently rejects. The images key is intentionally omitted.
+
+    return payload;
   }
 
   return {

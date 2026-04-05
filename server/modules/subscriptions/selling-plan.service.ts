@@ -1,6 +1,6 @@
 // selling-plan.service.ts — Shopify Selling Plans API wrapper (GraphQL)
 import { getShopifyConfig } from "../integrations/shopify";
-import * as storage from "./subscription.storage";
+import * as storage from "./infrastructure/subscription.repository";
 import type { SellingPlanConfig, SellingPlanGroupResult, ShopifyGraphQLResponse } from "./subscription.types";
 
 const SHOPIFY_API_VERSION = "2024-10";
@@ -34,59 +34,23 @@ async function shopifyGraphQL<T = any>(query: string, variables?: Record<string,
 
 export { shopifyGraphQL };
 
-// The plan configs we want to create on Shopify
-// Prices match the task spec: $4.99/mo, $49.99/yr, $19.99/mo, $199.99/yr
-const PLAN_CONFIGS: SellingPlanConfig[] = [
-  {
-    name: "Shellz Club Standard — Monthly",
-    options: ["Standard Monthly"],
-    billingInterval: "MONTH",
-    billingIntervalCount: 1,
-    priceCents: 499,
-    tier: "standard",
-    includesDropship: false,
-    planId: 0, // resolved at runtime from DB
-  },
-  {
-    name: "Shellz Club Standard — Annual",
-    options: ["Standard Annual"],
-    billingInterval: "YEAR",
-    billingIntervalCount: 1,
-    priceCents: 4999,
-    tier: "standard",
-    includesDropship: false,
-    planId: 0,
-  },
-  {
-    name: "Shellz Club Gold — Monthly",
-    options: ["Gold Monthly"],
-    billingInterval: "MONTH",
-    billingIntervalCount: 1,
-    priceCents: 1999,
-    tier: "gold",
-    includesDropship: true,
-    planId: 0,
-  },
-  {
-    name: "Shellz Club Gold — Annual",
-    options: ["Gold Annual"],
-    billingInterval: "YEAR",
-    billingIntervalCount: 1,
-    priceCents: 19999,
-    tier: "gold",
-    includesDropship: true,
-    planId: 0,
-  },
-];
-
 /**
  * Create the Selling Plan Group on Shopify and store mapping in DB.
  * Admin endpoint: POST /api/membership/setup-selling-plans
  */
 export async function createSellingPlanGroup(membershipProductGid: string): Promise<SellingPlanGroupResult> {
-  // First, ensure plan rows exist in DB for each config
+  // Dynamically resolve existing plans
   const existingPlans = await storage.getAllPlans();
-  const resolvedConfigs = await resolveOrCreatePlans(existingPlans);
+  const resolvedConfigs = existingPlans
+    .filter((p: any) => p.is_active && p.billing_interval !== "lifetime" && p.billing_interval != null)
+    .map((p: any) => ({
+      name: `${p.name}`,
+      options: [p.name],
+      billingInterval: p.billing_interval === "month" || p.billing_interval === "monthly" ? "MONTH" : "YEAR",
+      billingIntervalCount: p.billing_interval_count || 1,
+      priceCents: Math.max(0, p.price_cents || 0),
+      planId: p.id,
+    }));
 
   const sellingPlansToCreate = resolvedConfigs.map(cfg => ({
     name: cfg.name,
@@ -190,55 +154,6 @@ export async function createSellingPlanGroup(membershipProductGid: string): Prom
   };
 }
 
-/**
- * Match PLAN_CONFIGS to existing DB plans or create new rows.
- */
-async function resolveOrCreatePlans(existingPlans: any[]): Promise<SellingPlanConfig[]> {
-  const { pool } = await import("../../db");
-  const resolved: SellingPlanConfig[] = [];
-
-  for (const cfg of PLAN_CONFIGS) {
-    // Try to match by name pattern
-    let match = existingPlans.find(p => {
-      const name = (p.name || "").toLowerCase();
-      if (cfg.tier === "standard" && cfg.billingInterval === "MONTH") {
-        return name.includes("standard") && (name.includes("month") || name.includes("monthly"));
-      }
-      if (cfg.tier === "standard" && cfg.billingInterval === "YEAR") {
-        return name.includes("standard") && (name.includes("annual") || name.includes("year"));
-      }
-      if (cfg.tier === "gold" && cfg.billingInterval === "MONTH") {
-        return name.includes("gold") && (name.includes("month") || name.includes("monthly"));
-      }
-      if (cfg.tier === "gold" && cfg.billingInterval === "YEAR") {
-        return name.includes("gold") && (name.includes("annual") || name.includes("year"));
-      }
-      return false;
-    });
-
-    if (match) {
-      // Update existing plan with subscription details
-      await storage.updatePlanDetails(match.id, {
-        billing_interval: cfg.billingInterval === "MONTH" ? "month" : "year",
-        billing_interval_count: cfg.billingIntervalCount,
-        price_cents: cfg.priceCents,
-        tier: cfg.tier,
-        includes_dropship: cfg.includesDropship,
-      });
-      resolved.push({ ...cfg, planId: match.id });
-    } else {
-      // Create new plan row
-      const result = await pool.query(
-        `INSERT INTO membership.plans (name, tier, billing_interval, billing_interval_count, price_cents, includes_dropship, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6, true) RETURNING id`,
-        [cfg.name, cfg.tier, cfg.billingInterval === "MONTH" ? "month" : "year", cfg.billingIntervalCount, cfg.priceCents, cfg.includesDropship]
-      );
-      resolved.push({ ...cfg, planId: result.rows[0].id });
-    }
-  }
-
-  return resolved;
-}
 
 /**
  * List existing selling plan groups from Shopify
@@ -291,7 +206,7 @@ export async function listSellingPlanGroups(): Promise<any[]> {
 /**
  * Look up a subscription contract's line items to determine which selling plan was used.
  */
-export async function getContractSellingPlan(contractGid: string): Promise<{ sellingPlanGid: string; planId: number | null } | null> {
+export async function getContractSellingPlan(contractGid: string): Promise<{ sellingPlanGid: string | null; productId: string | null; planId: number | null } | null> {
   const query = `
     query getContract($id: ID!) {
       subscriptionContract(id: $id) {
@@ -300,6 +215,7 @@ export async function getContractSellingPlan(contractGid: string): Promise<{ sel
         lines(first: 5) {
           edges {
             node {
+              productId
               sellingPlanId
               sellingPlanName
             }
@@ -324,16 +240,20 @@ export async function getContractSellingPlan(contractGid: string): Promise<{ sel
   const contract = data.subscriptionContract;
   if (!contract) return null;
 
-  // Get selling plan ID from contract lines
+  // Get selling plan ID or product ID from contract lines
   const line = contract.lines?.edges?.[0]?.node;
-  const sellingPlanGid = line?.sellingPlanId;
-  if (!sellingPlanGid) return null;
+  const sellingPlanGid = line?.sellingPlanId || null;
+  const productId = line?.productId || null;
 
   // Look up in selling_plan_map
-  const plan = await storage.getPlanBySellingPlanGid(sellingPlanGid);
+  let plan = null;
+  if (sellingPlanGid) {
+    plan = await storage.getPlanBySellingPlanGid(sellingPlanGid);
+  }
 
   return {
     sellingPlanGid,
+    productId,
     planId: plan?.id || null,
   };
 }

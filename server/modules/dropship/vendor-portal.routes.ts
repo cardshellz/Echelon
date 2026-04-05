@@ -136,7 +136,7 @@ export function registerVendorPortalRoutes(app: Express) {
       try {
         // Validate all products exist and are eligible
         const validResult = await client.query(
-          `SELECT id FROM products WHERE id = ANY($1::int[]) AND dropship_eligible = true AND is_active = true`,
+          `SELECT id FROM catalog.products WHERE id = ANY($1::int[]) AND dropship_eligible = true AND is_active = true`,
           [productIds]
         );
         const validIds = new Set(validResult.rows.map((r: any) => r.id));

@@ -1,0 +1,81 @@
+﻿PROCESS-MAP.md:**Trigger:** Shopify fires `orders/create` webhook ΓåÆ Shopify app writes to `shopify_orders` table ΓåÆ PostgreSQL `LISTEN/NOTIFY` fires trigger
+PROCESS-MAP.md:1. Shopify webhook ΓåÆ shopify_orders INSERT
+PROCESS-MAP.md:   b. Fetch from shopify_orders + shopify_order_items
+PROCESS-MAP.md:**Trigger:** Shopify fires `orders/updated` webhook ΓåÆ `shopify_orders` UPDATE ΓåÆ PostgreSQL `shopify_order_update` NOTIFY
+PROCESS-MAP.md:   a. Fetch latest status from shopify_orders
+PROCESS-MAP.md:  ΓåÆ SELECT shopify_orders WHERE NOT EXISTS in orders
+PROCESS-MAP.md:Also: `backfillShopifyOrders()` ΓåÆ oms/shopify-bridge.ts:125 ΓÇö backfills `oms_orders` from `shopify_orders`.
+PROCESS-MAP.md:  LEFT JOIN shopify_orders s ON o.source_table_id = s.id
+PROCESS-MAP.md:**System Ownership:** WMS reads from `orders`, `order_items`, `combined_order_groups`, `shopify_orders`. All are WMS/OMS-owned.
+SHELLZ-CLUB-AUDIT.md:| `shopify_orders` | `shopifyOrders` | `id` (Shopify GID), `memberId`, `totalPriceCents`, `planDiscountsCents`, `rewardsProcessed` | Order mirror for savings tracking |
+SHELLZ-CLUB-DEEP-DIVE.md:| `shopify_orders` | Order headers from webhooks. Full pricing breakdown with `planDiscountsCents`, `couponDiscountsCents` |
+SYSTEM.md:| `shopify_orders` | 54k | Raw Shopify order mirror |
+SYSTEM.md:Shopify webhook ΓåÆ shopify_orders ΓåÆ shopify-bridge.ts (LISTEN/NOTIFY)
+artifact-exhaustive-map.md:| `shopify_orders` | **UNKNOWN / ORPHANED** | Pending Migration |
+check3.ts:  const shopifyRow = await db.execute(sql`SELECT shop_domain FROM shopify_orders LIMIT 1`);
+check_order.js:  const oResult = await pool.query("SELECT id, legacy_order_id, member_id, shopify_customer_id FROM shopify_orders WHERE order_number = '55521' OR legacy_order_id = '55521'");
+debug-columns.ts:    SELECT id, shop_domain FROM shopify_orders 
+debug-discounts.ts:  // Let's also check if discount_codes in shopify_orders is populated
+debug-discounts.ts:    const o = await db.execute(sql`SELECT discount_codes FROM shopify_orders WHERE id = ${orderId}`);
+inspect-shopify-json.ts:    const res = await db.execute(sql`SELECT json_payload FROM shopify_orders ORDER BY created_at DESC LIMIT 5`);
+migrations/015_multi_channel_order_sync.sql:-- Adds shop_domain to shopify_orders so orders can be traced back to their source store.
+migrations/015_multi_channel_order_sync.sql:-- 1. Add shop_domain to shopify_orders (nullable ΓÇö legacy orders won't have it)
+migrations/015_multi_channel_order_sync.sql:ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shop_domain VARCHAR(255);
+migrations/015_multi_channel_order_sync.sql:-- (Run manually after migration if needed: UPDATE shopify_orders SET shop_domain = 'your-store.myshopify.com' WHERE shop_domain IS NULL)
+migrations/015_multi_channel_order_sync.sql:CREATE INDEX IF NOT EXISTS idx_shopify_orders_shop_domain ON shopify_orders(shop_domain);
+migrations/023_backfill_shipped_orders.sql:FROM shopify_orders so
+migrations/049_shopify_order_source_name.sql:-- Add source_name to shopify_orders for tracking order origin (web, tiktok, pos, etc.)
+migrations/049_shopify_order_source_name.sql:ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source_name VARCHAR(100);
+migrations/049_shopify_order_source_name.sql:CREATE INDEX IF NOT EXISTS idx_shopify_orders_source_name ON shopify_orders(source_name);
+migrations/050_add_tax_exempt_to_shopify.sql:ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS tax_exempt BOOLEAN DEFAULT false;
+schema-dump.json:  "shopify_orders": [
+scripts/backfill-oms.ts:    SELECT id FROM shopify_orders
+server/db.ts:    // Migration 049: Add source_name to shopify_orders for reconciliation job
+server/db.ts:    await client.query(`ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source_name VARCHAR(100)`);
+server/db.ts:    await client.query(`CREATE INDEX IF NOT EXISTS idx_shopify_orders_source_name ON shopify_orders(source_name)`);
+server/db.ts:    console.log("Checked shopify_orders source_name column");
+server/modules/integrations/shopify.ts:// Full order data stays in shopify_orders table
+server/modules/oms/shopify-bridge.ts: * After a shopify_orders row is synced to the WMS `orders` table,
+server/modules/oms/shopify-bridge.ts: * @param shopifyOrderId - The shopify_orders.id value
+server/modules/oms/shopify-bridge.ts:      SELECT * FROM shopify_orders WHERE id = ${shopifyOrderId}
+server/modules/oms/shopify-bridge.ts: * Finds orders in shopify_orders that aren't yet in oms_orders and ingests them.
+server/modules/oms/shopify-bridge.ts:    SELECT so.id FROM shopify_orders so
+server/modules/orders/orders.storage.ts:      FROM shopify_orders so
+server/modules/orders/orders.storage.ts:      UPDATE shopify_orders SET
+server/modules/orders/orders.storage.ts:      SELECT COUNT(*) as count FROM shopify_orders WHERE customer_name IS NULL
+server/modules/orders/shopify-order-reconciliation.ts: * the webhook ΓåÆ shopify_orders ΓåÆ LISTEN/NOTIFY pipeline. This includes:
+server/modules/orders/shopify-order-reconciliation.ts: *   3. If missing from `shopify_orders`, insert the raw row + items first
+server/modules/orders/shopify-order-reconciliation.ts:// Insert into shopify_orders + shopify_order_items (if missing)
+server/modules/orders/shopify-order-reconciliation.ts:    SELECT id FROM shopify_orders WHERE id = ${shopifyId} LIMIT 1
+server/modules/orders/shopify-order-reconciliation.ts:  // Insert shopify_orders row
+server/modules/orders/shopify-order-reconciliation.ts:    INSERT INTO shopify_orders (
+server/modules/orders/shopify-order-reconciliation.ts:  console.log(`[RECONCILE] Created shopify_orders row for ${order.name} (${shopifyId}, source: ${order.source_name})`);
+server/modules/orders/shopify-order-reconciliation.ts:        // Step 1: Ensure shopify_orders + shopify_order_items rows exist
+server/routes/shopify.routes.ts:  // Sync from shopify_orders/shopify_order_items tables to operational orders/order_items
+server/routes/shopify.routes.ts:      console.log("Starting sync from shopify_orders to operational orders...");
+server/routes/shopify.routes.ts:      // Fetch unfulfilled orders from shopify_orders table
+server/routes/shopify.routes.ts:        // Create operational order using customer/shipping data from shopify_orders
+server/routes/shopify.routes.ts:          sourceTableId: rawOrder.id, // Links to shopify_orders.id for JOINs
+server/routes/shopify.routes.ts:  // Updates orders and order_items based on shopify_orders.fulfillment_status
+server/routes/shopify.routes.ts:  // Backfill operational orders table with customer data from shopify_orders
+server/routes/shopify.routes.ts:      console.log("Starting backfill of operational orders from shopify_orders...");
+server/routes/shopify.routes.ts:          ? `Updated ${updated} orders. ${remaining} orders could not be matched to shopify_orders.`
+server/routes/shopify.routes.ts:  // Backfill customer names from Shopify API into shopify_orders table
+server/routes/shopify.routes.ts:  // Orders now flow through: shopify_orders table -> sync-from-raw-tables -> orders table
+server/routes/shopify.routes.ts:      message: "Orders are now synced from shopify_orders table. Use POST /api/shopify/sync-from-raw-tables instead.",
+server/routes/shopify.routes.ts:  // Order create webhook - DISABLED: Orders sync from shopify_orders/shopify_order_items tables instead
+server/routes/shopify.routes.ts:      // Webhook disabled - orders come from shopify_orders table via sync-from-raw-tables
+server/routes/shopify.routes.ts:  // Order fulfilled webhook - DISABLED: Status updates sync from shopify_orders table instead
+server/routes/shopify.routes.ts:  // Order cancelled webhook - DISABLED: Status updates sync from shopify_orders table instead
+shared/schema/orders.schema.ts:  // Links to source raw tables (shopify_orders, ebay_orders, etc.) for full order data
+shared/schema/orders.schema.ts:  // ===== SHOPIFY STATUS (mirrored from shopify_orders) =====
+temp_check_payload.ts:  const r = await db.execute(sql`SELECT json_payload FROM shopify_orders WHERE json_payload IS NOT NULL LIMIT 1`);
+test-fetch.ts:    SELECT id, shop_domain FROM shopify_orders LIMIT 1
+test-fetch2.ts:    SELECT id, shop_domain FROM shopify_orders LIMIT 1
+test-shopify-bridge.ts:      SELECT id FROM shopify_orders ORDER BY order_date DESC LIMIT 1
+tmp-cols.ts:  const q1 = await db.execute(sql`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'shopify_orders'`);
+tmp-cols.ts:  console.log("shopify_orders:", JSON.stringify(q1.rows, null, 2));
+tmp-migrate.ts:  await db.execute(sql`ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS tax_exempt BOOLEAN DEFAULT false;`);
+tmp2.ts:      SELECT shop_domain FROM shopify_orders WHERE id = ${shopifyOrderId}
+tmp3.ts:    const res = await db.execute(sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'shopify_orders'`);
+tmp3.ts:    console.log("shopify_orders columns:", res.rows.map((r: any) => r.column_name).join(", "));

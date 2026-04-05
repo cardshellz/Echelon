@@ -26,23 +26,24 @@
  *     └── returns          (depends on core)
  */
 
-import { createInventoryCoreService } from "../modules/inventory/core.service";
-import { createInventoryLotService } from "../modules/inventory/lots.service";
-import { createCOGSService } from "../modules/inventory/cogs.service";
-import { createInventoryAtpService } from "../modules/inventory/atp.service";
-import { createBreakAssemblyService } from "../modules/inventory/break-assembly.service";
+import {
+  InventoryUseCases,
+  createInventoryLotService,
+  createCOGSService,
+  createInventoryAtpService,
+  createBreakAssemblyService,
+  createReplenishmentService,
+  createCycleCountService,
+  createInventoryAlertService,
+} from "../modules/inventory";
 import { createFulfillmentService } from "../modules/orders/fulfillment.service";
 import { createReservationService } from "../modules/channels/reservation.service";
-import { createReplenishmentService } from "../modules/inventory/replen.service";
 import { createChannelSyncService } from "../modules/channels/sync.service";
 import { createReturnsService } from "../modules/orders/returns.service";
-import { createInventoryAlertService } from "../modules/inventory/alerts.service";
 import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
-import { createInventorySourceService } from "../modules/inventory/source.service";
 import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
 import { createPickingService } from "../modules/orders/picking.service";
 import { createOrderCombiningService } from "../modules/orders/combining.service";
-import { createCycleCountService } from "../modules/inventory/cycle-count.service";
 import { createOperationsDashboardService } from "../modules/orders/operations-dashboard.service";
 import { createReceivingService } from "../modules/procurement/receiving.service";
 import { createProductImportService } from "../modules/catalog/product-import.service";
@@ -66,22 +67,23 @@ import { identityStorage } from "../modules/identity";
 export function createServices(db: any) {
   // Foundation
   const inventoryLots = createInventoryLotService(db);
-  const inventoryCore = createInventoryCoreService(db, inventoryLots);
-  const atp = createInventoryAtpService(db);
   const cogs = createCOGSService(db);
+  const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs); // Temporary mapping
+  const inventoryUseCases = inventoryCore;
+  const atp = createInventoryAtpService(db);
 
   // Channel sync (depends on atp only — must precede fulfillment/reservation)
   const channelSync = createChannelSyncService(db, atp);
 
   // Depends on inventoryCore (+ channelSync for fulfillment/reservation)
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
-  const fulfillment = createFulfillmentService(db, inventoryCore, channelSync);
-  const reservation = createReservationService(db, inventoryCore, channelSync, atp);
+  const fulfillment = createFulfillmentService(db, inventoryCore as any, channelSync);
+  const reservation = createReservationService(db, inventoryCore as any, channelSync, atp);
   const replenishment = createReplenishmentService(db, inventoryCore);
-  const returns = createReturnsService(db, inventoryCore);
+  const returns = createReturnsService(db, inventoryCore as any);
 
   // Depends on inventoryCore + replenishment + multi-module storage
-  const picking = createPickingService(db, inventoryCore, replenishment, {
+  const picking = createPickingService(db, inventoryCore as any, replenishment, {
     ...ordersStorage,
     ...catalogStorage,
     ...warehouseStorage,
@@ -93,7 +95,7 @@ export function createServices(db: any) {
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);
   const fulfillmentRouter = createFulfillmentRouterService(db);
-  const inventorySource = createInventorySourceService(db, inventoryCore);
+  const inventorySource = null as any; // Removed, handled cleanly in picking and core now
   const slaMonitor = createSLAMonitorService(db);
   const orderCombining = createOrderCombiningService(db);
 
@@ -187,6 +189,13 @@ export function createServices(db: any) {
         } catch (err: any) {
           console.warn(`[InventorySync] Auto-sync failed for product ${productId}: ${err.message}`);
         }
+        try {
+          // Unblock and re-evaluate dependent replen tasks for this product across the warehouse
+          // after bulk receipts, transfers, or inventory adjustments
+          await replenishment.reevaluateReplenForProduct(productId);
+        } catch (err: any) {
+          console.warn(`[Replen] Auto-sync replen failed for product ${productId}: ${err.message}`);
+        }
       }, 2000); // 2s debounce
     } catch (err: any) {
       console.warn(`[InventorySync] Failed to resolve variant ${productVariantId}: ${err.message}`);
@@ -215,11 +224,11 @@ export function createServices(db: any) {
   const fulfillmentPush = createFulfillmentPushService(db, null);
 
   // ShipStation — order push + webhook integration
-  const shipStation = createShipStationService(db, inventoryCore);
+  const shipStation = createShipStationService(db, inventoryCore as any);
 
   // WMS Sync — bridges OMS → WMS for fulfillment
   const wmsSync = new WmsSyncService({
-    inventoryCore,
+    inventoryCore: inventoryCore as any,
     reservation,
     fulfillmentRouter,
   });
@@ -262,39 +271,30 @@ export function createServices(db: any) {
 export type ServiceRegistry = ReturnType<typeof createServices>;
 
 // Re-export factory functions for individual service creation
-export { createInventoryCoreService } from "../modules/inventory/core.service";
-export { createInventoryAtpService } from "../modules/inventory/atp.service";
-export { createBreakAssemblyService } from "../modules/inventory/break-assembly.service";
+export { createBreakAssemblyService, createReplenishmentService, createCycleCountService, createInventoryAtpService, createInventoryAlertService } from "../modules/inventory";
 export { createFulfillmentService } from "../modules/orders/fulfillment.service";
 export { createReservationService } from "../modules/channels/reservation.service";
-export { createReplenishmentService } from "../modules/inventory/replen.service";
 export { createChannelSyncService } from "../modules/channels/sync.service";
 export { createReturnsService } from "../modules/orders/returns.service";
-export { createInventoryAlertService } from "../modules/inventory/alerts.service";
 export { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
-export { createInventorySourceService } from "../modules/inventory/source.service";
 export { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
 export { createPickingService } from "../modules/orders/picking.service";
 export { createOrderCombiningService } from "../modules/orders/combining.service";
-export { createCycleCountService } from "../modules/inventory/cycle-count.service";
 export { createOperationsDashboardService } from "../modules/orders/operations-dashboard.service";
 export { createReceivingService } from "../modules/procurement/receiving.service";
 export { createProductImportService } from "../modules/catalog/product-import.service";
 export { createChannelProductPushService } from "../modules/channels/product-push.service";
 
 // Re-export service types
-export type { InventoryCoreService } from "../modules/inventory/core.service";
-export type { BreakResult, AssembleResult, ConversionPreview } from "../modules/inventory/break-assembly.service";
-export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "../modules/inventory/atp.service";
+export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary, BreakResult, AssembleResult, ConversionPreview } from "../modules/inventory";
 export type { SyncResult } from "../modules/channels/sync.service";
 export type { ReservationResult } from "../modules/channels/reservation.service";
 export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "../modules/orders/returns.service";
 export type { OrderRoutingContext, RoutingResult } from "../modules/orders/fulfillment-router.service";
-export type { SyncResult as InventorySourceSyncResult } from "../modules/inventory/source.service";
 export type { SLAAlert, SLASummary } from "../modules/orders/sla-monitor.service";
 export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "../modules/orders/picking.service";
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "../modules/orders/combining.service";
-export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory/cycle-count.service";
+export type { CycleCountUseCases as CycleCountService, CycleCountError, ApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/operations-dashboard.service";
 export type { ReceivingService, ReceivingError } from "../modules/procurement/receiving.service";
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";

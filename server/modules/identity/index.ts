@@ -1,28 +1,30 @@
 /**
  * @echelon/identity — Users, Auth, RBAC
- *
- * Tables owned: users, userAudit, authRoles, authPermissions, authRolePermissions, authUserRoles
- * Depends on: nothing (leaf module)
  */
 
+import * as repository from "./infrastructure/identity.repository";
+import * as usecases from "./application/identity.use-cases";
+
 // Storage
-export { type IUserStorage, userMethods } from "./identity.storage";
-import { type IUserStorage, userMethods } from "./identity.storage";
-export const identityStorage: IUserStorage = userMethods;
+export const identityStorage = repository;
 
 // RBAC
-export {
-  seedRBAC,
-  seedDefaultChannels,
-  seedAdjustmentReasons,
-  getUserPermissions,
-  getUserRoles,
-  hasPermission,
-  getAllRoles,
-  getAllPermissions,
-  getRolePermissions,
-  createRole,
-  updateRolePermissions,
-  deleteRole,
-  assignUserRoles,
-} from "./rbac";
+export const seedRBAC = usecases.seedRBACUseCase;
+export const seedDefaultChannels = repository.seedDefaultChannels;
+export const seedAdjustmentReasons = usecases.seedAdjustmentReasonsUseCase;
+
+export const getUserPermissions = repository.getUserPermissions;
+export const getUserRoles = repository.getUserRoles;
+export const getAllRoles = repository.getAllRoles;
+export const getAllPermissions = repository.getAllPermissions;
+export const getRolePermissions = repository.getRolePermissions;
+
+export const assignUserRoles = usecases.assignUserRolesUseCase;
+export const createRole = usecases.createRoleUseCase;
+export const updateRolePermissions = usecases.updateRolePermissionsUseCase;
+export const deleteRole = repository.deleteRole; // Repo operation (no domain logic wrap needed yet)
+
+export async function hasPermission(userId: string, resource: string, action: string): Promise<boolean> {
+  const permissions = await repository.getUserPermissions(userId);
+  return permissions.includes(`${resource}:${action}`);
+}

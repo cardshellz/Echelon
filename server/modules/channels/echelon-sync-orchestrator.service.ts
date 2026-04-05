@@ -258,7 +258,7 @@ class EchelonSyncOrchestrator {
       .where(eq(channelFeeds.isActive, 1))
       .groupBy(productVariants.productId);
 
-    const productIds: number[] = [...new Set(feedRows.map((r: any) => r.productId as number))];
+    const productIds: number[] = Array.from(new Set(feedRows.map((r: any) => r.productId as number)));
     console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
 
     // Clear velocity cache at start of full sync cycle — each product will query fresh
@@ -369,10 +369,11 @@ class EchelonSyncOrchestrator {
         if (previousQty !== null && previousQty === a.allocatedUnits) {
           result.variantsSkipped++;
           result.details.push({
+            productId,
             variantId: a.productVariantId,
             sku: a.sku,
             previousQty,
-            pushQty: a.allocatedUnits,
+            allocatedQty: a.allocatedUnits,
             status: "skipped" as const,
           });
           continue;
@@ -385,10 +386,11 @@ class EchelonSyncOrchestrator {
           previousQty,
         });
         result.details.push({
+          productId,
           variantId: a.productVariantId,
           sku: a.sku,
           previousQty,
-          pushQty: a.allocatedUnits,
+          allocatedQty: a.allocatedUnits,
           status: "pushed" as const,
         });
       }
