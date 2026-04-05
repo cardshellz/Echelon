@@ -602,13 +602,12 @@ export const orderMethods: IOrderStorage = {
       updates.pickedAt = null;
     }
 
-    // When marking as completed, allow transition from both "pending" and "in_progress"
-    // to handle race conditions where status transitions between read and write
-    const condition = expectedCurrentStatus && status !== "completed"
+    // For "completed" transitions: no WHERE guard on status — the already_picked check above
+    // prevents actual double-completes. Using a guard here causes false status_conflict errors
+    // when concurrent reads/writes occur during the final unit pick.
+    const condition = (expectedCurrentStatus && status !== "completed")
       ? and(eq(orderItems.id, itemId), eq(orderItems.status, expectedCurrentStatus))
-      : expectedCurrentStatus && status === "completed"
-        ? and(eq(orderItems.id, itemId), inArray(orderItems.status, [expectedCurrentStatus as ItemStatus, "pending" as ItemStatus, "in_progress" as ItemStatus]))
-        : eq(orderItems.id, itemId);
+      : eq(orderItems.id, itemId);
 
     const result = await db
       .update(orderItems)
