@@ -205,7 +205,10 @@ class PickingService {
     );
 
     if (!item) {
-      return { success: false, error: "status_conflict", message: `Item ${itemId} status was changed by another request` };
+      // Re-read to find the current status for debugging
+      const currentItem = await this.storage.getOrderItemById(itemId);
+      console.error(`[Pick] status_conflict on item ${itemId}: expected status='${beforeItem.status}', actual DB status='${currentItem?.status}', requested transition to '${status}', pickedQty=${pickedQuantity}`);
+      return { success: false, error: "status_conflict", message: `Item ${itemId} status conflict: expected '${beforeItem.status}' but found '${currentItem?.status || 'unknown'}' in DB` };
     }
 
     // Log the action (fire-and-forget)
