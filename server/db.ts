@@ -21,7 +21,7 @@ export const pool = new Pool({
 });
 
 pool.on("connect", (client) => {
-  client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms').catch(console.error);
+  client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms, dropship').catch(console.error);
 });
 
 export const db = drizzle(pool, { schema });
