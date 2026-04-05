@@ -247,4 +247,24 @@ export function registerDiagnosticsRoutes(app: Express) {
       res.status(500).json({ error: error.message });
     }
   });
+
+  // Force release an order by order number (admin use only)
+  app.post("/api/diagnostics/force-release-by-number/:orderNumber", async (req, res) => {
+    try {
+      const { orderNumber } = req.params;
+      const { resetProgress = false } = req.body;
+      const storage = (req.app.locals as any).services?.ordersStorage
+        || (await import("../modules/orders")).ordersStorage;
+      // Find by order number
+      const result = await db.execute(sql`
+        SELECT id FROM wms.orders WHERE order_number = ${orderNumber} LIMIT 1
+      `);
+      if (!result.rows.length) return res.status(404).json({ error: "Order not found: " + orderNumber });
+      const orderId = result.rows[0].id as number;
+      const order = await storage.forceReleaseOrder(orderId, Boolean(resetProgress));
+      res.json({ success: true, orderId, order });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 }
