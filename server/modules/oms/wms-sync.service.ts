@@ -293,7 +293,6 @@ export class WmsSyncService {
     const result = await this.syncBatch(ids);
     return result.synced;
   }
-}
 
   /**
    * Resync items for an existing WMS order from its OMS source.
@@ -410,3 +409,5 @@ export class WmsSyncService {
 
     return { ordersFixed, ordersFailed, details };
   }
+
+}
