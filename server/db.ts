@@ -20,6 +20,10 @@ export const pool = new Pool({
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
 });
 
+pool.on("connect", (client) => {
+  client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms').catch(console.error);
+});
+
 export const db = drizzle(pool, { schema });
 
 // Run startup migrations to ensure schema is up to date
