@@ -191,9 +191,10 @@ class PickingService {
       return { success: false, error: "not_found", message: `Item ${itemId} not found` };
     }
 
-    // Prevent double-pick
+    // Prevent double-pick — if already completed, treat as success (idempotent)
     if (status === "completed" && beforeItem.status === "completed") {
-      return { success: false, error: "already_picked", message: `Item ${itemId} is already completed` };
+      console.log(`[Pick] Item ${itemId} already completed — returning success (idempotent)`);
+      return { success: true, item: beforeItem as any, inventory: { deducted: false, systemQtyAfter: 0, locationId: null, locationCode: null, sku: beforeItem.sku, binCountNeeded: false, replen: { triggered: false, taskId: null, taskStatus: null, autoExecuted: false, stockout: false, sourceLocationCode: null, sourceVariantSku: null, sourceVariantName: null, qtyToMove: null } } };
     }
 
     // Validate pickedQuantity bounds
