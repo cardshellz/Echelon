@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, doublePrecision } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, doublePrecision } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -458,3 +458,21 @@ export const insertInventoryLotSchema = createInsertSchema(inventoryLots).omit({
 
 export type InsertInventoryLot = z.infer<typeof insertInventoryLotSchema>;
 export type InventoryLot = typeof inventoryLots.$inferSelect;
+
+
+export const inventorySchema = pgSchema('inventory');
+
+export const orderLineCosts = inventorySchema.table('order_line_costs', {
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer('order_id').notNull(),
+  orderItemId: integer('order_item_id').notNull(),
+  productVariantId: integer('product_variant_id').notNull(),
+  lotId: integer('lot_id'),
+  qtyConsumed: integer('qty_consumed').notNull(),
+  unitCostCents: integer('unit_cost_cents').notNull(),
+  totalCostCents: integer('total_cost_cents').notNull(),
+  shippedAt: timestamp('shipped_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export type OrderLineCost = typeof orderLineCosts.$inferSelect;
