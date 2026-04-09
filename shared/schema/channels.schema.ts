@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, bigint, timestamp, jsonb, uniqueIndex, boolean, index } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, bigint, timestamp, jsonb, uniqueIndex, boolean, index } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -19,7 +19,9 @@ export const channelStatusEnum = ["active", "paused", "pending_setup", "error"] 
 export type ChannelStatus = typeof channelStatusEnum[number];
 
 // Channels - the core entity for all sales channels
-export const channels = pgTable("channels", {
+const channelsSchema = pgSchema("channels");
+
+export const channels = channelsSchema.table("channels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: varchar("name", { length: 100 }).notNull(),
   type: varchar("type", { length: 20 }).notNull().default("internal"), // internal or partner
@@ -46,7 +48,7 @@ export type InsertChannel = z.infer<typeof insertChannelSchema>;
 export type Channel = typeof channels.$inferSelect;
 
 // Channel connections - credentials and API settings per channel
-export const channelConnections = pgTable("channel_connections", {
+export const channelConnections = channelsSchema.table("channel_connections", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   shopDomain: varchar("shop_domain", { length: 255 }), // e.g., "mystore.myshopify.com"
@@ -75,7 +77,7 @@ export type InsertChannelConnection = z.infer<typeof insertChannelConnectionSche
 export type ChannelConnection = typeof channelConnections.$inferSelect;
 
 // Partner profiles - extra info for dropship/wholesale partners
-export const partnerProfiles = pgTable("partner_profiles", {
+export const partnerProfiles = channelsSchema.table("partner_profiles", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }).unique(),
   companyName: varchar("company_name", { length: 200 }).notNull(),
@@ -103,7 +105,7 @@ export type InsertPartnerProfile = z.infer<typeof insertPartnerProfileSchema>;
 export type PartnerProfile = typeof partnerProfiles.$inferSelect;
 
 // Channel feeds - maps variants to external channel IDs (Shopify, future marketplaces)
-export const channelFeeds = pgTable("channel_feeds", {
+export const channelFeeds = channelsSchema.table("channel_feeds", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").references(() => channels.id),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
@@ -129,7 +131,7 @@ export type InsertChannelFeed = z.infer<typeof insertChannelFeedSchema>;
 export type ChannelFeed = typeof channelFeeds.$inferSelect;
 
 // Channel reservations - priority stock allocation per channel
-export const channelReservations = pgTable("channel_reservations", {
+export const channelReservations = channelsSchema.table("channel_reservations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
@@ -154,7 +156,7 @@ export type InsertChannelReservation = z.infer<typeof insertChannelReservationSc
 export type ChannelReservation = typeof channelReservations.$inferSelect;
 
 // Channel product allocation - product-level rules per channel
-export const channelProductAllocation = pgTable("channel_product_allocation", {
+export const channelProductAllocation = channelsSchema.table("channel_product_allocation", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
@@ -178,7 +180,7 @@ export type InsertChannelProductAllocation = z.infer<typeof insertChannelProduct
 export type ChannelProductAllocation = typeof channelProductAllocation.$inferSelect;
 
 // Channel sync log - audit trail for every inventory push to a channel
-export const channelSyncLog = pgTable("channel_sync_log", {
+export const channelSyncLog = channelsSchema.table("channel_sync_log", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productId: integer("product_id").references(() => products.id),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
@@ -200,7 +202,7 @@ export const channelSyncLog = pgTable("channel_sync_log", {
 export type ChannelSyncLogEntry = typeof channelSyncLog.$inferSelect;
 
 // Many-to-many: channels → product lines (which lines a channel carries)
-export const channelProductLines = pgTable("channel_product_lines", {
+export const channelProductLines = channelsSchema.table("channel_product_lines", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productLineId: integer("product_line_id").notNull().references(() => productLines.id, { onDelete: "cascade" }),
@@ -213,7 +215,7 @@ export const channelProductLines = pgTable("channel_product_lines", {
 export type ChannelProductLine = typeof channelProductLines.$inferSelect;
 
 // Channel product overrides - per-channel content customization
-export const channelProductOverrides = pgTable("channel_product_overrides", {
+export const channelProductOverrides = channelsSchema.table("channel_product_overrides", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
@@ -243,7 +245,7 @@ export type InsertChannelProductOverride = z.infer<typeof insertChannelProductOv
 export type ChannelProductOverride = typeof channelProductOverrides.$inferSelect;
 
 // Channel pricing - per-channel, per-variant pricing
-export const channelPricing = pgTable("channel_pricing", {
+export const channelPricing = channelsSchema.table("channel_pricing", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
@@ -267,7 +269,7 @@ export type InsertChannelPricing = z.infer<typeof insertChannelPricingSchema>;
 export type ChannelPricing = typeof channelPricing.$inferSelect;
 
 // Channel listings - external IDs after pushing to channel
-export const channelListings = pgTable("channel_listings", {
+export const channelListings = channelsSchema.table("channel_listings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
@@ -296,7 +298,7 @@ export type InsertChannelListing = z.infer<typeof insertChannelListingSchema>;
 export type ChannelListing = typeof channelListings.$inferSelect;
 
 // Channel variant overrides - per-channel variant-level customization
-export const channelVariantOverrides = pgTable("channel_variant_overrides", {
+export const channelVariantOverrides = channelsSchema.table("channel_variant_overrides", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
@@ -321,7 +323,7 @@ export type InsertChannelVariantOverride = z.infer<typeof insertChannelVariantOv
 export type ChannelVariantOverride = typeof channelVariantOverrides.$inferSelect;
 
 // Channel asset overrides - per-channel media customization
-export const channelAssetOverrides = pgTable("channel_asset_overrides", {
+export const channelAssetOverrides = channelsSchema.table("channel_asset_overrides", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productAssetId: integer("product_asset_id").notNull().references(() => productAssets.id, { onDelete: "cascade" }),
@@ -362,7 +364,7 @@ export const sourceLockFieldTypeEnum = [
 ] as const;
 export type SourceLockFieldType = typeof sourceLockFieldTypeEnum[number];
 
-export const sourceLockConfig = pgTable("source_lock_config", {
+export const sourceLockConfig = channelsSchema.table("source_lock_config", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   fieldType: varchar("field_type", { length: 30 }).notNull(), // from sourceLockFieldTypeEnum
@@ -389,7 +391,7 @@ export type SourceLockConfig = typeof sourceLockConfig.$inferSelect;
 // Channel Warehouse Assignments — which warehouses fulfill for which channels
 // ---------------------------------------------------------------------------
 
-export const channelWarehouseAssignments = pgTable("channel_warehouse_assignments", {
+export const channelWarehouseAssignments = channelsSchema.table("channel_warehouse_assignments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   warehouseId: integer("warehouse_id").notNull(),
@@ -417,7 +419,7 @@ export type ChannelWarehouseAssignment = typeof channelWarehouseAssignments.$inf
 export const allocationModeEnum = ["mirror", "share", "fixed"] as const;
 export type AllocationMode = typeof allocationModeEnum[number];
 
-export const channelAllocationRules = pgTable("channel_allocation_rules", {
+export const channelAllocationRules = channelsSchema.table("channel_allocation_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   /** NULL = global rule that applies to all channels */
   channelId: integer("channel_id").references(() => channels.id, { onDelete: "cascade" }),
@@ -464,7 +466,7 @@ export type ChannelAllocationRule = typeof channelAllocationRules.$inferSelect;
 // Allocation Audit Log — tracks allocation engine decisions
 // ---------------------------------------------------------------------------
 
-export const allocationAuditLog = pgTable("allocation_audit_log", {
+export const allocationAuditLog = channelsSchema.table("allocation_audit_log", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productId: integer("product_id").references(() => products.id),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
@@ -484,7 +486,7 @@ export type AllocationAuditLogEntry = typeof allocationAuditLog.$inferSelect;
 // Sync Settings — global sync engine configuration
 // ---------------------------------------------------------------------------
 
-export const syncSettings = pgTable("sync_settings", {
+export const syncSettings = channelsSchema.table("sync_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   globalEnabled: boolean("global_enabled").notNull().default(false),
   sweepIntervalMinutes: integer("sweep_interval_minutes").notNull().default(15),
@@ -499,7 +501,7 @@ export type SyncSettings = typeof syncSettings.$inferSelect;
 // Sync Log — unified activity log for all sync operations
 // ---------------------------------------------------------------------------
 
-export const syncLog = pgTable("sync_log", {
+export const syncLog = channelsSchema.table("sync_log", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").references(() => channels.id),
   channelName: varchar("channel_name", { length: 100 }),
