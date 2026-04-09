@@ -508,7 +508,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Find eBay OMS orders stuck in "confirmed" for > 48 hours
       const stuckOrders = await db.execute(sql`
         SELECT o.id, o.external_order_id, o.order_number
-        FROM oms_orders o
+        FROM oms.oms_orders o
         WHERE o.channel_id = 67
           AND o.status = 'confirmed'
           AND o.created_at < NOW() - INTERVAL '48 hours'

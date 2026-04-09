@@ -273,7 +273,7 @@ export class WmsSyncService {
   async backfillUnsynced(limit: number = 100): Promise<number> {
     const unsynced = await db.execute<{ id: number }>(sql`
       SELECT oo.id 
-      FROM oms_orders oo
+      FROM oms.oms_orders oo
       WHERE NOT EXISTS (
         SELECT 1 FROM wms.orders o
         WHERE o.source_table_id = oo.id::text
@@ -374,7 +374,7 @@ export class WmsSyncService {
       LEFT JOIN wms.order_items oi ON oi.order_id = o.id
       JOIN (
         SELECT oo.id as oms_id, oo.external_order_number, COUNT(ol.id) as line_count
-        FROM oms_orders oo
+        FROM oms.oms_orders oo
         LEFT JOIN oms_order_lines ol ON ol.order_id = oo.id
         GROUP BY oo.id, oo.external_order_number
       ) oms_counts ON oms_counts.external_order_number = o.order_number

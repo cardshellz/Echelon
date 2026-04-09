@@ -34,7 +34,7 @@ export function registerDropshipAdminRoutes(app: Express) {
         const vendorResult = await client.query(
           `SELECT v.id, v.name, v.company_name, v.email, v.status, v.tier,
                   v.wallet_balance_cents, v.ebay_user_id, v.created_at,
-                  (SELECT COUNT(*) FROM oms_orders o WHERE o.vendor_id = v.id) as total_orders
+                  (SELECT COUNT(*) FROM oms.oms_orders o WHERE o.vendor_id = v.id) as total_orders
            FROM dropship_vendors v
            ${where}
            ORDER BY v.created_at DESC
@@ -92,9 +92,9 @@ export function registerDropshipAdminRoutes(app: Express) {
         // Stats
         const statsResult = await client.query(
           `SELECT
-             (SELECT COUNT(*) FROM oms_orders WHERE vendor_id = $1) as total_orders,
-             (SELECT COUNT(*) FROM oms_orders WHERE vendor_id = $1 AND ordered_at >= date_trunc('month', NOW())) as orders_this_month,
-             (SELECT COALESCE(SUM(total_cents), 0) FROM oms_orders WHERE vendor_id = $1) as total_revenue_cents,
+             (SELECT COUNT(*) FROM oms.oms_orders WHERE vendor_id = $1) as total_orders,
+             (SELECT COUNT(*) FROM oms.oms_orders WHERE vendor_id = $1 AND ordered_at >= date_trunc('month', NOW())) as orders_this_month,
+             (SELECT COALESCE(SUM(total_cents), 0) FROM oms.oms_orders WHERE vendor_id = $1) as total_revenue_cents,
              (SELECT COUNT(*) FROM dropship_vendor_products WHERE vendor_id = $1 AND enabled = true) as products_selected`,
           [vendorId]
         );
@@ -103,7 +103,7 @@ export function registerDropshipAdminRoutes(app: Express) {
         // Recent orders
         const ordersResult = await client.query(
           `SELECT id, external_order_id, status, customer_name, total_cents, tracking_number, ordered_at
-           FROM oms_orders WHERE vendor_id = $1 ORDER BY ordered_at DESC LIMIT 10`,
+           FROM oms.oms_orders WHERE vendor_id = $1 ORDER BY ordered_at DESC LIMIT 10`,
           [vendorId]
         );
 

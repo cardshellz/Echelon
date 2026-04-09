@@ -839,9 +839,9 @@ export const inventoryMethods: IInventoryStorage = {
   async getSyncHealthStats(): Promise<Record<string, unknown>> {
     const result = await db.execute(sql`
       SELECT
-        (SELECT MAX(ordered_at) FROM oms_orders) as latest_oms_order,
-        (SELECT MAX(created_at) FROM orders) as latest_synced_order,
-        (SELECT COUNT(*) FROM oms_orders oms
+        (SELECT MAX(ordered_at) FROM oms.oms_orders) as latest_oms_order,
+        (SELECT MAX(created_at) FROM wms.orders) as latest_synced_order,
+        (SELECT COUNT(*) FROM oms.oms_orders oms
          WHERE NOT EXISTS(SELECT 1 FROM wms.orders WHERE order_number = oms.external_order_number)
          AND oms.created_at > NOW() - INTERVAL '24 hours'
          AND oms.cancelled_at IS NULL
@@ -862,7 +862,7 @@ export const inventoryMethods: IInventoryStorage = {
 
   async getDebugSyncStatus(): Promise<{ missingCount: number; sampleOrders: Record<string, unknown>[] }> {
     const missing = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM oms_orders
+      SELECT COUNT(*) as count FROM oms.oms_orders
       WHERE external_order_number NOT IN (SELECT order_number FROM wms.orders WHERE order_number IS NOT NULL)
     `);
 
@@ -871,7 +871,7 @@ export const inventoryMethods: IInventoryStorage = {
       order_number: string | null;
       created_at: Date | null;
     }>(sql`
-      SELECT id::text as id, external_order_number as order_number, created_at FROM oms_orders
+      SELECT id::text as id, external_order_number as order_number, created_at FROM oms.oms_orders
       WHERE external_order_number NOT IN (SELECT order_number FROM wms.orders WHERE order_number IS NOT NULL)
       ORDER BY created_at DESC
       LIMIT 5

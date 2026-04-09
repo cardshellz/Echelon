@@ -246,7 +246,7 @@ async function processVendorOrder(
   try {
     // Dedup: check if order already exists
     const existingResult = await client.query(
-      `SELECT id FROM oms_orders WHERE external_order_id = $1 AND vendor_id = $2 LIMIT 1`,
+      `SELECT id FROM oms.oms_orders WHERE external_order_id = $1 AND vendor_id = $2 LIMIT 1`,
       [externalOrderId, vendorId],
     );
     if (existingResult.rows.length > 0) return false;

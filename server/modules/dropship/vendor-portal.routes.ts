@@ -315,7 +315,7 @@ export function registerVendorPortalRoutes(app: Express) {
         }
 
         const countResult = await client.query(
-          `SELECT COUNT(*) FROM oms_orders o ${where}`,
+          `SELECT COUNT(*) FROM oms.oms_orders o ${where}`,
           params
         );
         const total = parseInt(countResult.rows[0].count);
@@ -333,7 +333,7 @@ export function registerVendorPortalRoutes(app: Express) {
                     ))
                     FROM oms_order_lines ol WHERE ol.order_id = o.id
                   ), '[]'::json) as items
-           FROM oms_orders o
+           FROM oms.oms_orders o
            ${where}
            ORDER BY o.ordered_at DESC
            LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,

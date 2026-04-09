@@ -546,7 +546,7 @@ export const channelMethods: IChannelStorage = {
         tax_cents,
         shipping_cents,
         discount_cents
-      FROM oms_orders
+      FROM oms.oms_orders
       WHERE external_order_id = ${sourceTableId}
       LIMIT 1
     `);

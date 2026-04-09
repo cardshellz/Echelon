@@ -841,7 +841,7 @@ export const orderMethods: IOrderStorage = {
         oms.ship_to_state,
         oms.ship_to_zip,
         oms.ship_to_country
-      FROM oms_orders oms
+      FROM oms.oms_orders oms
       WHERE oms.fulfillment_status IS NULL
          OR oms.fulfillment_status = 'unfulfilled'
          OR oms.fulfillment_status = 'partial'
@@ -885,7 +885,7 @@ export const orderMethods: IOrderStorage = {
       UPDATE wms.orders o SET
         status = 'completed',
         completed_at = COALESCE(o.completed_at, NOW())
-      FROM oms_orders oms
+      FROM oms.oms_orders oms
       WHERE o.order_number = oms.external_order_number
         AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
         AND o.warehouse_status != 'completed'
@@ -910,7 +910,7 @@ export const orderMethods: IOrderStorage = {
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
       FROM wms.orders o
-      INNER JOIN oms_orders oms ON o.order_number = oms.external_order_number
+      INNER JOIN oms.oms_orders oms ON o.order_number = oms.external_order_number
       WHERE oi.order_id = o.id
         AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
         AND oi.status != 'completed'
@@ -939,7 +939,7 @@ export const orderMethods: IOrderStorage = {
         shipping_state = COALESCE(oms.ship_to_state, o.shipping_state),
         shipping_postal_code = COALESCE(oms.ship_to_zip, o.shipping_postal_code),
         shipping_country = COALESCE(oms.ship_to_country, o.shipping_country)
-      FROM oms_orders oms
+      FROM oms.oms_orders oms
       WHERE o.order_number = oms.external_order_number
         AND (o.shipping_address IS NULL OR o.shipping_city IS NULL)
     `);
@@ -985,7 +985,7 @@ export const orderMethods: IOrderStorage = {
 
   async countOmsRawOrdersMissingCustomerName(): Promise<number> {
     const result = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM oms_orders WHERE customer_name IS NULL
+      SELECT COUNT(*) as count FROM oms.oms_orders WHERE customer_name IS NULL
     `);
     return parseInt(result.rows[0]?.count || '0', 10);
   },

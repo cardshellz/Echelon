@@ -189,7 +189,7 @@ export async function backfillShopifyOrders(
   const unsynced = await db.execute(sql`
     SELECT so.id FROM shopify_orders so
     WHERE NOT EXISTS (
-      SELECT 1 FROM oms_orders oo
+      SELECT 1 FROM oms.oms_orders oo
       WHERE oo.external_order_id = so.id
         AND oo.channel_id IN (SELECT id FROM channels WHERE provider = 'shopify')
     )

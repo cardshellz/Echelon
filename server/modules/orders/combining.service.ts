@@ -181,7 +181,7 @@ class OrderCombiningService {
                COALESCE((SELECT SUM(oi.quantity) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
         FROM wms.orders o
         LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
-        LEFT JOIN oms_orders oms ON o.order_number = oms.external_order_number
+        LEFT JOIN oms.oms_orders oms ON o.order_number = oms.external_order_number
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
           AND (oms.cancelled_at IS NULL OR oms.id IS NULL)
@@ -197,7 +197,7 @@ class OrderCombiningService {
                  COALESCE((SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
                  COALESCE((SELECT SUM(oi.quantity) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
           FROM wms.orders o
-          LEFT JOIN oms_orders oms ON o.order_number = oms.external_order_number
+          LEFT JOIN oms.oms_orders oms ON o.order_number = oms.external_order_number
           WHERE o.warehouse_status = 'ready'
             AND o.on_hold = 0
             AND (oms.cancelled_at IS NULL OR oms.id IS NULL)
