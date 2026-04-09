@@ -1753,6 +1753,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         }
                                       </span>
                                     ) : (
+                                      <>
                                       <LocationTypeahead
                                         locations={selectedReceipt?.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
                                         value={line.putawayLocationId}
@@ -1773,6 +1774,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                           Use default ({locations.find(l => l.id === selectedReceipt.receivingLocationId)?.code})
                                         </button>
                                       )}
+                                    </>
                                     )}
                                   </div>
                                 </div>
