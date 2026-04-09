@@ -9,7 +9,6 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
@@ -67,6 +66,16 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
 
   const { data: settings } = useQuery<AutoDraftSettings>({
     queryKey: ["/api/purchasing/auto-draft-settings"],
+    enabled: open,
+  });
+
+  const { data: fieldValues } = useQuery<{ field: string; values: string[] }>({
+    queryKey: ["/api/purchasing/exclusion-rules/field-values", newField],
+    queryFn: async () => {
+      const res = await fetch(`/api/purchasing/exclusion-rules/field-values?field=${newField}`);
+      if (!res.ok) return { field: newField, values: [] };
+      return res.json();
+    },
     enabled: open,
   });
 
@@ -186,7 +195,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Match Field</label>
-                  <Select value={newField} onValueChange={setNewField}>
+                  <Select value={newField} onValueChange={(v) => { setNewField(v); setNewValue(""); }}>
                     <SelectTrigger className="h-8 text-xs">
                       <SelectValue />
                     </SelectTrigger>
@@ -199,13 +208,19 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
                 </div>
                 <div>
                   <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Value</label>
-                  <Input
-                    className="h-8 text-xs"
-                    placeholder="e.g. Pokemon"
-                    value={newValue}
-                    onChange={(e) => setNewValue(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleAddRule()}
-                  />
+                  <Select value={newValue} onValueChange={setNewValue}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder={`Select ${FIELD_LABELS[newField] || newField}...`} />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-[200px]">
+                      {(fieldValues?.values || []).map((v) => (
+                        <SelectItem key={v} value={v}>{v}</SelectItem>
+                      ))}
+                      {(!fieldValues?.values || fieldValues.values.length === 0) && (
+                        <div className="px-2 py-1.5 text-xs text-muted-foreground">No values found</div>
+                      )}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
               <div className="flex justify-end gap-2">

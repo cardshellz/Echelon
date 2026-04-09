@@ -3075,6 +3075,47 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // GET /api/purchasing/exclusion-rules/field-values?field=category
+  // Returns distinct values for a given field from products table
+  app.get("/api/purchasing/exclusion-rules/field-values", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const field = String(req.query.field || "").trim();
+      const allowedFields: Record<string, string> = {
+        category: "category",
+        brand: "brand",
+        product_type: "product_type",
+        tag: null, // handled separately — tags is jsonb array
+      };
+      if (!field || !(field in allowedFields)) {
+        return res.status(400).json({ error: "Invalid field. Must be one of: category, brand, product_type, tag" });
+      }
+      let values: string[] = [];
+      if (field === "tag") {
+        // Unnest tags jsonb array
+        const rows = await db.execute(sql`
+          SELECT DISTINCT trim(tag::text, '"') AS value
+          FROM catalog.products, jsonb_array_elements_text(tags) AS tag
+          WHERE tags IS NOT NULL AND jsonb_array_length(tags) > 0
+          ORDER BY value
+        `);
+        values = (rows.rows as any[]).map(r => r.value).filter(Boolean);
+      } else {
+        const col = allowedFields[field]!;
+        const rows = await db.execute(sql`
+          SELECT DISTINCT ${sql.raw(col)} AS value
+          FROM catalog.products
+          WHERE is_active = true AND ${sql.raw(col)} IS NOT NULL AND ${sql.raw(col)} != ''
+          ORDER BY value
+        `);
+        values = (rows.rows as any[]).map(r => r.value).filter(Boolean);
+      }
+      res.json({ field, values });
+    } catch (error: any) {
+      console.error("Error fetching field values:", error);
+      res.status(500).json({ error: "Failed to fetch field values" });
+    }
+  });
+
   // PATCH /api/purchasing/products/:productId/reorder-excluded
   app.patch("/api/purchasing/products/:productId/reorder-excluded", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
