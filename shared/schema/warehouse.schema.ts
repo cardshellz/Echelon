@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { productVariants } from "./catalog.schema";
@@ -25,7 +25,9 @@ export const zoneTypeEnum = ["RCV", "BULK", "FWD", "PACK", "SHIP"] as const;
 export type ZoneType = typeof zoneTypeEnum[number];
 
 // Warehouse zones (optional - for organizing locations)
-export const warehouseZones = pgTable("warehouse_zones", {
+const warehouseSchema = pgSchema("warehouse");
+
+export const warehouseZones = warehouseSchema.table("warehouse_zones", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 10 }).notNull().unique(), // RCV, BULK, FWD, PACK, SHIP
   name: varchar("name", { length: 50 }).notNull(), // "Receiving Dock", "Bulk Storage", etc.
@@ -82,7 +84,7 @@ export function generateLocationCode(parts: {
 }
 
 // Warehouses (physical warehouse buildings/sites)
-export const warehouses = pgTable("warehouses", {
+export const warehouses = warehouseSchema.table("warehouses", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 20 }).notNull().unique(), // Short code: "EAST", "WEST", "HQ"
   name: varchar("name", { length: 200 }).notNull(), // Full name: "East Coast Distribution Center"
@@ -114,7 +116,7 @@ export type InsertWarehouse = z.infer<typeof insertWarehouseSchema>;
 export type Warehouse = typeof warehouses.$inferSelect;
 
 // Warehouse locations (bins, pallets, racks, etc.)
-export const warehouseLocations = pgTable("warehouse_locations", {
+export const warehouseLocations = warehouseSchema.table("warehouse_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "cascade" }), // Which warehouse this location belongs to
   code: varchar("code", { length: 50 }).notNull(), // Auto-generated from hierarchy: "BULK-A-02-C-1" — unique per warehouse via composite constraint
@@ -160,7 +162,7 @@ export const insertWarehouseLocationSchema = createInsertSchema(warehouseLocatio
 export type InsertWarehouseLocation = z.infer<typeof insertWarehouseLocationSchema>;
 export type WarehouseLocation = typeof warehouseLocations.$inferSelect;
 
-export const productLocations = pgTable("product_locations", {
+export const productLocations = warehouseSchema.table("product_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productId: integer("product_id"), // Primary link to products - NOT unique, allows multiple locations per product
   sku: varchar("sku", { length: 100 }), // Optional - cached from catalog for display/legacy
@@ -195,7 +197,7 @@ export type ProductLocation = typeof productLocations.$inferSelect;
 // ECHELON APPLICATION SETTINGS
 // ============================================
 
-export const echelonSettings = pgTable("echelon_settings", {
+export const echelonSettings = warehouseSchema.table("echelon_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   key: varchar("key", { length: 100 }).notNull().unique(),
   value: text("value"),
@@ -214,7 +216,7 @@ export type InsertEchelonSetting = z.infer<typeof insertEchelonSettingSchema>;
 export type EchelonSetting = typeof echelonSettings.$inferSelect;
 
 // App Settings - key-value store for application configuration
-export const appSettings = pgTable("app_settings", {
+export const appSettings = warehouseSchema.table("app_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   key: varchar("key", { length: 100 }).notNull().unique(),
   value: text("value"),
