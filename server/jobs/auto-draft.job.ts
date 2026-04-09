@@ -62,7 +62,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
 
     // Get product metadata for exclusion checking
     const productMetaRows = await db.execute(sql`
-      SELECT id, category, brand, product_type, sku, reorder_excluded
+      SELECT id, category, brand, product_type, sku, tags, reorder_excluded
       FROM products WHERE is_active = true
     `);
     const productMeta = new Map<number, any>();
@@ -90,6 +90,12 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
             break;
           case "sku_exact":
             if ((meta.sku || "").toLowerCase() === val) return true;
+            break;
+          case "tag":
+            try {
+              const tags = Array.isArray(meta.tags) ? meta.tags.map((t: string) => t.toLowerCase()) : [];
+              if (tags.includes(val)) return true;
+            } catch (_) {}
             break;
         }
       }
