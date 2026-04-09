@@ -333,7 +333,7 @@ export const productMethods: IProductStorage = {
     const upperSku = sku.toUpperCase();
     const result = await db.execute<{ image_url: string | null }>(sql`
       SELECT image_url FROM (
-        SELECT pl.image_url FROM product_locations pl
+        SELECT pl.image_url FROM warehouse.product_locations pl
         WHERE UPPER(pl.sku) = ${upperSku} AND pl.image_url IS NOT NULL
         UNION ALL
         SELECT COALESCE(
@@ -434,9 +434,9 @@ export const productMethods: IProductStorage = {
         wl.is_pickable,
         w.name AS warehouse_name
       FROM product_variants pv
-      LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
-      LEFT JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-      LEFT JOIN warehouses w ON w.id = wl.warehouse_id
+      LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
+      LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      LEFT JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
       WHERE pv.product_id = ${productId}
       ORDER BY pv.hierarchy_level ASC, pv.sku ASC, wl.code ASC
     `);

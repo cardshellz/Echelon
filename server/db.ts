@@ -388,14 +388,14 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
     const zombieResult = await client.query(`
-      DELETE FROM inventory_levels il
+      DELETE FROM inventory.inventory_levels il
       WHERE il.variant_qty = 0
         AND il.reserved_qty = 0
         AND il.picked_qty = 0
         AND COALESCE(il.packed_qty, 0) = 0
         AND COALESCE(il.backorder_qty, 0) = 0
         AND NOT EXISTS (
-          SELECT 1 FROM product_locations pl
+          SELECT 1 FROM warehouse.product_locations pl
           WHERE pl.product_variant_id = il.product_variant_id
             AND pl.warehouse_location_id = il.warehouse_location_id
         )

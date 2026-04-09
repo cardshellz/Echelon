@@ -271,7 +271,7 @@ describe("Fix 2: Double Inventory Deduction Prevention", () => {
 
   describe("Prong C: deductInventoryForExternalShipment idempotency", () => {
     it("should skip deduction when ship transactions already exist for the order", async () => {
-      // The function checks: SELECT id FROM inventory_transactions
+      // The function checks: SELECT id FROM inventory.inventory_transactions
       // WHERE order_id = ? AND transaction_type = 'ship'
       const existingShipTxns = { rows: [{ id: 1 }] };
 

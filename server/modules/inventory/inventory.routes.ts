@@ -288,14 +288,14 @@ export function registerInventoryRoutes(app: Express) {
           // Clean up empty source level
           if (sourceLevel.variantQty - qtyToConvert <= 0) {
             const hasAssignment = await tx.execute(sql`
-              SELECT 1 FROM product_locations
+              SELECT 1 FROM warehouse.product_locations
               WHERE product_variant_id = ${fromVarId}
                 AND warehouse_location_id = ${inv.warehouse_location_id}
               LIMIT 1
             `);
             if (hasAssignment.rows.length === 0) {
               await tx.execute(sql`
-                DELETE FROM inventory_levels WHERE id = ${sourceLevel.id}
+                DELETE FROM inventory.inventory_levels WHERE id = ${sourceLevel.id}
               `);
             }
           }

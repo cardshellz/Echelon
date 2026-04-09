@@ -134,14 +134,14 @@ export class OperationsDashboardService {
       : sql``;
     const hasInvFilter =
       hasInventory === true
-        ? sql`AND EXISTS (SELECT 1 FROM inventory_levels il2 WHERE il2.warehouse_location_id = wl.id AND il2.variant_qty > 0)`
+        ? sql`AND EXISTS (SELECT 1 FROM inventory.inventory_levels il2 WHERE il2.warehouse_location_id = wl.id AND il2.variant_qty > 0)`
         : hasInventory === false
-          ? sql`AND NOT EXISTS (SELECT 1 FROM inventory_levels il2 WHERE il2.warehouse_location_id = wl.id AND il2.variant_qty > 0)`
+          ? sql`AND NOT EXISTS (SELECT 1 FROM inventory.inventory_levels il2 WHERE il2.warehouse_location_id = wl.id AND il2.variant_qty > 0)`
           : sql``;
 
     // Count total for pagination
     const countResult = await this.db.execute(sql`
-      SELECT COUNT(*)::int as total FROM warehouse_locations wl
+      SELECT COUNT(*)::int as total FROM warehouse.warehouse_locations wl
       WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
     `);
     const total = Number((countResult.rows[0] as any)?.total) || 0;
@@ -161,9 +161,9 @@ export class OperationsDashboardService {
         COUNT(DISTINCT CASE WHEN il.variant_qty > 0 THEN il.product_variant_id END)::int as sku_count,
         COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.variant_qty ELSE 0 END), 0)::int as total_variant_qty,
         COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.reserved_qty ELSE 0 END), 0)::int as total_reserved_qty
-      FROM warehouse_locations wl
-      LEFT JOIN warehouses w ON wl.warehouse_id = w.id
-      LEFT JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+      FROM warehouse.warehouse_locations wl
+      LEFT JOIN warehouse.warehouses w ON wl.warehouse_id = w.id
+      LEFT JOIN inventory.inventory_levels il ON il.warehouse_location_id = wl.id
       WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
       GROUP BY wl.id, wl.code, wl.zone, wl.location_type, wl.bin_type, wl.is_pickable,
                wl.warehouse_id, wl.capacity_cubic_mm, w.code
@@ -180,7 +180,7 @@ export class OperationsDashboardService {
       const itemsResult = await this.db.execute(sql`
         SELECT inventory_levels.warehouse_location_id as location_id, pv.id as variant_id, pv.sku, pv.name,
                inventory_levels.variant_qty, inventory_levels.reserved_qty
-        FROM inventory_levels
+        FROM inventory.inventory_levels
         JOIN product_variants pv ON inventory_levels.product_variant_id = pv.id
         WHERE ${inArray(inventoryLevels.warehouseLocationId, locationIds)}
           AND inventory_levels.variant_qty > 0
@@ -232,17 +232,17 @@ export class OperationsDashboardService {
     const [countResult, result] = await Promise.all([
       this.db.execute(sql`
         SELECT COUNT(*) as total
-        FROM inventory_levels il
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        FROM inventory.inventory_levels il
+        JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty > 0
           AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
       `),
       this.db.execute(sql`
         SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
                wl.id as location_id, wl.code as location_code, wl.location_type
-        FROM inventory_levels il
+        FROM inventory.inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty > 0
           AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
         ORDER BY pv.sku
@@ -281,29 +281,29 @@ export class OperationsDashboardService {
           COUNT(*) FILTER (WHERE wl.is_pickable = 1) as pick_locations,
           COUNT(*) FILTER (WHERE wl.location_type = 'reserve') as bulk_locations,
           COUNT(*) FILTER (WHERE NOT EXISTS (
-            SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+            SELECT 1 FROM inventory.inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
           )) as empty_locations,
           COUNT(*) FILTER (WHERE wl.is_pickable = 1 AND NOT EXISTS (
-            SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+            SELECT 1 FROM inventory.inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
           )) as empty_pick_locations,
           COUNT(*) FILTER (WHERE EXISTS (
-            SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty < 0
+            SELECT 1 FROM inventory.inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty < 0
           )) as negative_inventory_count,
           COUNT(*) FILTER (WHERE EXISTS (
-            SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+            SELECT 1 FROM inventory.inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
           ) AND NOT EXISTS (
-            SELECT 1 FROM inventory_transactions it
+            SELECT 1 FROM inventory.inventory_transactions it
             WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
               AND it.created_at > NOW() - INTERVAL '1 day' * ${staleDays}
           )) as stale_inventory_count
-        FROM warehouse_locations wl
+        FROM warehouse.warehouse_locations wl
         WHERE 1=1 ${warehouseFilter}
       `),
       this.db.execute(sql`
         SELECT
           (SELECT COUNT(*) FROM replen_tasks WHERE status IN ('pending', 'assigned')) as pending_replen_tasks,
-          (SELECT COUNT(*) FILTER (WHERE transaction_type = 'transfer') FROM inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_transfer_count,
-          (SELECT COUNT(*) FILTER (WHERE transaction_type = 'adjustment') FROM inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_adjustment_count
+          (SELECT COUNT(*) FILTER (WHERE transaction_type = 'transfer') FROM inventory.inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_transfer_count,
+          (SELECT COUNT(*) FILTER (WHERE transaction_type = 'adjustment') FROM inventory.inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_adjustment_count
       `),
     ]);
 
@@ -337,9 +337,9 @@ export class OperationsDashboardService {
       this.db.execute(sql`
         SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
                wl.id as location_id, wl.code as location_code
-        FROM inventory_levels il
+        FROM inventory.inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty < 0 ${warehouseFilter}
         ORDER BY il.variant_qty ASC
         LIMIT 50
@@ -347,17 +347,17 @@ export class OperationsDashboardService {
       // Empty pick faces
       this.db.execute(sql`
         SELECT wl.id as location_id, wl.code as location_code,
-               (SELECT pv.sku FROM inventory_transactions it
+               (SELECT pv.sku FROM inventory.inventory_transactions it
                 JOIN product_variants pv ON it.product_variant_id = pv.id
                 WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id
                 ORDER BY it.created_at DESC LIMIT 1) as last_sku,
-               (SELECT MAX(it.created_at) FROM inventory_transactions it
+               (SELECT MAX(it.created_at) FROM inventory.inventory_transactions it
                 WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id) as last_movement_at
-        FROM warehouse_locations wl
+        FROM warehouse.warehouse_locations wl
         WHERE wl.is_pickable = 1
           AND wl.location_type = 'pick'
           AND NOT EXISTS (
-            SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+            SELECT 1 FROM inventory.inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
           )
           ${warehouseFilter}
         ORDER BY wl.code
@@ -368,13 +368,13 @@ export class OperationsDashboardService {
         SELECT wl.id as location_id, wl.code as location_code, wl.location_type,
                COUNT(DISTINCT il.product_variant_id) as sku_count,
                COALESCE(SUM(il.variant_qty), 0) as total_qty,
-               (SELECT MAX(it.created_at) FROM inventory_transactions it
+               (SELECT MAX(it.created_at) FROM inventory.inventory_transactions it
                 WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id) as last_movement_at
-        FROM warehouse_locations wl
-        JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
+        FROM warehouse.warehouse_locations wl
+        JOIN inventory.inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
         WHERE 1=1 ${warehouseFilter}
           AND NOT EXISTS (
-            SELECT 1 FROM inventory_transactions it
+            SELECT 1 FROM inventory.inventory_transactions it
             WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
               AND it.created_at > NOW() - INTERVAL '1 day' * ${staleDays}
           )
@@ -429,13 +429,13 @@ export class OperationsDashboardService {
         COALESCE(bulk.bulk_qty, 0) as bulk_available,
         rt.id as pending_replen_task_id,
         rt.status as pending_replen_status
-      FROM warehouse_locations wl
-      JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+      FROM warehouse.warehouse_locations wl
+      JOIN inventory.inventory_levels il ON il.warehouse_location_id = wl.id
       JOIN product_variants pv ON il.product_variant_id = pv.id
       LEFT JOIN LATERAL (
         SELECT SUM(il2.variant_qty) as bulk_qty
-        FROM inventory_levels il2
-        JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
+        FROM inventory.inventory_levels il2
+        JOIN warehouse.warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
         WHERE wl2.location_type = 'reserve' AND il2.variant_qty > 0
           AND il2.product_variant_id = pv.id
       ) bulk ON true
@@ -495,10 +495,10 @@ export class OperationsDashboardService {
              fl.code as from_location_code,
              tl.code as to_location_code,
              it.order_id, it.reference_type, it.reference_id
-      FROM inventory_transactions it
+      FROM inventory.inventory_transactions it
       LEFT JOIN product_variants pv ON it.product_variant_id = pv.id
-      LEFT JOIN warehouse_locations fl ON it.from_location_id = fl.id
-      LEFT JOIN warehouse_locations tl ON it.to_location_id = tl.id
+      LEFT JOIN warehouse.warehouse_locations fl ON it.from_location_id = fl.id
+      LEFT JOIN warehouse.warehouse_locations tl ON it.to_location_id = tl.id
       WHERE 1=1 ${locationFilter} ${variantFilter}
       ORDER BY it.created_at DESC
       LIMIT ${limit}
@@ -561,20 +561,20 @@ export class OperationsDashboardService {
     // Counts query — always all 5 types (for KPI badges)
     const countsPromise = this.db.execute(sql`
       SELECT
-        (SELECT COUNT(*) FROM inventory_levels il
-         JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        (SELECT COUNT(*) FROM inventory.inventory_levels il
+         JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
          WHERE il.variant_qty < 0 ${whFilter}) as negative_count,
-        (SELECT COUNT(*) FROM inventory_levels il
-         JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        (SELECT COUNT(*) FROM inventory.inventory_levels il
+         JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
          WHERE il.variant_qty > 0
            AND wl.location_type IN ('receiving', 'staging')
            AND il.updated_at < NOW() - INTERVAL '24 hours'
            ${whFilter}) as aging_receiving_count,
-        (SELECT COUNT(*) FROM warehouse_locations wl
-         JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+        (SELECT COUNT(*) FROM warehouse.warehouse_locations wl
+         JOIN inventory.inventory_levels il ON il.warehouse_location_id = wl.id
          CROSS JOIN LATERAL (
            SELECT COALESCE(SUM(ABS(it.variant_qty_delta)), 0) / GREATEST(${lookbackDays}, 1) AS daily_velocity
-           FROM inventory_transactions it
+           FROM inventory.inventory_transactions it
            WHERE it.product_variant_id = il.product_variant_id
              AND it.transaction_type = 'pick'
              AND it.created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
@@ -601,27 +601,27 @@ export class OperationsDashboardService {
            AND vel.daily_velocity > 0
            AND (il.variant_qty / vel.daily_velocity) < trig.effective_trigger
            AND EXISTS (
-             SELECT 1 FROM inventory_levels il2
-             JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
+             SELECT 1 FROM inventory.inventory_levels il2
+             JOIN warehouse.warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
              WHERE wl2.location_type = 'reserve' AND wl2.is_pickable = 0
                AND il2.product_variant_id = il.product_variant_id AND il2.variant_qty > 0
            )
            ${whFilter}) as pallet_drop_count,
         (SELECT COUNT(*) FROM replen_tasks rt
-         LEFT JOIN warehouse_locations wl ON rt.to_location_id = wl.id
+         LEFT JOIN warehouse.warehouse_locations wl ON rt.to_location_id = wl.id
          WHERE rt.status IN ('pending', 'assigned')
            AND rt.replen_method = 'pallet_drop'
            ${whFilter}) as pallet_drop_task_count,
         (SELECT COUNT(*) FROM replen_tasks rt
-         LEFT JOIN warehouse_locations wl ON rt.to_location_id = wl.id
+         LEFT JOIN warehouse.warehouse_locations wl ON rt.to_location_id = wl.id
          WHERE rt.status IN ('pending', 'assigned')
            AND rt.created_at < NOW() - INTERVAL '4 hours'
            AND COALESCE(rt.replen_method, '') != 'pallet_drop'
            ${whFilter}) as stuck_replen_count,
-        (SELECT COUNT(DISTINCT wl.id) FROM warehouse_locations wl
-         JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
+        (SELECT COUNT(DISTINCT wl.id) FROM warehouse.warehouse_locations wl
+         JOIN inventory.inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
          WHERE NOT EXISTS (
-           SELECT 1 FROM inventory_transactions it
+           SELECT 1 FROM inventory.inventory_transactions it
            WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
              AND it.created_at > NOW() - INTERVAL '90 days')
          ${whFilter}) as stale_count
@@ -639,9 +639,9 @@ export class OperationsDashboardService {
           NULL::int as days_since_movement, NULL::int as sku_count,
           NULL::int as hours_aging, NULL::int as task_id,
           NULL::int as from_location_id, NULL::text as from_location_code
-        FROM inventory_levels il
+        FROM inventory.inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty < 0 ${whFilter}
 
         UNION ALL
@@ -656,9 +656,9 @@ export class OperationsDashboardService {
           NULL::int, NULL::text, NULL::int, NULL::int,
           FLOOR(EXTRACT(EPOCH FROM NOW() - il.updated_at) / 3600)::int, NULL::int,
           NULL::int, NULL::text
-        FROM inventory_levels il
+        FROM inventory.inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty > 0
           AND wl.location_type IN ('receiving', 'staging')
           AND il.updated_at < NOW() - INTERVAL '24 hours'
@@ -677,8 +677,8 @@ export class OperationsDashboardService {
           FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::int, rt.id,
           wl_from.id, wl_from.code
         FROM replen_tasks rt
-        JOIN warehouse_locations wl_to ON rt.to_location_id = wl_to.id
-        LEFT JOIN warehouse_locations wl_from ON rt.from_location_id = wl_from.id
+        JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
+        LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
         LEFT JOIN product_variants pv ON rt.pick_product_variant_id = pv.id
         WHERE rt.status IN ('pending', 'assigned')
           AND rt.replen_method = 'pallet_drop'
@@ -697,8 +697,8 @@ export class OperationsDashboardService {
           FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::int, rt.id,
           wl_from.id, wl_from.code
         FROM replen_tasks rt
-        JOIN warehouse_locations wl_to ON rt.to_location_id = wl_to.id
-        LEFT JOIN warehouse_locations wl_from ON rt.from_location_id = wl_from.id
+        JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
+        LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
         LEFT JOIN product_variants pv ON rt.pick_product_variant_id = pv.id
         WHERE rt.status IN ('pending', 'assigned')
           AND rt.created_at < NOW() - INTERVAL '4 hours'
@@ -719,15 +719,15 @@ export class OperationsDashboardService {
           COUNT(DISTINCT il.product_variant_id)::int,
           NULL::int, NULL::int,
           NULL::int, NULL::text
-        FROM warehouse_locations wl
-        JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
+        FROM warehouse.warehouse_locations wl
+        JOIN inventory.inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
         LEFT JOIN LATERAL (
           SELECT MAX(it.created_at) as last_at
-          FROM inventory_transactions it
+          FROM inventory.inventory_transactions it
           WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id
         ) last_move ON true
         WHERE NOT EXISTS (
-          SELECT 1 FROM inventory_transactions it
+          SELECT 1 FROM inventory.inventory_transactions it
           WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
             AND it.created_at > NOW() - INTERVAL '90 days')
         ${whFilter}

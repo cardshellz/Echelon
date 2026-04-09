@@ -62,7 +62,7 @@ export function registerVendorPortalRoutes(app: Express) {
                       ),
                       'atp', COALESCE(
                         (SELECT SUM(il.variant_qty - il.reserved_qty - COALESCE(il.picked_qty, 0))
-                         FROM inventory_levels il WHERE il.product_variant_id = pv.id),
+                         FROM inventory.inventory_levels il WHERE il.product_variant_id = pv.id),
                         0
                       )
                     ) ORDER BY pv.id)

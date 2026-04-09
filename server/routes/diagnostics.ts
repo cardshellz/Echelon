@@ -21,7 +21,7 @@ export function registerDiagnosticsRoutes(app: Express) {
       
       // First: delete inventory_transactions that reference order_items
       const transactionsResult = await db.execute(sql`
-        DELETE FROM inventory_transactions
+        DELETE FROM inventory.inventory_transactions
         WHERE order_item_id IN (
           SELECT oi.id FROM wms.order_items oi
           WHERE oi.order_id IN (

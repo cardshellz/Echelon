@@ -273,7 +273,7 @@ export class CycleCountUseCases {
     }
     // Delete reverse-linked items
     const reverseResult = await this.db.execute(sql`
-      SELECT id, status FROM cycle_count_items
+      SELECT id, status FROM inventory.cycle_count_items
       WHERE related_item_id = ${itemId} AND status != 'approved'
     `);
     for (const rev of reverseResult.rows) {
@@ -304,7 +304,7 @@ export class CycleCountUseCases {
       // READ CURRENT (real-time) inventory — NOT the stale snapshot
       const currentLevelResult = await this.db.execute(sql`
         SELECT COALESCE(variant_qty, 0) as variant_qty
-        FROM inventory_levels
+        FROM inventory.inventory_levels
         WHERE product_variant_id = ${item.productVariantId}
           AND warehouse_location_id = ${item.warehouseLocationId}
       `);
@@ -578,9 +578,9 @@ export class CycleCountUseCases {
           pv.product_id as product_id,
           pv.sku as sku,
           1 as is_assigned
-        FROM product_locations pl
+        FROM warehouse.product_locations pl
         JOIN product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
-        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
+        LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
           AND il.warehouse_location_id = ${location.id}
         WHERE pl.warehouse_location_id = ${location.id}
 
@@ -593,13 +593,13 @@ export class CycleCountUseCases {
           p.id as product_id,
           COALESCE(pv.sku, p.sku) as sku,
           0 as is_assigned
-        FROM inventory_levels il
+        FROM inventory.inventory_levels il
         LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
         WHERE il.warehouse_location_id = ${location.id}
           AND il.variant_qty > 0
           AND NOT EXISTS (
-            SELECT 1 FROM product_locations pl2
+            SELECT 1 FROM warehouse.product_locations pl2
             JOIN product_variants pv2 ON UPPER(pv2.sku) = UPPER(pl2.sku)
             WHERE pl2.warehouse_location_id = ${location.id}
               AND pv2.id = il.product_variant_id
@@ -830,7 +830,7 @@ export class CycleCountUseCases {
         // Read current system qty to compute real-time variance
         const autoResult = await this.db.execute(sql`
           SELECT COALESCE(variant_qty, 0) as variant_qty
-          FROM inventory_levels
+          FROM inventory.inventory_levels
           WHERE product_variant_id = ${item.productVariantId}
             AND warehouse_location_id = ${item.warehouseLocationId}
         `);
@@ -1080,7 +1080,7 @@ export class CycleCountUseCases {
     // Read current system inventory at this location
     const result = await this.db.execute(sql`
       SELECT COALESCE(variant_qty, 0) as variant_qty
-      FROM inventory_levels
+      FROM inventory.inventory_levels
       WHERE product_variant_id = ${item.productVariantId}
         AND warehouse_location_id = ${item.warehouseLocationId}
     `);
@@ -1233,7 +1233,7 @@ export class CycleCountUseCases {
     // Reverse link: approve any item pointing TO this one
     if (!ng) {
       const reverseResult = await this.db.execute(sql`
-        SELECT id FROM cycle_count_items
+        SELECT id FROM inventory.cycle_count_items
         WHERE related_item_id = ${itemId}
         AND status != 'approved'
         LIMIT 1
@@ -1344,7 +1344,7 @@ export class CycleCountUseCases {
           const linkedIds: number[] = [];
           if (item.relatedItemId) linkedIds.push(item.relatedItemId);
           const reverseResult = await this.db.execute(sql`
-            SELECT id FROM cycle_count_items
+            SELECT id FROM inventory.cycle_count_items
             WHERE related_item_id = ${itemId} AND status != 'approved'
           `);
           for (const row of reverseResult.rows) {
@@ -1514,7 +1514,7 @@ export class CycleCountUseCases {
       const withCurrentQty = await Promise.all(variantItems.map(async (item) => {
         const result = await this.db.execute(sql`
           SELECT COALESCE(variant_qty, 0) as variant_qty
-          FROM inventory_levels
+          FROM inventory.inventory_levels
           WHERE product_variant_id = ${variantId}
             AND warehouse_location_id = ${item.warehouseLocationId}
         `);
@@ -1633,7 +1633,7 @@ export class CycleCountUseCases {
       // Get CURRENT system qty
       const currentResult = await this.db.execute(sql`
         SELECT COALESCE(variant_qty, 0) as variant_qty
-        FROM inventory_levels
+        FROM inventory.inventory_levels
         WHERE product_variant_id = ${item.productVariantId}
           AND warehouse_location_id = ${item.warehouseLocationId}
       `);
@@ -1649,7 +1649,7 @@ export class CycleCountUseCases {
       if (countedAt) {
         const txResult = await this.db.execute(sql`
           SELECT transaction_type, variant_qty_delta, created_at
-          FROM inventory_transactions
+          FROM inventory.inventory_transactions
           WHERE product_variant_id = ${item.productVariantId}
             AND (from_location_id = ${item.warehouseLocationId} OR to_location_id = ${item.warehouseLocationId})
             AND created_at > ${countedAt}

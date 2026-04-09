@@ -189,7 +189,7 @@ class SLAMonitorService {
         o.order_placed_at
       FROM wms.orders o
       LEFT JOIN channels c ON o.channel_id = c.id
-      LEFT JOIN warehouses w ON o.warehouse_id = w.id
+      LEFT JOIN warehouse.warehouses w ON o.warehouse_id = w.id
       WHERE o.sla_due_at IS NOT NULL
         AND o.sla_status IN ('at_risk', 'overdue')
         AND o.warehouse_status NOT IN ('shipped', 'completed', 'cancelled')

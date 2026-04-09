@@ -188,7 +188,7 @@ async function createWmsOrderFromEbay(
     if (!imageUrl && line.sku) {
       const imageResult = await db.execute<{ image_url: string | null }>(sql`
         SELECT image_url FROM (
-          SELECT pl.image_url FROM product_locations pl
+          SELECT pl.image_url FROM warehouse.product_locations pl
           WHERE UPPER(pl.sku) = ${line.sku.toUpperCase()} AND pl.image_url IS NOT NULL
           UNION ALL
           SELECT pa.url as image_url

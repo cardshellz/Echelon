@@ -463,14 +463,14 @@ class EchelonSyncOrchestrator {
       const variantIdsAtWarehouse = await this.db.execute(sql`
         SELECT DISTINCT vid AS "variantId" FROM (
           SELECT il.product_variant_id AS vid
-          FROM inventory_levels il
-          INNER JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+          FROM inventory.inventory_levels il
+          INNER JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
           WHERE wl.warehouse_id = ${wh.warehouseId}
             AND (il.variant_qty > 0 OR il.reserved_qty > 0)
           UNION
           SELECT pl.product_variant_id AS vid
-          FROM product_locations pl
-          INNER JOIN warehouse_locations wl ON wl.id = pl.warehouse_location_id
+          FROM warehouse.product_locations pl
+          INNER JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
           WHERE wl.warehouse_id = ${wh.warehouseId}
             AND pl.status = 'active'
             AND pl.product_variant_id IS NOT NULL

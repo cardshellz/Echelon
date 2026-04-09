@@ -163,7 +163,7 @@ export const orderMethods: IOrderStorage = {
     const orderList = await db.execute(sql`
       SELECT o.*
       FROM wms.orders o
-      LEFT JOIN echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
+      LEFT JOIN warehouse.echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
           -- Ready/in_progress orders: show in pick queue
@@ -276,7 +276,7 @@ export const orderMethods: IOrderStorage = {
         const imageSkuList = sql.join(skusMissingImages.map(s => sql`${s}`), sql`, `);
         const imageResults = await db.execute<{ sku: string; image_url: string }>(sql`
           SELECT UPPER(sku) as sku, image_url FROM (
-            SELECT pl.sku, pl.image_url FROM product_locations pl
+            SELECT pl.sku, pl.image_url FROM warehouse.product_locations pl
             WHERE UPPER(pl.sku) IN (${imageSkuList}) AND pl.image_url IS NOT NULL
             UNION ALL
             SELECT pv.sku, 

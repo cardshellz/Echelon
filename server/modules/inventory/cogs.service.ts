@@ -555,7 +555,7 @@ export class COGSService {
 
         // Get default location for this variant
         const locResult = await this.db.execute(sql`
-          SELECT warehouse_location_id FROM inventory_levels
+          SELECT warehouse_location_id FROM inventory.inventory_levels
           WHERE product_variant_id = ${variant.id}
           ORDER BY variant_qty DESC
           LIMIT 1
@@ -680,7 +680,7 @@ export class COGSService {
       JOIN products p ON p.id = pv.product_id
       LEFT JOIN purchase_orders po ON po.id = il.purchase_order_id
       LEFT JOIN inbound_shipments ish ON ish.id = il.inbound_shipment_id
-      LEFT JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+      LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE ${whereClause}
       ORDER BY il.received_at ASC
       LIMIT ${limit} OFFSET ${offset}

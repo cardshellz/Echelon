@@ -604,9 +604,9 @@ export const inventoryMethods: IInventoryStorage = {
         il.variant_qty as available,
         wl.id as "locationId",
         wl.code as location
-      FROM inventory_levels il
+      FROM inventory.inventory_levels il
       JOIN product_variants pv ON pv.id = il.product_variant_id
-      JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+      JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.warehouse_location_id = ${locationId}
         AND il.variant_qty > 0
       ORDER BY pv.sku
@@ -649,10 +649,10 @@ export const inventoryMethods: IInventoryStorage = {
         il.variant_qty as available,
         il.warehouse_location_id as "locationId",
         w.code as "warehouseCode"
-      FROM inventory_levels il
+      FROM inventory.inventory_levels il
       JOIN product_variants pv ON pv.id = il.product_variant_id
-      JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-      LEFT JOIN warehouses w ON w.id = wl.warehouse_id
+      JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      LEFT JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
       WHERE il.variant_qty > 0
         AND (
           LOWER(pv.sku) LIKE ${searchPattern} OR
@@ -667,8 +667,8 @@ export const inventoryMethods: IInventoryStorage = {
     if (locationId) {
       const result = await db.execute(sql`
         SELECT il.*, wl.code as location_code
-        FROM inventory_levels il
-        JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+        FROM inventory.inventory_levels il
+        JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
         WHERE il.product_variant_id = ${variantId}
           AND il.warehouse_location_id = ${locationId}
           AND il.variant_qty > 0
@@ -677,8 +677,8 @@ export const inventoryMethods: IInventoryStorage = {
     }
     const result = await db.execute(sql`
       SELECT il.*, wl.code as location_code
-      FROM inventory_levels il
-      JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+      FROM inventory.inventory_levels il
+      JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.product_variant_id = ${variantId}
         AND il.variant_qty > 0
     `);
@@ -710,9 +710,9 @@ export const inventoryMethods: IInventoryStorage = {
                   ELSE 0 END) as has_replen_rule
       FROM product_variants pv
       LEFT JOIN products p ON pv.product_id = p.id
-      INNER JOIN inventory_levels il ON il.product_variant_id = pv.id
-      INNER JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id AND wl.warehouse_id = ${warehouseId}
-      LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
+      INNER JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
+      INNER JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id AND wl.warehouse_id = ${warehouseId}
+      LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
       LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
@@ -743,9 +743,9 @@ export const inventoryMethods: IInventoryStorage = {
                   ELSE 0 END) as has_replen_rule
       FROM product_variants pv
       LEFT JOIN products p ON pv.product_id = p.id
-      LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
-      LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-      LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id
+      LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
+      LEFT JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
+      LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id
       LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
@@ -774,15 +774,15 @@ export const inventoryMethods: IInventoryStorage = {
         il.reserved_qty,
         il.picked_qty,
         CASE WHEN pl.id IS NOT NULL THEN 1 ELSE 0 END as is_assigned,
-        (SELECT pv2.sku FROM product_locations pl2
+        (SELECT pv2.sku FROM warehouse.product_locations pl2
          JOIN product_variants pv2 ON pl2.product_variant_id = pv2.id
          WHERE pl2.warehouse_location_id = wl.id LIMIT 1) as assigned_sku
-      FROM inventory_levels il
-      JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      FROM inventory.inventory_levels il
+      JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
       JOIN product_variants pv ON il.product_variant_id = pv.id
       LEFT JOIN products p ON pv.product_id = p.id
-      LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
-      LEFT JOIN warehouses w ON wl.warehouse_id = w.id
+      LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
+      LEFT JOIN warehouse.warehouses w ON wl.warehouse_id = w.id
       WHERE (il.variant_qty != 0 OR il.reserved_qty != 0)
         ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
         ${search ? sql`AND (wl.code LIKE ${'%' + search + '%'} OR pv.sku LIKE ${'%' + search + '%'} OR pv.name LIKE ${'%' + search + '%'})` : sql``}
@@ -801,8 +801,8 @@ export const inventoryMethods: IInventoryStorage = {
         il.variant_qty,
         il.reserved_qty,
         il.picked_qty
-      FROM inventory_levels il
-      LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      FROM inventory.inventory_levels il
+      LEFT JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
       WHERE il.product_variant_id = ${variantId}
         ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
       ORDER BY wl.code
@@ -826,10 +826,10 @@ export const inventoryMethods: IInventoryStorage = {
         il.reserved_qty,
         il.picked_qty,
         (il.variant_qty - il.reserved_qty - il.picked_qty) as available_qty
-      FROM inventory_levels il
+      FROM inventory.inventory_levels il
       JOIN product_variants pv ON il.product_variant_id = pv.id
       LEFT JOIN products p ON pv.product_id = p.id
-      LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      LEFT JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
       WHERE il.variant_qty > 0
       ORDER BY wl.code, pv.sku
     `);

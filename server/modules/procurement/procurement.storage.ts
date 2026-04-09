@@ -913,7 +913,7 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
         on_order.earliest_expected,
         (SELECT MAX(it2.created_at)
-         FROM inventory_transactions it2
+         FROM inventory.inventory_transactions it2
          JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
          WHERE pv2.product_id = p.id
            AND it2.transaction_type = 'receipt') AS last_received_at
@@ -923,7 +923,7 @@ export const procurementMethods: IProcurementStorage = {
                SUM(il.variant_qty * pv.units_per_variant) AS total_pieces,
                SUM(il.reserved_qty * pv.units_per_variant) AS total_reserved_pieces,
                COUNT(DISTINCT pv.id) AS variant_count
-        FROM inventory_levels il
+        FROM inventory.inventory_levels il
         JOIN product_variants pv ON pv.id = il.product_variant_id
         WHERE pv.is_active = true
         GROUP BY pv.product_id
