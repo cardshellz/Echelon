@@ -1,11 +1,11 @@
 -- Migration 052: Purchasing Dashboard
 -- Adds reorder exclusion system, auto-draft runs, and PO source tracking
 
--- 1. Add reorder_excluded to products
-ALTER TABLE products
+-- 1. Add reorder_excluded to catalog.products
+ALTER TABLE catalog.products
   ADD COLUMN IF NOT EXISTS reorder_excluded BOOLEAN NOT NULL DEFAULT FALSE;
 
--- 2. Create reorder_exclusion_rules
+-- 2. Create reorder_exclusion_rules (public schema — standalone table)
 CREATE TABLE IF NOT EXISTS reorder_exclusion_rules (
   id          SERIAL PRIMARY KEY,
   field       VARCHAR(50)  NOT NULL,  -- 'category' | 'brand' | 'product_type' | 'sku_prefix' | 'sku_exact' | 'tag'
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS reorder_exclusion_rules (
 CREATE UNIQUE INDEX IF NOT EXISTS reorder_exclusion_rules_field_value_uq
   ON reorder_exclusion_rules (field, value);
 
--- 3. Create auto_draft_runs
+-- 3. Create auto_draft_runs (public schema)
 CREATE TABLE IF NOT EXISTS auto_draft_runs (
   id                  SERIAL PRIMARY KEY,
   run_at              TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -37,12 +37,12 @@ CREATE TABLE IF NOT EXISTS auto_draft_runs (
   finished_at         TIMESTAMP
 );
 
--- 4. Add source and auto_draft_date to purchase_orders
+-- 4. Add source and auto_draft_date to purchase_orders (public schema)
 ALTER TABLE purchase_orders
   ADD COLUMN IF NOT EXISTS source VARCHAR(30) DEFAULT 'manual',
   ADD COLUMN IF NOT EXISTS auto_draft_date DATE;
 
--- 5. Add auto-draft settings to warehouse_settings
+-- 5. Add auto-draft settings to warehouse_settings (public schema)
 ALTER TABLE warehouse_settings
   ADD COLUMN IF NOT EXISTS auto_draft_include_order_soon  BOOLEAN NOT NULL DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS auto_draft_skip_on_open_po     BOOLEAN NOT NULL DEFAULT TRUE,
