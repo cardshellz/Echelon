@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex, date } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -356,6 +356,10 @@ export const purchaseOrders = pgTable("purchase_orders", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   metadata: jsonb("metadata"), // Extensible (attachments, custom fields)
+
+  // Auto-draft tracking
+  source: varchar("source", { length: 30 }).default("manual"), // 'manual' | 'auto_draft' | 'reorder'
+  autoDraftDate: date("auto_draft_date"),
 });
 
 export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders).omit({
@@ -927,3 +931,57 @@ export const insertApPaymentAllocationSchema = createInsertSchema(apPaymentAlloc
 
 export type InsertApPaymentAllocation = z.infer<typeof insertApPaymentAllocationSchema>;
 export type ApPaymentAllocation = typeof apPaymentAllocations.$inferSelect;
+
+// ============================================================================
+// 22. REORDER EXCLUSION RULES
+// ============================================================================
+
+export const reorderExclusionRules = pgTable("reorder_exclusion_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  field: varchar("field", { length: 50 }).notNull(), // 'category' | 'brand' | 'product_type' | 'sku_prefix' | 'sku_exact' | 'tag'
+  value: text("value").notNull(),
+  createdBy: varchar("created_by", { length: 255 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("reorder_exclusion_rules_field_value_uq").on(table.field, table.value),
+]);
+
+export const insertReorderExclusionRuleSchema = createInsertSchema(reorderExclusionRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReorderExclusionRule = z.infer<typeof insertReorderExclusionRuleSchema>;
+export type ReorderExclusionRule = typeof reorderExclusionRules.$inferSelect;
+
+// ============================================================================
+// 23. AUTO-DRAFT RUNS
+// ============================================================================
+
+export const autoDraftRuns = pgTable("auto_draft_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  runAt: timestamp("run_at").defaultNow().notNull(),
+  triggeredBy: varchar("triggered_by", { length: 50 }).notNull().default("scheduler"), // 'scheduler' | 'manual'
+  triggeredByUser: varchar("triggered_by_user", { length: 255 }),
+  status: varchar("status", { length: 20 }).notNull().default("running"), // 'running' | 'success' | 'error'
+  itemsAnalyzed: integer("items_analyzed").notNull().default(0),
+  posCreated: integer("pos_created").notNull().default(0),
+  posUpdated: integer("pos_updated").notNull().default(0),
+  linesAdded: integer("lines_added").notNull().default(0),
+  skippedNoVendor: integer("skipped_no_vendor").notNull().default(0),
+  skippedOnOrder: integer("skipped_on_order").notNull().default(0),
+  skippedExcluded: integer("skipped_excluded").notNull().default(0),
+  errorMessage: text("error_message"),
+  summaryJson: jsonb("summary_json"),
+  finishedAt: timestamp("finished_at"),
+});
+
+export const insertAutoDraftRunSchema = createInsertSchema(autoDraftRuns).omit({
+  id: true,
+  runAt: true,
+});
+
+export type InsertAutoDraftRun = z.infer<typeof insertAutoDraftRunSchema>;
+export type AutoDraftRun = typeof autoDraftRuns.$inferSelect;

@@ -43,6 +43,7 @@ import ChannelAllocation from "@/pages/ChannelAllocation";
 import ProductLines from "@/pages/ProductLines";
 import PurchaseOrders from "@/pages/PurchaseOrders";
 import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
+import PurchasingDashboard from "@/pages/PurchasingDashboard";
 import Returns from "@/pages/Returns";
 import InboundShipments from "@/pages/InboundShipments";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
@@ -307,7 +308,9 @@ function Router() {
         {/* Redirects for old procurement URLs */}
         <Route path="/purchasing/catalog"><Redirect to="/reorder-analysis" /></Route>
         <Route path="/purchasing/:id"><Redirect to="/purchase-orders/:id" /></Route>
-        <Route path="/purchasing"><Redirect to="/purchase-orders" /></Route>
+        <Route path="/purchasing">
+          <ProtectedRoute component={PurchasingDashboard} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route path="/settings">
           <ProtectedRoute component={Settings} allowedRoles={["admin"]} />
         </Route>
