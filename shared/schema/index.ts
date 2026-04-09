@@ -12,3 +12,4 @@ export * from "./notifications.schema";
 export * from "./ebay.schema";
 export * from "./oms.schema";
 export * from "./membership.schema";
+export * from "./shopify.schema";
