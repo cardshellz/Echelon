@@ -851,7 +851,7 @@ export function registerChannelRoutes(app: Express) {
             COUNT(pa.id) AS asset_count,
             MIN(pa.url) AS sample_url
           FROM products p
-          JOIN product_assets pa ON pa.product_id = p.id
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
           WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
           GROUP BY p.id, p.name, p.shopify_product_id
           LIMIT 3
@@ -917,7 +917,7 @@ export function registerChannelRoutes(app: Express) {
           SELECT p.id, p.name, p.shopify_product_id,
             json_agg(json_build_object('url', pa.url, 'position', pa.position) ORDER BY pa.position ASC) AS assets
           FROM products p
-          JOIN product_assets pa ON pa.product_id = p.id
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
           WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
           GROUP BY p.id, p.name, p.shopify_product_id
           LIMIT 1
@@ -968,7 +968,7 @@ export function registerChannelRoutes(app: Express) {
             COALESCE(cl_data.shopify_product_id, p.shopify_product_id) AS shopify_product_id,
             json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text, 'file_data', encode(pa.file_data, 'base64'), 'mime_type', pa.mime_type) ORDER BY pa.position ASC) AS assets
           FROM products p
-          JOIN product_assets pa ON pa.product_id = p.id
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
           LEFT JOIN (
             SELECT DISTINCT ON (pv.product_id)
               pv.product_id,

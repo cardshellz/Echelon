@@ -457,7 +457,7 @@ async function createDropshipWmsOrder(
         SELECT pa.url as image_url
         FROM catalog.product_variants pv
         LEFT JOIN catalog.products p ON pv.product_id = p.id
-        LEFT JOIN product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
+        LEFT JOIN catalog.product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
         WHERE UPPER(pv.sku) = ${item.sku.toUpperCase()}
           AND pa.url IS NOT NULL
         LIMIT 1

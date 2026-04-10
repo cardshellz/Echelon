@@ -252,7 +252,7 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
       .where(and(
         eq(channelAssetOverrides.channelId, channelId),
         sql`${channelAssetOverrides.productAssetId} IN (
-          SELECT id FROM product_assets WHERE product_id = ${productId}
+          SELECT id FROM catalog.product_assets WHERE product_id = ${productId}
         )`
       ));
   },

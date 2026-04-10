@@ -301,7 +301,7 @@ export class OperationsDashboardService {
       `),
       this.db.execute(sql`
         SELECT
-          (SELECT COUNT(*) FROM replen_tasks WHERE status IN ('pending', 'assigned')) as pending_replen_tasks,
+          (SELECT COUNT(*) FROM inventory.replen_tasks WHERE status IN ('pending', 'assigned')) as pending_replen_tasks,
           (SELECT COUNT(*) FILTER (WHERE transaction_type = 'transfer') FROM inventory.inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_transfer_count,
           (SELECT COUNT(*) FILTER (WHERE transaction_type = 'adjustment') FROM inventory.inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_adjustment_count
       `),
@@ -441,7 +441,7 @@ export class OperationsDashboardService {
       ) bulk ON true
       LEFT JOIN LATERAL (
         SELECT rt2.id, rt2.status
-        FROM replen_tasks rt2
+        FROM inventory.replen_tasks rt2
         WHERE rt2.to_location_id = wl.id
           AND rt2.pick_product_variant_id = pv.id
           AND rt2.status IN ('pending', 'assigned', 'in_progress')
@@ -535,7 +535,7 @@ export class OperationsDashboardService {
     const offset = (page - 1) * pageSize;
 
     // Fetch velocity lookback days from warehouse settings
-    const wsResult = await this.db.execute(sql`SELECT velocity_lookback_days FROM warehouse_settings LIMIT 1`);
+    const wsResult = await this.db.execute(sql`SELECT velocity_lookback_days FROM inventory.warehouse_settings LIMIT 1`);
     const lookbackDays = (wsResult.rows[0] as any)?.velocity_lookback_days ?? 14;
 
     const safeFilter = VALID_ACTION_FILTERS.includes(filter as any) ? filter : "all";
@@ -581,15 +581,15 @@ export class OperationsDashboardService {
          ) vel
          CROSS JOIN LATERAL (
            SELECT COALESCE(
-             (SELECT lrc.trigger_value::numeric FROM location_replen_config lrc
+             (SELECT lrc.trigger_value::numeric FROM inventory.location_replen_config lrc
               WHERE lrc.warehouse_location_id = wl.id
                 AND (lrc.product_variant_id = il.product_variant_id OR lrc.product_variant_id IS NULL)
                 AND lrc.is_active = 1
               ORDER BY lrc.product_variant_id NULLS LAST LIMIT 1),
-             (SELECT rr.trigger_value::numeric FROM replen_rules rr
+             (SELECT rr.trigger_value::numeric FROM inventory.replen_rules rr
               WHERE rr.pick_product_variant_id = il.product_variant_id
                 AND rr.replen_method = 'pallet_drop' AND rr.is_active = 1 LIMIT 1),
-             (SELECT rtd.trigger_value::numeric FROM replen_tier_defaults rtd
+             (SELECT rtd.trigger_value::numeric FROM inventory.replen_tier_defaults rtd
               WHERE rtd.replen_method = 'pallet_drop' AND rtd.is_active = 1
               ORDER BY rtd.hierarchy_level LIMIT 1),
              2
@@ -607,12 +607,12 @@ export class OperationsDashboardService {
                AND il2.product_variant_id = il.product_variant_id AND il2.variant_qty > 0
            )
            ${whFilter}) as pallet_drop_count,
-        (SELECT COUNT(*) FROM replen_tasks rt
+        (SELECT COUNT(*) FROM inventory.replen_tasks rt
          LEFT JOIN warehouse.warehouse_locations wl ON rt.to_location_id = wl.id
          WHERE rt.status IN ('pending', 'assigned')
            AND rt.replen_method = 'pallet_drop'
            ${whFilter}) as pallet_drop_task_count,
-        (SELECT COUNT(*) FROM replen_tasks rt
+        (SELECT COUNT(*) FROM inventory.replen_tasks rt
          LEFT JOIN warehouse.warehouse_locations wl ON rt.to_location_id = wl.id
          WHERE rt.status IN ('pending', 'assigned')
            AND rt.created_at < NOW() - INTERVAL '4 hours'
@@ -676,7 +676,7 @@ export class OperationsDashboardService {
           NULL::int, rt.status, NULL::int, NULL::int,
           FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::int, rt.id,
           wl_from.id, wl_from.code
-        FROM replen_tasks rt
+        FROM inventory.replen_tasks rt
         JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
         LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
         LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
@@ -696,7 +696,7 @@ export class OperationsDashboardService {
           NULL::int, rt.status, NULL::int, NULL::int,
           FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::int, rt.id,
           wl_from.id, wl_from.code
-        FROM replen_tasks rt
+        FROM inventory.replen_tasks rt
         JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
         LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
         LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id

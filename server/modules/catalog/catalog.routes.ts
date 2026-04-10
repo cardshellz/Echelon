@@ -1087,7 +1087,7 @@ export async function registerProductRoutes(app: Express) {
     try {
       const id = parseInt(req.params.id);
       const result = await db.execute(sql`
-        SELECT file_data, mime_type, alt_text FROM product_assets WHERE id = ${id}
+        SELECT file_data, mime_type, alt_text FROM catalog.product_assets WHERE id = ${id}
       `);
 
       if (!result.rows.length || !result.rows[0].file_data) {

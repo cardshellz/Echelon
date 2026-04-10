@@ -231,8 +231,8 @@ export async function getBinLocationFromInventoryBySku(sku: string, tx: Tx = db)
     FROM catalog.product_variants pv
     JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
     JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
-    LEFT JOIN product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
-    LEFT JOIN product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
+    LEFT JOIN catalog.product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
+    LEFT JOIN catalog.product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
     WHERE UPPER(pv.sku) = ${sku.toUpperCase()} AND il.variant_qty > 0 AND wl.is_pickable = 1
     ORDER BY CASE wl.location_type WHEN 'pick' THEN 1 WHEN 'reserve' THEN 2 ELSE 3 END,
       wl.is_pickable DESC, wl.zone ASC, wl.aisle ASC, wl.bay ASC, wl.level ASC, wl.bin ASC, il.variant_qty DESC LIMIT 1
@@ -417,7 +417,7 @@ export async function getLocationInventoryDetail(warehouseLocationId: number, tx
   const result = await tx.execute(sql`
     SELECT il.id, il.product_variant_id, il.variant_qty, il.reserved_qty, il.picked_qty, pv.sku, pv.name as variant_name, pv.units_per_variant,
       COALESCE(p.title, p.name) as product_title, p.id as product_id,
-      (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url, pv.barcode
+      (SELECT pa.url FROM catalog.product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url, pv.barcode
     FROM inventory.inventory_levels il
     JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
     LEFT JOIN catalog.products p ON pv.product_id = p.id

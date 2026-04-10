@@ -205,7 +205,7 @@ export class COGSService {
 
       // Get full cost from COGS columns
       const [lotCost] = await db.execute(sql`
-        SELECT total_unit_cost_cents FROM inventory_lots WHERE id = ${lot.id}
+        SELECT total_unit_cost_cents FROM inventory.inventory_lots WHERE id = ${lot.id}
       `);
       const unitCost = lotCost?.rows?.[0]?.total_unit_cost_cents ?? lot.unitCostCents ?? 0;
 
@@ -274,7 +274,7 @@ export class COGSService {
       SELECT il.id, il.lot_number, il.product_variant_id,
              il.po_unit_cost_cents, il.landed_cost_cents, il.total_unit_cost_cents,
              pv.sku
-      FROM inventory_lots il
+      FROM inventory.inventory_lots il
       LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       WHERE il.id = ${lotId}
     `);
@@ -335,10 +335,10 @@ export class COGSService {
              pv.sku,
              po.po_number,
              ish.shipment_number
-      FROM inventory_lots il
+      FROM inventory.inventory_lots il
       LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       LEFT JOIN procurement.purchase_orders po ON po.id = il.purchase_order_id
-      LEFT JOIN inbound_shipments ish ON ish.id = il.inbound_shipment_id
+      LEFT JOIN procurement.inbound_shipments ish ON ish.id = il.inbound_shipment_id
       WHERE il.product_variant_id = ${productVariantId}
         AND il.status = 'active'
       ORDER BY il.received_at ASC
@@ -372,7 +372,7 @@ export class COGSService {
       FROM order_line_costs olc
       LEFT JOIN catalog.product_variants pv ON pv.id = olc.product_variant_id
       LEFT JOIN catalog.products p ON p.id = pv.product_id
-      LEFT JOIN inventory_lots il ON il.id = olc.lot_id
+      LEFT JOIN inventory.inventory_lots il ON il.id = olc.lot_id
       WHERE olc.order_id = ${orderId}
       ORDER BY olc.id ASC
     `);
@@ -456,7 +456,7 @@ export class COGSService {
         SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) as total_value_cents,
         COUNT(il.id) as active_lots,
         BOOL_OR(COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
-      FROM inventory_lots il
+      FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
       WHERE il.status = 'active' AND il.qty_on_hand > 0
@@ -482,7 +482,7 @@ export class COGSService {
     const pendingResult = await this.db.execute(sql`
       SELECT COUNT(*) as lot_count,
              SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) as pending_value
-      FROM inventory_lots il
+      FROM inventory.inventory_lots il
       WHERE il.status = 'active'
         AND il.qty_on_hand > 0
         AND COALESCE(il.landed_cost_cents, 0) = 0
@@ -651,7 +651,7 @@ export class COGSService {
 
     const countResult = await this.db.execute(sql`
       SELECT COUNT(*) as total
-      FROM inventory_lots il
+      FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
       WHERE ${whereClause}
@@ -675,11 +675,11 @@ export class COGSService {
              ish.shipment_number,
              wl.code as location_code,
              EXTRACT(DAY FROM NOW() - il.received_at) as age_days
-      FROM inventory_lots il
+      FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
       LEFT JOIN procurement.purchase_orders po ON po.id = il.purchase_order_id
-      LEFT JOIN inbound_shipments ish ON ish.id = il.inbound_shipment_id
+      LEFT JOIN procurement.inbound_shipments ish ON ish.id = il.inbound_shipment_id
       LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE ${whereClause}
       ORDER BY il.received_at ASC
@@ -703,7 +703,7 @@ export class COGSService {
   }): Promise<boolean> {
     // Verify it's a manual lot
     const result = await this.db.execute(sql`
-      SELECT cost_source FROM inventory_lots WHERE id = ${lotId}
+      SELECT cost_source FROM inventory.inventory_lots WHERE id = ${lotId}
     `);
     if (!result.rows?.[0] || result.rows[0].cost_source !== 'manual') {
       return false;
@@ -739,7 +739,7 @@ export class COGSService {
 
   async deleteManualLot(lotId: number): Promise<boolean> {
     const result = await this.db.execute(sql`
-      SELECT cost_source, qty_consumed FROM inventory_lots WHERE id = ${lotId}
+      SELECT cost_source, qty_consumed FROM inventory.inventory_lots WHERE id = ${lotId}
     `);
     const lot = result.rows?.[0];
     if (!lot || lot.cost_source !== 'manual') return false;
@@ -767,7 +767,7 @@ export class COGSService {
              il.batch_number,
              pv.sku,
              p.name as product_name
-      FROM inventory_lots il
+      FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
       WHERE il.cost_source = 'manual' AND il.status = 'active'

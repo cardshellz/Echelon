@@ -1045,7 +1045,7 @@ export const procurementMethods: IProcurementStorage = {
         MIN(po.order_date) AS first_po_date,
         MAX(po.order_date) AS last_po_date
       FROM procurement.purchase_orders po
-      JOIN vendors v ON v.id = po.vendor_id
+      JOIN procurement.vendors v ON v.id = po.vendor_id
       WHERE po.status NOT IN ('cancelled', 'draft')
       GROUP BY v.id, v.name
       ORDER BY total_spend_cents DESC
@@ -1070,10 +1070,10 @@ export const procurementMethods: IProcurementStorage = {
           ELSE 0
         END AS variance_percent,
         pr.created_at
-      FROM po_receipts pr
+      FROM procurement.po_receipts pr
       JOIN procurement.purchase_orders po ON po.id = pr.purchase_order_id
       JOIN procurement.purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
-      JOIN vendors v ON v.id = po.vendor_id
+      JOIN procurement.vendors v ON v.id = po.vendor_id
       WHERE pr.variance_cents IS NOT NULL AND pr.variance_cents != 0
       ORDER BY ABS(pr.variance_cents) DESC
       LIMIT 100
@@ -1123,7 +1123,7 @@ export const procurementMethods: IProcurementStorage = {
           ELSE 'on_track'
         END AS delivery_status
       FROM procurement.purchase_orders po
-      JOIN vendors v ON v.id = po.vendor_id
+      JOIN procurement.vendors v ON v.id = po.vendor_id
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
         AND po.order_date IS NOT NULL
       ORDER BY po.order_date ASC
@@ -1145,7 +1145,7 @@ export const procurementMethods: IProcurementStorage = {
         COUNT(pol.id) AS pending_lines,
         SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
       FROM procurement.purchase_orders po
-      JOIN vendors v ON v.id = po.vendor_id
+      JOIN procurement.vendors v ON v.id = po.vendor_id
       JOIN procurement.purchase_order_lines pol ON pol.purchase_order_id = po.id
         AND pol.status IN ('open', 'partially_received')
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')

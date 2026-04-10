@@ -168,7 +168,7 @@ class OrderCombiningService {
     // items = distinct shippable line items, units = sum of shippable quantities
     let result;
     try {
-      // LEFT JOIN combined_order_groups to only show "combined" badge when the group actually exists
+      // LEFT JOIN wms.combined_order_groups to only show "combined" badge when the group actually exists
       // (prevents orphaned combined_group_id from showing false badges)
       result = await this.db.execute(sql`
         SELECT o.id, o.order_number, o.customer_name, o.customer_email,
@@ -180,7 +180,7 @@ class OrderCombiningService {
                COALESCE((SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
                COALESCE((SELECT SUM(oi.quantity) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
         FROM wms.orders o
-        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
+        LEFT JOIN wms.combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
         LEFT JOIN oms.oms_orders oms ON o.order_number = oms.external_order_number
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
@@ -451,7 +451,7 @@ class OrderCombiningService {
                o.order_placed_at, o.shopify_created_at,
                CASE WHEN cog.id IS NOT NULL THEN o.combined_group_id ELSE NULL END AS combined_group_id
         FROM wms.orders o
-        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
+        LEFT JOIN wms.combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
       `);
