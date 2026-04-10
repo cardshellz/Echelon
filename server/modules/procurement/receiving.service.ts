@@ -254,6 +254,32 @@ export class ReceivingService {
       }
     }
 
+    // Auto-break cases into base units for child variant ATP
+    for (const line of lines) {
+      if (line.receivedQty > 0 && line.productVariantId) {
+        const variant = await this.storage.getProductVariantById(line.productVariantId);
+        if (variant && (variant as any).hierarchyLevel > 1) {
+          // Find the base unit variant (hierarchy_level = 1) for this product
+          const allVariants = await this.storage.getProductVariantsByProduct((variant as any).productId);
+          const baseVariant = allVariants.find((v: any) => v.hierarchyLevel === 1);
+          if (baseVariant && baseVariant.id !== line.productVariantId) {
+            const totalUnits = line.receivedQty * (variant as any).unitsPerVariant;
+            await this.inventoryCore.receiveInventory({
+              productVariantId: baseVariant.id,
+              warehouseLocationId: line.putawayLocationId,
+              qty: totalUnits,
+              referenceId: `BREAK-${batchId}-${line.id}`,
+              notes: `Auto-break: ${line.receivedQty}× ${variant.sku} → ${totalUnits}× ${baseVariant.sku}`,
+              userId: userId || undefined,
+              unitCostCents: (line as any).unitCost || undefined,
+              receivingOrderId: orderId,
+            });
+            receivedVariantIds.add(baseVariant.id);
+          }
+        }
+      }
+    }
+
     // Fire channel sync for all received variants (fire-and-forget)
     for (const variantId of Array.from(receivedVariantIds)) {
       this.channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
