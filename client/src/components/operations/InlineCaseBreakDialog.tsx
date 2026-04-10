@@ -181,7 +181,6 @@ export default function InlineCaseBreakDialog({
               </SelectTrigger>
               <SelectContent className="max-h-[200px]">
                 {filteredLocations
-                  .filter((loc) => loc.id !== defaultFromLocationId)
                   .map((loc) => (
                     <SelectItem key={loc.id} value={loc.id.toString()}>
                       {loc.code} ({loc.locationType.replace("_", " ")})
