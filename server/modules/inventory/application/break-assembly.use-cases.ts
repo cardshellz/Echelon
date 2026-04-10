@@ -122,10 +122,10 @@ export class BreakAssemblyUseCases {
     }
 
     // Enforce direct parent-child: target's parentVariantId must point to source
-    if (targetVariant.parentVariantId !== sourceVariant.id) {
+    if (sourceVariant.parentVariantId !== targetVariant.id) {
       throw new Error(
-        `Cannot break: "${targetVariant.sku ?? targetVariant.name}" is not a direct child of ` +
-        `"${sourceVariant.sku ?? sourceVariant.name}". Only direct parent→child breaks are allowed.`
+        `Cannot break: "${sourceVariant.sku ?? sourceVariant.name}" does not break directly into ` +
+        `"${targetVariant.sku ?? targetVariant.name}". Only direct parent→child breaks are allowed.`
       );
     }
 
