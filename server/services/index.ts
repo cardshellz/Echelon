@@ -90,7 +90,7 @@ export function createServices(db: any) {
     ...inventoryStorage,
     ...channelsStorage,
     ...identityStorage,
-  });
+  }, channelSync);
 
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);

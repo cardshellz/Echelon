@@ -134,12 +134,17 @@ export type PickQueueOrder = any; // Pass-through type from storage
 // Service
 // ---------------------------------------------------------------------------
 
+interface ChannelSyncLike {
+  queueSyncAfterInventoryChange(variantId: number): Promise<void>;
+}
+
 class PickingService {
   constructor(
     private readonly db: DrizzleDb,
     private readonly inventoryCore: InventoryCore,
     private readonly replenishment: ReplenishmentService,
     private readonly storage: Storage,
+    private readonly channelSync?: ChannelSyncLike,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -502,6 +507,13 @@ class PickingService {
     const loc = allLocations.find(l => l.id === pickLocationId);
 
     console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
+    
+    // Trigger channel sync for this variant (fire-and-forget)
+    if (this.channelSync) {
+      this.channelSync.queueSyncAfterInventoryChange(productVariant.id).catch((err: any) =>
+        console.warn(`[ChannelSync] Post-pick sync failed for variant ${productVariant.id}:`, err),
+      );
+    }
 
     return {
       success: true,
@@ -1196,8 +1208,9 @@ export function createPickingService(
   inventoryCore: InventoryCore,
   replenishment: ReplenishmentService,
   storage: Storage,
+  channelSync?: ChannelSyncLike,
 ) {
-  return new PickingService(db, inventoryCore, replenishment, storage);
+  return new PickingService(db, inventoryCore, replenishment, storage, channelSync);
 }
 
 export type { PickingService };
