@@ -1070,7 +1070,7 @@ class EchelonSyncOrchestrator {
                 description: pushFields.includes("description") ? resolved.description : null,
                 category: resolved.category,
                 tags: resolved.tags,
-                status: resolved.status as "active" | "draft" | "archived",
+                // status: resolved.status as "active" | "draft" | "archived",  // REMOVED: don't push listing status to Shopify
                 variants: resolved.variants
                   .filter((v: any) => v.isListed)
                   .map((v: any) => ({
