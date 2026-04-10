@@ -1625,17 +1625,16 @@ DEF-456,25,,,5.00,,Location TBD`;
                             updates: { receivingLocationId: locationId },
                           });
                           setSelectedReceipt(prev => prev ? { ...prev, receivingLocationId: locationId } : null);
-                          // Apply default to all lines without a location
+                          // Apply default to ALL lines
                           if (locationId && selectedReceipt.lines) {
-                            const linesToUpdate = selectedReceipt.lines.filter(l => !l.putawayLocationId);
-                            for (const line of linesToUpdate) {
+                            for (const line of selectedReceipt.lines) {
                               updateLineMutation.mutate({
                                 lineId: line.id,
                                 updates: { putawayLocationId: locationId },
                               });
                             }
                           }
-                        }}
+                        }}}
                       />
                     </div>
                   </div>
