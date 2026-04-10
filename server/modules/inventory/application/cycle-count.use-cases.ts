@@ -443,7 +443,7 @@ export class CycleCountUseCases {
    */
   private async unfreezeLocations(cycleCountId: number): Promise<void> {
     await this.db.execute(sql`
-      UPDATE warehouse_locations
+      UPDATE warehouse.warehouse_locations
       SET cycle_count_freeze_id = NULL, updated_at = NOW()
       WHERE cycle_count_freeze_id = ${cycleCountId}
     `);
@@ -672,7 +672,7 @@ export class CycleCountUseCases {
       for (let i = 0; i < locationIds.length; i += chunkSize) {
         const chunk = locationIds.slice(i, i + chunkSize);
         await this.db.execute(sql`
-          UPDATE warehouse_locations
+          UPDATE warehouse.warehouse_locations
           SET cycle_count_freeze_id = ${id}, updated_at = NOW()
           WHERE id IN (${sql.join(chunk.map((cid: number) => sql`${cid}`), sql`, `)})
             AND cycle_count_freeze_id IS NULL
