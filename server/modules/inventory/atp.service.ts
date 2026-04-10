@@ -172,7 +172,9 @@ class InventoryAtpService {
     const reserved = Number(row?.reserved ?? 0);
     const picked = Number(row?.picked ?? 0);
     const packed = Number(row?.packed ?? 0);
-    return onHand - reserved - picked - packed;
+    const atp = onHand - reserved - picked - packed;
+    console.log(`[ATP DEBUG] getAtpBaseByWarehouse(${productId}, ${warehouseId}): onHand=${onHand} reserved=${reserved} picked=${picked} packed=${packed} => ATP=${atp}`);
+    return atp;
   }
 
   // --------------------------------------------------------------------------
