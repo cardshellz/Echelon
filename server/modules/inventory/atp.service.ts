@@ -145,36 +145,23 @@ class InventoryAtpService {
     productId: number,
     warehouseId: number,
   ): Promise<number> {
-    const [row] = await this.db
-      .select({
-        onHand: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty} * ${productVariants.unitsPerVariant}), 0)`,
-        reserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty} * ${productVariants.unitsPerVariant}), 0)`,
-        picked: sql<number>`COALESCE(SUM(${inventoryLevels.pickedQty} * ${productVariants.unitsPerVariant}), 0)`,
-        packed: sql<number>`COALESCE(SUM(${inventoryLevels.packedQty} * ${productVariants.unitsPerVariant}), 0)`,
-      })
-      .from(inventoryLevels)
-      .innerJoin(
-        productVariants,
-        eq(inventoryLevels.productVariantId, productVariants.id),
-      )
-      .innerJoin(
-        warehouseLocations,
-        eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
-      )
-      .where(
-        and(
-          eq(productVariants.productId, productId),
-          eq(warehouseLocations.warehouseId, warehouseId),
-        ),
-      );
-
-    const onHand = Number(row?.onHand ?? 0);
-    const reserved = Number(row?.reserved ?? 0);
-    const picked = Number(row?.picked ?? 0);
-    const packed = Number(row?.packed ?? 0);
-    const atp = onHand - reserved - picked - packed;
-    console.log(`[ATP DEBUG] getAtpBaseByWarehouse(${productId}, ${warehouseId}): onHand=${onHand} reserved=${reserved} picked=${picked} packed=${packed} => ATP=${atp}`);
-    return atp;
+    const result = await this.db.execute(sql`
+      SELECT
+        COALESCE(SUM(il.variant_qty * pv.units_per_variant), 0)::bigint as on_hand,
+        COALESCE(SUM(il.reserved_qty * pv.units_per_variant), 0)::bigint as reserved,
+        COALESCE(SUM(il.picked_qty * pv.units_per_variant), 0)::bigint as picked,
+        COALESCE(SUM(il.packed_qty * pv.units_per_variant), 0)::bigint as packed
+      FROM inventory.inventory_levels il
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      WHERE pv.product_id = ${productId} AND wl.warehouse_id = ${warehouseId}
+    `);
+    const row = (result.rows as any[])[0] || {};
+    const onHand = Number(row.on_hand ?? 0);
+    const reserved = Number(row.reserved ?? 0);
+    const picked = Number(row.picked ?? 0);
+    const packed = Number(row.packed ?? 0);
+    return onHand - reserved - picked - packed;
   }
 
   // --------------------------------------------------------------------------
