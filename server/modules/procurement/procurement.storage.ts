@@ -988,7 +988,7 @@ export const procurementMethods: IProcurementStorage = {
       JOIN wms.order_items oi ON oi.order_id = o.id
       LEFT JOIN (
         SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
-        FROM order_item_costs
+        FROM oms.order_item_costs
         GROUP BY order_item_id
       ) oic_agg ON oic_agg.order_item_id = oi.id
       WHERE oi.total_price_cents IS NOT NULL
@@ -1022,7 +1022,7 @@ export const procurementMethods: IProcurementStorage = {
       JOIN catalog.products p ON p.id = pv.product_id
       LEFT JOIN (
         SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
-        FROM order_item_costs
+        FROM oms.order_item_costs
         GROUP BY order_item_id
       ) oic_agg ON oic_agg.order_item_id = oi.id
       WHERE oi.total_price_cents IS NOT NULL
