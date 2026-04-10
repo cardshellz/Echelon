@@ -118,7 +118,7 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
       .where(and(
         eq(channelVariantOverrides.channelId, channelId),
         sql`${channelVariantOverrides.productVariantId} IN (
-          SELECT id FROM product_variants WHERE product_id = ${productId}
+          SELECT id FROM catalog.product_variants WHERE product_id = ${productId}
         )`
       ));
   },
@@ -165,7 +165,7 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
       .where(and(
         eq(channelPricing.channelId, channelId),
         sql`${channelPricing.productVariantId} IN (
-          SELECT id FROM product_variants WHERE product_id = ${productId}
+          SELECT id FROM catalog.product_variants WHERE product_id = ${productId}
         )`
       ));
   },
@@ -211,7 +211,7 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
       .where(and(
         eq(channelListings.channelId, channelId),
         sql`${channelListings.productVariantId} IN (
-          SELECT id FROM product_variants WHERE product_id = ${productId}
+          SELECT id FROM catalog.product_variants WHERE product_id = ${productId}
         )`
       ));
   },

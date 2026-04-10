@@ -66,7 +66,7 @@ export function registerVendorPortalRoutes(app: Express) {
                         0
                       )
                     ) ORDER BY pv.id)
-                    FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = true
+                    FROM catalog.product_variants pv WHERE pv.product_id = p.id AND pv.is_active = true
                   , '[]'::json) as variants
            FROM products p
            LEFT JOIN dropship_vendor_products dvp ON dvp.product_id = p.id AND dvp.vendor_id = $1

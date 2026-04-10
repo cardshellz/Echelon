@@ -215,7 +215,7 @@ export async function getBinLocationFromInventoryBySku(sku: string, tx: Tx = db)
   const assigned = await tx.execute(sql`
     SELECT pl.location as location_code, pl.zone, pv.barcode, pl.image_url
     FROM warehouse.product_locations pl
-    JOIN product_variants pv ON pv.id = pl.product_variant_id
+    JOIN catalog.product_variants pv ON pv.id = pl.product_variant_id
     WHERE (UPPER(pv.sku) = ${sku.toUpperCase()} OR UPPER(pl.sku) = ${sku.toUpperCase()})
       AND pl.is_primary = 1 AND pl.status = 'active'
     ORDER BY pl.updated_at DESC LIMIT 1
@@ -228,7 +228,7 @@ export async function getBinLocationFromInventoryBySku(sku: string, tx: Tx = db)
 
   const result = await tx.execute(sql`
     SELECT wl.code as location_code, wl.zone, pv.barcode, COALESCE(pva.url, pa.url) as image_url
-    FROM product_variants pv
+    FROM catalog.product_variants pv
     JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
     JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
     LEFT JOIN product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
@@ -419,8 +419,8 @@ export async function getLocationInventoryDetail(warehouseLocationId: number, tx
       COALESCE(p.title, p.name) as product_title, p.id as product_id,
       (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url, pv.barcode
     FROM inventory.inventory_levels il
-    JOIN product_variants pv ON il.product_variant_id = pv.id
-    LEFT JOIN products p ON pv.product_id = p.id
+    JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
+    LEFT JOIN catalog.products p ON pv.product_id = p.id
     WHERE il.warehouse_location_id = ${warehouseLocationId} AND il.variant_qty > 0 ORDER BY pv.sku
   `);
   return (result.rows as any[]).map(row => ({

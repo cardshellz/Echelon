@@ -60,7 +60,7 @@ async function queryAvgDailyUsage(db: DrizzleDb, productId: number): Promise<num
       SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
       FROM wms.order_items oi
       JOIN wms.orders o ON o.id = oi.order_id
-      JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+      JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
       WHERE pv.product_id = ${productId}
         AND o.cancelled_at IS NULL
         AND o.warehouse_status != 'cancelled'

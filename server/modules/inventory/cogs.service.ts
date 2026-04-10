@@ -275,7 +275,7 @@ export class COGSService {
              il.po_unit_cost_cents, il.landed_cost_cents, il.total_unit_cost_cents,
              pv.sku
       FROM inventory_lots il
-      LEFT JOIN product_variants pv ON pv.id = il.product_variant_id
+      LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       WHERE il.id = ${lotId}
     `);
     const lot = result.rows?.[0];
@@ -336,8 +336,8 @@ export class COGSService {
              po.po_number,
              ish.shipment_number
       FROM inventory_lots il
-      LEFT JOIN product_variants pv ON pv.id = il.product_variant_id
-      LEFT JOIN purchase_orders po ON po.id = il.purchase_order_id
+      LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      LEFT JOIN procurement.purchase_orders po ON po.id = il.purchase_order_id
       LEFT JOIN inbound_shipments ish ON ish.id = il.inbound_shipment_id
       WHERE il.product_variant_id = ${productVariantId}
         AND il.status = 'active'
@@ -370,8 +370,8 @@ export class COGSService {
     const cogsResult = await this.db.execute(sql`
       SELECT olc.*, pv.sku, p.name as product_name, il.lot_number
       FROM order_line_costs olc
-      LEFT JOIN product_variants pv ON pv.id = olc.product_variant_id
-      LEFT JOIN products p ON p.id = pv.product_id
+      LEFT JOIN catalog.product_variants pv ON pv.id = olc.product_variant_id
+      LEFT JOIN catalog.products p ON p.id = pv.product_id
       LEFT JOIN inventory_lots il ON il.id = olc.lot_id
       WHERE olc.order_id = ${orderId}
       ORDER BY olc.id ASC
@@ -457,8 +457,8 @@ export class COGSService {
         COUNT(il.id) as active_lots,
         BOOL_OR(COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
       FROM inventory_lots il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
-      JOIN products p ON p.id = pv.product_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.products p ON p.id = pv.product_id
       WHERE il.status = 'active' AND il.qty_on_hand > 0
       GROUP BY p.id, p.name, p.base_sku
       ORDER BY total_value_cents DESC
@@ -652,8 +652,8 @@ export class COGSService {
     const countResult = await this.db.execute(sql`
       SELECT COUNT(*) as total
       FROM inventory_lots il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
-      JOIN products p ON p.id = pv.product_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.products p ON p.id = pv.product_id
       WHERE ${whereClause}
     `);
 
@@ -676,9 +676,9 @@ export class COGSService {
              wl.code as location_code,
              EXTRACT(DAY FROM NOW() - il.received_at) as age_days
       FROM inventory_lots il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
-      JOIN products p ON p.id = pv.product_id
-      LEFT JOIN purchase_orders po ON po.id = il.purchase_order_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.products p ON p.id = pv.product_id
+      LEFT JOIN procurement.purchase_orders po ON po.id = il.purchase_order_id
       LEFT JOIN inbound_shipments ish ON ish.id = il.inbound_shipment_id
       LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE ${whereClause}
@@ -768,8 +768,8 @@ export class COGSService {
              pv.sku,
              p.name as product_name
       FROM inventory_lots il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
-      JOIN products p ON p.id = pv.product_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.products p ON p.id = pv.product_id
       WHERE il.cost_source = 'manual' AND il.status = 'active'
       ORDER BY il.created_at DESC
     `);

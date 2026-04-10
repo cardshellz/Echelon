@@ -96,8 +96,8 @@ export class BinAssignmentService {
         wl.zone,
         pl.is_primary,
         il.variant_qty AS current_qty
-      FROM product_variants pv
-      JOIN products p ON pv.product_id = p.id
+      FROM catalog.product_variants pv
+      JOIN catalog.products p ON pv.product_id = p.id
       LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id
       LEFT JOIN warehouse.warehouse_locations wl ON pl.warehouse_location_id = wl.id AND wl.is_pickable = 1
       LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id AND il.warehouse_location_id = wl.id

@@ -875,7 +875,7 @@ export function registerChannelRoutes(app: Express) {
           LEFT JOIN (
             SELECT DISTINCT ON (pv.product_id) pv.product_id, cl2.external_product_id
             FROM channel_listings cl2
-            JOIN product_variants pv ON pv.id = cl2.product_variant_id
+            JOIN catalog.product_variants pv ON pv.id = cl2.product_variant_id
             WHERE cl2.channel_id = 36 AND cl2.external_product_id IS NOT NULL
             ORDER BY pv.product_id ASC, cl2.id DESC
           ) cl ON cl.product_id = p.id
@@ -974,7 +974,7 @@ export function registerChannelRoutes(app: Express) {
               pv.product_id,
               cl.external_product_id AS shopify_product_id
             FROM channel_listings cl
-            JOIN product_variants pv ON pv.id = cl.product_variant_id
+            JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
             WHERE cl.channel_id = $1 AND cl.external_product_id IS NOT NULL
             ORDER BY pv.product_id ASC, cl.id DESC
           ) cl_data ON cl_data.product_id = p.id
@@ -2202,7 +2202,7 @@ export function registerChannelRoutes(app: Express) {
         SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
-        JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+        JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE pv.product_id = ${productId}
           AND o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'

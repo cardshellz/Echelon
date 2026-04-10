@@ -181,7 +181,7 @@ export class OperationsDashboardService {
         SELECT inventory_levels.warehouse_location_id as location_id, pv.id as variant_id, pv.sku, pv.name,
                inventory_levels.variant_qty, inventory_levels.reserved_qty
         FROM inventory.inventory_levels
-        JOIN product_variants pv ON inventory_levels.product_variant_id = pv.id
+        JOIN catalog.product_variants pv ON inventory_levels.product_variant_id = pv.id
         WHERE ${inArray(inventoryLevels.warehouseLocationId, locationIds)}
           AND inventory_levels.variant_qty > 0
         ORDER BY inventory_levels.warehouse_location_id, pv.sku
@@ -241,7 +241,7 @@ export class OperationsDashboardService {
         SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
                wl.id as location_id, wl.code as location_code, wl.location_type
         FROM inventory.inventory_levels il
-        JOIN product_variants pv ON il.product_variant_id = pv.id
+        JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
         JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty > 0
           AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
@@ -338,7 +338,7 @@ export class OperationsDashboardService {
         SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
                wl.id as location_id, wl.code as location_code
         FROM inventory.inventory_levels il
-        JOIN product_variants pv ON il.product_variant_id = pv.id
+        JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
         JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty < 0 ${warehouseFilter}
         ORDER BY il.variant_qty ASC
@@ -348,7 +348,7 @@ export class OperationsDashboardService {
       this.db.execute(sql`
         SELECT wl.id as location_id, wl.code as location_code,
                (SELECT pv.sku FROM inventory.inventory_transactions it
-                JOIN product_variants pv ON it.product_variant_id = pv.id
+                JOIN catalog.product_variants pv ON it.product_variant_id = pv.id
                 WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id
                 ORDER BY it.created_at DESC LIMIT 1) as last_sku,
                (SELECT MAX(it.created_at) FROM inventory.inventory_transactions it
@@ -431,7 +431,7 @@ export class OperationsDashboardService {
         rt.status as pending_replen_status
       FROM warehouse.warehouse_locations wl
       JOIN inventory.inventory_levels il ON il.warehouse_location_id = wl.id
-      JOIN product_variants pv ON il.product_variant_id = pv.id
+      JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
       LEFT JOIN LATERAL (
         SELECT SUM(il2.variant_qty) as bulk_qty
         FROM inventory.inventory_levels il2
@@ -496,7 +496,7 @@ export class OperationsDashboardService {
              tl.code as to_location_code,
              it.order_id, it.reference_type, it.reference_id
       FROM inventory.inventory_transactions it
-      LEFT JOIN product_variants pv ON it.product_variant_id = pv.id
+      LEFT JOIN catalog.product_variants pv ON it.product_variant_id = pv.id
       LEFT JOIN warehouse.warehouse_locations fl ON it.from_location_id = fl.id
       LEFT JOIN warehouse.warehouse_locations tl ON it.to_location_id = tl.id
       WHERE 1=1 ${locationFilter} ${variantFilter}
@@ -640,7 +640,7 @@ export class OperationsDashboardService {
           NULL::int as hours_aging, NULL::int as task_id,
           NULL::int as from_location_id, NULL::text as from_location_code
         FROM inventory.inventory_levels il
-        JOIN product_variants pv ON il.product_variant_id = pv.id
+        JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
         JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty < 0 ${whFilter}
 
@@ -657,7 +657,7 @@ export class OperationsDashboardService {
           FLOOR(EXTRACT(EPOCH FROM NOW() - il.updated_at) / 3600)::int, NULL::int,
           NULL::int, NULL::text
         FROM inventory.inventory_levels il
-        JOIN product_variants pv ON il.product_variant_id = pv.id
+        JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
         JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty > 0
           AND wl.location_type IN ('receiving', 'staging')
@@ -679,7 +679,7 @@ export class OperationsDashboardService {
         FROM replen_tasks rt
         JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
         LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
-        LEFT JOIN product_variants pv ON rt.pick_product_variant_id = pv.id
+        LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
         WHERE rt.status IN ('pending', 'assigned')
           AND rt.replen_method = 'pallet_drop'
           ${whFilter}
@@ -699,7 +699,7 @@ export class OperationsDashboardService {
         FROM replen_tasks rt
         JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
         LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
-        LEFT JOIN product_variants pv ON rt.pick_product_variant_id = pv.id
+        LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
         WHERE rt.status IN ('pending', 'assigned')
           AND rt.created_at < NOW() - INTERVAL '4 hours'
           AND COALESCE(rt.replen_method, '') != 'pallet_drop'

@@ -221,8 +221,8 @@ async function createWmsOrderFromShopify(
           WHERE UPPER(pl.sku) = ${line.sku.toUpperCase()} AND pl.image_url IS NOT NULL
           UNION ALL
           SELECT pa.url as image_url
-          FROM product_variants pv
-          LEFT JOIN products p ON pv.product_id = p.id
+          FROM catalog.product_variants pv
+          LEFT JOIN catalog.products p ON pv.product_id = p.id
           LEFT JOIN product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
           WHERE UPPER(pv.sku) = ${line.sku.toUpperCase()}
             AND pa.url IS NOT NULL

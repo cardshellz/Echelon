@@ -63,7 +63,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
     // Get product metadata for exclusion checking
     const productMetaRows = await db.execute(sql`
       SELECT id, category, brand, product_type, sku, tags, reorder_excluded
-      FROM products WHERE is_active = true
+      FROM catalog.products WHERE is_active = true
     `);
     const productMeta = new Map<number, any>();
     for (const pm of productMetaRows.rows as any[]) {

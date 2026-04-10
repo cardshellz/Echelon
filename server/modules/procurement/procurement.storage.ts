@@ -914,17 +914,17 @@ export const procurementMethods: IProcurementStorage = {
         on_order.earliest_expected,
         (SELECT MAX(it2.created_at)
          FROM inventory.inventory_transactions it2
-         JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
+         JOIN catalog.product_variants pv2 ON pv2.id = it2.product_variant_id
          WHERE pv2.product_id = p.id
            AND it2.transaction_type = 'receipt') AS last_received_at
-      FROM products p
+      FROM catalog.products p
       LEFT JOIN (
         SELECT pv.product_id,
                SUM(il.variant_qty * pv.units_per_variant) AS total_pieces,
                SUM(il.reserved_qty * pv.units_per_variant) AS total_reserved_pieces,
                COUNT(DISTINCT pv.id) AS variant_count
         FROM inventory.inventory_levels il
-        JOIN product_variants pv ON pv.id = il.product_variant_id
+        JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
         WHERE pv.is_active = true
         GROUP BY pv.product_id
       ) inv ON inv.product_id = p.id
@@ -933,7 +933,7 @@ export const procurementMethods: IProcurementStorage = {
                SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
-        JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+        JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'
           AND oi.status != 'cancelled'
@@ -942,7 +942,7 @@ export const procurementMethods: IProcurementStorage = {
       ) vel ON vel.product_id = p.id
       LEFT JOIN LATERAL (
         SELECT pv.id AS variant_id, pv.units_per_variant, pv.sku, pv.hierarchy_level
-        FROM product_variants pv
+        FROM catalog.product_variants pv
         WHERE pv.product_id = p.id AND pv.is_active = true
         ORDER BY pv.hierarchy_level DESC
         LIMIT 1
@@ -952,9 +952,9 @@ export const procurementMethods: IProcurementStorage = {
                SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
                COUNT(DISTINCT po.id) AS open_po_count,
                MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
-        FROM purchase_order_lines pol
-        JOIN purchase_orders po ON po.id = pol.purchase_order_id
-        JOIN product_variants pv ON pv.id = pol.product_variant_id
+        FROM procurement.purchase_order_lines pol
+        JOIN procurement.purchase_orders po ON po.id = pol.purchase_order_id
+        JOIN catalog.product_variants pv ON pv.id = pol.product_variant_id
         WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
           AND pol.status IN ('open', 'partially_received')
         GROUP BY pv.product_id
@@ -1018,8 +1018,8 @@ export const procurementMethods: IProcurementStorage = {
         pv.last_cost_cents,
         pv.avg_cost_cents
       FROM wms.order_items oi
-      JOIN product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
-      JOIN products p ON p.id = pv.product_id
+      JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
+      JOIN catalog.products p ON p.id = pv.product_id
       LEFT JOIN (
         SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
         FROM order_item_costs
@@ -1044,7 +1044,7 @@ export const procurementMethods: IProcurementStorage = {
         SUM(CASE WHEN po.status IN ('sent', 'acknowledged', 'partially_received') THEN po.total_cents ELSE 0 END) AS open_spend_cents,
         MIN(po.order_date) AS first_po_date,
         MAX(po.order_date) AS last_po_date
-      FROM purchase_orders po
+      FROM procurement.purchase_orders po
       JOIN vendors v ON v.id = po.vendor_id
       WHERE po.status NOT IN ('cancelled', 'draft')
       GROUP BY v.id, v.name
@@ -1071,8 +1071,8 @@ export const procurementMethods: IProcurementStorage = {
         END AS variance_percent,
         pr.created_at
       FROM po_receipts pr
-      JOIN purchase_orders po ON po.id = pr.purchase_order_id
-      JOIN purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
+      JOIN procurement.purchase_orders po ON po.id = pr.purchase_order_id
+      JOIN procurement.purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
       JOIN vendors v ON v.id = po.vendor_id
       WHERE pr.variance_cents IS NOT NULL AND pr.variance_cents != 0
       ORDER BY ABS(pr.variance_cents) DESC
@@ -1090,7 +1090,7 @@ export const procurementMethods: IProcurementStorage = {
         SUM(po.line_count) AS total_lines,
         MIN(po.expected_delivery_date) AS earliest_delivery,
         MAX(po.expected_delivery_date) AS latest_delivery
-      FROM purchase_orders po
+      FROM procurement.purchase_orders po
       WHERE po.status IN ('draft', 'pending_approval', 'approved', 'sent', 'acknowledged', 'partially_received')
       GROUP BY po.status
       ORDER BY
@@ -1122,7 +1122,7 @@ export const procurementMethods: IProcurementStorage = {
           WHEN po.expected_delivery_date < NOW() + INTERVAL '7 days' THEN 'due_soon'
           ELSE 'on_track'
         END AS delivery_status
-      FROM purchase_orders po
+      FROM procurement.purchase_orders po
       JOIN vendors v ON v.id = po.vendor_id
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
         AND po.order_date IS NOT NULL
@@ -1144,9 +1144,9 @@ export const procurementMethods: IProcurementStorage = {
         SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS pending_units,
         COUNT(pol.id) AS pending_lines,
         SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
-      FROM purchase_orders po
+      FROM procurement.purchase_orders po
       JOIN vendors v ON v.id = po.vendor_id
-      JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+      JOIN procurement.purchase_order_lines pol ON pol.purchase_order_id = po.id
         AND pol.status IN ('open', 'partially_received')
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
       GROUP BY po.id, po.po_number, v.name, po.status, po.expected_delivery_date, po.confirmed_delivery_date

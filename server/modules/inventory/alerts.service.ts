@@ -61,7 +61,7 @@ class InventoryAlertService {
       SELECT il.id, pv.sku, wl.code AS location_code,
              il.variant_qty, il.reserved_qty, il.picked_qty, il.packed_qty
       FROM inventory.inventory_levels il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.variant_qty < 0
          OR il.reserved_qty < 0
@@ -96,7 +96,7 @@ class InventoryAlertService {
       SELECT il.id, pv.sku, wl.code AS location_code,
              il.variant_qty, il.reserved_qty
       FROM inventory.inventory_levels il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.reserved_qty > il.variant_qty
         AND il.reserved_qty > 0
@@ -122,7 +122,7 @@ class InventoryAlertService {
       SELECT il.id, pv.sku, wl.code AS location_code,
              il.picked_qty, il.updated_at
       FROM inventory.inventory_levels il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.picked_qty > 0
         AND il.updated_at < NOW() - INTERVAL '48 hours'
@@ -146,7 +146,7 @@ class InventoryAlertService {
     }>(sql`
       SELECT il.id, pv.sku, wl.code AS location_code, il.picked_qty
       FROM inventory.inventory_levels il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.picked_qty > 0
         AND NOT EXISTS (

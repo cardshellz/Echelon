@@ -340,7 +340,7 @@ export const productMethods: IProductStorage = {
           (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_variant_id = pv.id AND pa.is_primary = 1 LIMIT 1),
           (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1)
         ) as image_url
-        FROM product_variants pv
+        FROM catalog.product_variants pv
         WHERE UPPER(pv.sku) = ${upperSku}
           AND EXISTS (SELECT 1 FROM product_assets pa WHERE (pa.product_variant_id = pv.id OR (pa.product_id = pv.product_id AND pa.product_variant_id IS NULL)) AND pa.is_primary = 1)
       ) sub
@@ -433,7 +433,7 @@ export const productMethods: IProductStorage = {
         wl.zone,
         wl.is_pickable,
         w.name AS warehouse_name
-      FROM product_variants pv
+      FROM catalog.product_variants pv
       LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
       LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       LEFT JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
@@ -513,8 +513,8 @@ export const productMethods: IProductStorage = {
         p.sku as product_sku,
         COALESCE(p.title, p.name) as product_title,
         (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url
-      FROM product_variants pv
-      JOIN products p ON p.id = pv.product_id
+      FROM catalog.product_variants pv
+      JOIN catalog.products p ON p.id = pv.product_id
       WHERE pv.is_active = true
         AND pv.sku IS NOT NULL
         AND (

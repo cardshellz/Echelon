@@ -247,12 +247,12 @@ export class CycleCountUseCases {
    */
   private async lookupVariantAndProductBySku(sku: string): Promise<{ productVariantId: number | null; productId: number | null }> {
     const variantResult = await this.db.execute(sql`
-      SELECT id FROM product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
+      SELECT id FROM catalog.product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
     const productVariantId = variantResult.rows[0]?.id || null;
 
     const productResult = await this.db.execute(sql`
-      SELECT id FROM products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
+      SELECT id FROM catalog.products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
     const productId = productResult.rows[0]?.id || null;
 
@@ -579,7 +579,7 @@ export class CycleCountUseCases {
           pv.sku as sku,
           1 as is_assigned
         FROM warehouse.product_locations pl
-        JOIN product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
+        JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
         LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
           AND il.warehouse_location_id = ${location.id}
         WHERE pl.warehouse_location_id = ${location.id}
@@ -594,13 +594,13 @@ export class CycleCountUseCases {
           COALESCE(pv.sku, p.sku) as sku,
           0 as is_assigned
         FROM inventory.inventory_levels il
-        LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
-        LEFT JOIN products p ON pv.product_id = p.id
+        LEFT JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
+        LEFT JOIN catalog.products p ON pv.product_id = p.id
         WHERE il.warehouse_location_id = ${location.id}
           AND il.variant_qty > 0
           AND NOT EXISTS (
             SELECT 1 FROM warehouse.product_locations pl2
-            JOIN product_variants pv2 ON UPPER(pv2.sku) = UPPER(pl2.sku)
+            JOIN catalog.product_variants pv2 ON UPPER(pv2.sku) = UPPER(pl2.sku)
             WHERE pl2.warehouse_location_id = ${location.id}
               AND pv2.id = il.product_variant_id
           )

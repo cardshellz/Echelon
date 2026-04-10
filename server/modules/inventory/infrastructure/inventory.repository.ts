@@ -605,7 +605,7 @@ export const inventoryMethods: IInventoryStorage = {
         wl.id as "locationId",
         wl.code as location
       FROM inventory.inventory_levels il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       WHERE il.warehouse_location_id = ${locationId}
         AND il.variant_qty > 0
@@ -624,7 +624,7 @@ export const inventoryMethods: IInventoryStorage = {
         pv.product_id as "productId",
         pv.id as "productVariantId",
         pv.units_per_variant as "unitsPerVariant"
-      FROM product_variants pv
+      FROM catalog.product_variants pv
       WHERE pv.is_active = true
         AND pv.sku IS NOT NULL
         AND (
@@ -650,7 +650,7 @@ export const inventoryMethods: IInventoryStorage = {
         il.warehouse_location_id as "locationId",
         w.code as "warehouseCode"
       FROM inventory.inventory_levels il
-      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
       LEFT JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
       WHERE il.variant_qty > 0
@@ -708,8 +708,8 @@ export const inventoryMethods: IInventoryStorage = {
         MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1
                   WHEN rtd.id IS NOT NULL AND rtd.is_active = 1 THEN 1
                   ELSE 0 END) as has_replen_rule
-      FROM product_variants pv
-      LEFT JOIN products p ON pv.product_id = p.id
+      FROM catalog.product_variants pv
+      LEFT JOIN catalog.products p ON pv.product_id = p.id
       INNER JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
       INNER JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id AND wl.warehouse_id = ${warehouseId}
       LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
@@ -741,8 +741,8 @@ export const inventoryMethods: IInventoryStorage = {
         MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1
                   WHEN rtd.id IS NOT NULL AND rtd.is_active = 1 THEN 1
                   ELSE 0 END) as has_replen_rule
-      FROM product_variants pv
-      LEFT JOIN products p ON pv.product_id = p.id
+      FROM catalog.product_variants pv
+      LEFT JOIN catalog.products p ON pv.product_id = p.id
       LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
       LEFT JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
       LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id
@@ -775,12 +775,12 @@ export const inventoryMethods: IInventoryStorage = {
         il.picked_qty,
         CASE WHEN pl.id IS NOT NULL THEN 1 ELSE 0 END as is_assigned,
         (SELECT pv2.sku FROM warehouse.product_locations pl2
-         JOIN product_variants pv2 ON pl2.product_variant_id = pv2.id
+         JOIN catalog.product_variants pv2 ON pl2.product_variant_id = pv2.id
          WHERE pl2.warehouse_location_id = wl.id LIMIT 1) as assigned_sku
       FROM inventory.inventory_levels il
       JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
-      JOIN product_variants pv ON il.product_variant_id = pv.id
-      LEFT JOIN products p ON pv.product_id = p.id
+      JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
+      LEFT JOIN catalog.products p ON pv.product_id = p.id
       LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
       LEFT JOIN warehouse.warehouses w ON wl.warehouse_id = w.id
       WHERE (il.variant_qty != 0 OR il.reserved_qty != 0)
@@ -827,8 +827,8 @@ export const inventoryMethods: IInventoryStorage = {
         il.picked_qty,
         (il.variant_qty - il.reserved_qty - il.picked_qty) as available_qty
       FROM inventory.inventory_levels il
-      JOIN product_variants pv ON il.product_variant_id = pv.id
-      LEFT JOIN products p ON pv.product_id = p.id
+      JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
+      LEFT JOIN catalog.products p ON pv.product_id = p.id
       LEFT JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
       WHERE il.variant_qty > 0
       ORDER BY wl.code, pv.sku
