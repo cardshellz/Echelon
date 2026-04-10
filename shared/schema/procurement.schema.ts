@@ -938,7 +938,7 @@ export type ApPaymentAllocation = typeof apPaymentAllocations.$inferSelect;
 // 22. REORDER EXCLUSION RULES
 // ============================================================================
 
-export const reorderExclusionRules = procurementSchema.table("reorder_exclusion_rules", {
+export const reorderExclusionRules = pgTable("reorder_exclusion_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   field: varchar("field", { length: 50 }).notNull(), // 'category' | 'brand' | 'product_type' | 'sku_prefix' | 'sku_exact' | 'tag'
   value: text("value").notNull(),
@@ -962,7 +962,7 @@ export type ReorderExclusionRule = typeof reorderExclusionRules.$inferSelect;
 // 23. AUTO-DRAFT RUNS
 // ============================================================================
 
-export const autoDraftRuns = procurementSchema.table("auto_draft_runs", {
+export const autoDraftRuns = pgTable("auto_draft_runs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   runAt: timestamp("run_at").defaultNow().notNull(),
   triggeredBy: varchar("triggered_by", { length: 50 }).notNull().default("scheduler"), // 'scheduler' | 'manual'
