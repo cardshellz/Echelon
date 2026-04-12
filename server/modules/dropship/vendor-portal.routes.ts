@@ -55,7 +55,7 @@ export function registerVendorPortalRoutes(app: Express) {
                       'weight_grams', pv.weight_grams,
                       'barcode', pv.barcode,
                       'shopify_price_cents', COALESCE(
-                        (SELECT (cf.price_cents) FROM channel_feeds cf
+                        (SELECT (cf.price_cents) FROM channels.channel_feeds cf
                          JOIN channels ch ON ch.id = cf.channel_id
                          WHERE cf.product_variant_id = pv.id AND ch.platform = 'shopify' LIMIT 1),
                         0

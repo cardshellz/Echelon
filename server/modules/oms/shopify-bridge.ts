@@ -191,7 +191,7 @@ export async function backfillShopifyOrders(
     WHERE NOT EXISTS (
       SELECT 1 FROM oms.oms_orders oo
       WHERE oo.external_order_id = so.id
-        AND oo.channel_id IN (SELECT id FROM channels WHERE provider = 'shopify')
+        AND oo.channel_id IN (SELECT id FROM channels.channels WHERE provider = 'shopify')
     )
     ORDER BY so.created_at DESC
     LIMIT ${limit}

@@ -188,7 +188,7 @@ export async function runStartupMigrations(): Promise<void> {
     // Assign default line to all active channels (idempotent)
     await client.query(`
       INSERT INTO channel_product_lines (channel_id, product_line_id)
-      SELECT c.id, pl.id FROM channels c, product_lines pl
+      SELECT c.id, pl.id FROM channels.channels c, product_lines pl
       WHERE pl.code = 'TRADING_CARD_SUPPLIES' AND c.status = 'active'
         AND NOT EXISTS (SELECT 1 FROM channel_product_lines cpl WHERE cpl.channel_id = c.id AND cpl.product_line_id = pl.id)
     `);

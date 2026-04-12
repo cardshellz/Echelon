@@ -358,7 +358,7 @@ class EchelonSyncOrchestrator {
       const pushItems: any[] = [];
       for (const a of allocations) {
         const feedRow = await this.db.execute(sql`
-          SELECT last_synced_qty FROM channel_feeds 
+          SELECT last_synced_qty FROM channels.channel_feeds 
           WHERE product_variant_id = ${a.productVariantId} AND channel_id = ${channelId}
           LIMIT 1
         `).then((r: any) => r.rows[0]);

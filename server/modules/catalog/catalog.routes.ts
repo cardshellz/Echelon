@@ -336,7 +336,7 @@ export async function registerProductRoutes(app: Express) {
 
         // Deactivate channel feeds + clean up channel listings
         channelFeedsDeactivated += await storage.deactivateChannelFeedsByVariantId(v.id);
-        await db.execute(sql`DELETE FROM channel_listings WHERE product_variant_id = ${v.id}`);
+        await db.execute(sql`DELETE FROM channels.channel_listings WHERE product_variant_id = ${v.id}`);
         if (archiveChannelSync) {
           archiveChannelSync.queueSyncAfterInventoryChange(v.id).catch((err: any) =>
             console.warn(`[ChannelSync] Post-archive feed deactivation sync failed for variant ${v.id}:`, err)
@@ -785,7 +785,7 @@ export async function registerProductRoutes(app: Express) {
 
       // Deactivate channel feeds + clean up channel listings
       channelFeedsDeactivated = await storage.deactivateChannelFeedsByVariantId(id);
-      await db.execute(sql`DELETE FROM channel_listings WHERE product_variant_id = ${id}`);
+      await db.execute(sql`DELETE FROM channels.channel_listings WHERE product_variant_id = ${id}`);
       if (varArchiveSync) {
         varArchiveSync.queueSyncAfterInventoryChange(id).catch((err: any) =>
           console.warn(`[ChannelSync] Post-archive feed deactivation sync failed for variant ${id}:`, err)

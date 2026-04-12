@@ -342,7 +342,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       try {
         // Check if there are any synced eBay listings to verify
         const countResult = await client.query(
-          `SELECT COUNT(*) AS cnt FROM channel_listings WHERE channel_id = 67 AND sync_status = 'synced'`,
+          `SELECT COUNT(*) AS cnt FROM channels.channel_listings WHERE channel_id = 67 AND sync_status = 'synced'`,
         );
         const count = parseInt(countResult.rows[0]?.cnt || "0");
         if (count === 0) {

@@ -150,7 +150,7 @@ export async function assignUserRoles(userId: string, roleIds: number[], tx: Tx 
 export async function seedDefaultChannels() {
   console.log("Checking default channels...");
   try {
-    const existingShopify = await db.execute(sql`SELECT id FROM channels WHERE provider = 'shopify' LIMIT 1`);
+    const existingShopify = await db.execute(sql`SELECT id FROM channels.channels WHERE provider = 'shopify' LIMIT 1`);
     if (existingShopify.rows.length === 0) {
       await db.execute(sql`INSERT INTO channels (name, type, provider, status) VALUES ('Shopify Store', 'internal', 'shopify', 'active') ON CONFLICT DO NOTHING`);
     }

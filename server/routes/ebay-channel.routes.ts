@@ -647,7 +647,7 @@ ${categoriesXml}
           LEFT JOIN ebay_category_mappings ecm ON ecm.product_type_slug = p.product_type AND ecm.channel_id = $1
           LEFT JOIN LATERAL (
             SELECT cl2.id, cl2.sync_status, cl2.sync_error, cl2.external_product_id
-            FROM channel_listings cl2
+            FROM channels.channel_listings cl2
             JOIN catalog.product_variants pv2 ON pv2.id = cl2.product_variant_id
             WHERE pv2.product_id = p.id AND cl2.channel_id = $1
             ORDER BY CASE WHEN cl2.sync_error IS NOT NULL THEN 0 ELSE 1 END, cl2.id DESC
@@ -2579,7 +2579,7 @@ ${categoriesXml}
             p.ebay_fulfillment_policy_override AS product_fulfillment_override,
             p.ebay_return_policy_override AS product_return_override,
             p.ebay_payment_policy_override AS product_payment_override
-          FROM channel_listings cl
+          FROM channels.channel_listings cl
           JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           JOIN catalog.products p ON p.id = pv.product_id
           WHERE cl.channel_id = $1
@@ -3087,7 +3087,7 @@ ${categoriesXml}
           SELECT cl.id, cl.product_variant_id, cl.external_product_id, cl.external_variant_id,
                  cl.external_sku, cl.sync_status,
                  pv.sku AS variant_sku, p.name AS product_name
-          FROM channel_listings cl
+          FROM channels.channel_listings cl
           LEFT JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           LEFT JOIN catalog.products p ON p.id = pv.product_id
           WHERE cl.channel_id = $1 AND cl.sync_status = 'synced'
@@ -3391,7 +3391,7 @@ ${categoriesXml}
             p.id AS product_id,
             p.name AS product_name,
             cl.external_sku
-          FROM channel_listings cl
+          FROM channels.channel_listings cl
           JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           JOIN catalog.products p ON p.id = pv.product_id
           WHERE cl.channel_id = $1
@@ -3869,7 +3869,7 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
         p.ebay_fulfillment_policy_override AS product_fulfillment_override,
         p.ebay_return_policy_override AS product_return_override,
         p.ebay_payment_policy_override AS product_payment_override
-      FROM channel_listings cl
+      FROM channels.channel_listings cl
       JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
       WHERE cl.channel_id = $1

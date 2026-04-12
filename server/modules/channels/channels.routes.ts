@@ -874,7 +874,7 @@ export function registerChannelRoutes(app: Express) {
           FROM products p
           LEFT JOIN (
             SELECT DISTINCT ON (pv.product_id) pv.product_id, cl2.external_product_id
-            FROM channel_listings cl2
+            FROM channels.channel_listings cl2
             JOIN catalog.product_variants pv ON pv.id = cl2.product_variant_id
             WHERE cl2.channel_id = 36 AND cl2.external_product_id IS NOT NULL
             ORDER BY pv.product_id ASC, cl2.id DESC
@@ -973,7 +973,7 @@ export function registerChannelRoutes(app: Express) {
             SELECT DISTINCT ON (pv.product_id)
               pv.product_id,
               cl.external_product_id AS shopify_product_id
-            FROM channel_listings cl
+            FROM channels.channel_listings cl
             JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
             WHERE cl.channel_id = $1 AND cl.external_product_id IS NOT NULL
             ORDER BY pv.product_id ASC, cl.id DESC
