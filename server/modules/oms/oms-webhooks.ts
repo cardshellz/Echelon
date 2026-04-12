@@ -483,22 +483,10 @@ export function registerOmsWebhooks(
       const channelId = await getChannelId(req, shopifyOrder);
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
-      // Find existing OMS order
-      const [existing] = await db
-        .select()
-        .from(omsOrders)
-        .where(
-          and(
-            eq(omsOrders.channelId, channelId),
-            eq(omsOrders.externalOrderId, externalOrderId),
-          ),
-        )
-        .limit(1);
+      // Find or create existing OMS order via ingestOrder (UPSERT behavior)
+      const orderData = mapShopifyOrderToOrderData(shopifyOrder);
+      const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
-      if (!existing) {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} not in OMS, skipping update`);
-        return;
-      }
 
       const shipping = shopifyOrder.shipping_address || {};
       const now = new Date();
@@ -640,21 +628,9 @@ export function registerOmsWebhooks(
       const channelId = await getChannelId(req, shopifyOrder);
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
-      const [existing] = await db
-        .select()
-        .from(omsOrders)
-        .where(
-          and(
-            eq(omsOrders.channelId, channelId),
-            eq(omsOrders.externalOrderId, externalOrderId),
-          ),
-        )
-        .limit(1);
-
-      if (!existing) {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} not in OMS, skipping cancel`);
-        return;
-      }
+      // Find or create existing OMS order via ingestOrder
+      const orderData = mapShopifyOrderToOrderData(shopifyOrder);
+      const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
       if (existing.status === "cancelled") {
         console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already cancelled`);
@@ -734,21 +710,9 @@ export function registerOmsWebhooks(
       const channelId = await getChannelId(req, shopifyOrder);
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
-      const [existing] = await db
-        .select()
-        .from(omsOrders)
-        .where(
-          and(
-            eq(omsOrders.channelId, channelId),
-            eq(omsOrders.externalOrderId, externalOrderId),
-          ),
-        )
-        .limit(1);
-
-      if (!existing) {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} not in OMS, skipping fulfillment`);
-        return;
-      }
+      // Find or create existing OMS order via ingestOrder
+      const orderData = mapShopifyOrderToOrderData(shopifyOrder);
+      const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
       if (existing.status === "shipped") {
         console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already shipped`);
