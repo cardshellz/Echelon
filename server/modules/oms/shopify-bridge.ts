@@ -59,7 +59,8 @@ export async function bridgeShopifyOrderToOms(
     }
 
     if (connResult.rows.length === 0) {
-      console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown channel`);
+      // Debug only — skip logging every ignored order (floods logs)
+      // console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown channel`);
       return;
     }
     
