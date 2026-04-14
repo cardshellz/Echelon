@@ -861,6 +861,7 @@ export default function Picking() {
       setMultiQtyOpen(false);
 
       // Show error to user
+      console.error("[PICK ERROR]", error.message, "status:", error);
       toast({
         title: "Pick failed",
         description: error.message || "Failed to update item. Try again.",
