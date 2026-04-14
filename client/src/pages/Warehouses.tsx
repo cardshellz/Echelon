@@ -19,6 +19,7 @@ interface WarehouseRecord {
   code: string;
   name: string;
   warehouseType: string;
+  hubWarehouseId: number | null;
   address: string | null;
   city: string | null;
   state: string | null;
@@ -109,6 +110,7 @@ export default function Warehouses() {
     code: "",
     name: "",
     warehouseType: "operations",
+    hubWarehouseId: null as number | null,
     address: "",
     city: "",
     state: "",
@@ -217,6 +219,7 @@ export default function Warehouses() {
       code: "",
       name: "",
       warehouseType: "operations",
+      hubWarehouseId: null,
       address: "",
       city: "",
       state: "",
@@ -237,6 +240,7 @@ export default function Warehouses() {
       code: warehouse.code,
       name: warehouse.name,
       warehouseType: warehouse.warehouseType || "operations",
+      hubWarehouseId: warehouse.hubWarehouseId ?? null,
       address: warehouse.address || "",
       city: warehouse.city || "",
       state: warehouse.state || "",
@@ -259,6 +263,10 @@ export default function Warehouses() {
     } else {
       updates.inventorySourceType = "internal";
       updates.inventorySourceConfig = null;
+    }
+    // Clear hub link if switching away from bulk_storage
+    if (type !== "bulk_storage") {
+      updates.hubWarehouseId = null;
     }
     setFormData({ ...formData, ...updates });
   };

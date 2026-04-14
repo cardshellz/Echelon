@@ -89,6 +89,12 @@ export const warehouses = warehouseSchema.table("warehouses", {
   code: varchar("code", { length: 20 }).notNull().unique(), // Short code: "EAST", "WEST", "HQ"
   name: varchar("name", { length: 200 }).notNull(), // Full name: "East Coast Distribution Center"
   warehouseType: varchar("warehouse_type", { length: 30 }).notNull().default("operations"), // operations, bulk_storage, 3pl
+  /**
+   * Hub-and-spoke: if set, this is a spoke warehouse that feeds into the hub.
+   * Hub warehouses have this NULL. ATP for the hub includes all spoke inventory.
+   * Only applicable when warehouseType = 'bulk_storage'.
+   */
+  hubWarehouseId: integer("hub_warehouse_id"), // FK to warehouses.id — self-referencing, nullable
   address: text("address"),
   city: varchar("city", { length: 100 }),
   state: varchar("state", { length: 50 }),
