@@ -12,6 +12,9 @@ type DrizzleDb = {
   execute: (query: any) => Promise<{ rows: any[] }>;
 };
 
+// Import sql tagged template for raw queries
+import { sql } from "drizzle-orm";
+
 interface InventoryCore {
   receiveInventory(params: {
     productVariantId: number;
@@ -274,6 +277,16 @@ export class ReceivingService {
               unitCostCents: (line as any).unitCost || undefined,
               receivingOrderId: orderId,
             });
+
+            // Deduct the case variant inventory to avoid double-counting in ATP
+            // The base units are now the sellable quantity; the case is empty
+            await this.db.execute(sql`
+              UPDATE inventory.inventory_levels
+              SET variant_qty = GREATEST(0, variant_qty - ${line.receivedQty}),
+                  updated_at = NOW()
+              WHERE product_variant_id = ${line.productVariantId}
+                AND warehouse_location_id = ${line.putawayLocationId}
+            `);
             receivedVariantIds.add(baseVariant.id);
           }
         }

@@ -55,6 +55,7 @@ type ReplenishmentService = {
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
+  createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
 };
 
 /** Minimal storage interface — only the methods picking needs. */
@@ -100,6 +101,9 @@ export type PickInventoryContext = {
     taskId: number | null;
     taskStatus: string | null;
     autoExecuted: boolean;
+    autoExecutedMoved: number | null;
+    autoExecutedFailed: boolean;
+    autoExecuteFailReason: string | null;
     stockout: boolean;
     sourceLocationCode: string | null;
     sourceVariantSku: string | null;
@@ -199,7 +203,7 @@ class PickingService {
     // Prevent double-pick — if already completed, treat as success (idempotent)
     if (status === "completed" && beforeItem.status === "completed") {
       console.log(`[Pick] Item ${itemId} already completed — returning success (idempotent)`);
-      return { success: true, item: beforeItem as any, inventory: { deducted: false, systemQtyAfter: 0, locationId: null, locationCode: null, sku: beforeItem.sku, binCountNeeded: false, replen: { triggered: false, taskId: null, taskStatus: null, autoExecuted: false, stockout: false, sourceLocationCode: null, sourceVariantSku: null, sourceVariantName: null, qtyToMove: null } } };
+      return { success: true, item: beforeItem as any, inventory: { deducted: false, systemQtyAfter: 0, locationId: null, locationCode: null, sku: beforeItem.sku, binCountNeeded: false, replen: { triggered: false, taskId: null, taskStatus: null, autoExecuted: false, autoExecutedMoved: null, autoExecutedFailed: false, autoExecuteFailReason: null, stockout: false, sourceLocationCode: null, sourceVariantSku: null, sourceVariantName: null, qtyToMove: null } } };
     }
 
     // Validate pickedQuantity bounds
@@ -268,6 +272,9 @@ class PickingService {
         taskId: null,
         taskStatus: null,
         autoExecuted: false,
+        autoExecutedMoved: null,
+        autoExecutedFailed: false,
+        autoExecuteFailReason: null,
         stockout: false,
         sourceLocationCode: null,
         sourceVariantSku: null,
@@ -290,28 +297,65 @@ class PickingService {
         inventoryCtx.locationId = deductResult.locationId;
         inventoryCtx.locationCode = deductResult.locationCode;
 
-        // Guidance-only replen check — NO task created, just display info for picker
-        const replenGuidance = await this.replenishment
-          .checkReplenNeeded(deductResult.productVariantId, deductResult.locationId)
-          .catch((err: any) => { console.warn("[Replen] guidance check failed:", err.message); return null; });
+        // Auto-execute replen in background — no picker confirmation needed.
+        // Fire-and-forget: returns result to caller so UI can show dismissible notification.
+        try {
+          const replenResult = await this.replenishment.createAndExecuteReplen(
+            deductResult.productVariantId,
+            deductResult.locationId,
+            userId,
+          );
 
-        if (replenGuidance?.needed) {
+          if (replenResult) {
+            // Replen succeeded — notify picker with dismissible success banner
+            console.log(`[Replen] Auto-executed replen for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: moved ${replenResult.moved} units`);
+            inventoryCtx.replen.triggered = true;
+            inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
+            inventoryCtx.replen.taskStatus = "completed";
+            inventoryCtx.replen.autoExecuted = true;
+            inventoryCtx.replen.autoExecutedMoved = replenResult.moved;
+            inventoryCtx.replen.autoExecutedFailed = false;
+            inventoryCtx.replen.autoExecuteFailReason = null;
+            // Source info from the completed task for UI display
+            inventoryCtx.replen.qtyToMove = replenResult.moved;
+          } else {
+            // createAndExecuteReplen returned null — guidance check says no replen needed
+            // (threshold not met, or no source stock). Nothing to do — this is the normal case.
+            console.log(`[Replen] No replen needed after pick for variant=${deductResult.productVariantId} loc=${deductResult.locationId}`);
+          }
+        } catch (replenErr: any) {
+          // Replen failed — don't block the picker, but surface a persistent alert
+          const failReason = replenErr?.message || "unknown_error";
+          console.warn(`[Replen] Auto-execute failed for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ${failReason}`);
+
+          // Still show replen triggered so UI surfaces the failure alert
           inventoryCtx.replen.triggered = true;
-          inventoryCtx.replen.taskId = null; // no task created yet
-          inventoryCtx.replen.taskStatus = null;
           inventoryCtx.replen.autoExecuted = false;
-          inventoryCtx.replen.stockout = replenGuidance.stockout;
-          inventoryCtx.replen.sourceLocationCode = replenGuidance.sourceLocationCode;
-          inventoryCtx.replen.sourceVariantSku = replenGuidance.sourceVariantSku;
-          inventoryCtx.replen.sourceVariantName = replenGuidance.sourceVariantName;
-          inventoryCtx.replen.qtyToMove = replenGuidance.qtyTargetUnits || null;
+          inventoryCtx.replen.autoExecutedFailed = true;
+          inventoryCtx.replen.autoExecuteFailReason = failReason.startsWith("execute_failed:") ? "execute_failed" : failReason;
+
+          // Log failure for investigation (fire-and-forget)
+          this.storage.createPickingLog({
+            actionType: "replen_auto_execute_failed",
+            pickerId: pickerId || undefined,
+            pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+            orderId: item.orderId,
+            orderNumber: order?.orderNumber,
+            orderItemId: item.id,
+            sku: item.sku,
+            itemName: item.name,
+            locationCode: inventoryCtx.locationCode || item.location,
+            reason: failReason,
+            deviceType: deviceType || "desktop",
+            sessionId,
+          }).catch((err: any) => console.warn("[PickingLog] replen failure log failed:", err.message));
         }
-        // No log when replen isn't needed — that's the normal case, not an event
 
         // Only prompt bin count when there's a reason to verify:
-        // 1. Replen was triggered — picker needs to confirm before/after
-        // 2. Bin hit zero — verify it's actually empty
-        // 3. Inventory discrepancy detected (handled in the else branch below)
+        // 1. Replen auto-executed — picker should verify the bin after case break
+        // 2. Replen failed — picker needs to investigate
+        // 3. Bin hit zero — verify it's actually empty
+        // 4. Inventory discrepancy detected (handled in the else branch below)
         if (inventoryCtx.replen.triggered || deductResult.systemQtyAfter <= 0) {
           inventoryCtx.binCountNeeded = true;
         }
@@ -859,16 +903,13 @@ class PickingService {
     // Step 1: If picker confirmed replen, create+execute the task atomically
     if (didReplen) {
       try {
-        // [TODO] createAndExecuteReplen was removed from replen.service.ts
-        // replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
-        // if (replenResult) {
-        //   console.log(`[BinCount] replen executed: moved ${replenResult.moved} units`);
-        // } else {
-        //   replenFailReason = "no_source_stock";
-        //   console.warn(`[BinCount] replen returned null — likely no source stock or threshold no longer met`);
-        // }
-        replenFailReason = "method_removed";
-        console.warn(`[BinCount] replen triggered but createAndExecuteReplen is not implemented.`);
+        replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
+        if (replenResult) {
+          console.log(`[BinCount] replen executed: moved ${replenResult.moved} units`);
+        } else {
+          replenFailReason = "no_source_stock";
+          console.warn(`[BinCount] replen returned null — likely no source stock or threshold no longer met`);
+        }
       } catch (err: any) {
         const msg = err?.message || "unknown_error";
         replenFailReason = msg.startsWith("execute_failed:") ? "execute_failed" : msg;
