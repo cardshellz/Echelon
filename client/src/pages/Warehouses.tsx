@@ -605,17 +605,19 @@ export default function Warehouses() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs md:text-sm">Shopify Location ID</Label>
-                <Input
-                  placeholder="e.g. 61234567890"
-                  value={formData.shopifyLocationId}
-                  onChange={(e) => setFormData({ ...formData, shopifyLocationId: e.target.value })}
-                  className="h-11"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
+              {formData.warehouseType !== "bulk_storage" && (
+                <div className="space-y-1">
+                  <Label className="text-xs md:text-sm">Shopify Location ID</Label>
+                  <Input
+                    placeholder="e.g. 61234567890"
+                    value={formData.shopifyLocationId}
+                    onChange={(e) => setFormData({ ...formData, shopifyLocationId: e.target.value })}
+                    className="h-11"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+              )}
             </div>
 
             {formData.warehouseType === "bulk_storage" && (
