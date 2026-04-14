@@ -233,7 +233,7 @@ export async function getBinLocationFromInventoryBySku(sku: string, tx: Tx = db)
     JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
     LEFT JOIN catalog.product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
     LEFT JOIN catalog.product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
-    WHERE UPPER(pv.sku) = ${sku.toUpperCase()} AND il.variant_qty > 0 AND wl.is_pickable = 1
+    WHERE UPPER(pv.sku) = ${sku.toUpperCase()} AND wl.is_pickable = 1
     ORDER BY CASE wl.location_type WHEN 'pick' THEN 1 WHEN 'reserve' THEN 2 ELSE 3 END,
       wl.is_pickable DESC, wl.zone ASC, wl.aisle ASC, wl.bay ASC, wl.level ASC, wl.bin ASC, il.variant_qty DESC LIMIT 1
   `);
