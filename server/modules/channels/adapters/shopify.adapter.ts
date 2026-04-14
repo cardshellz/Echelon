@@ -139,7 +139,8 @@ export class ShopifyAdapter implements IChannelAdapter {
       body_html: listing.description || "",
       product_type: listing.category || "",
       tags: listing.tags?.join(", ") || "",
-      status: (listing.status === "active" || !listing.status) ? "active" : "draft",
+      // Don't push status to Shopify — preserve merchant's manual status
+      // status: listing.status === "active" ? "active" : "draft",
       variants,
       images,
     };
