@@ -139,7 +139,7 @@ export class ShopifyAdapter implements IChannelAdapter {
       body_html: listing.description || "",
       product_type: listing.category || "",
       tags: listing.tags?.join(", ") || "",
-      status: listing.status === "active" ? "active" : "draft",
+      status: (listing.status === "active" || !listing.status) ? "active" : "draft",
       variants,
       images,
     };
