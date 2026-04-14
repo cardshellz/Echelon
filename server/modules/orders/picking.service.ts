@@ -351,14 +351,8 @@ class PickingService {
           }).catch((err: any) => console.warn("[PickingLog] replen failure log failed:", err.message));
         }
 
-        // Only prompt bin count when there's a reason to verify:
-        // 1. Replen auto-executed — picker should verify the bin after case break
-        // 2. Replen failed — picker needs to investigate
-        // 3. Bin hit zero — verify it's actually empty
-        // 4. Inventory discrepancy detected (handled in the else branch below)
-        if (inventoryCtx.replen.triggered || deductResult.systemQtyAfter <= 0) {
-          inventoryCtx.binCountNeeded = true;
-        }
+        // binCountNeeded is only set for inventory discrepancies (deduction failure path).
+        // When replen triggers, the UI shows the simple replen-confirm toggle instead.
 
       } else if (!deductResult.success) {
         // Deduction FAILED — system inventory is wrong.
@@ -1035,7 +1029,79 @@ class PickingService {
   }
 
   // -------------------------------------------------------------------------
-  // 8. getPickQueue
+  // 8. confirmReplen — simplified picker replen confirmation
+  // -------------------------------------------------------------------------
+
+  /**
+   * Called after auto-replen executes. The picker taps:
+   *   confirmed = true  → log it as verified, done
+   *   confirmed = false → notify leads, cancel orphaned tasks (flag for cycle count)
+   */
+  async confirmReplen(params: {
+    sku: string;
+    locationId: number;
+    confirmed: boolean;
+    userId?: string;
+  }): Promise<{ success: true; action: "confirmed" | "flagged" }> {
+    const { sku, locationId, confirmed, userId } = params;
+
+    const variant = await this.storage.getProductVariantBySku(sku);
+    if (!variant) {
+      throw new Error(`No variant found for SKU ${sku}`);
+    }
+
+    if (confirmed) {
+      // Picker verified — just write an audit log
+      this.storage.createPickingLog({
+        actionType: "replen_confirmed",
+        pickerId: userId || undefined,
+        sku,
+        locationCode: String(locationId),
+        notes: "Picker confirmed case break replen completed",
+      }).catch((e: any) => console.warn("[ReplenConfirm] log failed:", e.message));
+
+      return { success: true, action: "confirmed" };
+    } else {
+      // Picker flagged issue — notify leads + cancel orphaned replen tasks
+      try {
+        const { notify } = await import("../notifications/notifications.service");
+        await notify("cycle_count_needed", {
+          title: `Replen issue flagged: ${sku}`,
+          message: `Picker flagged a replen issue at location ${locationId}. Please verify the bin.`,
+          data: { targetLocationId: locationId, variantId: variant.id, sku, flaggedBy: userId },
+        });
+      } catch (notifyErr: any) {
+        console.warn(`[ReplenConfirm] Notification failed: ${notifyErr.message}`);
+      }
+
+      // Cancel orphaned pending/blocked replen tasks
+      const existingTasks = await this.storage.getPendingReplenTasksForLocation(locationId);
+      for (const task of existingTasks) {
+        if (
+          task.pickProductVariantId === variant.id &&
+          (task.status === "pending" || task.status === "blocked")
+        ) {
+          await this.storage.updateReplenTask(task.id, {
+            status: "cancelled",
+            notes: `${task.notes || ""}\nCancelled: picker flagged replen issue`,
+          });
+        }
+      }
+
+      this.storage.createPickingLog({
+        actionType: "replen_issue_flagged",
+        pickerId: userId || undefined,
+        sku,
+        locationCode: String(locationId),
+        notes: "Picker flagged replen issue — cycle count needed",
+      }).catch((e: any) => console.warn("[ReplenConfirm] log failed:", e.message));
+
+      return { success: true, action: "flagged" };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 9. getPickQueue
   // -------------------------------------------------------------------------
 
   async getPickQueue(warehouseId?: number): Promise<PickQueueOrder[]> {
