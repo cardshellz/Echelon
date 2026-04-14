@@ -618,6 +618,35 @@ export default function Warehouses() {
               </div>
             </div>
 
+            {formData.warehouseType === "bulk_storage" && (
+              <div className="space-y-3 p-3 rounded-lg border bg-amber-50/50">
+                <p className="text-xs font-medium text-amber-800">Hub-and-Spoke Configuration</p>
+                <div className="space-y-1">
+                  <Label className="text-xs md:text-sm">Fulfillment Hub</Label>
+                  <Select
+                    value={formData.hubWarehouseId?.toString() || ""}
+                    onValueChange={(val) => setFormData({ ...formData, hubWarehouseId: val ? parseInt(val) : null })}
+                  >
+                    <SelectTrigger className="h-11">
+                      <SelectValue placeholder="Select a hub warehouse..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {warehouses
+                        .filter(w => w.warehouseType === "operations" && w.isActive && w.id !== editingWarehouse?.id)
+                        .map((w) => (
+                          <SelectItem key={w.id} value={w.id.toString()}>
+                            {w.name} ({w.code})
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    ATP for the hub will include this warehouse's inventory.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {formData.warehouseType === "3pl" && (
               <div className="space-y-3 p-3 rounded-lg border bg-purple-50/50">
                 <p className="text-xs font-medium text-purple-800">3PL Configuration</p>
