@@ -59,6 +59,7 @@ const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "pr
 const sessionPool = new Pool({
   connectionString: dbConnectionString,
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 
 app.use(
