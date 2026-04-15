@@ -184,6 +184,14 @@ export class InventoryUseCases {
     return result;
   }
 
+  async getLevelsByVariant(productVariantId: number): Promise<InventoryLevel[]> {
+    return this.storage.getInventoryLevelsByProductVariantId(productVariantId);
+  }
+
+  async getLevel(productVariantId: number, warehouseLocationId: number): Promise<InventoryLevel | null> {
+    return this.storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, productVariantId);
+  }
+
   // ---------------------------------------------------------------------------
   // SHIP
   // ---------------------------------------------------------------------------
