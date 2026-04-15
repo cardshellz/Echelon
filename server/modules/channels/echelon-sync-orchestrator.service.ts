@@ -14,7 +14,7 @@
  * All push operations support DRY_RUN mode.
  */
 
-import { eq, and, or, isNull, sql, inArray } from "drizzle-orm";
+import { eq, and, or, isNull, isNotNull, sql, inArray } from "drizzle-orm";
 import { clearVelocityCache } from "./allocation-engine.service";
 import {
   products,
@@ -344,6 +344,7 @@ class EchelonSyncOrchestrator {
         and(
           eq(channelWarehouseAssignments.channelId, channelId),
           eq(channelWarehouseAssignments.enabled, true),
+          isNotNull(warehouses.shopifyLocationId),
         ),
       );
 
