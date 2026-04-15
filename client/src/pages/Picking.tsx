@@ -819,17 +819,10 @@ export default function Picking() {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
 
       // Replen triggered → show simple replen-confirm banner (case break completed)
-      if (inventory?.replen.triggered && !inventory.binCountNeeded) {
+      if (inventory?.replen.triggered) {
         binCountPendingRef.current = true;
         setBinCountContext(inventory);
         setReplenConfirmOpen(true);
-      } else if (inventory?.binCountNeeded) {
-        // Inventory discrepancy → show full bin count dialog
-        binCountPendingRef.current = true;
-        setBinCountContext(inventory);
-        setBinCountQty("");
-        setDidReplen(false);
-        setBinCountOpen(true);
       } else {
         binCountPendingRef.current = false;
       }

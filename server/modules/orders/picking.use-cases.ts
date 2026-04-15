@@ -363,7 +363,7 @@ export class PickingUseCases {
         inventoryCtx.systemQtyAfter = deductResult.systemQty;
         inventoryCtx.locationId = deductResult.locationId;
         inventoryCtx.locationCode = deductResult.locationCode;
-        inventoryCtx.binCountNeeded = true;
+        inventoryCtx.binCountNeeded = false; // No bin count modal — picker shouldn't count inventory
 
         // Run the SAME replen check as the success path — picker needs full
         // guidance (source location, qty, method), not just a "no stock" boolean.
