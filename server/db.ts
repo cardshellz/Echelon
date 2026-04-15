@@ -18,6 +18,9 @@ const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "pr
 export const pool = new Pool({
   connectionString,
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  max: 3, // Limit connections per dyno (Heroku Hobby = 20 total across all dynos)
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
 
 pool.on("connect", (client) => {
@@ -28,7 +31,15 @@ export const db = drizzle(pool, { schema });
 
 // Run startup migrations to ensure schema is up to date
 export async function runStartupMigrations(): Promise<void> {
-  const client = await pool.connect();
+  // Use a SEPARATE connection so it doesn't block the shared pool
+  const migrationsPool = new Pool({
+    connectionString,
+    ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+    max: 1,
+    idleTimeoutMillis: 10000,
+    connectionTimeoutMillis: 15000,
+  });
+  const client = await migrationsPool.connect();
   try {
     // Create combined_order_groups table if it doesn't exist
     await client.query(`
@@ -188,7 +199,7 @@ export async function runStartupMigrations(): Promise<void> {
     // Assign default line to all active channels (idempotent)
     await client.query(`
       INSERT INTO channel_product_lines (channel_id, product_line_id)
-      SELECT c.id, pl.id FROM channels c, product_lines pl
+      SELECT c.id, pl.id FROM channels.channels c, product_lines pl
       WHERE pl.code = 'TRADING_CARD_SUPPLIES' AND c.status = 'active'
         AND NOT EXISTS (SELECT 1 FROM channel_product_lines cpl WHERE cpl.channel_id = c.id AND cpl.product_line_id = pl.id)
     `);
@@ -388,14 +399,14 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
     const zombieResult = await client.query(`
-      DELETE FROM inventory_levels il
+      DELETE FROM inventory.inventory_levels il
       WHERE il.variant_qty = 0
         AND il.reserved_qty = 0
         AND il.picked_qty = 0
         AND COALESCE(il.packed_qty, 0) = 0
         AND COALESCE(il.backorder_qty, 0) = 0
         AND NOT EXISTS (
-          SELECT 1 FROM product_locations pl
+          SELECT 1 FROM warehouse.product_locations pl
           WHERE pl.product_variant_id = il.product_variant_id
             AND pl.warehouse_location_id = il.warehouse_location_id
         )
@@ -833,5 +844,6 @@ export async function runStartupMigrations(): Promise<void> {
     console.error("Error running startup migrations:", error);
   } finally {
     client.release();
+    await migrationsPool.end().catch(() => {}); // Close the separate pool
   }
 }

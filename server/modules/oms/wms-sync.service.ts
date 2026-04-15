@@ -273,7 +273,7 @@ export class WmsSyncService {
   async backfillUnsynced(limit: number = 100): Promise<number> {
     const unsynced = await db.execute<{ id: number }>(sql`
       SELECT oo.id 
-      FROM oms_orders oo
+      FROM oms.oms_orders oo
       WHERE NOT EXISTS (
         SELECT 1 FROM wms.orders o
         WHERE o.source_table_id = oo.id::text
@@ -293,4 +293,121 @@ export class WmsSyncService {
     const result = await this.syncBatch(ids);
     return result.synced;
   }
+
+  /**
+   * Resync items for an existing WMS order from its OMS source.
+   * Use when a WMS order has 0 items or stale/wrong items.
+   * WARNING: deletes all existing order_items for the WMS order, re-creates from OMS.
+   */
+  async resyncOrderItems(wmsOrderId: number): Promise<{ success: boolean; message: string; itemCount?: number }> {
+    try {
+      // 1. Find the WMS order
+      const [wmsOrder] = await db.select().from(wmsOrders).where(eq(wmsOrders.id, wmsOrderId)).limit(1);
+      if (!wmsOrder) return { success: false, message: `WMS order ${wmsOrderId} not found` };
+
+      const omsOrderId = wmsOrder.omsFulfillmentOrderId ? parseInt(wmsOrder.omsFulfillmentOrderId, 10) : null;
+      if (!omsOrderId) return { success: false, message: `WMS order ${wmsOrderId} has no OMS source link` };
+
+      // 2. Fetch fresh OMS lines
+      const omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
+      if (omsLines.length === 0) return { success: false, message: `OMS order ${omsOrderId} has no line items` };
+
+      // 3. Delete existing WMS order items
+      await db.delete(wmsOrderItems).where(eq(wmsOrderItems.orderId, wmsOrderId));
+
+      // 4. Re-create items from OMS
+      const newItems: InsertWmsOrderItem[] = [];
+      for (const line of omsLines) {
+        const variantId = line.productVariantId || null;
+        let binLocation: { location: string; zone: string } | null = null;
+        if (variantId) {
+          try {
+            binLocation = await this.services.inventoryCore.getPrimaryBinLocation(variantId);
+          } catch {}
+        }
+        const itemRequiresShipping = line.requiresShipping !== false;
+        newItems.push({
+          orderId: wmsOrderId,
+          omsOrderLineId: line.id,
+          sku: line.sku || 'UNKNOWN',
+          name: line.title || 'Unknown Item',
+          quantity: line.quantity || 0,
+          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          status: itemRequiresShipping ? 'pending' : 'completed',
+          location: binLocation?.location || 'UNASSIGNED',
+          zone: binLocation?.zone || 'U',
+          productId: variantId,
+          requiresShipping: itemRequiresShipping ? 1 : 0,
+        });
+      }
+
+      if (newItems.length > 0) {
+        await db.insert(wmsOrderItems).values(newItems);
+      }
+
+      // 5. Recalculate order counts
+      const { ordersStorage } = await import('../orders');
+      await ordersStorage.updateOrderProgress(wmsOrderId);
+
+      console.log(`[WMS Resync] Resynced ${newItems.length} items for WMS order ${wmsOrderId} (OMS ${omsOrderId})`);
+      return { success: true, message: `Resynced ${newItems.length} items`, itemCount: newItems.length };
+    } catch (err: any) {
+      console.error(`[WMS Resync] Failed for WMS order ${wmsOrderId}: ${err.message}`);
+      return { success: false, message: err.message };
+    }
+  }
+
+  /**
+   * Find and repair WMS orders with broken items (0 items, or mismatch with OMS)
+   */
+  async repairBrokenOrders(dryRun = true): Promise<{ ordersFixed: number; ordersFailed: number; details: any[] }> {
+    // Find WMS orders linked to OMS where item counts don't match
+    const broken = await db.execute<{ wms_id: number; wms_order_number: string; wms_item_count: number; oms_line_count: number; oms_order_id: number }>(sql`
+      SELECT 
+        o.id as wms_id,
+        o.order_number as wms_order_number,
+        COUNT(oi.id) as wms_item_count,
+        oms_counts.line_count as oms_line_count,
+        oms_counts.oms_id as oms_order_id
+      FROM wms.orders o
+      LEFT JOIN wms.order_items oi ON oi.order_id = o.id
+      JOIN (
+        SELECT oo.id as oms_id, oo.external_order_number, COUNT(ol.id) as line_count
+        FROM oms.oms_orders oo
+        LEFT JOIN oms_order_lines ol ON ol.order_id = oo.id
+        GROUP BY oo.id, oo.external_order_number
+      ) oms_counts ON oms_counts.external_order_number = o.order_number
+      WHERE o.source = 'oms'
+        AND o.warehouse_status NOT IN ('shipped', 'cancelled')
+      GROUP BY o.id, o.order_number, oms_counts.line_count, oms_counts.oms_id
+      HAVING COUNT(oi.id) != oms_counts.line_count
+      ORDER BY o.id DESC
+    `);
+
+    const details: any[] = [];
+    let ordersFixed = 0;
+    let ordersFailed = 0;
+
+    for (const row of broken.rows) {
+      const detail: any = {
+        wmsOrderId: row.wms_id,
+        orderNumber: row.wms_order_number,
+        wmsItemCount: Number(row.wms_item_count),
+        omsLineCount: Number(row.oms_line_count),
+        action: dryRun ? 'dry_run' : 'pending',
+      };
+
+      if (!dryRun) {
+        const result = await this.resyncOrderItems(row.wms_id);
+        detail.action = result.success ? 'fixed' : 'failed';
+        detail.message = result.message;
+        if (result.success) ordersFixed++; else ordersFailed++;
+      }
+      details.push(detail);
+    }
+
+    return { ordersFixed, ordersFailed, details };
+  }
+
 }

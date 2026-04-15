@@ -145,37 +145,27 @@ class InventoryAtpService {
     productId: number,
     warehouseId: number,
   ): Promise<number> {
-    const [row] = await this.db
-      .select({
-        onHand: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty} * ${productVariants.unitsPerVariant}), 0)`,
-        reserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty} * ${productVariants.unitsPerVariant}), 0)`,
-        picked: sql<number>`COALESCE(SUM(${inventoryLevels.pickedQty} * ${productVariants.unitsPerVariant}), 0)`,
-        packed: sql<number>`COALESCE(SUM(${inventoryLevels.packedQty} * ${productVariants.unitsPerVariant}), 0)`,
-      })
-      .from(inventoryLevels)
-      .innerJoin(
-        productVariants,
-        eq(inventoryLevels.productVariantId, productVariants.id),
+    const result = await this.db.execute(sql`
+      SELECT
+        COALESCE(SUM(il.variant_qty * pv.units_per_variant), 0)::bigint as on_hand,
+        COALESCE(SUM(il.reserved_qty * pv.units_per_variant), 0)::bigint as reserved,
+        COALESCE(SUM(il.picked_qty * pv.units_per_variant), 0)::bigint as picked,
+        COALESCE(SUM(il.packed_qty * pv.units_per_variant), 0)::bigint as packed
+      FROM inventory.inventory_levels il
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      WHERE pv.product_id = ${productId} AND (
+        wl.warehouse_id = ${warehouseId}
+        OR wl.warehouse_id IN (
+          SELECT id FROM warehouse.warehouses WHERE hub_warehouse_id = ${warehouseId}
+        )
       )
-      .innerJoin(
-        warehouseLocations,
-        eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
-      )
-      .innerJoin(
-        sql`warehouses`,
-        sql`warehouse_locations.warehouse_id = warehouses.id`,
-      )
-      .where(
-        and(
-          eq(productVariants.productId, productId),
-          sql`(warehouse_locations.warehouse_id = ${warehouseId} OR warehouses.hub_warehouse_id = ${warehouseId})`,
-        ),
-      );
-
-    const onHand = Number(row?.onHand ?? 0);
-    const reserved = Number(row?.reserved ?? 0);
-    const picked = Number(row?.picked ?? 0);
-    const packed = Number(row?.packed ?? 0);
+    `);
+    const row = (result.rows as any[])[0] || {};
+    const onHand = Number(row.on_hand ?? 0);
+    const reserved = Number(row.reserved ?? 0);
+    const picked = Number(row.picked ?? 0);
+    const packed = Number(row.packed ?? 0);
     return onHand - reserved - picked - packed;
   }
 
@@ -209,37 +199,27 @@ class InventoryAtpService {
   ): Promise<Map<number, number>> {
     if (variantIds.length === 0) return new Map();
 
-    const rows = await this.db
-      .select({
-        productVariantId: inventoryLevels.productVariantId,
-        atp: sql<number>`SUM(GREATEST(
-          ${inventoryLevels.variantQty}
-          - ${inventoryLevels.reservedQty}
-          - ${inventoryLevels.pickedQty}
-          - COALESCE(${inventoryLevels.packedQty}, 0),
-          0
-        ))`,
-      })
-      .from(inventoryLevels)
-      .innerJoin(
-        warehouseLocations,
-        eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
-      )
-      .innerJoin(
-        sql`warehouses`,
-        sql`warehouse_locations.warehouse_id = warehouses.id`,
-      )
-      .where(
-        and(
-          sql`(warehouse_locations.warehouse_id = ${warehouseId} OR warehouses.hub_warehouse_id = ${warehouseId})`,
-          inArray(inventoryLevels.productVariantId, variantIds),
-        ),
-      )
-      .groupBy(inventoryLevels.productVariantId);
+    // Include hub + spoke warehouses
+    const idList = sql.join(variantIds.map(id => sql`${id}`), sql`, `);
+    const rows = await this.db.execute(sql`
+      SELECT 
+        il.product_variant_id,
+        SUM(GREATEST(il.variant_qty - il.reserved_qty - il.picked_qty - COALESCE(il.packed_qty, 0), 0)) as atp
+      FROM inventory.inventory_levels il
+      JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      WHERE il.product_variant_id IN (${idList})
+        AND (
+          wl.warehouse_id = ${warehouseId}
+          OR wl.warehouse_id IN (
+            SELECT id FROM warehouse.warehouses WHERE hub_warehouse_id = ${warehouseId}
+          )
+        )
+      GROUP BY il.product_variant_id
+    `);
 
     const result = new Map<number, number>();
-    for (const row of rows) {
-      result.set(Number(row.productVariantId), Math.max(0, Number(row.atp)));
+    for (const row of rows.rows as any[]) {
+      result.set(Number(row.product_variant_id), Math.max(0, Number(row.atp)));
     }
 
     // Variants with product_locations but no inventory_levels rows get 0

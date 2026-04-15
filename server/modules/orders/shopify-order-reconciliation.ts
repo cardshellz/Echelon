@@ -323,7 +323,7 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
 
 async function getLastCheckTime(): Promise<Date> {
   const result = await db.execute<{ value: string | null }>(sql`
-    SELECT value FROM echelon_settings WHERE key = ${SETTINGS_KEY} LIMIT 1
+    SELECT value FROM warehouse.echelon_settings WHERE key = ${SETTINGS_KEY} LIMIT 1
   `);
 
   if (result.rows.length > 0 && result.rows[0].value) {

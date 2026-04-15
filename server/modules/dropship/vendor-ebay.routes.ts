@@ -479,7 +479,7 @@ export function registerVendorEbayRoutes(app: Express): void {
             // Fetch variants
             const varResult = await client.query(
               `SELECT id, sku, name, option1_name, option1_value, price_cents, weight_grams, barcode
-               FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true
+               FROM catalog.product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true
                ORDER BY position ASC, id ASC`,
               [productId],
             );
@@ -759,7 +759,7 @@ export function registerVendorEbayRoutes(app: Express): void {
           `SELECT dvp.product_id, p.name as product_title, dvp.ebay_listing_id,
                   dvp.push_status, dvp.last_pushed_at, dvp.push_error
            FROM dropship_vendor_products dvp
-           JOIN products p ON p.id = dvp.product_id
+           JOIN catalog.products p ON p.id = dvp.product_id
            WHERE dvp.vendor_id = $1 AND dvp.enabled = true
            ORDER BY dvp.last_pushed_at DESC NULLS LAST`,
           [vendorId],

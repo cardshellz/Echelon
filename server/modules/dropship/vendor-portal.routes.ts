@@ -55,18 +55,18 @@ export function registerVendorPortalRoutes(app: Express) {
                       'weight_grams', pv.weight_grams,
                       'barcode', pv.barcode,
                       'shopify_price_cents', COALESCE(
-                        (SELECT (cf.price_cents) FROM channel_feeds cf
+                        (SELECT (cf.price_cents) FROM channels.channel_feeds cf
                          JOIN channels ch ON ch.id = cf.channel_id
                          WHERE cf.product_variant_id = pv.id AND ch.platform = 'shopify' LIMIT 1),
                         0
                       ),
                       'atp', COALESCE(
                         (SELECT SUM(il.variant_qty - il.reserved_qty - COALESCE(il.picked_qty, 0))
-                         FROM inventory_levels il WHERE il.product_variant_id = pv.id),
+                         FROM inventory.inventory_levels il WHERE il.product_variant_id = pv.id),
                         0
                       )
                     ) ORDER BY pv.id)
-                    FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = true
+                    FROM catalog.product_variants pv WHERE pv.product_id = p.id AND pv.is_active = true
                   , '[]'::json) as variants
            FROM products p
            LEFT JOIN dropship_vendor_products dvp ON dvp.product_id = p.id AND dvp.vendor_id = $1
@@ -315,7 +315,7 @@ export function registerVendorPortalRoutes(app: Express) {
         }
 
         const countResult = await client.query(
-          `SELECT COUNT(*) FROM oms_orders o ${where}`,
+          `SELECT COUNT(*) FROM oms.oms_orders o ${where}`,
           params
         );
         const total = parseInt(countResult.rows[0].count);
@@ -333,7 +333,7 @@ export function registerVendorPortalRoutes(app: Express) {
                     ))
                     FROM oms_order_lines ol WHERE ol.order_id = o.id
                   ), '[]'::json) as items
-           FROM oms_orders o
+           FROM oms.oms_orders o
            ${where}
            ORDER BY o.ordered_at DESC
            LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,

@@ -95,6 +95,7 @@ interface ReceivingOrder {
   sourceType: string;
   vendorId: number | null;
   warehouseId: number | null;
+  receivingLocationId: number | null;
   purchaseOrderId: number | null;
   status: string;
   expectedDate: string | null;
@@ -600,6 +601,24 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
     onError: () => {
       toast({ title: "Failed to update line", variant: "destructive" });
+    },
+  });
+
+  const updateReceiptMutation = useMutation({
+    mutationFn: async ({ id, updates }: { id: number; updates: Record<string, any> }) => {
+      const res = await fetch(`/api/receiving/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+      if (!res.ok) throw new Error("Failed to update receipt");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (selectedReceipt) {
+        queryClient.invalidateQueries({ queryKey: [`/api/receiving/${selectedReceipt.id}`] });
+      }
     },
   });
 
@@ -1569,6 +1588,58 @@ DEF-456,25,,,5.00,,Location TBD`;
                   )}
                 </div>
 
+                {/* Warehouse & Default Location */}
+                {selectedReceipt.status !== "closed" && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-muted/30 border rounded-lg">
+                    <div>
+                      <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Receiving Warehouse</label>
+                      <Select
+                        value={selectedReceipt.warehouseId?.toString() || ""}
+                        onValueChange={(v) => {
+                          const warehouseId = parseInt(v);
+                          updateReceiptMutation.mutate({
+                            id: selectedReceipt.id,
+                            updates: { warehouseId, receivingLocationId: null },
+                          });
+                          setSelectedReceipt(prev => prev ? { ...prev, warehouseId, receivingLocationId: null } : null);
+                        }}
+                      >
+                        <SelectTrigger className="h-9 text-xs">
+                          <SelectValue placeholder="Select warehouse..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {warehouses.map((w) => (
+                            <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Default Receiving Location</label>
+                      <LocationTypeahead
+                        locations={selectedReceipt.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
+                        value={selectedReceipt.receivingLocationId ?? null}
+                        onChange={(locationId) => {
+                          updateReceiptMutation.mutate({
+                            id: selectedReceipt.id,
+                            updates: { receivingLocationId: locationId },
+                          });
+                          setSelectedReceipt(prev => prev ? { ...prev, receivingLocationId: locationId } : null);
+                          // Apply default to ALL lines
+                          if (locationId && selectedReceipt.lines) {
+                            for (const line of selectedReceipt.lines) {
+                              updateLineMutation.mutate({
+                                lineId: line.id,
+                                updates: { putawayLocationId: locationId },
+                              });
+                            }
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+
                 {/* Lines section */}
                 <Card>
                   <CardHeader className="p-3 md:pb-2 flex flex-row items-center justify-between">
@@ -1691,6 +1762,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         }
                                       </span>
                                     ) : (
+                                      <>
                                       <LocationTypeahead
                                         locations={selectedReceipt?.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
                                         value={line.putawayLocationId}
@@ -1700,6 +1772,18 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         })}
                                         disabled={false}
                                       />
+                                      {selectedReceipt.receivingLocationId && !line.putawayLocationId && (
+                                        <button
+                                          className="text-[10px] text-primary mt-1 hover:underline"
+                                          onClick={() => updateLineMutation.mutate({
+                                            lineId: line.id,
+                                            updates: { putawayLocationId: selectedReceipt.receivingLocationId }
+                                          })}
+                                        >
+                                          Use default ({locations.find(l => l.id === selectedReceipt.receivingLocationId)?.code})
+                                        </button>
+                                      )}
+                                    </>
                                     )}
                                   </div>
                                 </div>

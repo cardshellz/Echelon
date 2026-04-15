@@ -13,3 +13,4 @@ export * from "./ebay.schema";
 export * from "./oms.schema";
 export * from "./membership.schema";
 export * from "./dropship.schema";
+export * from "./shopify.schema";

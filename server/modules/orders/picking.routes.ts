@@ -284,6 +284,27 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
+  // Simplified replen confirm — replaces the old bin-count dialog for replen flow
+  app.post("/api/picking/replen-confirm", requireAuth, async (req, res) => {
+    try {
+      const { picking } = req.app.locals.services;
+      const { sku, locationId, confirmed } = req.body;
+      if (!sku || locationId == null || confirmed == null) {
+        return res.status(400).json({ error: "sku, locationId, and confirmed are required" });
+      }
+      const result = await picking.confirmReplen({
+        sku,
+        locationId: Number(locationId),
+        confirmed: Boolean(confirmed),
+        userId: req.session.user?.id,
+      });
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error confirming replen:", error);
+      res.status(500).json({ error: error.message || "Failed to confirm replen" });
+    }
+  });
+
   app.post("/api/picking/replen-guidance", requireAuth, async (req, res) => {
     try {
       const { replenishment } = req.app.locals.services;

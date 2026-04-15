@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex, date } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -68,7 +68,9 @@ export type ApPaymentMethod = typeof apPaymentMethodEnum[number];
 // 1. VENDORS (no internal refs)
 // ============================================================================
 
-export const vendors = pgTable("vendors", {
+const procurementSchema = pgSchema("procurement");
+
+export const vendors = procurementSchema.table("vendors", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 20 }).notNull().unique(), // Short code like "ACME"
   name: text("name").notNull(),
@@ -114,7 +116,7 @@ export type Vendor = typeof vendors.$inferSelect;
 
 // ===== VENDOR PRODUCTS (product → vendor mapping) =====
 
-export const vendorProducts = pgTable("vendor_products", {
+export const vendorProducts = procurementSchema.table("vendor_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: "cascade" }),
   productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
@@ -156,7 +158,7 @@ export type VendorProduct = typeof vendorProducts.$inferSelect;
 
 // ===== PO APPROVAL TIERS =====
 
-export const poApprovalTiers = pgTable("po_approval_tiers", {
+export const poApprovalTiers = procurementSchema.table("po_approval_tiers", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   tierName: text("tier_name").notNull(), // "Standard", "High Value", "Critical"
   thresholdCents: integer("threshold_cents").notNull(), // Min PO total to trigger this tier
@@ -179,7 +181,7 @@ export type PoApprovalTier = typeof poApprovalTiers.$inferSelect;
 // ============================================================================
 
 // Receiving Orders - header for each receipt
-export const receivingOrders = pgTable("receiving_orders", {
+export const receivingOrders = procurementSchema.table("receiving_orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // Identification
@@ -232,7 +234,7 @@ export type ReceivingOrder = typeof receivingOrders.$inferSelect;
 // ============================================================================
 
 // Receiving Lines - individual items on a receipt
-export const receivingLines = pgTable("receiving_lines", {
+export const receivingLines = procurementSchema.table("receiving_lines", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
 
@@ -286,7 +288,7 @@ export type ReceivingLine = typeof receivingLines.$inferSelect;
 
 // ===== PURCHASE ORDERS =====
 
-export const purchaseOrders = pgTable("purchase_orders", {
+export const purchaseOrders = procurementSchema.table("purchase_orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   poNumber: varchar("po_number", { length: 30 }).notNull().unique(), // Auto: PO-YYYYMMDD-###
   vendorId: integer("vendor_id").notNull().references(() => vendors.id),
@@ -356,6 +358,10 @@ export const purchaseOrders = pgTable("purchase_orders", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   metadata: jsonb("metadata"), // Extensible (attachments, custom fields)
+
+  // Auto-draft tracking
+  source: varchar("source", { length: 30 }).default("manual"), // 'manual' | 'auto_draft' | 'reorder'
+  autoDraftDate: date("auto_draft_date"),
 });
 
 export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders).omit({
@@ -373,7 +379,7 @@ export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
 
 // ===== PURCHASE ORDER LINES =====
 
-export const purchaseOrderLines = pgTable("purchase_order_lines", {
+export const purchaseOrderLines = procurementSchema.table("purchase_order_lines", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
   lineNumber: integer("line_number").notNull(), // Sequential for display
@@ -437,7 +443,7 @@ export type PurchaseOrderLine = typeof purchaseOrderLines.$inferSelect;
 
 // ===== PO STATUS HISTORY (status transition audit) =====
 
-export const poStatusHistory = pgTable("po_status_history", {
+export const poStatusHistory = procurementSchema.table("po_status_history", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
   fromStatus: varchar("from_status", { length: 20 }), // NULL for creation
@@ -458,7 +464,7 @@ export type PoStatusHistory = typeof poStatusHistory.$inferSelect;
 
 // ===== PO REVISIONS (field-level change audit) =====
 
-export const poRevisions = pgTable("po_revisions", {
+export const poRevisions = procurementSchema.table("po_revisions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
   revisionNumber: integer("revision_number"),
@@ -486,7 +492,7 @@ export type PoRevision = typeof poRevisions.$inferSelect;
 
 // ===== PO RECEIPTS (PO line → Receiving line link) =====
 
-export const poReceipts = pgTable("po_receipts", {
+export const poReceipts = procurementSchema.table("po_receipts", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id, { onDelete: "cascade" }),
@@ -513,7 +519,7 @@ export type PoReceipt = typeof poReceipts.$inferSelect;
 // 10. INBOUND SHIPMENTS (external refs only)
 // ============================================================================
 
-export const inboundShipments = pgTable("inbound_shipments", {
+export const inboundShipments = procurementSchema.table("inbound_shipments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   shipmentNumber: varchar("shipment_number", { length: 30 }).notNull().unique(),
   status: varchar("status", { length: 20 }).notNull().default("draft"),
@@ -572,7 +578,7 @@ export type InboundShipment = typeof inboundShipments.$inferSelect;
 // 11. INBOUND SHIPMENT LINES (refs inboundShipments, purchaseOrders, purchaseOrderLines)
 // ============================================================================
 
-export const inboundShipmentLines = pgTable("inbound_shipment_lines", {
+export const inboundShipmentLines = procurementSchema.table("inbound_shipment_lines", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
   purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "set null" }),
@@ -616,7 +622,7 @@ export type InboundShipmentLine = typeof inboundShipmentLines.$inferSelect;
 
 // ===== VENDOR INVOICES =====
 
-export const vendorInvoices = pgTable("vendor_invoices", {
+export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   invoiceNumber: varchar("invoice_number", { length: 100 }).notNull(), // Vendor's invoice number
   ourReference: varchar("our_reference", { length: 100 }), // Internal reference
@@ -667,7 +673,7 @@ export type VendorInvoice = typeof vendorInvoices.$inferSelect;
 // 13. SHIPMENT COSTS (refs inboundShipments, vendors, vendorInvoices)
 // ============================================================================
 
-export const inboundFreightCosts = pgTable("inbound_freight_costs", {
+export const inboundFreightCosts = procurementSchema.table("inbound_freight_costs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
   costType: varchar("cost_type", { length: 30 }).notNull(),
@@ -703,7 +709,7 @@ export type InboundFreightCost = typeof inboundFreightCosts.$inferSelect;
 // 14. SHIPMENT COST ALLOCATIONS (refs shipmentCosts, inboundShipmentLines)
 // ============================================================================
 
-export const inboundFreightAllocations = pgTable("inbound_freight_allocations", {
+export const inboundFreightAllocations = procurementSchema.table("inbound_freight_allocations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   shipmentCostId: integer("shipment_cost_id").notNull().references(() => inboundFreightCosts.id, { onDelete: "cascade" }),
   inboundShipmentLineId: integer("inbound_shipment_line_id").notNull().references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
@@ -726,7 +732,7 @@ export type InboundFreightAllocation = typeof inboundFreightAllocations.$inferSe
 // 15. LANDED COST SNAPSHOTS (refs inboundShipmentLines, purchaseOrderLines)
 // ============================================================================
 
-export const landedCostSnapshots = pgTable("landed_cost_snapshots", {
+export const landedCostSnapshots = procurementSchema.table("landed_cost_snapshots", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inboundShipmentLineId: integer("inbound_shipment_line_id").references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
@@ -755,7 +761,7 @@ export type LandedCostSnapshot = typeof landedCostSnapshots.$inferSelect;
 // 16. INBOUND SHIPMENT STATUS HISTORY (refs inboundShipments)
 // ============================================================================
 
-export const inboundShipmentStatusHistory = pgTable("inbound_shipment_status_history", {
+export const inboundShipmentStatusHistory = procurementSchema.table("inbound_shipment_status_history", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
   fromStatus: varchar("from_status", { length: 20 }),
@@ -779,7 +785,7 @@ export type InboundShipmentStatusHistory = typeof inboundShipmentStatusHistory.$
 
 // ===== VENDOR INVOICE → PO LINKS =====
 
-export const vendorInvoicePoLinks = pgTable("vendor_invoice_po_links", {
+export const vendorInvoicePoLinks = procurementSchema.table("vendor_invoice_po_links", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
@@ -804,7 +810,7 @@ export type VendorInvoicePoLink = typeof vendorInvoicePoLinks.$inferSelect;
 
 // ===== VENDOR INVOICE LINES =====
 
-export const vendorInvoiceLines = pgTable("vendor_invoice_lines", {
+export const vendorInvoiceLines = procurementSchema.table("vendor_invoice_lines", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
@@ -839,7 +845,7 @@ export type VendorInvoiceLine = typeof vendorInvoiceLines.$inferSelect;
 
 // ===== VENDOR INVOICE ATTACHMENTS =====
 
-export const vendorInvoiceAttachments = pgTable("vendor_invoice_attachments", {
+export const vendorInvoiceAttachments = procurementSchema.table("vendor_invoice_attachments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
   fileName: varchar("file_name", { length: 255 }).notNull(),
@@ -865,7 +871,7 @@ export type VendorInvoiceAttachment = typeof vendorInvoiceAttachments.$inferSele
 
 // ===== AP PAYMENTS =====
 
-export const apPayments = pgTable("ap_payments", {
+export const apPayments = procurementSchema.table("ap_payments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   paymentNumber: varchar("payment_number", { length: 30 }).notNull().unique(), // Auto: PAY-YYYYMMDD-###
 
@@ -909,7 +915,7 @@ export type ApPayment = typeof apPayments.$inferSelect;
 
 // ===== AP PAYMENT ALLOCATIONS =====
 
-export const apPaymentAllocations = pgTable("ap_payment_allocations", {
+export const apPaymentAllocations = procurementSchema.table("ap_payment_allocations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   apPaymentId: integer("ap_payment_id").notNull().references(() => apPayments.id, { onDelete: "cascade" }),
   vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
@@ -927,3 +933,57 @@ export const insertApPaymentAllocationSchema = createInsertSchema(apPaymentAlloc
 
 export type InsertApPaymentAllocation = z.infer<typeof insertApPaymentAllocationSchema>;
 export type ApPaymentAllocation = typeof apPaymentAllocations.$inferSelect;
+
+// ============================================================================
+// 22. REORDER EXCLUSION RULES
+// ============================================================================
+
+export const reorderExclusionRules = pgTable("reorder_exclusion_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  field: varchar("field", { length: 50 }).notNull(), // 'category' | 'brand' | 'product_type' | 'sku_prefix' | 'sku_exact' | 'tag'
+  value: text("value").notNull(),
+  createdBy: varchar("created_by", { length: 255 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("reorder_exclusion_rules_field_value_uq").on(table.field, table.value),
+]);
+
+export const insertReorderExclusionRuleSchema = createInsertSchema(reorderExclusionRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReorderExclusionRule = z.infer<typeof insertReorderExclusionRuleSchema>;
+export type ReorderExclusionRule = typeof reorderExclusionRules.$inferSelect;
+
+// ============================================================================
+// 23. AUTO-DRAFT RUNS
+// ============================================================================
+
+export const autoDraftRuns = pgTable("auto_draft_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  runAt: timestamp("run_at").defaultNow().notNull(),
+  triggeredBy: varchar("triggered_by", { length: 50 }).notNull().default("scheduler"), // 'scheduler' | 'manual'
+  triggeredByUser: varchar("triggered_by_user", { length: 255 }),
+  status: varchar("status", { length: 20 }).notNull().default("running"), // 'running' | 'success' | 'error'
+  itemsAnalyzed: integer("items_analyzed").notNull().default(0),
+  posCreated: integer("pos_created").notNull().default(0),
+  posUpdated: integer("pos_updated").notNull().default(0),
+  linesAdded: integer("lines_added").notNull().default(0),
+  skippedNoVendor: integer("skipped_no_vendor").notNull().default(0),
+  skippedOnOrder: integer("skipped_on_order").notNull().default(0),
+  skippedExcluded: integer("skipped_excluded").notNull().default(0),
+  errorMessage: text("error_message"),
+  summaryJson: jsonb("summary_json"),
+  finishedAt: timestamp("finished_at"),
+});
+
+export const insertAutoDraftRunSchema = createInsertSchema(autoDraftRuns).omit({
+  id: true,
+  runAt: true,
+});
+
+export type InsertAutoDraftRun = z.infer<typeof insertAutoDraftRunSchema>;
+export type AutoDraftRun = typeof autoDraftRuns.$inferSelect;

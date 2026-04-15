@@ -14,7 +14,7 @@
  * All push operations support DRY_RUN mode.
  */
 
-import { eq, and, or, isNull, sql, inArray } from "drizzle-orm";
+import { eq, and, or, isNull, isNotNull, sql, inArray } from "drizzle-orm";
 import { clearVelocityCache } from "./allocation-engine.service";
 import {
   products,
@@ -344,6 +344,7 @@ class EchelonSyncOrchestrator {
         and(
           eq(channelWarehouseAssignments.channelId, channelId),
           eq(channelWarehouseAssignments.enabled, true),
+          isNotNull(warehouses.shopifyLocationId),
         ),
       );
 
@@ -358,7 +359,7 @@ class EchelonSyncOrchestrator {
       const pushItems: any[] = [];
       for (const a of allocations) {
         const feedRow = await this.db.execute(sql`
-          SELECT last_synced_qty FROM channel_feeds 
+          SELECT last_synced_qty FROM channels.channel_feeds 
           WHERE product_variant_id = ${a.productVariantId} AND channel_id = ${channelId}
           LIMIT 1
         `).then((r: any) => r.rows[0]);
@@ -463,16 +464,16 @@ class EchelonSyncOrchestrator {
       const variantIdsAtWarehouse = await this.db.execute(sql`
         SELECT DISTINCT vid AS "variantId" FROM (
           SELECT il.product_variant_id AS vid
-          FROM inventory_levels il
-          INNER JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-          INNER JOIN warehouses w ON w.id = wl.warehouse_id
+          FROM inventory.inventory_levels il
+          INNER JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+          INNER JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
           WHERE (wl.warehouse_id = ${wh.warehouseId} OR w.hub_warehouse_id = ${wh.warehouseId})
             AND (il.variant_qty > 0 OR il.reserved_qty > 0)
           UNION
           SELECT pl.product_variant_id AS vid
-          FROM product_locations pl
-          INNER JOIN warehouse_locations wl ON wl.id = pl.warehouse_location_id
-          INNER JOIN warehouses w ON w.id = wl.warehouse_id
+          FROM warehouse.product_locations pl
+          INNER JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+          INNER JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
           WHERE (wl.warehouse_id = ${wh.warehouseId} OR w.hub_warehouse_id = ${wh.warehouseId})
             AND pl.status = 'active'
             AND pl.product_variant_id IS NOT NULL
@@ -1072,7 +1073,7 @@ class EchelonSyncOrchestrator {
                 description: pushFields.includes("description") ? resolved.description : null,
                 category: resolved.category,
                 tags: resolved.tags,
-                status: resolved.status as "active" | "draft" | "archived",
+                // status: resolved.status as "active" | "draft" | "archived",  // REMOVED: don't push listing status to Shopify
                 variants: resolved.variants
                   .filter((v: any) => v.isListed)
                   .map((v: any) => ({

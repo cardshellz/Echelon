@@ -288,7 +288,7 @@ export const replenishmentMethods: IReplenishmentStorage = {
   },
 
   async getVelocityLookbackDays(): Promise<number> {
-    const result = await db.execute(sql`SELECT velocity_lookback_days FROM warehouse_settings LIMIT 1`);
+    const result = await db.execute(sql`SELECT velocity_lookback_days FROM inventory.warehouse_settings LIMIT 1`);
     return (result.rows[0] as any)?.velocity_lookback_days ?? 14;
   },
 

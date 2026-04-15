@@ -19,6 +19,7 @@ interface WarehouseRecord {
   code: string;
   name: string;
   warehouseType: string;
+  hubWarehouseId: number | null;
   address: string | null;
   city: string | null;
   state: string | null;
@@ -110,6 +111,7 @@ export default function Warehouses() {
     code: "",
     name: "",
     warehouseType: "operations",
+    hubWarehouseId: null as number | null,
     address: "",
     city: "",
     state: "",
@@ -121,7 +123,6 @@ export default function Warehouses() {
     shopifyLocationId: "",
     inventorySourceType: "internal",
     inventorySourceConfig: null as Record<string, any> | null,
-    hubWarehouseId: "" as string | null,
   });
 
   const canView = hasPermission("inventory", "view");
@@ -221,6 +222,7 @@ export default function Warehouses() {
       code: "",
       name: "",
       warehouseType: "operations",
+      hubWarehouseId: null,
       address: "",
       city: "",
       state: "",
@@ -232,7 +234,6 @@ export default function Warehouses() {
       shopifyLocationId: "",
       inventorySourceType: "internal",
       inventorySourceConfig: null,
-      hubWarehouseId: "",
     });
   };
 
@@ -242,6 +243,7 @@ export default function Warehouses() {
       code: warehouse.code,
       name: warehouse.name,
       warehouseType: warehouse.warehouseType || "operations",
+      hubWarehouseId: warehouse.hubWarehouseId ?? null,
       address: warehouse.address || "",
       city: warehouse.city || "",
       state: warehouse.state || "",
@@ -253,7 +255,6 @@ export default function Warehouses() {
       shopifyLocationId: warehouse.shopifyLocationId || "",
       inventorySourceType: warehouse.inventorySourceType || "internal",
       inventorySourceConfig: warehouse.inventorySourceConfig || null,
-      hubWarehouseId: warehouse.hubWarehouseId ? warehouse.hubWarehouseId.toString() : "",
     });
   };
 
@@ -265,6 +266,10 @@ export default function Warehouses() {
     } else {
       updates.inventorySourceType = "internal";
       updates.inventorySourceConfig = null;
+    }
+    // Clear hub link if switching away from bulk_storage
+    if (type !== "bulk_storage") {
+      updates.hubWarehouseId = null;
     }
     setFormData({ ...formData, ...updates });
   };
@@ -603,17 +608,19 @@ export default function Warehouses() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs md:text-sm">Shopify Location ID</Label>
-                <Input
-                  placeholder="e.g. 61234567890"
-                  value={formData.shopifyLocationId}
-                  onChange={(e) => setFormData({ ...formData, shopifyLocationId: e.target.value })}
-                  className="h-11"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
+              {formData.warehouseType !== "bulk_storage" && (
+                <div className="space-y-1">
+                  <Label className="text-xs md:text-sm">Shopify Location ID</Label>
+                  <Input
+                    placeholder="e.g. 61234567890"
+                    value={formData.shopifyLocationId}
+                    onChange={(e) => setFormData({ ...formData, shopifyLocationId: e.target.value })}
+                    className="h-11"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+              )}
             </div>
 
             {formData.warehouseType === "bulk_storage" && (
@@ -630,8 +637,10 @@ export default function Warehouses() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="none">None (Independent Reserve)</SelectItem>
-                      {warehouses.filter(w => w.warehouseType === "operations" && w.id !== editingWarehouse?.id).map(w => (
-                        <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
+                      {warehouses
+                        .filter(w => w.warehouseType === "operations" && w.isActive && w.id !== editingWarehouse?.id)
+                        .map(w => (
+                          <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>

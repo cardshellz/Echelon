@@ -535,7 +535,7 @@ export function createOmsService(db: any, reservationService?: any) {
     // By channel
     const channelRows = await db.execute(sql`
       SELECT c.name, COUNT(o.id) as cnt
-      FROM oms_orders o
+      FROM oms.oms_orders o
       JOIN channels c ON o.channel_id = c.id
       GROUP BY c.name
     `);

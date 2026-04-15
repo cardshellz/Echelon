@@ -78,11 +78,12 @@ const navStructure: NavEntry[] = [
     icon: ShoppingBag,
     roles: ["admin", "lead"],
     children: [
+      { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing" },
       { label: "Purchase Orders", icon: FileText, href: "/purchase-orders" },
+      { label: "Reorder Analysis", icon: BarChart3, href: "/reorder-analysis" },
       { label: "Receiving", icon: Truck, href: "/receiving" },
       { label: "Shipments", icon: Ship, href: "/shipments" },
       { label: "Suppliers", icon: Building2, href: "/suppliers" },
-      { label: "Reorder Analysis", icon: BarChart3, href: "/reorder-analysis" },
     ],
   },
   {

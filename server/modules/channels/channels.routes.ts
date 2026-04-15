@@ -851,7 +851,7 @@ export function registerChannelRoutes(app: Express) {
             COUNT(pa.id) AS asset_count,
             MIN(pa.url) AS sample_url
           FROM products p
-          JOIN product_assets pa ON pa.product_id = p.id
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
           WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
           GROUP BY p.id, p.name, p.shopify_product_id
           LIMIT 3
@@ -874,8 +874,8 @@ export function registerChannelRoutes(app: Express) {
           FROM products p
           LEFT JOIN (
             SELECT DISTINCT ON (pv.product_id) pv.product_id, cl2.external_product_id
-            FROM channel_listings cl2
-            JOIN product_variants pv ON pv.id = cl2.product_variant_id
+            FROM channels.channel_listings cl2
+            JOIN catalog.product_variants pv ON pv.id = cl2.product_variant_id
             WHERE cl2.channel_id = 36 AND cl2.external_product_id IS NOT NULL
             ORDER BY pv.product_id ASC, cl2.id DESC
           ) cl ON cl.product_id = p.id
@@ -917,7 +917,7 @@ export function registerChannelRoutes(app: Express) {
           SELECT p.id, p.name, p.shopify_product_id,
             json_agg(json_build_object('url', pa.url, 'position', pa.position) ORDER BY pa.position ASC) AS assets
           FROM products p
-          JOIN product_assets pa ON pa.product_id = p.id
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
           WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
           GROUP BY p.id, p.name, p.shopify_product_id
           LIMIT 1
@@ -968,13 +968,13 @@ export function registerChannelRoutes(app: Express) {
             COALESCE(cl_data.shopify_product_id, p.shopify_product_id) AS shopify_product_id,
             json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text, 'file_data', encode(pa.file_data, 'base64'), 'mime_type', pa.mime_type) ORDER BY pa.position ASC) AS assets
           FROM products p
-          JOIN product_assets pa ON pa.product_id = p.id
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
           LEFT JOIN (
             SELECT DISTINCT ON (pv.product_id)
               pv.product_id,
               cl.external_product_id AS shopify_product_id
-            FROM channel_listings cl
-            JOIN product_variants pv ON pv.id = cl.product_variant_id
+            FROM channels.channel_listings cl
+            JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
             WHERE cl.channel_id = $1 AND cl.external_product_id IS NOT NULL
             ORDER BY pv.product_id ASC, cl.id DESC
           ) cl_data ON cl_data.product_id = p.id
@@ -2202,7 +2202,7 @@ export function registerChannelRoutes(app: Express) {
         SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
-        JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+        JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE pv.product_id = ${productId}
           AND o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'

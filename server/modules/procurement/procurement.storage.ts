@@ -54,7 +54,10 @@ import {
   inboundFreightAllocations,
   landedCostSnapshots,
   inboundShipmentStatusHistory,
-  eq, and, or, inArray, sql, desc, asc, lte, like,
+  reorderExclusionRules,
+  autoDraftRuns,
+  products,
+  eq, and, or, inArray, sql, desc, asc, lte, like, ilike,
 } from "../../storage/base";
 
 export interface IProcurementStorage {
@@ -165,6 +168,20 @@ export interface IProcurementStorage {
   getOpenPoSummaryReport(): Promise<any[]>;
   getPoAgingReport(): Promise<any[]>;
   getExpectedReceiptsReport(): Promise<any[]>;
+
+  // Purchasing Dashboard
+  getReorderExclusionRules(): Promise<any[]>;
+  createReorderExclusionRule(data: { field: string; value: string; createdBy?: string }): Promise<any>;
+  deleteReorderExclusionRule(id: number): Promise<boolean>;
+  getExclusionRuleMatchCount(field: string, value: string): Promise<number>;
+  getTotalExcludedProducts(): Promise<number>;
+  setProductReorderExcluded(productId: number, excluded: boolean): Promise<void>;
+  getLatestAutoDraftRun(): Promise<any | undefined>;
+  createAutoDraftRun(data: any): Promise<any>;
+  updateAutoDraftRun(id: number, updates: any): Promise<void>;
+  getDashboardData(lookbackDays: number): Promise<any>;
+  getAutoDraftSettings(warehouseId?: number): Promise<any>;
+  updateAutoDraftSettings(warehouseId: number | undefined, settings: any): Promise<void>;
 }
 
 export const procurementMethods: IProcurementStorage = {
@@ -896,18 +913,18 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
         on_order.earliest_expected,
         (SELECT MAX(it2.created_at)
-         FROM inventory_transactions it2
-         JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
+         FROM inventory.inventory_transactions it2
+         JOIN catalog.product_variants pv2 ON pv2.id = it2.product_variant_id
          WHERE pv2.product_id = p.id
            AND it2.transaction_type = 'receipt') AS last_received_at
-      FROM products p
+      FROM catalog.products p
       LEFT JOIN (
         SELECT pv.product_id,
                SUM(il.variant_qty * pv.units_per_variant) AS total_pieces,
                SUM(il.reserved_qty * pv.units_per_variant) AS total_reserved_pieces,
                COUNT(DISTINCT pv.id) AS variant_count
-        FROM inventory_levels il
-        JOIN product_variants pv ON pv.id = il.product_variant_id
+        FROM inventory.inventory_levels il
+        JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
         WHERE pv.is_active = true
         GROUP BY pv.product_id
       ) inv ON inv.product_id = p.id
@@ -916,7 +933,7 @@ export const procurementMethods: IProcurementStorage = {
                SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
-        JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+        JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'
           AND oi.status != 'cancelled'
@@ -925,7 +942,7 @@ export const procurementMethods: IProcurementStorage = {
       ) vel ON vel.product_id = p.id
       LEFT JOIN LATERAL (
         SELECT pv.id AS variant_id, pv.units_per_variant, pv.sku, pv.hierarchy_level
-        FROM product_variants pv
+        FROM catalog.product_variants pv
         WHERE pv.product_id = p.id AND pv.is_active = true
         ORDER BY pv.hierarchy_level DESC
         LIMIT 1
@@ -935,9 +952,9 @@ export const procurementMethods: IProcurementStorage = {
                SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
                COUNT(DISTINCT po.id) AS open_po_count,
                MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
-        FROM purchase_order_lines pol
-        JOIN purchase_orders po ON po.id = pol.purchase_order_id
-        JOIN product_variants pv ON pv.id = pol.product_variant_id
+        FROM procurement.purchase_order_lines pol
+        JOIN procurement.purchase_orders po ON po.id = pol.purchase_order_id
+        JOIN catalog.product_variants pv ON pv.id = pol.product_variant_id
         WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
           AND pol.status IN ('open', 'partially_received')
         GROUP BY pv.product_id
@@ -971,7 +988,7 @@ export const procurementMethods: IProcurementStorage = {
       JOIN wms.order_items oi ON oi.order_id = o.id
       LEFT JOIN (
         SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
-        FROM order_item_costs
+        FROM oms.order_item_costs
         GROUP BY order_item_id
       ) oic_agg ON oic_agg.order_item_id = oi.id
       WHERE oi.total_price_cents IS NOT NULL
@@ -1001,11 +1018,11 @@ export const procurementMethods: IProcurementStorage = {
         pv.last_cost_cents,
         pv.avg_cost_cents
       FROM wms.order_items oi
-      JOIN product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
-      JOIN products p ON p.id = pv.product_id
+      JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
+      JOIN catalog.products p ON p.id = pv.product_id
       LEFT JOIN (
         SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
-        FROM order_item_costs
+        FROM oms.order_item_costs
         GROUP BY order_item_id
       ) oic_agg ON oic_agg.order_item_id = oi.id
       WHERE oi.total_price_cents IS NOT NULL
@@ -1027,8 +1044,8 @@ export const procurementMethods: IProcurementStorage = {
         SUM(CASE WHEN po.status IN ('sent', 'acknowledged', 'partially_received') THEN po.total_cents ELSE 0 END) AS open_spend_cents,
         MIN(po.order_date) AS first_po_date,
         MAX(po.order_date) AS last_po_date
-      FROM purchase_orders po
-      JOIN vendors v ON v.id = po.vendor_id
+      FROM procurement.purchase_orders po
+      JOIN procurement.vendors v ON v.id = po.vendor_id
       WHERE po.status NOT IN ('cancelled', 'draft')
       GROUP BY v.id, v.name
       ORDER BY total_spend_cents DESC
@@ -1053,10 +1070,10 @@ export const procurementMethods: IProcurementStorage = {
           ELSE 0
         END AS variance_percent,
         pr.created_at
-      FROM po_receipts pr
-      JOIN purchase_orders po ON po.id = pr.purchase_order_id
-      JOIN purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
-      JOIN vendors v ON v.id = po.vendor_id
+      FROM procurement.po_receipts pr
+      JOIN procurement.purchase_orders po ON po.id = pr.purchase_order_id
+      JOIN procurement.purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
+      JOIN procurement.vendors v ON v.id = po.vendor_id
       WHERE pr.variance_cents IS NOT NULL AND pr.variance_cents != 0
       ORDER BY ABS(pr.variance_cents) DESC
       LIMIT 100
@@ -1073,7 +1090,7 @@ export const procurementMethods: IProcurementStorage = {
         SUM(po.line_count) AS total_lines,
         MIN(po.expected_delivery_date) AS earliest_delivery,
         MAX(po.expected_delivery_date) AS latest_delivery
-      FROM purchase_orders po
+      FROM procurement.purchase_orders po
       WHERE po.status IN ('draft', 'pending_approval', 'approved', 'sent', 'acknowledged', 'partially_received')
       GROUP BY po.status
       ORDER BY
@@ -1105,8 +1122,8 @@ export const procurementMethods: IProcurementStorage = {
           WHEN po.expected_delivery_date < NOW() + INTERVAL '7 days' THEN 'due_soon'
           ELSE 'on_track'
         END AS delivery_status
-      FROM purchase_orders po
-      JOIN vendors v ON v.id = po.vendor_id
+      FROM procurement.purchase_orders po
+      JOIN procurement.vendors v ON v.id = po.vendor_id
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
         AND po.order_date IS NOT NULL
       ORDER BY po.order_date ASC
@@ -1127,14 +1144,409 @@ export const procurementMethods: IProcurementStorage = {
         SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS pending_units,
         COUNT(pol.id) AS pending_lines,
         SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
-      FROM purchase_orders po
-      JOIN vendors v ON v.id = po.vendor_id
-      JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+      FROM procurement.purchase_orders po
+      JOIN procurement.vendors v ON v.id = po.vendor_id
+      JOIN procurement.purchase_order_lines pol ON pol.purchase_order_id = po.id
         AND pol.status IN ('open', 'partially_received')
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
       GROUP BY po.id, po.po_number, v.name, po.status, po.expected_delivery_date, po.confirmed_delivery_date
       ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST
     `);
     return rows.rows as any[];
+  },
+
+  // ===== PURCHASING DASHBOARD METHODS =====
+
+  async getReorderExclusionRules(): Promise<any[]> {
+    return await db.select().from(reorderExclusionRules).orderBy(asc(reorderExclusionRules.field));
+  },
+
+  async createReorderExclusionRule(data: { field: string; value: string; createdBy?: string }): Promise<any> {
+    const [rule] = await db.insert(reorderExclusionRules).values({
+      field: data.field,
+      value: data.value,
+      createdBy: data.createdBy,
+    }).returning();
+    return rule;
+  },
+
+  async deleteReorderExclusionRule(id: number): Promise<boolean> {
+    const result = await db.delete(reorderExclusionRules).where(eq(reorderExclusionRules.id, id));
+    return (result.rowCount ?? 0) > 0;
+  },
+
+  async getExclusionRuleMatchCount(field: string, value: string): Promise<number> {
+    let condition: any;
+    switch (field) {
+      case "category":
+        condition = sql`LOWER(${products.category}) = LOWER(${value})`;
+        break;
+      case "brand":
+        condition = sql`LOWER(${products.brand}) = LOWER(${value})`;
+        break;
+      case "product_type":
+        condition = sql`LOWER(${products.productType}) = LOWER(${value})`;
+        break;
+      case "sku_prefix":
+        condition = sql`${products.sku} ILIKE ${value + "%"}`;
+        break;
+      case "sku_exact":
+        condition = sql`LOWER(${products.sku}) = LOWER(${value})`;
+        break;
+      case "tag":
+        condition = sql`${products.tags} @> jsonb_build_array(${value})`;
+        break;
+      default:
+        return 0;
+    }
+    const rows = await db.execute(sql`
+      SELECT COUNT(*)::int AS cnt FROM ${products}
+      WHERE ${products.isActive} = true AND ${condition}
+    `);
+    return Number((rows.rows as any[])[0]?.cnt || 0);
+  },
+
+  async getTotalExcludedProducts(): Promise<number> {
+    const rules = await db.select().from(reorderExclusionRules);
+    if (rules.length === 0) {
+      const rows = await db.execute(sql`
+        SELECT COUNT(*)::int AS cnt FROM ${products}
+        WHERE ${products.isActive} = true AND ${products.reorderExcluded} = true
+      `);
+      return Number((rows.rows as any[])[0]?.cnt || 0);
+    }
+
+    // Build exclusion conditions from rules
+    const conditions = rules.map((r: any) => {
+      switch (r.field) {
+        case "category": return sql`LOWER(${products.category}) = LOWER(${r.value})`;
+        case "brand": return sql`LOWER(${products.brand}) = LOWER(${r.value})`;
+        case "product_type": return sql`LOWER(${products.productType}) = LOWER(${r.value})`;
+        case "sku_prefix": return sql`${products.sku} ILIKE ${r.value + "%"}`;
+        case "sku_exact": return sql`LOWER(${products.sku}) = LOWER(${r.value})`;
+        case "tag": return sql`${products.tags} @> jsonb_build_array(${r.value})`;
+        default: return sql`false`;
+      }
+    });
+
+    const combinedCondition = conditions.length === 1 ? conditions[0] : sql`(${sql.join(conditions, sql` OR `)})`;
+
+    const rows = await db.execute(sql`
+      SELECT COUNT(DISTINCT ${products.id})::int AS cnt FROM ${products}
+      WHERE ${products.isActive} = true
+        AND (${products.reorderExcluded} = true OR ${combinedCondition})
+    `);
+    return Number((rows.rows as any[])[0]?.cnt || 0);
+  },
+
+  async setProductReorderExcluded(productId: number, excluded: boolean): Promise<void> {
+    await db.update(products).set({ reorderExcluded: excluded }).where(eq(products.id, productId));
+  },
+
+  async getLatestAutoDraftRun(): Promise<any | undefined> {
+    const [run] = await db.select().from(autoDraftRuns).orderBy(desc(autoDraftRuns.runAt)).limit(1);
+    return run;
+  },
+
+  async createAutoDraftRun(data: any): Promise<any> {
+    const [run] = await db.insert(autoDraftRuns).values(data).returning();
+    return run;
+  },
+
+  async updateAutoDraftRun(id: number, updates: any): Promise<void> {
+    await db.update(autoDraftRuns).set(updates).where(eq(autoDraftRuns.id, id));
+  },
+
+  async getAutoDraftSettings(warehouseId?: number): Promise<any> {
+    const rows = await db.execute(sql`
+      SELECT
+        COALESCE(auto_draft_include_order_soon, false) AS include_order_soon,
+        COALESCE(auto_draft_skip_on_open_po, true) AS skip_on_open_po,
+        COALESCE(auto_draft_skip_no_vendor, true) AS skip_no_vendor
+      FROM warehouse_settings
+      LIMIT 1
+    `);
+    const row = (rows.rows as any[])[0];
+    return {
+      includeOrderSoon: row?.include_order_soon ?? false,
+      skipOnOpenPo: row?.skip_on_open_po ?? true,
+      skipNoVendor: row?.skip_no_vendor ?? true,
+    };
+  },
+
+  async updateAutoDraftSettings(warehouseId: number | undefined, settings: any): Promise<void> {
+    await db.execute(sql`
+      UPDATE warehouse_settings SET
+        auto_draft_include_order_soon = ${settings.includeOrderSoon ?? false},
+        auto_draft_skip_on_open_po = ${settings.skipOnOpenPo ?? true},
+        auto_draft_skip_no_vendor = ${settings.skipNoVendor ?? true}
+    `);
+  },
+
+  async getDashboardData(lookbackDays: number): Promise<any> {
+    // Get reorder analysis data with exclusion filtering
+    const rawRows = await this.getReorderAnalysisData(lookbackDays);
+
+    // Get exclusion rules to filter out
+    const rules = await db.select().from(reorderExclusionRules);
+
+    const isExcluded = (row: any): boolean => {
+      // Check per-product flag
+      if (row.reorder_excluded) return true;
+      // Check rules
+      for (const r of rules) {
+        const val = String(r.value).toLowerCase();
+        switch (r.field) {
+          case "category":
+            if ((row.category || "").toLowerCase() === val) return true;
+            break;
+          case "brand":
+            if ((row.brand || "").toLowerCase() === val) return true;
+            break;
+          case "product_type":
+            if ((row.product_type || "").toLowerCase() === val) return true;
+            break;
+          case "sku_prefix":
+            if ((row.base_sku || "").toLowerCase().startsWith(val)) return true;
+            break;
+          case "sku_exact":
+            if ((row.base_sku || "").toLowerCase() === val) return true;
+            break;
+        }
+      }
+      return false;
+    };
+
+    // Enrich raw rows with product fields for exclusion check
+    const enrichedRows = await db.execute(sql`
+      SELECT p.id, p.category, p.brand, p.product_type, p.reorder_excluded
+      FROM ${products} p
+      WHERE p.is_active = true
+    `);
+    const productMeta = new Map<number, any>();
+    for (const pm of enrichedRows.rows as any[]) {
+      productMeta.set(pm.id, pm);
+    }
+
+    // Classify items
+    const HIERARCHY_LABELS: Record<number, string> = { 1: "Pack", 2: "Box", 3: "Case", 4: "Skid" };
+
+    const items = rawRows
+      .map((r: any) => {
+        const meta = productMeta.get(r.product_id) || {};
+        const totalOnHand = Number(r.total_pieces);
+        const totalReserved = Number(r.total_reserved_pieces);
+        const totalOutbound = Number(r.total_outbound_pieces);
+        const onOrderPieces = Number(r.on_order_pieces);
+        const available = totalOnHand - totalReserved;
+        const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
+        const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
+        const leadTimeDays = Number(r.lead_time_days);
+        const safetyStockDays = Number(r.safety_stock_days);
+        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
+        const effectiveSupply = available + onOrderPieces;
+        const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
+        const orderUomUnits = Number(r.order_uom_units) || 1;
+        const orderUomLevel = Number(r.order_uom_level) || 0;
+        const orderUomLabel = HIERARCHY_LABELS[orderUomLevel] || (orderUomUnits > 1 ? `${orderUomUnits}pk` : "pcs");
+        const suggestedOrderQty = orderUomUnits > 1 ? Math.ceil(rawOrderQtyPieces / orderUomUnits) : Math.ceil(rawOrderQtyPieces);
+        const suggestedOrderPieces = suggestedOrderQty * orderUomUnits;
+
+        let status: string;
+        if (available <= 0) {
+          status = "stockout";
+        } else if (avgDailyUsage === 0) {
+          status = "no_movement";
+        } else if (available <= reorderPoint && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
+          status = "on_order";
+        } else if (available <= reorderPoint) {
+          status = "order_now";
+        } else if (daysOfSupply <= leadTimeDays * 1.5) {
+          status = "order_soon";
+        } else {
+          status = "ok";
+        }
+
+        return {
+          productId: r.product_id,
+          sku: r.base_sku || r.product_name,
+          productName: r.product_name,
+          totalOnHand,
+          available,
+          daysOfSupply,
+          suggestedOrderQty,
+          suggestedOrderPieces,
+          orderUomUnits,
+          orderUomLabel,
+          onOrderPieces,
+          openPoCount: Number(r.open_po_count),
+          earliestExpectedDate: r.earliest_expected || null,
+          status,
+          _excluded: isExcluded({ ...r, ...meta }),
+          preferredVendorId: r.preferred_vendor_id ? Number(r.preferred_vendor_id) : null,
+          preferredVendorName: r.preferred_vendor_name || null,
+          estimatedCostCents: r.estimated_cost_cents ? Number(r.estimated_cost_cents) : null,
+        };
+      });
+
+    const activeItems = items.filter((i: any) => !i._excluded);
+
+    // Categorize
+    const stockoutItems = activeItems.filter((i: any) => i.status === "stockout");
+    const orderNowItems = activeItems.filter((i: any) => i.status === "order_now");
+    const healthBreakdown = {
+      stockout: activeItems.filter((i: any) => i.status === "stockout").length,
+      order_now: activeItems.filter((i: any) => i.status === "order_now").length,
+      order_soon: activeItems.filter((i: any) => i.status === "order_soon").length,
+      on_order: activeItems.filter((i: any) => i.status === "on_order").length,
+      ok: activeItems.filter((i: any) => i.status === "ok").length,
+      no_movement: activeItems.filter((i: any) => i.status === "no_movement").length,
+      total: activeItems.length,
+    };
+
+    // POs
+    const draftPOs = await db.select({
+      id: purchaseOrders.id,
+      poNumber: purchaseOrders.poNumber,
+      vendorId: purchaseOrders.vendorId,
+      status: purchaseOrders.status,
+      totalCents: purchaseOrders.totalCents,
+      lineCount: purchaseOrders.lineCount,
+      source: purchaseOrders.source,
+      expectedDeliveryDate: purchaseOrders.expectedDeliveryDate,
+      receivedLineCount: purchaseOrders.receivedLineCount,
+    }).from(purchaseOrders)
+      .where(sql`${purchaseOrders.status} IN ('draft', 'sent', 'acknowledged', 'partially_received')`)
+      .orderBy(asc(purchaseOrders.createdAt));
+
+    // Get vendor names for POs
+    const allVendors = await db.select().from(vendors);
+    const vendorMap = new Map(allVendors.map((v: any) => [v.id, v.name]));
+
+    const draftPos = draftPOs.filter((po: any) => po.status === "draft").map((po: any) => ({
+      id: po.id,
+      poNumber: po.poNumber,
+      vendorName: vendorMap.get(po.vendorId) || "Unknown",
+      lineCount: po.lineCount || 0,
+      totalCents: po.totalCents,
+      source: po.source || "manual",
+    }));
+
+    const inFlightPos = draftPOs.filter((po: any) => po.status !== "draft").map((po: any) => ({
+      id: po.id,
+      poNumber: po.poNumber,
+      vendorName: vendorMap.get(po.vendorId) || "Unknown",
+      status: po.status,
+      lineCount: po.lineCount || 0,
+      receivedLineCount: po.receivedLineCount || 0,
+      totalCents: po.totalCents,
+      expectedDeliveryDate: po.expectedDeliveryDate,
+    }));
+
+    // Open PO value
+    const openPoRows = await db.execute(sql`
+      SELECT COALESCE(SUM(${purchaseOrders.totalCents}), 0)::bigint AS total
+      FROM ${purchaseOrders}
+      WHERE ${purchaseOrders.status} NOT IN ('closed', 'cancelled')
+    `);
+    const openPoValueCents = Number((openPoRows.rows as any[])[0]?.total || 0);
+
+    // No vendor items
+    const noVendorItems: any[] = [];
+    for (const item of [...stockoutItems, ...orderNowItems].slice(0, 10)) {
+      if (!item.preferredVendorId) {
+        noVendorItems.push({
+          productId: item.productId,
+          sku: item.sku,
+          productName: item.productName,
+          totalOnHand: item.totalOnHand,
+        });
+      }
+    }
+
+    // Spend (last 30 days)
+    const spendRows = await db.execute(sql`
+      SELECT
+        COALESCE(SUM(${purchaseOrders.totalCents}), 0)::bigint AS total_received_cents,
+        COUNT(DISTINCT ${purchaseOrders.id})::int AS po_count,
+        COUNT(DISTINCT ${purchaseOrders.vendorId})::int AS supplier_count
+      FROM ${purchaseOrders}
+      WHERE ${purchaseOrders.status} = 'received'
+        AND ${purchaseOrders.closedAt} > NOW() - INTERVAL '30 days'
+    `);
+    const spendRow = (spendRows.rows as any[])[0] || {};
+
+    // Top supplier
+    const topSupplierRows = await db.execute(sql`
+      SELECT ${vendors.name} AS name, COALESCE(SUM(${purchaseOrders.totalCents}), 0)::bigint AS total
+      FROM ${purchaseOrders}
+      JOIN ${vendors} ON ${vendors.id} = ${purchaseOrders.vendorId}
+      WHERE ${purchaseOrders.status} = 'received'
+        AND ${purchaseOrders.closedAt} > NOW() - INTERVAL '30 days'
+      GROUP BY ${vendors.name}
+      ORDER BY total DESC
+      LIMIT 1
+    `);
+    const topSupplier = (topSupplierRows.rows as any[])[0] || {};
+
+    // Latest auto-draft run
+    const lastAutoDraftRun = await this.getLatestAutoDraftRun();
+
+    // In-transit count
+    const inTransitCount = inFlightPos.filter((po: any) => ["sent", "acknowledged"].includes(po.status)).length;
+
+    return {
+      stockouts: healthBreakdown.stockout,
+      orderNow: healthBreakdown.order_now,
+      draftPoCount: draftPos.length,
+      inTransitCount,
+      openPoValueCents,
+      noVendorCount: noVendorItems.length,
+
+      stockoutItems: stockoutItems.slice(0, 5).map((i: any) => ({
+        productId: i.productId,
+        sku: i.sku,
+        productName: i.productName,
+        totalOnHand: i.totalOnHand,
+      })),
+
+      draftPos,
+
+      inFlightPos,
+
+      noVendorItems: noVendorItems.slice(0, 5),
+
+      orderNowItems: orderNowItems.slice(0, 10).map((i: any) => ({
+        productId: i.productId,
+        sku: i.sku,
+        productName: i.productName,
+        daysOfSupply: i.daysOfSupply,
+        suggestedOrderQty: i.suggestedOrderQty,
+        orderUomLabel: i.orderUomLabel,
+        preferredVendorId: i.preferredVendorId,
+      })),
+
+      healthBreakdown,
+
+      spend: {
+        totalReceivedCents: Number(spendRow.total_received_cents || 0),
+        openPoValueCents,
+        avgPoCents: Number(spendRow.po_count) > 0 ? Math.round(Number(spendRow.total_received_cents || 0) / Number(spendRow.po_count)) : 0,
+        topSupplierName: topSupplier.name || null,
+        topSupplierCents: Number(topSupplier.total || 0),
+        activeSupplierCount: Number(spendRow.supplier_count || 0),
+      },
+
+      lastAutoDraftRun: lastAutoDraftRun ? {
+        runAt: lastAutoDraftRun.runAt || lastAutoDraftRun.run_at,
+        status: lastAutoDraftRun.status,
+        itemsAnalyzed: lastAutoDraftRun.itemsAnalyzed || lastAutoDraftRun.items_analyzed || 0,
+        posCreated: lastAutoDraftRun.posCreated || lastAutoDraftRun.pos_created || 0,
+        posUpdated: lastAutoDraftRun.posUpdated || lastAutoDraftRun.pos_updated || 0,
+        linesAdded: lastAutoDraftRun.linesAdded || lastAutoDraftRun.lines_added || 0,
+        skippedNoVendor: lastAutoDraftRun.skippedNoVendor || lastAutoDraftRun.skipped_no_vendor || 0,
+        skippedExcluded: lastAutoDraftRun.skippedExcluded || lastAutoDraftRun.skipped_excluded || 0,
+      } : null,
+    };
   },
 };

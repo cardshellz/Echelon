@@ -336,7 +336,7 @@ export async function registerProductRoutes(app: Express) {
 
         // Deactivate channel feeds + clean up channel listings
         channelFeedsDeactivated += await storage.deactivateChannelFeedsByVariantId(v.id);
-        await db.execute(sql`DELETE FROM channel_listings WHERE product_variant_id = ${v.id}`);
+        await db.execute(sql`DELETE FROM channels.channel_listings WHERE product_variant_id = ${v.id}`);
         if (archiveChannelSync) {
           archiveChannelSync.queueSyncAfterInventoryChange(v.id).catch((err: any) =>
             console.warn(`[ChannelSync] Post-archive feed deactivation sync failed for variant ${v.id}:`, err)
@@ -785,7 +785,7 @@ export async function registerProductRoutes(app: Express) {
 
       // Deactivate channel feeds + clean up channel listings
       channelFeedsDeactivated = await storage.deactivateChannelFeedsByVariantId(id);
-      await db.execute(sql`DELETE FROM channel_listings WHERE product_variant_id = ${id}`);
+      await db.execute(sql`DELETE FROM channels.channel_listings WHERE product_variant_id = ${id}`);
       if (varArchiveSync) {
         varArchiveSync.queueSyncAfterInventoryChange(id).catch((err: any) =>
           console.warn(`[ChannelSync] Post-archive feed deactivation sync failed for variant ${id}:`, err)
@@ -1087,7 +1087,7 @@ export async function registerProductRoutes(app: Express) {
     try {
       const id = parseInt(req.params.id);
       const result = await db.execute(sql`
-        SELECT file_data, mime_type, alt_text FROM product_assets WHERE id = ${id}
+        SELECT file_data, mime_type, alt_text FROM catalog.product_assets WHERE id = ${id}
       `);
 
       if (!result.rows.length || !result.rows[0].file_data) {

@@ -246,7 +246,7 @@ async function processVendorOrder(
   try {
     // Dedup: check if order already exists
     const existingResult = await client.query(
-      `SELECT id FROM oms_orders WHERE external_order_id = $1 AND vendor_id = $2 LIMIT 1`,
+      `SELECT id FROM oms.oms_orders WHERE external_order_id = $1 AND vendor_id = $2 LIMIT 1`,
       [externalOrderId, vendorId],
     );
     if (existingResult.rows.length > 0) return false;
@@ -278,8 +278,8 @@ async function processVendorOrder(
       // Look up product variant
       const varResult = await client.query(
         `SELECT pv.id, pv.price_cents, pv.weight_grams, p.name, p.id as product_id
-         FROM product_variants pv
-         JOIN products p ON p.id = pv.product_id
+         FROM catalog.product_variants pv
+         JOIN catalog.products p ON p.id = pv.product_id
          WHERE UPPER(pv.sku) = UPPER($1) AND pv.is_active = true
          LIMIT 1`,
         [sku],
@@ -455,9 +455,9 @@ async function createDropshipWmsOrder(
     if (!imageUrl) {
       const imageResult = await db.execute(sql`
         SELECT pa.url as image_url
-        FROM product_variants pv
-        LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
+        FROM catalog.product_variants pv
+        LEFT JOIN catalog.products p ON pv.product_id = p.id
+        LEFT JOIN catalog.product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
         WHERE UPPER(pv.sku) = ${item.sku.toUpperCase()}
           AND pa.url IS NOT NULL
         LIMIT 1

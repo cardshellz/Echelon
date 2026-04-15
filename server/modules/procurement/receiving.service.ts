@@ -12,6 +12,9 @@ type DrizzleDb = {
   execute: (query: any) => Promise<{ rows: any[] }>;
 };
 
+// Import sql tagged template for raw queries
+import { sql } from "drizzle-orm";
+
 interface InventoryCore {
   receiveInventory(params: {
     productVariantId: number;
@@ -251,6 +254,42 @@ export class ReceivingService {
         linesReceived++;
         receivedVariantIds.add(line.productVariantId);
         putawayLocationIds.add(line.putawayLocationId);
+      }
+    }
+
+    // Auto-break cases into base units for child variant ATP
+    for (const line of lines) {
+      if (line.receivedQty > 0 && line.productVariantId) {
+        const variant = await this.storage.getProductVariantById(line.productVariantId);
+        if (variant && (variant as any).hierarchyLevel > 1) {
+          // Find the base unit variant (hierarchy_level = 1) for this product
+          const allVariants = await this.storage.getProductVariantsByProduct((variant as any).productId);
+          const baseVariant = allVariants.find((v: any) => v.hierarchyLevel === 1);
+          if (baseVariant && baseVariant.id !== line.productVariantId) {
+            const totalUnits = line.receivedQty * (variant as any).unitsPerVariant;
+            await this.inventoryCore.receiveInventory({
+              productVariantId: baseVariant.id,
+              warehouseLocationId: line.putawayLocationId,
+              qty: totalUnits,
+              referenceId: `BREAK-${batchId}-${line.id}`,
+              notes: `Auto-break: ${line.receivedQty}× ${variant.sku} → ${totalUnits}× ${baseVariant.sku}`,
+              userId: userId || undefined,
+              unitCostCents: (line as any).unitCost || undefined,
+              receivingOrderId: orderId,
+            });
+
+            // Deduct the case variant inventory to avoid double-counting in ATP
+            // The base units are now the sellable quantity; the case is empty
+            await this.db.execute(sql`
+              UPDATE inventory.inventory_levels
+              SET variant_qty = GREATEST(0, variant_qty - ${line.receivedQty}),
+                  updated_at = NOW()
+              WHERE product_variant_id = ${line.productVariantId}
+                AND warehouse_location_id = ${line.putawayLocationId}
+            `);
+            receivedVariantIds.add(baseVariant.id);
+          }
+        }
       }
     }
 

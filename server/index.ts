@@ -59,6 +59,7 @@ const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "pr
 const sessionPool = new Pool({
   connectionString: dbConnectionString,
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 
 app.use(
@@ -108,7 +109,15 @@ app.use((req, res, next) => {
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        // Log response body only for errors (status >= 400)
+        if (res.statusCode >= 400) {
+          const jsonStr = JSON.stringify(capturedJsonResponse);
+          if (jsonStr.length > 500) {
+            logLine += ` :: ${jsonStr.slice(0, 500)}...`;
+          } else {
+            logLine += ` :: ${jsonStr}`;
+          }
+        }
       }
 
       log(logLine);
@@ -343,7 +352,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       try {
         // Check if there are any synced eBay listings to verify
         const countResult = await client.query(
-          `SELECT COUNT(*) AS cnt FROM channel_listings WHERE channel_id = 67 AND sync_status = 'synced'`,
+          `SELECT COUNT(*) AS cnt FROM channels.channel_listings WHERE channel_id = 67 AND sync_status = 'synced'`,
         );
         const count = parseInt(countResult.rows[0]?.cnt || "0");
         if (count === 0) {
@@ -509,7 +518,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Find eBay OMS orders stuck in "confirmed" for > 48 hours
       const stuckOrders = await db.execute(sql`
         SELECT o.id, o.external_order_id, o.order_number
-        FROM oms_orders o
+        FROM oms.oms_orders o
         WHERE o.channel_id = 67
           AND o.status = 'confirmed'
           AND o.created_at < NOW() - INTERVAL '48 hours'

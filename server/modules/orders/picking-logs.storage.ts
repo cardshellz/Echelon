@@ -224,8 +224,8 @@ export const pickingLogMethods: IPickingLogStorage = {
         AVG(EXTRACT(EPOCH FROM (c.timestamp - cl.timestamp))) as avg_claim_to_complete,
         AVG(EXTRACT(EPOCH FROM (cl.timestamp - o.created_at))) as avg_queue_wait
       FROM wms.orders o
-      LEFT JOIN picking_logs cl ON cl.order_id = o.id AND cl.action_type = 'order_claimed'
-      LEFT JOIN picking_logs c ON c.order_id = o.id AND c.action_type = 'order_completed'
+      LEFT JOIN public.picking_logs cl ON cl.order_id = o.id AND cl.action_type = 'order_claimed'
+      LEFT JOIN public.picking_logs c ON c.order_id = o.id AND c.action_type = 'order_completed'
       WHERE o.warehouse_status = 'completed' 
         AND o.completed_at >= ${startDate} 
         AND o.completed_at <= ${endDate}
@@ -248,7 +248,7 @@ export const pickingLogMethods: IPickingLogStorage = {
         count(*) FILTER (WHERE action_type = 'item_shorted')::int as short_picks,
         count(*) FILTER (WHERE action_type IN ('item_picked', 'item_quantity_adjusted') AND pick_method = 'scan')::int as scan_picks,
         count(*) FILTER (WHERE action_type IN ('item_picked', 'item_quantity_adjusted'))::int as total_picks
-      FROM picking_logs
+      FROM public.picking_logs
       WHERE timestamp >= ${startDate} AND timestamp <= ${endDate}
         AND picker_id IS NOT NULL
       GROUP BY picker_id
@@ -270,7 +270,7 @@ export const pickingLogMethods: IPickingLogStorage = {
         date_trunc('hour', timestamp) as hour,
         count(*) FILTER (WHERE action_type = 'order_completed')::int as orders,
         count(*) FILTER (WHERE action_type IN ('item_picked', 'item_quantity_adjusted'))::int as items
-      FROM picking_logs
+      FROM public.picking_logs
       WHERE timestamp >= ${startDate} AND timestamp <= ${endDate}
       GROUP BY date_trunc('hour', timestamp)
       ORDER BY hour
@@ -285,7 +285,7 @@ export const pickingLogMethods: IPickingLogStorage = {
       SELECT 
         COALESCE(reason, 'unknown') as reason,
         count(*)::int as count
-      FROM picking_logs
+      FROM public.picking_logs
       WHERE timestamp >= ${startDate} AND timestamp <= ${endDate}
         AND action_type = 'item_shorted'
       GROUP BY reason

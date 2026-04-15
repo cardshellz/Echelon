@@ -21,6 +21,7 @@ export const channelStatusEnum = ["active", "paused", "pending_setup", "error"] 
 export type ChannelStatus = typeof channelStatusEnum[number];
 
 // Channels - the core entity for all sales channels
+
 export const channels = channelsSchema.table("channels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: varchar("name", { length: 100 }).notNull(),

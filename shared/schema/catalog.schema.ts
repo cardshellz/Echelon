@@ -56,6 +56,7 @@ export const products = catalogSchema.table("products", {
   ebayBrowseCategoryId: varchar("ebay_browse_category_id", { length: 20 }), // Per-product eBay browse category override
   ebayBrowseCategoryName: varchar("ebay_browse_category_name", { length: 200 }), // Per-product eBay browse category name override
   dropshipEligible: boolean("dropship_eligible").default(false), // Whether product is eligible for dropship vendors
+  reorderExcluded: boolean("reorder_excluded").notNull().default(false), // Per-product exclusion from reorder analysis
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

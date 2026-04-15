@@ -248,12 +248,12 @@ export class CycleCountUseCases {
    */
   private async lookupVariantAndProductBySku(sku: string): Promise<{ productVariantId: number | null; productId: number | null }> {
     const variantResult = await this.db.execute(sql`
-      SELECT id FROM product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
+      SELECT id FROM catalog.product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
     const productVariantId = variantResult.rows[0]?.id || null;
 
     const productResult = await this.db.execute(sql`
-      SELECT id FROM products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
+      SELECT id FROM catalog.products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
     const productId = productResult.rows[0]?.id || null;
 
@@ -274,7 +274,7 @@ export class CycleCountUseCases {
     }
     // Delete reverse-linked items
     const reverseResult = await this.db.execute(sql`
-      SELECT id, status FROM cycle_count_items
+      SELECT id, status FROM inventory.cycle_count_items
       WHERE related_item_id = ${itemId} AND status != 'approved'
     `);
     for (const rev of reverseResult.rows) {
@@ -306,7 +306,7 @@ export class CycleCountUseCases {
       // READ CURRENT (real-time) inventory — NOT the stale snapshot
       const currentLevelResult = await (tx || this.db).execute(sql`
         SELECT COALESCE(variant_qty, 0) as variant_qty
-        FROM inventory_levels
+        FROM inventory.inventory_levels
         WHERE product_variant_id = ${item.productVariantId}
           AND warehouse_location_id = ${item.warehouseLocationId}
       `);
@@ -446,7 +446,7 @@ export class CycleCountUseCases {
    */
   private async unfreezeLocations(cycleCountId: number): Promise<void> {
     await this.db.execute(sql`
-      UPDATE warehouse_locations
+      UPDATE warehouse.warehouse_locations
       SET cycle_count_freeze_id = NULL, updated_at = NOW()
       WHERE cycle_count_freeze_id = ${cycleCountId}
     `);
@@ -574,39 +574,44 @@ export class CycleCountUseCases {
     const items: any[] = [];
     for (const location of locations) {
       const result = await this.db.execute(sql`
-        -- Assigned bins: always include even if qty=0 (verify the assignment)
-        SELECT
-          pv.id as product_variant_id,
-          COALESCE(il.variant_qty, 0) as variant_qty,
-          pv.product_id as product_id,
-          pv.sku as sku,
-          1 as is_assigned
-        FROM product_locations pl
-        JOIN product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
-        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
-          AND il.warehouse_location_id = ${location.id}
-        WHERE pl.warehouse_location_id = ${location.id}
+        SELECT DISTINCT ON (product_variant_id)
+          product_variant_id, variant_qty, product_id, sku, is_assigned
+        FROM (
+          -- Assigned bins: always include even if qty=0 (verify the assignment)
+          SELECT
+            pv.id as product_variant_id,
+            COALESCE(il.variant_qty, 0) as variant_qty,
+            pv.product_id as product_id,
+            pv.sku as sku,
+            1 as is_assigned
+          FROM warehouse.product_locations pl
+          JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
+          LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
+            AND il.warehouse_location_id = ${location.id}
+          WHERE pl.warehouse_location_id = ${location.id}
 
-        UNION
+          UNION ALL
 
-        -- Unassigned bins with stock > 0: stray inventory — flag for investigation
-        SELECT
-          il.product_variant_id,
-          il.variant_qty,
-          p.id as product_id,
-          COALESCE(pv.sku, p.sku) as sku,
-          0 as is_assigned
-        FROM inventory_levels il
-        LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
-        LEFT JOIN products p ON pv.product_id = p.id
-        WHERE il.warehouse_location_id = ${location.id}
-          AND il.variant_qty > 0
-          AND NOT EXISTS (
-            SELECT 1 FROM product_locations pl2
-            JOIN product_variants pv2 ON UPPER(pv2.sku) = UPPER(pl2.sku)
-            WHERE pl2.warehouse_location_id = ${location.id}
-              AND pv2.id = il.product_variant_id
-          )
+          -- Unassigned bins with stock > 0: stray inventory — flag for investigation
+          SELECT
+            il.product_variant_id,
+            il.variant_qty,
+            p.id as product_id,
+            COALESCE(pv.sku, p.sku) as sku,
+            0 as is_assigned
+          FROM inventory.inventory_levels il
+          LEFT JOIN catalog.product_variants pv ON il.product_variant_id = pv.id
+          LEFT JOIN catalog.products p ON pv.product_id = p.id
+          WHERE il.warehouse_location_id = ${location.id}
+            AND il.variant_qty > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM warehouse.product_locations pl2
+              JOIN catalog.product_variants pv2 ON UPPER(pv2.sku) = UPPER(pl2.sku)
+              WHERE pl2.warehouse_location_id = ${location.id}
+                AND pv2.id = il.product_variant_id
+            )
+        ) combined
+        ORDER BY product_variant_id, is_assigned DESC
       `);
 
       if (result.rows.length > 0) {
@@ -675,7 +680,7 @@ export class CycleCountUseCases {
       for (let i = 0; i < locationIds.length; i += chunkSize) {
         const chunk = locationIds.slice(i, i + chunkSize);
         await this.db.execute(sql`
-          UPDATE warehouse_locations
+          UPDATE warehouse.warehouse_locations
           SET cycle_count_freeze_id = ${id}, updated_at = NOW()
           WHERE id IN (${sql.join(chunk.map((cid: number) => sql`${cid}`), sql`, `)})
             AND cycle_count_freeze_id IS NULL
@@ -833,7 +838,7 @@ export class CycleCountUseCases {
         // Read current system qty to compute real-time variance
         const autoResult = await this.db.execute(sql`
           SELECT COALESCE(variant_qty, 0) as variant_qty
-          FROM inventory_levels
+          FROM inventory.inventory_levels
           WHERE product_variant_id = ${item.productVariantId}
             AND warehouse_location_id = ${item.warehouseLocationId}
         `);
@@ -1083,7 +1088,7 @@ export class CycleCountUseCases {
     // Read current system inventory at this location
     const result = await this.db.execute(sql`
       SELECT COALESCE(variant_qty, 0) as variant_qty
-      FROM inventory_levels
+      FROM inventory.inventory_levels
       WHERE product_variant_id = ${item.productVariantId}
         AND warehouse_location_id = ${item.warehouseLocationId}
     `);
@@ -1523,7 +1528,7 @@ export class CycleCountUseCases {
       const withCurrentQty = await Promise.all(variantItems.map(async (item) => {
         const result = await this.db.execute(sql`
           SELECT COALESCE(variant_qty, 0) as variant_qty
-          FROM inventory_levels
+          FROM inventory.inventory_levels
           WHERE product_variant_id = ${variantId}
             AND warehouse_location_id = ${item.warehouseLocationId}
         `);
@@ -1642,7 +1647,7 @@ export class CycleCountUseCases {
       // Get CURRENT system qty
       const currentResult = await this.db.execute(sql`
         SELECT COALESCE(variant_qty, 0) as variant_qty
-        FROM inventory_levels
+        FROM inventory.inventory_levels
         WHERE product_variant_id = ${item.productVariantId}
           AND warehouse_location_id = ${item.warehouseLocationId}
       `);
@@ -1658,7 +1663,7 @@ export class CycleCountUseCases {
       if (countedAt) {
         const txResult = await this.db.execute(sql`
           SELECT transaction_type, variant_qty_delta, created_at
-          FROM inventory_transactions
+          FROM inventory.inventory_transactions
           WHERE product_variant_id = ${item.productVariantId}
             AND (from_location_id = ${item.warehouseLocationId} OR to_location_id = ${item.warehouseLocationId})
             AND created_at > ${countedAt}

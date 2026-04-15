@@ -8,7 +8,9 @@ import { receivingOrders, purchaseOrders } from "./procurement.schema";
 
 // Inventory levels per location - all quantities in variant units (e.g., 5 cases, 10 packs)
 // Base unit equivalents are computed at query time via: qty * product_variants.units_per_variant
-export const inventoryLevels = pgTable("inventory_levels", {
+const inventorySchema = pgSchema("inventory");
+
+export const inventoryLevels = inventorySchema.table("inventory_levels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
@@ -47,7 +49,7 @@ export const transactionTypeEnum = [
 export type TransactionType = typeof transactionTypeEnum[number];
 
 // Standardized adjustment reasons lookup table
-export const adjustmentReasons = pgTable("adjustment_reasons", {
+export const adjustmentReasons = inventorySchema.table("adjustment_reasons", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 30 }).notNull().unique(),
   name: text("name").notNull(),
@@ -82,7 +84,7 @@ export const varianceTypeEnum = [
 export type VarianceType = typeof varianceTypeEnum[number];
 
 // Cycle count sessions (monthly reconciliation)
-export const cycleCounts = pgTable("cycle_counts", {
+export const cycleCounts = inventorySchema.table("cycle_counts", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: varchar("name", { length: 100 }).notNull(), // e.g., "January 2026 Cycle Count"
   description: text("description"),
@@ -116,7 +118,7 @@ export type CycleCount = typeof cycleCounts.$inferSelect;
 
 // Inventory transactions ledger (audit trail) - Full WMS
 // Every inventory movement is logged here for complete audit trail
-export const inventoryTransactions = pgTable("inventory_transactions", {
+export const inventoryTransactions = inventorySchema.table("inventory_transactions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
 
@@ -184,7 +186,7 @@ export const autoGenerateTriggerEnum = ["after_pick", "after_wave", "scheduled",
 export type AutoGenerateTrigger = typeof autoGenerateTriggerEnum[number];
 
 // Warehouse settings - configurable per warehouse
-export const warehouseSettings = pgTable("warehouse_settings", {
+export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   warehouseId: integer("warehouse_id").references(() => warehouses.id), // Link to actual warehouse (null = DEFAULT global settings)
   warehouseCode: varchar("warehouse_code", { length: 50 }).notNull().unique().default("DEFAULT"),
@@ -253,7 +255,7 @@ export type ReplenTaskStatus = typeof replenTaskStatusEnum[number];
 
 // Replenishment tier defaults - tier-based rules by UOM hierarchy level
 // These are the DEFAULT rules that apply to all products at a given tier
-export const replenTierDefaults = pgTable("replen_tier_defaults", {
+export const replenTierDefaults = inventorySchema.table("replen_tier_defaults", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   warehouseId: integer("warehouse_id").references(() => warehouses.id), // Which warehouse this rule applies to (null = global default for all warehouses)
   hierarchyLevel: integer("hierarchy_level").notNull(), // Which tier this applies to (1=each, 2=pack, 3=case, etc.)
@@ -282,7 +284,7 @@ export type ReplenTierDefault = typeof replenTierDefaults.$inferSelect;
 
 // Replenishment SKU overrides - product-specific exceptions to tier defaults
 // Only create these when a product needs DIFFERENT behavior than its tier default
-export const replenRules = pgTable("replen_rules", {
+export const replenRules = inventorySchema.table("replen_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productId: integer("product_id").references(() => products.id), // Which product this override applies to
   pickProductVariantId: integer("pick_product_variant_id").references(() => productVariants.id),
@@ -311,7 +313,7 @@ export type ReplenRule = typeof replenRules.$inferSelect;
 
 // Per-location replen configuration overrides
 // product_variant_id NULL = location-wide default, non-NULL = SKU-specific override at that location
-export const locationReplenConfig = pgTable("location_replen_config", {
+export const locationReplenConfig = inventorySchema.table("location_replen_config", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
@@ -334,7 +336,7 @@ export type InsertLocationReplenConfig = z.infer<typeof insertLocationReplenConf
 export type LocationReplenConfig = typeof locationReplenConfig.$inferSelect;
 
 // Replenishment tasks - work queue for warehouse workers
-export const replenTasks = pgTable("replen_tasks", {
+export const replenTasks = inventorySchema.table("replen_tasks", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   replenRuleId: integer("replen_rule_id").references(() => replenRules.id),
   fromLocationId: integer("from_location_id").notNull().references(() => warehouseLocations.id),
@@ -373,7 +375,7 @@ export type InsertReplenTask = z.infer<typeof insertReplenTaskSchema>;
 export type ReplenTask = typeof replenTasks.$inferSelect;
 
 // Individual bin counts within a cycle count session
-export const cycleCountItems = pgTable("cycle_count_items", {
+export const cycleCountItems = inventorySchema.table("cycle_count_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   cycleCountId: integer("cycle_count_id").notNull().references(() => cycleCounts.id, { onDelete: "cascade" }),
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
@@ -431,7 +433,7 @@ export type CycleCountItem = typeof cycleCountItems.$inferSelect;
 export const inventoryLotStatusEnum = ["active", "depleted", "expired"] as const;
 export type InventoryLotStatus = typeof inventoryLotStatusEnum[number];
 
-export const inventoryLots = pgTable("inventory_lots", {
+export const inventoryLots = inventorySchema.table("inventory_lots", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   lotNumber: varchar("lot_number", { length: 50 }).notNull(), // Auto: LOT-YYYYMMDD-###
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
@@ -460,7 +462,6 @@ export type InsertInventoryLot = z.infer<typeof insertInventoryLotSchema>;
 export type InventoryLot = typeof inventoryLots.$inferSelect;
 
 
-export const inventorySchema = pgSchema('inventory');
 
 export const orderLineCosts = inventorySchema.table('order_line_costs', {
   id: integer('id').primaryKey().generatedAlwaysAsIdentity(),

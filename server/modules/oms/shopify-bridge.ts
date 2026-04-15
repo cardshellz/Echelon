@@ -59,7 +59,8 @@ export async function bridgeShopifyOrderToOms(
     }
 
     if (connResult.rows.length === 0) {
-      console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown channel`);
+      // Debug only — skip logging every ignored order (floods logs)
+      // console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown channel`);
       return;
     }
     
@@ -189,9 +190,9 @@ export async function backfillShopifyOrders(
   const unsynced = await db.execute(sql`
     SELECT so.id FROM shopify_orders so
     WHERE NOT EXISTS (
-      SELECT 1 FROM oms_orders oo
+      SELECT 1 FROM oms.oms_orders oo
       WHERE oo.external_order_id = so.id
-        AND oo.channel_id IN (SELECT id FROM channels WHERE provider = 'shopify')
+        AND oo.channel_id IN (SELECT id FROM channels.channels WHERE provider = 'shopify')
     )
     ORDER BY so.created_at DESC
     LIMIT ${limit}

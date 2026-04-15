@@ -435,7 +435,7 @@ export async function getEvents(filters?: {
   const limit = filters?.limit || 100;
 
   const result = await pool.query(
-    `SELECT * FROM subscription_events ${whereClause} ORDER BY created_at DESC LIMIT $${idx}`,
+    `SELECT * FROM membership.subscription_events ${whereClause} ORDER BY created_at DESC LIMIT $${idx}`,
     [...vals, limit]
   );
   return result.rows;

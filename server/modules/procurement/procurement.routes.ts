@@ -3111,4 +3111,199 @@ export function registerPurchasingRoutes(app: Express) {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // ===== PURCHASING DASHBOARD ROUTES =====
+
+  // GET /api/purchasing/dashboard
+  app.get("/api/purchasing/dashboard", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const configuredLookback = await storage.getVelocityLookbackDays();
+      const lookbackDays = parseInt(req.query.lookbackDays as string) || configuredLookback;
+      const data = await storage.getDashboardData(lookbackDays);
+      res.json(data);
+    } catch (error) {
+      console.error("Error fetching purchasing dashboard:", error);
+      res.status(500).json({ error: "Failed to fetch dashboard data" });
+    }
+  });
+
+  // GET /api/purchasing/exclusion-rules
+  app.get("/api/purchasing/exclusion-rules", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const rules = await storage.getReorderExclusionRules();
+      const totalExcluded = await storage.getTotalExcludedProducts();
+
+      // Get match counts for each rule
+      const rulesWithCounts = await Promise.all(
+        rules.map(async (r: any) => ({
+          ...r,
+          matchCount: await storage.getExclusionRuleMatchCount(r.field, r.value),
+        }))
+      );
+
+      res.json({ rules: rulesWithCounts, totalExcluded });
+    } catch (error) {
+      console.error("Error fetching exclusion rules:", error);
+      res.status(500).json({ error: "Failed to fetch exclusion rules" });
+    }
+  });
+
+  // POST /api/purchasing/exclusion-rules
+  app.post("/api/purchasing/exclusion-rules", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { field, value } = req.body;
+      const validFields = ["category", "brand", "product_type", "sku_prefix", "sku_exact", "tag"];
+      if (!field || !validFields.includes(field)) {
+        return res.status(400).json({ error: `field must be one of: ${validFields.join(", ")}` });
+      }
+      if (!value || typeof value !== "string" || value.trim().length === 0) {
+        return res.status(400).json({ error: "value is required" });
+      }
+
+      const userId = (req as any).user?.id ?? req.session.user?.id;
+      const rule = await storage.createReorderExclusionRule({
+        field,
+        value: value.trim(),
+        createdBy: userId,
+      });
+      const matchCount = await storage.getExclusionRuleMatchCount(rule.field, rule.value);
+      res.status(201).json({ ...rule, matchCount });
+    } catch (error: any) {
+      if (error?.message?.includes("unique") || error?.code === "23505") {
+        return res.status(409).json({ error: "Rule already exists" });
+      }
+      console.error("Error creating exclusion rule:", error);
+      res.status(500).json({ error: "Failed to create exclusion rule" });
+    }
+  });
+
+  // DELETE /api/purchasing/exclusion-rules/:id
+  app.delete("/api/purchasing/exclusion-rules/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteReorderExclusionRule(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Rule not found" });
+      }
+      res.json({ ok: true });
+    } catch (error) {
+      console.error("Error deleting exclusion rule:", error);
+      res.status(500).json({ error: "Failed to delete exclusion rule" });
+    }
+  });
+
+  // GET /api/purchasing/exclusion-rules/field-values?field=category
+  // Returns distinct values for a given field from products table
+  app.get("/api/purchasing/exclusion-rules/field-values", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const field = String(req.query.field || "").trim();
+      const allowedFields: Record<string, string> = {
+        category: "category",
+        brand: "brand",
+        product_type: "product_type",
+        tag: null, // handled separately — tags is jsonb array
+      };
+      if (!field || !(field in allowedFields)) {
+        return res.status(400).json({ error: "Invalid field. Must be one of: category, brand, product_type, tag" });
+      }
+      let values: string[] = [];
+      if (field === "tag") {
+        // Unnest tags jsonb array
+        const rows = await db.execute(sql`
+          SELECT DISTINCT trim(tag::text, '"') AS value
+          FROM catalog.products, jsonb_array_elements_text(tags) AS tag
+          WHERE tags IS NOT NULL AND jsonb_array_length(tags) > 0
+          ORDER BY value
+        `);
+        values = (rows.rows as any[]).map(r => r.value).filter(Boolean);
+      } else {
+        const col = allowedFields[field]!;
+        const rows = await db.execute(sql`
+          SELECT DISTINCT ${sql.raw(col)} AS value
+          FROM catalog.products
+          WHERE is_active = true AND ${sql.raw(col)} IS NOT NULL AND ${sql.raw(col)} != ''
+          ORDER BY value
+        `);
+        values = (rows.rows as any[]).map(r => r.value).filter(Boolean);
+      }
+      res.json({ field, values });
+    } catch (error: any) {
+      console.error("Error fetching field values:", error);
+      res.status(500).json({ error: "Failed to fetch field values" });
+    }
+  });
+
+  // PATCH /api/purchasing/products/:productId/reorder-excluded
+  app.patch("/api/purchasing/products/:productId/reorder-excluded", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const { excluded } = req.body;
+      if (typeof excluded !== "boolean") {
+        return res.status(400).json({ error: "excluded must be a boolean" });
+      }
+      await storage.setProductReorderExcluded(productId, excluded);
+      res.json({ ok: true });
+    } catch (error) {
+      console.error("Error toggling product exclusion:", error);
+      res.status(500).json({ error: "Failed to update product exclusion" });
+    }
+  });
+
+  // GET /api/purchasing/auto-draft/status
+  app.get("/api/purchasing/auto-draft/status", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const run = await storage.getLatestAutoDraftRun();
+      res.json(run || null);
+    } catch (error) {
+      console.error("Error fetching auto-draft status:", error);
+      res.status(500).json({ error: "Failed to fetch auto-draft status" });
+    }
+  });
+
+  // POST /api/purchasing/auto-draft/run
+  app.post("/api/purchasing/auto-draft/run", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const user = (req as any).user ?? req.session.user;
+      if (user?.role !== "admin") {
+        return res.status(403).json({ error: "Admin role required" });
+      }
+
+      // Import and run the job asynchronously
+      const { runAutoDraftJob } = await import("../jobs/auto-draft.job");
+      runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: user?.id })
+        .catch((err: any) => console.error("[Auto-draft] manual run failed:", err));
+
+      res.status(202).json({ message: "Auto-draft job started" });
+    } catch (error) {
+      console.error("Error triggering auto-draft:", error);
+      res.status(500).json({ error: "Failed to trigger auto-draft" });
+    }
+  });
+
+  // GET /api/purchasing/auto-draft-settings
+  app.get("/api/purchasing/auto-draft-settings", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const settings = await storage.getAutoDraftSettings();
+      res.json(settings);
+    } catch (error) {
+      console.error("Error fetching auto-draft settings:", error);
+      res.status(500).json({ error: "Failed to fetch settings" });
+    }
+  });
+
+  // PATCH /api/purchasing/auto-draft-settings
+  app.patch("/api/purchasing/auto-draft-settings", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { includeOrderSoon, skipOnOpenPo, skipNoVendor } = req.body;
+      await storage.updateAutoDraftSettings(undefined, {
+        includeOrderSoon,
+        skipOnOpenPo,
+        skipNoVendor,
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      console.error("Error updating auto-draft settings:", error);
+      res.status(500).json({ error: "Failed to update settings" });
+    }
+  });
 }
