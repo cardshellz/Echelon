@@ -1174,6 +1174,12 @@ export default function Picking() {
       // Ignore modifier keys and special keys
       if (e.ctrlKey || e.altKey || e.metaKey) return;
       
+      // If user is focused on the manual input, let its own handlers (onChange/onKeyDown) deal with it
+      // to avoid double-processing the Enter or characters.
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      
       // Clear timeout on each keystroke
       if (scanBufferTimeoutRef.current) {
         clearTimeout(scanBufferTimeoutRef.current);
@@ -1685,6 +1691,13 @@ export default function Picking() {
   // Update processScanRef with current scan logic (for global keyboard capture)
   useEffect(() => {
     processScanRef.current = (value: string) => {
+      if (pickerViewMode === "focus") {
+        // Card mode / focus mode logic
+        handleScan(value);
+        return;
+      }
+      
+      // List mode logic
       if (!activeWork || !value.trim()) {
         addDebug(`Global scan: no value or no order`);
         return;
@@ -1727,7 +1740,7 @@ export default function Picking() {
         }, 1000);
       }
     };
-  }, [activeWork, playSound, triggerHaptic, maintainFocus]);
+  }, [activeWork, playSound, triggerHaptic, maintainFocus, pickerViewMode]);
   
   // Handle picking ONE unit of an item (for scanning - increments by 1)
   const handleListItemPickOne = (idx: number) => {
