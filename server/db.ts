@@ -31,7 +31,15 @@ export const db = drizzle(pool, { schema });
 
 // Run startup migrations to ensure schema is up to date
 export async function runStartupMigrations(): Promise<void> {
-  const client = await pool.connect();
+  // Use a SEPARATE connection so it doesn't block the shared pool
+  const migrationsPool = new Pool({
+    connectionString,
+    ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+    max: 1,
+    idleTimeoutMillis: 10000,
+    connectionTimeoutMillis: 15000,
+  });
+  const client = await migrationsPool.connect();
   try {
     // Create combined_order_groups table if it doesn't exist
     await client.query(`
@@ -836,5 +844,6 @@ export async function runStartupMigrations(): Promise<void> {
     console.error("Error running startup migrations:", error);
   } finally {
     client.release();
+    await migrationsPool.end().catch(() => {}); // Close the separate pool
   }
 }
