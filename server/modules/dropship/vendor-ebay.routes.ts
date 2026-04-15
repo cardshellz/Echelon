@@ -18,6 +18,7 @@ import { requireVendorAuth } from "./vendor-auth";
 import { pool } from "../../db";
 import { createInventoryAtpService } from "../inventory/atp.service";
 import { db } from "../../db";
+import { EbayClient } from "./infrastructure/ebay.client";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -67,20 +68,21 @@ export async function getVendorEbayToken(vendorId: number): Promise<string | nul
   const client = await pool.connect();
   try {
     const result = await client.query(
-      `SELECT ebay_oauth_token, ebay_refresh_token, ebay_token_expires_at, ebay_environment
-       FROM dropship_vendors WHERE id = $1`,
+      `SELECT access_token, refresh_token, token_expires_at as expires_at, config
+       FROM dropship_vendor_channels 
+       WHERE vendor_id = $1 AND platform = 'ebay' AND status = 'active'`,
       [vendorId],
     );
 
     if (result.rows.length === 0) return null;
-    const vendor = result.rows[0];
+    const channel = result.rows[0];
 
-    if (!vendor.ebay_oauth_token || !vendor.ebay_refresh_token) return null;
+    if (!channel.access_token || !channel.refresh_token) return null;
 
     // Check if token is still valid
-    const expiresAt = new Date(vendor.ebay_token_expires_at);
+    const expiresAt = new Date(channel.expires_at);
     if (expiresAt.getTime() - Date.now() > TOKEN_REFRESH_BUFFER_MS) {
-      return vendor.ebay_oauth_token;
+      return channel.access_token;
     }
 
     // Token expired or about to — refresh
@@ -98,7 +100,7 @@ export async function getVendorEbayToken(vendorId: number): Promise<string | nul
       },
       body: new URLSearchParams({
         grant_type: "refresh_token",
-        refresh_token: vendor.ebay_refresh_token,
+        refresh_token: channel.refresh_token,
         scope: DEFAULT_SCOPES,
       }).toString(),
     });
@@ -112,15 +114,15 @@ export async function getVendorEbayToken(vendorId: number): Promise<string | nul
     const tokenData = await response.json();
     const now = new Date();
     const newExpiresAt = new Date(now.getTime() + tokenData.expires_in * 1000);
-    const newRefreshToken = tokenData.refresh_token || vendor.ebay_refresh_token;
+    const newRefreshToken = tokenData.refresh_token || channel.refresh_token;
 
     await client.query(
-      `UPDATE dropship_vendors SET
-         ebay_oauth_token = $1,
-         ebay_refresh_token = $2,
-         ebay_token_expires_at = $3,
+      `UPDATE dropship_vendor_channels SET
+         access_token = $1,
+         refresh_token = $2,
+         token_expires_at = $3,
          updated_at = NOW()
-       WHERE id = $4`,
+       WHERE vendor_id = $4 AND platform = 'ebay'`,
       [tokenData.access_token, newRefreshToken, newExpiresAt, vendorId],
     );
 
@@ -300,23 +302,26 @@ export function registerVendorEbayRoutes(app: Express): void {
 
       const client = await pool.connect();
       try {
-        // Store tokens on vendor
+        // Store tokens on vendor_channels
         await client.query(
-          `UPDATE dropship_vendors SET
-             ebay_oauth_token = $1,
-             ebay_refresh_token = $2,
-             ebay_token_expires_at = $3,
-             ebay_user_id = $4,
-             ebay_environment = $5,
-             updated_at = NOW()
-           WHERE id = $6`,
+          `INSERT INTO dropship_vendor_channels 
+             (vendor_id, platform, platform_account_id, access_token, refresh_token, token_expires_at, config, status)
+           VALUES ($1, 'ebay', $2, $3, $4, $5, $6, 'active')
+           ON CONFLICT (vendor_id, platform) DO UPDATE SET
+             platform_account_id = EXCLUDED.platform_account_id,
+             access_token = EXCLUDED.access_token,
+             refresh_token = EXCLUDED.refresh_token,
+             token_expires_at = EXCLUDED.token_expires_at,
+             config = EXCLUDED.config,
+             status = 'active',
+             updated_at = NOW()`,
           [
+            vendorId,
+            ebayUserId,
             tokenData.access_token,
             tokenData.refresh_token,
             accessTokenExpiresAt,
-            ebayUserId,
-            config.environment,
-            vendorId,
+            JSON.stringify({ environment: config.environment }),
           ],
         );
 
@@ -324,6 +329,10 @@ export function registerVendorEbayRoutes(app: Express): void {
       } finally {
         client.release();
       }
+
+      // Application Layer Execution: Seed the Vendor's eBay account with Dropship standard policies
+      // Execute without blocking the redirect UX.
+      EbayClient.injectStandardPolicies(tokenData.access_token).catch(e => console.error("Policy seeding background failure:", e));
 
       res.redirect(`${VENDOR_PORTAL_URL}/settings?ebay=connected`);
     } catch (err: any) {
@@ -341,8 +350,10 @@ export function registerVendorEbayRoutes(app: Express): void {
       const client = await pool.connect();
       try {
         const result = await client.query(
-          `SELECT ebay_oauth_token, ebay_refresh_token, ebay_token_expires_at, ebay_user_id, ebay_environment
-           FROM dropship_vendors WHERE id = $1`,
+          `SELECT access_token as ebay_oauth_token, refresh_token as ebay_refresh_token, 
+                  token_expires_at as ebay_token_expires_at, platform_account_id as ebay_user_id,
+                  config->>'environment' as ebay_environment
+           FROM dropship_vendor_channels WHERE vendor_id = $1 AND platform = 'ebay' AND status = 'active'`,
           [vendorId],
         );
 
@@ -378,13 +389,12 @@ export function registerVendorEbayRoutes(app: Express): void {
       const client = await pool.connect();
       try {
         await client.query(
-          `UPDATE dropship_vendors SET
-             ebay_oauth_token = NULL,
-             ebay_refresh_token = NULL,
-             ebay_token_expires_at = NULL,
-             ebay_user_id = NULL,
+          `UPDATE dropship_vendor_channels SET
+             status = 'disconnected',
+             access_token = NULL,
+             refresh_token = NULL,
              updated_at = NOW()
-           WHERE id = $1`,
+           WHERE vendor_id = $1 AND platform = 'ebay'`,
           [vendorId],
         );
         res.json({ success: true, message: "eBay disconnected" });

@@ -1554,7 +1554,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         data-testid="btn-complete-all"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
-                        Mark All Received
+                        Accept All Quantities
                       </Button>
                       <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
@@ -1563,7 +1563,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         data-testid="btn-close-receipt"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
-                        Receive &amp; Update Inventory
+                        Finalize &amp; Update Inventory
                       </Button>
                     </>
                   )}

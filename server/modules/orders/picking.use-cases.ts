@@ -1,4 +1,6 @@
 import { eq, and, sql } from "drizzle-orm";
+import { IntegrityError, ValidationError } from "../../../shared/errors";
+import { AuditLogger } from "../../infrastructure/auditLogger";
 import {
   inventoryLevels,
   warehouseLocations,
@@ -134,7 +136,7 @@ export type PickQueueOrder = any; // Pass-through type from storage
 // Service
 // ---------------------------------------------------------------------------
 
-class PickingService {
+export class PickingUseCases {
   constructor(
     private readonly db: DrizzleDb,
     private readonly inventoryCore: InventoryCore,
@@ -177,30 +179,30 @@ class PickingService {
     userId?: string;
     deviceType?: string;
     sessionId?: string;
-  }): Promise<PickItemResult> {
+  }): Promise<{ success: true; item: OrderItem; inventory: PickInventoryContext }> {
     const { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId, userId, deviceType, sessionId } = params;
 
     // Validate status enum
     if (!itemStatusEnum.includes(status as any)) {
-      return { success: false, error: "invalid_status", message: `Status must be one of: ${itemStatusEnum.join(", ")}` };
+      throw new ValidationError(`Status must be one of: ${itemStatusEnum.join(", ")}`);
     }
 
     // Load item before update
     const beforeItem = await this.storage.getOrderItemById(itemId);
     if (!beforeItem) {
-      return { success: false, error: "not_found", message: `Item ${itemId} not found` };
+      throw new IntegrityError(`Item ${itemId} not found`);
     }
 
     // Prevent double-pick
     if (status === "completed" && beforeItem.status === "completed") {
-      return { success: false, error: "already_picked", message: `Item ${itemId} is already completed` };
+      throw new IntegrityError(`Item ${itemId} is already completed`);
     }
 
     // Validate pickedQuantity bounds
     if (pickedQuantity !== undefined) {
       const qty = Number(pickedQuantity);
       if (!Number.isInteger(qty) || qty < 0 || qty > beforeItem.quantity) {
-        return { success: false, error: "invalid_quantity", message: `pickedQuantity must be an integer between 0 and ${beforeItem.quantity}` };
+        throw new ValidationError(`pickedQuantity must be an integer between 0 and ${beforeItem.quantity}`);
       }
     }
 
@@ -210,7 +212,7 @@ class PickingService {
     );
 
     if (!item) {
-      return { success: false, error: "status_conflict", message: `Item ${itemId} status was changed by another request` };
+      throw new IntegrityError(`Item ${itemId} status was changed by another request`);
     }
 
     // Log the action (fire-and-forget)
@@ -223,7 +225,7 @@ class PickingService {
     else if (status === "short") actionType = "item_shorted";
     else if (pickedQuantity !== undefined && beforeItem.pickedQuantity !== pickedQuantity) actionType = "item_quantity_adjusted";
 
-    this.storage.createPickingLog({
+    await this.storage.createPickingLog({
       actionType,
       pickerId: pickerId || undefined,
       pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -244,7 +246,7 @@ class PickingService {
       deviceType: deviceType || "desktop",
       sessionId,
       pickMethod: pickMethod || "manual",
-    }).catch((err: any) => console.warn("[PickingLog] Failed to log item action:", err.message));
+    });
 
     // Build inventory context for picker UI
     const inventoryCtx: PickInventoryContext = {
@@ -342,7 +344,7 @@ class PickingService {
         }
 
         // Log discrepancy to picking_logs (fire-and-forget)
-        this.storage.createPickingLog({
+        await this.storage.createPickingLog({
           actionType: "inventory_discrepancy",
           pickerId: pickerId || undefined,
           pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -358,7 +360,7 @@ class PickingService {
           reason: deductResult.message,
           deviceType: deviceType || "desktop",
           sessionId,
-        }).catch((err: any) => console.warn("[PickingLog] discrepancy log failed:", err.message));
+        });
       }
       // else: noVariant = true (non-inventory item) — no deduction needed, inventoryCtx stays default
     }
@@ -538,17 +540,17 @@ class PickingService {
   // 2. claimOrder
   // -------------------------------------------------------------------------
 
-  async claimOrder(orderId: number, pickerId: string, deviceType?: string, sessionId?: string): Promise<{ order: Order; items: OrderItem[] } | null> {
-    if (!pickerId) return null;
+  async claimOrder(orderId: number, pickerId: string, deviceType?: string, sessionId?: string): Promise<{ order: Order; items: OrderItem[] }> { 
+    if (!pickerId) throw new ValidationError("pickerId is required");
 
     const orderBefore = await this.storage.getOrderById(orderId);
 
     const order = await this.storage.claimOrder(orderId, pickerId);
-    if (!order) return null;
+    if (!order) throw new IntegrityError("Order is no longer available");
 
     // Audit log (fire-and-forget)
     const picker = await this.storage.getUser(pickerId);
-    this.storage.createPickingLog({
+    await this.storage.createPickingLog({
       actionType: "order_claimed",
       pickerId,
       pickerName: picker?.displayName || picker?.username || pickerId,
@@ -559,7 +561,7 @@ class PickingService {
       orderStatusAfter: order.warehouseStatus,
       deviceType: deviceType || "desktop",
       sessionId,
-    }).catch((err: any) => console.warn("[PickingLog] Failed to log order_claimed:", err.message));
+    });
 
     const items = await this.storage.getOrderItems(orderId);
     return { order, items };
@@ -584,7 +586,7 @@ class PickingService {
     // Audit log
     const pickerId = orderBefore?.assignedPickerId;
     const picker = pickerId ? await this.storage.getUser(pickerId) : null;
-    this.storage.createPickingLog({
+    await this.storage.createPickingLog({
       actionType: "order_released",
       pickerId: pickerId || undefined,
       pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -596,7 +598,7 @@ class PickingService {
       reason: options?.reason || (resetProgress ? "Progress reset" : "Progress preserved"),
       deviceType: options?.deviceType || "desktop",
       sessionId: options?.sessionId,
-    }).catch((err: any) => console.warn("[PickingLog] Failed to log order_released:", err.message));
+    });
 
     return order;
   }
@@ -612,7 +614,7 @@ class PickingService {
 
     const pickerId = order.assignedPickerId;
     const picker = pickerId ? await this.storage.getUser(pickerId) : null;
-    this.storage.createPickingLog({
+    await this.storage.createPickingLog({
       actionType: "order_completed",
       pickerId: pickerId || undefined,
       pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -623,7 +625,7 @@ class PickingService {
       orderStatusAfter: order.warehouseStatus,
       deviceType: deviceType || "desktop",
       sessionId,
-    }).catch((err: any) => console.warn("[PickingLog] Failed to log order_completed:", err.message));
+    });
 
     return order;
   }
@@ -1193,7 +1195,7 @@ export function createPickingService(
   replenishment: ReplenishmentService,
   storage: Storage,
 ) {
-  return new PickingService(db, inventoryCore, replenishment, storage);
+  return new PickingUseCases(db, inventoryCore, replenishment, storage);
 }
 
-export type { PickingService };
+export type { PickingUseCases as PickingService };

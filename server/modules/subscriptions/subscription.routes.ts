@@ -2,7 +2,8 @@
 import type { Express, Request, Response } from "express";
 import * as storage from "./infrastructure/subscription.repository";
 import * as service from "./application/subscription.use-cases";
-import { createSellingPlanGroup, listSellingPlanGroups, registerSubscriptionWebhooks } from "./selling-plan.service";
+import { createSellingPlanGroupUseCase, listSellingPlanGroupsUseCase } from "./application/selling-plan.use-cases";
+import { registerSubscriptionWebhooksUseCase } from "./application/subscription.use-cases";
 import { processDueBillings } from "./subscription.scheduler";
 
 /**
@@ -173,7 +174,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       if (!productGid) {
         return res.status(400).json({ error: "product_gid required (or set SHOPIFY_MEMBERSHIP_PRODUCT_GID env var)" });
       }
-      const result = await createSellingPlanGroup(productGid);
+      const result = await createSellingPlanGroupUseCase(productGid);
       res.json(result);
     } catch (err: any) {
       console.error("[SubRoutes] Setup selling plans error:", err.message);
@@ -185,7 +186,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   app.post("/api/membership/register-webhooks", async (req: Request, res: Response) => {
     try {
       const baseUrl = req.body?.base_url || `https://${req.headers.host}`;
-      // const registered = await registerSubscriptionWebhooks(baseUrl);
+      // const registered = await registerSubscriptionWebhooksUseCase(baseUrl);
       // res.json({ registered });
       res.json({ registered: ["disabled - handled by shellz-club-app"] });
     } catch (err: any) {
@@ -197,7 +198,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   // ─── Shopify Selling Plans (read from Shopify) ────────────────
   app.get("/api/membership/shopify-selling-plans", async (_req: Request, res: Response) => {
     try {
-      const groups = await listSellingPlanGroups();
+      const groups = await listSellingPlanGroupsUseCase();
       res.json(groups);
     } catch (err: any) {
       console.error("[SubRoutes] Shopify plans error:", err.message);

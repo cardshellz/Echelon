@@ -28,6 +28,7 @@ type DrizzleDb = {
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
   execute: (...args: any[]) => any;
+  transaction: (callback: (tx: any) => Promise<any>) => Promise<any>;
 };
 
 import { InventoryUseCases } from "./inventory.use-cases";
@@ -50,12 +51,12 @@ type Storage = {
   getAllCycleCounts(): Promise<CycleCount[]>;
   getCycleCountById(id: number): Promise<CycleCount | undefined>;
   createCycleCount(data: InsertCycleCount): Promise<CycleCount>;
-  updateCycleCount(id: number, updates: Partial<InsertCycleCount>): Promise<CycleCount | null>;
+  updateCycleCount(id: number, updates: Partial<InsertCycleCount>, tx?: any): Promise<CycleCount | null>;
   deleteCycleCount(id: number): Promise<boolean>;
   // Cycle count items
   getCycleCountItems(cycleCountId: number): Promise<CycleCountItem[]>;
   getCycleCountItemById(id: number): Promise<CycleCountItem | undefined>;
-  updateCycleCountItem(id: number, updates: Partial<any>): Promise<CycleCountItem | null>;
+  updateCycleCountItem(id: number, updates: Partial<any>, tx?: any): Promise<CycleCountItem | null>;
   deleteCycleCountItem(id: number): Promise<boolean>;
   bulkCreateCycleCountItems(items: any[]): Promise<CycleCountItem[]>;
   // Warehouse locations
@@ -295,6 +296,7 @@ export class CycleCountUseCases {
     reasonCode: string,
     notes: string | undefined,
     approvedBy: string | undefined,
+    tx?: any
   ): Promise<{ adjustment: ApprovalAdjustment | null; negativeGuarded: boolean }> {
     let adjustment: ApprovalAdjustment | null = null;
     let negativeGuarded = false;
@@ -302,7 +304,7 @@ export class CycleCountUseCases {
     // Apply inventory adjustment if item has a variant and counted qty
     if (item.productVariantId && item.countedQty !== null) {
       // READ CURRENT (real-time) inventory — NOT the stale snapshot
-      const currentLevelResult = await this.db.execute(sql`
+      const currentLevelResult = await (tx || this.db).execute(sql`
         SELECT COALESCE(variant_qty, 0) as variant_qty
         FROM inventory_levels
         WHERE product_variant_id = ${item.productVariantId}
@@ -325,7 +327,7 @@ export class CycleCountUseCases {
           await this.storage.updateCycleCountItem(item.id, {
             status: "investigate",
             varianceNotes: `${item.varianceNotes || ''}\n[NEGATIVE GUARD] Adjustment of ${realTimeVariance} would result in negative inventory (current: ${currentQty}). Flagged for manual investigation.`.trim(),
-          });
+          }, tx);
           return { adjustment: null, negativeGuarded: true };
         }
 
@@ -335,7 +337,8 @@ export class CycleCountUseCases {
           `staleVariance=${item.varianceQty} realTimeVariance=${realTimeVariance} sku=${item.expectedSku || item.countedSku}`
         );
 
-        await this.inventoryUseCases.adjustInventory({
+        const invUseCases = tx ? this.inventoryUseCases.withTx(tx) : this.inventoryUseCases;
+        await invUseCases.adjustInventory({
           productVariantId: item.productVariantId,
           warehouseLocationId: item.warehouseLocationId,
           qtyDelta: realTimeVariance,
@@ -390,7 +393,7 @@ export class CycleCountUseCases {
       approvedBy,
       approvedAt: new Date(),
       varianceReason: reasonCode,
-    });
+    }, tx);
     await this.reconcileBinAssignment(item);
 
     return { adjustment, negativeGuarded };
@@ -1214,45 +1217,49 @@ export class CycleCountUseCases {
     const adjustmentsMade: ApprovalAdjustment[] = [];
     const { reasonCode, notes, approvedBy } = params;
 
-    // Approve the primary item
-    const { adjustment: adj, negativeGuarded: ng } = await this.approveItemCore(item, reasonCode, notes, approvedBy);
-    if (adj) adjustmentsMade.push(adj);
+    const { linkedItemsApproved } = await this.db.transaction(async (tx: any) => {
+      // Approve the primary item
+      const { adjustment: adj, negativeGuarded: ng } = await this.approveItemCore(item, reasonCode, notes, approvedBy, tx);
+      if (adj) adjustmentsMade.push(adj);
 
-    let linkedItemsApproved = 0;
+      let innerLinkedItemsApproved = 0;
 
-    // Forward link: approve related item
-    if (item.relatedItemId && !ng) {
-      const relatedItem = await this.storage.getCycleCountItemById(item.relatedItemId);
-      if (relatedItem && relatedItem.status !== "approved") {
-        const { adjustment: relAdj } = await this.approveItemCore(relatedItem, reasonCode, notes, approvedBy);
-        if (relAdj) adjustmentsMade.push(relAdj);
-        linkedItemsApproved++;
-      }
-    }
-
-    // Reverse link: approve any item pointing TO this one
-    if (!ng) {
-      const reverseResult = await this.db.execute(sql`
-        SELECT id FROM cycle_count_items
-        WHERE related_item_id = ${itemId}
-        AND status != 'approved'
-        LIMIT 1
-      `);
-
-      if (reverseResult.rows.length > 0) {
-        const reverseItem = await this.storage.getCycleCountItemById(reverseResult.rows[0].id);
-        if (reverseItem && reverseItem.status !== "approved") {
-          const { adjustment: revAdj } = await this.approveItemCore(reverseItem, reasonCode, notes, approvedBy);
-          if (revAdj) adjustmentsMade.push(revAdj);
-          linkedItemsApproved++;
+      // Forward link: approve related item
+      if (item.relatedItemId && !ng) {
+        const relatedItem = await this.storage.getCycleCountItemById(item.relatedItemId);
+        if (relatedItem && relatedItem.status !== "approved") {
+          const { adjustment: relAdj } = await this.approveItemCore(relatedItem, reasonCode, notes, approvedBy, tx);
+          if (relAdj) adjustmentsMade.push(relAdj);
+          innerLinkedItemsApproved++;
         }
       }
-    }
 
-    // Update approved count on cycle count header
-    const allItems = await this.storage.getCycleCountItems(item.cycleCountId);
-    const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
-    await this.storage.updateCycleCount(item.cycleCountId, { approvedVariances: approvedCount });
+      // Reverse link: approve any item pointing TO this one
+      if (!ng) {
+        const reverseResult = await tx.execute(sql`
+          SELECT id FROM cycle_count_items
+          WHERE related_item_id = ${itemId}
+          AND status != 'approved'
+          LIMIT 1
+        `);
+
+        if (reverseResult.rows.length > 0) {
+          const reverseItem = await this.storage.getCycleCountItemById(reverseResult.rows[0].id);
+          if (reverseItem && reverseItem.status !== "approved") {
+            const { adjustment: revAdj } = await this.approveItemCore(reverseItem, reasonCode, notes, approvedBy, tx);
+            if (revAdj) adjustmentsMade.push(revAdj);
+            innerLinkedItemsApproved++;
+          }
+        }
+      }
+
+      // Update approved count on cycle count header
+      const allItems = await this.storage.getCycleCountItems(item.cycleCountId);
+      const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
+      await this.storage.updateCycleCount(item.cycleCountId, { approvedVariances: approvedCount }, tx);
+
+      return { linkedItemsApproved: innerLinkedItemsApproved };
+    });
 
     // Fire channel sync + replen (fire-and-forget)
     await this.firePostApprovalSideEffects(adjustmentsMade);
@@ -1329,40 +1336,42 @@ export class CycleCountUseCases {
         if (item.status === "approved" || item.status === "adjusted") { skipped++; continue; }
         if (!item.varianceType) { skipped++; continue; }
 
-        // Approve primary item (uses real-time qty)
-        console.log(`[CYCLE COUNT] bulkApprove item ${itemId}: sku=${item.expectedSku || item.countedSku} varianceQty=${item.varianceQty} varianceType=${item.varianceType} pvId=${item.productVariantId}`);
-        const { adjustment: adj, negativeGuarded } = await this.approveItemCore(item, reasonCode, notes, approvedBy);
-        if (adj) { allAdjustments.push(adj); adjustmentCount++; }
-        if (negativeGuarded) {
-          negativeGuardedItems.push(`${item.expectedSku || item.countedSku} @ loc:${item.warehouseLocationId}`);
-        } else {
-          approved++;
-        }
-
-        // Handle linked items (mismatch pairs)
-        if (!negativeGuarded) {
-          const linkedIds: number[] = [];
-          if (item.relatedItemId) linkedIds.push(item.relatedItemId);
-          const reverseResult = await this.db.execute(sql`
-            SELECT id FROM cycle_count_items
-            WHERE related_item_id = ${itemId} AND status != 'approved'
-          `);
-          for (const row of reverseResult.rows) {
-            linkedIds.push(row.id);
-          }
-
-          for (const linkedId of linkedIds) {
-            if (processedIds.has(linkedId)) continue;
-            processedIds.add(linkedId);
-
-            const linked = await this.storage.getCycleCountItemById(linkedId);
-            if (!linked || linked.status === "approved") continue;
-
-            const { adjustment: linkAdj } = await this.approveItemCore(linked, reasonCode, notes, approvedBy);
-            if (linkAdj) { allAdjustments.push(linkAdj); adjustmentCount++; }
+        await this.db.transaction(async (tx: any) => {
+          // Approve primary item (uses real-time qty)
+          console.log(`[CYCLE COUNT] bulkApprove item ${itemId}: sku=${item.expectedSku || item.countedSku} varianceQty=${item.varianceQty} varianceType=${item.varianceType} pvId=${item.productVariantId}`);
+          const { adjustment: adj, negativeGuarded } = await this.approveItemCore(item, reasonCode, notes, approvedBy, tx);
+          if (adj) { allAdjustments.push(adj); adjustmentCount++; }
+          if (negativeGuarded) {
+            negativeGuardedItems.push(`${item.expectedSku || item.countedSku} @ loc:${item.warehouseLocationId}`);
+          } else {
             approved++;
           }
-        }
+
+          // Handle linked items (mismatch pairs)
+          if (!negativeGuarded) {
+            const linkedIds: number[] = [];
+            if (item.relatedItemId) linkedIds.push(item.relatedItemId);
+            const reverseResult = await tx.execute(sql`
+              SELECT id FROM cycle_count_items
+              WHERE related_item_id = ${itemId} AND status != 'approved'
+            `);
+            for (const row of reverseResult.rows) {
+              linkedIds.push(row.id);
+            }
+
+            for (const linkedId of linkedIds) {
+              if (processedIds.has(linkedId)) continue;
+              processedIds.add(linkedId);
+
+              const linked = await this.storage.getCycleCountItemById(linkedId);
+              if (!linked || linked.status === "approved") continue;
+
+              const { adjustment: linkAdj } = await this.approveItemCore(linked, reasonCode, notes, approvedBy, tx);
+              if (linkAdj) { allAdjustments.push(linkAdj); adjustmentCount++; }
+              approved++;
+            }
+          }
+        });
       } catch (e: any) {
         errors.push(`Item ${itemId}: ${e.message}`);
       }

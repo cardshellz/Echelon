@@ -46,7 +46,7 @@ function formatCents(cents: number | null | undefined): string {
   return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-type Vendor = { id: number; name: string; code: string; defaultIncoterms?: string | null; email?: string | null };
+type Vendor = { id: number; name: string; code: string; defaultIncoterms?: string | null; email?: string | null; country?: string | null; };
 type PurchaseOrder = {
   id: number;
   poNumber: string;
@@ -699,26 +699,28 @@ export default function PurchaseOrders() {
               </summary>
               <div className="space-y-3 mt-3 pl-4 border-l-2">
                 <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Incoterms</Label>
-                    <Select value={newPO.incoterms} onValueChange={v => setNewPO(prev => ({ ...prev, incoterms: v }))}>
-                      <SelectTrigger className="h-10">
-                        <SelectValue placeholder="Select..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="EXW">EXW</SelectItem>
-                        <SelectItem value="FCA">FCA</SelectItem>
-                        <SelectItem value="FOB">FOB</SelectItem>
-                        <SelectItem value="CFR">CFR</SelectItem>
-                        <SelectItem value="CIF">CIF</SelectItem>
-                        <SelectItem value="CPT">CPT</SelectItem>
-                        <SelectItem value="CIP">CIP</SelectItem>
-                        <SelectItem value="DAP">DAP</SelectItem>
-                        <SelectItem value="DPU">DPU</SelectItem>
-                        <SelectItem value="DDP">DDP</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
+                  {(!selectedVendor || selectedVendor.country !== 'US') && (
+                    <div className="space-y-1">
+                      <Label className="text-xs">Incoterms</Label>
+                      <Select value={newPO.incoterms} onValueChange={v => setNewPO(prev => ({ ...prev, incoterms: v }))}>
+                        <SelectTrigger className="h-10">
+                          <SelectValue placeholder="Select..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="EXW">EXW</SelectItem>
+                          <SelectItem value="FCA">FCA</SelectItem>
+                          <SelectItem value="FOB">FOB</SelectItem>
+                          <SelectItem value="CFR">CFR</SelectItem>
+                          <SelectItem value="CIF">CIF</SelectItem>
+                          <SelectItem value="CPT">CPT</SelectItem>
+                          <SelectItem value="CIP">CIP</SelectItem>
+                          <SelectItem value="DAP">DAP</SelectItem>
+                          <SelectItem value="DPU">DPU</SelectItem>
+                          <SelectItem value="DDP">DDP</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <Label className="text-xs">Expected Delivery</Label>
                     <Input

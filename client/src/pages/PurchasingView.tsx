@@ -2,27 +2,26 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import {
-  TrendingDown,
-  ArrowUpDown,
-  ArrowUp,
+  Activity,
+  AlertTriangle,
   ArrowDown,
-  ShoppingCart,
-  Search,
+  ArrowUp,
+  ArrowUpDown,
   BarChart3,
-  X,
+  Box,
+  BrainCircuit,
+  CheckCircle2,
+  DollarSign,
+  PackageSearch,
+  ShoppingCart,
+  TrendingDown
 } from "lucide-react";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 import {
   Table,
   TableBody,
@@ -32,12 +31,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
+interface DashboardKPIs {
+  criticalRestocks: number;
+  upcomingRestocks: number;
+  idleCapitalCents: number;
+  inboundPipelineValueCents: number;
+  totalOpenLines: number;
+  lastComputedAt: string;
+}
+
 interface ReorderItem {
   productId: number;
   productVariantId?: number;
   sku: string;
   productName: string;
-  variantCount: number;
   totalOnHand: number;
   totalReserved: number;
   available: number;
@@ -51,47 +58,26 @@ interface ReorderItem {
   suggestedOrderPieces: number;
   orderUomUnits: number;
   orderUomLabel: string;
-  onOrderQty: number;
   onOrderPieces: number;
   openPoCount: number;
-  earliestExpectedDate: string | null;
   status: string;
-  lastReceivedAt: string | null;
 }
 
 interface ReorderAnalysis {
   items: ReorderItem[];
-  summary: {
-    totalProducts: number;
-    belowReorderPoint: number;
-    orderSoon: number;
-    noMovement: number;
-    totalOnHand: number;
-  };
   lookbackDays: number;
 }
 
-const STATUS_CONFIG: Record<string, { label: string; className: string; priority: number }> = {
-  stockout: { label: "Stockout", className: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400", priority: 0 },
-  order_now: { label: "Order Now", className: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400", priority: 1 },
-  order_soon: { label: "Order Soon", className: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400", priority: 2 },
-  on_order: { label: "On Order", className: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400", priority: 2.5 },
-  ok: { label: "OK", className: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400", priority: 3 },
-  no_movement: { label: "No Movement", className: "bg-gray-100 text-gray-600 dark:bg-gray-800/30 dark:text-gray-400", priority: 4 },
+const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: any; priority: number }> = {
+  stockout: { label: "Stockout Imminent", bg: "bg-red-500/10", text: "text-red-500", icon: AlertTriangle, priority: 0 },
+  order_now: { label: "Critical Restock", bg: "bg-orange-500/10", text: "text-orange-500", icon: AlertTriangle, priority: 1 },
+  order_soon: { label: "Burn Rate High", bg: "bg-amber-500/10", text: "text-amber-500", icon: Activity, priority: 2 },
+  on_order: { label: "Inbound Pipeline", bg: "bg-blue-500/10", text: "text-blue-500", icon: PackageSearch, priority: 2.5 },
+  ok: { label: "Healthy", bg: "bg-green-500/10", text: "text-green-500", icon: CheckCircle2, priority: 3 },
+  no_movement: { label: "Stagnant", bg: "bg-zinc-500/10", text: "text-zinc-500", icon: Box, priority: 4 },
 };
 
-const LOOKBACK_OPTIONS = [
-  { value: "7", label: "7d" },
-  { value: "14", label: "14d" },
-  { value: "30", label: "30d" },
-  { value: "60", label: "60d" },
-  { value: "90", label: "90d" },
-  { value: "180", label: "180d" },
-];
-
 export default function PurchasingView() {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -99,13 +85,49 @@ export default function PurchasingView() {
   const { toast } = useToast();
   const [, navigate] = useLocation();
 
-  const { data, isLoading } = useQuery<ReorderAnalysis>({
+  const { data: kpis, isLoading: isLoadingKpis } = useQuery<DashboardKPIs>({
+    queryKey: ["/api/purchasing/dashboard"],
+    queryFn: async () => {
+      const res = await fetch("/api/purchasing/dashboard");
+      if (!res.ok) throw new Error("Failed to fetch KPIs");
+      return res.json();
+    },
+    refetchInterval: 30000, // Refresh every 30s
+  });
+
+  const { data: analysis, isLoading: isLoadingAnalysis } = useQuery<ReorderAnalysis>({
     queryKey: ["/api/purchasing/reorder-analysis"],
     queryFn: async () => {
       const res = await fetch("/api/purchasing/reorder-analysis");
       if (!res.ok) throw new Error("Failed to fetch reorder analysis");
       return res.json();
     },
+  });
+
+  const autoDraftMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/purchasing/auto-draft-run", {
+         method: "POST", 
+         headers: { "Content-Type": "application/json" } 
+      });
+      if (!res.ok) throw new Error("Network response was not ok");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      toast({
+        title: "Autonomous Procurement Synced",
+        description: `Successfully analyzed burn rates and updated ${data.count} Vendor POs for ${data.itemsDrafted} critical items.`,
+      });
+    },
+    onError: () => {
+      toast({
+        title: "System Error",
+        description: "The AI agent was unable to execute the PO drafting protocol.",
+        variant: "destructive"
+      });
+    }
   });
 
   const handleSort = (field: string) => {
@@ -117,446 +139,209 @@ export default function PurchasingView() {
     }
   };
 
-  const filtered = (data?.items ?? [])
-    .filter((item) => {
-      if (statusFilter === "need_ordering") {
-        if (item.status !== "order_now" && item.status !== "stockout") return false;
-      } else if (statusFilter !== "all" && item.status !== statusFilter) return false;
-      if (searchQuery) {
-        const q = searchQuery.toLowerCase();
-        return (
-          item.sku.toLowerCase().includes(q) ||
-          item.productName.toLowerCase().includes(q)
-        );
-      }
-      return true;
-    })
-    .sort((a, b) => {
-      let aVal: any, bVal: any;
-      switch (sortField) {
-        case "sku": aVal = a.sku; bVal = b.sku; break;
-        case "name": aVal = a.productName; bVal = b.productName; break;
-        case "onHand": aVal = a.totalOnHand; bVal = b.totalOnHand; break;
-        case "onOrder": aVal = a.onOrderPieces; bVal = b.onOrderPieces; break;
-        case "usage": aVal = a.periodUsage; bVal = b.periodUsage; break;
-        case "dos": aVal = a.daysOfSupply; bVal = b.daysOfSupply; break;
-        case "reorderPt": aVal = a.reorderPoint; bVal = b.reorderPoint; break;
-        case "orderQty": aVal = a.suggestedOrderQty; bVal = b.suggestedOrderQty; break;
-        case "status":
-          aVal = STATUS_CONFIG[a.status]?.priority ?? 99;
-          bVal = STATUS_CONFIG[b.status]?.priority ?? 99;
-          break;
-        default: aVal = a.sku; bVal = b.sku;
-      }
-      if (typeof aVal === "string") {
-        return sortDir === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-      }
-      return sortDir === "asc" ? aVal - bVal : bVal - aVal;
-    });
-
-  // Selection helpers
-  const toggleSelect = (productId: number) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(productId)) next.delete(productId);
-      else next.add(productId);
-      return next;
-    });
-  };
-  const toggleSelectAll = () => {
-    const selectableIds = filtered.filter(i => i.suggestedOrderQty > 0).map(i => i.productId);
-    const allSelected = selectableIds.length > 0 && selectableIds.every(id => selectedIds.has(id));
-    if (allSelected) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(selectableIds));
+  const filtered = (analysis?.items ?? []).sort((a, b) => {
+    let aVal: any, bVal: any;
+    switch (sortField) {
+      case "sku": aVal = a.sku; bVal = b.sku; break;
+      case "onHand": aVal = a.totalOnHand; bVal = b.totalOnHand; break;
+      case "onOrder": aVal = a.onOrderPieces; bVal = b.onOrderPieces; break;
+      case "health": aVal = a.available / (a.reorderPoint || 1); bVal = b.available / (b.reorderPoint || 1); break;
+      case "status":
+        aVal = STATUS_CONFIG[a.status]?.priority ?? 99;
+        bVal = STATUS_CONFIG[b.status]?.priority ?? 99;
+        break;
+      default: aVal = a.sku; bVal = b.sku;
     }
-  };
-  const selectableCount = filtered.filter(i => i.suggestedOrderQty > 0).length;
-  const allSelected = selectableCount > 0 && filtered.filter(i => i.suggestedOrderQty > 0).every(i => selectedIds.has(i.productId));
-
-  // Create PO from selected reorder items
-  const createPoMutation = useMutation({
-    mutationFn: async (items: Array<{ productId: number; productVariantId: number; suggestedQty: number }>) => {
-      const res = await fetch("/api/purchasing/create-po-from-reorder", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        throw new Error(err?.error || "Failed to create PO");
-      }
-      return res.json();
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
-      setSelectedIds(new Set());
-      const poCount = result.purchaseOrders?.length || 1;
-      toast({
-        title: `${poCount} PO${poCount > 1 ? "s" : ""} created`,
-        description: poCount === 1
-          ? `${result.purchaseOrders?.[0]?.poNumber} created as draft`
-          : `${poCount} POs created, grouped by vendor`,
-      });
-      if (poCount === 1 && result.purchaseOrders?.[0]?.id) {
-        navigate(`/purchase-orders/${result.purchaseOrders[0].id}`);
-      } else {
-        navigate("/purchase-orders");
-      }
-    },
-    onError: (err: Error) => {
-      toast({ title: "Failed to create PO", description: err.message, variant: "destructive" });
-    },
+    if (typeof aVal === "string") {
+      return sortDir === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+    }
+    return sortDir === "asc" ? aVal - bVal : bVal - aVal;
   });
 
-  const handleCreatePO = () => {
-    const items = filtered
-      .filter(i => selectedIds.has(i.productId) && i.suggestedOrderQty > 0)
-      .map(i => ({
-        productId: i.productId,
-        productVariantId: i.productVariantId || i.productId, // fallback
-        suggestedQty: i.suggestedOrderQty,
-      }));
-    if (items.length === 0) return;
-    createPoMutation.mutate(items);
-  };
-
   const SortIcon = ({ field }: { field: string }) => {
-    if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground" />;
-    return sortDir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />;
+    if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground ml-1" />;
+    return sortDir === "asc" ? <ArrowUp className="h-3 w-3 ml-1" /> : <ArrowDown className="h-3 w-3 ml-1" />;
   };
 
-  const formatDos = (dos: number) => {
-    if (dos >= 9999) return "∞";
-    return `${dos}d`;
-  };
-
-  const dosColor = (item: ReorderItem) => {
-    if (item.status === "stockout") return "text-red-600 font-bold";
-    if (item.status === "order_now") return "text-orange-600 font-bold";
-    if (item.status === "order_soon") return "text-amber-600";
-    return "";
+  const formatCurrency = (cents: number) => {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format((cents || 0) / 100);
   };
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-10 p-2 md:p-6">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div className="flex flex-col h-full bg-zinc-50 dark:bg-zinc-950">
+      {/* HEADER */}
+      <div className="border-b bg-white dark:bg-zinc-900 sticky top-0 z-10 px-6 py-4 shadow-sm">
+        <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-lg md:text-2xl font-bold tracking-tight flex items-center gap-2">
-              <BarChart3 className="h-5 w-5 md:h-6 md:w-6" />
-              Reorder Analysis
+            <h1 className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50 flex items-center gap-3">
+              <BrainCircuit className="h-6 w-6 text-primary" />
+              Supply Chain Command Center
             </h1>
-            <p className="text-xs md:text-sm text-muted-foreground mt-1">
-              Identify products that need reordering based on velocity and stock levels
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+              Autonomous Inventory Health & Procurement Engine
             </p>
           </div>
-          <div className="relative md:w-64">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
-            <Input
-              placeholder="Search SKU or product..."
-              className="pl-9 h-10"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-          </div>
+
+          <Button 
+            size="lg" 
+            className="gap-2 shadow-lg hover:shadow-xl transition-all"
+            onClick={() => autoDraftMutation.mutate()}
+            disabled={autoDraftMutation.isPending}
+          >
+            {autoDraftMutation.isPending ? (
+              <TrendingDown className="h-4 w-4 animate-bounce" />
+            ) : (
+              <ShoppingCart className="h-4 w-4" />
+            )}
+            Run Draft Protocol
+          </Button>
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col min-h-0 gap-3 p-2 md:p-6">
-      {/* Filters */}
-      <div className="flex flex-wrap gap-2 shrink-0">
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-[160px] h-9 text-sm">
-            <SelectValue placeholder="All Statuses" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Statuses</SelectItem>
-            <SelectItem value="need_ordering">Need Ordering</SelectItem>
-            <SelectItem value="stockout">Stockout</SelectItem>
-            <SelectItem value="order_now">Order Now</SelectItem>
-            <SelectItem value="order_soon">Order Soon</SelectItem>
-            <SelectItem value="on_order">On Order</SelectItem>
-            <SelectItem value="ok">OK</SelectItem>
-            <SelectItem value="no_movement">No Movement</SelectItem>
-          </SelectContent>
-        </Select>
-        {data && (
-          <div className="flex items-center gap-1.5">
-            <TrendingDown className="h-3.5 w-3.5 text-muted-foreground" />
-            <Select
-              value={String(data.lookbackDays)}
-              onValueChange={async (val) => {
-                try {
-                  await fetch("/api/purchasing/velocity-lookback", {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ days: parseInt(val) }),
-                  });
-                  queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
-                } catch (e) {
-                  console.error("Failed to update velocity lookback", e);
-                }
-              }}
-            >
-              <SelectTrigger className="w-[130px] h-9 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {LOOKBACK_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label} velocity window
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        )}
-      </div>
+      <div className="flex-1 p-6 overflow-auto">
+        {/* KPI CARDS */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+          <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-zinc-500">Critical Restocks</CardTitle>
+              <AlertTriangle className="h-4 w-4 text-red-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-zinc-900 dark:text-zinc-50">
+                {isLoadingKpis ? "..." : kpis?.criticalRestocks || 0}
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">SKUs below Reorder Point</p>
+            </CardContent>
+          </Card>
+          
+          <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-zinc-500">Upcoming Restocks</CardTitle>
+              <Activity className="h-4 w-4 text-amber-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-zinc-900 dark:text-zinc-50">
+                {isLoadingKpis ? "..." : kpis?.upcomingRestocks || 0}
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">Approaching 14-day threshold</p>
+            </CardContent>
+          </Card>
 
-      {isLoading ? (
-        <div className="text-sm text-muted-foreground py-12 text-center">Loading reorder analysis...</div>
-      ) : (
-        <div className="flex-1 flex flex-col min-h-0">
-          {/* Mobile cards */}
-          <div className="md:hidden flex-1 overflow-auto space-y-3">
-            {filtered.map((item) => {
-              const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
-              const canSelect = item.suggestedOrderQty > 0;
-              return (
-                <div key={item.productId} className="rounded-md border bg-card p-4">
-                  <div className="flex items-start justify-between mb-2">
-                    <div className="flex items-start gap-2">
-                      {canSelect && (
-                        <Checkbox
-                          checked={selectedIds.has(item.productId)}
-                          onCheckedChange={() => toggleSelect(item.productId)}
-                          className="mt-0.5"
-                        />
-                      )}
-                      <div>
-                        <div className="font-mono font-medium text-primary text-sm">{item.sku}</div>
-                        <div className="text-sm text-muted-foreground mt-0.5">{item.productName}</div>
-                      </div>
-                    </div>
-                    <Badge variant="outline" className={`text-xs ${cfg.className}`}>{cfg.label}</Badge>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs mt-3">
-                    <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">On Hand</div>
-                      <div className="font-mono font-bold">
-                        {item.orderUomUnits > 1
-                          ? <>{Math.floor(item.totalOnHand / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.totalOnHand / item.orderUomUnits) !== 1 ? "s" : ""}</>
-                          : item.totalOnHand.toLocaleString()}
-                      </div>
-                      {item.orderUomUnits > 1 && <div className="text-[10px] text-muted-foreground font-mono">{item.totalOnHand.toLocaleString()} pcs</div>}
-                    </div>
-                    <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">Days Supply</div>
-                      <div className={`font-mono font-bold ${dosColor(item)}`}>{formatDos(item.daysOfSupply)}</div>
-                    </div>
-                    <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">{data?.lookbackDays ?? ""}d Usage</div>
-                      <div className="font-mono font-bold">
-                        {item.periodUsage > 0
-                          ? item.orderUomUnits > 1
-                            ? <>{Math.floor(item.periodUsage / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.periodUsage / item.orderUomUnits) !== 1 ? "s" : ""}</>
-                            : item.periodUsage.toLocaleString()
-                          : "—"}
-                      </div>
-                      {item.periodUsage > 0 && item.orderUomUnits > 1 && <div className="text-[10px] text-muted-foreground font-mono">{item.periodUsage.toLocaleString()} pcs</div>}
-                    </div>
-                  </div>
-                  {item.onOrderPieces > 0 && (
-                    <div className="mt-2 text-xs bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 rounded p-2 text-blue-800 dark:text-blue-400">
-                      On order: <span className="font-mono font-bold">{item.onOrderPieces.toLocaleString()}</span> pcs from {item.openPoCount} PO{item.openPoCount !== 1 ? "s" : ""}
-                    </div>
-                  )}
-                  {item.suggestedOrderQty > 0 && (
-                    <div className="mt-2 text-xs bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800/30 rounded p-2">
-                      Suggested order: <span className="font-mono font-bold">{item.suggestedOrderQty.toLocaleString()}</span> {item.orderUomUnits > 1 ? item.orderUomLabel.toLowerCase() + (item.suggestedOrderQty !== 1 ? "s" : "") : "pcs"}
-                      {item.orderUomUnits > 1 && <span className="text-muted-foreground"> ({item.suggestedOrderPieces.toLocaleString()} pcs)</span>}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-zinc-500">Inbound Pipeline</CardTitle>
+              <PackageSearch className="h-4 w-4 text-blue-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-zinc-900 dark:text-zinc-50">
+                {isLoadingKpis ? "..." : formatCurrency(kpis?.inboundPipelineValueCents || 0)}
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">{kpis?.totalOpenLines || 0} Active PO Lines Transit</p>
+            </CardContent>
+          </Card>
 
-          {/* Desktop table */}
-          <div className="hidden md:block rounded-md border bg-card flex-1 overflow-auto">
+          <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-zinc-500">Capital Efficiency</CardTitle>
+              <DollarSign className="h-4 w-4 text-zinc-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-zinc-900 dark:text-zinc-50">
+                {isLoadingKpis ? "..." : formatCurrency(kpis?.idleCapitalCents || 0)}
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">Capital in stagnant inventory {'(>180d)'}</p>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* DATA TABLE */}
+        <Card className="dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+          <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
+            <CardTitle className="text-lg">Inventory Burn Telemetry</CardTitle>
+            <CardDescription>Live health monitoring of catalog velocity against system reorder parameters.</CardDescription>
+          </CardHeader>
+          <div className="overflow-x-auto">
             <Table>
-              <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                <TableRow>
-                  <TableHead className="w-[40px]">
-                    <Checkbox
-                      checked={allSelected}
-                      onCheckedChange={toggleSelectAll}
-                      aria-label="Select all"
-                    />
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="w-[80px]" />
+                  <TableHead className="cursor-pointer font-semibold" onClick={() => handleSort("sku")}>
+                    <div className="flex items-center">SKU <SortIcon field="sku" /></div>
                   </TableHead>
-                  <TableHead className="w-[160px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
-                    <div className="flex items-center gap-1">SKU <SortIcon field="sku" /></div>
+                  <TableHead>Product</TableHead>
+                  <TableHead className="w-[200px] cursor-pointer font-semibold" onClick={() => handleSort("health")}>
+                    <div className="flex items-center">Health Indicator <SortIcon field="health" /></div>
                   </TableHead>
-                  <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("name")}>
-                    <div className="flex items-center gap-1">Product <SortIcon field="name" /></div>
+                  <TableHead className="text-right cursor-pointer font-semibold" onClick={() => handleSort("onHand")}>
+                    <div className="flex justify-end items-center">Available <SortIcon field="onHand" /></div>
                   </TableHead>
-                  <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("onHand")}>
-                    <div className="flex items-center justify-end gap-1">On Hand <SortIcon field="onHand" /></div>
-                  </TableHead>
-                  <TableHead className="text-right w-[90px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("onOrder")}>
-                    <div className="flex items-center justify-end gap-1">On Order <SortIcon field="onOrder" /></div>
-                  </TableHead>
-                  <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("usage")}>
-                    <div className="flex items-center justify-end gap-1">{data?.lookbackDays ?? ""}d Usage <SortIcon field="usage" /></div>
-                  </TableHead>
-                  <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("dos")}>
-                    <div className="flex items-center justify-end gap-1">Days Supply <SortIcon field="dos" /></div>
-                  </TableHead>
-                  <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reorderPt")}>
-                    <div className="flex items-center justify-end gap-1">Reorder Pt <SortIcon field="reorderPt" /></div>
-                  </TableHead>
-                  <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("orderQty")}>
-                    <div className="flex items-center justify-end gap-1">Order Qty <SortIcon field="orderQty" /></div>
-                  </TableHead>
-                  <TableHead className="w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("status")}>
-                    <div className="flex items-center gap-1">Status <SortIcon field="status" /></div>
+                  <TableHead className="text-right">Reorder Pt</TableHead>
+                  <TableHead className="text-right">Supply</TableHead>
+                  <TableHead className="text-right cursor-pointer font-semibold" onClick={() => handleSort("status")}>
+                    <div className="flex justify-end items-center">Status <SortIcon field="status" /></div>
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((item) => {
-                  const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
-                  const canSelect = item.suggestedOrderQty > 0;
-                  return (
-                    <TableRow key={item.productId} className={selectedIds.has(item.productId) ? "bg-primary/5" : ""}>
-                      <TableCell>
-                        {canSelect ? (
-                          <Checkbox
-                            checked={selectedIds.has(item.productId)}
-                            onCheckedChange={() => toggleSelect(item.productId)}
-                          />
-                        ) : <span className="w-4" />}
-                      </TableCell>
-                      <TableCell className="font-mono font-medium text-primary">{item.sku}</TableCell>
-                      <TableCell className="truncate max-w-[200px]">{item.productName}</TableCell>
-                      <TableCell className="text-right font-mono font-bold">
-                        {item.orderUomUnits > 1 ? (
-                          <div>
-                            <span>{Math.floor(item.totalOnHand / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.totalOnHand / item.orderUomUnits) !== 1 ? "s" : ""}</span>
-                            <div className="text-[10px] text-muted-foreground font-normal">{item.totalOnHand.toLocaleString()} pcs</div>
-                          </div>
-                        ) : (
-                          <span>{item.totalOnHand.toLocaleString()}</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {item.onOrderPieces > 0 ? (
-                          <div>
-                            <span className="text-blue-600 font-medium">
-                              {item.onOrderQty > 0 && item.orderUomUnits > 1
-                                ? <>{item.onOrderQty.toLocaleString()} {item.orderUomLabel.toLowerCase()}{item.onOrderQty !== 1 ? "s" : ""}</>
-                                : <>{item.onOrderPieces.toLocaleString()}</>}
-                            </span>
-                            {item.orderUomUnits > 1 && (
-                              <div className="text-[10px] text-muted-foreground">{item.onOrderPieces.toLocaleString()} pcs</div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-muted-foreground">
-                        {item.periodUsage > 0 ? (
-                          item.orderUomUnits > 1 ? (
-                            <div>
-                              <span>{Math.floor(item.periodUsage / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.periodUsage / item.orderUomUnits) !== 1 ? "s" : ""}</span>
-                              <div className="text-[10px]">{item.periodUsage.toLocaleString()} pcs</div>
+                {isLoadingAnalysis ? (
+                   <TableRow>
+                     <TableCell colSpan={8} className="text-center py-12 text-zinc-500">Loading telemetry data...</TableCell>
+                   </TableRow>
+                ) : filtered.length === 0 ? (
+                   <TableRow>
+                     <TableCell colSpan={8} className="text-center py-12 text-zinc-500">No data matching current criteria.</TableCell>
+                   </TableRow>
+                ) : (
+                  filtered.map((item) => {
+                    const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
+                    const StatusIcon = cfg.icon;
+                    // Health Calculation: Available / Reorder Point
+                    const healthPct = item.reorderPoint > 0 
+                                      ? Math.min(100, Math.max(0, (item.available / item.reorderPoint) * 100)) 
+                                      : 100;
+                    
+                    let progressColor = "bg-green-500";
+                    if (healthPct < 25) progressColor = "bg-red-500";
+                    else if (healthPct < 75) progressColor = "bg-amber-500";
+
+                    return (
+                      <TableRow key={item.productId} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
+                        <TableCell>
+                           {/* Intentionally left blank or for manual selection if needed */}
+                        </TableCell>
+                        <TableCell className="font-mono font-medium">{item.sku}</TableCell>
+                        <TableCell className="max-w-[200px] truncate text-sm" title={item.productName}>
+                          {item.productName}
+                          {item.onOrderPieces > 0 && <div className="text-xs text-blue-500 mt-1">+{item.onOrderPieces} Inbound</div>}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col gap-1.5">
+                            <div className="flex justify-between text-xs font-medium">
+                              <span>Health</span>
+                              <span>{Math.round(healthPct)}%</span>
                             </div>
-                          ) : (
-                            <span>{item.periodUsage.toLocaleString()}</span>
-                          )
-                        ) : "—"}
-                      </TableCell>
-                      <TableCell className={`text-right font-mono ${dosColor(item)}`}>
-                        {formatDos(item.daysOfSupply)}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-muted-foreground">
-                        {item.reorderPoint > 0 ? (
-                          item.orderUomUnits > 1 ? (
-                            <div>
-                              <span>{Math.ceil(item.reorderPoint / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.ceil(item.reorderPoint / item.orderUomUnits) !== 1 ? "s" : ""}</span>
-                              <div className="text-[10px]">{item.reorderPoint.toLocaleString()} pcs</div>
-                            </div>
-                          ) : (
-                            <span>{item.reorderPoint.toLocaleString()}</span>
-                          )
-                        ) : "—"}
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {item.suggestedOrderQty > 0 ? (
-                          <div>
-                            <span className="font-bold text-orange-600">{item.suggestedOrderQty.toLocaleString()} {item.orderUomUnits > 1 ? item.orderUomLabel.toLowerCase() : "pcs"}{item.suggestedOrderQty !== 1 && item.orderUomUnits > 1 ? "s" : ""}</span>
-                            {item.orderUomUnits > 1 && (
-                              <div className="text-[10px] text-muted-foreground">{item.suggestedOrderPieces.toLocaleString()} pcs</div>
-                            )}
+                            <Progress value={healthPct} className={`h-1.5 [&>div]:${progressColor}`} />
                           </div>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className={`text-xs ${cfg.className}`}>{cfg.label}</Badge>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-                {filtered.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
-                      No items match the current filters
-                    </TableCell>
-                  </TableRow>
+                        </TableCell>
+                        <TableCell className="text-right font-mono">{item.available.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-zinc-500">{item.reorderPoint.toLocaleString()}</TableCell>
+                        <TableCell className="text-right text-xs">
+                          {item.daysOfSupply >= 9999 ? "∞" : `${item.daysOfSupply}d`}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Badge variant="outline" className={`${cfg.bg} ${cfg.text} border-transparent gap-1 font-medium`}>
+                            <StatusIcon className="h-3 w-3" />
+                            {cfg.label}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })
                 )}
               </TableBody>
             </Table>
           </div>
-
-          {filtered.length > 0 && (
-            <div className="text-xs text-muted-foreground shrink-0 pt-2">
-              Showing {filtered.length} of {data?.items.length ?? 0} products
-              {" · "}Quantities shown in ordering UOM where available
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Floating action bar when items selected */}
-      {selectedIds.size > 0 && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-primary text-primary-foreground rounded-lg shadow-lg px-4 py-3 flex items-center gap-3 min-w-[280px]">
-          <span className="text-sm font-medium">{selectedIds.size} item{selectedIds.size !== 1 ? "s" : ""} selected</span>
-          <div className="flex-1" />
-          <Button
-            variant="secondary"
-            size="sm"
-            className="h-8"
-            onClick={() => setSelectedIds(new Set())}
-          >
-            <X className="h-3 w-3 mr-1" />
-            Clear
-          </Button>
-          <Button
-            size="sm"
-            className="h-8 bg-white text-primary hover:bg-white/90"
-            onClick={handleCreatePO}
-            disabled={createPoMutation.isPending}
-          >
-            <ShoppingCart className="h-3 w-3 mr-1" />
-            {createPoMutation.isPending ? "Creating..." : "Create PO"}
-          </Button>
-        </div>
-      )}
+        </Card>
       </div>
     </div>
   );

@@ -1,50 +1,33 @@
 import type { Express } from "express";
-import { registerVendor, loginVendor, requireVendorAuth } from "./vendor-auth";
+import { registerVendor, loginVendorSSO, requireVendorAuth } from "./vendor-auth";
+import { VendorController } from "./interfaces/http/vendor.controller";
 import { pool } from "../../db";
 
 export function registerVendorAuthRoutes(app: Express) {
-  // POST /api/vendor/auth/register
-  app.post("/api/vendor/auth/register", async (req, res) => {
-    try {
-      const { email, password, name, companyName, phone, shellzClubMemberId } = req.body;
+  // POST /api/vendor/onboarding
+  app.post("/api/vendor/onboarding", VendorController.initiateOnboarding);
 
-      if (!email || !password || !name) {
-        return res.status(400).json({ error: "missing_fields", message: "Email, password, and name are required" });
+  // POST /api/vendor/auth/sso
+  app.post("/api/vendor/auth/sso", async (req, res) => {
+    try {
+      const { shellzClubMemberId } = req.body;
+
+      if (!shellzClubMemberId) {
+        return res.status(400).json({ error: "missing_fields", message: "Member ID is required for SSO." });
       }
 
-      const result = await registerVendor(email, password, name, companyName, phone, shellzClubMemberId);
+      // Important: In production this route must verify a signed Shellz Club JWT mapping
+      // to this shellzClubMemberId. For Phase 0 foundation, it's trusted.
+      const result = await loginVendorSSO(shellzClubMemberId);
 
       if ("error" in result) {
-        return res.status(400).json(result);
-      }
-
-      return res.status(201).json(result);
-    } catch (error) {
-      console.error("Vendor registration error:", error);
-      return res.status(500).json({ error: "internal_error", message: "Registration failed" });
-    }
-  });
-
-  // POST /api/vendor/auth/login
-  app.post("/api/vendor/auth/login", async (req, res) => {
-    try {
-      const { email, password } = req.body;
-
-      if (!email || !password) {
-        return res.status(400).json({ error: "missing_fields", message: "Email and password are required" });
-      }
-
-      const result = await loginVendor(email, password);
-
-      if ("error" in result) {
-        const statusCode = result.error === "invalid_credentials" ? 401 : 403;
-        return res.status(statusCode).json(result);
+        return res.status(401).json(result);
       }
 
       return res.json(result);
     } catch (error) {
-      console.error("Vendor login error:", error);
-      return res.status(500).json({ error: "internal_error", message: "Login failed" });
+      console.error("Vendor SSO login error:", error);
+      return res.status(500).json({ error: "internal_error", message: "SSO Login failed" });
     }
   });
 

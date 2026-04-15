@@ -161,10 +161,14 @@ class InventoryAtpService {
         warehouseLocations,
         eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
       )
+      .innerJoin(
+        sql`warehouses`,
+        sql`warehouse_locations.warehouse_id = warehouses.id`,
+      )
       .where(
         and(
           eq(productVariants.productId, productId),
-          eq(warehouseLocations.warehouseId, warehouseId),
+          sql`(warehouse_locations.warehouse_id = ${warehouseId} OR warehouses.hub_warehouse_id = ${warehouseId})`,
         ),
       );
 
@@ -221,9 +225,13 @@ class InventoryAtpService {
         warehouseLocations,
         eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
       )
+      .innerJoin(
+        sql`warehouses`,
+        sql`warehouse_locations.warehouse_id = warehouses.id`,
+      )
       .where(
         and(
-          eq(warehouseLocations.warehouseId, warehouseId),
+          sql`(warehouse_locations.warehouse_id = ${warehouseId} OR warehouses.hub_warehouse_id = ${warehouseId})`,
           inArray(inventoryLevels.productVariantId, variantIds),
         ),
       )

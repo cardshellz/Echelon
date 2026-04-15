@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { 
   RefreshCw, 
   ExternalLink, 
@@ -50,8 +51,40 @@ const platforms = [
 export default function Dropship() {
   const [isConnectOpen, setIsConnectOpen] = useState(false);
 
-  const vendors: any[] = [];
-  const syncCatalog: any[] = [];
+  const { data: vendorsResponse } = useQuery({
+    queryKey: ["/api/admin/vendors"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/vendors");
+      if (!res.ok) throw new Error("Failed to fetch vendors");
+      return res.json();
+    }
+  });
+  
+  const { data: catalogResponse } = useQuery({
+    queryKey: ["/api/admin/dropship-catalog"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/dropship-catalog");
+      if (!res.ok) throw new Error("Failed to fetch catalog");
+      return res.json();
+    }
+  });
+
+  const vendorsList = vendorsResponse?.vendors || [];
+  const vendors = vendorsList.map((v: any) => ({
+    id: v.id,
+    name: v.name,
+    status: v.status === "active" ? "Active" : v.status === "suspended" ? "Suspended" : "Pending",
+    platform: v.ebay_connected ? "eBay" : "Shopify",
+    lastSync: new Date(v.created_at).toLocaleDateString(),
+    health: 100,
+    listings: 0,
+    balance: "$" + ((v.wallet_balance_cents || 0) / 100).toFixed(2),
+  }));
+
+  const syncCatalog = catalogResponse?.catalog || [];
+
+  const totalUnsettled = vendorsList.reduce((acc: number, v: any) => acc + (v.wallet_balance_cents || 0), 0);
+  const formattedUnsettled = "$" + (totalUnsettled / 100).toFixed(2);
 
   return (
     <div className="flex flex-col h-full">
@@ -148,7 +181,7 @@ export default function Dropship() {
           </div>
           <div className="bg-muted/30 p-2 md:p-3 rounded-md border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Unsettled Balance</div>
-            <div className="text-xl md:text-2xl font-bold font-mono text-emerald-600 mt-1" data-testid="text-unsettled-balance">$0.00</div>
+            <div className="text-xl md:text-2xl font-bold font-mono text-emerald-600 mt-1" data-testid="text-unsettled-balance">{formattedUnsettled}</div>
           </div>
         </div>
       </div>

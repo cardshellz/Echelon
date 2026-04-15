@@ -1,13 +1,15 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+
+export const identitySchema = pgSchema("identity");
 
 // User roles
 export const userRoleEnum = ["admin", "lead", "picker"] as const;
 export type UserRole = typeof userRoleEnum[number];
 
-export const users = pgTable("users", {
+export const users = identitySchema.table("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
@@ -31,7 +33,7 @@ export type User = typeof users.$inferSelect;
 export type SafeUser = Omit<User, "password">;
 
 // User audit trail for tracking username/profile changes
-export const userAudit = pgTable("user_audit", {
+export const userAudit = identitySchema.table("user_audit", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   fieldChanged: varchar("field_changed", { length: 50 }).notNull(), // username, displayName, role, etc.
@@ -58,7 +60,7 @@ export const permissionCategoryEnum = ["dashboard", "inventory", "orders", "pick
 export type PermissionCategory = typeof permissionCategoryEnum[number];
 
 // Auth roles - custom roles created by admin
-export const authRoles = pgTable("auth_roles", {
+export const authRoles = identitySchema.table("auth_roles", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: varchar("name", { length: 100 }).notNull().unique(),
   description: text("description"),
@@ -77,7 +79,7 @@ export type InsertAuthRole = z.infer<typeof insertAuthRoleSchema>;
 export type AuthRole = typeof authRoles.$inferSelect;
 
 // Auth permissions - individual permissions (resource:action pairs)
-export const authPermissions = pgTable("auth_permissions", {
+export const authPermissions = identitySchema.table("auth_permissions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   resource: varchar("resource", { length: 50 }).notNull(), // e.g., "inventory", "orders"
   action: varchar("action", { length: 50 }).notNull(), // e.g., "view", "create", "edit", "delete"
@@ -97,7 +99,7 @@ export type InsertAuthPermission = z.infer<typeof insertAuthPermissionSchema>;
 export type AuthPermission = typeof authPermissions.$inferSelect;
 
 // Auth role permissions - links roles to their allowed permissions
-export const authRolePermissions = pgTable("auth_role_permissions", {
+export const authRolePermissions = identitySchema.table("auth_role_permissions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   roleId: integer("role_id").notNull().references(() => authRoles.id, { onDelete: "cascade" }),
   permissionId: integer("permission_id").notNull().references(() => authPermissions.id, { onDelete: "cascade" }),
@@ -116,7 +118,7 @@ export type InsertAuthRolePermission = z.infer<typeof insertAuthRolePermissionSc
 export type AuthRolePermission = typeof authRolePermissions.$inferSelect;
 
 // Auth user roles - assigns roles to users (supports multiple roles per user)
-export const authUserRoles = pgTable("auth_user_roles", {
+export const authUserRoles = identitySchema.table("auth_user_roles", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   roleId: integer("role_id").notNull().references(() => authRoles.id, { onDelete: "cascade" }),

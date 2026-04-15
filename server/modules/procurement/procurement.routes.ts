@@ -1404,6 +1404,123 @@ export function registerPurchasingRoutes(app: Express) {
   });
 
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
+  app.get("/api/purchasing/dashboard", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const configuredLookback = await storage.getVelocityLookbackDays();
+      const rawRows = await storage.getReorderAnalysisData(configuredLookback);
+      
+      let criticalRestocks = 0;
+      let upcomingRestocks = 0;
+      let idleCapitalCents = 0;
+
+      rawRows.forEach((r: any) => {
+        const totalOnHand = Number(r.total_pieces) || 0;
+        const totalReserved = Number(r.total_reserved_pieces) || 0;
+        const totalOutbound = Number(r.total_outbound_pieces) || 0;
+        const onOrderPieces = Number(r.on_order_pieces) || 0;
+        const leadTimeDays = Number(r.lead_time_days) || 0;
+        const safetyStockDays = Number(r.safety_stock_days) || 0;
+        const costCents = Number(r.unit_cost_cents) || 0;
+        
+        const available = totalOnHand - totalReserved;
+        const avgDailyUsage = configuredLookback > 0 ? totalOutbound / configuredLookback : 0;
+        const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
+        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
+        const effectiveSupply = available + onOrderPieces;
+
+        // KPI Calculations
+        if (effectiveSupply < reorderPoint) {
+          criticalRestocks++;
+        } else if (effectiveSupply < (reorderPoint + (14 * avgDailyUsage)) && avgDailyUsage > 0) {
+          upcomingRestocks++;
+        }
+
+        if (daysOfSupply > 180 && totalOnHand > 0) {
+          idleCapitalCents += (totalOnHand * costCents);
+        }
+      });
+
+      // Pipeline Value Calculation
+      const openPoSummary = await storage.getOpenPoSummaryReport();
+      let inboundPipelineValueCents = 0;
+      let totalOpenLines = 0;
+      openPoSummary.forEach((po) => {
+        if (['approved', 'sent', 'acknowledged', 'partially_received'].includes(po.status)) {
+          inboundPipelineValueCents += Number(po.total_value_cents) || 0;
+          totalOpenLines += Number(po.total_lines) || 0;
+        }
+      });
+
+      res.json({
+        criticalRestocks,
+        upcomingRestocks,
+        idleCapitalCents,
+        inboundPipelineValueCents,
+        totalOpenLines,
+        lastComputedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("Error fetching purchasing dashboard KPIs:", error);
+      res.status(500).json({ error: "Failed to fetch purchasing dashboard KPIs" });
+    }
+  });
+
+  app.post("/api/purchasing/auto-draft-run", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { purchasing } = app.locals.services;
+      const configuredLookback = await storage.getVelocityLookbackDays();
+      const rawRows = await storage.getReorderAnalysisData(configuredLookback);
+      
+      const itemsToOrder: Array<{
+        productId: number;
+        productVariantId: number;
+        suggestedQty: number;
+      }> = [];
+
+      rawRows.forEach((r: any) => {
+        const totalOnHand = Number(r.total_pieces) || 0;
+        const totalReserved = Number(r.total_reserved_pieces) || 0;
+        const totalOutbound = Number(r.total_outbound_pieces) || 0;
+        const onOrderPieces = Number(r.on_order_pieces) || 0;
+        const leadTimeDays = Number(r.lead_time_days) || 0;
+        const safetyStockDays = Number(r.safety_stock_days) || 0;
+        
+        const available = totalOnHand - totalReserved;
+        const avgDailyUsage = configuredLookback > 0 ? totalOutbound / configuredLookback : 0;
+        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
+        const effectiveSupply = available + onOrderPieces;
+
+        if (effectiveSupply < reorderPoint) {
+            const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
+            const orderUomUnits = Number(r.order_uom_units) || 1;
+            const suggestedOrderQty = orderUomUnits > 1
+                ? Math.ceil(rawOrderQtyPieces / orderUomUnits)
+                : Math.ceil(rawOrderQtyPieces);
+            
+            if (suggestedOrderQty > 0) {
+                itemsToOrder.push({
+                    productId: r.product_id,
+                    productVariantId: r.highest_hierarchy_variant_id || r.product_variant_id, // Default to highest UOM
+                    suggestedQty: suggestedOrderQty,
+                });
+            }
+        }
+      });
+
+      if (itemsToOrder.length > 0) {
+        const result = await purchasing.createPOFromReorder(itemsToOrder, req.session?.user?.id || 'SYSTEM');
+        res.json({ success: true, pos: result, count: result.length, itemsDrafted: itemsToOrder.length });
+      } else {
+        res.json({ success: true, count: 0, itemsDrafted: 0 });
+      }
+
+    } catch (error) {
+      console.error("Error running auto-draft:", error);
+      res.status(500).json({ error: "Failed to run auto-draft" });
+    }
+  });
+
+  // ── Purchasing / Reorder Analysis ──────────────────────────────────
   app.get("/api/purchasing/reorder-analysis", requirePermission("inventory", "view"), async (req, res) => {
     try {
       // Use velocity_lookback_days from warehouse_settings as the default lookback

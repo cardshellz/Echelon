@@ -96,3 +96,52 @@ export function determineCustomerTags(tier: string): string[] {
 export function isDunningExhausted(failedAttempts: number, maxRetries: number): boolean {
   return failedAttempts >= maxRetries;
 }
+
+/**
+ * Maps database Plan records into sanitized Selling Plan configurations.
+ */
+export function mapPlansToSellingPlanConfigs(existingPlans: PlanRecord[]): any[] {
+  return existingPlans
+    .filter((p: any) => p.is_active && p.billing_interval !== "lifetime" && p.billing_interval != null)
+    .map((p: any) => ({
+      name: `${p.name}`,
+      options: [p.name],
+      billingInterval: p.billing_interval === "month" || p.billing_interval === "monthly" ? "MONTH" : "YEAR",
+      billingIntervalCount: p.billing_interval_count || 1,
+      priceCents: Math.max(0, p.price_cents || 0),
+      planId: p.id,
+    }));
+}
+
+/**
+ * Builds the exact Shopify GraphQL payload required to create selling plans.
+ */
+export function buildShopifySellingPlanCreatePayload(resolvedConfigs: any[]): any[] {
+  return resolvedConfigs.map(cfg => ({
+    name: cfg.name,
+    options: cfg.options,
+    category: "SUBSCRIPTION",
+    billingPolicy: {
+      recurring: {
+        interval: cfg.billingInterval,
+        intervalCount: cfg.billingIntervalCount,
+      },
+    },
+    deliveryPolicy: {
+      recurring: {
+        interval: cfg.billingInterval,
+        intervalCount: cfg.billingIntervalCount,
+      },
+    },
+    pricingPolicies: [
+      {
+        fixed: {
+          adjustmentType: "PRICE",
+          adjustmentValue: {
+            fixedValue: (cfg.priceCents / 100).toFixed(2),
+          },
+        },
+      },
+    ],
+  }));
+}

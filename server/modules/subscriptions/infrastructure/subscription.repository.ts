@@ -31,9 +31,10 @@ export async function getActivePlans(): Promise<PlanRecord[]> {
 export async function updatePlanSellingPlan(
   planId: number,
   shopifySellingPlanGid: string,
-  shopifySellingPlanId: number
+  shopifySellingPlanId: number,
+  client: any = pool
 ): Promise<void> {
-  await pool.query(
+  await client.query(
     `UPDATE membership.plans SET shopify_selling_plan_gid = $1, shopify_selling_plan_id = $2 WHERE id = $3`,
     [shopifySellingPlanGid, shopifySellingPlanId, planId]
   );
@@ -95,8 +96,8 @@ export async function upsertSellingPlanMap(entry: {
   plan_name: string;
   billing_interval: string;
   price_cents: number;
-}): Promise<void> {
-  await pool.query(
+}, client: any = pool): Promise<void> {
+  await client.query(
     `INSERT INTO membership.selling_plan_map (shopify_selling_plan_gid, shopify_selling_plan_group_gid, plan_id, plan_name, billing_interval, price_cents, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, NOW())
      ON CONFLICT (shopify_selling_plan_gid) DO UPDATE SET

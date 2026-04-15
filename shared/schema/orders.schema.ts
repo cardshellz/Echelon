@@ -282,7 +282,7 @@ export type PickingLog = typeof pickingLogs.$inferSelect;
 // ============================================
 
 // Combined Order Groups - for picking/shipping multiple orders together
-export const combinedOrderGroups = pgTable("combined_order_groups", {
+export const combinedOrderGroups = wmsSchema.table("combined_order_groups", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // Identification

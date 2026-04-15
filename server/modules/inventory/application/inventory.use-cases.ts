@@ -4,6 +4,8 @@ import type { InventoryLotService } from "../lots.service";
 import type { COGSService } from "../cogs.service";
 import { warehouses, warehouseLocations, channelConnections } from "../../../storage/base";
 import { eq, and } from "drizzle-orm";
+import { AuditLogger } from "../../../infrastructure/auditLogger";
+import { IntegrityError, ValidationError } from "../../../../shared/errors";
 
 /** Type wrapper for Drizzle database instance */
 type DrizzleDb = {
@@ -210,8 +212,10 @@ export class InventoryUseCases {
       const fromPicked = Math.min(level.pickedQty, params.qty);
       let fromOnHand = params.qty - fromPicked;
 
-      if (fromOnHand > 0 && fromOnHand > level.variantQty) {
-        fromOnHand = Math.max(0, level.variantQty);
+      if (fromOnHand > level.variantQty) {
+        throw new IntegrityError(
+          `Negative Inventory Guard: Cannot record shipment of ${params.qty}. Picked: ${fromPicked}, On-hand: ${level.variantQty}, Required from on-hand: ${fromOnHand}.`
+        );
       }
 
       if (fromPicked > 0) {
@@ -498,6 +502,144 @@ export class InventoryUseCases {
   }
 
   // ---------------------------------------------------------------------------
+  // SKU CONVERSION
+  // ---------------------------------------------------------------------------
+
+  async convertSku(params: {
+    fromVariantId: number;
+    toVariantId: number;
+    locationId?: number;
+    quantity?: number;
+    notes?: string;
+    userId?: string;
+  }): Promise<{ totalConverted: number; conversions: { locationCode: string; qty: number }[]; batchId: string }> {
+    if (params.fromVariantId === params.toVariantId) {
+      throw new ValidationError("Source and destination variants must be different");
+    }
+
+    const convertQty = params.quantity ?? null;
+    if (convertQty !== null && convertQty <= 0) {
+      throw new ValidationError("Quantity must be a positive integer");
+    }
+
+    const batchId = `skuconv-${Date.now()}`;
+    const conversions: { locationCode: string; qty: number }[] = [];
+
+    const result = await this.db.transaction(async (tx) => {
+      // Find all inventory for the source variant
+      const sourceInventoryResp = await tx.execute(sql`
+        SELECT
+          il.warehouse_location_id as warehouse_location_id,
+          il.variant_qty as variant_qty,
+          wl.code as location_code
+        FROM inventory_levels il
+        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        WHERE il.product_variant_id = ${params.fromVariantId}
+          ${params.locationId ? sql`AND il.warehouse_location_id = ${params.locationId}` : sql``}
+          AND il.variant_qty > 0
+      `);
+      
+      const sourceInventory = sourceInventoryResp.rows;
+      if (sourceInventory.length === 0) {
+        throw new IntegrityError("No inventory found for source variant");
+      }
+
+      const totalAvailable = sourceInventory.reduce((s: number, l: any) => s + Number(l.variant_qty), 0);
+      if (convertQty !== null && convertQty > totalAvailable) {
+        throw new IntegrityError(`Requested ${convertQty} but only ${totalAvailable} available`);
+      }
+
+      let remaining = convertQty ?? totalAvailable;
+
+      for (const inv of sourceInventory) {
+        if (remaining <= 0) break;
+        const qtyToConvert = Math.min(Number(inv.variant_qty), remaining);
+
+        // Adjust-out from old variant
+        const sourceLevel = await this.storage.upsertInventoryLevel({
+          productVariantId: params.fromVariantId,
+          warehouseLocationId: inv.warehouse_location_id,
+        }, tx);
+        
+        await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -qtyToConvert }, tx);
+        
+        await this.storage.createInventoryTransaction({
+          productVariantId: params.fromVariantId,
+          fromLocationId: inv.warehouse_location_id,
+          transactionType: "sku_correction",
+          variantQtyDelta: -qtyToConvert,
+          variantQtyBefore: sourceLevel.variantQty,
+          variantQtyAfter: sourceLevel.variantQty - qtyToConvert,
+          sourceState: "on_hand",
+          targetState: "on_hand",
+          batchId,
+          referenceType: "sku_conversion",
+          referenceId: `${params.fromVariantId}→${params.toVariantId}`,
+          notes: params.notes ?? null,
+          userId: params.userId ?? null,
+        }, tx);
+
+        // Adjust-in to new variant
+        const destLevel = await this.storage.upsertInventoryLevel({
+          productVariantId: params.toVariantId,
+          warehouseLocationId: inv.warehouse_location_id,
+        }, tx);
+        
+        await this.storage.adjustInventoryLevel(destLevel.id, { variantQty: qtyToConvert }, tx);
+        
+        await this.storage.createInventoryTransaction({
+          productVariantId: params.toVariantId,
+          toLocationId: inv.warehouse_location_id,
+          transactionType: "sku_correction",
+          variantQtyDelta: qtyToConvert,
+          variantQtyBefore: destLevel.variantQty,
+          variantQtyAfter: destLevel.variantQty + qtyToConvert,
+          sourceState: "on_hand",
+          targetState: "on_hand",
+          batchId,
+          referenceType: "sku_conversion",
+          referenceId: `${params.fromVariantId}→${params.toVariantId}`,
+          notes: params.notes ?? null,
+          userId: params.userId ?? null,
+        }, tx);
+
+        // Cleanup empty source
+        if (sourceLevel.variantQty - qtyToConvert <= 0) {
+          const hasAssignment = await tx.execute(sql`
+            SELECT 1 FROM product_locations
+            WHERE product_variant_id = ${params.fromVariantId}
+              AND warehouse_location_id = ${inv.warehouse_location_id}
+            LIMIT 1
+          `);
+          if (hasAssignment.rows.length === 0) {
+            await tx.execute(sql`DELETE FROM inventory_levels WHERE id = ${sourceLevel.id}`);
+          }
+        }
+
+        conversions.push({ locationCode: inv.location_code, qty: qtyToConvert });
+        remaining -= qtyToConvert;
+      }
+      
+      return { totalConverted: conversions.reduce((s, c) => s + c.qty, 0), conversions, batchId };
+    });
+
+    AuditLogger.log({
+      actor: params.userId || "system",
+      action: "convert_sku",
+      target: `variant_${params.fromVariantId}_to_${params.toVariantId}`,
+      changes: {
+        before: { variant_id: params.fromVariantId },
+        after: { variant_id: params.toVariantId, amount_converted: result.totalConverted }
+      }
+    });
+
+    this.triggerNotifyChange(params.fromVariantId, "convert-sku-out");
+    this.triggerNotifyChange(params.toVariantId, "convert-sku-in");
+
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
   // EXTERNAL SOURCE SYNC
   // ---------------------------------------------------------------------------
 
@@ -646,5 +788,18 @@ export class InventoryUseCases {
     }
 
     return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // INTERNAL: transaction-scoped clone
+  // ---------------------------------------------------------------------------
+
+  withTx(tx: any): InventoryUseCases {
+    return new InventoryUseCases(
+      tx as DrizzleDb,
+      this.storage,
+      this.lotService,
+      this.cogsService
+    );
   }
 }

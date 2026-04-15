@@ -688,7 +688,7 @@ export default function PurchaseOrderDetail() {
           {po.status === "draft" && isSoloMode && (
             <Button onClick={() => sendToVendorMutation.mutate()} disabled={sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
-              {sendToVendorMutation.isPending ? "Sending..." : "Send to Vendor"}
+              {sendToVendorMutation.isPending ? "Submitting..." : "Submit & Send"}
             </Button>
           )}
           {/* Multi-person mode: individual Submit button */}

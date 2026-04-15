@@ -1,5 +1,4 @@
 import { Request, Response, NextFunction } from "express";
-import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../../db";
 
@@ -33,7 +32,6 @@ function signToken(vendor: { id: number; email: string; tier: string; status: st
 
 export async function registerVendor(
   email: string,
-  password: string,
   name: string,
   companyName?: string,
   phone?: string,
@@ -111,16 +109,6 @@ export async function registerVendor(
       }
     }
 
-    // Validate password
-    if (!password || password.length < 8) {
-      return { error: "weak_password", message: "Password must be at least 8 characters" };
-    }
-    if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
-      return { error: "weak_password", message: "Password must contain at least 1 letter and 1 number" };
-    }
-
-    const passwordHash = await bcrypt.hash(password, 12);
-
     // Create Stripe Customer
     let stripeCustomerId: string | null = null;
     try {
@@ -141,10 +129,10 @@ export async function registerVendor(
     }
 
     const result = await client.query(
-      `INSERT INTO dropship_vendors (name, email, password_hash, company_name, phone, shellz_club_member_id, status, tier, stripe_customer_id)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
+      `INSERT INTO dropship_vendors (name, email, company_name, phone, shellz_club_member_id, status, tier, stripe_customer_id)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
        RETURNING id, name, email, company_name, status, tier, wallet_balance_cents, created_at`,
-      [name, email.toLowerCase().trim(), passwordHash, companyName || null, phone || null, shellzClubMemberIdResolved || null, tier, stripeCustomerId]
+      [name, email.toLowerCase().trim(), companyName || null, phone || null, shellzClubMemberIdResolved || null, tier, stripeCustomerId]
     );
 
     const vendor = result.rows[0];
@@ -167,18 +155,18 @@ export async function registerVendor(
   }
 }
 
-export async function loginVendor(email: string, password: string) {
+export async function loginVendorSSO(shellzClubMemberId: number) {
   const client = await pool.connect();
   try {
     const result = await client.query(
-      `SELECT id, name, email, password_hash, company_name, status, tier, wallet_balance_cents,
+      `SELECT id, name, email, company_name, status, tier, wallet_balance_cents,
               ebay_user_id, created_at
-       FROM dropship_vendors WHERE email = $1`,
-      [email.toLowerCase().trim()]
+       FROM dropship_vendors WHERE shellz_club_member_id = $1`,
+      [shellzClubMemberId]
     );
 
     if (result.rows.length === 0) {
-      return { error: "invalid_credentials", message: "Invalid email or password" };
+      return { error: "unregistered", message: "No dropship account associated with this membership." };
     }
 
     const vendor = result.rows[0];
@@ -188,11 +176,6 @@ export async function loginVendor(email: string, password: string) {
     }
     if (vendor.status === "closed") {
       return { error: "account_closed", message: "This account has been closed." };
-    }
-
-    const valid = await bcrypt.compare(password, vendor.password_hash);
-    if (!valid) {
-      return { error: "invalid_credentials", message: "Invalid email or password" };
     }
 
     const token = signToken(vendor);

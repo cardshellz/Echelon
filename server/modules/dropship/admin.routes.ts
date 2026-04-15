@@ -275,4 +275,101 @@ export function registerDropshipAdminRoutes(app: Express) {
       return res.status(500).json({ error: "internal_error" });
     }
   });
+
+  // POST /api/admin/vendors/:id/wallet/adjust
+  app.post("/api/admin/vendors/:id/wallet/adjust", requireAuth, async (req, res) => {
+    try {
+      const vendorId = parseInt(req.params.id);
+      if (isNaN(vendorId)) return res.status(400).json({ error: "invalid_id" });
+
+      const { amount_cents, notes } = req.body;
+      if (!amount_cents || isNaN(parseInt(amount_cents))) {
+        return res.status(400).json({ error: "invalid_amount" });
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        
+        // Lock the vendor row for update
+        const vendorResult = await client.query(
+          "SELECT wallet_balance_cents FROM dropship_vendors WHERE id = $1 FOR UPDATE",
+          [vendorId]
+        );
+        
+        if (vendorResult.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return res.status(404).json({ error: "not_found" });
+        }
+        
+        const currentBalance = vendorResult.rows[0].wallet_balance_cents;
+        const newBalance = currentBalance + parseInt(amount_cents);
+        const adminUser = (req as any).user ? `admin:${(req as any).user.id}` : "system";
+        const type = parseInt(amount_cents) > 0 ? "adjustment" : "withdrawal";
+
+        // Insert ledger entry
+        await client.query(
+          `INSERT INTO dropship_wallet_ledger 
+           (vendor_id, type, amount_cents, balance_after_cents, notes, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [vendorId, type, parseInt(amount_cents), newBalance, notes || "Manual Admin Adjustment", adminUser]
+        );
+
+        // Update vendor balance
+        await client.query(
+          "UPDATE dropship_vendors SET wallet_balance_cents = $1, updated_at = NOW() WHERE id = $2",
+          [newBalance, vendorId]
+        );
+
+        await client.query("COMMIT");
+        return res.json({ success: true, new_balance_cents: newBalance });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      console.error("Wallet adjust error:", error);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  });
+
+  // GET /api/admin/dropship-catalog — list dropship enabled products for all vendors
+  app.get("/api/admin/dropship-catalog", requireAuth, async (req, res) => {
+    try {
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT 
+            dvp.id,
+            p.sku,
+            p.name,
+            v.name as vendor,
+            p.msrp_cents as price,
+            dvp.enabled as status
+          FROM dropship_vendor_products dvp
+          JOIN catalog.products p ON p.id = dvp.product_id
+          JOIN dropship_vendors v ON v.id = dvp.vendor_id
+          ORDER BY dvp.created_at DESC
+        `);
+        return res.json({
+          catalog: result.rows.map((r: any) => ({
+            id: r.id,
+            sku: r.sku,
+            name: r.name,
+            vendor: r.vendor,
+            extId: r.id.toString(), // Internal placeholder until real mapping implementation
+            price: r.price ? "$" + (r.price / 100).toFixed(2) : "N/A",
+            status: r.status ? "Synced" : "Paused"
+          }))
+        });
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      console.error("Admin dropship catalog error:", error);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  });
 }

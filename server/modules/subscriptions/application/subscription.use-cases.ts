@@ -3,6 +3,7 @@ import * as storage from "../infrastructure/subscription.repository";
 import * as shopifyAdapter from "../infrastructure/shopify.adapter";
 import * as domain from "../domain/subscription.domain";
 import type { ContractWebhookPayload, BillingWebhookPayload } from "../subscription.types";
+import { AuditLogger } from "../../../infrastructure/auditLogger";
 
 const DUNNING_MAX_RETRIES = parseInt(process.env.SUBSCRIPTION_DUNNING_MAX_RETRIES || "4");
 
@@ -278,6 +279,16 @@ export async function changePlanUseCase(subscriptionId: number, newPlanId: numbe
 
     await client.query('COMMIT');
 
+    AuditLogger.log({
+      actor: "system_admin",
+      action: "change_subscription_plan",
+      target: `subscription_${subscriptionId}`,
+      changes: {
+        before: { plan_id: subscription.plan_id },
+        after: { plan_id: newPlanId, plan_name: newPlan.name }
+      }
+    });
+
     if (subscription.member_shopify_id) {
       const customerGid = `gid://shopify/Customer/${subscription.member_shopify_id}`;
       shopifyAdapter.removeCustomerTags(customerGid, ["shellz-club-standard", "shellz-club-gold", "shellz-club-dropship"])
@@ -325,6 +336,16 @@ export async function cancelSubscriptionUseCase(subscriptionId: number, reason: 
 
     await client.query('COMMIT');
 
+    AuditLogger.log({
+      actor: "system_admin",
+      action: "cancel_subscription",
+      target: `subscription_${subscriptionId}`,
+      changes: {
+        before: { status: subscription.status },
+        after: { status: "cancelled", reason }
+      }
+    });
+
     // Async externals
     if (subscription.member_shopify_id) {
       const customerGid = `gid://shopify/Customer/${subscription.member_shopify_id}`;
@@ -364,6 +385,13 @@ export async function pauseSubscriptionUseCase(subscriptionId: number, paused: b
     });
 
     await client.query('COMMIT');
+
+    AuditLogger.log({
+      actor: "system_admin",
+      action: paused ? "pause_subscription" : "unpause_subscription",
+      target: `subscription_${subscriptionId}`,
+      context: { billing_status: billingStatus }
+    });
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -415,4 +443,31 @@ export async function retryBillingUseCase(subscriptionId: number): Promise<{ suc
     await storage.setBillingInProgress(subscriptionId, false);
     return { success: false, error: err.message };
   }
+}
+
+export async function registerSubscriptionWebhooksUseCase(baseUrl: string): Promise<string[]> {
+  const topics = [
+    { topic: "SUBSCRIPTION_CONTRACTS_CREATE", path: "/api/webhooks/subscription-contracts/create" },
+    { topic: "SUBSCRIPTION_CONTRACTS_UPDATE", path: "/api/webhooks/subscription-contracts/update" },
+    { topic: "SUBSCRIPTION_BILLING_ATTEMPTS_SUCCESS", path: "/api/webhooks/subscription-billing/success" },
+    { topic: "SUBSCRIPTION_BILLING_ATTEMPTS_FAILURE", path: "/api/webhooks/subscription-billing/failure" },
+  ];
+
+  const registered: string[] = [];
+
+  for (const { topic, path } of topics) {
+    try {
+      const result = await shopifyAdapter.registerWebhookSubscriptionGraphql(topic, `${baseUrl}${path}`);
+      if (result.userErrors?.length > 0) {
+        console.warn(`[Subscription UseCase] Webhook ${topic} error: ${result.userErrors.map((e: any) => e.message).join(", ")}`);
+      } else {
+        registered.push(topic);
+        console.log(`[Subscription UseCase] Registered webhook: ${topic}`);
+      }
+    } catch (err: any) {
+      console.error(`[Subscription UseCase] Failed to register webhook ${topic}: ${err.message}`);
+    }
+  }
+
+  return registered;
 }

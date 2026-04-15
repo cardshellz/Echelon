@@ -300,7 +300,7 @@ export class COGSService {
 
     // Log the adjustment
     await this.db.execute(sql`
-      INSERT INTO cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
+      INSERT INTO inventory.cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
       VALUES (${lotId}, ${lot.lot_number}, ${lot.product_variant_id}, ${lot.sku || ''}, ${oldTotal}, ${newTotal}, ${newTotal - oldTotal}, 'landed_cost_finalized', NOW())
     `);
 
@@ -590,7 +590,7 @@ export class COGSService {
 
   async getCostAdjustments(limit: number = 50): Promise<CostAdjustmentLog[]> {
     const result = await this.db.execute(sql`
-      SELECT * FROM cost_adjustment_log
+      SELECT * FROM inventory.cost_adjustment_log
       ORDER BY created_at DESC
       LIMIT ${limit}
     `);

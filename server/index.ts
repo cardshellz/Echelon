@@ -65,6 +65,7 @@ app.use(
   session({
     store: new PgSession({
       pool: sessionPool,
+      schemaName: "identity",
       tableName: "session",
       createTableIfMissing: true,
     }),

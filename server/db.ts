@@ -32,7 +32,7 @@ export async function runStartupMigrations(): Promise<void> {
   try {
     // Create combined_order_groups table if it doesn't exist
     await client.query(`
-      CREATE TABLE IF NOT EXISTS combined_order_groups (
+      CREATE TABLE IF NOT EXISTS wms.combined_order_groups (
         id SERIAL PRIMARY KEY,
         group_code VARCHAR(20),
         customer_name TEXT DEFAULT 'Unknown',
@@ -97,10 +97,10 @@ export async function runStartupMigrations(): Promise<void> {
     
     // Migration 024: Channel allocation tables
     await client.query(`
-      CREATE TABLE IF NOT EXISTS channel_product_allocation (
+      CREATE TABLE IF NOT EXISTS channels.channel_product_allocation (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
         channel_id integer NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-        product_id integer NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        product_id integer NOT NULL REFERENCES catalog.products(id) ON DELETE CASCADE,
         min_atp_base integer,
         max_atp_base integer,
         is_listed integer NOT NULL DEFAULT 1,
@@ -114,10 +114,10 @@ export async function runStartupMigrations(): Promise<void> {
       ON channel_product_allocation(channel_id, product_id)
     `);
     await client.query(`
-      CREATE TABLE IF NOT EXISTS channel_sync_log (
+      CREATE TABLE IF NOT EXISTS channels.channel_sync_log (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-        product_id integer REFERENCES products(id),
-        product_variant_id integer REFERENCES product_variants(id),
+        product_id integer REFERENCES catalog.products(id),
+        product_variant_id integer REFERENCES catalog.product_variants(id),
         channel_id integer REFERENCES channels(id),
         channel_feed_id integer REFERENCES channel_feeds(id),
         atp_base integer NOT NULL,
@@ -138,7 +138,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Migration 037: Product lines
     await client.query(`
-      CREATE TABLE IF NOT EXISTS product_lines (
+      CREATE TABLE IF NOT EXISTS catalog.product_lines (
         id SERIAL PRIMARY KEY,
         code VARCHAR(50) UNIQUE NOT NULL,
         name VARCHAR(100) NOT NULL,
@@ -150,19 +150,19 @@ export async function runStartupMigrations(): Promise<void> {
       )
     `);
     await client.query(`
-      CREATE TABLE IF NOT EXISTS product_line_products (
+      CREATE TABLE IF NOT EXISTS catalog.product_line_products (
         id SERIAL PRIMARY KEY,
-        product_line_id INTEGER NOT NULL REFERENCES product_lines(id) ON DELETE CASCADE,
-        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        product_line_id INTEGER NOT NULL REFERENCES catalog.product_lines(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL REFERENCES catalog.products(id) ON DELETE CASCADE,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         UNIQUE(product_line_id, product_id)
       )
     `);
     await client.query(`
-      CREATE TABLE IF NOT EXISTS channel_product_lines (
+      CREATE TABLE IF NOT EXISTS channels.channel_product_lines (
         id SERIAL PRIMARY KEY,
         channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-        product_line_id INTEGER NOT NULL REFERENCES product_lines(id) ON DELETE CASCADE,
+        product_line_id INTEGER NOT NULL REFERENCES catalog.product_lines(id) ON DELETE CASCADE,
         is_active BOOLEAN NOT NULL DEFAULT true,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         UNIQUE(channel_id, product_line_id)
@@ -234,7 +234,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Migration: product_types reference table
     await client.query(`
-      CREATE TABLE IF NOT EXISTS product_types (
+      CREATE TABLE IF NOT EXISTS catalog.product_types (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         slug VARCHAR(50) UNIQUE NOT NULL,
         name VARCHAR(100) NOT NULL,
@@ -270,7 +270,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Migration: ebay_listing_rules table
     await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay_listing_rules (
+      CREATE TABLE IF NOT EXISTS ebay.ebay_listing_rules (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         channel_id INTEGER NOT NULL REFERENCES channels(id),
         scope_type VARCHAR(20) NOT NULL CHECK (scope_type IN ('default', 'product_type', 'sku')),
@@ -291,7 +291,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Migration: ebay_category_mappings table
     await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay_category_mappings (
+      CREATE TABLE IF NOT EXISTS ebay.ebay_category_mappings (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         channel_id INTEGER NOT NULL REFERENCES channels(id),
         product_type_slug VARCHAR(50) NOT NULL,
@@ -311,7 +311,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Migration 045: OMS tables
     await client.query(`
-      CREATE TABLE IF NOT EXISTS oms_orders (
+      CREATE TABLE IF NOT EXISTS oms.oms_orders (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         channel_id INTEGER NOT NULL REFERENCES channels(id),
         external_order_id VARCHAR(100) NOT NULL,
@@ -348,16 +348,16 @@ export async function runStartupMigrations(): Promise<void> {
         UNIQUE(channel_id, external_order_id)
       )
     `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_status ON oms_orders(status)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_channel ON oms_orders(channel_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_ordered ON oms_orders(ordered_at DESC)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_external ON oms_orders(external_order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_status ON oms.oms_orders(status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_channel ON oms.oms_orders(channel_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_ordered ON oms.oms_orders(ordered_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_external ON oms.oms_orders(external_order_id)`);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS oms_order_lines (
+      CREATE TABLE IF NOT EXISTS oms.oms_order_lines (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        order_id BIGINT NOT NULL REFERENCES oms_orders(id) ON DELETE CASCADE,
-        product_variant_id INTEGER REFERENCES product_variants(id),
+        order_id BIGINT NOT NULL REFERENCES oms.oms_orders(id) ON DELETE CASCADE,
+        product_variant_id INTEGER REFERENCES catalog.product_variants(id),
         external_line_item_id VARCHAR(100),
         sku VARCHAR(100),
         title VARCHAR(300),
@@ -371,19 +371,19 @@ export async function runStartupMigrations(): Promise<void> {
         created_at TIMESTAMP DEFAULT NOW() NOT NULL
       )
     `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_lines_order ON oms_order_lines(order_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_lines_variant ON oms_order_lines(product_variant_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_lines_order ON oms.oms_order_lines(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_lines_variant ON oms.oms_order_lines(product_variant_id)`);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS oms_order_events (
+      CREATE TABLE IF NOT EXISTS oms.oms_order_events (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        order_id BIGINT NOT NULL REFERENCES oms_orders(id) ON DELETE CASCADE,
+        order_id BIGINT NOT NULL REFERENCES oms.oms_orders(id) ON DELETE CASCADE,
         event_type VARCHAR(50) NOT NULL,
         details JSONB,
         created_at TIMESTAMP DEFAULT NOW() NOT NULL
       )
     `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_events_order ON oms_order_events(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_events_order ON oms.oms_order_events(order_id)`);
     console.log("Checked OMS tables (oms_orders, oms_order_lines, oms_order_events)");
 
     // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
@@ -407,7 +407,7 @@ export async function runStartupMigrations(): Promise<void> {
     // Migration: Sync Control System tables
     // 1. sync_settings — global sync engine config
     await client.query(`
-      CREATE TABLE IF NOT EXISTS sync_settings (
+      CREATE TABLE IF NOT EXISTS channels.sync_settings (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         global_enabled BOOLEAN NOT NULL DEFAULT false,
         sweep_interval_minutes INTEGER NOT NULL DEFAULT 15,
@@ -445,7 +445,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // 4. sync_log — unified activity log
     await client.query(`
-      CREATE TABLE IF NOT EXISTS sync_log (
+      CREATE TABLE IF NOT EXISTS channels.sync_log (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         channel_id INTEGER REFERENCES channels(id),
         channel_name VARCHAR(100),
@@ -466,8 +466,8 @@ export async function runStartupMigrations(): Promise<void> {
     console.log("Checked sync control system tables (sync_settings, sync_log, channel sync columns, warehouse feed_enabled)");
 
     // 5. ShipStation integration columns on oms_orders
-    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_id INTEGER`);
-    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_id INTEGER`);
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
     console.log("Checked ShipStation columns on oms_orders");
 
     // 6. eBay listing control columns
@@ -486,7 +486,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // 8. eBay Item Specifics (Aspects) management tables
     await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay_category_aspects (
+      CREATE TABLE IF NOT EXISTS ebay.ebay_category_aspects (
         id SERIAL PRIMARY KEY,
         category_id VARCHAR(20) NOT NULL,
         aspect_name VARCHAR(200) NOT NULL,
@@ -502,7 +502,7 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_cat_aspects_cat ON ebay_category_aspects(category_id)`);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay_type_aspect_defaults (
+      CREATE TABLE IF NOT EXISTS ebay.ebay_type_aspect_defaults (
         id SERIAL PRIMARY KEY,
         product_type_slug VARCHAR(100) NOT NULL,
         aspect_name VARCHAR(200) NOT NULL,
@@ -515,9 +515,9 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_type_aspects_slug ON ebay_type_aspect_defaults(product_type_slug)`);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay_product_aspect_overrides (
+      CREATE TABLE IF NOT EXISTS ebay.ebay_product_aspect_overrides (
         id SERIAL PRIMARY KEY,
-        product_id INTEGER NOT NULL REFERENCES products(id),
+        product_id INTEGER NOT NULL REFERENCES catalog.products(id),
         aspect_name VARCHAR(200) NOT NULL,
         aspect_value VARCHAR(500) NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -530,7 +530,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Migration: channel_pricing_rules table for hierarchical pricing
     await client.query(`
-      CREATE TABLE IF NOT EXISTS channel_pricing_rules (
+      CREATE TABLE IF NOT EXISTS channels.channel_pricing_rules (
         id SERIAL PRIMARY KEY,
         channel_id INTEGER NOT NULL,
         scope VARCHAR(20) NOT NULL,
@@ -635,7 +635,7 @@ export async function runStartupMigrations(): Promise<void> {
       CREATE TABLE IF NOT EXISTS dropship_vendor_products (
         id SERIAL PRIMARY KEY,
         vendor_id INTEGER NOT NULL REFERENCES dropship_vendors(id),
-        product_id INTEGER NOT NULL REFERENCES products(id),
+        product_id INTEGER NOT NULL REFERENCES catalog.products(id),
         enabled BOOLEAN NOT NULL DEFAULT true,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         UNIQUE(vendor_id, product_id)
@@ -647,8 +647,8 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Add vendor_id to orders and oms_orders
     await client.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS vendor_id INTEGER`);
-    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS vendor_id INTEGER`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_vendor ON oms_orders(vendor_id) WHERE vendor_id IS NOT NULL`);
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS vendor_id INTEGER`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_vendor ON oms.oms_orders(vendor_id) WHERE vendor_id IS NOT NULL`);
 
     console.log("Checked dropship platform tables (dropship_vendors, dropship_wallet_ledger, dropship_vendor_products)");
 
@@ -698,7 +698,7 @@ export async function runStartupMigrations(): Promise<void> {
 
     // cost_adjustment_log table (tracks cost changes)
     await client.query(`
-      CREATE TABLE IF NOT EXISTS cost_adjustment_log (
+      CREATE TABLE IF NOT EXISTS inventory.cost_adjustment_log (
         id SERIAL PRIMARY KEY,
         lot_id INTEGER NOT NULL,
         lot_number VARCHAR(50),
@@ -711,8 +711,8 @@ export async function runStartupMigrations(): Promise<void> {
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )
     `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cal_lot ON cost_adjustment_log(lot_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cal_created ON cost_adjustment_log(created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cal_lot ON inventory.cost_adjustment_log(lot_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cal_created ON inventory.cost_adjustment_log(created_at DESC)`);
 
     // FIFO indexes
     await client.query(`
@@ -824,9 +824,9 @@ export async function runStartupMigrations(): Promise<void> {
     console.log("Checked subscription engine tables (subscription_billing_log, subscription_events, selling_plan_map)");
 
     // ─── Migration 053: OMS Shopify webhook columns ──────────
-    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS financial_status VARCHAR(30) DEFAULT 'paid'`);
-    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
-    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP`);
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS financial_status VARCHAR(30) DEFAULT 'paid'`);
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP`);
     console.log("Checked OMS Shopify webhook columns (financial_status, cancelled_at, refunded_at)");
 
   } catch (error) {

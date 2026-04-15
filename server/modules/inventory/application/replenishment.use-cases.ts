@@ -507,6 +507,7 @@ export class ReplenishmentUseCases {
 
     const movedBaseUnits = await this.db.transaction(async (tx: any) => {
       let moved = 0;
+      const invTx = this.inventoryUseCases.withTx(tx);
 
       if (
         replenMethod === "case_break" &&
@@ -530,7 +531,7 @@ export class ReplenishmentUseCases {
 
         // Decrement source variant via inventoryUseCases.adjustInventory()
         // (routes through audit trail, lot tracking, negative guards, and notifyChange)
-        await this.inventoryUseCases.adjustInventory({
+        await invTx.adjustInventory({
           productVariantId: sourceVariant.id,
           warehouseLocationId: task.fromLocationId,
           qtyDelta: -task.qtySourceUnits,
@@ -540,7 +541,7 @@ export class ReplenishmentUseCases {
 
         // Increment target variant via inventoryUseCases.adjustInventory()
         // (routes through audit trail, lot tracking, and notifyChange)
-        await this.inventoryUseCases.adjustInventory({
+        await invTx.adjustInventory({
           productVariantId: pickVariant.id,
           warehouseLocationId: task.toLocationId,
           qtyDelta: pickVariantUnits,
@@ -555,7 +556,7 @@ export class ReplenishmentUseCases {
         const variant = sourceVariant ?? pickVariant;
         const baseUnits = task.qtySourceUnits * (variant?.unitsPerVariant ?? 1);
 
-        await this.inventoryUseCases.transfer({
+        await invTx.transfer({
           productVariantId: variantId,
           fromLocationId: task.fromLocationId,
           toLocationId: task.toLocationId,

@@ -186,3 +186,113 @@ export async function createBillingAttempt(
 
   return result.subscriptionBillingAttempt;
 }
+
+/**
+ * Creates Selling Plan Group
+ */
+export async function createSellingPlanGroupGraphql(
+  membershipProductGid: string,
+  sellingPlansToCreate: any[]
+): Promise<any> {
+  const mutation = `
+    mutation sellingPlanGroupCreate($input: SellingPlanGroupInput!, $resources: SellingPlanGroupResourceInput!) {
+      sellingPlanGroupCreate(input: $input, resources: $resources) {
+        sellingPlanGroup {
+          id
+          sellingPlans(first: 10) {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = {
+    input: {
+      name: "Shellz Club Membership",
+      merchantCode: "shellz-club",
+      options: ["Membership Tier"],
+      position: 1,
+      sellingPlansToCreate,
+    },
+    resources: {
+      productIds: [membershipProductGid],
+    },
+  };
+
+  const data = await shopifyGraphQL<any>(mutation, variables);
+  const result = data.sellingPlanGroupCreate;
+
+  if (result.userErrors?.length > 0) {
+    throw new Error(`Selling plan creation errors: ${result.userErrors.map((e: any) => e.message).join(", ")}`);
+  }
+
+  return result.sellingPlanGroup;
+}
+
+/**
+ * Lists Selling Plan Groups
+ */
+export async function fetchSellingPlanGroupsGraphql(): Promise<any[]> {
+  const query = `
+    query {
+      sellingPlanGroups(first: 10) {
+        edges {
+          node {
+            id
+            name
+            merchantCode
+            sellingPlans(first: 20) {
+              edges {
+                node {
+                  id
+                  name
+                  category
+                  billingPolicy {
+                    ... on SellingPlanRecurringBillingPolicy {
+                      interval
+                      intervalCount
+                    }
+                  }
+                  pricingPolicies {
+                    ... on SellingPlanFixedPricingPolicy {
+                      adjustmentType
+                      adjustmentValue { ... on MoneyV2 { amount currencyCode } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await shopifyGraphQL<any>(query);
+  return data.sellingPlanGroups.edges.map((e: any) => e.node);
+}
+
+/**
+ * Register webhooks on Shopify
+ */
+export async function registerWebhookSubscriptionGraphql(topic: string, callbackUrl: string): Promise<any> {
+  const mutation = `
+    mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+      webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+        webhookSubscription { id }
+        userErrors { field message }
+      }
+    }
+  `;
+  const data = await shopifyGraphQL<any>(mutation, {
+    topic,
+    webhookSubscription: { callbackUrl, format: "JSON" },
+  });
+  return data.webhookSubscriptionCreate;
+}

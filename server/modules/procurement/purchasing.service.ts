@@ -956,22 +956,49 @@ export function createPurchasingService(db: any, storage: Storage) {
     const createdPOs: any[] = [];
 
     for (const [vendorId, groupItems] of vendorGroups) {
-      const po = await createPO({ vendorId, createdBy: userId });
-
-      const lineData: any[] = [];
-      for (const item of groupItems) {
-        const vp = await storage.getPreferredVendorProduct(item.productId, item.productVariantId);
-        lineData.push({
-          productId: item.productId,
-          productVariantId: item.productVariantId,
-          vendorProductId: vp?.id,
-          orderQty: item.suggestedQty,
-          unitCostCents: vp?.unitCostCents || 0,
-          vendorSku: vp?.vendorSku,
-        });
+      // Find existing draft PO for this vendor to append to
+      const existingDrafts = await storage.getPurchaseOrders({ vendorId, status: "draft", limit: 1 });
+      let po;
+      let isNew = false;
+      if (existingDrafts && existingDrafts.length > 0) {
+        po = existingDrafts[0];
+      } else {
+        po = await createPO({ vendorId, createdBy: userId });
+        isNew = true;
       }
 
-      await addBulkLines(po.id, lineData, userId);
+      const existingLines = isNew ? [] : await storage.getPurchaseOrderLines(po.id);
+      const lineDataToCreate: any[] = [];
+      let linesUpdated = false;
+
+      for (const item of groupItems) {
+        const existingLine = existingLines.find((l: any) => l.productId === item.productId && l.productVariantId === item.productVariantId);
+        
+        if (existingLine) {
+          // If the suggested qty is higher than the existing drafted qty, update the line
+          if (item.suggestedQty > existingLine.orderQty) {
+            await updateLine(existingLine.id, { orderQty: item.suggestedQty }, userId);
+            linesUpdated = true;
+          }
+        } else {
+          const vp = await storage.getPreferredVendorProduct(item.productId, item.productVariantId);
+          lineDataToCreate.push({
+            productId: item.productId,
+            productVariantId: item.productVariantId,
+            vendorProductId: vp?.id,
+            orderQty: item.suggestedQty,
+            unitCostCents: vp?.unitCostCents || 0,
+            vendorSku: vp?.vendorSku,
+          });
+        }
+      }
+
+      if (lineDataToCreate.length > 0) {
+        await addBulkLines(po.id, lineDataToCreate, userId);
+      } else if (linesUpdated) {
+        await recalculateTotals(po.id, userId);
+      }
+
       const finalPo = await storage.getPurchaseOrderById(po.id);
       createdPOs.push(finalPo);
     }

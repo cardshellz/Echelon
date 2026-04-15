@@ -1,9 +1,6 @@
 import crypto from "crypto";
 
 // Use existing variable names from user's Shopify app setup
-const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET; // shpss_ prefix, used for webhook HMAC verification
 
 export interface ShopifyVariant {
   id: number;
@@ -58,6 +55,8 @@ export interface ShopifyProductsResponse {
 }
 
 export function getShopifyConfig() {
+  const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
+  const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
   if (!SHOPIFY_SHOP_DOMAIN || !SHOPIFY_ACCESS_TOKEN) {
     throw new Error("SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN environment variables are required");
   }

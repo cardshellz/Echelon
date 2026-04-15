@@ -33,6 +33,7 @@ interface WarehouseRecord {
   lastInventorySyncAt: string | null;
   inventorySyncStatus: string | null;
   feedEnabled: boolean | null;
+  hubWarehouseId: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -120,6 +121,7 @@ export default function Warehouses() {
     shopifyLocationId: "",
     inventorySourceType: "internal",
     inventorySourceConfig: null as Record<string, any> | null,
+    hubWarehouseId: "" as string | null,
   });
 
   const canView = hasPermission("inventory", "view");
@@ -142,6 +144,7 @@ export default function Warehouses() {
         ...data,
         shopifyLocationId: data.shopifyLocationId || null,
         inventorySourceConfig: data.inventorySourceConfig || null,
+        hubWarehouseId: data.hubWarehouseId && data.hubWarehouseId !== "none" ? parseInt(data.hubWarehouseId) : null,
       };
       const res = await fetch("/api/warehouses", {
         method: "POST",
@@ -171,6 +174,7 @@ export default function Warehouses() {
         ...data,
         shopifyLocationId: data.shopifyLocationId || null,
         inventorySourceConfig: data.inventorySourceConfig || null,
+        hubWarehouseId: data.hubWarehouseId && data.hubWarehouseId !== "none" ? parseInt(data.hubWarehouseId as string) : null,
       };
       const res = await fetch(`/api/warehouses/${id}`, {
         method: "PATCH",
@@ -228,6 +232,7 @@ export default function Warehouses() {
       shopifyLocationId: "",
       inventorySourceType: "internal",
       inventorySourceConfig: null,
+      hubWarehouseId: "",
     });
   };
 
@@ -248,6 +253,7 @@ export default function Warehouses() {
       shopifyLocationId: warehouse.shopifyLocationId || "",
       inventorySourceType: warehouse.inventorySourceType || "internal",
       inventorySourceConfig: warehouse.inventorySourceConfig || null,
+      hubWarehouseId: warehouse.hubWarehouseId ? warehouse.hubWarehouseId.toString() : "",
     });
   };
 
@@ -609,6 +615,32 @@ export default function Warehouses() {
                 />
               </div>
             </div>
+
+            {formData.warehouseType === "bulk_storage" && (
+              <div className="space-y-3 p-3 rounded-lg border bg-amber-50/50">
+                <p className="text-xs font-medium text-amber-800">Reserve Configuration</p>
+                <div className="space-y-1">
+                  <Label className="text-xs md:text-sm">Fulfillment Hub Link</Label>
+                  <Select 
+                    value={formData.hubWarehouseId || ""} 
+                    onValueChange={(val) => setFormData({ ...formData, hubWarehouseId: val })}
+                  >
+                    <SelectTrigger className="h-11">
+                      <SelectValue placeholder="Select operations hub..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None (Independent Reserve)</SelectItem>
+                      {warehouses.filter(w => w.warehouseType === "operations" && w.id !== editingWarehouse?.id).map(w => (
+                        <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    Inventory in this reserve will automatically aggregate into the ATP pool for the selected hub.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {formData.warehouseType === "3pl" && (
               <div className="space-y-3 p-3 rounded-lg border bg-purple-50/50">

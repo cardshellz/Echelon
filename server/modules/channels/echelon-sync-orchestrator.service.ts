@@ -465,13 +465,15 @@ class EchelonSyncOrchestrator {
           SELECT il.product_variant_id AS vid
           FROM inventory_levels il
           INNER JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-          WHERE wl.warehouse_id = ${wh.warehouseId}
+          INNER JOIN warehouses w ON w.id = wl.warehouse_id
+          WHERE (wl.warehouse_id = ${wh.warehouseId} OR w.hub_warehouse_id = ${wh.warehouseId})
             AND (il.variant_qty > 0 OR il.reserved_qty > 0)
           UNION
           SELECT pl.product_variant_id AS vid
           FROM product_locations pl
           INNER JOIN warehouse_locations wl ON wl.id = pl.warehouse_location_id
-          WHERE wl.warehouse_id = ${wh.warehouseId}
+          INNER JOIN warehouses w ON w.id = wl.warehouse_id
+          WHERE (wl.warehouse_id = ${wh.warehouseId} OR w.hub_warehouse_id = ${wh.warehouseId})
             AND pl.status = 'active'
             AND pl.product_variant_id IS NOT NULL
         ) AS variant_existence
@@ -1270,7 +1272,8 @@ class EchelonSyncOrchestrator {
       console.error("[SyncOrchestrator] Inventory sync failed:", err.message);
     }
 
-    // 2. Pricing sync per channel
+    // 2. Pricing sync per channel (DISABLED TEMPORARILY)
+    /*
     for (const channel of activeChannels) {
       if (!this.adapterRegistry.has(channel.provider)) continue;
 
@@ -1281,8 +1284,10 @@ class EchelonSyncOrchestrator {
         result.errors.push(`Pricing sync failed for channel ${channel.name}: ${err.message}`);
       }
     }
+    */
 
-    // 3. Listings sync per channel
+    // 3. Listings sync per channel (DISABLED TEMPORARILY)
+    /*
     for (const channel of activeChannels) {
       if (!this.adapterRegistry.has(channel.provider)) continue;
 
@@ -1293,6 +1298,7 @@ class EchelonSyncOrchestrator {
         result.errors.push(`Listings sync failed for channel ${channel.name}: ${err.message}`);
       }
     }
+    */
 
     result.completedAt = new Date();
     const durationMs = result.completedAt.getTime() - startedAt.getTime();

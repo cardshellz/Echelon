@@ -101,7 +101,7 @@ export function registerPickingRoutes(app: Express) {
       const { picking } = req.app.locals.services;
       const orders = await picking.getPickQueue();
       res.json(orders);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching picking queue:", error);
       res.status(500).json({ error: "Failed to fetch picking queue" });
     }
@@ -115,7 +115,7 @@ export function registerPickingRoutes(app: Express) {
       const allItems = await storage.getOrderItems(id);
       const shippableItems = allItems.filter(item => item.requiresShipping === 1);
       res.json({ ...order, items: shippableItems });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching order:", error);
       res.status(500).json({ error: "Failed to fetch order" });
     }
@@ -128,9 +128,9 @@ export function registerPickingRoutes(app: Express) {
       const { pickerId } = req.body;
       if (!pickerId) return res.status(400).json({ error: "pickerId is required" });
       const result = await picking.claimOrder(id, pickerId, req.headers["x-device-type"] as string, req.sessionID);
-      if (!result) return res.status(409).json({ error: "Order is no longer available" });
+      
       res.json({ ...result.order, items: result.items });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error claiming order:", error);
       res.status(500).json({ error: "Failed to claim order" });
     }
@@ -149,7 +149,7 @@ export function registerPickingRoutes(app: Express) {
       });
       if (!order) return res.status(404).json({ error: "Order not found" });
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error releasing order:", error);
       res.status(500).json({ error: "Failed to release order" });
     }
@@ -168,13 +168,9 @@ export function registerPickingRoutes(app: Express) {
         deviceType: req.headers["x-device-type"] as string,
         sessionId: req.sessionID,
       });
-      if (!result.success) {
-        const code = result.error === "not_found" ? 404
-          : ["invalid_status", "invalid_quantity"].includes(result.error) ? 400 : 409;
-        return res.status(code).json({ error: result.error, message: result.message });
-      }
+      
       res.json({ item: result.item, inventory: result.inventory });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating item:", error);
       res.status(500).json({ error: "Failed to update item" });
     }
@@ -314,7 +310,7 @@ export function registerPickingRoutes(app: Express) {
       );
       if (!order) return res.status(404).json({ error: "Order not found" });
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating order:", error);
       res.status(500).json({ error: "Failed to update order" });
     }
@@ -325,7 +321,7 @@ export function registerPickingRoutes(app: Express) {
     try {
       const orders = await storage.getOrdersWithItems();
       res.json(orders);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching orders:", error);
       res.status(500).json({ error: "Failed to fetch orders" });
     }
@@ -362,7 +358,7 @@ export function registerPickingRoutes(app: Express) {
       }).catch(err => console.warn("[PickingLog] Failed to log order_held:", err.message));
       
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error holding order:", error);
       res.status(500).json({ error: "Failed to hold order" });
     }
@@ -398,7 +394,7 @@ export function registerPickingRoutes(app: Express) {
       }).catch(err => console.warn("[PickingLog] Failed to log order_unhold:", err.message));
       
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error releasing hold:", error);
       res.status(500).json({ error: "Failed to release hold" });
     }
@@ -444,7 +440,7 @@ export function registerPickingRoutes(app: Express) {
       }).catch(err => console.warn("[PickingLog] Failed to log priority_changed:", err.message));
 
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error setting priority:", error);
       res.status(500).json({ error: "Failed to set priority" });
     }
@@ -489,7 +485,7 @@ export function registerPickingRoutes(app: Express) {
       }).catch(err => console.warn("[PickingLog] Failed to log force_release:", err.message));
       
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error force releasing order:", error);
       res.status(500).json({ error: "Failed to force release order" });
     }
@@ -500,7 +496,7 @@ export function registerPickingRoutes(app: Express) {
   app.get("/api/settings/order-combining", async (req, res) => {
     try {
       res.json(await orderCombining.getSettings());
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching order combining setting:", error);
       res.json({ enabled: true });
     }
@@ -512,7 +508,7 @@ export function registerPickingRoutes(app: Express) {
         return res.status(403).json({ error: "Admin access required" });
       }
       res.json(await orderCombining.updateSettings(req.body.enabled));
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating order combining setting:", error);
       res.status(500).json({ error: "Failed to update setting" });
     }
@@ -521,7 +517,7 @@ export function registerPickingRoutes(app: Express) {
   app.get("/api/orders/combinable", async (req, res) => {
     try {
       res.json(await orderCombining.getCombinableGroups());
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching combinable orders:", error);
       res.status(500).json({ error: "Failed to fetch combinable orders" });
     }
@@ -576,7 +572,7 @@ export function registerPickingRoutes(app: Express) {
   app.get("/api/orders/combined-groups", async (req, res) => {
     try {
       res.json(await orderCombining.getActiveGroups());
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching combined groups:", error);
       res.status(500).json({ error: "Failed to fetch combined groups" });
     }
@@ -614,7 +610,7 @@ export function registerPickingRoutes(app: Express) {
       });
       
       res.json(exceptionsWithChannel);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching exceptions:", error);
       res.status(500).json({ error: "Failed to fetch exceptions" });
     }
@@ -659,7 +655,7 @@ export function registerPickingRoutes(app: Express) {
       
       broadcastOrdersUpdated();
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error resolving exception:", error);
       res.status(500).json({ error: "Failed to resolve exception" });
     }
@@ -712,7 +708,7 @@ export function registerPickingRoutes(app: Express) {
       ]);
       
       res.json({ logs, count, limit: filters.limit, offset: filters.offset });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching picking logs:", error);
       res.status(500).json({ error: "Failed to fetch picking logs" });
     }
@@ -753,7 +749,7 @@ export function registerPickingRoutes(app: Express) {
       };
       
       res.json({ order, logs, metrics });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching order timeline:", error);
       res.status(500).json({ error: "Failed to fetch order timeline" });
     }
@@ -890,7 +886,7 @@ export function registerPickingRoutes(app: Express) {
         logsCreated,
         ordersFailed,
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error backfilling picking logs:", error);
       res.status(500).json({ error: "Failed to backfill picking logs" });
     }
@@ -963,7 +959,7 @@ export function registerPickingRoutes(app: Express) {
         hourlyTrend: metricsData.hourlyTrend || [],
         shortReasons: metricsData.shortReasons || []
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching picking metrics:", error);
       res.status(500).json({ error: "Failed to fetch picking metrics" });
     }
@@ -999,7 +995,7 @@ export function registerPickingRoutes(app: Express) {
       ]);
       
       res.json({ orders, total });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching order history:", error);
       res.status(500).json({ error: "Failed to fetch order history" });
     }
@@ -1022,7 +1018,7 @@ export function registerPickingRoutes(app: Express) {
       }
       
       res.json(detail);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching order detail:", error);
       res.status(500).json({ error: "Failed to fetch order detail" });
     }
@@ -1070,7 +1066,7 @@ export function registerPickingRoutes(app: Express) {
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename=order-history-${new Date().toISOString().split('T')[0]}.csv`);
       res.send(csv);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error exporting order history:", error);
       res.status(500).json({ error: "Failed to export order history" });
     }
