@@ -6,13 +6,13 @@ set -e
 
 # Run pending SQL migrations
 echo "Running SQL migrations from migrations/ folder..."
-node -r esbuild-register migrations/run-migrations.ts || echo "SQL migration step completed with warnings"
+npx tsx migrations/run-migrations.ts || echo "SQL migration step completed with warnings"
 
 echo "Running drizzle-kit push (non-interactive)..."
-yes '' | npx drizzle-kit@0.31.8 push \
+yes '' | PGSSLMODE=require npx drizzle-kit@0.31.8 push \
   --dialect=postgresql \
   --schema=./shared/schema.ts \
-  --url="$DATABASE_URL" \
+  --url="$DATABASE_URL?sslmode=require" \
   --force \
   2>&1 || {
     echo "WARNING: drizzle-kit push exited with non-zero, but this may be expected if yes pipe closed early"
