@@ -130,7 +130,8 @@ export class InventoryUseCases {
     const result = await this.db.transaction(async (tx) => {
       const level = await this.storage.getInventoryLevelByLocationAndVariant(
         params.warehouseLocationId,
-        params.productVariantId
+        params.productVariantId,
+        tx
       );
 
       if (!level) return false;
@@ -210,7 +211,8 @@ export class InventoryUseCases {
     await this.db.transaction(async (tx) => {
       const level = await this.storage.getInventoryLevelByLocationAndVariant(
         params.warehouseLocationId,
-        params.productVariantId
+        params.productVariantId,
+        tx
       );
 
       if (!level) {
@@ -406,7 +408,8 @@ export class InventoryUseCases {
     await this.db.transaction(async (tx) => {
       const level = await this.storage.getInventoryLevelByLocationAndVariant(
         params.warehouseLocationId,
-        params.productVariantId
+        params.productVariantId,
+        tx
       );
 
       if (!level) throw new Error(`No inventory level`);
@@ -462,7 +465,8 @@ export class InventoryUseCases {
     await this.db.transaction(async (tx) => {
       const sourceLevel = await this.storage.getInventoryLevelByLocationAndVariant(
         params.fromLocationId,
-        params.productVariantId
+        params.productVariantId,
+        tx
       );
 
       if (!sourceLevel || sourceLevel.variantQty < params.qty) {
@@ -811,3 +815,4 @@ export class InventoryUseCases {
     );
   }
 }
+

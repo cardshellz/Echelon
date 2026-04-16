@@ -12,7 +12,7 @@ import {
 export interface IInventoryStorage {
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
   getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]>;
-  getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number): Promise<InventoryLevel | undefined>;
+  getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number, tx?: any): Promise<InventoryLevel | undefined>;
   createInventoryLevel(level: InsertInventoryLevel, tx?: any): Promise<InventoryLevel>;
   upsertInventoryLevel(level: InsertInventoryLevel, tx?: any): Promise<InventoryLevel>;
   adjustInventoryLevel(id: number, adjustments: { variantQty?: number; reservedQty?: number; pickedQty?: number; backorderQty?: number }, tx?: any): Promise<InventoryLevel | null>;
@@ -100,8 +100,8 @@ export const inventoryMethods: IInventoryStorage = {
       .where(eq(inventoryLevels.productVariantId, productVariantId));
   },
 
-  async getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number): Promise<InventoryLevel | undefined> {
-    const result = await db
+  async getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number, tx?: any): Promise<InventoryLevel | undefined> {
+    const result = await (tx || db)
       .select()
       .from(inventoryLevels)
       .where(and(
