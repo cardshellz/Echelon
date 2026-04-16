@@ -122,7 +122,7 @@ export default function InlineCaseBreakDialog({
   const caseBreakMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/replen/tasks", {
-        mode: "case_break",
+        replenMethod: "case_break",
         fromLocationId: defaultFromLocationId?.toString(),
         toLocationId: toLocationId?.toString(),
         sourceVariantId: sourceVariantId?.toString(),
