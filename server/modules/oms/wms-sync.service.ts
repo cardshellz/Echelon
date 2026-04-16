@@ -119,7 +119,16 @@ export class WmsSyncService {
 
         if (variantId) {
           try {
-            binLocation = await this.services.inventoryCore.getPrimaryBinLocation(variantId);
+            const res = await db.execute<{ code: string; zone_id: number | null }>(sql`
+              SELECT wl.code, wl.zone_id
+              FROM product_locations pl
+              JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
+              WHERE pl.product_variant_id = ${variantId} AND pl.is_primary = 1
+              LIMIT 1
+            `);
+            if (res.rows.length > 0) {
+              binLocation = { location: String(res.rows[0].code), zone: res.rows[0].zone_id ? String(res.rows[0].zone_id) : "U" };
+            }
           } catch (err) {
             console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}`);
           }
@@ -322,7 +331,16 @@ export class WmsSyncService {
         let binLocation: { location: string; zone: string } | null = null;
         if (variantId) {
           try {
-            binLocation = await this.services.inventoryCore.getPrimaryBinLocation(variantId);
+            const res = await db.execute<{ code: string; zone_id: number | null }>(sql`
+              SELECT wl.code, wl.zone_id
+              FROM product_locations pl
+              JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
+              WHERE pl.product_variant_id = ${variantId} AND pl.is_primary = 1
+              LIMIT 1
+            `);
+            if (res.rows.length > 0) {
+              binLocation = { location: String(res.rows[0].code), zone: res.rows[0].zone_id ? String(res.rows[0].zone_id) : "U" };
+            }
           } catch {}
         }
         const itemRequiresShipping = line.requiresShipping !== false;
