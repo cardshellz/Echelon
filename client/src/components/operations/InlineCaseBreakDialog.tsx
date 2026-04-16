@@ -85,6 +85,28 @@ export default function InlineCaseBreakDialog({
     enabled: open,
   });
 
+  const { data: targetLocations } = useQuery({
+    queryKey: ["/api/inventory/variants", pickVariantId, "locations"],
+    queryFn: async () => {
+      const res = await fetch(`/api/inventory/variants/${pickVariantId}/locations`);
+      if (!res.ok) throw new Error("Failed to fetch target locations");
+      return res.json();
+    },
+    enabled: open && !!pickVariantId && toLocationId === null,
+  });
+
+  useEffect(() => {
+    if (open && toLocationId === null && targetLocations && targetLocations.length > 0) {
+      // Prefer pick bins, otherwise just take the first one
+      const pickBin = targetLocations.find((l: any) => l.location?.locationType === "pick");
+      if (pickBin?.location?.id) {
+        setToLocationId(pickBin.location.id);
+      } else if (targetLocations[0].location?.id) {
+        setToLocationId(targetLocations[0].location.id);
+      }
+    }
+  }, [open, toLocationId, targetLocations]);
+
   const filteredLocations = useMemo(() => {
     if (!locations) return [];
     if (!locationSearch) return locations;

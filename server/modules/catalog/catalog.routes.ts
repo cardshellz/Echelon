@@ -11,7 +11,6 @@ import { warehouseStorage } from "../warehouse";
 import { procurementStorage } from "../procurement";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission } from "../../routes/middleware";
-import { syncPickQueueForSku } from "../orders";
 
 export async function registerProductRoutes(app: Express) {
   // ============================================================================
@@ -949,10 +948,6 @@ export async function registerProductRoutes(app: Express) {
         isPrimary,
       });
 
-      // Fire-and-forget: sync pick queue for this SKU
-      if (result.sku) {
-        syncPickQueueForSku(result.sku).catch(() => {});
-      }
 
       res.json(result);
     } catch (error: any) {
@@ -967,10 +962,6 @@ export async function registerProductRoutes(app: Express) {
       const deleted = await binAssignment.unassignVariant(id);
       if (!deleted) return res.status(404).json({ error: "Assignment not found" });
 
-      // Fire-and-forget: sync pick queue for this SKU
-      if (deleted.sku) {
-        syncPickQueueForSku(deleted.sku).catch(() => {});
-      }
 
       res.status(204).end();
     } catch (error: any) {

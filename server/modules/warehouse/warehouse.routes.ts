@@ -5,7 +5,7 @@ import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...catalogStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
-import { syncPickQueueForSku } from "../orders";
+
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
 
 export function registerWarehouseRoutes(app: Express) {
@@ -679,7 +679,7 @@ export function registerWarehouseRoutes(app: Express) {
       });
 
       if (assignmentSku) {
-        syncPickQueueForSku(assignmentSku).catch(() => {});
+
       }
 
       res.status(201).json(productLocation);

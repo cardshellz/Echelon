@@ -309,7 +309,7 @@ export class PickingUseCases {
           );
 
           if (replenResult) {
-            // Replen succeeded — notify picker with dismissible success banner
+            // Replen succeeded - notify picker with dismissible success banner
             console.log(`[Replen] Auto-executed replen for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: moved ${replenResult.moved} units`);
             inventoryCtx.replen.triggered = true;
             inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
@@ -320,6 +320,14 @@ export class PickingUseCases {
             inventoryCtx.replen.autoExecuteFailReason = null;
             // Source info from the completed task for UI display
             inventoryCtx.replen.qtyToMove = replenResult.moved;
+            
+            // Fix: The "Zero Collision"
+            // If the bin hit zero, it initially flipped binCountNeeded to true.
+            // But if auto-replenishment immediately refilled it inline, we MUST suppress the bin count,
+            // otherwise the picker receives a redundant count prompt that overlaps and crashes replen!
+            if (replenResult.moved > 0) {
+              inventoryCtx.binCountNeeded = false;
+            }
           } else {
             // createAndExecuteReplen returned null — guidance check says no replen needed
             // (threshold not met, or no source stock). Nothing to do — this is the normal case.

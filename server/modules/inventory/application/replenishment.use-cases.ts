@@ -930,25 +930,29 @@ export class ReplenishmentUseCases {
       notes: `${guidance.taskNotes}\nConfirmed by picker, executing atomically`,
     } satisfies InsertReplenTask).returning();
 
-    console.log(`${_tag} created task ${task.id}, executing immediately...`);
-
-    // Execute the inventory movement
-    try {
-      const result = await this.executeTask(task.id, userId ?? "picker:confirmed");
-      console.log(`${_tag} task ${task.id} executed, moved ${result.moved} units`);
-      // Re-read task to get final state
-      const [completed] = await this.db.select().from(replenTasks).where(eq(replenTasks.id, task.id)).limit(1);
-      return { task: completed as ReplenTask, moved: result.moved };
-    } catch (err: any) {
-      console.error(`${_tag} executeTask failed for task ${task.id}:`, err?.message);
-      // Mark as blocked so it's visible in the queue for manual resolution
-      await this.db.update(replenTasks).set({
-        status: "blocked",
-        notes: `${task.notes}\nExecution failed: ${err?.message || "unknown error"}`,
-      }).where(eq(replenTasks.id, task.id));
-      // Re-throw so caller gets the real reason (not confused with "no source stock")
-      throw new Error(`execute_failed: ${err?.message || "unknown error"}`);
+    let moved = 0;
+    if (guidance.shouldAutoExecute) {
+      console.log(`${_tag} created task ${task.id}, executing immediately...`);
+      try {
+        const result = await this.executeTask(task.id, userId ?? "picker:confirmed");
+        moved = result.moved;
+        console.log(`${_tag} task ${task.id} executed, moved ${result.moved} units`);
+      } catch (err: any) {
+        console.error(`${_tag} executeTask failed for task ${task.id}:`, err?.message);
+        // Mark as blocked so it's visible in the queue for manual resolution
+        await this.db.update(replenTasks).set({
+          status: "blocked",
+          notes: `${task.notes}\nExecute failed: ${err?.message}`,
+        }).where(eq(replenTasks.id, task.id));
+        throw err;
+      }
+    } else {
+      console.log(`${_tag} created task ${task.id}, executionMode is queue. Leaving as pending.`);
     }
+
+    // Re-read task to get final state
+    const [finalTask] = await this.db.select().from(replenTasks).where(eq(replenTasks.id, task.id)).limit(1);
+    return { task: finalTask as ReplenTask, moved };
   }
 
   /**

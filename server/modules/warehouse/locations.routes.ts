@@ -6,7 +6,6 @@ import { ordersStorage } from "../orders";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...inventoryStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
-import { syncPickQueueForSku } from "../orders";
 import { insertProductLocationSchema, updateProductLocationSchema, productLocations, productVariants, products, inventoryLevels, warehouseLocations } from "@shared/schema";
 import type { InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -124,7 +123,7 @@ export function registerLocationRoutes(app: Express) {
 
       // Auto-sync pick queue for this SKU (fire-and-forget)
       if (location.sku) {
-        syncPickQueueForSku(location.sku).catch(() => {});
+
       }
 
       res.status(201).json(location);
@@ -169,7 +168,7 @@ export function registerLocationRoutes(app: Express) {
 
       // Auto-sync pick queue for this SKU (fire-and-forget)
       if (location.sku) {
-        syncPickQueueForSku(location.sku).catch(() => {});
+
       }
 
       res.json(location);
@@ -192,11 +191,6 @@ export function registerLocationRoutes(app: Express) {
 
       if (!deleted) {
         return res.status(404).json({ error: "Location not found" });
-      }
-
-      // Auto-sync pick queue for this SKU (fire-and-forget)
-      if (existing?.sku) {
-        syncPickQueueForSku(existing.sku).catch(() => {});
       }
 
       res.status(204).send();

@@ -8,7 +8,6 @@ import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...channelsStorage };
 import { requirePermission, requireAuth, upload } from "../../routes/middleware";
-import { syncPickQueueForSku } from "../orders";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
 
@@ -173,10 +172,6 @@ export function registerInventoryRoutes(app: Express) {
         xfrReplen.checkReplenForLocation(fromLocId).catch((err: any) =>
           console.warn(`[Replen] Post-transfer replen check failed for loc ${fromLocId}:`, err)
         );
-      }
-      // Auto-sync pick queue locations for this SKU (fire-and-forget)
-      if (variant.sku) {
-        syncPickQueueForSku(variant.sku).catch(() => {});
       }
 
       res.json({ success: true });

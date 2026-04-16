@@ -1065,6 +1065,7 @@ export default function Picking() {
   
   // Scan input ref for focus management
   const manualInputRef = useRef<HTMLInputElement>(null);
+  const hiddenScannerRef = useRef<HTMLInputElement>(null);
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Refs for item elements to enable auto-scroll
@@ -1086,8 +1087,8 @@ export default function Picking() {
   // Keep focus on scan input - aggressive refocus for scanner devices
   const maintainFocus = useCallback(() => {
     // Don't steal focus when any dialog is open — let dialogs own their focus
-    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen && manualInputRef.current) {
-      manualInputRef.current.focus();
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen) {
+      if (hiddenScannerRef.current) hiddenScannerRef.current.focus();
     }
   }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen]);
 
@@ -1880,10 +1881,10 @@ export default function Picking() {
     triggerHaptic("medium");
     handleListItemPickDirect(idx, item.qty);
     
-    // Blur the input to prevent keyboard from popping up
-    if (manualInputRef.current) {
-      manualInputRef.current.blur();
-    }
+    // Snatch focus back to the hidden scanner sink after clicking a button.
+    // This prevents the OS virtual keyboard from popping up while ensuring
+    // that the Bluetooth HID scanner remains securely tethered to a DOM input.
+    setTimeout(maintainFocus, 50);
     
     // Scroll to next pending item after a short delay (to allow state to update)
     setTimeout(() => {
@@ -3446,6 +3447,29 @@ export default function Picking() {
   // PICKING VIEW (Scanner Optimized)
   return (
     <div className="flex flex-col min-h-full bg-muted/20 overflow-auto select-none">
+      {/* Hidden scanner sink - captures hardware barcode scans reliably without software keyboard */}
+      <input 
+        ref={hiddenScannerRef}
+        className="opacity-0 absolute w-0 h-0 -z-10"
+        inputMode="none"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            const val = e.currentTarget.value.trim();
+            if (val && processScanRef.current) {
+              setScanInput(val);
+              setTimeout(() => {
+                processScanRef.current(val);
+                setScanInput("");
+              }, 10);
+            }
+            e.currentTarget.value = "";
+          }
+        }}
+        autoComplete="off"
+        tabIndex={-1}
+        aria-hidden="true"
+      />
       {/* Compact Header */}
       <div className="bg-card border-b p-3 md:p-4 sticky top-0 z-10">
         <div className="flex items-center justify-between gap-2 mb-2">

@@ -22,8 +22,6 @@ export const ordersStorage: OrdersModuleStorage = {
   ...orderHistoryMethods,
 };
 
-// Pick queue sync
-export { syncPickQueueForSku } from "./pick-queue-sync";
 
 // Service types
 export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "./picking.use-cases";
