@@ -1404,7 +1404,7 @@ export function registerPurchasingRoutes(app: Express) {
   });
 
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
-  app.get("/api/purchasing/dashboard", requirePermission("inventory", "view"), async (req, res) => {
+  app.get("/api/purchasing/kpis", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const configuredLookback = await storage.getVelocityLookbackDays();
       const rawRows = await storage.getReorderAnalysisData(configuredLookback);

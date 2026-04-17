@@ -86,9 +86,9 @@ export default function PurchasingView() {
   const [, navigate] = useLocation();
 
   const { data: kpis, isLoading: isLoadingKpis } = useQuery<DashboardKPIs>({
-    queryKey: ["/api/purchasing/dashboard"],
+    queryKey: ["/api/purchasing/kpis"],
     queryFn: async () => {
-      const res = await fetch("/api/purchasing/dashboard");
+      const res = await fetch("/api/purchasing/kpis");
       if (!res.ok) throw new Error("Failed to fetch KPIs");
       return res.json();
     },
