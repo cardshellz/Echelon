@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
@@ -1480,6 +1480,7 @@ export default function ProductDetail() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete Product</DialogTitle>
+            <DialogDescription className="sr-only">Confirm product deletion</DialogDescription>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             Permanently delete <strong>{product.name}</strong> ({product.sku}) and all its variants? This cannot be undone.
@@ -2458,6 +2459,7 @@ export default function ProductDetail() {
                 <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
                   <DialogHeader>
                     <DialogTitle>{editingSupplierId ? "Edit Supplier" : "Add Supplier"}</DialogTitle>
+                    <DialogDescription className="sr-only">Form to add or edit a supplier</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
                     {!editingSupplierId && (
@@ -2620,6 +2622,7 @@ export default function ProductDetail() {
         <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingVariant ? "Edit Variant" : "Add Variant"}</DialogTitle>
+            <DialogDescription className="sr-only">Form to add or edit a product variant</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-1.5">
@@ -2784,6 +2787,7 @@ export default function ProductDetail() {
               <Archive className="h-5 w-5" />
               Archive Product
             </DialogTitle>
+            <DialogDescription className="sr-only">Confirm archiving the whole product</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <p className="text-sm text-muted-foreground">
@@ -3060,6 +3064,7 @@ export default function ProductDetail() {
               <Archive className="h-5 w-5" />
               Archive Variant
             </DialogTitle>
+            <DialogDescription className="sr-only">Confirm archiving the variant</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <p className="text-sm text-muted-foreground">

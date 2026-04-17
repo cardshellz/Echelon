@@ -386,8 +386,11 @@ export async function registerProductRoutes(app: Express) {
         return res.status(404).json({ error: "Product not found" });
       }
       res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error deleting product:", error);
+      if (error.message && error.message.includes("foreign key constraint")) {
+        return res.status(400).json({ error: "Cannot completely delete this product because it has historical records linked to it (e.g. cycle counts, transactions, or purchase orders). Please Archive it instead." });
+      }
       res.status(500).json({ error: "Failed to delete product" });
     }
   });
