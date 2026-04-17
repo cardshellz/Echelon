@@ -913,12 +913,50 @@ export function registerShopifyRoutes(app: Express) {
       const shopifyOrderId = String(payload.order_id);
       const fulfillmentStatus = payload.status;
 
-      console.log(`Fulfillment update webhook: order ${shopifyOrderId}, status: ${fulfillmentStatus} (metadata update only, not processing line items)`);
-      
-      // We don't process line items on update to avoid double-counting.
-      // The create webhook already processed the shipment.
-      
+      console.log(`Fulfillment update webhook: order ${shopifyOrderId}, status: ${fulfillmentStatus}`);
+
       res.status(200).json({ received: true });
+
+      // If fulfillment is successful, update WMS order status (in case create webhook was missed)
+      if (fulfillmentStatus === "success") {
+        try {
+          const { db } = app.locals;
+          const trackingNumber = payload.tracking_number || null;
+          const now = new Date();
+
+          const wmsOrder = await db.execute<{ id: number }>(sql`
+            SELECT id FROM wms.orders
+            WHERE (oms_fulfillment_order_id = ${shopifyOrderId}
+                   OR source_table_id = ${shopifyOrderId})
+              AND warehouse_status NOT IN ('shipped', 'cancelled')
+            LIMIT 1
+          `);
+
+          if (wmsOrder.rows.length > 0) {
+            const wmsOrderId = wmsOrder.rows[0].id;
+            await db.execute(sql`
+              UPDATE wms.orders SET
+                warehouse_status = 'shipped',
+                completed_at = ${now},
+                tracking_number = ${trackingNumber}
+              WHERE id = ${wmsOrderId}
+            `);
+
+            await db.execute(sql`
+              UPDATE wms.order_items SET
+                status = 'completed',
+                picked_quantity = quantity,
+                fulfilled_quantity = quantity
+              WHERE wms_order_id = ${wmsOrderId}
+                AND status NOT IN ('completed', 'short', 'cancelled')
+            `);
+
+            console.log(`Fulfillment update webhook: WMS order ${wmsOrderId} marked shipped`);
+          }
+        } catch (wmsErr: any) {
+          console.warn(`Fulfillment update webhook: WMS update failed for ${shopifyOrderId}: ${wmsErr.message}`);
+        }
+      }
     } catch (error) {
       console.error("Fulfillment update webhook error:", error);
       res.status(500).json({ error: "Webhook processing failed" });

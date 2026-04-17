@@ -523,6 +523,38 @@ class FulfillmentService {
 
         console.log(`[Fulfillment] OMS order ${omsOrder.id} marked shipped via Shopify webhook`);
       }
+
+      // Update WMS order status to shipped (clears from pick queue)
+      const [wmsOrder] = await this.db.execute<{ id: number }>(sql`
+        SELECT id FROM wms.orders
+        WHERE (oms_fulfillment_order_id = ${shopifyOrderIdStr}
+               OR source_table_id = ${shopifyOrderIdStr})
+          AND warehouse_status NOT IN ('shipped', 'cancelled')
+        LIMIT 1
+      `);
+
+      if (wmsOrder.rows.length > 0) {
+        const wmsOrderId = wmsOrder.rows[0].id;
+        const now = new Date();
+        await this.db.execute(sql`
+          UPDATE wms.orders SET
+            warehouse_status = 'shipped',
+            completed_at = ${now},
+            tracking_number = ${params.trackingNumber || null}
+          WHERE id = ${wmsOrderId}
+        `);
+
+        await this.db.execute(sql`
+          UPDATE wms.order_items SET
+            status = 'completed',
+            picked_quantity = quantity,
+            fulfilled_quantity = quantity
+          WHERE wms_order_id = ${wmsOrderId}
+            AND status NOT IN ('completed', 'short', 'cancelled')
+        `);
+
+        console.log(`[Fulfillment] WMS order ${wmsOrderId} marked shipped via Shopify webhook`);
+      }
     } catch (err: any) {
       // Non-blocking — OMS update failure shouldn't fail the shipment
       console.warn(`[Fulfillment] Failed to update OMS status for Shopify order ${params.shopifyOrderId}: ${err.message}`);

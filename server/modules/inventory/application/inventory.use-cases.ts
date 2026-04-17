@@ -470,7 +470,13 @@ export class InventoryUseCases {
       );
 
       if (!sourceLevel || sourceLevel.variantQty < params.qty) {
-        throw new Error(`Insufficient on-hand at source: need ${params.qty}`);
+        throw new Error(`Insufficient on-hand at source: need ${params.qty}, have ${sourceLevel?.variantQty || 0}`);
+      }
+
+      // Check that we're not transferring reserved inventory
+      const available = sourceLevel.variantQty - (sourceLevel.reservedQty || 0);
+      if (available < params.qty) {
+        throw new Error(`Insufficient available at source: need ${params.qty}, have ${available} available (${sourceLevel.reservedQty} reserved)`);
       }
 
       const decremented = await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -params.qty }, tx);
