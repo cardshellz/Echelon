@@ -3197,7 +3197,7 @@ export function registerPurchasingRoutes(app: Express) {
   app.get("/api/purchasing/exclusion-rules/field-values", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const field = String(req.query.field || "").trim();
-      const allowedFields: Record<string, string> = {
+      const allowedFields: Record<string, string | null> = {
         category: "category",
         brand: "brand",
         product_type: "product_type",
