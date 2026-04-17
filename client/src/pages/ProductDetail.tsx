@@ -702,6 +702,29 @@ export default function ProductDetail() {
     },
   });
 
+  const unarchiveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/products/${product?.productId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: true, status: "active" }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || body?.error || "Failed to reactivate product");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      toast({ title: "Product reactivated successfully" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Reactivation failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   // --- Archive: variant search for SKU correction transfer ---
   const variantSearchResults = useQuery<{ sku: string; name: string; productVariantId: number; productId: number; unitsPerVariant: number }[]>({
     queryKey: ["/api/inventory/skus/search", variantSearchQuery],
@@ -1417,7 +1440,7 @@ export default function ProductDetail() {
           <Badge variant={product.isActive ? "default" : "secondary"} className="text-xs">
             {product.status === "archived" ? "Archived" : product.isActive ? "Active" : "Inactive"}
           </Badge>
-          {product.isActive && (
+          {product.isActive ? (
             <Button
               variant="outline"
               size="sm"
@@ -1426,6 +1449,17 @@ export default function ProductDetail() {
             >
               <Archive className="h-4 w-4 mr-2" />
               Archive
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              className="min-h-[44px] text-green-600 border-green-600/20 hover:bg-green-600/10"
+              onClick={() => unarchiveMutation.mutate()}
+              disabled={unarchiveMutation.isPending}
+            >
+              <RotateCcw className="h-4 w-4 mr-2" />
+              {unarchiveMutation.isPending ? "Activating..." : "Reactivate"}
             </Button>
           )}
           <Button
