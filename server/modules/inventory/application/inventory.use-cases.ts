@@ -276,6 +276,8 @@ export class InventoryUseCases {
         notes: fromOnHand > 0 ? `Shipped without pick: ${fromPicked} from picked, ${fromOnHand} from on-hand` : null,
       }, tx);
     });
+
+    this.triggerNotifyChange(params.productVariantId, "ship");
   }
 
   // ---------------------------------------------------------------------------
