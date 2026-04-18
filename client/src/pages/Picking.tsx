@@ -3450,8 +3450,8 @@ export default function Picking() {
       {/* Hidden scanner sink - captures hardware barcode scans reliably without software keyboard */}
       <input 
         ref={hiddenScannerRef}
-        className="opacity-0 absolute w-0 h-0 -z-10"
-        inputMode="none"
+        className="opacity-0 absolute -z-10"
+        
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();
