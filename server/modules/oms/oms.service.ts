@@ -91,19 +91,62 @@ export function createOmsService(db: any, reservationService?: any) {
     externalOrderId: string,
     data: OrderData,
   ): Promise<OmsOrder> {
-    // Check for existing (idempotent dedup)
-    const existing = await db
-      .select()
-      .from(omsOrders)
-      .where(
-        and(
-          eq(omsOrders.channelId, channelId),
-          eq(omsOrders.externalOrderId, externalOrderId),
-        ),
-      )
-      .limit(1);
+    // App-layer race protection (P1-1 / P1-2): Insert natively resolving any potential conflict seamlessly
+    const [order] = await db
+      .insert(omsOrders)
+      .values({
+        channelId,
+        externalOrderId,
+        externalOrderNumber: data.externalOrderNumber || externalOrderId,
+        status: data.status || "pending",
+        financialStatus: data.financialStatus || "paid",
+        fulfillmentStatus: data.fulfillmentStatus || "unfulfilled",
+        customerName: data.customerName,
+        customerEmail: data.customerEmail,
+        customerPhone: data.customerPhone,
+        shipToName: data.shipToName,
+        shipToAddress1: data.shipToAddress1,
+        shipToAddress2: data.shipToAddress2,
+        shipToCity: data.shipToCity,
+        shipToState: data.shipToState,
+        shipToZip: data.shipToZip,
+        shipToCountry: data.shipToCountry,
+        subtotalCents: data.subtotalCents || 0,
+        shippingCents: data.shippingCents || 0,
+        taxCents: data.taxCents || 0,
+        discountCents: data.discountCents || 0,
+        totalCents: data.totalCents || 0,
+        currency: data.currency || "USD",
+        taxExempt: data.taxExempt || false,
+        rawPayload: data.rawPayload as any,
+        notes: data.notes,
+        tags: data.tags ? JSON.stringify(data.tags) : null,
+        shippingMethod: data.shippingMethod || null,
+        shippingMethodCode: data.shippingMethodCode || null,
+        orderedAt: data.orderedAt,
+      } satisfies InsertOmsOrder)
+      .onConflictDoNothing({ target: [omsOrders.channelId, omsOrders.externalOrderId] })
+      .returning();
 
-    if (existing.length > 0) {
+    // Conflict hit - ingestion avoided (double ingestion dedup guard). Safely route dynamically back to retrieving existing.
+    if (!order) {
+      console.log(`[METRIC] oms.duplicate_ingest_avoided_total=1 (channel_id=${channelId}, external_order_id=${externalOrderId})`);
+
+      const existing = await db
+        .select()
+        .from(omsOrders)
+        .where(
+          and(
+            eq(omsOrders.channelId, channelId),
+            eq(omsOrders.externalOrderId, externalOrderId),
+          ),
+        )
+        .limit(1);
+
+      if (existing.length === 0) {
+        throw new Error(`[OMS] Unresolved race condition hit avoiding duplicate for ${externalOrderId}. Order not found after conflict.`);
+      }
+
       // Check if line items exist for this order
       const existingLines = await db
         .select()
@@ -159,42 +202,6 @@ export function createOmsService(db: any, reservationService?: any) {
 
       return existing[0];
     }
-
-    // Insert order
-    const [order] = await db
-      .insert(omsOrders)
-      .values({
-        channelId,
-        externalOrderId,
-        externalOrderNumber: data.externalOrderNumber || externalOrderId,
-        status: data.status || "pending",
-        financialStatus: data.financialStatus || "paid",
-        fulfillmentStatus: data.fulfillmentStatus || "unfulfilled",
-        customerName: data.customerName,
-        customerEmail: data.customerEmail,
-        customerPhone: data.customerPhone,
-        shipToName: data.shipToName,
-        shipToAddress1: data.shipToAddress1,
-        shipToAddress2: data.shipToAddress2,
-        shipToCity: data.shipToCity,
-        shipToState: data.shipToState,
-        shipToZip: data.shipToZip,
-        shipToCountry: data.shipToCountry,
-        subtotalCents: data.subtotalCents || 0,
-        shippingCents: data.shippingCents || 0,
-        taxCents: data.taxCents || 0,
-        discountCents: data.discountCents || 0,
-        totalCents: data.totalCents || 0,
-        currency: data.currency || "USD",
-        taxExempt: data.taxExempt || false,
-        rawPayload: data.rawPayload as any,
-        notes: data.notes,
-        tags: data.tags ? JSON.stringify(data.tags) : null,
-        shippingMethod: data.shippingMethod || null,
-        shippingMethodCode: data.shippingMethodCode || null,
-        orderedAt: data.orderedAt,
-      } satisfies InsertOmsOrder)
-      .returning();
 
     // Insert line items with SKU → product_variant lookup
     for (const item of data.lineItems) {
