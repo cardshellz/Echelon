@@ -925,6 +925,19 @@ export default function PurchaseOrderDetail() {
 
       </div>
 
+      {/* Auto-Draft Banner */}
+      {po.source === "auto_draft" && (
+        <div className="bg-amber-50 border border-amber-200 rounded-md px-4 py-3 flex items-center gap-4 text-sm">
+          <span className="text-lg flex-shrink-0">🤖</span>
+          <div className="flex-1">
+            <strong className="text-amber-700">Auto-Draft</strong>
+            <p className="text-muted-foreground text-xs mt-0.5">
+              Created by the nightly auto-draft job{po.autoDraftDate ? ` on ${new Date(po.autoDraftDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}` : ""}. Review quantities and send to vendor when ready.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>

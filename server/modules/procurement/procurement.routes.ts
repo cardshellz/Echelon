@@ -1531,9 +1531,36 @@ export function registerPurchasingRoutes(app: Express) {
       // Also fetch the highest-level variant (ordering UOM) for rounding order quantities
       const rawRows = await storage.getReorderAnalysisData(lookbackDays);
 
+      // Apply exclusion filtering (reorder_excluded flag + exclusion rules)
+      const { db } = await import("../../db");
+      const { products: productsTable, reorderExclusionRules: exclRules } = await import("../../storage/base");
+      const { sql: sqlFn } = await import("drizzle-orm");
+      const allRules = await db.select().from(exclRules);
+      const excludedIds = new Set<number>();
+      if (allRules.length > 0) {
+        const metaRows = await db.execute(sqlFn`SELECT id, category, brand, product_type, sku, reorder_excluded FROM ${productsTable} WHERE is_active = true`);
+        for (const pm of metaRows.rows as any[]) {
+          if (pm.reorder_excluded) { excludedIds.add(pm.id); continue; }
+          for (const r of allRules) {
+            const val = String(r.value).toLowerCase();
+            let match = false;
+            switch (r.field) {
+              case "category": match = (pm.category || "").toLowerCase() === val; break;
+              case "brand": match = (pm.brand || "").toLowerCase() === val; break;
+              case "product_type": match = (pm.product_type || "").toLowerCase() === val; break;
+              case "sku_prefix": match = (pm.sku || "").toLowerCase().startsWith(val); break;
+              case "sku_exact": match = (pm.sku || "").toLowerCase() === val; break;
+            }
+            if (match) { excludedIds.add(pm.id); break; }
+          }
+        }
+      }
+      const rowsToProcess = allRules.length > 0 ? rawRows.filter((r: any) => !excludedIds.has(r.product_id)) : rawRows;
+      const excludedCount = rawRows.length - rowsToProcess.length;
+
       const HIERARCHY_LABELS: Record<number, string> = { 1: "Pack", 2: "Box", 3: "Case", 4: "Skid" };
 
-      const items = rawRows.map((r: any) => {
+      const items = rowsToProcess.map((r: any) => {
         const totalOnHand = Number(r.total_pieces);
         const totalReserved = Number(r.total_reserved_pieces);
         const totalOutbound = Number(r.total_outbound_pieces);
@@ -1619,7 +1646,7 @@ export function registerPurchasingRoutes(app: Express) {
         totalOnHand: items.reduce((s, i) => s + i.totalOnHand, 0),
       };
 
-      res.json({ items, summary, lookbackDays });
+      res.json({ items, summary: { ...summary, excludedCount }, lookbackDays });
     } catch (error) {
       console.error("Error fetching reorder analysis:", error);
       res.status(500).json({ error: "Failed to fetch reorder analysis" });
