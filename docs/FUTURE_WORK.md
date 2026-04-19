@@ -65,3 +65,19 @@ equipment, different priorities) without rewriting the picker today.
 - Cross-schema FK from `warehouse.warehouse_locations.pick_zone_id` to
   `inventory.warehouse_pick_zones.id` is declared in the migration, not the
   Drizzle schema, because Drizzle's cross-schema FK support is limited.
+
+---
+
+# Other Future Work
+
+## Stale `app_settings` type export
+
+Echelon's `shared/schema/warehouse.schema.ts` exports an `appSettings` type
+that claims a `key/value` shape. The actual `warehouse.app_settings` table
+in production is a single-row config-flag table owned by shellz-club-app
+(Shopify creds, Klaviyo keys, offer codes, etc.). Echelon has no legitimate
+use for this table and the stale type export should be removed.
+
+Coordinated with shellz-club-app relocating the table out of the `warehouse`
+schema entirely. See `shellz-club-app/docs/FUTURE_WORK.md` entry 1 for the
+full plan.
