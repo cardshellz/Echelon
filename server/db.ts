@@ -18,7 +18,7 @@ const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "pr
 export const pool = new Pool({
   connectionString,
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
-  max: 3, // Limit connections per dyno (Heroku Hobby = 20 total across all dynos)
+  max: 2, // SHARED DB with shellz-club-app — keep total under 20 on Basic
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });

@@ -16,7 +16,7 @@ import { Pool } from "pg";
 const shellzClubDb = new Pool({
   connectionString: process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
-  max: 2, // Bound connections (was unbounded — pg defaults to 10, burning Heroku's 20-cap)
+  max: 1, // SHARED DB — keep minimal; tier enrichment is low-volume
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });
