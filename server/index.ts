@@ -60,8 +60,6 @@ const sessionPool = new Pool({
   connectionString: dbConnectionString,
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
   max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
 });
 
 app.use(

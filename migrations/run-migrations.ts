@@ -18,10 +18,7 @@ if (!connectionString) {
 
 const pool = new Pool({
   connectionString,
-  ssl: { rejectUnauthorized: false },
-  max: 1, // release-phase dyno only needs a single connection
-  idleTimeoutMillis: 5000,
-  connectionTimeoutMillis: 15000,
+  ssl: { rejectUnauthorized: false }
 });
 
 async function runMigrations() {
