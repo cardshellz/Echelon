@@ -1,19 +1,13 @@
--- Migrate the enable_order_combining setting from warehouse.app_settings
--- to warehouse.echelon_settings. Both tables have compatible key/value shape.
+-- NOOP. The original intent of this migration was to copy an
+-- enable_order_combining row from warehouse.app_settings to
+-- warehouse.echelon_settings. In practice, warehouse.app_settings is a
+-- different shape entirely (config flags table, not key/value), so there
+-- is no source row to migrate. The value has always lived directly in
+-- warehouse.echelon_settings (or was a code default).
 --
--- Non-destructive: copies the row only if echelon_settings doesn't already
--- have the key. app_settings row stays in place for rollback safety.
-
-INSERT INTO warehouse.echelon_settings (key, value, type, category, description)
-SELECT
-  a.key,
-  a.value,
-  COALESCE(a.type, 'boolean'),
-  COALESCE(a.category, 'picking'),
-  COALESCE(a.description, 'Show combine badges to pickers for same-customer orders')
-FROM warehouse.app_settings a
-WHERE a.key = 'enable_order_combining'
-  AND NOT EXISTS (
-    SELECT 1 FROM warehouse.echelon_settings e
-    WHERE e.key = 'enable_order_combining'
-  );
+-- Migration 0082_order_combining_per_warehouse.sql then consolidates the
+-- value from warehouse.echelon_settings into the DEFAULT row of
+-- inventory.warehouse_settings.
+--
+-- Kept as a placeholder so subsequent migration numbers don't reshuffle.
+SELECT 1;
