@@ -4,7 +4,7 @@ This doc tracks work deferred from the pick zones infrastructure PR.
 
 ## Context
 
-As of migration `0078_pick_zones_infrastructure.sql` the database supports
+As of migration `0081_pick_zones_infrastructure.sql` the database supports
 per-warehouse pick zones, but the picker service is not yet zone-aware. Every
 warehouse gets a single `DEFAULT` zone; all pick operations continue to behave
 exactly as they did before.
