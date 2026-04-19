@@ -237,17 +237,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       log(`[Echelon Sync] Starting with ${intervalMinutes}-minute sweep interval`, "echelon-sync");
 
-      // Defer first sweep — previously ran immediately on boot, which blew through
-      // the Postgres connection pool during startup. Set SKIP_STARTUP_SYNC=true in
-      // Heroku config to skip the interval entirely (emergency kill switch).
-      if (process.env.SKIP_STARTUP_SYNC === "true") {
-        log(`[Echelon Sync] SKIP_STARTUP_SYNC=true — sync disabled`, "echelon-sync");
-        return;
-      }
+      // Run first sweep immediately on boot
+      runSweep();
 
-      // Wait one interval before first run so app can settle on boot.
-      // Heroku requests can start arriving while sync is still warming up — serving those first.
-      setTimeout(() => runSweep(), intervalMinutes * 60 * 1000);
       intervalHandle = setInterval(() => runSweep(), intervalMinutes * 60 * 1000);
     } catch (err: any) {
       console.warn("[Echelon Sync] Failed to start scheduler:", err?.message);
