@@ -3,7 +3,7 @@ import {
   orders,
   orderItems,
   combinedOrderGroups,
-  echelonSettings,
+  appSettings,
 } from "@shared/schema";
 import type {
   CombinedOrderGroup,
@@ -146,37 +146,18 @@ class OrderCombiningService {
   async getSettings(): Promise<{ enabled: boolean }> {
     const setting = await this.db
       .select()
-      .from(echelonSettings)
-      .where(eq(echelonSettings.key, "enable_order_combining"))
+      .from(appSettings)
+      .where(eq(appSettings.key, "enable_order_combining"))
       .limit(1);
-    // Default to enabled when no row exists (preserves prior behavior)
     const enabled = setting.length > 0 ? setting[0].value === "true" : true;
     return { enabled };
   }
 
   async updateSettings(enabled: boolean): Promise<{ enabled: boolean }> {
-    const value = enabled ? "true" : "false";
-    // Upsert — insert if missing, update if present. Was a bare UPDATE before
-    // which silently no-op'd on a fresh DB with no row yet.
-    const existing = await this.db
-      .select()
-      .from(echelonSettings)
-      .where(eq(echelonSettings.key, "enable_order_combining"))
-      .limit(1);
-    if (existing.length > 0) {
-      await this.db
-        .update(echelonSettings)
-        .set({ value, updatedAt: new Date() })
-        .where(eq(echelonSettings.key, "enable_order_combining"));
-    } else {
-      await this.db.insert(echelonSettings).values({
-        key: "enable_order_combining",
-        value,
-        type: "boolean",
-        category: "picking",
-        description: "Show combine badges to pickers for same-customer orders",
-      });
-    }
+    await this.db
+      .update(appSettings)
+      .set({ value: enabled ? "true" : "false", updatedAt: new Date() })
+      .where(eq(appSettings.key, "enable_order_combining"));
     return { enabled };
   }
 
