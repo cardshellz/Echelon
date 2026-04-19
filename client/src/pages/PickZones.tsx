@@ -91,7 +91,7 @@ export default function PickZones() {
             <p className="text-muted-foreground text-sm">
               No pick zones found. Every warehouse should have at least a
               DEFAULT zone seeded by the latest migration — if you see this,
-              re-run migration <code>0075_pick_zones_infrastructure.sql</code>.
+              re-run migration <code>0078_pick_zones_infrastructure.sql</code>.
             </p>
           </CardContent>
         </Card>
