@@ -235,9 +235,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       log(`[Echelon Sync] Starting with ${intervalMinutes}-minute sweep interval`, "echelon-sync");
 
-      // Skip startup sync — deploying triggers a full inventory push to Shopify which
-      // floods downstream webhook receivers (shellz-club-app) with fulfillment events.
-      // The scheduled interval handles catch-up within minutes anyway.
+      // Run first sweep immediately on boot
+      runSweep();
+
       intervalHandle = setInterval(() => runSweep(), intervalMinutes * 60 * 1000);
     } catch (err: any) {
       console.warn("[Echelon Sync] Failed to start scheduler:", err?.message);
