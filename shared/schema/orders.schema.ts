@@ -281,12 +281,18 @@ export type PickingLog = typeof pickingLogs.$inferSelect;
 // COMBINED ORDER GROUPS
 // ============================================
 
-// Combined Order Groups - for picking/shipping multiple orders together
+// Combined Order Groups - for picking/shipping multiple orders together.
+// Groups are always scoped to a single warehouse — orders from different
+// warehouses cannot combine (no transship at pick time).
 export const combinedOrderGroups = wmsSchema.table("combined_order_groups", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // Identification
   groupCode: varchar("group_code", { length: 20 }).notNull().unique(), // e.g., "G-1024" based on parent order
+
+  // Warehouse scope — every combined group belongs to exactly one warehouse.
+  // Nullable for migration tolerance (old rows pre-backfill), but new rows must set it.
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }),
 
   // Shared customer/shipping info (denormalized for quick display)
   customerName: text("customer_name").notNull(),

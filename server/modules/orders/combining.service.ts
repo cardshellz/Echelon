@@ -1,9 +1,10 @@
-import { eq, inArray, sql, and } from "drizzle-orm";
+import { eq, inArray, sql, and, or, isNull } from "drizzle-orm";
 import {
   orders,
   orderItems,
   combinedOrderGroups,
-  echelonSettings,
+  warehouseSettings,
+  warehouses,
 } from "@shared/schema";
 import type {
   CombinedOrderGroup,
@@ -29,6 +30,7 @@ type DrizzleDb = {
 
 export interface CombinableGroup {
   addressHash: string;
+  warehouseId: number | null;
   customerName: string;
   customerEmail: string | null;
   shippingAddress: string | null;
@@ -141,40 +143,118 @@ class OrderCombiningService {
     return normalized;
   }
 
-  // ---- Settings ----
+  // ---- Settings (per-warehouse) ----
+  //
+  // Order combining must be scoped per warehouse because combining two orders
+  // means picking them from a single warehouse. Without a transship step at pick
+  // time you can't combine across warehouses.
+  //
+  // Resolution rules:
+  //   - getSettings(warehouseId)    → reads warehouse_settings for that warehouse;
+  //                                   falls back to the DEFAULT row if missing.
+  //   - getSettings() / no arg      → reads the DEFAULT row (company template).
+  //   - updateSettings(warehouseId, enabled) → writes that warehouse's row
+  //                                   (creating a row if none exists).
+  //   - updateSettings(null, enabled)        → writes the DEFAULT row.
 
-  async getSettings(): Promise<{ enabled: boolean }> {
-    const setting = await this.db
+  /** Resolve the effective combining flag for a warehouse (or DEFAULT). */
+  private async resolveWarehouseSettings(warehouseId: number | null): Promise<{
+    enabled: boolean;
+    source: "warehouse" | "default" | "fallback";
+  }> {
+    // First try the requested warehouse's own row
+    if (warehouseId !== null) {
+      const rows = await this.db
+        .select()
+        .from(warehouseSettings)
+        .where(eq(warehouseSettings.warehouseId, warehouseId))
+        .limit(1);
+      if (rows.length > 0) {
+        return {
+          enabled: Number(rows[0].enableOrderCombining ?? 1) === 1,
+          source: "warehouse",
+        };
+      }
+    }
+    // Fall through to DEFAULT row (warehouseCode = 'DEFAULT', warehouseId IS NULL)
+    const defaults = await this.db
       .select()
-      .from(echelonSettings)
-      .where(eq(echelonSettings.key, "enable_order_combining"))
+      .from(warehouseSettings)
+      .where(eq(warehouseSettings.warehouseCode, "DEFAULT"))
       .limit(1);
-    // Default to enabled when no row exists (preserves prior behavior)
-    const enabled = setting.length > 0 ? setting[0].value === "true" : true;
+    if (defaults.length > 0) {
+      return {
+        enabled: Number(defaults[0].enableOrderCombining ?? 1) === 1,
+        source: "default",
+      };
+    }
+    // No DEFAULT row configured either — permissive fallback.
+    return { enabled: true, source: "fallback" };
+  }
+
+  async getSettings(warehouseId?: number | null): Promise<{ enabled: boolean }> {
+    const { enabled } = await this.resolveWarehouseSettings(
+      warehouseId ?? null
+    );
     return { enabled };
   }
 
-  async updateSettings(enabled: boolean): Promise<{ enabled: boolean }> {
-    const value = enabled ? "true" : "false";
-    // Upsert — insert if missing, update if present. Was a bare UPDATE before
-    // which silently no-op'd on a fresh DB with no row yet.
+  async updateSettings(
+    warehouseId: number | null,
+    enabled: boolean
+  ): Promise<{ enabled: boolean }> {
+    const value = enabled ? 1 : 0;
+    // Per-warehouse write
+    if (warehouseId !== null) {
+      const existing = await this.db
+        .select()
+        .from(warehouseSettings)
+        .where(eq(warehouseSettings.warehouseId, warehouseId))
+        .limit(1);
+      if (existing.length > 0) {
+        await this.db
+          .update(warehouseSettings)
+          .set({ enableOrderCombining: value, updatedAt: new Date() })
+          .where(eq(warehouseSettings.warehouseId, warehouseId));
+      } else {
+        // Create a per-warehouse row. Need a unique warehouseCode and name;
+        // pull them from the warehouses table.
+        const wh = await this.db
+          .select()
+          .from(warehouses)
+          .where(eq(warehouses.id, warehouseId))
+          .limit(1);
+        if (wh.length === 0) {
+          throw Object.assign(new Error("Warehouse not found"), {
+            name: "CombineError",
+            statusCode: 404,
+          });
+        }
+        await this.db.insert(warehouseSettings).values({
+          warehouseId,
+          warehouseCode: wh[0].code,
+          warehouseName: wh[0].name,
+          enableOrderCombining: value,
+        });
+      }
+      return { enabled };
+    }
+    // DEFAULT template write
     const existing = await this.db
       .select()
-      .from(echelonSettings)
-      .where(eq(echelonSettings.key, "enable_order_combining"))
+      .from(warehouseSettings)
+      .where(eq(warehouseSettings.warehouseCode, "DEFAULT"))
       .limit(1);
     if (existing.length > 0) {
       await this.db
-        .update(echelonSettings)
-        .set({ value, updatedAt: new Date() })
-        .where(eq(echelonSettings.key, "enable_order_combining"));
+        .update(warehouseSettings)
+        .set({ enableOrderCombining: value, updatedAt: new Date() })
+        .where(eq(warehouseSettings.warehouseCode, "DEFAULT"));
     } else {
-      await this.db.insert(echelonSettings).values({
-        key: "enable_order_combining",
-        value,
-        type: "boolean",
-        category: "picking",
-        description: "Show combine badges to pickers for same-customer orders",
+      await this.db.insert(warehouseSettings).values({
+        warehouseCode: "DEFAULT",
+        warehouseName: "Default",
+        enableOrderCombining: value,
       });
     }
     return { enabled };
@@ -182,15 +262,30 @@ class OrderCombiningService {
 
   // ---- Combinable groups ----
 
-  async getCombinableGroups(): Promise<CombinableGroup[]> {
-    // Compute shippable item/unit counts from wms.order_items (same logic as pick queue)
-    // items = distinct shippable line items, units = sum of shippable quantities
+  /**
+   * Find address-clustered orders eligible for combining.
+   *
+   * Warehouse-scoped: orders from different warehouses never combine because
+   * combining means picking them together from a single location. When a
+   * warehouseId is passed, only that warehouse's ready orders are considered.
+   * Without a warehouseId, all warehouses are considered but groups are still
+   * composed only of orders sharing the same warehouse.
+   *
+   * Also respects each warehouse's enableOrderCombining flag — warehouses
+   * with combining disabled yield no groups.
+   */
+  async getCombinableGroups(
+    warehouseId?: number | null
+  ): Promise<CombinableGroup[]> {
+    const scopedFilter = warehouseId != null
+      ? sql`AND o.warehouse_id = ${warehouseId}`
+      : sql``;
+
     let result;
     try {
-      // LEFT JOIN wms.combined_order_groups to only show "combined" badge when the group actually exists
-      // (prevents orphaned combined_group_id from showing false badges)
       result = await this.db.execute(sql`
-        SELECT o.id, o.order_number, o.customer_name, o.customer_email,
+        SELECT o.id, o.order_number, o.warehouse_id,
+               o.customer_name, o.customer_email,
                o.shipping_address, o.shipping_city, o.shipping_state,
                o.shipping_postal_code, o.shipping_country,
                o.total_amount, o.source, o.created_at,
@@ -204,12 +299,14 @@ class OrderCombiningService {
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
           AND (oms.cancelled_at IS NULL OR oms.id IS NULL)
+          ${scopedFilter}
       `);
     } catch (columnError: any) {
       if (columnError?.code === "42703") {
         console.log("Note: combined_group_id column not yet in database, querying without it");
         result = await this.db.execute(sql`
-          SELECT o.id, o.order_number, o.customer_name, o.customer_email,
+          SELECT o.id, o.order_number, o.warehouse_id,
+                 o.customer_name, o.customer_email,
                  o.shipping_address, o.shipping_city, o.shipping_state,
                  o.shipping_postal_code, o.shipping_country,
                  o.total_amount, o.source, o.created_at,
@@ -220,6 +317,7 @@ class OrderCombiningService {
           WHERE o.warehouse_status = 'ready'
             AND o.on_hold = 0
             AND (oms.cancelled_at IS NULL OR oms.id IS NULL)
+            ${scopedFilter}
         `);
       } else {
         throw columnError;
@@ -227,27 +325,56 @@ class OrderCombiningService {
     }
 
     const readyOrders = result.rows as any[];
-    const groupedByAddress = new Map<string, typeof readyOrders>();
+
+    // Group by composite key: (warehouseId, addressHash). Two orders must share
+    // BOTH warehouse and shipping address to combine.
+    const groupedByWarehouseAndAddress = new Map<string, typeof readyOrders>();
 
     for (const order of readyOrders) {
       const hash = this.createAddressHash(order);
       if (!hash || hash === "||||" || !hash.replace(/\|/g, "").trim()) continue;
-      if (!groupedByAddress.has(hash)) {
-        groupedByAddress.set(hash, []);
+      const whId = order.warehouse_id ?? "null";
+      const compositeKey = `${whId}::${hash}`;
+      if (!groupedByWarehouseAndAddress.has(compositeKey)) {
+        groupedByWarehouseAndAddress.set(compositeKey, []);
       }
-      groupedByAddress.get(hash)!.push(order);
+      groupedByWarehouseAndAddress.get(compositeKey)!.push(order);
     }
 
-    return Array.from(groupedByAddress.entries())
-      .filter(([_, grpOrders]) => {
-        // Need 2+ orders AND at least one uncombined order (otherwise group is already complete)
+    // Cache enabled-flag lookups per warehouse to avoid redundant queries
+    const enabledCache = new Map<number | "null", boolean>();
+    const isEnabledForWarehouse = async (whId: number | null): Promise<boolean> => {
+      const key = whId === null ? ("null" as const) : whId;
+      if (enabledCache.has(key)) return enabledCache.get(key)!;
+      const { enabled } = await this.resolveWarehouseSettings(whId);
+      enabledCache.set(key, enabled);
+      return enabled;
+    };
+
+    const entries = Array.from(groupedByWarehouseAndAddress.entries()).filter(
+      ([_, grpOrders]) => {
         if (grpOrders.length < 2) return false;
         return grpOrders.some((o: any) => !o.combined_group_id);
-      })
-      .map(([hash, grpOrders]) => {
+      }
+    );
+
+    // Filter out warehouses where combining is disabled
+    const allowedEntries: typeof entries = [];
+    for (const [key, grpOrders] of entries) {
+      const whId = grpOrders[0].warehouse_id ?? null;
+      if (await isEnabledForWarehouse(whId)) allowedEntries.push([key, grpOrders]);
+    }
+
+    return allowedEntries
+      .map(([compositeKey, grpOrders]) => {
         const first = grpOrders[0];
+        // addressHash is the part after the "::" in the composite key
+        const hash = compositeKey.includes("::")
+          ? compositeKey.slice(compositeKey.indexOf("::") + 2)
+          : compositeKey;
         return {
           addressHash: hash,
+          warehouseId: first.warehouse_id ?? null,
           customerName: first.customer_name,
           customerEmail: first.customer_email,
           shippingAddress: first.shipping_address,
@@ -267,8 +394,14 @@ class OrderCombiningService {
             combinedRole: o.combined_role ?? null,
           })),
           totalOrders: grpOrders.length,
-          totalItems: grpOrders.reduce((sum: number, o: any) => sum + (Number(o.shippable_items) || 0), 0),
-          totalUnits: grpOrders.reduce((sum: number, o: any) => sum + (Number(o.shippable_units) || 0), 0),
+          totalItems: grpOrders.reduce(
+            (sum: number, o: any) => sum + (Number(o.shippable_items) || 0),
+            0
+          ),
+          totalUnits: grpOrders.reduce(
+            (sum: number, o: any) => sum + (Number(o.shippable_units) || 0),
+            0
+          ),
         };
       })
       .sort((a, b) => b.totalOrders - a.totalOrders);
@@ -297,6 +430,33 @@ class OrderCombiningService {
       if (order.onHold) {
         throw new CombineError(`Order ${order.orderNumber} is on hold`, 400);
       }
+    }
+
+    // --- Warehouse constraint ---
+    // All orders in a combined group must belong to the same warehouse.
+    // Without a transship-at-pick step there is no way to pick two orders
+    // from different warehouses as a single unit.
+    const warehouseIds = new Set<number | null>(
+      ordersToGroup.map((o) => o.warehouseId ?? null)
+    );
+    if (warehouseIds.size > 1) {
+      throw new CombineError(
+        "Cannot combine orders from different warehouses",
+        400
+      );
+    }
+    const sharedWarehouseId: number | null =
+      ordersToGroup[0]?.warehouseId ?? null;
+
+    // --- Per-warehouse enabled check ---
+    const { enabled } = await this.resolveWarehouseSettings(sharedWarehouseId);
+    if (!enabled) {
+      throw new CombineError(
+        sharedWarehouseId == null
+          ? "Order combining is disabled (no warehouse assigned)"
+          : `Order combining is disabled for this warehouse`,
+        403
+      );
     }
 
     // Determine existing group IDs among selected orders
@@ -421,6 +581,7 @@ class OrderCombiningService {
       .insert(combinedOrderGroups)
       .values({
         groupCode,
+        warehouseId: sharedWarehouseId,
         customerName: parentOrder.customerName,
         customerEmail: parentOrder.customerEmail,
         shippingAddress: parentOrder.shippingAddress,
@@ -458,12 +619,25 @@ class OrderCombiningService {
 
   // ---- Combine all ----
 
-  async combineAll(createdBy: string): Promise<{ groupsCreated: number; totalOrdersCombined: number }> {
+  /**
+   * Run the auto-combine sweep across all ready orders (or a specific warehouse).
+   *
+   * Warehouse-scoped: groups are composed per-(warehouse, address), never across
+   * warehouses. Warehouses whose combining flag is disabled are skipped entirely.
+   */
+  async combineAll(
+    createdBy: string,
+    warehouseId?: number | null
+  ): Promise<{ groupsCreated: number; totalOrdersCombined: number }> {
+    const scopedFilter = warehouseId != null
+      ? sql`AND o.warehouse_id = ${warehouseId}`
+      : sql``;
+
     let result;
     try {
-      // LEFT JOIN to validate combined_group_id references an existing active group
       result = await this.db.execute(sql`
-        SELECT o.id, o.order_number, o.customer_name, o.customer_email,
+        SELECT o.id, o.order_number, o.warehouse_id,
+               o.customer_name, o.customer_email,
                o.shipping_address, o.shipping_city, o.shipping_state,
                o.shipping_postal_code, o.shipping_country, o.item_count,
                o.unit_count, o.total_amount, o.source, o.created_at,
@@ -473,29 +647,51 @@ class OrderCombiningService {
         LEFT JOIN wms.combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
+          ${scopedFilter}
       `);
     } catch {
       throw new CombineError("Failed to query orders", 500);
     }
 
     const readyOrders = result.rows as any[];
-    const groupedByAddress = new Map<string, any[]>();
+
+    // Composite grouping: (warehouseId, addressHash)
+    const groupedByWarehouseAndAddress = new Map<string, any[]>();
 
     for (const order of readyOrders) {
       const hash = this.createAddressHash(order);
       if (!hash || hash === "||||" || !hash.replace(/\|/g, "").trim()) continue;
-      if (!groupedByAddress.has(hash)) {
-        groupedByAddress.set(hash, []);
+      const whId = order.warehouse_id ?? "null";
+      const compositeKey = `${whId}::${hash}`;
+      if (!groupedByWarehouseAndAddress.has(compositeKey)) {
+        groupedByWarehouseAndAddress.set(compositeKey, []);
       }
-      groupedByAddress.get(hash)!.push(order);
+      groupedByWarehouseAndAddress.get(compositeKey)!.push(order);
     }
 
-    // Only groups with 2+ orders AND at least one uncombined
-    const combinableGroups = Array.from(groupedByAddress.entries())
-      .filter(([_, grpOrders]) => {
-        if (grpOrders.length < 2) return false;
-        return grpOrders.some((o: any) => !o.combined_group_id);
-      });
+    // Cache enabled-flag per warehouse
+    const enabledCache = new Map<number | "null", boolean>();
+    const isEnabledForWarehouse = async (whId: number | null): Promise<boolean> => {
+      const key = whId === null ? ("null" as const) : whId;
+      if (enabledCache.has(key)) return enabledCache.get(key)!;
+      const { enabled } = await this.resolveWarehouseSettings(whId);
+      enabledCache.set(key, enabled);
+      return enabled;
+    };
+
+    // Only groups with 2+ orders AND at least one uncombined AND warehouse allows combining
+    const initialCombinable = Array.from(
+      groupedByWarehouseAndAddress.entries()
+    ).filter(([_, grpOrders]) => {
+      if (grpOrders.length < 2) return false;
+      return grpOrders.some((o: any) => !o.combined_group_id);
+    });
+
+    const combinableGroups: typeof initialCombinable = [];
+    for (const [key, grpOrders] of initialCombinable) {
+      const whId = grpOrders[0].warehouse_id ?? null;
+      if (await isEnabledForWarehouse(whId)) combinableGroups.push([key, grpOrders]);
+    }
 
     if (combinableGroups.length === 0) {
       return { groupsCreated: 0, totalOrdersCombined: 0 };
@@ -554,6 +750,7 @@ class OrderCombiningService {
         .insert(combinedOrderGroups)
         .values({
           groupCode,
+          warehouseId: parentOrder.warehouse_id ?? null,
           customerName: parentOrder.customer_name,
           customerEmail: parentOrder.customer_email,
           shippingAddress: parentOrder.shipping_address,

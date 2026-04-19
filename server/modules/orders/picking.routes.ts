@@ -520,7 +520,14 @@ export function registerPickingRoutes(app: Express) {
 
   app.get("/api/settings/order-combining", requireAuth, async (req, res) => {
     try {
-      res.json(await orderCombining.getSettings());
+      // Optional ?warehouseId=X — if omitted, returns the DEFAULT template value
+      const raw = req.query.warehouseId;
+      const warehouseId =
+        typeof raw === "string" && raw.trim().length > 0
+          ? Number.parseInt(raw, 10)
+          : null;
+      const effective = Number.isFinite(warehouseId as number) ? (warehouseId as number) : null;
+      res.json(await orderCombining.getSettings(effective));
     } catch (error: any) {
       console.error("Error fetching order combining setting:", error);
       res.json({ enabled: true });
@@ -532,8 +539,16 @@ export function registerPickingRoutes(app: Express) {
       if (!req.session.user || req.session.user.role !== "admin") {
         return res.status(403).json({ error: "Admin access required" });
       }
-      res.json(await orderCombining.updateSettings(req.body.enabled));
+      // Body: { warehouseId: number | null, enabled: boolean }
+      // warehouseId omitted / null → writes the DEFAULT template.
+      const warehouseId =
+        typeof req.body.warehouseId === "number" ? req.body.warehouseId : null;
+      const enabled = !!req.body.enabled;
+      res.json(await orderCombining.updateSettings(warehouseId, enabled));
     } catch (error: any) {
+      if (error?.name === "CombineError") {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
       console.error("Error updating order combining setting:", error);
       res.status(500).json({ error: "Failed to update setting" });
     }
@@ -541,7 +556,14 @@ export function registerPickingRoutes(app: Express) {
 
   app.get("/api/orders/combinable", requireAuth, async (req, res) => {
     try {
-      res.json(await orderCombining.getCombinableGroups());
+      // Optional ?warehouseId=X — scopes the search to one warehouse
+      const raw = req.query.warehouseId;
+      const warehouseId =
+        typeof raw === "string" && raw.trim().length > 0
+          ? Number.parseInt(raw, 10)
+          : null;
+      const effective = Number.isFinite(warehouseId as number) ? (warehouseId as number) : null;
+      res.json(await orderCombining.getCombinableGroups(effective));
     } catch (error: any) {
       console.error("Error fetching combinable orders:", error);
       res.status(500).json({ error: "Failed to fetch combinable orders" });
@@ -568,7 +590,10 @@ export function registerPickingRoutes(app: Express) {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
-      res.json(await orderCombining.combineAll(req.session.user.id));
+      // Optional body.warehouseId — scopes the sweep to a single warehouse
+      const warehouseId =
+        typeof req.body?.warehouseId === "number" ? req.body.warehouseId : null;
+      res.json(await orderCombining.combineAll(req.session.user.id, warehouseId));
     } catch (error: any) {
       if (error?.name === "CombineError") {
         return res.status(error.statusCode).json({ error: error.message });
