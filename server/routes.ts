@@ -11,6 +11,7 @@ import { registerProductRoutes } from "./modules/catalog/catalog.routes";
 import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
+import { registerPickZoneRoutes } from "./modules/warehouse/pick-zones.routes";
 import { registerPurchasingRoutes } from "./modules/procurement/procurement.routes";
 import { registerEbayOAuthRoutes } from "./routes/ebay-oauth.routes";
 import { registerEbaySettingsRoutes } from "./routes/ebay-settings.routes";
@@ -47,6 +48,7 @@ export async function registerRoutes(
   registerInventoryRoutes(app);
   registerChannelRoutes(app);
   registerSettingsRoutes(app);
+  registerPickZoneRoutes(app);
   registerPurchasingRoutes(app);
   registerEbayOAuthRoutes(app);
   registerEbaySettingsRoutes(app);

@@ -210,8 +210,9 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   scheduledReplenIntervalMinutes: integer("scheduled_replen_interval_minutes").default(30),
   scheduledReplenEnabled: integer("scheduled_replen_enabled").default(0),
 
-  // Pick path optimization
-  pickPathOptimization: varchar("pick_path_optimization", { length: 30 }).default("zone_sequence"), // zone_sequence, shortest_path, fifo
+  // NOTE: Pick path strategy moved to inventory.warehouse_pick_zones.strategy
+  // so it can be configured per-zone (EACH/CASE/PALLET) rather than per-warehouse.
+  // See warehousePickZones table below.
 
   // Wave planning settings
   maxOrdersPerWave: integer("max_orders_per_wave").default(50),
@@ -248,6 +249,62 @@ export const insertWarehouseSettingsSchema = createInsertSchema(warehouseSetting
 
 export type InsertWarehouseSettings = z.infer<typeof insertWarehouseSettingsSchema>;
 export type WarehouseSettings = typeof warehouseSettings.$inferSelect;
+
+// ============================================================================
+// Pick Zones — groups of locations that share a pick strategy and priority.
+//
+// A warehouse has one or more pick zones. Each zone defines:
+//   - strategy: zone_sequence | shortest_path | fifo (how pickers walk it)
+//   - priority: lower number = pick first (forklift zones before cart zones)
+//   - uom_hierarchy_min/max: which UOM tiers route to this zone (each/case/pallet)
+//   - equipment_type: optional hint (cart, forklift, pallet_jack)
+//
+// A warehouse_location can belong to a pick zone via pick_zone_id.
+// Locations with NULL pick_zone_id fall through to the warehouse's DEFAULT zone
+// (code = 'DEFAULT').
+//
+// Current state (this PR is infrastructure-only):
+//   - Every warehouse gets a single DEFAULT zone created at migration time
+//   - Locations are NOT yet zone-assigned (all fall through to DEFAULT)
+//   - Picker service is NOT yet zone-aware — behavior unchanged from today
+//
+// Future PRs (tracked in docs/FUTURE_WORK.md):
+//   - Editable zones UI (create/edit/delete zones via admin)
+//   - Per-location zone assignment UI
+//   - Pick-task splitting by zone (one task per zone per order)
+//   - Zone-aware pick queue (tasks ordered by zone priority)
+//   - Zone-aware pick strategy execution (route differently per zone)
+// ============================================================================
+
+export const pickZoneStrategyEnum = ["zone_sequence", "shortest_path", "fifo"] as const;
+export type PickZoneStrategy = typeof pickZoneStrategyEnum[number];
+
+export const pickZoneEquipmentEnum = ["cart", "forklift", "pallet_jack"] as const;
+export type PickZoneEquipment = typeof pickZoneEquipmentEnum[number];
+
+export const warehousePickZones = inventorySchema.table("warehouse_pick_zones", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id, { onDelete: "cascade" }),
+  code: varchar("code", { length: 50 }).notNull(),             // e.g. "DEFAULT", "EACH", "CASE", "PALLET"
+  name: varchar("name", { length: 100 }).notNull(),            // Display name
+  priority: integer("priority").notNull().default(100),        // Lower = pick first
+  strategy: varchar("strategy", { length: 30 }).notNull().default("zone_sequence"),
+  uomHierarchyMin: integer("uom_hierarchy_min"),               // NULL = any UOM level
+  uomHierarchyMax: integer("uom_hierarchy_max"),               // NULL = any UOM level
+  equipmentType: varchar("equipment_type", { length: 30 }),    // NULL = no equipment requirement
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertWarehousePickZoneSchema = createInsertSchema(warehousePickZones).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertWarehousePickZone = z.infer<typeof insertWarehousePickZoneSchema>;
+export type WarehousePickZone = typeof warehousePickZones.$inferSelect;
 
 // Replenishment task status workflow
 export const replenTaskStatusEnum = ["pending", "assigned", "in_progress", "completed", "cancelled", "blocked"] as const;

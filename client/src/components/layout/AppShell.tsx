@@ -38,6 +38,7 @@ import {
   DollarSign,
   Tag,
   Crown,
+  Map as MapIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -103,6 +104,7 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Stock Levels", icon: Box, href: "/inventory" },
       { label: "Warehouses", icon: Building2, href: "/warehouse" },
+      { label: "Pick Zones", icon: MapIcon, href: "/pick-zones" },
       { label: "Bin Assignments", icon: MapPin, href: "/bin-assignments" },
       { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts" },
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },

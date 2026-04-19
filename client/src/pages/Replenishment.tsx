@@ -189,7 +189,6 @@ interface WarehouseSettings {
   scheduledReplenIntervalMinutes: number | null;
   scheduledReplenEnabled: number | null;
   velocityLookbackDays: number;
-  pickPathOptimization: string | null;
   maxOrdersPerWave: number | null;
   maxItemsPerWave: number | null;
   waveAutoRelease: number | null;

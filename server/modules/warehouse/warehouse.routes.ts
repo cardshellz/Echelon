@@ -274,7 +274,6 @@ export function registerWarehouseRoutes(app: Express) {
         minMaxPriority: data.minMaxPriority || 5,
         scheduledReplenIntervalMinutes: data.scheduledReplenIntervalMinutes || 30,
         scheduledReplenEnabled: data.scheduledReplenEnabled || 0,
-        pickPathOptimization: data.pickPathOptimization || "zone_sequence",
         maxOrdersPerWave: data.maxOrdersPerWave || 50,
         maxItemsPerWave: data.maxItemsPerWave || 500,
         waveAutoRelease: data.waveAutoRelease || 0,

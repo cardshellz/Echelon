@@ -153,6 +153,11 @@ export const warehouseLocations = warehouseSchema.table("warehouse_locations", {
   heightMm: integer("height_mm"),
   depthMm: integer("depth_mm"),
 
+  // Pick zone assignment (nullable). NULL = falls through to warehouse's DEFAULT zone at runtime.
+  // FK to inventory.warehouse_pick_zones.id — declared via SQL migration since the target table
+  // is in a different schema (inventory) and Drizzle cross-schema FKs are limited.
+  pickZoneId: integer("pick_zone_id"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   isActive: integer("is_active").notNull().default(1),
   pickSequence: integer("pick_sequence"),
