@@ -4,7 +4,7 @@ import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
 import { warehouses, warehouseLocations } from "./warehouse.schema";
 import { orders, orderItems, outboundShipments } from "./orders.schema";
-import { receivingOrders, purchaseOrders } from "./procurement.schema";
+import { receivingOrders, purchaseOrders, inboundShipments } from "./procurement.schema";
 
 // Inventory levels per location - all quantities in variant units (e.g., 5 cases, 10 packs)
 // Base unit equivalents are computed at query time via: qty * product_variants.units_per_variant
@@ -140,7 +140,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
 
   // Cost & lot tracking
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }), // Cost traceability on every transaction
-  inventoryLotId: integer("inventory_lot_id"), // Lot linkage (FK added after inventoryLots table definition)
+  inventoryLotId: integer("inventory_lot_id").references(() => inventoryLots.id, { onDelete: "set null" }), // Lot linkage (FK added after inventoryLots table definition)
 
   // Reference links - which operation triggered this transaction
   orderId: integer("order_id").references(() => orders.id),
@@ -419,7 +419,7 @@ export const replenTasks = inventorySchema.table("replen_tasks", {
   notes: text("notes"),
   exceptionReason: varchar("exception_reason", { length: 30 }),
   linkedCycleCountId: integer("linked_cycle_count_id").references(() => cycleCounts.id),
-  dependsOnTaskId: integer("depends_on_task_id"), // Blocked until this upstream task completes
+  dependsOnTaskId: integer("depends_on_task_id").references(() => replenTasks.id, { onDelete: "set null" }), // Blocked until this upstream task completes
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -457,7 +457,7 @@ export const cycleCountItems = inventorySchema.table("cycle_count_items", {
   status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, counted, variance, approved, adjusted, resolved, investigate
 
   // Related item for SKU mismatch workflow (links expected→found items)
-  relatedItemId: integer("related_item_id"), // Points to the other half of a mismatch pair
+  relatedItemId: integer("related_item_id").references(() => cycleCountItems.id, { onDelete: "set null" }), // Points to the other half of a mismatch pair
   mismatchType: varchar("mismatch_type", { length: 20 }), // "expected_missing" or "unexpected_found"
 
   // Approval workflow
@@ -504,7 +504,7 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   receivedAt: timestamp("received_at").notNull(), // FIFO sort key
   expiryDate: timestamp("expiry_date"), // Future (perishables)
   status: varchar("status", { length: 20 }).default("active"), // active, depleted, expired
-  inboundShipmentId: integer("inbound_shipment_id"), // FK to inbound_shipments (added post-definition)
+  inboundShipmentId: integer("inbound_shipment_id").references(() => inboundShipments.id, { onDelete: "set null" }), // FK to inbound_shipments (added post-definition)
   costProvisional: integer("cost_provisional").notNull().default(0), // 1 = landed cost not yet finalized
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -522,10 +522,10 @@ export type InventoryLot = typeof inventoryLots.$inferSelect;
 
 export const orderLineCosts = inventorySchema.table('order_line_costs', {
   id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
-  orderId: integer('order_id').notNull(),
-  orderItemId: integer('order_item_id').notNull(),
-  productVariantId: integer('product_variant_id').notNull(),
-  lotId: integer('lot_id'),
+  orderId: integer('order_id').notNull().references(() => orders.id, { onDelete: "cascade" }),
+  orderItemId: integer('order_item_id').notNull().references(() => orderItems.id, { onDelete: "cascade" }),
+  productVariantId: integer('product_variant_id').notNull().references(() => productVariants.id),
+  lotId: integer('lot_id').references(() => inventoryLots.id, { onDelete: "set null" }),
   qtyConsumed: integer('qty_consumed').notNull(),
   unitCostCents: bigint('unit_cost_cents', { mode: 'number' }).notNull(),
   totalCostCents: bigint('total_cost_cents', { mode: 'number' }).notNull(),
