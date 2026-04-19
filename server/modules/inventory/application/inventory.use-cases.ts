@@ -4,6 +4,7 @@ import type { InventoryLotService } from "../lots.service";
 import type { COGSService } from "../cogs.service";
 import { warehouses, warehouseLocations, channelConnections } from "../../../storage/base";
 import { eq, and } from "drizzle-orm";
+import type { InventoryLevel } from "../../../../shared/schema";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
 
@@ -56,10 +57,10 @@ export class InventoryUseCases {
     purchaseOrderId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
-  }): Promise<void> {
+  }, externalTx?: any): Promise<void> {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
-    await this.db.transaction(async (tx) => {
+    const doWork = async (tx: any) => {
       // 1. Upsert Location Level
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
@@ -108,7 +109,13 @@ export class InventoryUseCases {
         unitCostCents: params.unitCostCents ?? null,
         inventoryLotId: lotId ?? null,
       }, tx);
-    });
+    };
+
+    if (externalTx) {
+      await doWork(externalTx);
+    } else {
+      await this.db.transaction(doWork);
+    }
 
     this.triggerNotifyChange(params.productVariantId, "receive");
   }
@@ -128,7 +135,7 @@ export class InventoryUseCases {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
     const result = await this.db.transaction(async (tx) => {
-      const level = await this.storage.getInventoryLevelByLocationAndVariant(
+      const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
         tx
@@ -190,7 +197,8 @@ export class InventoryUseCases {
   }
 
   async getLevel(productVariantId: number, warehouseLocationId: number): Promise<InventoryLevel | null> {
-    return this.storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, productVariantId);
+    const level = await this.storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, productVariantId);
+    return level || null;
   }
 
   // ---------------------------------------------------------------------------
@@ -209,7 +217,7 @@ export class InventoryUseCases {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
     await this.db.transaction(async (tx) => {
-      const level = await this.storage.getInventoryLevelByLocationAndVariant(
+      const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
         tx
@@ -406,7 +414,7 @@ export class InventoryUseCases {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
     await this.db.transaction(async (tx) => {
-      const level = await this.storage.getInventoryLevelByLocationAndVariant(
+      const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
         tx
@@ -463,7 +471,7 @@ export class InventoryUseCases {
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
 
     await this.db.transaction(async (tx) => {
-      const sourceLevel = await this.storage.getInventoryLevelByLocationAndVariant(
+      const sourceLevel = await this.storage.lockInventoryLevel(
         params.fromLocationId,
         params.productVariantId,
         tx
@@ -555,6 +563,7 @@ export class InventoryUseCases {
         WHERE il.product_variant_id = ${params.fromVariantId}
           ${params.locationId ? sql`AND il.warehouse_location_id = ${params.locationId}` : sql``}
           AND il.variant_qty > 0
+        FOR UPDATE
       `);
       
       const sourceInventory = sourceInventoryResp.rows;

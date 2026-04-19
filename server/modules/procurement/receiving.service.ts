@@ -10,6 +10,7 @@
 
 type DrizzleDb = {
   execute: (query: any) => Promise<{ rows: any[] }>;
+  transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
 // Import sql tagged template for raw queries
@@ -28,7 +29,7 @@ interface InventoryCore {
     purchaseOrderId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
-  }): Promise<void>;
+  }, tx?: any): Promise<void>;
 }
 
 interface ChannelSync {
@@ -54,13 +55,14 @@ interface Storage {
   getReceivingOrderById(id: number): Promise<any>;
   getReceivingLines(orderId: number): Promise<any[]>;
   getReceivingLineById(lineId: number): Promise<any>;
-  updateReceivingOrder(id: number, updates: any): Promise<any>;
-  updateReceivingLine(lineId: number, updates: any): Promise<any>;
-  bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
+  updateReceivingOrder(id: number, updates: any, tx?: any): Promise<any>;
+  updateReceivingLine(lineId: number, updates: any, tx?: any): Promise<any>;
+  bulkCreateReceivingLines(lines: any[], tx?: any): Promise<any[]>;
   getVendorById(id: number): Promise<any>;
   // Inventory lookups
   getProductVariantBySku(sku: string): Promise<any>;
   getProductVariantById(id: number): Promise<any>;
+  getProductVariantsByProductId(productId: number): Promise<any[]>;
   getAllProductVariants(): Promise<any[]>;
   getProductBySku(sku: string): Promise<any>;
   createProduct(data: any): Promise<any>;
@@ -84,6 +86,13 @@ export class ReceivingError extends Error {
   ) {
     super(message);
     this.name = "ReceivingError";
+  }
+}
+
+export class ReceivingReconciliationError extends ReceivingError {
+  constructor(message: string, details?: any) {
+    super(message, 409, details);
+    this.name = "ReceivingReconciliationError";
   }
 }
 
@@ -202,7 +211,8 @@ export class ReceivingService {
     const receivedVariantIds = new Set<number>();
     const putawayLocationIds = new Set<number>();
 
-    for (const line of lines) {
+    const updated = await this.db.transaction(async (tx) => {
+      for (const line of lines) {
       if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
         const qtyToAdd = line.receivedQty;
 
@@ -242,13 +252,13 @@ export class ReceivingService {
           purchaseOrderId: order.purchaseOrderId || undefined,
           inboundShipmentId,
           costProvisional,
-        });
+        }, tx);
 
         // Mark line as put away
         await this.storage.updateReceivingLine(line.id, {
           putawayComplete: 1,
           status: "complete",
-        });
+        }, tx);
 
         totalReceived += qtyToAdd;
         linesReceived++;
@@ -263,7 +273,7 @@ export class ReceivingService {
         const variant = await this.storage.getProductVariantById(line.productVariantId);
         if (variant && (variant as any).hierarchyLevel > 1) {
           // Find the base unit variant (hierarchy_level = 1) for this product
-          const allVariants = await this.storage.getProductVariantsByProduct((variant as any).productId);
+          const allVariants = await this.storage.getProductVariantsByProductId((variant as any).productId);
           const baseVariant = allVariants.find((v: any) => v.hierarchyLevel === 1);
           if (baseVariant && baseVariant.id !== line.productVariantId) {
             const totalUnits = line.receivedQty * (variant as any).unitsPerVariant;
@@ -276,13 +286,23 @@ export class ReceivingService {
               userId: userId || undefined,
               unitCostCents: (line as any).unitCost || undefined,
               receivingOrderId: orderId,
-            });
+            }, tx);
 
             // Deduct the case variant inventory to avoid double-counting in ATP
             // The base units are now the sellable quantity; the case is empty
-            await this.db.execute(sql`
+            const check = await tx.execute(sql`
+              SELECT variant_qty FROM inventory.inventory_levels
+              WHERE product_variant_id = ${line.productVariantId}
+                AND warehouse_location_id = ${line.putawayLocationId}
+              FOR UPDATE
+            `);
+            const currentQty = check.rows.length ? Number(check.rows[0].variant_qty) : 0;
+            if (currentQty < line.receivedQty) {
+              throw new ReceivingReconciliationError(`Negative Inventory Guard: Cannot break case variant ${line.productVariantId}. Requires ${line.receivedQty}, has ${currentQty}.`);
+            }
+            await tx.execute(sql`
               UPDATE inventory.inventory_levels
-              SET variant_qty = GREATEST(0, variant_qty - ${line.receivedQty}),
+              SET variant_qty = variant_qty - ${line.receivedQty},
                   updated_at = NOW()
               WHERE product_variant_id = ${line.productVariantId}
                 AND warehouse_location_id = ${line.putawayLocationId}
@@ -300,14 +320,17 @@ export class ReceivingService {
       );
     }
 
-    // Update order totals and close
-    const updated = await this.storage.updateReceivingOrder(orderId, {
-      status: "closed",
-      closedDate: new Date(),
-      closedBy: userId,
-      receivedLineCount: linesReceived,
-      receivedTotalUnits: totalReceived,
+      // Update order totals and close
+      return await this.storage.updateReceivingOrder(orderId, {
+        status: "closed",
+        closedDate: new Date(),
+        closedBy: userId,
+        receivedLineCount: linesReceived,
+        receivedTotalUnits: totalReceived,
+      }, tx);
     });
+
+    // Fire channel sync for all received variants (fire-and-forget)
 
     // If this receipt is linked to a PO, update PO line quantities and auto-transition status
     if (order.purchaseOrderId && this.purchasing) {

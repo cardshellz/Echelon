@@ -129,6 +129,8 @@ export default function PurchaseOrderDetail() {
   const [shippingDollars, setShippingDollars] = useState("");
   const [editingTax, setEditingTax] = useState(false);
   const [taxDollars, setTaxDollars] = useState("");
+  const [editingTolerance, setEditingTolerance] = useState(false);
+  const [toleranceVal, setToleranceVal] = useState("");
 
   // Inline line editing state
   const [editingLineId, setEditingLineId] = useState<number | null>(null);
@@ -568,6 +570,7 @@ export default function PurchaseOrderDetail() {
       setEditingDiscount(false);
       setEditingShipping(false);
       setEditingTax(false);
+      setEditingTolerance(false);
       toast({ title: "Updated" });
     },
     onError: (err: Error) => {
@@ -638,6 +641,7 @@ export default function PurchaseOrderDetail() {
             </Badge>
             {po.priority === "rush" && <Badge variant="destructive">Rush</Badge>}
             {po.priority === "high" && <Badge variant="outline" className="text-orange-600 border-orange-300">High</Badge>}
+            {Number(po.overReceiptTolerancePct) > 0 && <Badge variant="outline" className="border-blue-300 text-blue-700 bg-blue-50">Tol: {Number(po.overReceiptTolerancePct)}%</Badge>}
           </div>
           <div className="text-sm text-muted-foreground mt-1 flex items-center gap-x-2 flex-wrap">
             <span>{po.vendor?.name || `Vendor #${po.vendorId}`}</span>
@@ -786,7 +790,41 @@ export default function PurchaseOrderDetail() {
       </div>
 
       {/* Charge summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-2 md:gap-4">
+
+        <Card>
+          <CardContent className="p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground" title="Over-Receipt Tolerance %">Tolerance</div>
+              {isNotCancelled && !editingTolerance && (
+                <Button variant="ghost" size="icon" className="h-5 w-5"
+                  onClick={() => { setToleranceVal(String(Number(po.overReceiptTolerancePct) || 0)); setEditingTolerance(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {editingTolerance ? (
+              <div className="flex gap-1 mt-1">
+                <Input type="number" min="0" max="100" step="1" value={toleranceVal}
+                  onChange={e => setToleranceVal(e.target.value)}
+                  className="h-7 text-sm font-mono w-16 px-1" autoFocus
+                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ overReceiptTolerancePct: parseFloat(toleranceVal || "0") } as any); if (e.key === "Escape") setEditingTolerance(false); }}
+                />
+                <Button size="sm" className="h-7 px-1" disabled={updateChargesMutation.isPending}
+                  onClick={() => updateChargesMutation.mutate({ overReceiptTolerancePct: parseFloat(toleranceVal || "0") } as any)}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-1" onClick={() => setEditingTolerance(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{Number(po.overReceiptTolerancePct) || 0}%</div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Subtotal — always read-only */}
         <Card>

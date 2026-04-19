@@ -361,8 +361,6 @@ export async function pollEbayOrders(
             // Status changed on eBay — update OMS
             if (orderData.status === "cancelled" && existing.status !== "cancelled") {
               console.log(`[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS`);
-              const { db } = require("../../db");
-              const { sql } = require("drizzle-orm");
               await db.execute(sql`
                 UPDATE oms_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
                 WHERE id = ${result.id} AND status != 'cancelled'
@@ -383,8 +381,6 @@ export async function pollEbayOrders(
             if ((orderData.financialStatus === "refunded" || orderData.financialStatus === "partially_refunded") 
                 && existing.financialStatus !== orderData.financialStatus) {
               console.log(`[eBay Orders] Order ${ebayOrder.orderId} ${orderData.financialStatus} on eBay — updating OMS`);
-              const { db } = require("../../db");
-              const { sql } = require("drizzle-orm");
               await db.execute(sql`
                 UPDATE oms_orders SET financial_status = ${orderData.financialStatus}, refunded_at = NOW(), updated_at = NOW()
                 WHERE id = ${result.id}
@@ -468,8 +464,12 @@ export function createEbayOrderWebhookHandler(
   return async function handleEbayOrderWebhook(req: Request, res: Response) {
     // eBay challenge validation — they send a GET with challenge_code
     if (req.method === "GET" && req.query.challenge_code) {
-      const verificationToken = process.env.EBAY_VERIFICATION_TOKEN || "";
-      const endpoint = process.env.EBAY_WEBHOOK_ENDPOINT || "";
+      const verificationToken = process.env.EBAY_VERIFICATION_TOKEN;
+      const endpoint = process.env.EBAY_WEBHOOK_ENDPOINT;
+
+      if (!verificationToken || !endpoint) {
+        return res.status(500).json({ error: "Server missing eBay webhook configuration" });
+      }
       const challengeCode = req.query.challenge_code as string;
 
       // eBay expects: SHA-256(challengeCode + verificationToken + endpoint)

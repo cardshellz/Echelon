@@ -105,7 +105,12 @@ export class EbayAuthService {
     // Token expired or about to expire — refresh it
     // Use lock to prevent concurrent refresh storms
     if (!this.refreshPromise) {
-      this.refreshPromise = this.refreshAccessToken(channelId, token.refreshToken)
+      const refreshTask = this.refreshAccessToken(channelId, token.refreshToken);
+      const timeoutTask = new Promise<string>((_, reject) => {
+        setTimeout(() => reject(new Error("eBay token refresh timed out after 30s")), 30000);
+      });
+
+      this.refreshPromise = Promise.race([refreshTask, timeoutTask])
         .finally(() => {
           this.refreshPromise = null;
         });

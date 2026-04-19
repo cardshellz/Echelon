@@ -144,28 +144,39 @@ export async function createInvoice(data: {
   poIds?: number[]; // POs to link + auto-import lines
   createdBy?: string;
 }) {
-  const [invoice] = await db
-    .insert(vendorInvoices)
-    .values({
-      invoiceNumber: data.invoiceNumber,
-      ourReference: data.ourReference,
-      vendorId: data.vendorId,
-      status: "received",
-      receivedDate: new Date(),
-      invoiceDate: data.invoiceDate,
-      dueDate: data.dueDate,
-      invoicedAmountCents: data.invoicedAmountCents ?? 0,
-      paidAmountCents: 0,
-      balanceCents: data.invoicedAmountCents ?? 0,
-      currency: data.currency ?? "USD",
-      paymentTermsDays: data.paymentTermsDays,
-      paymentTermsType: data.paymentTermsType,
-      notes: data.notes,
-      internalNotes: data.internalNotes,
-      createdBy: data.createdBy,
-      updatedBy: data.createdBy,
-    })
-    .returning();
+  let invoice;
+  try {
+    const [inserted] = await db
+      .insert(vendorInvoices)
+      .values({
+        invoiceNumber: data.invoiceNumber,
+        ourReference: data.ourReference,
+        vendorId: data.vendorId,
+        status: "received",
+        receivedDate: new Date(),
+        invoiceDate: data.invoiceDate,
+        dueDate: data.dueDate,
+        invoicedAmountCents: data.invoicedAmountCents ?? 0,
+        paidAmountCents: 0,
+        balanceCents: data.invoicedAmountCents ?? 0,
+        currency: data.currency ?? "USD",
+        paymentTermsDays: data.paymentTermsDays,
+        paymentTermsType: data.paymentTermsType,
+        notes: data.notes,
+        internalNotes: data.internalNotes,
+        createdBy: data.createdBy,
+        updatedBy: data.createdBy,
+      })
+      .returning();
+    invoice = inserted;
+  } catch (err: any) {
+    if (err.code === "23505" || err.message?.includes("vendor_invoices_vendor_invoice_idx")) {
+      const e = new Error(`Duplicate Invoice: This vendor already has an invoice recorded with invoice number "${data.invoiceNumber}".`);
+      (e as any).statusCode = 409;
+      throw e;
+    }
+    throw err;
+  }
 
   if (data.poIds?.length) {
     await db.insert(vendorInvoicePoLinks).values(
@@ -454,6 +465,7 @@ export async function recordPayment(data: {
   notes?: string;
   status?: string;
   allocations: Array<{ vendorInvoiceId: number; appliedAmountCents: number; notes?: string }>;
+  forceOverride?: boolean;
   createdBy?: string;
 }) {
   const paymentNumber = await generatePaymentNumber();
@@ -462,6 +474,29 @@ export async function recordPayment(data: {
   const allocTotal = data.allocations.reduce((s, a) => s + a.appliedAmountCents, 0);
   if (allocTotal > data.totalAmountCents) {
     throw new Error(`Allocation total (${allocTotal}) exceeds payment total (${data.totalAmountCents})`);
+  }
+
+  // P1-5: 3-Way Match Check before Payment
+  const invoiceIds = data.allocations.map(a => a.vendorInvoiceId);
+  if (invoiceIds.length > 0) {
+    const lines = await db
+      .select({ id: vendorInvoiceLines.id, matchStatus: vendorInvoiceLines.matchStatus, invoiceNumber: vendorInvoices.invoiceNumber })
+      .from(vendorInvoiceLines)
+      .innerJoin(vendorInvoices, eq(vendorInvoiceLines.vendorInvoiceId, vendorInvoices.id))
+      .where(inArray(vendorInvoiceLines.vendorInvoiceId, invoiceIds));
+      
+    // Find any line that isn't cleanly matched
+    const mismatches = lines.filter(l => l.matchStatus !== "matched");
+    
+    if (mismatches.length > 0) {
+      if (!data.forceOverride) {
+        const e = new Error(`3-Way Match Discrepancy: Invoice ${mismatches[0].invoiceNumber} has lines that are not fully matched (Status: ${mismatches[0].matchStatus}). Provide forceOverride=true to pay anyway.`);
+        (e as any).statusCode = 409;
+        throw e;
+      } else {
+        data.notes = (data.notes ? data.notes + "\n" : "") + "WARNING: Paid via manual admin override despite 3-way match discrepancy.";
+      }
+    }
   }
 
   const [payment] = await db

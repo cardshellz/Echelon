@@ -268,40 +268,45 @@ export function createPurchasingService(db: any, storage: Storage) {
     return `$${((Number(cents) || 0) / 100).toFixed(2)}`;
   }
 
-  async function updateIncotermsAndCharges(
-    id: number,
-    updates: {
-      incoterms?: string | null;
-      discountCents?: number;
-      taxCents?: number;
-      shippingCostCents?: number;
-    },
-    userId?: string,
-  ) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-    if (po.status === "cancelled") throw new PurchasingError("Cannot update a cancelled PO", 400);
-
-    const changes: string[] = [];
-    const patch: Record<string, any> = {};
-
-    if (updates.incoterms !== undefined && updates.incoterms !== po.incoterms) {
-      changes.push(`Incoterms: ${po.incoterms || "none"} → ${updates.incoterms || "none"}`);
-      patch.incoterms = updates.incoterms;
-    }
-    if (updates.discountCents !== undefined && updates.discountCents !== Number(po.discountCents)) {
-      if (po.status !== "draft") throw new PurchasingError("Discount can only be changed in draft status", 400);
-      changes.push(`Discount: ${fmtCents(po.discountCents)} → ${fmtCents(updates.discountCents)}`);
-      patch.discountCents = updates.discountCents;
-    }
-    if (updates.taxCents !== undefined && updates.taxCents !== Number(po.taxCents)) {
-      changes.push(`Tax: ${fmtCents(po.taxCents)} → ${fmtCents(updates.taxCents)}`);
-      patch.taxCents = updates.taxCents;
-    }
-    if (updates.shippingCostCents !== undefined && updates.shippingCostCents !== Number(po.shippingCostCents)) {
-      changes.push(`Shipping: ${fmtCents(po.shippingCostCents)} → ${fmtCents(updates.shippingCostCents)}`);
-      patch.shippingCostCents = updates.shippingCostCents;
-    }
+    async function updateIncotermsAndCharges(
+      id: number,
+      updates: {
+        incoterms?: string | null;
+        discountCents?: number;
+        taxCents?: number;
+        shippingCostCents?: number;
+        overReceiptTolerancePct?: number;
+      },
+      userId?: string,
+    ) {
+      const po = await storage.getPurchaseOrderById(id);
+      if (!po) throw new PurchasingError("Purchase order not found", 404);
+      if (po.status === "cancelled") throw new PurchasingError("Cannot update a cancelled PO", 400);
+  
+      const changes: string[] = [];
+      const patch: Record<string, any> = {};
+  
+      if (updates.incoterms !== undefined && updates.incoterms !== po.incoterms) {
+        changes.push(`Incoterms: ${po.incoterms || "none"} → ${updates.incoterms || "none"}`);
+        patch.incoterms = updates.incoterms;
+      }
+      if (updates.discountCents !== undefined && updates.discountCents !== Number(po.discountCents)) {
+        if (po.status !== "draft") throw new PurchasingError("Discount can only be changed in draft status", 400);
+        changes.push(`Discount: ${fmtCents(po.discountCents)} → ${fmtCents(updates.discountCents)}`);
+        patch.discountCents = updates.discountCents;
+      }
+      if (updates.taxCents !== undefined && updates.taxCents !== Number(po.taxCents)) {
+        changes.push(`Tax: ${fmtCents(po.taxCents)} → ${fmtCents(updates.taxCents)}`);
+        patch.taxCents = updates.taxCents;
+      }
+      if (updates.shippingCostCents !== undefined && updates.shippingCostCents !== Number(po.shippingCostCents)) {
+        changes.push(`Shipping: ${fmtCents(po.shippingCostCents)} → ${fmtCents(updates.shippingCostCents)}`);
+        patch.shippingCostCents = updates.shippingCostCents;
+      }
+      if (updates.overReceiptTolerancePct !== undefined && updates.overReceiptTolerancePct !== Number(po.overReceiptTolerancePct)) {
+        changes.push(`Over-Receipt Tolerance: ${Number(po.overReceiptTolerancePct || 0)}% → ${updates.overReceiptTolerancePct}%`);
+        patch.overReceiptTolerancePct = String(updates.overReceiptTolerancePct);
+      }
 
     if (changes.length === 0) return po;
 

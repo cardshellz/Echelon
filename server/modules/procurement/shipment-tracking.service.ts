@@ -21,6 +21,7 @@ import type {
   InboundShipmentStatusHistory,
   InventoryLot,
 } from "@shared/schema";
+import { sql as sqlTag } from "drizzle-orm";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -60,6 +61,7 @@ interface Storage {
   createLandedCostSnapshot(data: InsertLandedCostSnapshot): Promise<any>;
   bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[]): Promise<any[]>;
   deleteLandedCostSnapshotsForShipment(inboundShipmentId: number): Promise<void>;
+  createLandedCostAdjustment(data: any): Promise<any>;
   // Status history
   createInboundShipmentStatusHistory(data: any): Promise<InboundShipmentStatusHistory>;
   getInboundShipmentStatusHistory(inboundShipmentId: number): Promise<InboundShipmentStatusHistory[]>;
@@ -950,6 +952,15 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     // Re-fetch lines after allocation
     const updatedLines = await storage.getInboundShipmentLines(shipmentId);
 
+    // Fetch old snapshots before deleting
+    const oldSnapshotsByLine = new Map<number, any>();
+    for (const line of updatedLines) {
+      const snaps = await storage.getLandedCostSnapshots(line.id);
+      if (snaps.length > 0) {
+        oldSnapshotsByLine.set(line.id, snaps[0]);
+      }
+    }
+
     // Delete existing snapshots and create new ones
     await storage.deleteLandedCostSnapshotsForShipment(shipmentId);
 
@@ -979,6 +990,22 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
       const totalLandedCostCents = (poUnitCostCents * line.qtyShipped) + freightCents + dutyCents + insuranceCents + otherCents;
       const landedUnitCostCents = line.qtyShipped > 0 ? Math.round(totalLandedCostCents / line.qtyShipped) : 0;
+
+      // H6: Landed-cost re-allocation must not retroactively mutate closed lines
+      if (shipment.status === "closed") {
+        const oldSnap = oldSnapshotsByLine.get(line.id);
+        if (oldSnap && oldSnap.totalLandedCostCents !== totalLandedCostCents) {
+          const adjustmentCents = totalLandedCostCents - oldSnap.totalLandedCostCents;
+          
+          await storage.createLandedCostAdjustment({
+            inboundShipmentLineId: line.id,
+            purchaseOrderLineId: line.purchaseOrderLineId,
+            adjustmentAmountCents: adjustmentCents,
+            reason: "Post-close landed cost reallocation",
+            createdBy: userId || "system",
+          });
+        }
+      }
 
       snapshots.push({
         inboundShipmentLineId: line.id,
@@ -1034,7 +1061,6 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
         const landedCostCents = Math.max(0, landedPerPiece);
         
         // Use raw SQL to update COGS columns that may not be in the ORM yet
-        const { sql: sqlTag } = require("drizzle-orm");
         await (storage as any).db?.execute?.(sqlTag`
           UPDATE inventory_lots SET
             landed_cost_cents = ${landedCostCents},

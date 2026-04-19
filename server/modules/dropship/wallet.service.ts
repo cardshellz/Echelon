@@ -246,7 +246,12 @@ export function createWalletService() {
       // Try to charge saved payment method
       try {
         const Stripe = (await import("stripe")).default;
-        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", { apiVersion: "2024-12-18.acacia" as any });
+        const stripeKey = process.env.STRIPE_SECRET_KEY;
+        if (!stripeKey) {
+          console.error(`[Wallet AutoReload] Payments are not configured. Cannot auto-reload vendor ${vendorId}`);
+          return;
+        }
+        const stripe = new Stripe(stripeKey, { apiVersion: "2024-12-18.acacia" as any });
 
         // Get saved payment methods
         const paymentMethods = await stripe.paymentMethods.list({

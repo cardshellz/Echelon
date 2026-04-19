@@ -15,7 +15,7 @@ export class WalletOrchestrator {
     let stripeCustomerId = "";
 
     try {
-      const vendorRow = await client.query(\`SELECT stripe_customer_id FROM dropship_vendors WHERE id = $1 LIMIT 1\`, [vendorId]);
+      const vendorRow = await client.query(`SELECT stripe_customer_id FROM dropship_vendors WHERE id = $1 LIMIT 1`, [vendorId]);
       if (vendorRow.rowCount === 0) throw new DropshipError("VENDOR_NOT_FOUND", "Focal vendor completely unavailable dynamically.");
       
       stripeCustomerId = vendorRow.rows[0].stripe_customer_id;
@@ -35,27 +35,27 @@ export class WalletOrchestrator {
       await client.query("BEGIN"); // ACID Boundary preventing overlapping Webhooks explicitly
 
       // Idempotency: Prevent identical Stripe Webhook crashes purely
-      const exists = await client.query(\`SELECT id FROM dropship_wallet_ledger WHERE reference_id = $1 LIMIT 1\`, [stripeChargeId]);
-      if (exists.rowCount > 0) {
+      const exists = await client.query(`SELECT id FROM dropship_wallet_ledger WHERE reference_id = $1 LIMIT 1`, [stripeChargeId]);
+      if ((exists.rowCount ?? 0) > 0) {
         await client.query("ROLLBACK");
         return;
       }
 
       // Explicit Locking ensuring physical separation of sequential hits efficiently
-      const vendorRow = await client.query(\`SELECT wallet_balance_cents FROM dropship_vendors WHERE id = $1 FOR UPDATE\`, [vendorId]);
+      const vendorRow = await client.query(`SELECT wallet_balance_cents FROM dropship_vendors WHERE id = $1 FOR UPDATE`, [vendorId]);
       if (vendorRow.rowCount === 0) throw new Error("Ledger targeting structurally invalid.");
       
       const currentBalance = parseInt(vendorRow.rows[0].wallet_balance_cents, 10);
       const newBalance = currentBalance + amountCents;
 
       // Mutability Core
-      await client.query(\`UPDATE dropship_vendors SET wallet_balance_cents = $1, updated_at = NOW() WHERE id = $2\`, [newBalance, vendorId]);
+      await client.query(`UPDATE dropship_vendors SET wallet_balance_cents = $1, updated_at = NOW() WHERE id = $2`, [newBalance, vendorId]);
 
       // Trace Ledger Writing explicitly immutable natively
-      await client.query(\`
+      await client.query(`
         INSERT INTO dropship_wallet_ledger (vendor_id, type, amount_cents, balance_after_cents, reference_type, reference_id, payment_method)
         VALUES ($1, 'deposit', $2, $3, 'stripe_charge', $4, 'stripe_card')
-      \`, [vendorId, amountCents, newBalance, stripeChargeId]);
+      `, [vendorId, amountCents, newBalance, stripeChargeId]);
 
       await client.query("COMMIT");
     } catch (e) {
@@ -72,14 +72,14 @@ export class WalletOrchestrator {
   static async fetchDashboard(vendorId: number) {
     const client = await pool.connect();
     try {
-      const vendorRow = await client.query(\`SELECT wallet_balance_cents, tier, status FROM dropship_vendors WHERE id = $1\`, [vendorId]);
+      const vendorRow = await client.query(`SELECT wallet_balance_cents, tier, status FROM dropship_vendors WHERE id = $1`, [vendorId]);
       if (vendorRow.rowCount === 0) throw new DropshipError("VENDOR_NOT_FOUND", "Ledger query empty");
 
-      const ledgerRows = await client.query(\`
+      const ledgerRows = await client.query(`
         SELECT type, amount_cents, balance_after_cents, created_at, reference_type 
         FROM dropship_wallet_ledger 
         WHERE vendor_id = $1 ORDER BY created_at DESC LIMIT 10
-      \`, [vendorId]);
+      `, [vendorId]);
 
       return {
         balanceCents: parseInt(vendorRow.rows[0].wallet_balance_cents, 10),

@@ -15,6 +15,7 @@ import type { Express, Request, Response } from "express";
 import { eq, and, sql, asc, isNotNull } from "drizzle-orm";
 import https from "https";
 import { db, pool } from "../db";
+import { requireAuth, requireInternalApiKey, requirePermission } from "./middleware";
 import {
   channels,
   channelConnections,
@@ -230,7 +231,7 @@ export function registerEbayChannelRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/channel-config — Full eBay channel configuration
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/channel-config", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/channel-config", requireAuth, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
 
@@ -387,7 +388,7 @@ export function registerEbayChannelRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // PUT /api/ebay/category-mapping — Save category mappings (batch upsert)
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/category-mapping", async (req: Request, res: Response) => {
+  app.put("/api/ebay/category-mapping", requireAuth, async (req: Request, res: Response) => {
     try {
       const { mappings } = req.body as {
         mappings: Array<{
@@ -464,7 +465,7 @@ export function registerEbayChannelRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // POST /api/ebay/sync-store-categories — Create eBay store categories
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/sync-store-categories", async (req: Request, res: Response) => {
+  app.post("/api/ebay/sync-store-categories", requireAuth, async (req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -551,7 +552,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/product-category/:productId — Set per-product category override
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/product-category/:productId", async (req: Request, res: Response) => {
+  app.put("/api/ebay/product-category/:productId", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -581,7 +582,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/variant-exclusion/:variantId — Toggle per-variant eBay exclusion
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/variant-exclusion/:variantId", async (req: Request, res: Response) => {
+  app.put("/api/ebay/variant-exclusion/:variantId", requireAuth, async (req: Request, res: Response) => {
     try {
       const variantId = parseInt(req.params.variantId);
       if (isNaN(variantId)) {
@@ -612,7 +613,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/listing-feed — Products with types for listing feed
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/listing-feed", async (req: Request, res: Response) => {
+  app.get("/api/ebay/listing-feed", requireAuth, async (req: Request, res: Response) => {
     try {
       const client = await pool.connect();
       try {
@@ -862,7 +863,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/toggle-type-listing/:productTypeSlug — Toggle listingEnabled for a product type
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/toggle-type-listing/:productTypeSlug", async (req: Request, res: Response) => {
+  app.put("/api/ebay/toggle-type-listing/:productTypeSlug", requireAuth, async (req: Request, res: Response) => {
     try {
       const { productTypeSlug } = req.params;
       if (!productTypeSlug) {
@@ -898,7 +899,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/category-tree — Root-level eBay categories (Taxonomy API)
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/category-tree", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/category-tree", requireAuth, async (_req: Request, res: Response) => {
     try {
       const cached = getCached<any>("root");
       if (cached) {
@@ -960,7 +961,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/category-tree/:categoryId/children — Children of a category
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/category-tree/:categoryId/children", async (req: Request, res: Response) => {
+  app.get("/api/ebay/category-tree/:categoryId/children", requireAuth, async (req: Request, res: Response) => {
     try {
       const { categoryId } = req.params;
       if (!categoryId) {
@@ -1040,7 +1041,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/category-search — Search eBay browse categories (Taxonomy API)
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/category-search", async (req: Request, res: Response) => {
+  app.get("/api/ebay/category-search", requireAuth, async (req: Request, res: Response) => {
     try {
       const q = (req.query.q as string || "").trim();
       if (!q || q.length < 2) {
@@ -1105,7 +1106,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/category-aspects/:categoryId — Cached eBay aspect definitions
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/category-aspects/:categoryId", async (req: Request, res: Response) => {
+  app.get("/api/ebay/category-aspects/:categoryId", requireAuth, async (req: Request, res: Response) => {
     try {
       const { categoryId } = req.params;
       if (!categoryId) {
@@ -1243,7 +1244,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/type-aspect-defaults/:productTypeSlug
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/type-aspect-defaults/:productTypeSlug", async (req: Request, res: Response) => {
+  app.get("/api/ebay/type-aspect-defaults/:productTypeSlug", requireAuth, async (req: Request, res: Response) => {
     try {
       const { productTypeSlug } = req.params;
       const client = await pool.connect();
@@ -1270,7 +1271,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/type-aspect-defaults/:productTypeSlug
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/type-aspect-defaults/:productTypeSlug", async (req: Request, res: Response) => {
+  app.put("/api/ebay/type-aspect-defaults/:productTypeSlug", requireAuth, async (req: Request, res: Response) => {
     try {
       const { productTypeSlug } = req.params;
       const { defaults } = req.body as { defaults: Record<string, string> };
@@ -1324,7 +1325,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/product-aspects/:productId
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/product-aspects/:productId", async (req: Request, res: Response) => {
+  app.get("/api/ebay/product-aspects/:productId", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -1355,7 +1356,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/product-aspects/:productId
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/product-aspects/:productId", async (req: Request, res: Response) => {
+  app.put("/api/ebay/product-aspects/:productId", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -1414,7 +1415,7 @@ ${categoriesXml}
   //   Supports multi-variant listings via eBay Inventory Item Groups.
   //   All eBay API calls use ebayApiRequest (https module).
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listings/push", async (req: Request, res: Response) => {
+  app.post("/api/ebay/listings/push", requireAuth, async (req: Request, res: Response) => {
     try {
       const { productIds } = req.body as { productIds: number[] };
       if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
@@ -1952,7 +1953,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/listings/push-stream — SSE push with real-time progress
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/listings/push-stream", async (req: Request, res: Response) => {
+  app.get("/api/ebay/listings/push-stream", requireAuth, async (req: Request, res: Response) => {
     // Parse product IDs from query string
     const idsParam = req.query.productIds as string;
     if (!idsParam) {
@@ -2469,7 +2470,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // POST /api/ebay/listings/sync-all — Sync all active eBay listings
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listings/sync-all", async (_req: Request, res: Response) => {
+  app.post("/api/ebay/listings/sync-all", requireAuth, async (_req: Request, res: Response) => {
     try {
       const result = await syncActiveListings(null);
       res.json(result);
@@ -2482,7 +2483,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // POST /api/ebay/listings/sync-product/:productId — Sync a single product
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listings/sync-product/:productId", async (req: Request, res: Response) => {
+  app.post("/api/ebay/listings/sync-product/:productId", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -2500,7 +2501,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/listings/sync-stream — SSE sync with real-time progress
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/listings/sync-stream", async (req: Request, res: Response) => {
+  app.get("/api/ebay/listings/sync-stream", requireAuth, async (req: Request, res: Response) => {
     const idsParam = req.query.productIds as string | undefined;
     const productIds = idsParam
       ? idsParam.split(",").map((id) => parseInt(id.trim())).filter((id) => !isNaN(id))
@@ -2860,7 +2861,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
 
   // GET /api/ebay/pricing-rules
-  app.get("/api/ebay/pricing-rules", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/pricing-rules", requireAuth, async (_req: Request, res: Response) => {
     try {
       const client = await pool.connect();
       try {
@@ -2890,7 +2891,7 @@ ${categoriesXml}
   });
 
   // PUT /api/ebay/pricing-rules
-  app.put("/api/ebay/pricing-rules", async (req: Request, res: Response) => {
+  app.put("/api/ebay/pricing-rules", requireAuth, async (req: Request, res: Response) => {
     try {
       const { scope, scopeId, ruleType, value } = req.body as {
         scope: string;
@@ -2985,7 +2986,7 @@ ${categoriesXml}
   });
 
   // DELETE /api/ebay/pricing-rules/:id
-  app.delete("/api/ebay/pricing-rules/:id", async (req: Request, res: Response) => {
+  app.delete("/api/ebay/pricing-rules/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
@@ -3007,7 +3008,7 @@ ${categoriesXml}
   });
 
   // GET /api/ebay/effective-price/:variantId
-  app.get("/api/ebay/effective-price/:variantId", async (req: Request, res: Response) => {
+  app.get("/api/ebay/effective-price/:variantId", requireAuth, async (req: Request, res: Response) => {
     try {
       const variantId = parseInt(req.params.variantId);
       if (isNaN(variantId)) { res.status(400).json({ error: "Invalid variantId" }); return; }
@@ -3040,7 +3041,7 @@ ${categoriesXml}
   });
 
   // GET /api/ebay/effective-prices — bulk effective prices for listing feed
-  app.get("/api/ebay/effective-prices", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/effective-prices", requireAuth, async (_req: Request, res: Response) => {
     try {
       const client = await pool.connect();
       try {
@@ -3070,7 +3071,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // POST /api/ebay/listings/reconcile — Verify eBay listings still exist
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listings/reconcile", async (_req: Request, res: Response) => {
+  app.post("/api/ebay/listings/reconcile", requireInternalApiKey, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -3204,7 +3205,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/product-exclusion/:productId — Toggle individual product exclusion
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/product-exclusion/:productId", async (req: Request, res: Response) => {
+  app.put("/api/ebay/product-exclusion/:productId", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -3231,7 +3232,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/product-policies/:productId — Set policy overrides for a product
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/product-policies/:productId", async (req: Request, res: Response) => {
+  app.put("/api/ebay/product-policies/:productId", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -3266,7 +3267,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/variant-policies/:variantId — Set policy overrides for a variant
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/variant-policies/:variantId", async (req: Request, res: Response) => {
+  app.put("/api/ebay/variant-policies/:variantId", requireAuth, async (req: Request, res: Response) => {
     try {
       const variantId = parseInt(req.params.variantId);
       if (isNaN(variantId)) {
@@ -3301,7 +3302,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/product-policies/:productId — Get policy overrides for a product
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/product-policies/:productId", async (req: Request, res: Response) => {
+  app.get("/api/ebay/product-policies/:productId", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -3337,7 +3338,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // GET /api/ebay/variant-policies/:variantId — Get policy overrides for a variant
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/variant-policies/:variantId", async (req: Request, res: Response) => {
+  app.get("/api/ebay/variant-policies/:variantId", requireAuth, async (req: Request, res: Response) => {
     try {
       const variantId = parseInt(req.params.variantId);
       if (isNaN(variantId)) {
@@ -3373,7 +3374,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // POST /api/ebay/import-images — Import product images from eBay into product_assets
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/import-images", async (_req: Request, res: Response) => {
+  app.post("/api/ebay/import-images", requireAuth, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -3474,7 +3475,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // POST /api/ebay/admin/cleanup-prod60 — One-time cleanup of PROD-60 group
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/admin/cleanup-prod60", async (_req: Request, res: Response) => {
+  app.post("/api/ebay/admin/cleanup-prod60", requireAuth, async (_req: Request, res: Response) => {
     const log: string[] = [];
     try {
       const authService = getAuthService();

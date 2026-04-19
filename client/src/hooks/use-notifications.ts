@@ -54,8 +54,7 @@ export function useUnreadCount() {
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      // Authenticate the connection
-      ws.send(JSON.stringify({ type: "auth", userId: user.id }));
+      console.log("[WebSocket] Connected for notifications");
     };
 
     ws.onmessage = (event) => {

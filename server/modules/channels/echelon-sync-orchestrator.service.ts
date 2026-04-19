@@ -1067,7 +1067,7 @@ class EchelonSyncOrchestrator {
 
             if (!config.dryRun) {
               // Build partial listing payload with only locked fields
-              const listingPayload: ChannelListingPayload = {
+              const listingPayload = {
                 productId: product.id,
                 title: pushFields.includes("title") ? resolved.title : product.title || product.name,
                 description: pushFields.includes("description") ? resolved.description : null,
@@ -1098,7 +1098,7 @@ class EchelonSyncOrchestrator {
                       variantSku: img.variantSku,
                     }))
                   : [],
-              };
+              } as ChannelListingPayload;
 
               const pushResults = await adapter.pushListings(channelId, [listingPayload]);
 

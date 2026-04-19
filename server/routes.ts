@@ -20,7 +20,8 @@ import { registerSyncControlRoutes } from "./modules/channels/sync-control.route
 import { registerOmsRoutes } from "./routes/oms.routes";
 import { registerDropshipAdminRoutes } from "./modules/dropship/admin.routes";
 import { registerVendorAuthRoutes } from "./modules/dropship/vendor-auth.routes";
-import { registerVendorPortalRoutes, registerStripeWebhookRoute } from "./modules/dropship/vendor-portal.routes";
+import { registerVendorPortalRoutes } from "./modules/dropship/vendor-portal.routes";
+import { registerStripeWebhookRoute } from "./modules/dropship/vendor-webhooks";
 import { registerVendorEbayRoutes } from "./modules/dropship/vendor-ebay.routes";
 import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subscription.webhooks";
 import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";

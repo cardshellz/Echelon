@@ -13,6 +13,7 @@ export interface IInventoryStorage {
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
   getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number, tx?: any): Promise<InventoryLevel | undefined>;
+  lockInventoryLevel(warehouseLocationId: number, productVariantId: number, tx: any): Promise<InventoryLevel | undefined>;
   createInventoryLevel(level: InsertInventoryLevel, tx?: any): Promise<InventoryLevel>;
   upsertInventoryLevel(level: InsertInventoryLevel, tx?: any): Promise<InventoryLevel>;
   adjustInventoryLevel(id: number, adjustments: { variantQty?: number; reservedQty?: number; pickedQty?: number; backorderQty?: number }, tx?: any): Promise<InventoryLevel | null>;
@@ -111,6 +112,31 @@ export const inventoryMethods: IInventoryStorage = {
     return result[0];
   },
 
+  async lockInventoryLevel(warehouseLocationId: number, productVariantId: number, tx: any): Promise<InventoryLevel | undefined> {
+    if (!tx) throw new Error("Transaction is required for lockInventoryLevel");
+    const result = await tx.execute(sql`
+      SELECT * FROM inventory.inventory_levels 
+      WHERE warehouse_location_id = ${warehouseLocationId} 
+        AND product_variant_id = ${productVariantId} 
+      FOR UPDATE LIMIT 1
+    `);
+    
+    if (!result.rows || result.rows.length === 0) return undefined;
+    
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      warehouseLocationId: row.warehouse_location_id,
+      productVariantId: row.product_variant_id,
+      variantQty: row.variant_qty,
+      reservedQty: row.reserved_qty,
+      pickedQty: row.picked_qty,
+      packedQty: row.packed_qty,
+      backorderQty: row.backorder_qty,
+      updatedAt: row.updated_at
+    } as InventoryLevel;
+  },
+
   async createInventoryLevel(level: InsertInventoryLevel, tx: any = db): Promise<InventoryLevel> {
     const result = await tx.insert(inventoryLevels).values(level).returning();
     return result[0];
@@ -121,19 +147,21 @@ export const inventoryMethods: IInventoryStorage = {
       throw new Error("productVariantId is required for upsertInventoryLevel");
     }
 
-    const existing = await tx
-      .select()
-      .from(inventoryLevels)
-      .where(and(
-        eq(inventoryLevels.productVariantId, level.productVariantId),
-        eq(inventoryLevels.warehouseLocationId, level.warehouseLocationId)
-      ));
+    // Atomic FOR UPDATE inside transaction if tx is passed
+    const existingResult = await tx.execute(sql`
+      SELECT id FROM inventory.inventory_levels 
+      WHERE warehouse_location_id = ${level.warehouseLocationId} 
+        AND product_variant_id = ${level.productVariantId} 
+      FOR UPDATE LIMIT 1
+    `);
 
-    if (existing[0]) {
+    const existing = existingResult.rows && existingResult.rows.length > 0 ? existingResult.rows[0] : null;
+
+    if (existing) {
       const result = await tx
         .update(inventoryLevels)
         .set({ ...level, updatedAt: new Date() })
-        .where(eq(inventoryLevels.id, existing[0].id))
+        .where(eq(inventoryLevels.id, existing.id))
         .returning();
       return result[0];
     } else {
@@ -271,17 +299,17 @@ export const inventoryMethods: IInventoryStorage = {
   }, tx: any = db): Promise<InventoryTransaction> {
     const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes } = params;
 
-    const sourceLevel = await tx
-      .select()
-      .from(inventoryLevels)
-      .where(and(
-        eq(inventoryLevels.warehouseLocationId, fromLocationId),
-        eq(inventoryLevels.productVariantId, productVariantId)
-      ))
-      .limit(1);
+    const sourceResult = await tx.execute(sql`
+      SELECT id, variant_qty FROM inventory.inventory_levels 
+      WHERE warehouse_location_id = ${fromLocationId} 
+        AND product_variant_id = ${productVariantId} 
+      FOR UPDATE LIMIT 1
+    `);
+    
+    const sourceLevel = sourceResult.rows && sourceResult.rows.length > 0 ? sourceResult.rows[0] : null;
 
-    if (!sourceLevel.length || sourceLevel[0].variantQty < quantity) {
-      throw new Error(`Insufficient inventory at source location. Available: ${sourceLevel[0]?.variantQty || 0}`);
+    if (!sourceLevel || sourceLevel.variant_qty < quantity) {
+      throw new Error(`Insufficient inventory at source location. Available: ${sourceLevel?.variant_qty || 0}`);
     }
 
     const variant = await tx.select().from(productVariants).where(eq(productVariants.id, productVariantId)).limit(1);
@@ -295,25 +323,24 @@ export const inventoryMethods: IInventoryStorage = {
         variantQty: sql`${inventoryLevels.variantQty} - ${quantity}`,
         updatedAt: new Date()
       })
-      .where(eq(inventoryLevels.id, sourceLevel[0].id));
+      .where(eq(inventoryLevels.id, sourceLevel.id));
 
-    const destLevel = await tx
-      .select()
-      .from(inventoryLevels)
-      .where(and(
-        eq(inventoryLevels.warehouseLocationId, toLocationId),
-        eq(inventoryLevels.productVariantId, productVariantId)
-      ))
-      .limit(1);
+    const destResult = await tx.execute(sql`
+      SELECT id FROM inventory.inventory_levels 
+      WHERE warehouse_location_id = ${toLocationId} 
+        AND product_variant_id = ${productVariantId} 
+      FOR UPDATE LIMIT 1
+    `);
+    const destLevel = destResult.rows && destResult.rows.length > 0 ? destResult.rows[0] : null;
 
-    if (destLevel.length) {
+    if (destLevel) {
       await tx
         .update(inventoryLevels)
         .set({
           variantQty: sql`${inventoryLevels.variantQty} + ${quantity}`,
           updatedAt: new Date()
         })
-        .where(eq(inventoryLevels.id, destLevel[0].id));
+        .where(eq(inventoryLevels.id, destLevel.id));
     } else {
       await tx.insert(inventoryLevels).values({
         warehouseLocationId: toLocationId,
@@ -333,8 +360,8 @@ export const inventoryMethods: IInventoryStorage = {
       toLocationId,
       transactionType: "transfer",
       variantQtyDelta: quantity,
-      variantQtyBefore: sourceLevel[0].variantQty,
-      variantQtyAfter: sourceLevel[0].variantQty - quantity,
+      variantQtyBefore: sourceLevel.variant_qty,
+      variantQtyAfter: sourceLevel.variant_qty - quantity,
       batchId,
       sourceState: "on_hand",
       targetState: "on_hand",

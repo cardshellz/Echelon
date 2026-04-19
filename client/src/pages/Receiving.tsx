@@ -570,7 +570,10 @@ DEF-456,25,,,5.00,,Location TBD`;
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
       });
-      if (!res.ok) throw new Error("Failed to update line");
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({ error: "Failed to update line" }));
+        throw new Error(errJson.error || "Failed to update line");
+      }
       return res.json();
     },
     onSuccess: (updatedLine) => {
@@ -584,9 +587,8 @@ DEF-456,25,,,5.00,,Location TBD`;
           lines: updatedLines
         });
         
-        // Check if the line was completed
+        // Handle Line Status Toasts
         if (updatedLine.status === "complete") {
-          // Check if all lines are now complete
           const allComplete = updatedLines.every(l => l.status === "complete");
           if (allComplete) {
             toast({ 
@@ -596,11 +598,17 @@ DEF-456,25,,,5.00,,Location TBD`;
           } else {
             toast({ title: "Line marked complete" });
           }
+        } else if (updatedLine.status === "overage") {
+          toast({ 
+            title: "Overage Detected", 
+            description: "Please route the extra physical items to the Problem Solve bin for supervisor review.",
+            variant: "destructive"
+          });
         }
       }
     },
-    onError: () => {
-      toast({ title: "Failed to update line", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to update line", description: error.message, variant: "destructive" });
     },
   });
 

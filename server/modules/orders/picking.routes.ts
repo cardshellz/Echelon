@@ -14,7 +14,7 @@ export function registerPickingRoutes(app: Express) {
   // ===== PICKING QUEUE API =====
   
   // DEBUG: Raw SQL test to pinpoint column issues
-  app.get("/api/picking/debug", async (req, res) => {
+  app.get("/api/picking/debug", requireAuth, async (req, res) => {
     try {
       // Raw SQL to bypass Drizzle type mapping
       const rows = await storage.debugPickingQueue();
@@ -26,7 +26,7 @@ export function registerPickingRoutes(app: Express) {
   
   // Get orders for picking queue (including completed for Done count)
   // Diagnostic endpoint to inspect a specific order's items
-  app.get("/api/picking/diagnose/:orderNumber", async (req, res) => {
+  app.get("/api/picking/diagnose/:orderNumber", requireAuth, async (req, res) => {
     try {
       const orderNumber = '#' + req.params.orderNumber;
       const diagnosis = await storage.diagnoseOrder(orderNumber);
@@ -37,7 +37,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Diagnostic: find orders where picked_count > unit_count (double counting)
-  app.get("/api/picking/diagnose-overcounted", async (req, res) => {
+  app.get("/api/picking/diagnose-overcounted", requireAuth, async (req, res) => {
     try {
       const rows = await storage.diagnoseOvercountedOrders();
       res.json(rows);
@@ -47,7 +47,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Fix stale item_count/unit_count on all orders
-  app.post("/api/picking/fix-order-counts", async (req, res) => {
+  app.post("/api/picking/fix-order-counts", requireAuth, async (req, res) => {
     try {
       const rowsUpdated = await storage.fixOrderCounts();
       res.json({ message: "Order counts recalculated", rowsUpdated });
@@ -57,7 +57,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Diagnostic endpoint to fix stuck orders (considers only shippable items)
-  app.post("/api/picking/fix-stuck-orders", async (req, res) => {
+  app.post("/api/picking/fix-stuck-orders", requireAuth, async (req, res) => {
     try {
       const stuckOrders = await storage.getStuckInProgressOrders();
       const fixed: string[] = [];
@@ -91,7 +91,7 @@ export function registerPickingRoutes(app: Express) {
 
   // ===== PICKING ROUTES (thin adapters → PickingService) =====
 
-  app.get("/api/picking/queue", async (req, res) => {
+  app.get("/api/picking/queue", requireAuth, async (req, res) => {
     try {
       // Disable caching - pick queue changes frequently
       res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -107,7 +107,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/picking/orders/:id", async (req, res) => {
+  app.get("/api/picking/orders/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const order = await storage.getOrderById(id);
@@ -121,7 +121,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/orders/:id/claim", async (req, res) => {
+  app.post("/api/picking/orders/:id/claim", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const id = parseInt(req.params.id);
@@ -136,7 +136,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/orders/:id/release", async (req, res) => {
+  app.post("/api/picking/orders/:id/release", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const id = parseInt(req.params.id);
@@ -168,6 +168,10 @@ export function registerPickingRoutes(app: Express) {
         deviceType: req.headers["x-device-type"] as string,
         sessionId: req.sessionID,
       });
+      
+      if (!result.success) {
+        return res.status(400).json(result);
+      }
       
       res.json({ item: result.item, inventory: result.inventory });
     } catch (error: any) {
@@ -320,7 +324,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/orders/:id/ready-to-ship", async (req, res) => {
+  app.post("/api/picking/orders/:id/ready-to-ship", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const order = await picking.markReadyToShip(
@@ -338,7 +342,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Get all orders (for orders management page)
-  app.get("/api/orders", async (req, res) => {
+  app.get("/api/orders", requireAuth, async (req, res) => {
     try {
       const orders = await storage.getOrdersWithItems();
       res.json(orders);
@@ -349,7 +353,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Hold an order (any authenticated user)
-  app.post("/api/orders/:id/hold", async (req, res) => {
+  app.post("/api/orders/:id/hold", requireAuth, async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(401).json({ error: "Authentication required" });
@@ -386,7 +390,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Release hold on an order (any authenticated user)
-  app.post("/api/orders/:id/release-hold", async (req, res) => {
+  app.post("/api/orders/:id/release-hold", requireAuth, async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(401).json({ error: "Authentication required" });
@@ -423,7 +427,7 @@ export function registerPickingRoutes(app: Express) {
 
   // Set order priority (admin/lead only)
   // Accepts a numeric priority value: 9999 = Bump to Top, -1 = Hold, 100 = Normal (SLA reset)
-  app.post("/api/orders/:id/priority", async (req, res) => {
+  app.post("/api/orders/:id/priority", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -468,7 +472,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Force release an order (admin only) - for stuck orders
-  app.post("/api/orders/:id/force-release", async (req, res) => {
+  app.post("/api/orders/:id/force-release", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || req.session.user.role !== "admin") {
         return res.status(403).json({ error: "Admin access required" });
@@ -514,7 +518,7 @@ export function registerPickingRoutes(app: Express) {
 
   // ===== ORDER COMBINING =====
 
-  app.get("/api/settings/order-combining", async (req, res) => {
+  app.get("/api/settings/order-combining", requireAuth, async (req, res) => {
     try {
       res.json(await orderCombining.getSettings());
     } catch (error: any) {
@@ -523,7 +527,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/settings/order-combining", async (req, res) => {
+  app.post("/api/settings/order-combining", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || req.session.user.role !== "admin") {
         return res.status(403).json({ error: "Admin access required" });
@@ -535,7 +539,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/combinable", async (req, res) => {
+  app.get("/api/orders/combinable", requireAuth, async (req, res) => {
     try {
       res.json(await orderCombining.getCombinableGroups());
     } catch (error: any) {
@@ -544,7 +548,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/combine", async (req, res) => {
+  app.post("/api/orders/combine", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -559,7 +563,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/combine-all", async (req, res) => {
+  app.post("/api/orders/combine-all", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -574,7 +578,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/:id/uncombine", async (req, res) => {
+  app.post("/api/orders/:id/uncombine", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -590,7 +594,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/combined-groups", async (req, res) => {
+  app.get("/api/orders/combined-groups", requireAuth, async (req, res) => {
     try {
       res.json(await orderCombining.getActiveGroups());
     } catch (error: any) {
@@ -602,7 +606,7 @@ export function registerPickingRoutes(app: Express) {
   // ===== EXCEPTION HANDLING =====
   
   // Get all orders in exception status (admin/lead only)
-  app.get("/api/orders/exceptions", async (req, res) => {
+  app.get("/api/orders/exceptions", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -638,7 +642,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Resolve an exception (admin/lead only)
-  app.post("/api/orders/:id/resolve-exception", async (req, res) => {
+  app.post("/api/orders/:id/resolve-exception", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -685,7 +689,7 @@ export function registerPickingRoutes(app: Express) {
   // ===== PICKING LOGS API =====
 
   // Get picking logs with filters (admin/lead only)
-  app.get("/api/picking/logs", async (req, res) => {
+  app.get("/api/picking/logs", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -736,7 +740,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Get order timeline (logs for a specific order)
-  app.get("/api/picking/orders/:id/timeline", async (req, res) => {
+  app.get("/api/picking/orders/:id/timeline", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -777,7 +781,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Get action types for filtering
-  app.get("/api/picking/logs/action-types", async (req, res) => {
+  app.get("/api/picking/logs/action-types", requireAuth, async (req, res) => {
     res.json([
       { value: "order_claimed", label: "Order Claimed" },
       { value: "order_released", label: "Order Released" },
@@ -792,7 +796,7 @@ export function registerPickingRoutes(app: Express) {
     ]);
   });
 
-  app.post("/api/picking/logs/backfill", async (req, res) => {
+  app.post("/api/picking/logs/backfill", requireAuth, async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user || user.role !== "admin") {
@@ -913,7 +917,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/picking/metrics", async (req, res) => {
+  app.get("/api/picking/metrics", requireAuth, async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user || !["admin", "lead"].includes(user.role)) {
@@ -986,7 +990,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/history", async (req, res) => {
+  app.get("/api/orders/history", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -1022,7 +1026,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/orders/:id/detail", async (req, res) => {
+  app.get("/api/orders/:id/detail", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -1045,7 +1049,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/orders/history/export", async (req, res) => {
+  app.get("/api/orders/history/export", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
         return res.status(403).json({ error: "Admin or lead access required" });

@@ -188,7 +188,7 @@ export class PickingUseCases {
     userId?: string;
     deviceType?: string;
     sessionId?: string;
-  }): Promise<{ success: true; item: OrderItem; inventory: PickInventoryContext }> {
+  }): Promise<PickItemResult> {
     const { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId, userId, deviceType, sessionId } = params;
 
     // Validate status enum

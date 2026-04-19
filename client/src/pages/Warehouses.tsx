@@ -34,7 +34,7 @@ interface WarehouseRecord {
   lastInventorySyncAt: string | null;
   inventorySyncStatus: string | null;
   feedEnabled: boolean | null;
-  hubWarehouseId: number | null;
+
   createdAt: string;
   updatedAt: string;
 }
@@ -145,7 +145,7 @@ export default function Warehouses() {
         ...data,
         shopifyLocationId: data.shopifyLocationId || null,
         inventorySourceConfig: data.inventorySourceConfig || null,
-        hubWarehouseId: data.hubWarehouseId && data.hubWarehouseId !== "none" ? parseInt(data.hubWarehouseId) : null,
+        hubWarehouseId: data.hubWarehouseId || null,
       };
       const res = await fetch("/api/warehouses", {
         method: "POST",
@@ -175,7 +175,7 @@ export default function Warehouses() {
         ...data,
         shopifyLocationId: data.shopifyLocationId || null,
         inventorySourceConfig: data.inventorySourceConfig || null,
-        hubWarehouseId: data.hubWarehouseId && data.hubWarehouseId !== "none" ? parseInt(data.hubWarehouseId as string) : null,
+        hubWarehouseId: data.hubWarehouseId || null,
       };
       const res = await fetch(`/api/warehouses/${id}`, {
         method: "PATCH",
@@ -629,8 +629,8 @@ export default function Warehouses() {
                 <div className="space-y-1">
                   <Label className="text-xs md:text-sm">Fulfillment Hub Link</Label>
                   <Select 
-                    value={formData.hubWarehouseId || ""} 
-                    onValueChange={(val) => setFormData({ ...formData, hubWarehouseId: val })}
+                    value={formData.hubWarehouseId ? String(formData.hubWarehouseId) : "none"} 
+                    onValueChange={(val) => setFormData({ ...formData, hubWarehouseId: val === "none" ? null : parseInt(val) })}
                   >
                     <SelectTrigger className="h-11">
                       <SelectValue placeholder="Select operations hub..." />

@@ -58,22 +58,22 @@ export function registerSubscriptionWebhookRoutes(app: Express): void {
   // Disabled: shellz-club-app is now the canonical membership webhook listener
   
   // subscription_contracts/create
-  app.post("/api/webhooks/subscription-contracts/create", (req, res) => {
+  app.post("/api/webhooks/subscription-contracts/create", requireAuth, (req, res) => {
     processWebhook(req, res, handleContractCreated);
   });
 
   // subscription_contracts/update
-  app.post("/api/webhooks/subscription-contracts/update", (req, res) => {
+  app.post("/api/webhooks/subscription-contracts/update", requireAuth, (req, res) => {
     processWebhook(req, res, handleContractUpdated);
   });
 
   // subscription_billing_attempts/success
-  app.post("/api/webhooks/subscription-billing/success", (req, res) => {
+  app.post("/api/webhooks/subscription-billing/success", requireAuth, (req, res) => {
     processWebhook(req, res, handleBillingSuccess);
   });
 
   // subscription_billing_attempts/failure
-  app.post("/api/webhooks/subscription-billing/failure", (req, res) => {
+  app.post("/api/webhooks/subscription-billing/failure", requireAuth, (req, res) => {
     processWebhook(req, res, handleBillingFailure);
   });
   */

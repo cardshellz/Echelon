@@ -61,7 +61,7 @@ export function registerSettingsRoutes(app: Express) {
   });
 
   // Adjustment Reasons API
-  app.get("/api/inventory/adjustment-reasons", async (req, res) => {
+  app.get("/api/inventory/adjustment-reasons", requireAuth, async (req, res) => {
     try {
       const reasons = await storage.getActiveAdjustmentReasons();
       res.json(reasons);
@@ -71,7 +71,7 @@ export function registerSettingsRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/adjustment-reasons", async (req, res) => {
+  app.post("/api/inventory/adjustment-reasons", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || req.session.user.role !== "admin") {
         return res.status(403).json({ error: "Admin access required" });
@@ -85,7 +85,7 @@ export function registerSettingsRoutes(app: Express) {
   });
 
   // Seed default adjustment reasons
-  app.post("/api/inventory/adjustment-reasons/seed", async (req, res) => {
+  app.post("/api/inventory/adjustment-reasons/seed", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || req.session.user.role !== "admin") {
         return res.status(403).json({ error: "Admin access required" });

@@ -931,7 +931,7 @@ export class ReplenishmentUseCases {
     } satisfies InsertReplenTask).returning();
 
     let moved = 0;
-    if (guidance.shouldAutoExecute) {
+    if (guidance.executionMode === "auto") {
       console.log(`${_tag} created task ${task.id}, executing immediately...`);
       try {
         const result = await this.executeTask(task.id, userId ?? "picker:confirmed");

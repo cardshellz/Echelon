@@ -28,6 +28,7 @@ type DrizzleDb = {
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
+  execute: (query: any) => Promise<any>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
@@ -525,15 +526,15 @@ class FulfillmentService {
       }
 
       // Update WMS order status to shipped (clears from pick queue)
-      const [wmsOrder] = await this.db.execute<{ id: number }>(sql`
+      const wmsOrder = (await this.db.execute(sql`
         SELECT id FROM wms.orders
         WHERE (oms_fulfillment_order_id = ${shopifyOrderIdStr}
                OR source_table_id = ${shopifyOrderIdStr})
           AND warehouse_status NOT IN ('shipped', 'cancelled')
         LIMIT 1
-      `);
+      `)) as any;
 
-      if (wmsOrder.rows.length > 0) {
+      if (wmsOrder?.rows?.length > 0) {
         const wmsOrderId = wmsOrder.rows[0].id;
         const now = new Date();
         await this.db.execute(sql`

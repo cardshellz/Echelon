@@ -35,7 +35,7 @@ export function registerAuthRoutes(app: Express) {
     });
   });
   
-  app.get("/api/auth/me", async (req, res) => {
+  app.get("/api/auth/me", requireAuth, async (req, res) => {
     if (req.session.user) {
       try {
         const permissions = await repo.getUserPermissions(req.session.user.id);

@@ -5,13 +5,19 @@ import * as service from "./application/subscription.use-cases";
 import { createSellingPlanGroupUseCase, listSellingPlanGroupsUseCase } from "./application/selling-plan.use-cases";
 import { registerSubscriptionWebhooksUseCase } from "./application/subscription.use-cases";
 import { processDueBillings } from "./subscription.scheduler";
+import { requireAuth, requirePermission } from "../../routes/middleware";
 
 /**
  * Register admin subscription routes (behind Echelon auth).
  */
 export function registerSubscriptionRoutes(app: Express): void {
+  // Apply middleware to all routes in this file
+  const adminMw = [requireAuth, requirePermission("shellz", "admin")] as any;
+  app.use("/api/subscriptions", ...adminMw);
+  app.use("/api/membership", ...adminMw);
+
   // ─── Dashboard Stats ──────────────────────────────────────────
-  app.get("/api/subscriptions/dashboard", async (_req: Request, res: Response) => {
+  app.get("/api/subscriptions/dashboard", requireAuth, async (_req: Request, res: Response) => {
     try {
       const stats = await storage.getDashboardStats();
       res.json(stats);
@@ -22,7 +28,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Subscriber List ──────────────────────────────────────────
-  app.get("/api/subscriptions/list", async (req: Request, res: Response) => {
+  app.get("/api/subscriptions/list", requireAuth, async (req: Request, res: Response) => {
     try {
       const { status, billing_status, tier, search, limit, offset } = req.query;
       const result = await storage.getSubscriberList({
@@ -41,7 +47,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Subscription Detail ──────────────────────────────────────
-  app.get("/api/subscriptions/:id", async (req: Request, res: Response) => {
+  app.get("/api/subscriptions/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       const detail = await storage.getSubscriptionDetail(id);
@@ -59,7 +65,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Cancel Subscription ──────────────────────────────────────
-  app.post("/api/subscriptions/:id/cancel", async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/:id/cancel", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       const reason = req.body?.reason || "Admin cancelled";
@@ -72,7 +78,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Change Plan ──────────────────────────────────────────────
-  app.post("/api/subscriptions/:id/change-plan", async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/:id/change-plan", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       const newPlanId = req.body?.plan_id;
@@ -86,7 +92,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Retry Billing ────────────────────────────────────────────
-  app.post("/api/subscriptions/:id/retry-billing", async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/:id/retry-billing", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       const result = await service.retryBillingUseCase(id);
@@ -98,7 +104,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Pause/Unpause ────────────────────────────────────────────
-  app.post("/api/subscriptions/:id/pause", async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/:id/pause", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       const paused = req.body?.paused !== false; // default to true
@@ -111,7 +117,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Plans ────────────────────────────────────────────────────
-  app.get("/api/subscriptions/plans/list", async (_req: Request, res: Response) => {
+  app.get("/api/subscriptions/plans/list", requireAuth, async (_req: Request, res: Response) => {
     try {
       const plans = await storage.getAllPlans();
       const sellingPlanMap = await storage.getSellingPlanMap();
@@ -122,7 +128,7 @@ export function registerSubscriptionRoutes(app: Express): void {
     }
   });
 
-  app.put("/api/subscriptions/plans/:id", async (req: Request, res: Response) => {
+  app.put("/api/subscriptions/plans/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       const { name, tier, billing_interval, price_cents, includes_dropship, is_active, priority_modifier } = req.body;
@@ -137,7 +143,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Billing Log ──────────────────────────────────────────────
-  app.get("/api/subscriptions/billing/log", async (req: Request, res: Response) => {
+  app.get("/api/subscriptions/billing/log", requireAuth, async (req: Request, res: Response) => {
     try {
       const { status, limit, offset } = req.query;
       const result = await storage.getBillingLogs({
@@ -153,7 +159,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Events ───────────────────────────────────────────────────
-  app.get("/api/subscriptions/events/list", async (req: Request, res: Response) => {
+  app.get("/api/subscriptions/events/list", requireAuth, async (req: Request, res: Response) => {
     try {
       const { event_type, limit } = req.query;
       const events = await storage.getEvents({
@@ -168,7 +174,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Setup Selling Plans ──────────────────────────────────────
-  app.post("/api/membership/setup-selling-plans", async (req: Request, res: Response) => {
+  app.post("/api/membership/setup-selling-plans", requireAuth, async (req: Request, res: Response) => {
     try {
       const productGid = req.body?.product_gid || process.env.SHOPIFY_MEMBERSHIP_PRODUCT_GID;
       if (!productGid) {
@@ -183,7 +189,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Register Webhooks ────────────────────────────────────────
-  app.post("/api/membership/register-webhooks", async (req: Request, res: Response) => {
+  app.post("/api/membership/register-webhooks", requireAuth, async (req: Request, res: Response) => {
     try {
       const baseUrl = req.body?.base_url || `https://${req.headers.host}`;
       // const registered = await registerSubscriptionWebhooksUseCase(baseUrl);
@@ -196,7 +202,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Shopify Selling Plans (read from Shopify) ────────────────
-  app.get("/api/membership/shopify-selling-plans", async (_req: Request, res: Response) => {
+  app.get("/api/membership/shopify-selling-plans", requireAuth, async (_req: Request, res: Response) => {
     try {
       const groups = await listSellingPlanGroupsUseCase();
       res.json(groups);
@@ -207,7 +213,7 @@ export function registerSubscriptionRoutes(app: Express): void {
   });
 
   // ─── Manual Billing Run ───────────────────────────────────────
-  app.post("/api/subscriptions/billing/run", async (_req: Request, res: Response) => {
+  app.post("/api/subscriptions/billing/run", requireAuth, async (_req: Request, res: Response) => {
     try {
       const result = await processDueBillings();
       res.json(result);

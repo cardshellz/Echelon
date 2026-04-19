@@ -63,7 +63,13 @@ import { ordersStorage } from "../modules/orders";
 import { channelsStorage } from "../modules/channels";
 import { procurementStorage } from "../modules/procurement";
 import { identityStorage } from "../modules/identity";
-
+import { createAllocationEngine } from "../modules/channels/allocation-engine.service";
+import { createSourceLockService } from "../modules/channels/source-lock.service";
+import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
+import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
+import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-orchestrator.service";
+import { productVariants as pvTable } from "@shared/schema";
+import { eq as eqOp } from "drizzle-orm";
 export function createServices(db: any) {
   // Foundation
   const inventoryLots = createInventoryLotService(db);
@@ -139,11 +145,6 @@ export function createServices(db: any) {
   const syncSettings = createSyncSettingsService(db);
 
   // Echelon sync orchestrator — the REAL sync engine (allocation + per-channel push)
-  const { createAllocationEngine } = require("../modules/channels/allocation-engine.service");
-  const { createSourceLockService } = require("../modules/channels/source-lock.service");
-  const { createShopifyAdapter } = require("../modules/channels/adapters/shopify.adapter");
-  const { ChannelAdapterRegistry } = require("../modules/channels/channel-adapter.interface");
-  const { createEchelonSyncOrchestrator } = require("../modules/channels/echelon-sync-orchestrator.service");
 
   const allocationEngine = createAllocationEngine(db, atp);
   const sourceLockService = createSourceLockService(db);
@@ -161,8 +162,6 @@ export function createServices(db: any) {
 
   // Wire inventory change → immediate channel sync
   // Every inventory mutation (receive, pick, ship, adjust) triggers allocation + push
-  const { productVariants: pvTable } = require("@shared/schema");
-  const { eq: eqOp } = require("drizzle-orm");
   const pendingSyncs = new Set<number>(); // debounce by productId
   inventoryCore.onInventoryChange(async (productVariantId: number, triggeredBy: string) => {
     try {

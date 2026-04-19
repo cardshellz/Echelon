@@ -1,3 +1,4 @@
+import { requireAuth } from "./middleware";
 /**
  * eBay Settings Routes
  *
@@ -95,7 +96,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/settings — Current eBay config & connection status
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/settings", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/settings", requireAuth, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -183,7 +184,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/policies — Fetch business policies from eBay API
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/policies", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/policies", requireAuth, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -245,7 +246,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // POST /api/ebay/location — Create merchant location on eBay
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/location", async (req: Request, res: Response) => {
+  app.post("/api/ebay/location", requireAuth, async (req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -348,7 +349,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // PUT /api/ebay/settings — Save policy selections & config
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/settings", async (req: Request, res: Response) => {
+  app.put("/api/ebay/settings", requireAuth, async (req: Request, res: Response) => {
     try {
       const { fulfillmentPolicyId, returnPolicyId, paymentPolicyId } = req.body;
 
@@ -378,7 +379,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/listings/preview — Preview how products would look on eBay
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/listings/preview", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/listings/preview", requireAuth, async (_req: Request, res: Response) => {
     try {
       // Fetch 3 active products with variants and images
       const sampleProducts = await (db as any)
@@ -457,7 +458,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // POST /api/ebay/listings/test — Create a single test listing on eBay
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listings/test", async (req: Request, res: Response) => {
+  app.post("/api/ebay/listings/test", requireAuth, async (req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -627,7 +628,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/stats — Channel stats (orders, listings, last sync)
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/stats", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/stats", requireAuth, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       let orderCount = 0;

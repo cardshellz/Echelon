@@ -4,9 +4,13 @@ import { sql } from "drizzle-orm";
 import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 
+import { requireAuth, requireInternalApiKey } from "./middleware";
+
 export function registerDiagnosticsRoutes(app: Express) {
+  app.use("/api/_internal/diagnostics", requireInternalApiKey);
+
   // Clean up duplicate orders with normalized Shopify IDs (handles gid:// prefix differences)
-  app.post("/api/diagnostics/cleanup-duplicates-normalized", async (req, res) => {
+  app.post("/api/_internal/diagnostics/cleanup-duplicates-normalized", requireAuth, async (req, res) => {
     try {
       const { confirm } = req.body;
       if (confirm !== "DELETE_DUPLICATES") {
@@ -93,7 +97,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Clean up duplicate orders (DELETE operation - requires confirmation)
-  app.post("/api/diagnostics/cleanup-duplicates", async (req, res) => {
+  app.post("/api/_internal/diagnostics/cleanup-duplicates", requireAuth, async (req, res) => {
     try {
       const { confirm } = req.body;
       if (confirm !== "DELETE_DUPLICATES") {
@@ -144,7 +148,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Check for duplicate orders (admin-only for security)
-  app.get("/api/diagnostics/duplicate-orders", async (req, res) => {
+  app.get("/api/_internal/diagnostics/duplicate-orders", requireAuth, async (req, res) => {
     try {
       const pickQueueDupes = await db.execute(sql`
         SELECT 
@@ -184,7 +188,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Backfill member tiers for existing orders
-  app.post("/api/diagnostics/backfill-member-tiers", async (req, res) => {
+  app.post("/api/_internal/diagnostics/backfill-member-tiers", requireAuth, async (req, res) => {
     try {
       const { limit = 100 } = req.body;
       const enriched = await backfillMemberTiers(limit);
@@ -200,7 +204,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Diagnose broken WMS orders (items mismatch with OMS)
-  app.get("/api/diagnostics/broken-wms-orders", async (req, res) => {
+  app.get("/api/_internal/diagnostics/broken-wms-orders", requireAuth, async (req, res) => {
     try {
       const services = (req.app.locals as any).services;
       const wmsSyncSvc = new WmsSyncService({
@@ -216,7 +220,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Repair broken WMS orders — resyncs items from OMS
-  app.post("/api/diagnostics/repair-wms-orders", async (req, res) => {
+  app.post("/api/_internal/diagnostics/repair-wms-orders", requireAuth, async (req, res) => {
     try {
       const services = (req.app.locals as any).services;
       const wmsSyncSvc = new WmsSyncService({
@@ -232,7 +236,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Resync a single WMS order's items from OMS
-  app.post("/api/diagnostics/resync-wms-order/:wmsOrderId", async (req, res) => {
+  app.post("/api/_internal/diagnostics/resync-wms-order/:wmsOrderId", requireAuth, async (req, res) => {
     try {
       const wmsOrderId = parseInt(req.params.wmsOrderId, 10);
       const services = (req.app.locals as any).services;
@@ -250,7 +254,7 @@ export function registerDiagnosticsRoutes(app: Express) {
 
   // Bulk release ALL stuck in_progress orders with an assignedPickerId
   // Safe to run — only unassigns orders, doesn't reset pick progress
-  app.post("/api/diagnostics/release-stuck-orders", async (req, res) => {
+  app.post("/api/_internal/diagnostics/release-stuck-orders", requireAuth, async (req, res) => {
     try {
       const { orderNumberGte, resetProgress = false } = req.body; // e.g. orderNumberGte: "55561"
       let whereClause = `warehouse_status = 'in_progress' AND assigned_picker_id IS NOT NULL`;
@@ -272,7 +276,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Force release an order by order number (admin use only)
-  app.post("/api/diagnostics/force-release-by-number/:orderNumber", async (req, res) => {
+  app.post("/api/_internal/diagnostics/force-release-by-number/:orderNumber", requireAuth, async (req, res) => {
     try {
       const { orderNumber } = req.params;
       const { resetProgress = false } = req.body;

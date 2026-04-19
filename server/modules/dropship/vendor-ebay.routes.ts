@@ -226,7 +226,7 @@ export function registerVendorEbayRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/vendor/ebay/callback — handle OAuth callback
   // -----------------------------------------------------------------------
-  app.get("/api/vendor/ebay/callback", async (req: Request, res: Response) => {
+  app.get("/api/vendor/ebay/callback", requireVendorAuth, async (req: Request, res: Response) => {
     const config = getEbayConfig();
     if (!config) {
       res.redirect(`${VENDOR_PORTAL_URL}/settings?ebay=error&reason=not_configured`);

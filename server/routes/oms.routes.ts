@@ -1,3 +1,4 @@
+import { requireAuth } from "./middleware";
 /**
  * OMS API Routes
  *
@@ -19,7 +20,7 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // GET /api/oms/orders/stats — summary stats (must be before :id route)
   // -----------------------------------------------------------------------
-  app.get("/api/oms/orders/stats", async (req: Request, res: Response) => {
+  app.get("/api/oms/orders/stats", requireAuth, async (req: Request, res: Response) => {
     try {
       const stats = await getOms(req).getStats();
       res.json(stats);
@@ -32,7 +33,7 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // GET /api/oms/orders — list orders with filters
   // -----------------------------------------------------------------------
-  app.get("/api/oms/orders", async (req: Request, res: Response) => {
+  app.get("/api/oms/orders", requireAuth, async (req: Request, res: Response) => {
     try {
       const { channelId, status, search, startDate, endDate, page, limit } = req.query;
 
@@ -56,7 +57,7 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // GET /api/oms/orders/:id — order detail with lines and events
   // -----------------------------------------------------------------------
-  app.get("/api/oms/orders/:id", async (req: Request, res: Response) => {
+  app.get("/api/oms/orders/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
       const order = await getOms(req).getOrderById(id);
@@ -75,7 +76,7 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // POST /api/oms/orders/:id/assign-warehouse — manual warehouse assignment
   // -----------------------------------------------------------------------
-  app.post("/api/oms/orders/:id/assign-warehouse", async (req: Request, res: Response) => {
+  app.post("/api/oms/orders/:id/assign-warehouse", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
       const { warehouseId } = req.body;
@@ -93,7 +94,7 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // POST /api/oms/orders/:id/mark-shipped — manual ship with tracking
   // -----------------------------------------------------------------------
-  app.post("/api/oms/orders/:id/mark-shipped", async (req: Request, res: Response) => {
+  app.post("/api/oms/orders/:id/mark-shipped", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
       const { trackingNumber, carrier } = req.body;
@@ -125,7 +126,7 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // POST /api/oms/orders/:id/reserve — manual inventory reservation
   // -----------------------------------------------------------------------
-  app.post("/api/oms/orders/:id/reserve", async (req: Request, res: Response) => {
+  app.post("/api/oms/orders/:id/reserve", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
       const result = await getOms(req).reserveInventory(id);
@@ -139,7 +140,7 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // POST /api/oms/orders/:id/push-to-shipstation — manual ShipStation push
   // -----------------------------------------------------------------------
-  app.post("/api/oms/orders/:id/push-to-shipstation", async (req: Request, res: Response) => {
+  app.post("/api/oms/orders/:id/push-to-shipstation", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
       const ss = getShipStation(req);

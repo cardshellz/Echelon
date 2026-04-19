@@ -1,0 +1,1 @@
+ALTER TABLE "procurement"."purchase_orders" ADD COLUMN "over_receipt_tolerance_pct" numeric(5, 2) DEFAULT '0';

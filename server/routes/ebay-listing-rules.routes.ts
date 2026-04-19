@@ -1,3 +1,4 @@
+import { requireAuth } from "./middleware";
 /**
  * eBay Listing Rules Routes
  *
@@ -60,7 +61,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/product-types — List all product types
   // -----------------------------------------------------------------------
-  app.get("/api/product-types", async (_req: Request, res: Response) => {
+  app.get("/api/product-types", requireAuth, async (_req: Request, res: Response) => {
     try {
       const types = await (db as any)
         .select()
@@ -76,7 +77,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/products/with-types — Products list for type assignment UI
   // -----------------------------------------------------------------------
-  app.get("/api/products/with-types", async (req: Request, res: Response) => {
+  app.get("/api/products/with-types", requireAuth, async (req: Request, res: Response) => {
     try {
       const { filter, search } = req.query;
       
@@ -123,7 +124,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // PUT /api/products/:id/product-type — Assign product type to single product
   // -----------------------------------------------------------------------
-  app.put("/api/products/:id/product-type", async (req: Request, res: Response) => {
+  app.put("/api/products/:id/product-type", requireAuth, async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.id, 10);
       const { productType } = req.body;
@@ -164,7 +165,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // PUT /api/products/bulk-product-type — Bulk assign product type
   // -----------------------------------------------------------------------
-  app.put("/api/products/bulk-product-type", async (req: Request, res: Response) => {
+  app.put("/api/products/bulk-product-type", requireAuth, async (req: Request, res: Response) => {
     try {
       const { productIds, productType } = req.body;
 
@@ -209,7 +210,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/listing-rules — Get all rules for channel 67
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/listing-rules", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/listing-rules", requireAuth, async (_req: Request, res: Response) => {
     try {
       const rules = await (db as any)
         .select()
@@ -226,7 +227,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // POST /api/ebay/listing-rules — Create rule
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listing-rules", async (req: Request, res: Response) => {
+  app.post("/api/ebay/listing-rules", requireAuth, async (req: Request, res: Response) => {
     try {
       const {
         scopeType,
@@ -276,7 +277,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // PUT /api/ebay/listing-rules/:id — Update rule
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/listing-rules/:id", async (req: Request, res: Response) => {
+  app.put("/api/ebay/listing-rules/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const ruleId = parseInt(req.params.id, 10);
       if (isNaN(ruleId)) {
@@ -327,7 +328,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // DELETE /api/ebay/listing-rules/:id — Delete rule
   // -----------------------------------------------------------------------
-  app.delete("/api/ebay/listing-rules/:id", async (req: Request, res: Response) => {
+  app.delete("/api/ebay/listing-rules/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const ruleId = parseInt(req.params.id, 10);
       if (isNaN(ruleId)) {
@@ -371,7 +372,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/listing-rules/resolve/:sku — Resolve effective config
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/listing-rules/resolve/:sku", async (req: Request, res: Response) => {
+  app.get("/api/ebay/listing-rules/resolve/:sku", requireAuth, async (req: Request, res: Response) => {
     try {
       const sku = req.params.sku;
 
@@ -457,7 +458,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/store-categories — Fetch eBay store categories via Trading API
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/store-categories", async (_req: Request, res: Response) => {
+  app.get("/api/ebay/store-categories", requireAuth, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -513,7 +514,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/browse-categories?q= — Search eBay browse categories
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/browse-categories", async (req: Request, res: Response) => {
+  app.get("/api/ebay/browse-categories", requireAuth, async (req: Request, res: Response) => {
     try {
       const q = req.query.q as string;
       if (!q || q.length < 2) {

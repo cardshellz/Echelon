@@ -59,7 +59,7 @@ export function registerInventoryRoutes(app: Express) {
 
   // Search SKUs for typeahead (used in cycle counts, receiving, etc.)
   // product_variants is source of truth for sellable SKUs
-  app.get("/api/inventory/skus/search", async (req, res) => {
+  app.get("/api/inventory/skus/search", requireAuth, async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
       const locationId = req.query.locationId ? parseInt(String(req.query.locationId)) : null;
@@ -83,7 +83,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/inventory/sku-locations", async (req, res) => {
+  app.get("/api/inventory/sku-locations", requireAuth, async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
       if (!query || query.length < 2) {
@@ -348,7 +348,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Inventory Transactions History
-  app.get("/api/inventory/transactions", async (req, res) => {
+  app.get("/api/inventory/transactions", requireAuth, async (req, res) => {
     try {
       const { batchId, transactionType, startDate, endDate, limit, offset, locationCode } = req.query;
 
@@ -403,7 +403,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // CSV Inventory Upload - bulk update inventory levels
-  app.post("/api/inventory/upload-csv", upload.single("file"), async (req, res) => {
+  app.post("/api/inventory/upload-csv", requireAuth, upload.single("file"), async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -584,14 +584,14 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // CSV Template download
-  app.get("/api/inventory/csv-template", (req, res) => {
+  app.get("/api/inventory/csv-template", requireAuth, (req, res) => {
     const template = "location_code,sku,quantity\nFP-A-01,EG-SLV-STD-P100,50\nBK-B-02,EG-SLV-STD-B500,10\n";
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", "attachment; filename=inventory_template.csv");
     res.send(template);
   });
 
-  app.post("/api/inventory/receive", async (req, res) => {
+  app.post("/api/inventory/receive", requireAuth, async (req, res) => {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -652,7 +652,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Get inventory levels by variant ID (for expandable location breakdown)
-  app.get("/api/inventory/variants/:variantId/locations", async (req, res) => {
+  app.get("/api/inventory/variants/:variantId/locations", requireAuth, async (req, res) => {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -721,7 +721,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Check backorder status for an item
-  app.get("/api/inventory/backorder-status/:itemId", async (req, res) => {
+  app.get("/api/inventory/backorder-status/:itemId", requireAuth, async (req, res) => {
     try {
       const itemId = parseInt(req.params.itemId);
       const { atp: atpSvc } = req.app.locals.services;
@@ -745,7 +745,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Inventory Transactions (Audit Trail)
-  app.get("/api/inventory/transactions/:itemId", async (req, res) => {
+  app.get("/api/inventory/transactions/:itemId", requireAuth, async (req, res) => {
     try {
       const itemId = parseInt(req.params.itemId);
       const limit = parseInt(req.query.limit as string) || 100;
@@ -759,7 +759,7 @@ export function registerInventoryRoutes(app: Express) {
 
   // Full inventory summary with all items and their variant availability
   // Optional query params: warehouseId (filter by warehouse)
-  app.get("/api/inventory/summary", async (req, res) => {
+  app.get("/api/inventory/summary", requireAuth, async (req, res) => {
     try {
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
       
@@ -874,7 +874,7 @@ export function registerInventoryRoutes(app: Express) {
 
   // Sync inventory to all active channels via channel-sync service.
   // Supports single-product sync (productId in body) or full sync.
-  app.post("/api/inventory/sync-shopify", async (req, res) => {
+  app.post("/api/inventory/sync-shopify", requireAuth, async (req, res) => {
     try {
       const { channelSync } = req.app.locals.services;
       const { productId } = req.body;
@@ -1353,7 +1353,7 @@ export function registerInventoryRoutes(app: Express) {
   // BOOTSTRAP ROUTES
   // ============================================
 
-  app.post("/api/inventory/bootstrap/dry-run", async (req, res) => {
+  app.post("/api/inventory/bootstrap/dry-run", requireAuth, async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user || user.role !== "admin") {
@@ -1487,7 +1487,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/bootstrap", async (req, res) => {
+  app.post("/api/inventory/bootstrap", requireAuth, async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user || user.role !== "admin") {
@@ -1705,7 +1705,7 @@ export function registerInventoryRoutes(app: Express) {
   // INVENTORY LOCATIONS & CATALOG ROUTES
   // ============================================
 
-  app.get("/api/inventory/locations", async (req, res) => {
+  app.get("/api/inventory/locations", requireAuth, async (req, res) => {
     try {
       const locations = await storage.getAllWarehouseLocations();
       res.json(locations);
@@ -1715,7 +1715,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/locations", async (req, res) => {
+  app.post("/api/inventory/locations", requireAuth, async (req, res) => {
     try {
       const parsed = insertWarehouseLocationSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1729,7 +1729,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/catalog/products", async (req, res) => {
+  app.get("/api/catalog/products", requireAuth, async (req, res) => {
     try {
       const allProducts = await storage.getAllProducts();
       res.json(allProducts);
@@ -1739,7 +1739,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/catalog/products/search", async (req, res) => {
+  app.get("/api/catalog/products/search", requireAuth, async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
       const limit = parseInt(String(req.query.limit)) || 20;
@@ -1763,7 +1763,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/catalog/products/:id", async (req, res) => {
+  app.get("/api/catalog/products/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const product = await storage.getProductById(id);
@@ -1827,7 +1827,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/inventory/items", async (req, res) => {
+  app.get("/api/inventory/items", requireAuth, async (req, res) => {
     try {
       const items = await storage.getAllProducts();
       res.json(items);
@@ -1837,7 +1837,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/inventory/items/unassigned", async (req, res) => {
+  app.get("/api/inventory/items/unassigned", requireAuth, async (req, res) => {
     try {
       const productsData = await storage.getProductsWithoutLocations();
       res.json(productsData);
@@ -1847,7 +1847,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/inventory/items/:id", async (req, res) => {
+  app.get("/api/inventory/items/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const { atp } = req.app.locals.services;
@@ -1862,7 +1862,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/items", async (req, res) => {
+  app.post("/api/inventory/items", requireAuth, async (req, res) => {
     try {
       const parsed = insertProductSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1876,7 +1876,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/inventory/variants", async (req, res) => {
+  app.get("/api/inventory/variants", requireAuth, async (req, res) => {
     try {
       const variants = await storage.getAllProductVariants();
       res.json(variants);
@@ -1907,7 +1907,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/inventory/items/:id/variants", async (req, res) => {
+  app.get("/api/inventory/items/:id/variants", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const variants = await storage.getProductVariantsByProductId(id);
@@ -1918,7 +1918,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/variants", async (req, res) => {
+  app.post("/api/inventory/variants", requireAuth, async (req, res) => {
     try {
       const parsed = insertProductVariantSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1932,7 +1932,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/inventory/levels/:variantId", async (req, res) => {
+  app.get("/api/inventory/levels/:variantId", requireAuth, async (req, res) => {
     try {
       const variantId = parseInt(req.params.variantId);
       const levels = await storage.getInventoryLevelsByProductVariantId(variantId);
@@ -1947,7 +1947,7 @@ export function registerInventoryRoutes(app: Express) {
   // MIGRATE LOCATIONS & SYNC/DEBUG ROUTES
   // ============================================
 
-  app.post("/api/inventory/migrate-locations", async (req, res) => {
+  app.post("/api/inventory/migrate-locations", requireAuth, async (req, res) => {
     try {
       if (!req.session.user || req.session.user.role !== "admin") {
         return res.status(403).json({ error: "Admin access required" });
@@ -2011,7 +2011,7 @@ export function registerInventoryRoutes(app: Express) {
     res.status(410).json({ error: "Order sync listener removed - orders now sync via OMS webhooks" });
   });
 
-  app.get("/api/sync/health", async (req, res) => {
+  app.get("/api/sync/health", requireAuth, async (req, res) => {
     try {
       // DISABLED: order-sync-listener deleted
       const health = { status: "removed", message: "Order sync listener removed in Phase 3" };
@@ -2083,7 +2083,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/debug/order-dates/:orderNumber", async (req, res) => {
+  app.get("/api/debug/order-dates/:orderNumber", requireAuth, async (req, res) => {
     try {
       const orderNumber = req.params.orderNumber;
       const row = await storage.getDebugOrderDates(orderNumber);
@@ -2102,7 +2102,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.get("/api/debug/sync-status", async (req, res) => {
+  app.get("/api/debug/sync-status", requireAuth, async (req, res) => {
     try {
       const debugStatus = await storage.getDebugSyncStatus();
 

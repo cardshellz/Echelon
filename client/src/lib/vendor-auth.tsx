@@ -29,14 +29,16 @@ interface VendorAuthContextType {
 
 const VendorAuthContext = createContext<VendorAuthContextType | null>(null);
 
-const TOKEN_KEY = "vendor_token";
+const TOKEN_KEY = "vendor_token"; // Deprecated client-side storage key
 
+// We no longer manage tokens on the client to ensure security (HttpOnly cookies)
 export function getVendorToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return null;
 }
 
-export function setVendorToken(token: string) {
-  localStorage.setItem(TOKEN_KEY, token);
+export function setVendorToken(_token: string) {
+  // Legacy cleanup if it existed
+  localStorage.removeItem(TOKEN_KEY);
 }
 
 export function clearVendorToken() {
@@ -44,12 +46,11 @@ export function clearVendorToken() {
 }
 
 export function vendorFetch(path: string, options?: RequestInit): Promise<Response> {
-  const token = getVendorToken();
+  // Cookies handle auth automatically
   return fetch(path, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
   });
@@ -60,12 +61,8 @@ export function VendorAuthProvider({ children }: { children: React.ReactNode }) 
   const [isLoading, setIsLoading] = useState(true);
 
   const refetch = useCallback(async () => {
-    const token = getVendorToken();
-    if (!token) {
-      setVendor(null);
-      setIsLoading(false);
-      return;
-    }
+    // Clear any legacy client-side token
+    clearVendorToken();
     try {
       const res = await vendorFetch("/api/vendor/auth/me");
       if (res.ok) {
@@ -93,19 +90,23 @@ export function VendorAuthProvider({ children }: { children: React.ReactNode }) 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
-      if (res.ok && data.token) {
-        setVendorToken(data.token);
+      if (res.ok) {
+        // The server will set the HttpOnly cookie for us
+        clearVendorToken();
         await refetch();
         return { success: true };
       }
-      return { success: false, error: data.message || data.error || "Login failed" };
+      const errorData = await res.json().catch(() => ({}));
+      return { success: false, error: errorData.message || errorData.error || "Login failed" };
     } catch {
       return { success: false, error: "Network error" };
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await fetch("/api/vendor/auth/logout", { method: "POST" });
+    } catch (e) {}
     clearVendorToken();
     setVendor(null);
   };

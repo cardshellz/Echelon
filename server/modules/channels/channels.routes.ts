@@ -6,7 +6,7 @@ import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 const storage = { ...channelsStorage, ...ordersStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
-import { requirePermission } from "../../routes/middleware";
+import { requirePermission, requireAuth } from "../../routes/middleware";
 import { insertChannelSchema, insertChannelReservationSchema } from "@shared/schema";
 import { db } from "../../storage/base";
 import {
@@ -28,7 +28,7 @@ export function registerChannelRoutes(app: Express) {
   // CHANNEL FEEDS (from inventory section)
   // ============================================
 
-  app.get("/api/inventory/channel-feeds", async (req, res) => {
+  app.get("/api/inventory/channel-feeds", requireAuth, async (req, res) => {
     try {
       const channelType = (req.query.channel as string) || "shopify";
       const feeds = await storage.getChannelFeedsByChannel(channelType);

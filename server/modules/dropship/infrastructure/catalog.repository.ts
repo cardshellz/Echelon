@@ -52,7 +52,7 @@ export class CatalogRepository {
         productId: row.product_id,
         variantId: row.variant_id,
         sku: row.sku,
-        name: row.variant_name ? \`\${row.product_name} - \${row.variant_name}\` : row.product_name,
+        name: row.variant_name ? `${row.product_name} - ${row.variant_name}` : row.product_name,
         retailPriceCents: parseInt(row.price_cents, 10),
         atpUnits: Math.max(0, parseInt(row.atp_units, 10)),
         imageUrl: row.image_url

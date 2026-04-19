@@ -13,7 +13,8 @@
  */
 
 import { createHmac } from "crypto";
-import type { Express, Request, Response } from "express";
+import type { Request, Response, Express } from "express";
+import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import type { InsertOrderItem } from "@shared/schema";
@@ -60,7 +61,6 @@ interface ShipStationService {
 
 function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boolean {
   if (!hmacHeader) return false;
-  const crypto = require("crypto");
   // Try both app API secret and admin webhook secret
   const secrets = [process.env.SHOPIFY_API_SECRET, process.env.SHOPIFY_WEBHOOK_SECRET].filter(Boolean) as string[];
   for (const secret of secrets) {
@@ -344,12 +344,12 @@ export function registerOmsWebhooks(
       return null;
     }
 
-    // TEMP: Bypass HMAC to restore order flow while debugging
-    if (false && rawBody && !verifyShopifyHmac(rawBody as Buffer, hmac)) {
-      const crypto = require("crypto");
-      const s = process.env.SHOPIFY_API_SECRET || "";
-      const computed = crypto.createHmac("sha256", s).update(rawBody as Buffer).digest("base64");
-      console.warn(`${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${(rawBody as Buffer).length} rawBody_type=${typeof rawBody} is_buffer=${Buffer.isBuffer(rawBody)}`);
+    if (rawBody && !verifyShopifyHmac(rawBody as Buffer, hmac)) {
+      const s = process.env.SHOPIFY_API_SECRET || process.env.SHOPIFY_WEBHOOK_SECRET;
+      if (s) {
+        const computed = crypto.createHmac("sha256", s).update(rawBody as Buffer).digest("base64");
+        console.warn(`${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${(rawBody as Buffer).length} rawBody_type=${typeof rawBody} is_buffer=${Buffer.isBuffer(rawBody)}`);
+      }
       console.warn(`${LOG_PREFIX} HMAC verification failed`);
       res.status(401).send("Unauthorized");
       return null;

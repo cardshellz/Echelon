@@ -135,6 +135,9 @@ type PickInventoryContext = {
     taskId: number | null;
     taskStatus: string | null;
     autoExecuted: boolean;
+    autoExecutedMoved: number | null;
+    autoExecutedFailed: boolean;
+    autoExecuteFailReason: string | null;
     stockout: boolean;
     sourceLocationCode: string | null;
     sourceVariantSku: string | null;

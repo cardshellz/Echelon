@@ -12,13 +12,14 @@ import * as apLedger from "./ap-ledger.service";
 import { renderPoHtml } from "./po-document";
 import * as emailService from "../notifications/email.service";
 import * as notificationService from "../notifications/notifications.service";
+import { sql } from "drizzle-orm";
 
 export function registerPurchasingRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
 
   // ===== VENDORS API =====
   
-  app.get("/api/vendors", async (req, res) => {
+  app.get("/api/vendors", requireAuth, async (req, res) => {
     try {
       const vendors = await storage.getAllVendors();
       res.json(vendors);
@@ -28,7 +29,7 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/vendors/:id", async (req, res) => {
+  app.get("/api/vendors/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const vendor = await storage.getVendorById(id);
@@ -101,7 +102,7 @@ export function registerPurchasingRoutes(app: Express) {
   
   // ===== RECEIVING ORDERS API =====
   
-  app.get("/api/receiving", async (req, res) => {
+  app.get("/api/receiving", requireAuth, async (req, res) => {
     try {
       const status = req.query.status as string | undefined;
       const orders = status 
@@ -124,7 +125,7 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/receiving/:id", async (req, res) => {
+  app.get("/api/receiving/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       console.log("[RECEIVING] Fetching order id:", id);
@@ -248,7 +249,7 @@ export function registerPurchasingRoutes(app: Express) {
   
   // ===== RECEIVING LINES API =====
   
-  app.get("/api/receiving/:orderId/lines", async (req, res) => {
+  app.get("/api/receiving/:orderId/lines", requireAuth, async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
       const lines = await storage.getReceivingLines(orderId);
@@ -316,6 +317,9 @@ export function registerPurchasingRoutes(app: Express) {
             updates.status = "complete";
           } else if (receivedQty > expectedQty) {
             updates.status = "overage";
+            
+            // Soft-Flag: Tolerance limits are kept for reporting/financial dashboards 
+            // but no longer block operational receiving on the floor.
           }
         }
       }
@@ -1828,10 +1832,10 @@ export function registerPurchasingRoutes(app: Express) {
   // Update incoterms and/or header charges (discount in draft only; shipping/tax any non-cancelled status)
   app.patch("/api/purchase-orders/:id/incoterms-charges", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const { incoterms, discountCents, taxCents, shippingCostCents } = req.body;
+      const { incoterms, discountCents, taxCents, shippingCostCents, overReceiptTolerancePct } = req.body;
       const po = await purchasing.updateIncotermsAndCharges(
         Number(req.params.id),
-        { incoterms, discountCents, taxCents, shippingCostCents },
+        { incoterms, discountCents, taxCents, shippingCostCents, overReceiptTolerancePct },
         req.session.user?.id,
       );
       res.json(po);
@@ -3223,6 +3227,7 @@ export function registerPurchasingRoutes(app: Express) {
   // Returns distinct values for a given field from products table
   app.get("/api/purchasing/exclusion-rules/field-values", requirePermission("inventory", "view"), async (req, res) => {
     try {
+      const { db } = await import("../../db");
       const field = String(req.query.field || "").trim();
       const allowedFields: Record<string, string | null> = {
         category: "category",
@@ -3296,7 +3301,7 @@ export function registerPurchasingRoutes(app: Express) {
       }
 
       // Import and run the job asynchronously
-      const { runAutoDraftJob } = await import("../jobs/auto-draft.job");
+      const { runAutoDraftJob } = await import("../../jobs/auto-draft.job");
       runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: user?.id })
         .catch((err: any) => console.error("[Auto-draft] manual run failed:", err));
 

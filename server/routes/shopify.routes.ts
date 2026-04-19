@@ -1,3 +1,4 @@
+import { requireAuth } from "./middleware";
 import type { Express, Request, Response } from "express";
 import { ordersStorage } from "../modules/orders";
 import { channelsStorage } from "../modules/channels";
@@ -9,14 +10,15 @@ import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebh
 import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
 import crypto from "crypto";
-
+import { runReconciliationNow } from "../modules/orders/shopify-order-reconciliation";
+import { sql } from "drizzle-orm";
 export function registerShopifyRoutes(app: Express) {
 
   // -----------------------------------------------------------------------
   // GET /api/shopify/oauth/install — Start OAuth flow (redirect to Shopify consent)
   // Usage: visit https://your-app.herokuapp.com/api/shopify/oauth/install
   // -----------------------------------------------------------------------
-  app.get("/api/shopify/oauth/install", (_req: Request, res: Response) => {
+  app.get("/api/shopify/oauth/install", requireAuth, (_req: Request, res: Response) => {
     const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || "card-shellz";
     const apiKey = process.env.SHOPIFY_API_KEY;
     const redirectUri = process.env.SHOPIFY_OAUTH_REDIRECT_URI ||
@@ -45,7 +47,7 @@ export function registerShopifyRoutes(app: Express) {
   // GET /api/shopify/oauth/callback — Handle OAuth callback from Shopify
   // Exchanges auth code for access token and saves to channel_connections
   // -----------------------------------------------------------------------
-  app.get("/api/shopify/oauth/callback", async (req: Request, res: Response) => {
+  app.get("/api/shopify/oauth/callback", requireAuth, async (req: Request, res: Response) => {
     try {
       const { code, shop, state, hmac } = req.query as Record<string, string>;
 
@@ -116,7 +118,7 @@ export function registerShopifyRoutes(app: Express) {
     productImport,
   } = app.locals.services;
 
-  app.post("/api/shopify/sync", async (req, res) => {
+  app.post("/api/shopify/sync", requireAuth, async (req, res) => {
     try {
       const result = await productImport.syncContentAndAssets();
       res.json(result);
@@ -131,7 +133,7 @@ export function registerShopifyRoutes(app: Express) {
 
   // Sync Shopify variants to products/product_variants tables
   // Parses SKU pattern: BASE-SKU-P50, BASE-SKU-C700 etc.
-  app.post("/api/shopify/sync-products", async (req, res) => {
+  app.post("/api/shopify/sync-products", requireAuth, async (req, res) => {
     try {
       const result = await productImport.syncProductsWithMultiUOM();
       // Also sync content + images now that products exist
@@ -156,7 +158,7 @@ export function registerShopifyRoutes(app: Express) {
 
   // Sync from oms_orders/oms_order_lines tables to operational orders/order_items
   // This reads from the unified OMS Hub and extracts the WMS operational subset
-  app.post("/api/orders/sync-from-oms", async (req, res) => {
+  app.post("/api/orders/sync-from-oms", requireAuth, async (req, res) => {
     try {
       console.log("Starting sync from oms_orders to operational WMS orders...");
       
@@ -271,7 +273,7 @@ export function registerShopifyRoutes(app: Express) {
 
   // Sync order statuses FROM Shopify fulfillment data
   // Updates orders and order_items based on shopify_orders.fulfillment_status
-  app.post("/api/shopify/sync-statuses-from-shopify", async (req, res) => {
+  app.post("/api/shopify/sync-statuses-from-shopify", requireAuth, async (req, res) => {
     try {
       console.log("Syncing order statuses from Shopify fulfillment data...");
       const startTime = Date.now();
@@ -294,7 +296,7 @@ export function registerShopifyRoutes(app: Express) {
 
   // Backfill operational orders table with customer data from oms_orders
   // Uses efficient UPDATE FROM JOIN to process thousands of orders at once
-  app.post("/api/orders/backfill-orders-from-oms", async (req, res) => {
+  app.post("/api/orders/backfill-orders-from-oms", requireAuth, async (req, res) => {
     try {
       console.log("Starting backfill of operational orders from oms_orders...");
       const startTime = Date.now();
@@ -325,7 +327,7 @@ export function registerShopifyRoutes(app: Express) {
 
   // Backfill customer names from Shopify API into shopify_orders table
   // Processes ALL orders automatically by looping through all pages
-  app.post("/api/shopify/backfill-customer-names", async (req, res) => {
+  app.post("/api/shopify/backfill-customer-names", requireAuth, async (req, res) => {
     try {
       console.log("Starting FULL customer name backfill from Shopify API...");
       
@@ -473,7 +475,7 @@ export function registerShopifyRoutes(app: Express) {
 
   // Shopify Orders Sync - DEPRECATED: Use sync-from-raw-tables instead
   // Orders now flow through: shopify_orders table -> sync-from-raw-tables -> orders table
-  app.post("/api/shopify/sync-orders", async (req, res) => {
+  app.post("/api/shopify/sync-orders", requireAuth, async (req, res) => {
     console.log("[DEPRECATED] /api/shopify/sync-orders called - redirecting to sync-from-raw-tables");
     res.status(410).json({ 
       error: "This endpoint is deprecated",
@@ -612,7 +614,7 @@ export function registerShopifyRoutes(app: Express) {
   }
 
   // Dedicated fulfillment sync endpoint
-  app.post("/api/shopify/sync-fulfillments", async (req, res) => {
+  app.post("/api/shopify/sync-fulfillments", requireAuth, async (req, res) => {
     try {
       console.log("Starting fulfillment status sync...");
       
@@ -924,13 +926,13 @@ export function registerShopifyRoutes(app: Express) {
           const trackingNumber = payload.tracking_number || null;
           const now = new Date();
 
-          const wmsOrder = await db.execute<{ id: number }>(sql`
+          const wmsOrder = (await db.execute(sql`
             SELECT id FROM wms.orders
             WHERE (oms_fulfillment_order_id = ${shopifyOrderId}
                    OR source_table_id = ${shopifyOrderId})
               AND warehouse_status NOT IN ('shipped', 'cancelled')
             LIMIT 1
-          `);
+          `)) as any;
 
           if (wmsOrder.rows.length > 0) {
             const wmsOrderId = wmsOrder.rows[0].id;
@@ -997,9 +999,8 @@ export function registerShopifyRoutes(app: Express) {
   });
 
   // Manual trigger for Shopify order reconciliation
-  app.post("/api/shopify/reconcile-orders", async (req: Request, res: Response) => {
+  app.post("/api/shopify/reconcile-orders", requireAuth, async (req: Request, res: Response) => {
     try {
-      const { runReconciliationNow } = require("../modules/orders/shopify-order-reconciliation");
       const result = await runReconciliationNow();
       res.json(result);
     } catch (error: any) {

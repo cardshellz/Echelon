@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
+import cookieParser from "cookie-parser";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -17,8 +18,14 @@ import { startBillingScheduler } from "./modules/subscriptions/subscription.sche
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
-import { eq } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import type { SafeUser } from "@shared/schema";
+import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
+import { pool as dbPool } from "./db";
+import * as http from "http";
+import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapters/ebay/ebay-auth.service";
+import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
+import { requireAuth } from "./routes/middleware";
 
 declare module "express-session" {
   interface SessionData {
@@ -29,7 +36,7 @@ declare module "express-session" {
 const app = express();
 const httpServer = createServer(app);
 
-setupWebSocket(httpServer);
+// setupWebSocket is deferred until sessionMiddleware is created
 
 declare module "http" {
   interface IncomingMessage {
@@ -46,10 +53,15 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
 
 // Trust proxy for Heroku (needed for secure cookies behind load balancer)
 if (process.env.NODE_ENV === "production") {
   app.set("trust proxy", 1);
+}
+
+if (!process.env.SESSION_SECRET) {
+  throw new Error("FATAL: SESSION_SECRET environment variable is missing. Halting startup to prevent fallback secret exploitation.");
 }
 
 // Set up PostgreSQL session store for persistent sessions
@@ -62,25 +74,28 @@ const sessionPool = new Pool({
   max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 
-app.use(
-  session({
-    store: new PgSession({
-      pool: sessionPool,
-      schemaName: "identity",
-      tableName: "session",
-      createTableIfMissing: true,
-    }),
-    secret: process.env.SESSION_SECRET || "echelon-dev-secret-change-me",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: true,
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      sameSite: "lax", // Required for PWA compatibility
-    },
-  })
-);
+const sessionMiddleware = session({
+  store: new PgSession({
+    pool: sessionPool,
+    schemaName: "identity",
+    tableName: "session",
+    createTableIfMissing: true,
+  }),
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === "production",
+    httpOnly: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    sameSite: "lax", // Required for PWA compatibility
+  },
+});
+
+app.use(sessionMiddleware);
+
+// Initialize WebSocket server with session support
+setupWebSocket(httpServer, sessionMiddleware);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -148,15 +163,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       }
 
       // 2. Get all active channels with sync enabled
-      const { channels: channelsTable, syncLog: syncLogTable } = require("@shared/schema");
-      const { and: andOp, eq: eqOp } = require("drizzle-orm");
-
       const activeChannels = await dbInstance
         .select()
         .from(channelsTable)
-        .where(andOp(
-          eqOp(channelsTable.status, "active"),
-          eqOp(channelsTable.syncEnabled, true),
+        .where(and(
+          eq(channelsTable.status, "active"),
+          eq(channelsTable.syncEnabled, true),
         ));
 
       if (activeChannels.length === 0) {
@@ -299,9 +311,6 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
   // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
   try {
-    const { createEbayAuthConfig, EbayAuthService } = require("./modules/channels/adapters/ebay/ebay-auth.service");
-    const { createEbayApiClient } = require("./modules/channels/adapters/ebay/ebay-api.client");
-
     const ebayConfig = createEbayAuthConfig();
     const ebayAuthService = new EbayAuthService(db, ebayConfig);
     const ebayApiClient = createEbayApiClient(ebayAuthService, 67);
@@ -316,8 +325,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
     // Register eBay order webhook
     const webhookHandler = createEbayOrderWebhookHandler(services.oms, ebayApiClient);
-    app.get("/api/ebay/webhooks/order", webhookHandler);
-    app.post("/api/ebay/webhooks/order", webhookHandler);
+    app.get("/api/ebay/webhooks/order", requireAuth, webhookHandler);
+    app.post("/api/ebay/webhooks/order", requireAuth, webhookHandler);
     log("eBay order polling and webhook registered", "oms");
   } catch (err: any) {
     log(`eBay order polling not started (config missing): ${err.message}`, "oms");
@@ -347,7 +356,6 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     if (reconcileRunning) return;
     reconcileRunning = true;
     try {
-      const { pool: dbPool } = require("./db");
       const client = await dbPool.connect();
       try {
         // Check if there are any synced eBay listings to verify
@@ -360,7 +368,6 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         }
 
         // Call the reconcile endpoint directly (bypass auth)
-        const http = require("http");
         const port = process.env.PORT || 5000;
         const reqData = JSON.stringify({});
         const options = {
@@ -456,7 +463,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     const message = err.message || "Internal Server Error";
 
     res.status(status).json({ message });
-    throw err;
+    console.error("[Global Error Handler] Unhandled exception:", err);
   });
 
   // importantly only setup vite in development and after
@@ -475,10 +482,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
   try {
-    const { sql } = require("drizzle-orm");
-    const res = await db.execute(sql`UPDATE inventory_levels SET variant_qty = 0 WHERE variant_qty < 0`);
-    if ((res as any).rowCount > 0) {
-      console.log(`[Startup Fix] Cleared ${(res as any).rowCount} negative inventory levels.`);
+    const res = await db.execute(sql`SELECT id, variant_id, location_id, variant_qty FROM inventory_levels WHERE variant_qty < 0`);
+    if ((res as any).rows.length > 0) {
+      console.warn(`[Startup Warning] Found ${(res as any).rows.length} negative inventory levels. They have NOT been cleared. Writing to audit log.`);
+      for (const row of (res as any).rows) {
+        await db.execute(sql`INSERT INTO startup_inventory_anomalies (variant_id, location_id, qty_on_hand) VALUES (${row.variant_id}, ${row.location_id}, ${row.variant_qty})`);
+      }
     }
 
     const fixRes = await db.execute(sql`UPDATE wms.order_items SET picked_quantity = quantity, fulfilled_quantity = quantity WHERE status = 'completed' AND quantity > 0 AND picked_quantity = 0`);
@@ -507,60 +516,61 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       // Start subscription billing scheduler (runs hourly)
       startBillingScheduler();
-    },
+    }
   );
-})();
 
   // eBay order reconciliation — check for stuck orders every 4 hours
-  setInterval(async () => {
-    try {
-      const { sql } = require("drizzle-orm");
-      // Find eBay OMS orders stuck in "confirmed" for > 48 hours
-      const stuckOrders = await db.execute(sql`
-        SELECT o.id, o.external_order_id, o.order_number
-        FROM oms.oms_orders o
-        WHERE o.channel_id = 67
-          AND o.status = 'confirmed'
-          AND o.created_at < NOW() - INTERVAL '48 hours'
-        LIMIT 50
-      `);
-      if (stuckOrders.rows.length === 0) return;
+  if (process.env.DISABLE_SCHEDULERS !== 'true') {
+    setInterval(async () => {
+      try {
+        // Find eBay OMS orders stuck in "confirmed" for > 48 hours
+        const stuckOrders = await db.execute(sql`
+          SELECT o.id, o.external_order_id, o.order_number
+          FROM oms.oms_orders o
+          WHERE o.channel_id = 67
+            AND o.status = 'confirmed'
+            AND o.created_at < NOW() - INTERVAL '48 hours'
+          LIMIT 50
+        `);
+        if (stuckOrders.rows.length === 0) return;
 
-      console.log(`[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking ShipStation...`);
-      // @ts-ignore
-      const ss = services.shipStation;
-      if (!ss?.isConfigured()) return;
+        console.log(`[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking ShipStation...`);
+        // @ts-ignore
+        const ss = services.shipStation;
+        if (!ss?.isConfigured()) return;
 
-      for (const order of stuckOrders.rows) {
-        try {
-          // Check ShipStation for this order
-          const ssOrders = await ss.findOrderByNumber(`EB-${order.order_number || order.external_order_id}`);
-          if (ssOrders?.length > 0 && ssOrders[0].orderStatus === "shipped") {
-            const shipment = ssOrders[0];
-            await db.execute(sql`
-              UPDATE oms_orders SET status = 'shipped',
-                tracking_number = ${shipment.trackingNumber || null},
-                carrier = ${shipment.carrierCode || null},
-                updated_at = NOW()
-              WHERE id = ${order.id}
-            `);
-            console.log(`[eBay Reconcile] Auto-shipped OMS order ${order.id} (${order.external_order_id})`);
+        for (const order of stuckOrders.rows) {
+          try {
+            // Check ShipStation for this order
+            const ssOrder = await ss.getOrderByKey(`EB-${order.order_number || order.external_order_id}`);
+            if (ssOrder && ssOrder.orderStatus === "shipped") {
+              const shipment = ssOrder;
+              await db.execute(sql`
+                UPDATE oms_orders SET status = 'shipped',
+                  tracking_number = ${shipment.trackingNumber || null},
+                  carrier = ${shipment.carrierCode || null},
+                  updated_at = NOW()
+                WHERE id = ${order.id}
+              `);
+              console.log(`[eBay Reconcile] Auto-shipped OMS order ${order.id} (${order.external_order_id})`);
 
-            // Push tracking to eBay
-            try {
-              // @ts-ignore
-              await services.fulfillmentPush.pushTracking(order.id);
-            } catch (e: any) {
-              console.warn(`[eBay Reconcile] Tracking push failed for ${order.id}: ${e.message}`);
+              // Push tracking to eBay
+              try {
+                // @ts-ignore
+                await services.fulfillmentPush.pushTracking(order.id);
+              } catch (e: any) {
+                console.warn(`[eBay Reconcile] Tracking push failed for ${order.id}: ${e.message}`);
+              }
             }
+          } catch (e: any) {
+            console.warn(`[eBay Reconcile] Failed to check order ${order.id}: ${e.message}`);
           }
-        } catch (e: any) {
-          console.warn(`[eBay Reconcile] Failed to check order ${order.id}: ${e.message}`);
+          // Rate limit
+          await new Promise(r => setTimeout(r, 500));
         }
-        // Rate limit
-        await new Promise(r => setTimeout(r, 500));
+      } catch (err: any) {
+        console.warn("[eBay Reconcile] Sweep error:", err?.message);
       }
-    } catch (err: any) {
-      console.warn("[eBay Reconcile] Sweep error:", err?.message);
-    }
-  }, 4 * 60 * 60 * 1000); // Every 4 hours
+    }, 4 * 60 * 60 * 1000); // Every 4 hours
+  }
+})();

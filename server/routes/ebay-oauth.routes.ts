@@ -1,3 +1,4 @@
+import { requireAuth } from "./middleware";
 /**
  * eBay OAuth2 Routes
  * 
@@ -32,7 +33,7 @@ export function registerEbayOAuthRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/oauth/consent — Redirect to eBay consent page
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/oauth/consent", (_req: Request, res: Response) => {
+  app.get("/api/ebay/oauth/consent", requireAuth, (_req: Request, res: Response) => {
     const config = getEbayAuthConfig();
     if (!config) {
       res.status(500).json({
@@ -164,7 +165,7 @@ export function registerEbayOAuthRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // GET /api/ebay/oauth/status — Check token status
   // -----------------------------------------------------------------------
-  app.get("/api/ebay/oauth/status", async (req: Request, res: Response) => {
+  app.get("/api/ebay/oauth/status", requireAuth, async (req: Request, res: Response) => {
     const config = getEbayAuthConfig();
     if (!config) {
       res.json({ configured: false, error: "EBAY env vars not set" });

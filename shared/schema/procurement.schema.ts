@@ -339,6 +339,7 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   // Notes
   vendorNotes: text("vendor_notes"), // Printed on PO document
   internalNotes: text("internal_notes"), // Warehouse-only
+  overReceiptTolerancePct: numeric("over_receipt_tolerance_pct", { precision: 5, scale: 2 }).default("0"),
 
   // Approval
   approvalTierId: integer("approval_tier_id").references(() => poApprovalTiers.id, { onDelete: "set null" }),
@@ -658,7 +659,9 @@ export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("vendor_invoices_vendor_invoice_idx").on(table.vendorId, table.invoiceNumber),
+]);
 
 export const insertVendorInvoiceSchema = createInsertSchema(vendorInvoices).omit({
   id: true,
@@ -756,6 +759,24 @@ export const insertLandedCostSnapshotSchema = createInsertSchema(landedCostSnaps
 
 export type InsertLandedCostSnapshot = z.infer<typeof insertLandedCostSnapshotSchema>;
 export type LandedCostSnapshot = typeof landedCostSnapshots.$inferSelect;
+
+export const landedCostAdjustments = procurementSchema.table("landed_cost_adjustments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inboundShipmentLineId: integer("inbound_shipment_line_id").notNull().references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
+  purchaseOrderLineId: integer("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id),
+  adjustmentAmountCents: bigint("adjustment_amount_cents", { mode: "number" }).notNull(),
+  reason: text("reason").notNull(),
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertLandedCostAdjustmentSchema = createInsertSchema(landedCostAdjustments).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertLandedCostAdjustment = z.infer<typeof insertLandedCostAdjustmentSchema>;
+export type LandedCostAdjustment = typeof landedCostAdjustments.$inferSelect;
 
 // ============================================================================
 // 16. INBOUND SHIPMENT STATUS HISTORY (refs inboundShipments)

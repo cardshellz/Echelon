@@ -22,8 +22,9 @@ import { db } from "../../db";
 import { sql } from "drizzle-orm";
 import { channelConnections } from "@shared/schema";
 import { eq } from "drizzle-orm";
-import type { ServiceRegistry } from "../../services";
+
 import type { OmsService } from "../oms/oms.service";
+import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
 
 // Re-export for registration in index.ts
 export { startShopifyReconciliation };
@@ -416,7 +417,6 @@ async function runReconciliation(): Promise<ReconciliationResult> {
         // Step 2: Bridge to OMS
         if (omsService) {
           try {
-            const { bridgeShopifyOrderToOms } = require("../oms/shopify-bridge");
             await bridgeShopifyOrderToOms(db, omsService, shopifyRowId);
             result.reconciled++;
             const source = order.source_name || "unknown";

@@ -53,6 +53,7 @@ import {
   inboundFreightCosts,
   inboundFreightAllocations,
   landedCostSnapshots,
+  landedCostAdjustments,
   inboundShipmentStatusHistory,
   reorderExclusionRules,
   autoDraftRuns,
@@ -156,6 +157,7 @@ export interface IProcurementStorage {
   createLandedCostSnapshot(data: InsertLandedCostSnapshot): Promise<any>;
   bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[]): Promise<any[]>;
   deleteLandedCostSnapshotsForShipment(inboundShipmentId: number): Promise<void>;
+  createLandedCostAdjustment(data: any): Promise<any>;
   createInboundShipmentStatusHistory(data: any): Promise<InboundShipmentStatusHistory>;
   getInboundShipmentStatusHistory(inboundShipmentId: number): Promise<InboundShipmentStatusHistory[]>;
   getInboundShipmentsByPo(purchaseOrderId: number): Promise<InboundShipment[]>;
@@ -849,6 +851,11 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
+  async createLandedCostAdjustment(data: any): Promise<any> {
+    const result = await db.insert(landedCostAdjustments).values(data).returning();
+    return result[0];
+  },
+
   async bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[]): Promise<any[]> {
     if (snapshots.length === 0) return [];
     return await db.insert(landedCostSnapshots).values(snapshots as any).returning();
@@ -885,7 +892,10 @@ export const procurementMethods: IProcurementStorage = {
 
   async getProvisionalLotsByShipment(inboundShipmentId: number): Promise<InventoryLot[]> {
     return await db.select().from(inventoryLots)
-      .where(eq((inventoryLots as any).inboundShipmentId, inboundShipmentId));
+      .where(and(
+        eq((inventoryLots as any).inboundShipmentId, inboundShipmentId),
+        eq((inventoryLots as any).costProvisional, 1)
+      ));
   },
 
   async getReorderAnalysisData(lookbackDays: number): Promise<any[]> {

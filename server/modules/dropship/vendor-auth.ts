@@ -2,7 +2,10 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { pool } from "../../db";
 
-const VENDOR_JWT_SECRET = process.env.VENDOR_JWT_SECRET || "vendor-jwt-secret-change-me";
+if (!process.env.VENDOR_JWT_SECRET) {
+  throw new Error("FATAL: VENDOR_JWT_SECRET environment variable is missing.");
+}
+const VENDOR_JWT_SECRET = process.env.VENDOR_JWT_SECRET;
 const VENDOR_JWT_EXPIRES_IN = process.env.VENDOR_JWT_EXPIRES_IN || "24h";
 
 export interface VendorPayload {
@@ -198,13 +201,21 @@ export async function loginVendorSSO(shellzClubMemberId: number) {
   }
 }
 
-export function requireVendorAuth(req: Request, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "unauthorized", message: "Missing or invalid authorization header" });
+export async function requireVendorAuth(req: Request, res: Response, next: NextFunction) {
+  // Read token from cookie first, fall back to Authorization header
+  let token = req.cookies?.vendor_token;
+  
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.slice(7);
+    }
   }
 
-  const token = authHeader.slice(7);
+  if (!token) {
+    return res.status(401).json({ error: "unauthorized", message: "Missing or invalid authorization token" });
+  }
+
   try {
     const decoded = jwt.verify(token, VENDOR_JWT_SECRET) as VendorPayload;
 
@@ -213,35 +224,36 @@ export function requireVendorAuth(req: Request, res: Response, next: NextFunctio
     }
 
     // Attach vendor info to request — load fresh from DB for critical fields
-    pool.connect().then(async (client) => {
-      try {
-        const result = await client.query(
-          `SELECT id, name, email, company_name, status, tier FROM dropship_vendors WHERE id = $1`,
-          [decoded.vendor_id]
-        );
-        if (result.rows.length === 0) {
-          return res.status(401).json({ error: "unauthorized", message: "Vendor not found" });
-        }
-        const vendor = result.rows[0];
-        if (vendor.status !== "active") {
-          return res.status(403).json({ error: "account_not_active", status: vendor.status });
-        }
-        req.vendor = {
-          vendor_id: vendor.id,
-          id: vendor.id,
-          email: vendor.email,
-          name: vendor.name,
-          company_name: vendor.company_name,
-          tier: vendor.tier,
-          status: vendor.status,
-        };
-        next();
-      } finally {
-        client.release();
+    let client;
+    try {
+      client = await pool.connect();
+      const result = await client.query(
+        `SELECT id, name, email, company_name, status, tier FROM dropship_vendors WHERE id = $1`,
+        [decoded.vendor_id]
+      );
+      if (result.rows.length === 0) {
+        return res.status(401).json({ error: "unauthorized", message: "Vendor not found" });
       }
-    }).catch(() => {
+      const vendor = result.rows[0];
+      if (vendor.status !== "active") {
+        return res.status(403).json({ error: "account_not_active", status: vendor.status });
+      }
+      req.vendor = {
+        vendor_id: vendor.id,
+        id: vendor.id,
+        email: vendor.email,
+        name: vendor.name,
+        company_name: vendor.company_name,
+        tier: vendor.tier,
+        status: vendor.status,
+      };
+      
+      return next();
+    } catch (dbErr) {
       return res.status(500).json({ error: "internal_error" });
-    });
+    } finally {
+      if (client) client.release();
+    }
   } catch (err: any) {
     if (err.name === "TokenExpiredError") {
       return res.status(401).json({ error: "token_expired", message: "Token has expired" });

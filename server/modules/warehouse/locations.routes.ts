@@ -14,7 +14,7 @@ import { broadcastOrdersUpdated } from "../../websocket";
 export function registerLocationRoutes(app: Express) {
 
   // Get all locations
-  app.get("/api/locations", async (req, res) => {
+  app.get("/api/locations", requirePermission("inventory", "view"), async (req, res) => {
     try {
       // Return ALL products with their locations (if assigned)
       const locations = await storage.getAllProductsWithLocations();
@@ -26,7 +26,7 @@ export function registerLocationRoutes(app: Express) {
   });
 
   // Get location by ID
-  app.get("/api/locations/:id", async (req, res) => {
+  app.get("/api/locations/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const location = await storage.getProductLocationById(id);
@@ -43,7 +43,7 @@ export function registerLocationRoutes(app: Express) {
   });
 
   // Get location by SKU
-  app.get("/api/locations/sku/:sku", async (req, res) => {
+  app.get("/api/locations/sku/:sku", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const sku = req.params.sku;
       const location = await storage.getProductLocationBySku(sku);
@@ -85,7 +85,7 @@ export function registerLocationRoutes(app: Express) {
   }
 
   // Create location (with upsert support for productId)
-  app.post("/api/locations", async (req, res) => {
+  app.post("/api/locations", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const parsed = insertProductLocationSchema.safeParse(req.body);
       
@@ -137,7 +137,7 @@ export function registerLocationRoutes(app: Express) {
   });
 
   // Update location
-  app.patch("/api/locations/:id", async (req, res) => {
+  app.patch("/api/locations/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const parsed = updateProductLocationSchema.safeParse(req.body);
@@ -182,7 +182,7 @@ export function registerLocationRoutes(app: Express) {
   });
 
   // Delete location
-  app.delete("/api/locations/:id", async (req, res) => {
+  app.delete("/api/locations/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       // Get SKU before deleting for queue sync
@@ -263,7 +263,7 @@ export function registerLocationRoutes(app: Express) {
   });
 
   // CSV Export - Download all locations as CSV using papaparse
-  app.get("/api/locations/export/csv", async (req, res) => {
+  app.get("/api/locations/export/csv", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const locations = await storage.getAllProductLocations();
       
@@ -291,7 +291,7 @@ export function registerLocationRoutes(app: Express) {
   });
 
   // CSV Import - Bulk update locations from CSV using papaparse
-  app.post("/api/locations/import/csv", async (req, res) => {
+  app.post("/api/locations/import/csv", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const { csvData } = req.body;
       

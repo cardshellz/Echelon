@@ -13,7 +13,7 @@ if (!connectionString) {
 
 // Always use SSL for external/production databases
 // Heroku and most cloud databases require SSL connections
-const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
+const useSSL = process.env.EXTERNAL_DATABASE_URL || (process.env.DATABASE_URL && process.env.DATABASE_URL.includes("amazonaws.com"));
 
 export const pool = new Pool({
   connectionString,

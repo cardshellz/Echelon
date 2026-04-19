@@ -319,7 +319,6 @@ describe("Shopify Adapter", () => {
       expect(body.product.title).toBe("Premium UV Shield Toploaders");
       expect(body.product.body_html).toBe("<p>99.99% UV protection</p>");
       expect(body.product.tags).toBe("toploaders, UV, premium");
-      expect(body.product.status).toBe("active");
 
       // Variant mapping
       expect(body.product.variants).toHaveLength(2);

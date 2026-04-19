@@ -2,13 +2,14 @@ import type { Express } from "express";
 import { registerVendor, loginVendorSSO, requireVendorAuth } from "./vendor-auth";
 import { VendorController } from "./interfaces/http/vendor.controller";
 import { pool } from "../../db";
+import { requireAuth } from "../../routes/middleware";
 
 export function registerVendorAuthRoutes(app: Express) {
   // POST /api/vendor/onboarding
-  app.post("/api/vendor/onboarding", VendorController.initiateOnboarding);
+  app.post("/api/vendor/onboarding", requireAuth, VendorController.initiateOnboarding);
 
   // POST /api/vendor/auth/sso
-  app.post("/api/vendor/auth/sso", async (req, res) => {
+  app.post("/api/vendor/auth/sso", requireAuth, async (req, res) => {
     try {
       const { shellzClubMemberId } = req.body;
 
@@ -24,7 +25,14 @@ export function registerVendorAuthRoutes(app: Express) {
         return res.status(401).json(result);
       }
 
-      return res.json(result);
+      res.cookie('vendor_token', result.token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+      });
+
+      return res.json({ vendor: result.vendor });
     } catch (error) {
       console.error("Vendor SSO login error:", error);
       return res.status(500).json({ error: "internal_error", message: "SSO Login failed" });
@@ -33,6 +41,7 @@ export function registerVendorAuthRoutes(app: Express) {
 
   // POST /api/vendor/auth/logout (client-side JWT invalidation)
   app.post("/api/vendor/auth/logout", (_req, res) => {
+    res.clearCookie('vendor_token');
     return res.json({ success: true });
   });
 

@@ -1,9 +1,13 @@
 import Stripe from "stripe";
 import { DropshipError } from "../domain/errors";
 
+if (!process.env.STRIPE_SECRET_KEY) {
+  throw new Error("FATAL: STRIPE_SECRET_KEY environment variable is missing.");
+}
+
 // Strict API versioning locking determinism
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_test_mock", {
-  apiVersion: "2023-10-16",
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2023-10-16" as any,
   typescript: true,
 });
 

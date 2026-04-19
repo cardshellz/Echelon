@@ -10,7 +10,7 @@ import { channelsStorage } from "../channels";
 import { warehouseStorage } from "../warehouse";
 import { procurementStorage } from "../procurement";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
-import { requirePermission } from "../../routes/middleware";
+import { requirePermission, requireAuth } from "../../routes/middleware";
 
 export async function registerProductRoutes(app: Express) {
   // ============================================================================
@@ -886,7 +886,7 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
-  app.get("/api/products/:productId/locations", async (req, res) => {
+  app.get("/api/products/:productId/locations", requireAuth, async (req, res) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -1077,7 +1077,7 @@ export async function registerProductRoutes(app: Express) {
    * GET /api/product-assets/:id/file
    * Serve a stored image file from the database.
    */
-  app.get("/api/product-assets/:id/file", async (req, res) => {
+  app.get("/api/product-assets/:id/file", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const result = await db.execute(sql`
