@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, boolean, doublePrecision, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, bigint, timestamp, jsonb, boolean, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -88,11 +88,11 @@ export const productVariants = catalogSchema.table("product_variants", {
   lengthMm: integer("length_mm"),
   widthMm: integer("width_mm"),
   heightMm: integer("height_mm"),
-  priceCents: integer("price_cents"),
-  compareAtPriceCents: integer("compare_at_price_cents"),
-  standardCostCents: doublePrecision("standard_cost_cents"), // Standard cost for valuation
-  lastCostCents: doublePrecision("last_cost_cents"), // Most recent purchase cost
-  avgCostCents: doublePrecision("avg_cost_cents"), // Weighted average cost (updated on each receipt)
+  priceCents: bigint("price_cents", { mode: "number" }),
+  compareAtPriceCents: bigint("compare_at_price_cents", { mode: "number" }),
+  standardCostCents: bigint("standard_cost_cents", { mode: "number" }), // Standard cost for valuation
+  lastCostCents: bigint("last_cost_cents", { mode: "number" }), // Most recent purchase cost
+  avgCostCents: bigint("avg_cost_cents", { mode: "number" }), // Weighted average cost (updated on each receipt)
   trackInventory: boolean("track_inventory").default(true),
   inventoryPolicy: varchar("inventory_policy", { length: 20 }).default("deny"),
   shopifyVariantId: varchar("shopify_variant_id", { length: 100 }),

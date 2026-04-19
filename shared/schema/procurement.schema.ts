@@ -1,4 +1,4 @@
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex, date } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, date } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -89,8 +89,8 @@ export const vendors = procurementSchema.table("vendors", {
   accountNumber: varchar("account_number", { length: 50 }), // Our account # with this vendor
   website: text("website"),
   defaultLeadTimeDays: integer("default_lead_time_days").default(120), // Default lead time
-  minimumOrderCents: integer("minimum_order_cents").default(0), // Min PO dollar amount
-  freeFreightThresholdCents: integer("free_freight_threshold_cents"), // PO value above which freight is free
+  minimumOrderCents: bigint("minimum_order_cents", { mode: "number" }).default(0), // Min PO dollar amount
+  freeFreightThresholdCents: bigint("free_freight_threshold_cents", { mode: "number" }), // PO value above which freight is free
   vendorType: varchar("vendor_type", { length: 20 }).default("distributor"), // manufacturer, distributor, broker
   shipFromAddress: text("ship_from_address"), // Where they ship from (for landed cost)
   country: varchar("country", { length: 50 }).default("US"), // Origin country
@@ -123,14 +123,14 @@ export const vendorProducts = procurementSchema.table("vendor_products", {
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }), // Specific variant if vendor sells at variant level
   vendorSku: varchar("vendor_sku", { length: 100 }), // Vendor's own catalog number
   vendorProductName: text("vendor_product_name"), // Vendor's product name
-  unitCostCents: doublePrecision("unit_cost_cents").default(0), // Negotiated cost per unit
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).default(0), // Negotiated cost per unit
   packSize: integer("pack_size").default(1), // Units in vendor's selling unit
   moq: integer("moq").default(1), // Minimum order quantity
   leadTimeDays: integer("lead_time_days"), // Vendor-specific override
   isPreferred: integer("is_preferred").default(0), // 1 = primary vendor for this product
   isActive: integer("is_active").default(1),
   lastPurchasedAt: timestamp("last_purchased_at"), // For stale-link detection
-  lastCostCents: doublePrecision("last_cost_cents"), // Cost from most recent closed PO
+  lastCostCents: bigint("last_cost_cents", { mode: "number" }), // Cost from most recent closed PO
   // Packaging dimensions (for shipment tracking / landed cost allocation)
   weightKg: numeric("weight_kg", { precision: 10, scale: 3 }),
   lengthCm: numeric("length_cm", { precision: 8, scale: 2 }),
@@ -161,7 +161,7 @@ export type VendorProduct = typeof vendorProducts.$inferSelect;
 export const poApprovalTiers = procurementSchema.table("po_approval_tiers", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   tierName: text("tier_name").notNull(), // "Standard", "High Value", "Critical"
-  thresholdCents: integer("threshold_cents").notNull(), // Min PO total to trigger this tier
+  thresholdCents: bigint("threshold_cents", { mode: "number" }).notNull(), // Min PO total to trigger this tier
   approverRole: varchar("approver_role", { length: 30 }).notNull(), // Required role: "lead", "admin"
   sortOrder: integer("sort_order").default(0),
   active: integer("active").default(1),
@@ -256,7 +256,7 @@ export const receivingLines = procurementSchema.table("receiving_lines", {
   purchaseOrderLineId: integer("purchase_order_line_id"), // FK to purchase_order_lines (added post-definition)
 
   // Cost tracking
-  unitCost: doublePrecision("unit_cost"), // Cost per unit in cents
+  unitCost: bigint("unit_cost", { mode: "number" }), // Cost per unit in cents
 
   // Put-away location (where it goes after receiving)
   putawayLocationId: integer("putaway_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
@@ -403,12 +403,12 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   cancelledQty: integer("cancelled_qty").default(0),
 
   // Cost
-  unitCostCents: doublePrecision("unit_cost_cents").notNull().default(0),
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull().default(0),
   discountPercent: numeric("discount_percent", { precision: 5, scale: 2 }).default("0"),
-  discountCents: doublePrecision("discount_cents").default(0), // Computed
+  discountCents: bigint("discount_cents", { mode: "number" }).default(0), // Computed
   taxRatePercent: numeric("tax_rate_percent", { precision: 5, scale: 2 }).default("0"),
-  taxCents: doublePrecision("tax_cents").default(0),
-  lineTotalCents: doublePrecision("line_total_cents"), // (order_qty * unit_cost_cents) - discount + tax
+  taxCents: bigint("tax_cents", { mode: "number" }).default(0),
+  lineTotalCents: bigint("line_total_cents", { mode: "number" }), // (order_qty * unit_cost_cents) - discount + tax
 
   // Dates
   expectedDeliveryDate: timestamp("expected_delivery_date"), // Per-line override
@@ -499,9 +499,9 @@ export const poReceipts = procurementSchema.table("po_receipts", {
   receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
   receivingLineId: integer("receiving_line_id").notNull().references(() => receivingLines.id, { onDelete: "cascade" }),
   qtyReceived: integer("qty_received").notNull().default(0),
-  poUnitCostCents: doublePrecision("po_unit_cost_cents"), // Cost on PO
-  actualUnitCostCents: doublePrecision("actual_unit_cost_cents"), // Actual receipt cost
-  varianceCents: doublePrecision("variance_cents"), // actual - po
+  poUnitCostCents: bigint("po_unit_cost_cents", { mode: "number" }), // Cost on PO
+  actualUnitCostCents: bigint("actual_unit_cost_cents", { mode: "number" }), // Actual receipt cost
+  varianceCents: bigint("variance_cents", { mode: "number" }), // actual - po
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("po_receipts_po_line_rcv_line_idx").on(table.purchaseOrderLineId, table.receivingLineId),
@@ -601,7 +601,7 @@ export const inboundShipmentLines = procurementSchema.table("inbound_shipment_li
   palletCount: integer("pallet_count"),
   // Allocation results
   allocatedCostCents: bigint("allocated_cost_cents", { mode: "number" }),
-  landedUnitCostCents: doublePrecision("landed_unit_cost_cents"),
+  landedUnitCostCents: bigint("landed_unit_cost_cents", { mode: "number" }),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -737,13 +737,13 @@ export const landedCostSnapshots = procurementSchema.table("landed_cost_snapshot
   inboundShipmentLineId: integer("inbound_shipment_line_id").references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
-  poUnitCostCents: doublePrecision("po_unit_cost_cents"),
+  poUnitCostCents: bigint("po_unit_cost_cents", { mode: "number" }),
   freightAllocatedCents: bigint("freight_allocated_cents", { mode: "number" }),
   dutyAllocatedCents: bigint("duty_allocated_cents", { mode: "number" }),
   insuranceAllocatedCents: bigint("insurance_allocated_cents", { mode: "number" }),
   otherAllocatedCents: bigint("other_allocated_cents", { mode: "number" }),
   totalLandedCostCents: bigint("total_landed_cost_cents", { mode: "number" }),
-  landedUnitCostCents: doublePrecision("landed_unit_cost_cents"),
+  landedUnitCostCents: bigint("landed_unit_cost_cents", { mode: "number" }),
   qty: integer("qty"),
   finalizedAt: timestamp("finalized_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -822,8 +822,8 @@ export const vendorInvoiceLines = procurementSchema.table("vendor_invoice_lines"
   qtyInvoiced: integer("qty_invoiced").notNull(),
   qtyOrdered: integer("qty_ordered"),
   qtyReceived: integer("qty_received"),
-  unitCostCents: doublePrecision("unit_cost_cents").notNull(),
-  lineTotalCents: doublePrecision("line_total_cents").notNull(),
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull(),
+  lineTotalCents: bigint("line_total_cents", { mode: "number" }).notNull(),
   matchStatus: varchar("match_status", { length: 20 }).notNull().default("pending"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -987,3 +987,4 @@ export const insertAutoDraftRunSchema = createInsertSchema(autoDraftRuns).omit({
 
 export type InsertAutoDraftRun = z.infer<typeof insertAutoDraftRunSchema>;
 export type AutoDraftRun = typeof autoDraftRuns.$inferSelect;
+

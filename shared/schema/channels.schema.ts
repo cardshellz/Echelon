@@ -250,9 +250,9 @@ export const channelPricing = channelsSchema.table("channel_pricing", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
-  price: integer("price").notNull(), // In cents
-  compareAtPrice: integer("compare_at_price"), // MSRP / strikethrough price
-  cost: integer("cost"), // For margin tracking
+  price: bigint("price", { mode: "number" }).notNull(), // In cents
+  compareAtPrice: bigint("compare_at_price", { mode: "number" }), // MSRP / strikethrough price
+  cost: bigint("cost", { mode: "number" }), // For margin tracking
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -279,7 +279,7 @@ export const channelListings = channelsSchema.table("channel_listings", {
   externalSku: varchar("external_sku", { length: 100 }),
   externalUrl: text("external_url"), // Link to listing on marketplace
   lastSyncedQty: integer("last_synced_qty"),
-  lastSyncedPrice: integer("last_synced_price"), // In cents
+  lastSyncedPrice: bigint("last_synced_price", { mode: "number" }), // In cents
   lastSyncedAt: timestamp("last_synced_at"),
   syncStatus: varchar("sync_status", { length: 20 }).default("pending"), // pending, synced, error
   syncError: text("sync_error"),

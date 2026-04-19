@@ -1,4 +1,4 @@
-import { pgSchema, text, varchar, integer, timestamp, boolean, numeric, jsonb } from "drizzle-orm/pg-core";
+import { pgSchema, text, varchar, integer, bigint, timestamp, boolean, numeric, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -36,7 +36,7 @@ export const plans = membershipSchema.table("plans", {
   // DYNAMIC CONFIG: The priority modifier subtracted/added to the base shipping score
   priorityModifier: integer("priority_modifier").notNull().default(5),
   
-  priceCents: integer("price_cents"),
+  priceCents: bigint("price_cents", { mode: "number" }),
   billingInterval: text("billing_interval"),
   billingIntervalCount: integer("billing_interval_count"),
   shopifySellingPlanId: varchar("shopify_selling_plan_id"),
@@ -264,14 +264,14 @@ export const memberShopifyCustomerIds = membershipSchema.table("member_shopify_c
 
 export const memberStats = membershipSchema.table("member_stats", {
   memberId: text("member_id"),
-  lifetimeSavingsCents: integer("lifetime_savings_cents"),
-  rewardsBalanceCents: integer("rewards_balance_cents"),
+  lifetimeSavingsCents: bigint("lifetime_savings_cents", { mode: "number" }),
+  rewardsBalanceCents: bigint("rewards_balance_cents", { mode: "number" }),
   totalOrders: integer("total_orders"),
-  totalSpentCents: integer("total_spent_cents"),
-  planSavingsCents: integer("plan_savings_cents"),
-  couponSavingsCents: integer("coupon_savings_cents"),
+  totalSpentCents: bigint("total_spent_cents", { mode: "number" }),
+  planSavingsCents: bigint("plan_savings_cents", { mode: "number" }),
+  couponSavingsCents: bigint("coupon_savings_cents", { mode: "number" }),
   updatedAt: timestamp("updated_at"),
-  qtySavingsCents: integer("qty_savings_cents"),
+  qtySavingsCents: bigint("qty_savings_cents", { mode: "number" }),
 });
 
 export const subscriptionBillingAttempts = membershipSchema.table("subscription_billing_attempts", {
@@ -279,7 +279,7 @@ export const subscriptionBillingAttempts = membershipSchema.table("subscription_
   contractId: text("contract_id"),
   shopifyBillingAttemptId: text("shopify_billing_attempt_id"),
   status: text("status"),
-  amountCents: integer("amount_cents"),
+  amountCents: bigint("amount_cents", { mode: "number" }),
   currency: text("currency"),
   billingCycleIndex: integer("billing_cycle_index"),
   errorCode: text("error_code"),
@@ -325,9 +325,9 @@ export const subscriptionLedger = membershipSchema.table("subscription_ledger", 
   eventType: text("event_type"),
   fromPlanId: text("from_plan_id"),
   toPlanId: text("to_plan_id"),
-  chargeCents: integer("charge_cents"),
-  creditCents: integer("credit_cents"),
-  netAmountCents: integer("net_amount_cents"),
+  chargeCents: bigint("charge_cents", { mode: "number" }),
+  creditCents: bigint("credit_cents", { mode: "number" }),
+  netAmountCents: bigint("net_amount_cents", { mode: "number" }),
   description: text("description"),
   refundPolicySnapshot: text("refund_policy_snapshot"),
   shopifyOrderId: text("shopify_order_id"),

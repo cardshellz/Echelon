@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, doublePrecision, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -340,8 +340,8 @@ export const outboundShipments = wmsSchema.table("outbound_shipments", {
   deliveredAt: timestamp("delivered_at"),
   
   // Shipping costs (for dropship invoicing & profitability)
-  carrierCostCents: integer("carrier_cost_cents").default(0), // Actual carrier charge
-  dunnageCostCents: integer("dunnage_cost_cents").default(0), // Packaging materials
+  carrierCostCents: bigint("carrier_cost_cents", { mode: "number" }).default(0), // Actual carrier charge
+  dunnageCostCents: bigint("dunnage_cost_cents", { mode: "number" }).default(0), // Packaging materials
   // totalShippingCostCents computed column added via migration
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -378,5 +378,6 @@ export const insertOutboundShipmentItemSchema = createInsertSchema(outboundShipm
 
 export type InsertOutboundShipmentItem = z.infer<typeof insertOutboundShipmentItemSchema>;
 export type OutboundShipmentItem = typeof outboundShipmentItems.$inferSelect;
+
 
 

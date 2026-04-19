@@ -1,4 +1,4 @@
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, doublePrecision } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -139,7 +139,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   targetState: varchar("target_state", { length: 20 }), // "committed", "picked", "shipped", etc.
 
   // Cost & lot tracking
-  unitCostCents: doublePrecision("unit_cost_cents"), // Cost traceability on every transaction
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }), // Cost traceability on every transaction
   inventoryLotId: integer("inventory_lot_id"), // Lot linkage (FK added after inventoryLots table definition)
 
   // Reference links - which operation triggered this transaction
@@ -440,7 +440,7 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
   receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id, { onDelete: "set null" }),
   purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "set null" }),
-  unitCostCents: doublePrecision("unit_cost_cents").notNull().default(0), // Cost per variant unit
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull().default(0), // Cost per variant unit
   qtyOnHand: integer("qty_on_hand").notNull().default(0),
   qtyReserved: integer("qty_reserved").notNull().default(0),
   qtyPicked: integer("qty_picked").notNull().default(0),
@@ -470,8 +470,8 @@ export const orderLineCosts = inventorySchema.table('order_line_costs', {
   productVariantId: integer('product_variant_id').notNull(),
   lotId: integer('lot_id'),
   qtyConsumed: integer('qty_consumed').notNull(),
-  unitCostCents: integer('unit_cost_cents').notNull(),
-  totalCostCents: integer('total_cost_cents').notNull(),
+  unitCostCents: bigint('unit_cost_cents', { mode: 'number' }).notNull(),
+  totalCostCents: bigint('total_cost_cents', { mode: 'number' }).notNull(),
   shippedAt: timestamp('shipped_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });

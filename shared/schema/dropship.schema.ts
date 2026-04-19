@@ -1,4 +1,4 @@
-import { pgSchema, varchar, integer, timestamp, boolean, text, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgSchema, varchar, integer, bigint, timestamp, boolean, text, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products } from "./catalog.schema";
@@ -16,10 +16,10 @@ export const dropshipVendors = dropshipSchema.table("dropship_vendors", {
   status: varchar("status", { length: 20 }).notNull().default("pending"),
   tier: varchar("tier", { length: 20 }).default("standard"),
   stripeCustomerId: varchar("stripe_customer_id", { length: 100 }),
-  walletBalanceCents: integer("wallet_balance_cents").notNull().default(0),
+  walletBalanceCents: bigint("wallet_balance_cents", { mode: "number" }).notNull().default(0),
   autoReloadEnabled: boolean("auto_reload_enabled").default(false),
-  autoReloadThresholdCents: integer("auto_reload_threshold_cents").default(5000),
-  autoReloadAmountCents: integer("auto_reload_amount_cents").default(20000),
+  autoReloadThresholdCents: bigint("auto_reload_threshold_cents", { mode: "number" }).default(5000),
+  autoReloadAmountCents: bigint("auto_reload_amount_cents", { mode: "number" }).default(20000),
   usdcWalletAddress: varchar("usdc_wallet_address", { length: 100 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -62,8 +62,8 @@ export const dropshipWalletLedger = dropshipSchema.table("dropship_wallet_ledger
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
   type: varchar("type", { length: 30 }).notNull(), // deposit, withdrawal, charge, refund, credit
-  amountCents: integer("amount_cents").notNull(),
-  balanceAfterCents: integer("balance_after_cents").notNull(),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+  balanceAfterCents: bigint("balance_after_cents", { mode: "number" }).notNull(),
   referenceType: varchar("reference_type", { length: 50 }), // order, plan, manual
   referenceId: varchar("reference_id", { length: 200 }),
   paymentMethod: varchar("payment_method", { length: 30 }), // 'stripe_ach', 'stripe_card', 'usdc_base', 'manual'
