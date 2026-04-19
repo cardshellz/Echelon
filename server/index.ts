@@ -15,6 +15,7 @@ import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
 import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationService, setDropshipWmsServices } from "./modules/dropship/vendor-order-polling";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
+import { startWebhookRetryWorker } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
@@ -516,6 +517,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       // Start subscription billing scheduler (runs hourly)
       startBillingScheduler();
+
+      // Start webhook DLQ recovery worker
+      if (process.env.DISABLE_SCHEDULERS !== 'true') {
+        startWebhookRetryWorker();
+      }
     }
   );
 

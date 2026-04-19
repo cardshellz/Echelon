@@ -16,7 +16,11 @@ import { registerPurchasingRoutes } from "./modules/procurement/procurement.rout
 import { registerEbayOAuthRoutes } from "./routes/ebay-oauth.routes";
 import { registerEbaySettingsRoutes } from "./routes/ebay-settings.routes";
 import { registerEbayListingRulesRoutes } from "./routes/ebay-listing-rules.routes";
-import { registerEbayChannelRoutes } from "./routes/ebay-channel.routes";
+import { router as ebayConfigRouter } from "./routes/ebay/ebay-config.routes";
+import { router as ebayTaxonomyRouter } from "./routes/ebay/ebay-taxonomy.routes";
+import { router as ebayListingsRouter } from "./routes/ebay/ebay-listings.routes";
+import { router as ebayPricingRouter } from "./routes/ebay/ebay-pricing.routes";
+import { router as ebayPoliciesRouter } from "./routes/ebay/ebay-policies.routes";
 import { registerSyncControlRoutes } from "./modules/channels/sync-control.routes";
 import { registerOmsRoutes } from "./routes/oms.routes";
 import { registerDropshipAdminRoutes } from "./modules/dropship/admin.routes";
@@ -53,7 +57,11 @@ export async function registerRoutes(
   registerEbayOAuthRoutes(app);
   registerEbaySettingsRoutes(app);
   registerEbayListingRulesRoutes(app);
-  registerEbayChannelRoutes(app);
+  app.use(ebayConfigRouter);
+  app.use(ebayTaxonomyRouter);
+  app.use(ebayListingsRouter);
+  app.use(ebayPricingRouter);
+  app.use(ebayPoliciesRouter);
   registerSyncControlRoutes(app);
   registerOmsRoutes(app);
 

@@ -7,6 +7,7 @@
  */
 
 import { pgTable, varchar, integer, bigint, timestamp, jsonb, text, boolean, uniqueIndex, index, pgSchema, numeric } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { channels } from "./channels.schema";
@@ -254,3 +255,33 @@ export const insertOrderItemFinancialSchema = createInsertSchema(orderItemFinanc
 
 export type InsertOrderItemFinancial = z.infer<typeof insertOrderItemFinancialSchema>;
 export type OrderItemFinancial = typeof orderItemFinancials.$inferSelect;
+
+// ============================================================================
+// WEBHOOK RETRY QUEUE
+// ============================================================================
+
+export const webhookRetryQueue = omsSchema.table("webhook_retry_queue", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  provider: varchar("provider", { length: 50 }).notNull(), // 'shopify', 'ebay', 'shipstation'
+  topic: varchar("topic", { length: 100 }).notNull(),
+  payload: jsonb("payload").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  nextRetryAt: timestamp("next_retry_at", { withTimezone: true }).notNull().defaultNow(),
+  status: varchar("status", { length: 20 }).notNull().default('pending'), // 'pending', 'dead', 'success'
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+}, (table) => {
+  return {
+    statusNextRetryIdx: index("idx_webhook_retry_queue_status_next_retry").on(table.status, table.nextRetryAt).where(sql`status = 'pending'`),
+  };
+});
+
+export const insertWebhookRetryQueueSchema = createInsertSchema(webhookRetryQueue).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertWebhookRetryQueue = z.infer<typeof insertWebhookRetryQueueSchema>;
+export type WebhookRetryQueue = typeof webhookRetryQueue.$inferSelect;

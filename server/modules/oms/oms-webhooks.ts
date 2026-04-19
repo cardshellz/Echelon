@@ -18,7 +18,7 @@ import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import type { InsertOrderItem } from "@shared/schema";
-import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections } from "@shared/schema";
+import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections, webhookRetryQueue } from "@shared/schema";
 import { db } from "../../db";
 import { ordersStorage } from "../orders";
 import { warehouseStorage } from "../warehouse";
@@ -338,6 +338,11 @@ export function registerOmsWebhooks(
     // rawBody is set by the global express.json({ verify }) middleware
     const rawBody = (req as any).rawBody as Buffer | undefined;
 
+    // Allow internal worker bypass
+    if (req.headers["x-internal-retry"] === process.env.SESSION_SECRET) {
+      return req.body;
+    }
+
     if (!rawBody || !Buffer.isBuffer(rawBody) || rawBody.length === 0) {
       console.warn(`${LOG_PREFIX} Empty or missing rawBody`);
       res.status(200).send("ok"); // Return 200 to prevent retries
@@ -464,6 +469,12 @@ export function registerOmsWebhooks(
       pushToMissionControl(omsOrder.id, "order.created");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/paid error for ${shopifyOrder.name}: ${err.message}`);
+      await db.insert(webhookRetryQueue).values({
+        provider: "shopify",
+        topic: "orders/paid",
+        payload: shopifyOrder,
+        lastError: err.message || String(err)
+      });
     }
   });
 
@@ -609,6 +620,12 @@ export function registerOmsWebhooks(
       pushToMissionControl(existing.id, "order.updated");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/updated error for ${shopifyOrder.name}: ${err.message}`);
+      await db.insert(webhookRetryQueue).values({
+        provider: "shopify",
+        topic: "orders/updated",
+        payload: shopifyOrder,
+        lastError: err.message || String(err)
+      });
     }
   });
 
@@ -691,6 +708,12 @@ export function registerOmsWebhooks(
       pushToMissionControl(existing.id, "order.cancelled");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/cancelled error for ${shopifyOrder.name}: ${err.message}`);
+      await db.insert(webhookRetryQueue).values({
+        provider: "shopify",
+        topic: "orders/cancelled",
+        payload: shopifyOrder,
+        lastError: err.message || String(err)
+      });
     }
   });
 
@@ -778,6 +801,12 @@ export function registerOmsWebhooks(
       pushToMissionControl(existing.id, "order.fulfilled");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/fulfilled error for ${shopifyOrder.name}: ${err.message}`);
+      await db.insert(webhookRetryQueue).values({
+        provider: "shopify",
+        topic: "orders/fulfilled",
+        payload: shopifyOrder,
+        lastError: err.message || String(err)
+      });
     }
   });
 
@@ -902,6 +931,12 @@ export function registerOmsWebhooks(
       pushToMissionControl(existing.id, "order.refunded");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} refunds/create error for order ${shopifyOrderId}: ${err.message}`);
+      await db.insert(webhookRetryQueue).values({
+        provider: "shopify",
+        topic: "refunds/create",
+        payload: refundPayload,
+        lastError: err.message || String(err)
+      });
     }
   });
 

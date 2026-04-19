@@ -83,6 +83,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     method: string,
     path: string,
     body?: unknown,
+    retries = 3
   ): Promise<T> {
     const url = path.startsWith("http") ? path : `${baseUrl}${path}`;
     const headers: Record<string, string> = {
@@ -90,18 +91,32 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       "Content-Type": "application/json",
     };
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    let attempt = 0;
+    while (attempt <= retries) {
+      const res = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+      });
 
-    if (!res.ok) {
-      const errorBody = await res.text();
-      throw new Error(`ShipStation API ${method} ${path} failed (${res.status}): ${errorBody}`);
+      if (!res.ok) {
+        if (res.status === 429 && attempt < retries) {
+          // ShipStation standard format: X-Rate-Limit-Reset gives seconds until limit resets
+          const retryAfter = res.headers.get("x-rate-limit-reset") || res.headers.get("retry-after") || "5";
+          const waitSecs = parseInt(retryAfter, 10);
+          console.warn(`[ShipStation] 429 Rate Limit hit. Waiting ${waitSecs}s before retry ${attempt + 1}/${retries}...`);
+          await new Promise(r => setTimeout(r, (waitSecs + 1) * 1000)); // wait required + 1s buffer
+          attempt++;
+          continue;
+        }
+
+        const errorBody = await res.text();
+        throw new Error(`ShipStation API ${method} ${path} failed (${res.status}): ${errorBody}`);
+      }
+
+      return res.json() as Promise<T>;
     }
-
-    return res.json() as Promise<T>;
+    throw new Error("ShipStation API request failed after max retries.");
   }
 
   // -------------------------------------------------------------------------
