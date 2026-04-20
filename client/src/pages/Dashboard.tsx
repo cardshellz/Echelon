@@ -47,42 +47,16 @@ export default function Dashboard() {
 
   const triggerSyncMutation = useMutation({
     mutationFn: async () => {
-      // Two-step sync to close both gaps the alert banner can surface:
-      //   1. Pull missing Shopify orders into shopify_orders + OMS (reconcile-orders)
-      //   2. Backfill any OMS orders that didn't make it to WMS (backfill-oms-to-wms)
-      // The banner's "orders waiting to sync" count is the OMS→WMS gap.
-      const reconcileRes = await fetch("/api/shopify/reconcile-orders", {
+      const res = await fetch("/api/sync/trigger", {
         method: "POST",
         credentials: "include",
       });
-      const reconcileData = reconcileRes.ok ? await reconcileRes.json() : {};
-
-      const backfillRes = await fetch("/api/sync/backfill-oms-to-wms", {
-        method: "POST",
-        credentials: "include",
-      });
-      const backfillData = backfillRes.ok ? await backfillRes.json() : {};
-
-      if (!reconcileRes.ok && !backfillRes.ok) {
-        throw new Error("Sync failed");
-      }
-      return {
-        reconciled: reconcileData?.reconciled ?? 0,
-        checked: reconcileData?.checked ?? 0,
-        bridged: backfillData?.synced ?? 0,
-      };
+      if (!res.ok) throw new Error("Failed to trigger sync");
+      return res.json();
     },
-    onSuccess: (data: { reconciled: number; checked: number; bridged: number }) => {
-      const parts: string[] = [];
-      if (data.reconciled > 0) parts.push(`${data.reconciled} order(s) pulled from Shopify`);
-      if (data.bridged > 0) parts.push(`${data.bridged} OMS order(s) bridged to WMS`);
-      const description =
-        parts.length > 0
-          ? parts.join(", ") + "."
-          : `No missing orders found (checked ${data.checked} in Shopify).`;
-      toast({ title: "Sync complete", description });
+    onSuccess: () => {
+      toast({ title: "Sync triggered", description: "Order sync has been initiated" });
       queryClient.invalidateQueries({ queryKey: ["/api/sync/health"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
     },
     onError: (error) => {
       toast({ title: "Sync failed", description: String(error), variant: "destructive" });

@@ -70,6 +70,46 @@ equipment, different priorities) without rewriting the picker today.
 
 # Other Future Work
 
+## Channel-agnostic sync recovery orchestrator
+
+**Problem**
+
+The dashboard's 'Order Sync Alert' banner surfaces `unsynced_24h` from
+`oms.oms_orders` that didn't bridge to `wms.orders`. Today clicking 'Sync
+Now' triggers the *inventory* sync orchestrator (inventory → channels
+push), which is unrelated to closing that gap.
+
+There are two independent recovery paths today:
+- **Shopify order reconciliation** — pulls missing orders from Shopify via
+  `/api/shopify/reconcile-orders` (exists). Uses `shopify_reconciliation_last_check`
+  cursor stored in `warehouse.echelon_settings`.
+- **OMS→WMS backfill** — exposed at `/api/sync/backfill-oms-to-wms` (new),
+  wraps `wmsSyncService.backfillUnsynced()`. Finds oms_orders without a
+  matching wms.orders row and creates the WMS order.
+
+Neither is multi-channel. eBay has its own reconciliation service
+(`[eBay Reconcile]` seen in logs) but no unified entry point.
+
+**Plan**
+
+1. Extend `IChannelAdapter` interface with optional `reconcile(since: Date)`
+   method. Returns `{ checked, reconciled, failed }`.
+2. Implement on:
+   - `ShopifyAdapter` — wraps existing `shopify-order-reconciliation`.
+   - `EbayAdapter` — wraps existing eBay reconciliation service.
+3. Create `POST /api/sync/reconcile-all` that:
+   - Iterates enabled channels via `ChannelAdapterRegistry`.
+   - Calls each adapter's `reconcile()` if implemented.
+   - Runs OMS→WMS backfill at the end.
+   - Returns aggregated counts per channel.
+4. Dashboard 'Sync Now' button calls `/api/sync/reconcile-all` instead of
+   the inventory push trigger.
+5. Optional: banner text becomes channel-aware (show which channels have
+   gaps).
+
+**Scope:** 2-3 hours. Not urgent — existing per-channel reconciliation
+still runs automatically every 15-30 minutes.
+
 ## Stale `app_settings` type export
 
 Echelon's `shared/schema/warehouse.schema.ts` exports an `appSettings` type
