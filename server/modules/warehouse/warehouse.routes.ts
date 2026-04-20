@@ -282,6 +282,10 @@ export function registerWarehouseRoutes(app: Express) {
         requireScanConfirm: data.requireScanConfirm ?? 0,
         pickingBatchSize: data.pickingBatchSize || 20,
         autoReleaseDelayMinutes: data.autoReleaseDelayMinutes || 30,
+        enableOrderCombining: data.enableOrderCombining ?? 1,
+        channelSyncEnabled: data.channelSyncEnabled ?? 0,
+        channelSyncIntervalMinutes: data.channelSyncIntervalMinutes || 15,
+        velocityLookbackDays: data.velocityLookbackDays || 14,
         isActive: data.isActive ?? 1,
       });
       res.status(201).json(settings);

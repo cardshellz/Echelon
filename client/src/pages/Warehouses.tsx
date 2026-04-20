@@ -11,7 +11,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Trash2, Edit, Building2, Check, X, Warehouse, Package, Truck } from "lucide-react";
+import { Plus, Trash2, Edit, Building2, Check, X, Warehouse, Package, Truck, Settings as SettingsIcon, FileText } from "lucide-react";
+import { Link } from "wouter";
 import { Switch } from "@/components/ui/switch";
 
 interface WarehouseRecord {
@@ -389,6 +390,31 @@ export default function Warehouses() {
         </Card>
       </div>
 
+      {/* Default settings template — inherited by any warehouse without its own override */}
+      <Card className="border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20">
+        <CardHeader className="p-3 md:p-6 flex flex-row items-start justify-between gap-4">
+          <div>
+            <CardTitle className="text-base md:text-lg flex items-center gap-2">
+              <FileText className="h-5 w-5" />
+              Default Settings Template
+              <Badge variant="outline" className="border-amber-500/50 text-amber-700 dark:text-amber-400">
+                Template
+              </Badge>
+            </CardTitle>
+            <CardDescription className="text-xs md:text-sm">
+              Values here are the fallback for every warehouse without an explicit override.
+              Edit the template to set defaults across your network at once.
+            </CardDescription>
+          </div>
+          <Button asChild variant="outline" size="sm" data-testid="btn-edit-default-template">
+            <Link to="/warehouse/settings/DEFAULT">
+              <SettingsIcon className="h-4 w-4 mr-2" />
+              Edit Template
+            </Link>
+          </Button>
+        </CardHeader>
+      </Card>
+
       <Card>
         <CardHeader className="p-3 md:p-6">
           <CardTitle className="text-lg md:text-xl">Warehouse List</CardTitle>
@@ -518,6 +544,17 @@ export default function Warehouses() {
                         {canEdit && (
                           <TableCell>
                             <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                asChild
+                                data-testid={`btn-settings-warehouse-${warehouse.id}`}
+                                title="Operational settings"
+                              >
+                                <Link to={`/warehouse/settings/${warehouse.id}`}>
+                                  <SettingsIcon className="h-4 w-4" />
+                                </Link>
+                              </Button>
                               <Button
                                 variant="ghost"
                                 size="icon"
