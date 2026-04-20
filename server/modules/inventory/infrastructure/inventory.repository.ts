@@ -297,6 +297,12 @@ export const inventoryMethods: IInventoryStorage = {
     userId: string;
     notes?: string;
   }, tx: any = db): Promise<InventoryTransaction> {
+    if (tx === db) {
+      return await db.transaction(async (t) => {
+        return await this.executeTransfer(params, t);
+      });
+    }
+
     const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes } = params;
 
     const sourceResult = await tx.execute(sql`

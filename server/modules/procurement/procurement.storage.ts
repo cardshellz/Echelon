@@ -100,6 +100,7 @@ export interface IProcurementStorage {
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
   createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
   updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>): Promise<PurchaseOrder | null>;
+  updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>): Promise<PurchaseOrder | null>;
   deletePurchaseOrder(id: number): Promise<boolean>;
   generatePoNumber(): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]>;
@@ -478,6 +479,24 @@ export const procurementMethods: IProcurementStorage = {
       .where(eq(purchaseOrders.id, id))
       .returning();
     return result[0] || null;
+  },
+
+  async updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>): Promise<PurchaseOrder | null> {
+    return await db.transaction(async (tx) => {
+      const result = await tx.update(purchaseOrders)
+        .set({ ...updates, updatedAt: new Date() })
+        .where(eq(purchaseOrders.id, id))
+        .returning();
+
+      const updatedPo = result[0] || null;
+      if (updatedPo) {
+        await tx.insert(poStatusHistory).values({
+          ...historyData,
+          purchaseOrderId: id,
+        });
+      }
+      return updatedPo;
+    });
   },
 
   async deletePurchaseOrder(id: number): Promise<boolean> {

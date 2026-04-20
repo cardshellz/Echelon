@@ -1,4 +1,5 @@
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -20,7 +21,9 @@ export const inventoryLevels = inventorySchema.table("inventory_levels", {
   packedQty: integer("packed_qty").notNull().default(0), // Boxed, awaiting ship (variant units)
   backorderQty: integer("backorder_qty").notNull().default(0), // Backorder demand (variant units)
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  checkReservedLteOnHand: check("check_reserved_lte_on_hand", sql`${table.reservedQty} <= ${table.variantQty}`)
+}));
 
 export const insertInventoryLevelSchema = createInsertSchema(inventoryLevels).omit({
   id: true,
