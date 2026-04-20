@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+
+// Spec A feature flag shape. Only `useNewPoEditor` matters on this page;
+// the rest of the keys are queried together and ignored here.
+type ProcurementSettings = {
+  useNewPoEditor: boolean;
+  [key: string]: unknown;
+};
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -100,6 +107,29 @@ export default function PurchaseOrders() {
   const [statusFilter, setStatusFilter] = useState("active");
   const [searchQuery, setSearchQuery] = useState("");
   const [vendorFilter, setVendorFilter] = useState<number | null>(null);
+
+  // Spec A feature flag. When true, '+ New Purchase Order' navigates to the
+  // new full-page editor instead of opening the legacy dialog. Flag lives on
+  // procurement settings so an admin can flip it without a redeploy.
+  const { data: procurementSettings } = useQuery<ProcurementSettings>({
+    queryKey: ["/api/settings/procurement"],
+    queryFn: async () => {
+      const res = await fetch("/api/settings/procurement");
+      if (!res.ok) throw new Error("Failed to load procurement settings");
+      return res.json();
+    },
+    // Not critical for the rest of the page; default staleTime is fine.
+    retry: false,
+  });
+  const useNewPoEditor = procurementSettings?.useNewPoEditor === true;
+
+  function handleNewPoClick() {
+    if (useNewPoEditor) {
+      navigate("/purchase-orders/new");
+      return;
+    }
+    setShowCreateDialog(true);
+  }
 
   // Create dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -414,7 +444,7 @@ export default function PurchaseOrders() {
             Create and manage purchase orders
           </p>
         </div>
-        <Button onClick={() => setShowCreateDialog(true)} className="min-h-[44px] w-full sm:w-auto">
+        <Button onClick={handleNewPoClick} className="min-h-[44px] w-full sm:w-auto">
           <Plus className="h-4 w-4 mr-2" />
           New Purchase Order
         </Button>
