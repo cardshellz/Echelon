@@ -267,6 +267,66 @@ function getChannelBadgeStyle(provider: string | null | undefined): { className:
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+
+/**
+ * Priority badges — shipping service level + membership plan, side-by-side.
+ * Shipping uses static colors (amber=expedited, red=overnight).
+ * Membership uses the plan's primary_color from the DB (stamped at sync).
+ *
+ * Rules:
+ *   standard + .core        → nothing
+ *   standard + .club/.ops   → membership badge only
+ *   expedited + .core       → shipping badge only
+ *   expedited + .club/.ops  → both badges
+ */
+function PriorityBadges({
+  shippingServiceLevel,
+  memberPlanName,
+  memberPlanColor,
+  size = "sm",
+}: {
+  shippingServiceLevel?: "standard" | "expedited" | "overnight" | null;
+  memberPlanName?: string | null;
+  memberPlanColor?: string | null;
+  size?: "xs" | "sm";
+}) {
+  const textSize = size === "xs" ? "text-[9px]" : "text-[10px]";
+  const pad = size === "xs" ? "px-1.5 py-0.5" : "px-1.5 py-0";
+
+  const shippingBadge =
+    shippingServiceLevel === "overnight" ? (
+      <Badge className={cn("bg-red-600 text-white", textSize, pad)}>OVERNIGHT</Badge>
+    ) : shippingServiceLevel === "expedited" ? (
+      <Badge className={cn("bg-amber-500 text-white", textSize, pad)}>EXPEDITED</Badge>
+    ) : null;
+
+  const isPaidTier =
+    memberPlanName &&
+    memberPlanName.toLowerCase() !== ".core" &&
+    memberPlanName.toLowerCase() !== "core";
+  const memberBadge = isPaidTier ? (
+    <Badge
+      variant="outline"
+      className={cn(textSize, pad, "border-2 font-semibold")}
+      style={
+        memberPlanColor
+          ? { borderColor: memberPlanColor, color: memberPlanColor }
+          : undefined
+      }
+    >
+      {memberPlanName!.toUpperCase()}
+    </Badge>
+  ) : null;
+
+  if (!shippingBadge && !memberBadge) return null;
+  return (
+    <>
+      {shippingBadge}
+      {memberBadge}
+    </>
+  );
+}
+
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -340,6 +400,10 @@ interface SingleOrder {
   // For combined orders - contains the individual orders in the group
   combinedOrders?: { id: string; orderNumber: string; itemCount: number }[];
   isCombinedGroup?: boolean; // True if this entry represents a combined group
+  // Priority badge data populated by WMS sync at order ingest time
+  shippingServiceLevel?: "standard" | "expedited" | "overnight" | null;
+  memberPlanName?: string | null;
+  memberPlanColor?: string | null;
 }
 
 
@@ -545,6 +609,9 @@ export default function Picking() {
     channelProvider: order.channelProvider || null,
     combinedGroupId: order.combinedGroupId,
     combinedRole: order.combinedRole,
+    shippingServiceLevel: (order as any).shippingServiceLevel,
+    memberPlanName: (order as any).memberPlanName,
+    memberPlanColor: (order as any).memberPlanColor,
     items: order.items.map((item): PickItem => ({
       id: item.id,
       sku: item.sku,
@@ -2783,7 +2850,7 @@ export default function Picking() {
                         <div className="font-semibold flex items-center gap-2 text-base">
                           {batch.id}
                           {batch.priority >= 9999 && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">🔼 BUMPED</Badge>}
-                          {batch.priority >= 300 && batch.priority < 9999 && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-orange-300 text-orange-700 bg-orange-50">P{batch.priority}</Badge>}
+                          {/* Batches render per-order badges on the order cards within. */}
                         </div>
                         <div className="text-sm text-muted-foreground">
                           {batch.orders} order{batch.orders > 1 ? "s" : ""} • {batch.items.length} items
@@ -2986,7 +3053,14 @@ export default function Picking() {
                         )}
                         {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
                         {order.priority >= 9999 && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">🔼 BUMPED</Badge>}
-                        {order.priority >= 300 && order.priority < 9999 && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-orange-300 text-orange-700 bg-orange-50">P{order.priority}</Badge>}
+                        {!order.onHold && order.priority < 9999 && (
+                          <PriorityBadges
+                            shippingServiceLevel={order.shippingServiceLevel}
+                            memberPlanName={order.memberPlanName}
+                            memberPlanColor={order.memberPlanColor}
+                            size="xs"
+                          />
+                        )}
                         {order.status === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}

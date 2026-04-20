@@ -52,6 +52,8 @@ export const omsOrders = omsSchema.table("oms_orders", {
   shippingMethod: varchar("shipping_method", { length: 200 }), // free-form customer-facing label (do NOT use for routing)
   shippingMethodCode: varchar("shipping_method_code", { length: 100 }), // platform code
   shippingServiceLevel: varchar("shipping_service_level", { length: 20 }).notNull().default("standard"), // normalized: standard | expedited | overnight
+  memberPlanName: varchar("member_plan_name", { length: 20 }),
+  memberPlanColor: varchar("member_plan_color", { length: 20 }),
 
   // Totals (cents)
   subtotalCents: bigint("subtotal_cents", { mode: "number" }).notNull().default(0),

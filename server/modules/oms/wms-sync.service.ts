@@ -86,7 +86,7 @@ export class WmsSyncService {
       const warehouseStatus = hasShippableItems
         ? this.determineWarehouseStatus(omsOrder)
         : "completed"; // Pure digital/donation/membership → skip pick queue
-      const priority = await this.determinePriority(omsOrder);
+      const { priority, memberPlanName, memberPlanColor } = await this.determinePriority(omsOrder);
 
       const wmsOrderData: InsertWmsOrder = {
         channelId: omsOrder.channelId,
@@ -104,6 +104,8 @@ export class WmsSyncService {
         shippingCountry: omsOrder.shipToCountry || "US",
         priority,
         shippingServiceLevel: ((omsOrder as any).shippingServiceLevel as string | null) || "standard",
+        memberPlanName,
+        memberPlanColor,
         warehouseStatus,
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
@@ -203,7 +205,11 @@ export class WmsSyncService {
    * Higher score = higher priority in the pick queue.
    * WMS "Bump" override uses 9999; "Hold" uses -1.
    */
-  private async determinePriority(omsOrder: typeof omsOrders.$inferSelect): Promise<number> {
+  private async determinePriority(omsOrder: typeof omsOrders.$inferSelect): Promise<{
+    priority: number;
+    memberPlanName: string | null;
+    memberPlanColor: string | null;
+  }> {
     // 1. Shipping Service Level Base — higher base = picked sooner.
     //    Reads the normalized service_level field, NOT the customer-facing
     //    shipping_method string. The method label is zone-dependent and
@@ -217,12 +223,17 @@ export class WmsSyncService {
     const level = ((omsOrder as any).shippingServiceLevel as string | null) || "standard";
     const base = baseByLevel[level] ?? 100;
 
-    // 2. Dynamic Tier Modifier from Hub's Plans Table (additive boost)
-    let modifier = 0; // Default: no membership boost
+    // 2. Dynamic Tier Modifier + plan metadata snapshot.
+    //    Fetches priority_modifier for sort math AND plan name/primary_color
+    //    so the picker can render the membership badge without re-joining
+    //    on every render. Snapshot is frozen at sync time.
+    let modifier = 0;
+    let memberPlanName: string | null = null;
+    let memberPlanColor: string | null = null;
 
     try {
       const result = await db.execute(sql`
-        SELECT p.priority_modifier
+        SELECT p.priority_modifier, p.name, p.primary_color
         FROM membership.plans p
         INNER JOIN membership.member_subscriptions ms ON p.id = ms.plan_id
         INNER JOIN membership.members m ON ms.member_id = m.id
@@ -233,15 +244,19 @@ export class WmsSyncService {
 
       if (result.rows.length > 0) {
         modifier = Number(result.rows[0].priority_modifier);
+        memberPlanName = (result.rows[0].name as string) || null;
+        memberPlanColor = (result.rows[0].primary_color as string) || null;
       } else if (omsOrder.memberTier) {
         const planResult = await db.execute(sql`
-          SELECT priority_modifier FROM membership.plans
+          SELECT priority_modifier, name, primary_color FROM membership.plans
           WHERE LOWER(name) = LOWER(${omsOrder.memberTier})
              OR id = ${omsOrder.memberTier}
           LIMIT 1
         `);
         if (planResult.rows.length > 0) {
           modifier = Number(planResult.rows[0].priority_modifier);
+          memberPlanName = (planResult.rows[0].name as string) || null;
+          memberPlanColor = (planResult.rows[0].primary_color as string) || null;
         }
       }
     } catch (err) {
@@ -249,7 +264,11 @@ export class WmsSyncService {
     }
 
     // Higher = Better: base + modifier. Leads can manually set 9999 (Bump) or -1 (Hold).
-    return base + modifier;
+    return {
+      priority: base + modifier,
+      memberPlanName,
+      memberPlanColor,
+    };
   }
 
   /**
