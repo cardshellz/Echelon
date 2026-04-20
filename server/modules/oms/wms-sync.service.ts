@@ -103,7 +103,6 @@ export class WmsSyncService {
         shippingPostalCode: omsOrder.shipToZip || null,
         shippingCountry: omsOrder.shipToCountry || "US",
         priority,
-        shippingServiceLevel: ((omsOrder as any).shippingServiceLevel as string | null) || "standard",
         warehouseStatus,
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
@@ -199,27 +198,28 @@ export class WmsSyncService {
 
   /**
    * Determine WMS priority via Composite Score:
-   *   WMS Priority = (Shipping Service Level Base) + (Plan Tier Modifier)
-   *
+   * WMS Priority = (Shipping Speed Base) + (Plan Tier Modifier)
    * Higher score = higher priority in the pick queue.
    * WMS "Bump" override uses 9999; "Hold" uses -1.
-   *
-   * Service level is a normalized enum on the order itself
-   * (standard | expedited | overnight) set during ingestion. It expresses
-   * business intent — NOT the customer-facing shipping_method label or the
-   * carrier service class used on the label. Those strings are unreliable
-   * (e.g. "USPS Priority Mail" is a carrier service, not a customer-paid
-   * expedite) and must never be parsed for routing decisions.
    */
   private async determinePriority(omsOrder: typeof omsOrders.$inferSelect): Promise<number> {
-    // 1. Shipping Service Level Base — higher base = picked sooner
-    const baseByLevel: Record<string, number> = {
-      standard: 100,
-      expedited: 300,
-      overnight: 500,
-    };
-    const level = ((omsOrder as any).shippingServiceLevel as string | null) || "standard";
-    const base = baseByLevel[level] ?? 100;
+    // 1. Shipping Speed Base — higher base = picked sooner
+    let base = 100; // Standard shipping
+    if (omsOrder.shippingMethod) {
+      const shippingStr = omsOrder.shippingMethod.toLowerCase();
+      if (
+        shippingStr.includes("overnight") ||
+        shippingStr.includes("next day")
+      ) {
+        base = 500; // Overnight: very urgent
+      } else if (
+        shippingStr.includes("express") ||
+        shippingStr.includes("2-day") ||
+        shippingStr.includes("priority")
+      ) {
+        base = 300; // Express: elevated
+      }
+    }
 
     // 2. Dynamic Tier Modifier from Hub's Plans Table (additive boost)
     let modifier = 0; // Default: no membership boost

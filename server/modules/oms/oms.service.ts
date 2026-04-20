@@ -34,7 +34,6 @@ export interface OrderData {
   shipToCountry?: string;
   shippingMethod?: string | null;
   shippingMethodCode?: string | null;
-  shippingServiceLevel?: "standard" | "expedited" | "overnight";
   subtotalCents?: number;
   shippingCents?: number;
   taxCents?: number;
@@ -124,7 +123,6 @@ export function createOmsService(db: any, reservationService?: any) {
         tags: data.tags ? JSON.stringify(data.tags) : null,
         shippingMethod: data.shippingMethod || null,
         shippingMethodCode: data.shippingMethodCode || null,
-        shippingServiceLevel: data.shippingServiceLevel || "standard",
         orderedAt: data.orderedAt,
       } satisfies InsertOmsOrder)
       .onConflictDoNothing({ target: [omsOrders.channelId, omsOrders.externalOrderId] })

@@ -24,12 +24,6 @@ export type ExceptionResolution = typeof exceptionResolutionEnum[number];
 export const orderPriorityEnum = ["rush", "high", "normal"] as const;
 export type OrderPriority = typeof orderPriorityEnum[number];
 
-// Shipping service level — business fulfillment intent, independent of
-// customer-facing label text or carrier service class. This is the field
-// the WMS priority scorer reads. Keep in sync with migration 0552.
-export const shippingServiceLevelEnum = ["standard", "expedited", "overnight"] as const;
-export type ShippingServiceLevel = typeof shippingServiceLevelEnum[number];
-
 // Item status during picking
 export const itemStatusEnum = ["pending", "in_progress", "completed", "short"] as const;
 export type ItemStatus = typeof itemStatusEnum[number];
@@ -106,7 +100,6 @@ export const orders = wmsSchema.table("orders", {
   // ===== WAREHOUSE OPERATIONS =====
   warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }), // Which warehouse fulfills this order
   priority: integer("priority").notNull().default(100), // Numerical priority: higher is better
-  shippingServiceLevel: varchar("shipping_service_level", { length: 20 }).notNull().default("standard"), // normalized fulfillment intent: standard | expedited | overnight
   warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
   heldAt: timestamp("held_at"),

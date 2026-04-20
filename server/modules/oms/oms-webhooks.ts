@@ -148,10 +148,6 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     shipToCountry: shipping.country_code || shipping.country,
     shippingMethod: shopifyOrder.shipping_lines?.[0]?.title || null,
     shippingMethodCode: shopifyOrder.shipping_lines?.[0]?.code || null,
-    // Normalize to business service level. Today Card Shellz only offers
-    // "standard" fulfillment. When expedited/overnight tiers are added,
-    // map from shipping_lines[0].code here.
-    shippingServiceLevel: "standard" as const,
     subtotalCents: dollarsToCents(shopifyOrder.subtotal_price),
     shippingCents: (shopifyOrder.shipping_lines || []).reduce(
       (sum: number, s: any) => sum + dollarsToCents(s.price), 0
