@@ -3012,7 +3012,8 @@ export default function Picking() {
                                 {" · "}P={order.priority}
                                 {" · "}ship={order.shippingServiceLevel || "std"}
                                 {" · "}plan={order.memberPlanName || "none"}
-                                {(order as any).sortRank && <>{" · "}rank={(order as any).sortRank.slice(0, 10)}…</>}
+                                {" · "}age={parseAgeToMinutes(order.age)}m
+                                {(order as any).sortRank && <>{" · "}rank={(order as any).sortRank}</>}
                               </div>
                             )}
                             {/* Admin action buttons (Bump / Normal / Hold / Release) — kept inline */}
