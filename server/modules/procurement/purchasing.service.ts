@@ -11,8 +11,17 @@
  * - Reorder-to-PO generation
  */
 
-import { eq } from "drizzle-orm";
-import { inboundShipmentLines, landedCostSnapshots, vendorInvoiceLines } from "@shared/schema";
+import { eq, sql } from "drizzle-orm";
+import {
+  inboundShipmentLines,
+  landedCostSnapshots,
+  vendorInvoiceLines,
+  purchaseOrders as purchaseOrdersTable,
+  purchaseOrderLines as purchaseOrderLinesTable,
+  poStatusHistory as poStatusHistoryTable,
+  poEvents as poEventsTable,
+  warehouseSettings as warehouseSettingsTable,
+} from "@shared/schema";
 import { Decimal } from "decimal.js";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
@@ -1051,7 +1060,656 @@ export function createPurchasingService(db: any, storage: Storage) {
     return createdPOs;
   }
 
-  // ── ON-ORDER QUERY ──────────────────────────────────────────────
+  // ── PROCUREMENT SETTINGS (Spec A) ───────────────────────────────────────
+  //
+  // These live on inventory.warehouse_settings (DEFAULT row) per spec §12.
+  // Whitelisted here to prevent arbitrary key writes from the PATCH endpoint.
+  // Only `requireApproval` and `autoSendOnApprove` affect Spec A directly;
+  // the remaining keys are scaffolded for Specs B and C.
+
+  const PROCUREMENT_SETTING_KEYS = [
+    "requireApproval",
+    "autoSendOnApprove",
+    "requireAcknowledgeBeforeReceive",
+    "hideIncotermsDomestic",
+    "enableShipmentTracking",
+    "autoPutawayLocation",
+    "autoCloseOnReconcile",
+    "oneClickReceiveStart",
+    "useNewPoEditor",
+  ] as const;
+  type ProcurementSettingKey = typeof PROCUREMENT_SETTING_KEYS[number];
+  const PROCUREMENT_SETTING_KEY_SET = new Set<string>(PROCUREMENT_SETTING_KEYS);
+
+  // Defaults mirror the NOT NULL DEFAULT clauses in migration 0557. Returned
+  // when no DEFAULT row exists yet (new install, test DB).
+  const PROCUREMENT_SETTING_DEFAULTS: Record<ProcurementSettingKey, boolean> = {
+    requireApproval: false,
+    autoSendOnApprove: true,
+    requireAcknowledgeBeforeReceive: false,
+    hideIncotermsDomestic: true,
+    enableShipmentTracking: true,
+    autoPutawayLocation: true,
+    autoCloseOnReconcile: true,
+    oneClickReceiveStart: true,
+    useNewPoEditor: false,
+  };
+
+  async function getProcurementSettings(): Promise<Record<ProcurementSettingKey, boolean>> {
+    const rows = await db
+      .select({
+        requireApproval: warehouseSettingsTable.requireApproval,
+        autoSendOnApprove: warehouseSettingsTable.autoSendOnApprove,
+        requireAcknowledgeBeforeReceive: warehouseSettingsTable.requireAcknowledgeBeforeReceive,
+        hideIncotermsDomestic: warehouseSettingsTable.hideIncotermsDomestic,
+        enableShipmentTracking: warehouseSettingsTable.enableShipmentTracking,
+        autoPutawayLocation: warehouseSettingsTable.autoPutawayLocation,
+        autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
+        oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
+        useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
+      })
+      .from(warehouseSettingsTable)
+      .where(eq(warehouseSettingsTable.warehouseCode, "DEFAULT"))
+      .limit(1);
+
+    if (rows.length === 0) {
+      // Fallback: first row. Covers edge cases where no DEFAULT code exists.
+      const fallback = await db
+        .select({
+          requireApproval: warehouseSettingsTable.requireApproval,
+          autoSendOnApprove: warehouseSettingsTable.autoSendOnApprove,
+          requireAcknowledgeBeforeReceive: warehouseSettingsTable.requireAcknowledgeBeforeReceive,
+          hideIncotermsDomestic: warehouseSettingsTable.hideIncotermsDomestic,
+          enableShipmentTracking: warehouseSettingsTable.enableShipmentTracking,
+          autoPutawayLocation: warehouseSettingsTable.autoPutawayLocation,
+          autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
+          oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
+          useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
+        })
+        .from(warehouseSettingsTable)
+        .limit(1);
+      if (fallback.length === 0) return { ...PROCUREMENT_SETTING_DEFAULTS };
+      return fallback[0] as Record<ProcurementSettingKey, boolean>;
+    }
+    return rows[0] as Record<ProcurementSettingKey, boolean>;
+  }
+
+  async function updateProcurementSetting(
+    key: string,
+    value: boolean,
+    userId?: string,
+  ): Promise<Record<ProcurementSettingKey, boolean>> {
+    if (!PROCUREMENT_SETTING_KEY_SET.has(key)) {
+      throw new PurchasingError(`Unknown procurement setting: ${key}`, 400);
+    }
+    if (typeof value !== "boolean") {
+      throw new PurchasingError(`Procurement setting '${key}' must be a boolean`, 400);
+    }
+    // Drizzle column names match the schema keys. Use a dynamic set object.
+    const patch: Record<string, any> = { [key]: value, updatedAt: new Date() };
+    const result = await db
+      .update(warehouseSettingsTable)
+      .set(patch)
+      .where(eq(warehouseSettingsTable.warehouseCode, "DEFAULT"))
+      .returning();
+    // If no DEFAULT row yet, apply to first row.
+    if (result.length === 0) {
+      await db
+        .update(warehouseSettingsTable)
+        .set(patch);
+    }
+    console.log(`[Purchasing] procurement setting "${key}" set to ${value} by ${userId ?? "system"}`);
+    return getProcurementSettings();
+  }
+
+  // ── PO EVENT STREAM (Spec A) ─────────────────────────────────────────────
+  //
+  // Append-only audit stream. Rule #8 (Auditability): every event captures
+  // actor (user_id or 'system:auto') and timestamp. Before/after state goes
+  // in payload when meaningful.
+
+  function resolveActor(userId: string | null | undefined): { actorType: "user" | "system"; actorId: string } {
+    if (userId && userId.length > 0) {
+      return { actorType: "user", actorId: userId };
+    }
+    return { actorType: "system", actorId: "system:auto" };
+  }
+
+  // Emit outside of a caller-owned transaction. Prefer the txn variant inside
+  // create/send flows so the event lands atomically with the state change.
+  async function emitPoEvent(
+    poId: number,
+    eventType: string,
+    userId: string | null | undefined,
+    payload?: Record<string, unknown>,
+  ): Promise<void> {
+    const { actorType, actorId } = resolveActor(userId);
+    await db.insert(poEventsTable).values({
+      poId,
+      eventType,
+      actorType,
+      actorId,
+      payloadJson: payload ?? null,
+    });
+  }
+
+  async function emitPoEventTx(
+    tx: any,
+    poId: number,
+    eventType: string,
+    userId: string | null | undefined,
+    payload?: Record<string, unknown>,
+  ): Promise<void> {
+    const { actorType, actorId } = resolveActor(userId);
+    await tx.insert(poEventsTable).values({
+      poId,
+      eventType,
+      actorType,
+      actorId,
+      payloadJson: payload ?? null,
+    });
+  }
+
+  // ── NEW INLINE-CREATE FLOW (Spec A) ───────────────────────────────────
+  //
+  // Replaces the two-step "createPO" + "addBulkLines" flow with a single
+  // transactional create-with-lines. Rule #3 (Data Integrity): all money
+  // arrives in integer cents, validated via zod-style checks at the boundary.
+  // Rule #7 (DB Discipline): header + lines + status history + po_events are
+  // inserted in one transaction so a partial row can never leak.
+
+  type CreatePurchaseOrderWithLinesInput = {
+    vendorId: number;
+    warehouseId?: number;
+    poType?: string;
+    priority?: string;
+    expectedDeliveryDate?: Date | null;
+    incoterms?: string | null;
+    vendorNotes?: string | null;
+    internalNotes?: string | null;
+    lines: Array<{
+      productVariantId: number;
+      orderQty: number;
+      unitCostCents: number;
+      vendorProductId?: number | null;
+      description?: string | null;
+    }>;
+  };
+
+  function validateCreateWithLinesInput(input: CreatePurchaseOrderWithLinesInput): void {
+    if (!input || typeof input !== "object") {
+      throw new PurchasingError("Request body is required", 400);
+    }
+    if (!Number.isInteger(input.vendorId) || input.vendorId <= 0) {
+      throw new PurchasingError("vendor_id is required", 400);
+    }
+    if (!Array.isArray(input.lines) || input.lines.length === 0) {
+      throw new PurchasingError("At least one line is required", 400);
+    }
+    for (const [idx, line] of input.lines.entries()) {
+      const label = `lines[${idx}]`;
+      if (!line || typeof line !== "object") {
+        throw new PurchasingError(`${label} is invalid`, 400);
+      }
+      if (!Number.isInteger(line.productVariantId) || line.productVariantId <= 0) {
+        throw new PurchasingError(`${label}.product_variant_id is required`, 400);
+      }
+      if (!Number.isInteger(line.orderQty) || line.orderQty <= 0) {
+        throw new PurchasingError(`${label}.quantity_ordered must be a positive integer`, 400);
+      }
+      if (!Number.isInteger(line.unitCostCents) || line.unitCostCents < 0) {
+        throw new PurchasingError(`${label}.unit_cost_cents must be a non-negative integer`, 400);
+      }
+    }
+  }
+
+  async function createPurchaseOrderWithLines(
+    input: CreatePurchaseOrderWithLinesInput,
+    userId?: string,
+  ): Promise<any> {
+    validateCreateWithLinesInput(input);
+
+    const vendor = await storage.getVendorById(input.vendorId);
+    if (!vendor) throw new PurchasingError("Vendor not found", 404);
+
+    // Resolve product + variant info up-front (outside the txn) so we can
+    // cache SKU + product name on each line and fail fast on missing refs.
+    const resolvedLines = await Promise.all(
+      input.lines.map(async (line) => {
+        const variant = await storage.getProductVariantById(line.productVariantId);
+        if (!variant) {
+          throw new PurchasingError(`Product variant ${line.productVariantId} not found`, 404);
+        }
+        const product = await storage.getProductById(variant.productId);
+        if (!product) {
+          throw new PurchasingError(`Product ${variant.productId} not found`, 404);
+        }
+        const costs = calculateLineCosts({
+          orderQty: line.orderQty,
+          unitCostCents: line.unitCostCents,
+        });
+        return { line, variant, product, costs };
+      }),
+    );
+
+    const poNumber = await storage.generatePoNumber();
+
+    const subtotalCents = resolvedLines.reduce(
+      (sum, r) => sum + BigInt(r.costs.lineTotalCents),
+      BigInt(0),
+    );
+
+    // Single transaction: header + lines + status history + po_events['created']
+    const created = await db.transaction(async (tx: any) => {
+      const [header] = await tx
+        .insert(purchaseOrdersTable)
+        .values({
+          poNumber,
+          vendorId: input.vendorId,
+          warehouseId: input.warehouseId ?? null,
+          status: "draft",
+          poType: input.poType ?? "standard",
+          priority: input.priority ?? "normal",
+          expectedDeliveryDate: input.expectedDeliveryDate ?? null,
+          incoterms: input.incoterms ?? null,
+          vendorNotes: input.vendorNotes ?? null,
+          internalNotes: input.internalNotes ?? null,
+          currency: vendor.currency || "USD",
+          paymentTermsDays: vendor.paymentTermsDays,
+          paymentTermsType: vendor.paymentTermsType,
+          shipFromAddress: vendor.shipFromAddress,
+          subtotalCents: Number(subtotalCents),
+          totalCents: Number(subtotalCents), // no header discount/tax/shipping on inline create
+          lineCount: resolvedLines.length,
+          createdBy: userId ?? null,
+          updatedBy: userId ?? null,
+        })
+        .returning();
+
+      const lineRows = resolvedLines.map((r, idx) => ({
+        purchaseOrderId: header.id,
+        lineNumber: idx + 1,
+        productId: r.variant.productId,
+        productVariantId: r.variant.id,
+        vendorProductId: r.line.vendorProductId ?? null,
+        sku: r.variant.sku,
+        productName: r.product.name,
+        description: r.line.description ?? null,
+        unitOfMeasure: r.variant.name?.split(" ")[0]?.toLowerCase() ?? "each",
+        unitsPerUom: r.variant.unitsPerVariant || 1,
+        orderQty: r.line.orderQty,
+        unitCostCents: r.line.unitCostCents,
+        discountCents: r.costs.discountCents,
+        taxCents: r.costs.taxCents,
+        lineTotalCents: r.costs.lineTotalCents,
+        status: "open" as const,
+      }));
+      await tx.insert(purchaseOrderLinesTable).values(lineRows);
+
+      // Status history: creation row (from NULL -> 'draft').
+      await tx.insert(poStatusHistoryTable).values({
+        purchaseOrderId: header.id,
+        fromStatus: null,
+        toStatus: "draft",
+        changedBy: userId ?? null,
+        changeNotes: "PO created (inline)",
+      });
+
+      // Event stream.
+      await emitPoEventTx(tx, header.id, "created", userId, {
+        source: "inline_editor",
+        line_count: resolvedLines.length,
+        subtotal_cents: Number(subtotalCents),
+      });
+
+      return header;
+    });
+
+    return created;
+  }
+
+  // ── NEW SEND FLOW (Spec A) ───────────────────────────────────────────────
+  //
+  // Replaces Submit -> Approve -> Send with a single call that honors the
+  // current procurement settings:
+  //  - require_approval=true AND tier matches on total  → pending_approval
+  //  - else  → cascade draft→approved→sent in one transaction
+  //
+  // PDF is STUBBED. Returning { pdf_placeholder: true, reason } keeps the
+  // wire contract stable for when real generation lands.
+
+  type SendPurchaseOrderResult = {
+    po: any;
+    status: string;
+    pdf: { pdf_placeholder: true; reason: string } | null;
+    pendingApproval: boolean;
+  };
+
+  async function sendPurchaseOrder(
+    poId: number,
+    userId?: string,
+  ): Promise<SendPurchaseOrderResult> {
+    const po = await storage.getPurchaseOrderById(poId);
+    if (!po) throw new PurchasingError("Purchase order not found", 404);
+    if (po.status !== "draft" && po.status !== "approved") {
+      throw new PurchasingError(
+        `Cannot send PO in '${po.status}' status (must be draft or approved)`,
+        400,
+      );
+    }
+
+    // Validate at least one active line.
+    const lines = await storage.getPurchaseOrderLines(poId);
+    const activeLines = lines.filter((l: any) => l.status !== "cancelled" && l.orderQty > 0);
+    if (activeLines.length === 0) {
+      throw new PurchasingError("PO must have at least one line with quantity > 0", 400);
+    }
+
+    // Refresh totals before the approval check.
+    await recalculateTotals(poId, userId);
+    const fresh = await storage.getPurchaseOrderById(poId);
+    const totalCents = Number(fresh.totalCents || 0);
+
+    const settings = await getProcurementSettings();
+
+    // Approval gate. A matching tier + require_approval routes through
+    // pending_approval and does NOT generate a PDF.
+    if (settings.requireApproval && po.status === "draft") {
+      const tier = await storage.getMatchingApprovalTier(totalCents);
+      if (tier) {
+        const updated = await db.transaction(async (tx: any) => {
+          const [row] = await tx
+            .update(purchaseOrdersTable)
+            .set({
+              status: "pending_approval",
+              approvalTierId: tier.id,
+              updatedBy: userId ?? null,
+              updatedAt: new Date(),
+            })
+            .where(eq(purchaseOrdersTable.id, poId))
+            .returning();
+          await tx.insert(poStatusHistoryTable).values({
+            purchaseOrderId: poId,
+            fromStatus: po.status,
+            toStatus: "pending_approval",
+            changedBy: userId ?? null,
+            changeNotes: `Submitted for approval (tier: ${tier.tierName})`,
+          });
+          await emitPoEventTx(tx, poId, "submitted", userId, {
+            tier_id: tier.id,
+            tier_name: tier.tierName,
+            total_cents: totalCents,
+          });
+          return row;
+        });
+        return {
+          po: updated,
+          status: "pending_approval",
+          pdf: null,
+          pendingApproval: true,
+        };
+      }
+    }
+
+    // Cascade draft → approved → sent atomically.
+    const updated = await db.transaction(async (tx: any) => {
+      let currentStatus = po.status;
+      if (currentStatus === "draft") {
+        await tx
+          .update(purchaseOrdersTable)
+          .set({
+            status: "approved",
+            approvedBy: userId ?? null,
+            approvedAt: new Date(),
+            approvalNotes: settings.requireApproval
+              ? "Auto-approved (no matching tier)"
+              : "Auto-approved (approval not required)",
+            updatedBy: userId ?? null,
+            updatedAt: new Date(),
+          })
+          .where(eq(purchaseOrdersTable.id, poId));
+        await tx.insert(poStatusHistoryTable).values({
+          purchaseOrderId: poId,
+          fromStatus: currentStatus,
+          toStatus: "approved",
+          changedBy: userId ?? null,
+          changeNotes: settings.requireApproval
+            ? "Auto-approved (no matching tier)"
+            : "Auto-approved (approval not required)",
+        });
+        await emitPoEventTx(tx, poId, "approved", userId, {
+          auto: true,
+          require_approval: settings.requireApproval,
+          total_cents: totalCents,
+        });
+        currentStatus = "approved";
+      }
+
+      const [row] = await tx
+        .update(purchaseOrdersTable)
+        .set({
+          status: "sent",
+          orderDate: new Date(),
+          sentToVendorAt: new Date(),
+          updatedBy: userId ?? null,
+          updatedAt: new Date(),
+        })
+        .where(eq(purchaseOrdersTable.id, poId))
+        .returning();
+      await tx.insert(poStatusHistoryTable).values({
+        purchaseOrderId: poId,
+        fromStatus: currentStatus,
+        toStatus: "sent",
+        changedBy: userId ?? null,
+        changeNotes: "Sent to vendor (PDF placeholder)",
+      });
+      await emitPoEventTx(tx, poId, "sent_to_vendor", userId, {
+        method: "pdf_placeholder",
+        pdf_placeholder: true,
+      });
+      return row;
+    });
+
+    // PDF STUB. Do not generate a real PDF. The real generator will land in a
+    // later pass; callers should branch on `pdf.pdf_placeholder`.
+    return {
+      po: updated,
+      status: "sent",
+      pdf: {
+        pdf_placeholder: true,
+        reason: "PDF generation not yet implemented",
+      },
+      pendingApproval: false,
+    };
+  }
+
+  // ── DUPLICATE (Spec A) ──────────────────────────────────────────────────
+  //
+  // Duplicate an existing PO's lines into a fresh draft. Per spec §11.4 the
+  // default behavior is to refresh unit cost from the current vendor catalog
+  // when one exists; otherwise we fall back to the source line's cost.
+
+  async function duplicatePurchaseOrder(
+    sourceId: number,
+    overrides: { vendorId?: number; expectedDeliveryDate?: Date | null } | undefined,
+    userId?: string,
+  ): Promise<any> {
+    const source = await storage.getPurchaseOrderById(sourceId);
+    if (!source) throw new PurchasingError("Source purchase order not found", 404);
+    const sourceLines = await storage.getPurchaseOrderLines(sourceId);
+    if (sourceLines.length === 0) {
+      throw new PurchasingError("Source PO has no lines to duplicate", 400);
+    }
+
+    const targetVendorId = overrides?.vendorId ?? source.vendorId;
+
+    // Refresh costs from the current vendor catalog when available.
+    const dupLines: CreatePurchaseOrderWithLinesInput["lines"] = [];
+    for (const src of sourceLines) {
+      if (src.status === "cancelled") continue;
+      let unitCostCents: number = Number(src.unitCostCents || 0);
+      let vendorProductId: number | null = null;
+      try {
+        const vp = await storage.getPreferredVendorProduct(src.productId, src.productVariantId);
+        if (vp && vp.vendorId === targetVendorId && typeof vp.unitCostCents === "number") {
+          unitCostCents = vp.unitCostCents;
+          vendorProductId = vp.id ?? null;
+        }
+      } catch {
+        // Non-fatal: fall back to source cost.
+      }
+      dupLines.push({
+        productVariantId: src.productVariantId,
+        orderQty: src.orderQty,
+        unitCostCents,
+        vendorProductId,
+        description: src.description ?? null,
+      });
+    }
+
+    if (dupLines.length === 0) {
+      throw new PurchasingError("Source PO has no active lines to duplicate", 400);
+    }
+
+    const created = await createPurchaseOrderWithLines(
+      {
+        vendorId: targetVendorId,
+        poType: source.poType ?? "standard",
+        priority: source.priority ?? "normal",
+        expectedDeliveryDate: overrides?.expectedDeliveryDate ?? null,
+        incoterms: source.incoterms ?? null,
+        vendorNotes: source.vendorNotes ?? null,
+        internalNotes: source.internalNotes ?? null,
+        lines: dupLines,
+      },
+      userId,
+    );
+
+    await emitPoEvent(created.id, "duplicated_from", userId, {
+      source_po_id: source.id,
+      source_po_number: source.poNumber,
+      line_count: dupLines.length,
+    });
+
+    return created;
+  }
+
+  // ── NEW-PO PRELOAD (Spec A §10.1) ───────────────────────────────────
+  //
+  // Returns vendor + suggested lines in one round trip so the editor page
+  // can render without a cascade of follow-up fetches.
+
+  type PreloadLine = {
+    productVariantId: number;
+    productName: string;
+    sku: string | null;
+    variantDescription: string | null;
+    uomLabel: string | null;
+    suggestedQty: number;
+    unitCostCents: number;
+    catalogSource: "vendor_catalog" | "product_default" | "duplicate" | "manual";
+  };
+
+  async function getNewPoPreload(params: {
+    vendorId?: number;
+    variantIds?: number[];
+    duplicateFrom?: number;
+  }): Promise<{
+    vendor: any | null;
+    lines: PreloadLine[];
+    sourcePo: { poNumber: string; note: string } | null;
+  }> {
+    const { vendorId, variantIds, duplicateFrom } = params;
+
+    // Duplicate path takes precedence: use source PO's vendor + lines.
+    if (duplicateFrom !== undefined) {
+      const source = await storage.getPurchaseOrderById(duplicateFrom);
+      if (!source) throw new PurchasingError("Source purchase order not found", 404);
+      const [vendor, srcLines] = await Promise.all([
+        storage.getVendorById(source.vendorId),
+        storage.getPurchaseOrderLines(duplicateFrom),
+      ]);
+      const lines: PreloadLine[] = [];
+      for (const src of srcLines) {
+        if (src.status === "cancelled") continue;
+        let unitCostCents: number = Number(src.unitCostCents || 0);
+        let catalogSource: PreloadLine["catalogSource"] = "duplicate";
+        try {
+          const vp = await storage.getPreferredVendorProduct(src.productId, src.productVariantId);
+          if (vp && vp.vendorId === source.vendorId && typeof vp.unitCostCents === "number") {
+            unitCostCents = vp.unitCostCents;
+            catalogSource = "vendor_catalog";
+          }
+        } catch {
+          // non-fatal
+        }
+        lines.push({
+          productVariantId: src.productVariantId,
+          productName: src.productName ?? "",
+          sku: src.sku ?? null,
+          variantDescription: null,
+          uomLabel: src.unitOfMeasure ?? null,
+          suggestedQty: src.orderQty,
+          unitCostCents,
+          catalogSource,
+        });
+      }
+      return {
+        vendor: vendor ?? null,
+        lines,
+        sourcePo: {
+          poNumber: source.poNumber,
+          note: `Duplicated from ${source.poNumber}`,
+        },
+      };
+    }
+
+    const vendor = vendorId ? await storage.getVendorById(vendorId) : null;
+
+    const lines: PreloadLine[] = [];
+    if (Array.isArray(variantIds) && variantIds.length > 0) {
+      for (const vid of variantIds) {
+        if (!Number.isInteger(vid) || vid <= 0) continue;
+        const variant = await storage.getProductVariantById(vid);
+        if (!variant) continue;
+        const product = await storage.getProductById(variant.productId);
+        if (!product) continue;
+        // Default cost: vendor catalog wins; else variant.standardCostCents;
+        // else variant.lastCostCents; else 0 (user will fill in manually).
+        let unitCostCents: number = Number(
+          variant.standardCostCents ?? variant.lastCostCents ?? 0,
+        );
+        let catalogSource: PreloadLine["catalogSource"] = "product_default";
+        if (vendorId) {
+          try {
+            const vp = await storage.getPreferredVendorProduct(product.id, variant.id);
+            if (vp && vp.vendorId === vendorId && typeof vp.unitCostCents === "number") {
+              unitCostCents = vp.unitCostCents;
+              catalogSource = "vendor_catalog";
+            }
+          } catch {
+            // non-fatal
+          }
+        }
+        lines.push({
+          productVariantId: variant.id,
+          productName: product.name ?? "",
+          sku: variant.sku ?? null,
+          variantDescription: variant.name ?? null,
+          uomLabel: variant.name?.split(" ")[0]?.toLowerCase() ?? null,
+          // No reorder_quantity column today. Default to 1 so the row is
+          // usable; users edit qty in the lines editor.
+          suggestedQty: 1,
+          unitCostCents,
+          catalogSource,
+        });
+      }
+    }
+
+    return { vendor, lines, sourcePo: null };
+  }
+
+  // ── ON-ORDER QUERY ──────────────────────────────────────
 
   async function getOnOrderQty(productVariantId: number): Promise<{
     onOrderQty: number;
@@ -1147,5 +1805,14 @@ export function createPurchasingService(db: any, storage: Storage) {
     createVendorProduct: (data: any) => (storage as any).createVendorProduct(data),
     updateVendorProduct: (id: number, updates: any) => (storage as any).updateVendorProduct(id, updates),
     deleteVendorProduct: (id: number) => (storage as any).deleteVendorProduct(id),
+
+    // Spec A: inline create, one-click send, duplicate, preload, settings.
+    createPurchaseOrderWithLines,
+    sendPurchaseOrder,
+    duplicatePurchaseOrder,
+    getNewPoPreload,
+    getProcurementSettings,
+    updateProcurementSetting,
+    emitPoEvent,
   };
 }
