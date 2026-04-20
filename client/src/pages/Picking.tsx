@@ -2984,9 +2984,22 @@ export default function Picking() {
                                 />
                               </span>
                             </div>
-                            <div className="text-xs text-muted-foreground truncate">
-                              {order.customer}
+                            <div className="text-xs text-muted-foreground truncate flex items-center gap-2">
+                              <span>{order.customer}</span>
+                              {order.channelProvider && (
+                                <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0", getChannelBadgeStyle(order.channelProvider).className)}>
+                                  {getChannelBadgeStyle(order.channelProvider).label}
+                                </Badge>
+                              )}
                             </div>
+                            {isAdminOrLead && (
+                              <div className="text-[9px] text-muted-foreground/70 font-mono mt-0.5">
+                                P={order.priority}
+                                {order.shippingServiceLevel && order.shippingServiceLevel !== "standard" && ` · ship=${order.shippingServiceLevel}`}
+                                {order.memberPlanName && ` · plan=${order.memberPlanName}`}
+                                {!order.memberPlanName && " · no-member"}
+                              </div>
+                            )}
                             {/* Admin action buttons (Bump / Normal / Hold / Release) — kept inline */}
                             {(isAdminOrLead || order.onHold) && (
                               <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2 mt-0.5">
@@ -3071,21 +3084,14 @@ export default function Picking() {
                         )}
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
-                        {order.channelProvider && !order.isCombinedGroup && (
+                        {/* Channel pill for combined groups only — singles show it on row 2 */}
+                        {order.channelProvider && order.isCombinedGroup && (
                           <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
                             {getChannelBadgeStyle(order.channelProvider).label}
                           </Badge>
                         )}
                         {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
                         {order.priority >= 9999 && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">🔼 BUMPED</Badge>}
-                        {!order.onHold && order.priority < 9999 && (
-                          <PriorityBadges
-                            shippingServiceLevel={order.shippingServiceLevel}
-                            memberPlanName={order.memberPlanName}
-                            memberPlanColor={order.memberPlanColor}
-                            size="xs"
-                          />
-                        )}
                         {order.status === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}
