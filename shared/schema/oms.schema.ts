@@ -52,8 +52,6 @@ export const omsOrders = omsSchema.table("oms_orders", {
   shippingMethod: varchar("shipping_method", { length: 200 }), // free-form customer-facing label (do NOT use for routing)
   shippingMethodCode: varchar("shipping_method_code", { length: 100 }), // platform-provided code (stable, still not business intent)
   shippingServiceLevel: varchar("shipping_service_level", { length: 20 }).notNull().default("standard"), // normalized fulfillment intent: standard | expedited | overnight
-  memberPlanName: varchar("member_plan_name", { length: 20 }),   // stamped plan name for picker badge (e.g. '.club', '.ops')
-  memberPlanColor: varchar("member_plan_color", { length: 20 }), // stamped plan primary_color for picker badge
 
   // Totals (cents)
   subtotalCents: bigint("subtotal_cents", { mode: "number" }).notNull().default(0),

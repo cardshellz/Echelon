@@ -107,8 +107,6 @@ export const orders = wmsSchema.table("orders", {
   warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }), // Which warehouse fulfills this order
   priority: integer("priority").notNull().default(100), // Numerical priority: higher is better
   shippingServiceLevel: varchar("shipping_service_level", { length: 20 }).notNull().default("standard"), // normalized fulfillment intent: standard | expedited | overnight
-  memberPlanName: varchar("member_plan_name", { length: 20 }),   // stamped plan name for picker badge
-  memberPlanColor: varchar("member_plan_color", { length: 20 }), // stamped plan primary_color for picker badge
   warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
   heldAt: timestamp("held_at"),
