@@ -1,4 +1,5 @@
 import { eq, and, sql, inArray } from "drizzle-orm";
+import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
 import {
   channelFeeds,
   channelConnections,
@@ -117,15 +118,17 @@ class ChannelSyncService {
     return this._syncEnabled!;
   }
 
-  /** Reload the kill switch from warehouse_settings */
+  /**
+   * Reload the global kill switch from the DEFAULT warehouse_settings row.
+   * Previously read via LIMIT 1 — picked an arbitrary row, which was a
+   * correctness bug once multiple warehouses existed. The DEFAULT row
+   * is now the global template; per-warehouse overrides happen at
+   * push time in the orchestrator.
+   */
   async refreshSyncEnabled(): Promise<boolean> {
     try {
-      const settings = await this.db
-        .select({ channelSyncEnabled: warehouseSettings.channelSyncEnabled })
-        .from(warehouseSettings)
-        .where(eq(warehouseSettings.isActive, 1))
-        .limit(1);
-      this._syncEnabled = settings[0]?.channelSyncEnabled === 1;
+      const row = await getSettingsForWarehouse(null, this.db);
+      this._syncEnabled = (row?.channelSyncEnabled ?? 0) === 1;
     } catch {
       this._syncEnabled = false; // Fail safe: don't push if we can't read settings
     }

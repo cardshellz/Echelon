@@ -17,6 +17,7 @@ import {
   warehouseSettings,
   eq, and, inArray, isNull, desc, asc, sql,
 } from "../../../storage/base";
+import { getSettingsForWarehouse } from "../../warehouse/settings.resolver";
 
 export interface IReplenishmentStorage {
   getAllReplenTierDefaults(): Promise<ReplenTierDefault[]>;
@@ -53,8 +54,8 @@ export interface IReplenishmentStorage {
   createWarehouseSettings(data: InsertWarehouseSettings): Promise<WarehouseSettings>;
   updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>): Promise<WarehouseSettings | null>;
   deleteWarehouseSettings(id: number): Promise<boolean>;
-  getVelocityLookbackDays(): Promise<number>;
-  updateVelocityLookbackDays(days: number): Promise<void>;
+  getVelocityLookbackDays(warehouseId?: number | null): Promise<number>;
+  updateVelocityLookbackDays(days: number, warehouseId?: number | null): Promise<void>;
 }
 
 export const replenishmentMethods: IReplenishmentStorage = {
@@ -287,12 +288,27 @@ export const replenishmentMethods: IReplenishmentStorage = {
     return result.length > 0;
   },
 
-  async getVelocityLookbackDays(): Promise<number> {
-    const result = await db.execute(sql`SELECT velocity_lookback_days FROM inventory.warehouse_settings LIMIT 1`);
-    return (result.rows[0] as any)?.velocity_lookback_days ?? 14;
+  async getVelocityLookbackDays(warehouseId?: number | null): Promise<number> {
+    // Uses the shared resolver (warehouse → by code → DEFAULT). No more LIMIT 1.
+    const row = await getSettingsForWarehouse(warehouseId, db);
+    return (row?.velocityLookbackDays as number | null | undefined) ?? 14;
   },
 
-  async updateVelocityLookbackDays(days: number): Promise<void> {
-    await db.execute(sql`UPDATE warehouse_settings SET velocity_lookback_days = ${days}, updated_at = NOW()`);
+  async updateVelocityLookbackDays(days: number, warehouseId?: number | null): Promise<void> {
+    // If a warehouse is specified, update that row only. Otherwise update
+    // the DEFAULT template so everyone inherits the new value.
+    if (warehouseId != null) {
+      await db.execute(sql`
+        UPDATE inventory.warehouse_settings
+        SET velocity_lookback_days = ${days}, updated_at = NOW()
+        WHERE warehouse_id = ${warehouseId}
+      `);
+    } else {
+      await db.execute(sql`
+        UPDATE inventory.warehouse_settings
+        SET velocity_lookback_days = ${days}, updated_at = NOW()
+        WHERE warehouse_code = 'DEFAULT'
+      `);
+    }
   },
 };

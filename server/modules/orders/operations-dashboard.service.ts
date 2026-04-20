@@ -8,6 +8,7 @@
 
 import { sql, inArray } from "drizzle-orm";
 import { inventoryLevels } from "@shared/schema";
+import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
 
 // ── Minimal DB duck-type ────────────────────────────────────────────
 type DrizzleDb = {
@@ -534,9 +535,15 @@ export class OperationsDashboardService {
     const pageSize = Math.min(100, Math.max(1, params.pageSize || 50));
     const offset = (page - 1) * pageSize;
 
-    // Fetch velocity lookback days from warehouse settings
-    const wsResult = await this.db.execute(sql`SELECT velocity_lookback_days FROM inventory.warehouse_settings LIMIT 1`);
-    const lookbackDays = (wsResult.rows[0] as any)?.velocity_lookback_days ?? 14;
+    // Fetch velocity lookback days via the shared resolver (warehouse →
+    // warehouse code → DEFAULT). No more SELECT ... LIMIT 1 picking
+    // whatever row Postgres hands back first.
+    // params.warehouseId is optional — null falls through to DEFAULT.
+    const wsRow = await getSettingsForWarehouse(
+      (params as any)?.warehouseId ?? null,
+      this.db,
+    );
+    const lookbackDays = (wsRow?.velocityLookbackDays as number | null | undefined) ?? 14;
 
     const safeFilter = VALID_ACTION_FILTERS.includes(filter as any) ? filter : "all";
 
