@@ -214,10 +214,13 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   // so it can be configured per-zone (EACH/CASE/PALLET) rather than per-warehouse.
   // See warehousePickZones table below.
 
-  // Wave planning settings
+  // Wave planning settings — SCAFFOLDING, not yet consumed by any service.
+  // Kept intentionally so the data model is ready when pick waves are
+  // implemented. See docs/FUTURE_WORK.md "Pick wave management" for the
+  // implementation plan.
   maxOrdersPerWave: integer("max_orders_per_wave").default(50),
   maxItemsPerWave: integer("max_items_per_wave").default(500),
-  waveAutoRelease: integer("wave_auto_release").default(0), // Auto-release waves when full
+  waveAutoRelease: integer("wave_auto_release").default(0),
 
   // Order combining settings
   enableOrderCombining: integer("enable_order_combining").notNull().default(1), // Show combine badges to pickers

@@ -70,6 +70,37 @@ equipment, different priorities) without rewriting the picker today.
 
 # Other Future Work
 
+## Pick wave management (Step 5)
+
+**Current state**
+
+`inventory.warehouse_settings` has three columns scaffolded for a future
+wave-management feature, but nothing reads them today:
+
+| Column                 | Default | Purpose when implemented |
+|------------------------|---------|--------------------------|
+| `max_orders_per_wave`  | 50      | Cap on how many orders go into a single pick wave |
+| `max_items_per_wave`   | 500     | Cap on total item lines in a wave |
+| `wave_auto_release`    | 0       | When a wave hits capacity, auto-transition it to 'released' |
+
+Kept as scaffolding — the DB columns exist, the resolver returns values,
+admin UI can expose them whenever waves get built. No DB work needed at
+implementation time, just service + UI.
+
+**Plan when implemented**
+
+1. New `pick_waves` table (id, warehouse_id, status, released_at, etc.)
+2. `pick_tasks` get a `wave_id` FK when assigned to a wave
+3. Wave builder service:
+   - Reads `max_orders_per_wave` / `max_items_per_wave` via the shared
+     resolver for the wave's warehouse
+   - Fills waves greedily by priority
+   - If `wave_auto_release = 1`, marks the wave released when capacity
+     reached
+4. Picker UI claims a wave, not individual orders
+5. Extends naturally from the pick zones infrastructure — a wave is just
+   a collection of (order, zone) pick tasks that belong together
+
 ## Per-order sync failure tracking
 
 **Problem**
