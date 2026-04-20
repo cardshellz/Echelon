@@ -3006,14 +3006,13 @@ export default function Picking() {
                               )}
                             </div>
                             {isAdminOrLead && (
-                              <div className="text-[9px] text-muted-foreground/70 font-mono mt-0.5" title={(order as any).sortRank || "no sort_rank"}>
-                                hold={order.onHold ? 1 : 0}
-                                {" · "}bump={order.priority >= 9999 ? 1 : 0}
-                                {" · "}P={order.priority}
-                                {" · "}ship={order.shippingServiceLevel || "std"}
+                              <div className="text-[9px] text-muted-foreground/70 font-mono mt-0.5">
+                                ship={order.shippingServiceLevel || "std"}
                                 {" · "}plan={order.memberPlanName || "none"}
                                 {" · "}age={parseAgeToMinutes(order.age)}m
-                                {(order as any).sortRank && <>{" · "}rank={(order as any).sortRank}</>}
+                                {order.onHold && " · HOLD"}
+                                {order.priority >= 9999 && " · BUMPED"}
+                                {(order as any).sortRank && <>{" · rank="}{(order as any).sortRank}</>}
                               </div>
                             )}
                             {/* Admin action buttons (Bump / Normal / Hold / Release) — kept inline */}
