@@ -47,16 +47,28 @@ export default function Dashboard() {
 
   const triggerSyncMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/sync/trigger", { 
+      // Pulls missing Shopify orders into our DB. This is what the alert
+      // banner is actually about (orders-waiting-to-sync comes from
+      // shopify_orders rows that haven't been bridged into OMS/WMS yet).
+      const res = await fetch("/api/shopify/reconcile-orders", {
         method: "POST",
         credentials: "include",
       });
       if (!res.ok) throw new Error("Failed to trigger sync");
       return res.json();
     },
-    onSuccess: () => {
-      toast({ title: "Sync triggered", description: "Order sync has been initiated" });
+    onSuccess: (data: any) => {
+      const reconciled = data?.reconciled ?? 0;
+      const checked = data?.checked ?? 0;
+      toast({
+        title: "Sync complete",
+        description:
+          reconciled > 0
+            ? `Pulled ${reconciled} missing order(s) from Shopify (checked ${checked}).`
+            : `No missing orders found (checked ${checked}).`,
+      });
       queryClient.invalidateQueries({ queryKey: ["/api/sync/health"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
     },
     onError: (error) => {
       toast({ title: "Sync failed", description: String(error), variant: "destructive" });
