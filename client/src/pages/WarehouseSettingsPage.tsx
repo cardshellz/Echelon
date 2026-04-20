@@ -285,7 +285,10 @@ export default function WarehouseSettingsPage() {
                   onCheckedChange={(checked) => setForm({ ...form, requireScanConfirm: checked ? 1 : 0 })}
                 />
                 <div>
-                  <Label>Require scan confirmation</Label>
+                  <Label>
+                    Require scan confirmation
+                    <HintIcon text="When on, pickers must scan the item's barcode to confirm each pick. Catches wrong-SKU mistakes but adds seconds to every pick." />
+                  </Label>
                   <p className="text-xs text-muted-foreground">Force barcode scan on every pick. Safer but slower.</p>
                 </div>
               </div>
@@ -380,7 +383,10 @@ export default function WarehouseSettingsPage() {
                 </Select>
               </div>
               <div>
-                <Label>Inline replen max units</Label>
+                <Label>
+                  Inline replen max units
+                  <HintIcon text="Hybrid-mode threshold measured in individual pieces. Tasks for this many units or fewer run inline (auto-execute); larger ones queue for a human." />
+                </Label>
                 <Input
                   type="number"
                   min={0}
@@ -393,7 +399,10 @@ export default function WarehouseSettingsPage() {
                 </p>
               </div>
               <div>
-                <Label>Inline replen max cases</Label>
+                <Label>
+                  Inline replen max cases
+                  <HintIcon text="Hybrid-mode threshold measured in cases. Same idea as max units, but for replens measured by case count. Whichever limit is crossed first pushes the task to the queue." />
+                </Label>
                 <Input
                   type="number"
                   min={0}
@@ -403,7 +412,10 @@ export default function WarehouseSettingsPage() {
                 />
               </div>
               <div>
-                <Label>Urgent replen threshold (units)</Label>
+                <Label>
+                  Urgent replen threshold (units)
+                  <HintIcon text="When on-hand drops to this many units or below, the replen is marked URGENT and jumps above normal tasks. Set to 0 to disable (only stockouts trigger urgency). Try 5–10 for proactive escalation." />
+                </Label>
                 <Input
                   type="number"
                   min={0}
@@ -413,7 +425,10 @@ export default function WarehouseSettingsPage() {
                 />
               </div>
               <div>
-                <Label>Stockout priority</Label>
+                <Label>
+                  Stockout priority
+                  <HintIcon text="Priority number assigned to replen tasks triggered by an empty pick bin. Lower = higher priority. Default 1 puts these at the top of the queue so active picks don't stay blocked." />
+                </Label>
                 <Input
                   type="number"
                   min={1}
@@ -423,7 +438,10 @@ export default function WarehouseSettingsPage() {
                 />
               </div>
               <div>
-                <Label>Min/max priority</Label>
+                <Label>
+                  Min/max priority
+                  <HintIcon text="Priority number for routine replens (bin fell below its min level, but isn't empty). Default 5 sits below stockouts (1) and urgent (3) so workers clear critical stuff first." />
+                </Label>
                 <Input
                   type="number"
                   min={1}
@@ -438,12 +456,18 @@ export default function WarehouseSettingsPage() {
                   onCheckedChange={(checked) => setForm({ ...form, scheduledReplenEnabled: checked ? 1 : 0 })}
                 />
                 <div>
-                  <Label>Scheduled replen enabled</Label>
+                  <Label>
+                    Scheduled replen enabled
+                    <HintIcon text="When on, a background job pre-scans the warehouse on the interval below and queues upcoming replens before they become urgent. When off, replens are purely reactive (only on pick failure or manual trigger)." />
+                  </Label>
                   <p className="text-xs text-muted-foreground">Run the scheduled replen job on the interval below.</p>
                 </div>
               </div>
               <div>
-                <Label>Scheduled replen interval (minutes)</Label>
+                <Label>
+                  Scheduled replen interval (minutes)
+                  <HintIcon text="How often the scheduled replen scanner runs. 30 is balanced; lower values catch issues faster but put more load on the DB." />
+                </Label>
                 <Input
                   type="number"
                   min={1}
@@ -473,7 +497,10 @@ export default function WarehouseSettingsPage() {
                   onCheckedChange={(checked) => setForm({ ...form, enableOrderCombining: checked ? 1 : 0 })}
                 />
                 <div>
-                  <Label>Enable order combining for this warehouse</Label>
+                  <Label>
+                    Enable order combining for this warehouse
+                    <HintIcon text="When on, multiple orders shipping to the same address get grouped into a single pick/ship bundle. Saves picker trips and shipping cost on customers who order twice in quick succession." />
+                  </Label>
                   <p className="text-xs text-muted-foreground">
                     When off, orders in this warehouse never combine even if they share an address.
                   </p>
@@ -497,14 +524,20 @@ export default function WarehouseSettingsPage() {
                   onCheckedChange={(checked) => setForm({ ...form, channelSyncEnabled: checked ? 1 : 0 })}
                 />
                 <div>
-                  <Label>Channel sync enabled</Label>
+                  <Label>
+                    Channel sync enabled
+                    <HintIcon text="Master switch for inventory push from this warehouse to Shopify/eBay/etc. Turn off to stop pushing entirely (useful during bulk edits or troubleshooting). Pull from channels still works." />
+                  </Label>
                   <p className="text-xs text-muted-foreground">
                     Master kill-switch. When off, inventory stops pushing to this warehouse's channels.
                   </p>
                 </div>
               </div>
               <div>
-                <Label>Channel sync interval (minutes)</Label>
+                <Label>
+                  Channel sync interval (minutes)
+                  <HintIcon text="Target interval for full inventory-level pushes. The actual orchestrator runs at the app level; this is currently informational until per-warehouse scheduling is wired up." />
+                </Label>
                 <Input
                   type="number"
                   min={1}
@@ -569,7 +602,10 @@ export default function WarehouseSettingsPage() {
             </CardHeader>
             <CardContent className="grid md:grid-cols-2 gap-6">
               <div>
-                <Label>Max orders per wave</Label>
+                <Label>
+                  Max orders per wave
+                  <HintIcon text="Upper bound on how many orders a single pick wave can contain. Larger waves = more parallelism for pickers but higher stakes if anything goes wrong." />
+                </Label>
                 <Input
                   type="number"
                   min={1}
@@ -579,7 +615,10 @@ export default function WarehouseSettingsPage() {
                 />
               </div>
               <div>
-                <Label>Max items per wave</Label>
+                <Label>
+                  Max items per wave
+                  <HintIcon text="Upper bound on total line items across all orders in a single wave. Prevents one massive order from monopolizing a wave." />
+                </Label>
                 <Input
                   type="number"
                   min={1}
@@ -594,7 +633,10 @@ export default function WarehouseSettingsPage() {
                   onCheckedChange={(checked) => setForm({ ...form, waveAutoRelease: checked ? 1 : 0 })}
                 />
                 <div>
-                  <Label>Wave auto-release</Label>
+                  <Label>
+                    Wave auto-release
+                    <HintIcon text="When a wave hits either capacity limit, automatically transition it to 'released' so pickers can start work immediately. Off means a human has to manually release each wave." />
+                  </Label>
                   <p className="text-xs text-muted-foreground">When a wave hits capacity, auto-release to pickers.</p>
                 </div>
               </div>
