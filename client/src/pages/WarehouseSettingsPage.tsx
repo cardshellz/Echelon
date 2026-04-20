@@ -156,13 +156,20 @@ export default function WarehouseSettingsPage() {
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!form) throw new Error("No form data");
+      // Strip server-managed immutables before sending. Drizzle rejects updates
+      // that try to set id/createdAt, and they're meaningless on insert too.
+      const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...payload } =
+        form as any;
       if (current?.id) {
-        // update
-        const res = await apiRequest("PATCH", `/api/warehouse-settings/${current.id}`, form);
+        const res = await apiRequest(
+          "PATCH",
+          `/api/warehouse-settings/${current.id}`,
+          payload,
+        );
         return res.json();
       } else {
-        // create (first-time for a warehouse; inherits DEFAULT's values from the seed above)
-        const res = await apiRequest("POST", `/api/warehouse-settings`, form);
+        // First-time create for a warehouse; inherits DEFAULT's values from seed above.
+        const res = await apiRequest("POST", `/api/warehouse-settings`, payload);
         return res.json();
       }
     },
@@ -401,7 +408,10 @@ export default function WarehouseSettingsPage() {
               <div>
                 <Label>
                   Inline replen max cases
-                  <HintIcon text="Hybrid-mode threshold measured in cases. Same idea as max units, but for replens measured by case count. Whichever limit is crossed first pushes the task to the queue." />
+                  <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
+                    Coming Soon
+                  </Badge>
+                  <HintIcon text="Planned hybrid-mode threshold measured in cases (complement to the units threshold). Not yet consumed by the replen service — value saves but does nothing today." />
                 </Label>
                 <Input
                   type="number"
@@ -414,7 +424,10 @@ export default function WarehouseSettingsPage() {
               <div>
                 <Label>
                   Urgent replen threshold (units)
-                  <HintIcon text="When on-hand drops to this many units or below, the replen is marked URGENT and jumps above normal tasks. Set to 0 to disable (only stockouts trigger urgency). Try 5–10 for proactive escalation." />
+                  <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
+                    Coming Soon
+                  </Badge>
+                  <HintIcon text="Planned: threshold for escalating a replen to URGENT priority before a full stockout. Exact measurement (bin on-hand vs ATP) will be decided when the feature is wired up. Value saves but is not yet read." />
                 </Label>
                 <Input
                   type="number"
@@ -427,7 +440,10 @@ export default function WarehouseSettingsPage() {
               <div>
                 <Label>
                   Stockout priority
-                  <HintIcon text="Priority number assigned to replen tasks triggered by an empty pick bin. Lower = higher priority. Default 1 puts these at the top of the queue so active picks don't stay blocked." />
+                  <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
+                    Coming Soon
+                  </Badge>
+                  <HintIcon text="Planned priority number for stockout-triggered replens (lower = higher priority). Currently scaffolded — priority sorting in the replen queue is not yet implemented." />
                 </Label>
                 <Input
                   type="number"
@@ -440,7 +456,10 @@ export default function WarehouseSettingsPage() {
               <div>
                 <Label>
                   Min/max priority
-                  <HintIcon text="Priority number for routine replens (bin fell below its min level, but isn't empty). Default 5 sits below stockouts (1) and urgent (3) so workers clear critical stuff first." />
+                  <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
+                    Coming Soon
+                  </Badge>
+                  <HintIcon text="Planned priority number for routine min/max replens. Currently scaffolded — value saves but the replen queue doesn't yet sort by priority." />
                 </Label>
                 <Input
                   type="number"
@@ -458,7 +477,10 @@ export default function WarehouseSettingsPage() {
                 <div>
                   <Label>
                     Scheduled replen enabled
-                    <HintIcon text="When on, a background job pre-scans the warehouse on the interval below and queues upcoming replens before they become urgent. When off, replens are purely reactive (only on pick failure or manual trigger)." />
+                    <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
+                      Coming Soon
+                    </Badge>
+                    <HintIcon text="Planned: background scanner that pre-generates replens before stockouts. Not yet running — toggle saves but does nothing today." />
                   </Label>
                   <p className="text-xs text-muted-foreground">Run the scheduled replen job on the interval below.</p>
                 </div>
@@ -466,7 +488,10 @@ export default function WarehouseSettingsPage() {
               <div>
                 <Label>
                   Scheduled replen interval (minutes)
-                  <HintIcon text="How often the scheduled replen scanner runs. 30 is balanced; lower values catch issues faster but put more load on the DB." />
+                  <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
+                    Coming Soon
+                  </Badge>
+                  <HintIcon text="Planned interval for the scheduled replen scanner. Not yet consumed by any service." />
                 </Label>
                 <Input
                   type="number"
@@ -536,6 +561,9 @@ export default function WarehouseSettingsPage() {
               <div>
                 <Label>
                   Channel sync interval (minutes)
+                  <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
+                    Informational
+                  </Badge>
                   <HintIcon text="Target interval for full inventory-level pushes. The actual orchestrator runs at the app level; this is currently informational until per-warehouse scheduling is wired up." />
                 </Label>
                 <Input
