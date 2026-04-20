@@ -2919,14 +2919,30 @@ export default function Picking() {
                 <CardContent className="p-3 md:p-4">
                   <div className="flex flex-col gap-2">
                     <div className="flex items-center gap-3">
+                      {/* Rail: rank (always) + lines + units stacked */}
                       <div className={cn(
-                        "h-12 w-12 md:h-10 md:w-10 rounded-lg flex flex-col items-center justify-center shrink-0 text-center",
-                        order.onHold ? "bg-slate-200 text-slate-600" : 
-                        order.status === "completed" ? "bg-emerald-100 text-emerald-700" :
-                        order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
+                        "min-w-[58px] rounded-lg flex flex-col items-center justify-center shrink-0 text-center py-2 px-1.5 border",
+                        order.onHold ? "bg-slate-100 border-slate-200 text-slate-500" :
+                        order.status === "completed" ? "bg-emerald-50 border-emerald-100" :
+                        order.status === "in_progress" ? "bg-amber-50 border-amber-100" : "bg-slate-50 border-slate-100"
                       )}>
-                        <span className="text-base md:text-sm font-bold leading-none">{order.items.reduce((sum, i) => sum + i.qty, 0)}</span>
-                        <span className="text-[9px] leading-none mt-0.5">units</span>
+                        {!order.isCombinedGroup && sortBy === "priority" && sortDirection === "desc" && (
+                          <div className="flex items-baseline gap-1 leading-none mb-1.5">
+                            <span className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Rank</span>
+                            <span className={cn(
+                              "text-[13px] font-bold font-mono",
+                              queueIndex === 0 ? "text-orange-600" : "text-foreground"
+                            )}>#{queueIndex + 1}</span>
+                          </div>
+                        )}
+                        <div className="flex flex-col items-center gap-0.5 leading-tight">
+                          <div className="text-[10px] text-muted-foreground">
+                            <span className="font-bold text-foreground font-mono">{order.items.length}</span> {order.items.length === 1 ? "line" : "lines"}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">
+                            <span className="font-bold text-foreground font-mono">{order.items.reduce((sum, i) => sum + i.qty, 0)}</span> units
+                          </div>
+                        </div>
                       </div>
                       <div className="min-w-0 flex-1">
                         {order.isCombinedGroup && order.combinedOrders ? (
@@ -2954,31 +2970,26 @@ export default function Picking() {
                         ) : (
                           <>
                             <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
-                              {/* Pick queue rank — matches ShipStation Custom Field 1 sort */}
-                              {sortBy === "priority" && sortDirection === "desc" && (
-                                <span className="inline-flex items-center justify-center min-w-[22px] h-[18px] px-1.5 rounded bg-slate-900 text-white text-[10px] font-mono font-semibold" title="Pick queue rank">
-                                  #{queueIndex + 1}
-                                </span>
-                              )}
                               {order.orderNumber}
-                              <span className="text-xs text-muted-foreground font-normal flex items-center gap-0.5">
+                              <span className="text-xs text-muted-foreground font-normal flex items-center gap-1">
                                 <Clock size={10} /> {order.age}
+                                {order.orderDate && <><span className="opacity-40">·</span><span>{order.orderDate}</span></>}
+                              </span>
+                              <span className="ml-auto inline-flex gap-1 items-center">
+                                <PriorityBadges
+                                  shippingServiceLevel={order.shippingServiceLevel}
+                                  memberPlanName={order.memberPlanName}
+                                  memberPlanColor={order.memberPlanColor}
+                                  size="xs"
+                                />
                               </span>
                             </div>
                             <div className="text-xs text-muted-foreground truncate">
-                              {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
+                              {order.customer}
                             </div>
-                            {/* Show who is picking this order if in_progress and assigned to another user */}
-                            {order.status === "in_progress" && order.assignee && order.assignee !== pickerId && (
-                              <div className="text-[10px] text-amber-600 flex items-center gap-1 mt-0.5">
-                                <User size={10} />
-                                <span>Being picked by {order.pickerName || 'another user'}</span>
-                              </div>
-                            )}
-                            {order.orderDate && (
-                              <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2">
-                                <span>{order.orderDate}</span>
-                                {/* Admin inline Rush/Hold buttons for ready orders */}
+                            {/* Admin action buttons (Bump / Normal / Hold / Release) — kept inline */}
+                            {(isAdminOrLead || order.onHold) && (
+                              <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2 mt-0.5">
                                 {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority < 9999 && (
                                   <button
                                     className="text-red-500 hover:text-red-600 flex items-center gap-0.5 font-medium"
@@ -3042,6 +3053,13 @@ export default function Picking() {
                                     Release
                                   </button>
                                 )}
+                              </div>
+                            )}
+                            {/* Show who is picking this order if in_progress and assigned to another user */}
+                            {order.status === "in_progress" && order.assignee && order.assignee !== pickerId && (
+                              <div className="text-[10px] text-amber-600 flex items-center gap-1 mt-0.5">
+                                <User size={10} />
+                                <span>Being picked by {order.pickerName || 'another user'}</span>
                               </div>
                             )}
                             {order.status === "completed" && order.pickerName && (
