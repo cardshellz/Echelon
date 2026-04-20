@@ -45,6 +45,7 @@ import ChannelAllocation from "@/pages/ChannelAllocation";
 import ProductLines from "@/pages/ProductLines";
 import PurchaseOrders from "@/pages/PurchaseOrders";
 import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
+import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
 import PurchasingDashboard from "@/pages/PurchasingDashboard";
 import Returns from "@/pages/Returns";
 import InboundShipments from "@/pages/InboundShipments";
@@ -267,6 +268,14 @@ function Router() {
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        {/* New-PO editor routes (Spec A). MUST be registered before
+            /purchase-orders/:id so wouter does not match 'new' as an :id. */}
+        <Route path="/purchase-orders/new">
+          <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/purchase-orders/:id/edit">
+          <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/purchase-orders/:id">
           <ProtectedRoute component={PurchaseOrderDetail} allowedRoles={["admin", "lead"]} />
