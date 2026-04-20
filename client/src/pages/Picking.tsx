@@ -1402,7 +1402,13 @@ export default function Picking() {
       let result = 0;
       switch (sortBy) {
         case "priority": {
-          result = a.priority - b.priority;
+          // Use sort_rank string (the composite) — lexical compare DESC
+          // in the top-level call. Here we return ASC difference so the
+          // parent's sortDirection flip yields the same DESC result as
+          // the server's ORDER BY sort_rank DESC.
+          const aRank = (a as any).sortRank || "";
+          const bRank = (b as any).sortRank || "";
+          result = aRank < bRank ? -1 : aRank > bRank ? 1 : 0;
           break;
         }
         case "items":
@@ -2505,7 +2511,13 @@ export default function Picking() {
       let result = 0;
       switch (sortBy) {
         case "priority": {
-          result = a.priority - b.priority;
+          // Use sort_rank string (the composite) — lexical compare DESC
+          // in the top-level call. Here we return ASC difference so the
+          // parent's sortDirection flip yields the same DESC result as
+          // the server's ORDER BY sort_rank DESC.
+          const aRank = (a as any).sortRank || "";
+          const bRank = (b as any).sortRank || "";
+          result = aRank < bRank ? -1 : aRank > bRank ? 1 : 0;
           break;
         }
         case "items":
