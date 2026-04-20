@@ -9,6 +9,7 @@ import { channelsStorage } from "../channels";
 const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...channelsStorage };
 import { requirePermission, requireAuth, upload } from "../../routes/middleware";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
+import { runReconciliationNow as shopifyRunReconciliationNow } from "../orders/shopify-order-reconciliation";
 import Papa from "papaparse";
 
 export function registerInventoryRoutes(app: Express) {
@@ -2058,10 +2059,7 @@ export function registerInventoryRoutes(app: Express) {
     // --- Per-channel order reconciliation ---
     // Shopify
     try {
-      const { runReconciliationNow } = await import(
-        "../../orders/shopify-order-reconciliation"
-      );
-      const result = await runReconciliationNow();
+      const result = await shopifyRunReconciliationNow();
       response.channels.push({
         name: "Shopify",
         checked: result?.checked ?? 0,
