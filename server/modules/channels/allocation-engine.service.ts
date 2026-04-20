@@ -131,6 +131,8 @@ export interface VariantChannelAllocation {
   method: string;
   /** Why this amount was allocated */
   reason: string;
+  /** Disaggregated sub-quantities per target warehouse */
+  warehouseBreakdown: Array<{ warehouseId: number; qty: number }>;
 }
 
 /** Full allocation result for a product across all channels */
@@ -343,14 +345,21 @@ class AllocationEngine {
 
       // Calculate base ATP summed across assigned warehouses
       let channelBaseAtp = 0;
+      const warehouseRawAtp = new Map<number, number>();
+
       for (const whId of assignedWarehouseIds) {
         if (this.atpService.getAtpBaseByWarehouse) {
-          channelBaseAtp += await this.atpService.getAtpBaseByWarehouse(productId, whId);
+          const atp = await this.atpService.getAtpBaseByWarehouse(productId, whId);
+          channelBaseAtp += atp;
+          warehouseRawAtp.set(whId, atp);
         } else {
           // Fallback: use per-variant-by-warehouse (first variant's atpBase)
           const whVariants = await this.atpService.getAtpPerVariantByWarehouse(productId, whId);
           if (whVariants.length > 0) {
             channelBaseAtp += whVariants[0].atpBase;
+            warehouseRawAtp.set(whId, whVariants[0].atpBase);
+          } else {
+            warehouseRawAtp.set(whId, 0);
           }
         }
       }
@@ -404,6 +413,7 @@ class AllocationEngine {
             allocatedBase: 0,
             method: "zero",
             reason: "Product ineligible for this channel",
+            warehouseBreakdown: [],
           });
         }
         continue;
@@ -425,7 +435,8 @@ class AllocationEngine {
             allocatedUnits: 0,
             allocatedBase: 0,
             method: "zero",
-            reason: "Variant is explicitly unlisted for this channel (via overrides)"
+            reason: "Variant is explicitly unlisted for this channel (via overrides)",
+            warehouseBreakdown: [],
           });
           continue;
         }
@@ -440,6 +451,7 @@ class AllocationEngine {
         const resolved = this.resolveRule(channelDefaultRule, productRule, variantRule);
         const allocation = this.computeAllocation(
           channelBaseAtp,
+          warehouseRawAtp,
           variant,
           resolved,
           channel,
@@ -496,6 +508,7 @@ class AllocationEngine {
 
   private computeAllocation(
     channelBaseAtp: number,
+    warehouseRawAtp: Map<number, number>,
     variant: { productVariantId: number; sku: string; name: string; unitsPerVariant: number },
     rule: ResolvedRule,
     channel: Channel,
@@ -520,6 +533,7 @@ class AllocationEngine {
         allocatedBase: 0,
         method: "zero",
         reason: "Variant ineligible for this channel",
+        warehouseBreakdown: [],
       };
     }
 
@@ -543,59 +557,71 @@ class AllocationEngine {
           allocatedBase: 0,
           method: "zero",
           reason: floorReason,
+          warehouseBreakdown: [],
         };
       }
     }
 
-    // Step 3: Apply allocation mode
-    let atpBase: number;
-    let method: string;
-    let reason: string;
+    // Step 3 & 4: Determine global limit caps
+    let remainingFixedOrCeiling = -1;
+    let limitReason = "";
 
-    switch (rule.mode) {
-      case "mirror":
-        atpBase = channelBaseAtp;
-        method = "mirror";
-        reason = `Mirror: 100% of ${channelBaseAtp} base ATP (warehouses: [${assignedWarehouseIds.join(",")}])`;
-        break;
-
-      case "share":
-        const pct = rule.sharePct ?? 100;
-        atpBase = Math.floor(channelBaseAtp * pct / 100);
-        method = "share";
-        reason = `Share: ${pct}% of ${channelBaseAtp} = ${atpBase} base units (warehouses: [${assignedWarehouseIds.join(",")}])`;
-        break;
-
-      case "fixed":
-        atpBase = Math.min(rule.fixedQty ?? 0, channelBaseAtp);
-        method = "fixed";
-        reason = `Fixed: ${rule.fixedQty} base units (capped by ATP ${channelBaseAtp}, warehouses: [${assignedWarehouseIds.join(",")}])`;
-        break;
-
-      default:
-        atpBase = channelBaseAtp;
-        method = "mirror";
-        reason = `Default mirror: 100% of ${channelBaseAtp}`;
+    if (rule.ceilingQty != null && rule.ceilingQty >= 0) {
+      remainingFixedOrCeiling = rule.ceilingQty;
+      limitReason = "Ceiling Cap";
     }
-
-    // Step 4: Apply ceiling
-    if (rule.ceilingQty != null) {
-      if (atpBase > rule.ceilingQty) {
-        reason += ` → ceiling capped from ${atpBase} to ${rule.ceilingQty}`;
-        atpBase = rule.ceilingQty;
+    if (rule.mode === "fixed") {
+      const fixed = rule.fixedQty ?? 0;
+      if (remainingFixedOrCeiling === -1 || fixed < remainingFixedOrCeiling) {
+        remainingFixedOrCeiling = fixed;
+        limitReason = "Fixed Cap";
       }
     }
 
-    // Step 5: Convert to variant units
-    const allocatedUnits = Math.max(0, Math.floor(atpBase / variant.unitsPerVariant));
-    const allocatedBase = allocatedUnits * variant.unitsPerVariant;
+    // Step 5: Apply allocation modes PER WAREHOUSE to assemble parts safely
+    let totalAllocatedUnits = 0;
+    const warehouseBreakdown: Array<{ warehouseId: number, qty: number }> = [];
+
+    for (const whId of assignedWarehouseIds) {
+      const whBaseAtp = warehouseRawAtp.get(whId) ?? 0;
+      let locationBaseToUse = whBaseAtp;
+
+      if (rule.mode === "share") {
+        const pct = rule.sharePct ?? 100;
+        locationBaseToUse = Math.floor(whBaseAtp * pct / 100);
+      } else if (rule.mode === "mirror" || rule.mode === "fixed") {
+        locationBaseToUse = whBaseAtp;
+      }
+
+      // Convert local piece pool into strictly assembled variant units
+      let variantQty = Math.max(0, Math.floor(locationBaseToUse / variant.unitsPerVariant));
+
+      // Apply the global limit constraint geometrically by case sizes
+      if (remainingFixedOrCeiling !== -1) {
+        const variantLimit = Math.floor(remainingFixedOrCeiling / variant.unitsPerVariant);
+        if (variantQty > variantLimit) {
+           variantQty = variantLimit;
+        }
+        // Draw down the remaining piece pool using the assembled cases
+        remainingFixedOrCeiling -= (variantQty * variant.unitsPerVariant);
+        remainingFixedOrCeiling = Math.max(0, remainingFixedOrCeiling);
+      }
+
+      warehouseBreakdown.push({ warehouseId: whId, qty: variantQty });
+      totalAllocatedUnits += variantQty;
+    }
+
+    let method = rule.mode;
+    let reason = "Multi-warehouse breakdown.";
+    if (limitReason) reason += ` Applied ${limitReason}.`;
 
     return {
       ...base,
-      allocatedUnits,
-      allocatedBase,
+      allocatedUnits: totalAllocatedUnits,
+      allocatedBase: totalAllocatedUnits * variant.unitsPerVariant,
       method,
       reason,
+      warehouseBreakdown,
     };
   }
 
