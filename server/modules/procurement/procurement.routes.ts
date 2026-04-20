@@ -13,6 +13,7 @@ import { renderPoHtml } from "./po-document";
 import * as emailService from "../notifications/email.service";
 import * as notificationService from "../notifications/notifications.service";
 import { sql } from "drizzle-orm";
+import { db } from "../../db";
 
 export function registerPurchasingRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
@@ -1412,7 +1413,20 @@ export function registerPurchasingRoutes(app: Express) {
     try {
       const configuredLookback = await storage.getVelocityLookbackDays();
       const rawRows = await storage.getReorderAnalysisData(configuredLookback);
-      
+
+      // Global defaults for lead time / safety stock when product is unconfigured.
+      // See procurement.storage.getDashboardData for the same hierarchy.
+      const defaultsQuery = await db.execute(sql`
+        SELECT key, value FROM warehouse.echelon_settings
+        WHERE key IN ('default_lead_time_days','default_safety_stock_days')
+      `);
+      const defaultsMap = new Map<string, string>();
+      for (const row of defaultsQuery.rows as any[]) defaultsMap.set(row.key, row.value);
+      const defaultLeadTimeDays =
+        Number.parseInt(defaultsMap.get("default_lead_time_days") ?? "14", 10) || 14;
+      const defaultSafetyStockDays =
+        Number.parseInt(defaultsMap.get("default_safety_stock_days") ?? "7", 10) || 7;
+
       let criticalRestocks = 0;
       let upcomingRestocks = 0;
       let idleCapitalCents = 0;
@@ -1422,8 +1436,14 @@ export function registerPurchasingRoutes(app: Express) {
         const totalReserved = Number(r.total_reserved_pieces) || 0;
         const totalOutbound = Number(r.total_outbound_pieces) || 0;
         const onOrderPieces = Number(r.on_order_pieces) || 0;
-        const leadTimeDays = Number(r.lead_time_days) || 0;
-        const safetyStockDays = Number(r.safety_stock_days) || 0;
+        const leadTimeDays =
+          r.lead_time_days == null || Number.isNaN(Number(r.lead_time_days))
+            ? defaultLeadTimeDays
+            : Number(r.lead_time_days);
+        const safetyStockDays =
+          r.safety_stock_days == null || Number.isNaN(Number(r.safety_stock_days))
+            ? defaultSafetyStockDays
+            : Number(r.safety_stock_days);
         const costCents = Number(r.unit_cost_cents) || 0;
         
         const available = totalOnHand - totalReserved;

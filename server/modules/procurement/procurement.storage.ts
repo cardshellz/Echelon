@@ -1300,6 +1300,23 @@ export const procurementMethods: IProcurementStorage = {
     // Get exclusion rules to filter out
     const rules = await db.select().from(reorderExclusionRules);
 
+    // Global defaults for lead time / safety stock. Used as a fallback when
+    // a product has no explicit per-product value set. Hierarchy:
+    //   1. vendor_products.leadTimeDays  (per-vendor-per-product; most specific)
+    //   2. products.leadTimeDays          (per-product)
+    //   3. echelon_settings.default_lead_time_days   (global fallback)
+    //   4. hardcoded 14 / 7 (last resort)
+    const defaultsQuery = await db.execute(sql`
+      SELECT key, value FROM warehouse.echelon_settings
+      WHERE key IN ('default_lead_time_days','default_safety_stock_days')
+    `);
+    const defaultsMap = new Map<string, string>();
+    for (const r of defaultsQuery.rows as any[]) defaultsMap.set(r.key, r.value);
+    const defaultLeadTimeDays =
+      Number.parseInt(defaultsMap.get("default_lead_time_days") ?? "14", 10) || 14;
+    const defaultSafetyStockDays =
+      Number.parseInt(defaultsMap.get("default_safety_stock_days") ?? "7", 10) || 7;
+
     const isExcluded = (row: any): boolean => {
       // Check per-product flag
       if (row.reorder_excluded) return true;
@@ -1351,8 +1368,18 @@ export const procurementMethods: IProcurementStorage = {
         const available = totalOnHand - totalReserved;
         const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
         const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
-        const leadTimeDays = Number(r.lead_time_days);
-        const safetyStockDays = Number(r.safety_stock_days);
+        // Per-product value wins; fall back to the global default from
+        // echelon_settings if the product has no value configured.
+        const rawLeadTime = r.lead_time_days;
+        const rawSafety = r.safety_stock_days;
+        const leadTimeDays =
+          rawLeadTime == null || Number.isNaN(Number(rawLeadTime))
+            ? defaultLeadTimeDays
+            : Number(rawLeadTime);
+        const safetyStockDays =
+          rawSafety == null || Number.isNaN(Number(rawSafety))
+            ? defaultSafetyStockDays
+            : Number(rawSafety);
         const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
         const effectiveSupply = available + onOrderPieces;
         const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
