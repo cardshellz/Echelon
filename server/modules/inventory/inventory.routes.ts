@@ -2035,6 +2035,68 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
+  /**
+   * Recover orders from every channel that supports it and bridge
+   * any orphaned OMS orders into WMS.
+   *
+   * This is the channel-agnostic 'Sync Now' recovery entry point. As new
+   * channels (eBay, Amazon, wholesale portals) add reconciliation support
+   * they get plugged in here. Today: Shopify + OMS→WMS backfill.
+   *
+   * Response:
+   *   {
+   *     channels: [{ name, checked, reconciled, failed, error? }, ...],
+   *     omsToWms: { synced }
+   *   }
+   */
+  app.post("/api/sync/recover-orders", requireAuth, async (req, res) => {
+    const response: any = {
+      channels: [] as Array<Record<string, any>>,
+      omsToWms: null as null | { synced: number },
+    };
+
+    // --- Per-channel order reconciliation ---
+    // Shopify
+    try {
+      const { runReconciliationNow } = await import(
+        "../../orders/shopify-order-reconciliation"
+      );
+      const result = await runReconciliationNow();
+      response.channels.push({
+        name: "Shopify",
+        checked: result?.checked ?? 0,
+        reconciled: result?.reconciled ?? 0,
+        failed: result?.failed ?? 0,
+        skipped: result?.skipped ?? 0,
+      });
+    } catch (err: any) {
+      console.error("[Recover] Shopify reconciliation failed:", err);
+      response.channels.push({
+        name: "Shopify",
+        error: err?.message || String(err),
+      });
+    }
+
+    // Future: add eBay/Amazon/etc. as they grow reconcile methods on their adapters.
+    // For now eBay pulls orders via a 5-min polling loop, so the gap window is small.
+
+    // --- OMS → WMS backfill ---
+    try {
+      const wmsSync = (req.app.locals.services as any)?.wmsSync;
+      if (wmsSync?.backfillUnsynced) {
+        const synced = await wmsSync.backfillUnsynced(200);
+        response.omsToWms = { synced };
+      } else {
+        response.omsToWms = { synced: 0, note: "wmsSync unavailable" };
+      }
+    } catch (err: any) {
+      console.error("[Recover] OMS→WMS backfill failed:", err);
+      response.omsToWms = { synced: 0, error: err?.message || String(err) };
+    }
+
+    res.json(response);
+  });
+
   app.get("/api/sync/health", requireAuth, async (req, res) => {
     try {
       // DISABLED: order-sync-listener deleted

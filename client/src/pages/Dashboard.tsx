@@ -47,16 +47,40 @@ export default function Dashboard() {
 
   const triggerSyncMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/sync/trigger", {
+      const res = await fetch("/api/sync/recover-orders", {
         method: "POST",
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to trigger sync");
+      if (!res.ok) throw new Error("Failed to recover orders");
       return res.json();
     },
-    onSuccess: () => {
-      toast({ title: "Sync triggered", description: "Order sync has been initiated" });
+    onSuccess: (data: any) => {
+      const channelReports: string[] = (data?.channels ?? [])
+        .filter((c: any) => !c.error)
+        .map((c: any) => `${c.name}: ${c.reconciled ?? 0} pulled`);
+      const bridged = data?.omsToWms?.synced ?? 0;
+      const channelErrors: string[] = (data?.channels ?? [])
+        .filter((c: any) => c.error)
+        .map((c: any) => `${c.name}: ${c.error}`);
+
+      const parts = [...channelReports];
+      if (bridged > 0) parts.push(`${bridged} bridged to WMS`);
+
+      const description =
+        parts.length > 0 ? parts.join(" • ") : "No missing orders found.";
+
+      if (channelErrors.length > 0) {
+        toast({
+          title: "Sync completed with warnings",
+          description: `${description} — errors: ${channelErrors.join("; ")}`,
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Sync complete", description });
+      }
+
       queryClient.invalidateQueries({ queryKey: ["/api/sync/health"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
     },
     onError: (error) => {
       toast({ title: "Sync failed", description: String(error), variant: "destructive" });
