@@ -10,6 +10,7 @@ const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, .
 import { requirePermission, requireAuth, upload } from "../../routes/middleware";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import { runReconciliationNow as shopifyRunReconciliationNow } from "../orders/shopify-order-reconciliation";
+import { backfillShopifyOrders as backfillShopifyOrdersToOms } from "../oms/shopify-bridge";
 import Papa from "papaparse";
 
 export function registerInventoryRoutes(app: Express) {
@@ -2057,15 +2058,26 @@ export function registerInventoryRoutes(app: Express) {
     };
 
     // --- Per-channel order reconciliation ---
-    // Shopify
+    // Shopify: (1) pull missing orders from Shopify → shopify_orders table,
+    // (2) backfill any shopify_orders rows that didn't bridge into OMS yet.
     try {
       const result = await shopifyRunReconciliationNow();
+      let bridged = 0;
+      try {
+        const omsService = (req.app.locals.services as any)?.oms;
+        if (omsService) {
+          bridged = await backfillShopifyOrdersToOms(db, omsService, 500);
+        }
+      } catch (bridgeErr: any) {
+        console.error("[Recover] Shopify→OMS bridge failed:", bridgeErr);
+      }
       response.channels.push({
         name: "Shopify",
         checked: result?.checked ?? 0,
         reconciled: result?.reconciled ?? 0,
         failed: result?.failed ?? 0,
         skipped: result?.skipped ?? 0,
+        bridgedToOms: bridged,
       });
     } catch (err: any) {
       console.error("[Recover] Shopify reconciliation failed:", err);
