@@ -50,18 +50,27 @@ async function main() {
   `);
   console.log(`[Backfill] Stamped plan info on ${omsPlanResult?.rows?.length ?? 0} OMS rows`);
 
-  // 3. Also recompute priority for orders whose member_plan was just stamped
-  //    (they may have had priority=100 but actually deserve the modifier boost)
-  console.log("[Backfill] Step 3: recomputing priority for newly-stamped orders...");
+  // 3. Recompute priority for ALL active orders from scratch.
+  //    base = shipping_service_level tier (100/300/500)
+  //    + plan_priority_modifier (0 if no member)
+  //    Skips bumped (>=9999) and held (-1) overrides.
+  console.log("[Backfill] Step 3: recomputing priority for all active orders from scratch...");
   const priorityResult: any = await db.execute(sql`
     UPDATE wms.orders o
-    SET priority = 100 + COALESCE(p.priority_modifier, 0),
+    SET priority = CASE
+          WHEN COALESCE(oms.shipping_service_level, 'standard') = 'overnight' THEN 500
+          WHEN COALESCE(oms.shipping_service_level, 'standard') = 'expedited' THEN 300
+          ELSE 100
+        END + COALESCE(p.priority_modifier, 0),
         updated_at = NOW()
-    FROM membership.plans p
-    WHERE p.name = o.member_plan_name
-      AND o.priority = 100
-      AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'ready_to_ship')
+    FROM oms.oms_orders oms
+    LEFT JOIN membership.plans p ON p.name = oms.member_plan_name
+    WHERE (
+            (o.source = 'oms'     AND o.oms_fulfillment_order_id = oms.id::text)
+         OR (o.source = 'shopify' AND o.source_table_id = oms.id::text)
+          )
       AND o.priority < 9999
+      AND o.warehouse_status IN ('ready', 'in_progress')
     RETURNING o.id
   `);
   console.log(`[Backfill] Recomputed priority on ${priorityResult?.rows?.length ?? 0} orders`);

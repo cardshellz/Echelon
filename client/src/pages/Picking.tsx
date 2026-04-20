@@ -2878,11 +2878,24 @@ export default function Picking() {
                   "cursor-pointer hover:border-primary/50 transition-all active:scale-[0.99]",
                   order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20",
                   !order.isCombinedGroup && order.priority >= 9999 && "border-l-4 border-l-red-500",
-                  !order.isCombinedGroup && order.priority >= 300 && order.priority < 9999 && "border-l-4 border-l-orange-500",
+                  !order.isCombinedGroup && order.priority < 9999 && order.shippingServiceLevel === "overnight" && "border-l-4 border-l-red-500",
+                  !order.isCombinedGroup && order.priority < 9999 && order.shippingServiceLevel === "expedited" && "border-l-4 border-l-amber-500",
+                  !order.isCombinedGroup && order.priority < 9999 && (!order.shippingServiceLevel || order.shippingServiceLevel === "standard") && order.memberPlanName && order.memberPlanColor && "border-l-4",
                   order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
                   order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
+                style={
+                  !order.isCombinedGroup &&
+                  order.priority < 9999 &&
+                  (!order.shippingServiceLevel || order.shippingServiceLevel === "standard") &&
+                  order.memberPlanName &&
+                  order.memberPlanColor &&
+                  order.memberPlanName.toLowerCase() !== ".core" &&
+                  order.memberPlanName.toLowerCase() !== "core"
+                    ? { borderLeftColor: order.memberPlanColor }
+                    : undefined
+                }
                 onClick={() => {
                   console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold, "assignee:", order.assignee);
                   if (order.status === "ready" && !order.onHold) {

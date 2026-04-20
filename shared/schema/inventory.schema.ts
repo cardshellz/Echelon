@@ -242,6 +242,23 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   pickingBatchSize: integer("picking_batch_size").notNull().default(20), // Max orders per picking batch
   autoReleaseDelayMinutes: integer("auto_release_delay_minutes").notNull().default(30), // Minutes before unclaimed orders release
 
+  // ── Procurement settings (Spec A) ────────────────────────────────────────
+  // Solo-operator defaults; per-setting flexibility to enable team workflow.
+  // Only requireApproval + autoSendOnApprove affect Spec A's PO send flow.
+  // The rest are scaffolded for Specs B/C so admins manage everything in one
+  // settings page from the start.
+  requireApproval: boolean("require_approval").notNull().default(false),
+  autoSendOnApprove: boolean("auto_send_on_approve").notNull().default(true),
+  requireAcknowledgeBeforeReceive: boolean("require_acknowledge_before_receive").notNull().default(false),
+  hideIncotermsDomestic: boolean("hide_incoterms_domestic").notNull().default(true),
+  enableShipmentTracking: boolean("enable_shipment_tracking").notNull().default(true),
+  autoPutawayLocation: boolean("auto_putaway_location").notNull().default(true),
+  autoCloseOnReconcile: boolean("auto_close_on_reconcile").notNull().default(true),
+  oneClickReceiveStart: boolean("one_click_receive_start").notNull().default(true),
+  // Feature flag: when true, the "+ New PO" button navigates to the new
+  // full-page editor instead of opening the legacy create-PO dialog.
+  useNewPoEditor: boolean("use_new_po_editor").notNull().default(false),
+
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

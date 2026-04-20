@@ -1009,3 +1009,38 @@ export const insertAutoDraftRunSchema = createInsertSchema(autoDraftRuns).omit({
 export type InsertAutoDraftRun = z.infer<typeof insertAutoDraftRunSchema>;
 export type AutoDraftRun = typeof autoDraftRuns.$inferSelect;
 
+
+// ============================================================================
+// 24. PO EVENTS — append-only lifecycle audit stream (Spec A)
+// ============================================================================
+//
+// Separate from po_status_history so non-status events (edits, sends,
+// duplicates) have a home without polluting the status machine table.
+// Every row is an immutable audit record: who did what to which PO when.
+//
+// event_type values emitted by the PO module today:
+//   'created', 'submitted', 'approved', 'sent_to_vendor',
+//   'edited', 'duplicated_from'
+// Other modules (receiving, AP) will add more types over time.
+//
+// actor_type: 'user' | 'agent' | 'system'.
+// actor_id: users.id for 'user'; free-form string for agents/systems
+//           (e.g. 'system:auto', 'agent:auto-draft-job').
+
+export const poEvents = procurementSchema.table("po_events", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  poId: integer("po_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  eventType: varchar("event_type", { length: 40 }).notNull(),
+  actorType: varchar("actor_type", { length: 20 }).notNull(), // 'user' | 'agent' | 'system'
+  actorId: varchar("actor_id", { length: 100 }),
+  payloadJson: jsonb("payload_json"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertPoEventSchema = createInsertSchema(poEvents).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPoEvent = z.infer<typeof insertPoEventSchema>;
+export type PoEvent = typeof poEvents.$inferSelect;
