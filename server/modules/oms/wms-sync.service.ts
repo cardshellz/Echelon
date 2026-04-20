@@ -103,6 +103,7 @@ export class WmsSyncService {
         shippingPostalCode: omsOrder.shipToZip || null,
         shippingCountry: omsOrder.shipToCountry || "US",
         priority,
+        shippingServiceLevel: ((omsOrder as any).shippingServiceLevel as string | null) || "standard",
         warehouseStatus,
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
@@ -203,23 +204,18 @@ export class WmsSyncService {
    * WMS "Bump" override uses 9999; "Hold" uses -1.
    */
   private async determinePriority(omsOrder: typeof omsOrders.$inferSelect): Promise<number> {
-    // 1. Shipping Speed Base — higher base = picked sooner
-    let base = 100; // Standard shipping
-    if (omsOrder.shippingMethod) {
-      const shippingStr = omsOrder.shippingMethod.toLowerCase();
-      if (
-        shippingStr.includes("overnight") ||
-        shippingStr.includes("next day")
-      ) {
-        base = 500; // Overnight: very urgent
-      } else if (
-        shippingStr.includes("express") ||
-        shippingStr.includes("2-day") ||
-        shippingStr.includes("priority")
-      ) {
-        base = 300; // Express: elevated
-      }
-    }
+    // 1. Shipping Service Level Base — higher base = picked sooner.
+    //    Reads the normalized service_level field, NOT the customer-facing
+    //    shipping_method string. The method label is zone-dependent and
+    //    unreliable (e.g. "USPS Priority Mail" is a carrier service class,
+    //    not a customer-paid expedite).
+    const baseByLevel: Record<string, number> = {
+      standard: 100,
+      expedited: 300,
+      overnight: 500,
+    };
+    const level = ((omsOrder as any).shippingServiceLevel as string | null) || "standard";
+    const base = baseByLevel[level] ?? 100;
 
     // 2. Dynamic Tier Modifier from Hub's Plans Table (additive boost)
     let modifier = 0; // Default: no membership boost
