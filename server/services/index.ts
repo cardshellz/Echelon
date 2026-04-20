@@ -56,6 +56,7 @@ import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createShipStationService } from "../modules/oms/shipstation.service";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
+import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
 import { catalogStorage } from "../modules/catalog";
 import { warehouseStorage } from "../modules/warehouse";
 import { inventoryStorage } from "../modules/inventory";
@@ -232,6 +233,10 @@ export function createServices(db: any) {
     fulfillmentRouter,
   });
 
+  // SyncRecovery — unified order-pipeline gap recovery (Shopify → shopify_orders
+  // → OMS → WMS). Runs on a schedule and is exposed via /api/sync/recover-orders.
+  const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync });
+
   return {
     inventoryCore,
     inventoryLots,
@@ -263,6 +268,7 @@ export function createServices(db: any) {
     fulfillmentPush,
     shipStation,
     wmsSync,
+    syncRecovery,
   };
 }
 

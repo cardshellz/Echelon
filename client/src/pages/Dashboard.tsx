@@ -55,30 +55,38 @@ export default function Dashboard() {
       return res.json();
     },
     onSuccess: (data: any) => {
-      const channelReports: string[] = (data?.channels ?? [])
-        .filter((c: any) => !c.error)
-        .map((c: any) => `${c.name}: ${c.reconciled ?? 0} pulled`);
-      const bridged = data?.omsToWms?.synced ?? 0;
-      const channelErrors: string[] = (data?.channels ?? [])
-        .filter((c: any) => c.error)
-        .map((c: any) => `${c.name}: ${c.error}`);
-
-      const parts = [...channelReports];
-      if (bridged > 0) parts.push(`${bridged} bridged to WMS`);
-
-      const description =
-        parts.length > 0 ? parts.join(" • ") : "No missing orders found.";
-
-      if (channelErrors.length > 0) {
+      // Response shape: { startedAt, durationMs, stages: [{name, ok, data, error?}], allOk }
+      const stages = data?.stages ?? [];
+      const parts: string[] = [];
+      const errors: string[] = [];
+      for (const s of stages) {
+        if (s.error) {
+          errors.push(`${s.name}: ${s.error}`);
+          continue;
+        }
+        if (!s.data) continue;
+        if (s.name === "shopify_reconcile" && s.data.reconciled > 0) {
+          parts.push(`${s.data.reconciled} from Shopify`);
+        }
+        if (s.name === "shopify_to_oms" && s.data.bridged > 0) {
+          parts.push(`${s.data.bridged} to OMS`);
+        }
+        if (s.name === "oms_to_wms" && s.data.synced > 0) {
+          parts.push(`${s.data.synced} to WMS`);
+        }
+      }
+      const description = parts.length > 0
+        ? parts.join(" • ")
+        : "No missing orders found.";
+      if (errors.length > 0) {
         toast({
           title: "Sync completed with warnings",
-          description: `${description} — errors: ${channelErrors.join("; ")}`,
+          description: `${description} — errors: ${errors.join("; ")}`,
           variant: "destructive",
         });
       } else {
         toast({ title: "Sync complete", description });
       }
-
       queryClient.invalidateQueries({ queryKey: ["/api/sync/health"] });
       queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
     },

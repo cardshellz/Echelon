@@ -70,45 +70,48 @@ equipment, different priorities) without rewriting the picker today.
 
 # Other Future Work
 
-## Channel-agnostic sync recovery orchestrator
+## Per-order sync failure tracking
 
 **Problem**
 
-The dashboard's 'Order Sync Alert' banner surfaces `unsynced_24h` from
-`oms.oms_orders` that didn't bridge to `wms.orders`. Today clicking 'Sync
-Now' triggers the *inventory* sync orchestrator (inventory → channels
-push), which is unrelated to closing that gap.
-
-There are two independent recovery paths today:
-- **Shopify order reconciliation** — pulls missing orders from Shopify via
-  `/api/shopify/reconcile-orders` (exists). Uses `shopify_reconciliation_last_check`
-  cursor stored in `warehouse.echelon_settings`.
-- **OMS→WMS backfill** — exposed at `/api/sync/backfill-oms-to-wms` (new),
-  wraps `wmsSyncService.backfillUnsynced()`. Finds oms_orders without a
-  matching wms.orders row and creates the WMS order.
-
-Neither is multi-channel. eBay has its own reconciliation service
-(`[eBay Reconcile]` seen in logs) but no unified entry point.
+SyncRecoveryService logs per-stage totals but not per-order outcomes. If
+`bridgeShopifyOrderToOms()` fails repeatedly for a specific order (bad
+data, schema mismatch, deleted variant, etc.) there's no record of it,
+no retry cap, no alert.
 
 **Plan**
 
-1. Extend `IChannelAdapter` interface with optional `reconcile(since: Date)`
-   method. Returns `{ checked, reconciled, failed }`.
-2. Implement on:
-   - `ShopifyAdapter` — wraps existing `shopify-order-reconciliation`.
-   - `EbayAdapter` — wraps existing eBay reconciliation service.
-3. Create `POST /api/sync/reconcile-all` that:
-   - Iterates enabled channels via `ChannelAdapterRegistry`.
-   - Calls each adapter's `reconcile()` if implemented.
-   - Runs OMS→WMS backfill at the end.
-   - Returns aggregated counts per channel.
-4. Dashboard 'Sync Now' button calls `/api/sync/reconcile-all` instead of
-   the inventory push trigger.
-5. Optional: banner text becomes channel-aware (show which channels have
-   gaps).
+1. New table `wms.sync_failures`:
+   - `id`, `stage` (shopify_reconcile | shopify_to_oms | oms_to_wms)
+   - `external_ref` (Shopify order id, OMS id, etc.)
+   - `attempts`, `last_attempt_at`, `last_error`
+   - `resolved_at` nullable
+2. SyncRecovery stages catch per-row errors, insert/update a row here.
+3. Scheduled runs skip rows with `attempts > N` (configurable, default 5)
+   to prevent forever-failing entries from being retried every 10 min.
+4. Admin UI at `/admin/sync-failures` lists unresolved rows with error
+   messages and a "retry" button that resets `attempts` to 0.
+5. Optional Discord/email alert when `attempts == 3` so you know early.
 
-**Scope:** 2-3 hours. Not urgent — existing per-channel reconciliation
-still runs automatically every 15-30 minutes.
+**Scope:** ~4 hours including migration, service changes, admin UI.
+
+## eBay order reconciliation gap recovery
+
+**Problem**
+
+eBay orders come in via webhook + a 5-min polling loop. If webhook fails
+AND the polling misses the window (rate limit, timeout) the order is
+lost. Today there's no reconcile pass that fetches missing eBay orders
+by date range.
+
+**Plan**
+
+1. Add `ebay-order-reconciliation.ts` mirroring `shopify-order-reconciliation.ts`:
+   fetch orders from eBay API since last-check, insert any missing rows.
+2. Add `runEbayReconcile()` method to `SyncRecoveryService`.
+3. Call it in `runAll()` between the other stages.
+
+**Scope:** ~2-3 hours. Depends on eBay API's order-by-date query limits.
 
 ## Stale `app_settings` type export
 

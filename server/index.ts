@@ -17,7 +17,6 @@ import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationS
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { startWebhookRetryWorker } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
-import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { eq, and, sql } from "drizzle-orm";
 import type { SafeUser } from "@shared/schema";
@@ -448,14 +447,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     }
   }, 15_000);
 
-  // Shopify Bridge — backfill existing orders to OMS (runs once at startup, non-blocking)
-  setTimeout(async () => {
-    try {
-      await backfillShopifyOrders(db, services.oms, 500);
-    } catch (err: any) {
-      console.error("[Shopify Bridge] Backfill error:", err.message);
-    }
-  }, 10_000);
+  // Sync Recovery — unified gap-recovery orchestrator. Runs every 10 min and
+  // closes the full pipeline Shopify → shopify_orders → OMS → WMS. Replaces the
+  // old one-shot boot-time backfill.
+  if (services.syncRecovery) {
+    services.syncRecovery.startScheduled(10, 30_000);
+  }
 
   await registerRoutes(httpServer, app);
 

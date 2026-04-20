@@ -9,8 +9,6 @@ import { channelsStorage } from "../channels";
 const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...channelsStorage };
 import { requirePermission, requireAuth, upload } from "../../routes/middleware";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
-import { runReconciliationNow as shopifyRunReconciliationNow } from "../orders/shopify-order-reconciliation";
-import { backfillShopifyOrders as backfillShopifyOrdersToOms } from "../oms/shopify-bridge";
 import Papa from "papaparse";
 
 export function registerInventoryRoutes(app: Express) {
@@ -2038,73 +2036,26 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   /**
-   * Recover orders from every channel that supports it and bridge
-   * any orphaned OMS orders into WMS.
-   *
-   * This is the channel-agnostic 'Sync Now' recovery entry point. As new
-   * channels (eBay, Amazon, wholesale portals) add reconciliation support
-   * they get plugged in here. Today: Shopify + OMS→WMS backfill.
-   *
-   * Response:
-   *   {
-   *     channels: [{ name, checked, reconciled, failed, error? }, ...],
-   *     omsToWms: { synced }
-   *   }
+   * Manual trigger for the unified order-pipeline recovery.
+   * Runs the same SyncRecoveryService.runAll() that fires on a 10-min
+   * schedule in the background.
    */
   app.post("/api/sync/recover-orders", requireAuth, async (req, res) => {
-    const response: any = {
-      channels: [] as Array<Record<string, any>>,
-      omsToWms: null as null | { synced: number },
-    };
-
-    // --- Per-channel order reconciliation ---
-    // Shopify: (1) pull missing orders from Shopify → shopify_orders table,
-    // (2) backfill any shopify_orders rows that didn't bridge into OMS yet.
     try {
-      const result = await shopifyRunReconciliationNow();
-      let bridged = 0;
-      try {
-        const omsService = (req.app.locals.services as any)?.oms;
-        if (omsService) {
-          bridged = await backfillShopifyOrdersToOms(db, omsService, 500);
-        }
-      } catch (bridgeErr: any) {
-        console.error("[Recover] Shopify→OMS bridge failed:", bridgeErr);
+      const syncRecovery = (req.app.locals.services as any)?.syncRecovery;
+      if (!syncRecovery?.runAll) {
+        return res
+          .status(500)
+          .json({ error: "syncRecovery service unavailable" });
       }
-      response.channels.push({
-        name: "Shopify",
-        checked: result?.checked ?? 0,
-        reconciled: result?.reconciled ?? 0,
-        failed: result?.failed ?? 0,
-        skipped: result?.skipped ?? 0,
-        bridgedToOms: bridged,
-      });
-    } catch (err: any) {
-      console.error("[Recover] Shopify reconciliation failed:", err);
-      response.channels.push({
-        name: "Shopify",
-        error: err?.message || String(err),
-      });
+      const result = await syncRecovery.runAll();
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Recover] Failed:", error);
+      res
+        .status(500)
+        .json({ error: error?.message || "Failed to run recovery" });
     }
-
-    // Future: add eBay/Amazon/etc. as they grow reconcile methods on their adapters.
-    // For now eBay pulls orders via a 5-min polling loop, so the gap window is small.
-
-    // --- OMS → WMS backfill ---
-    try {
-      const wmsSync = (req.app.locals.services as any)?.wmsSync;
-      if (wmsSync?.backfillUnsynced) {
-        const synced = await wmsSync.backfillUnsynced(200);
-        response.omsToWms = { synced };
-      } else {
-        response.omsToWms = { synced: 0, note: "wmsSync unavailable" };
-      }
-    } catch (err: any) {
-      console.error("[Recover] OMS→WMS backfill failed:", err);
-      response.omsToWms = { synced: 0, error: err?.message || String(err) };
-    }
-
-    res.json(response);
   });
 
   app.get("/api/sync/health", requireAuth, async (req, res) => {
