@@ -15,6 +15,7 @@ type DrizzleDb = {
 
 // Import sql tagged template for raw queries
 import { sql } from "drizzle-orm";
+import { Decimal } from "decimal.js";
 
 interface InventoryCore {
   receiveInventory(params: {
@@ -642,7 +643,7 @@ export class ReceivingService {
       // Parse numeric values
       const parsedQty = parseInt(String(qty)) || 0;
       const parsedDamagedQty = parseInt(String(damaged_qty)) || 0;
-      const parsedUnitCost = unit_cost ? Math.round(parseFloat(String(unit_cost)) * 100) : null;
+      const parsedUnitCost = unit_cost ? new Decimal(String(unit_cost)).times(100).round().toNumber() : null;
 
       // Build notes: append CSV location if unmatched for resolution UI
       let lineNotes = notes || null;

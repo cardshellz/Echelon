@@ -210,3 +210,44 @@ export async function backfillShopifyOrders(
 
   return bridged;
 }
+
+/**
+ * M18: Continuous Shopify Bridge
+ * Subscribes to the postgres NOTIFY channel to instantly ingest new orders
+ * without relying solely on interval batches.
+ */
+export function startShopifyBridgeListener(db: any, omsService: OmsService): void {
+  // Access the underlying pg pool client from drizzle
+  // The exact method to get a raw client depends on setup, but typically we can use db.$client
+  const pool = db.$client; // This assumes drizzle was initialized with a pg pool
+  
+  if (!pool || typeof pool.connect !== 'function') {
+    console.warn("[Shopify Bridge] Cannot hook LISTEN/NOTIFY: db.$client is not a standard pg pool");
+    return;
+  }
+
+  pool.connect((err: Error | null, client: any, done: () => void) => {
+    if (err) {
+      console.error("[Shopify Bridge] Error acquiring client for listener:", err.message);
+      return;
+    }
+
+    client.on('notification', async (msg: any) => {
+      if (msg.channel === 'shopify_order_ingested') {
+        // Trigger backfill asynchronously, rate-limited by nature of single loop
+        try {
+          await backfillShopifyOrders(db, omsService, 50);
+        } catch (error: any) {
+          console.error(`[Shopify Bridge] Error running continuous backfill: ${error.message}`);
+        }
+      }
+    });
+
+    client.query('LISTEN shopify_order_ingested')
+      .then(() => console.log("[Shopify Bridge] Real-time continuous order bridge active!"))
+      .catch((err: Error) => {
+        console.error("[Shopify Bridge] Error listening to bridge channel:", err.message);
+        done();
+      });
+  });
+}

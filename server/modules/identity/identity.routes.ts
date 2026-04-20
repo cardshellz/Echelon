@@ -4,10 +4,19 @@ import * as useCases from "./application/identity.use-cases";
 import { requirePermission, requireAuth } from "../../routes/middleware";
 import type { SafeUser } from "@shared/schema";
 import bcrypt from "bcrypt"; // Keep for update password if not fully extracted yet, or extract it too.
+import rateLimit from "express-rate-limit";
+
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 15, // Limit each IP to 15 login requests per `window`
+  message: { error: "Too many login attempts from this IP, please try again after 15 minutes" },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
 
 export function registerAuthRoutes(app: Express) {
   // Auth API
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", loginRateLimiter, async (req, res) => {
     try {
       const { username, password } = req.body;
       if (!username || !password) return res.status(400).json({ error: "Username and password required" });

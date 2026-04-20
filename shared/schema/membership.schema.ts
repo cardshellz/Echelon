@@ -289,6 +289,9 @@ export const subscriptionBillingAttempts = membershipSchema.table("subscription_
   createdAt: timestamp("created_at"),
 });
 
+// ...
+// NOTE: An active cycle overlapping exclusion constraint (prevent_overlapping_active_contracts)
+// is enforced via a raw migration (migrations/0004_m6_subscription_overlap_prevent.sql) using EXCLUDE USING gist.
 export const subscriptionContracts = membershipSchema.table("subscription_contracts", {
   id: text("id").primaryKey(),
   shopifyContractId: text("shopify_contract_id"),

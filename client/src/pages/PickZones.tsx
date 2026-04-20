@@ -3,7 +3,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Map } from "lucide-react";
+import { Map as MapIcon } from "lucide-react";
 
 interface PickZone {
   id: number;
@@ -54,7 +54,7 @@ export default function PickZones() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-semibold flex items-center gap-2">
-            <Map className="w-7 h-7" />
+            <MapIcon className="w-7 h-7" />
             Pick Zones
           </h1>
           <p className="text-muted-foreground text-sm md:text-base mt-1">

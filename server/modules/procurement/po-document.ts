@@ -4,14 +4,16 @@
  * Suitable for printing or embedding in an email.
  */
 
+import { Decimal } from "decimal.js";
+
 function fmtMoney(cents: number | null | undefined): string {
   if (cents == null) return "$0.00";
-  const n = Number(cents) / 100;
+  const n = new Decimal(cents).dividedBy(100);
   // Show sub-cent precision for unit costs — no rounding
-  if (n !== parseFloat(n.toFixed(2))) {
-    return `$${String(n)}`;
+  if (!n.isInteger() && n.decimalPlaces() > 2) {
+    return `$${n.toString()}`;
   }
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `$${n.toNumber().toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function fmtDate(d: string | Date | null | undefined): string {

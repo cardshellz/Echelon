@@ -18,6 +18,7 @@ import { startBillingScheduler } from "./modules/subscriptions/subscription.sche
 import { startWebhookRetryWorker } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
+import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
@@ -509,6 +510,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
       initReconciliation(services.oms);
       startShopifyReconciliation();
+      
+      // Hook up continuous Shopify Bridge listener (M18)
+      startShopifyBridgeListener(db, services.oms);
 
       // Start subscription billing scheduler (runs hourly)
       startBillingScheduler();

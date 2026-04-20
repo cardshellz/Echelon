@@ -1,11 +1,21 @@
 import express, { type Express, Request, Response } from "express";
 import { pool } from "../../db";
 import { walletService } from "./wallet.service";
+import rateLimit from "express-rate-limit";
 
 export function registerStripeWebhookRoute(app: Express): void {
+  const stripeWebhookLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 100, // Limit each IP to 100 webhook requests per `window`
+    message: "Too many webhooks from this IP, please try again later",
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
   // Use express.raw() to capture the raw body buffer exactly as Stripe sent it
   app.post(
     "/api/webhooks/stripe-dropship",
+    stripeWebhookLimiter,
     express.raw({ type: "application/json" }),
     async (req: Request, res: Response) => {
       try {

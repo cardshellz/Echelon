@@ -469,13 +469,13 @@ Covered tersely; each is independent unless noted.
 ## P3 — Low / hygiene (Backlog)
 
 - **L1 — DB SSL** — addressed in P0-b-7 above.
-- **L2 — eBay token rotation race** — covered in H10 plus add DB-level single-writer. **Effort:** S.
-- **L3 — `fmtMoney` float precision in PO PDF** — swap for a `Decimal.toFixed(2)` once B1 lands. **Effort:** S.
-- **L4 — `VENDOR_JWT_EXPIRES_IN` default "24h"** — accept; document. **Effort:** 0.
-- **L5 — Redundant `SELECT COUNT(*)`** — delete. **Effort:** S.
+- **L2 — eBay token rotation race** — [COMPLETED] covered in H10 plus add DB-level single-writer. **Effort:** S.
+- **L3 — `fmtMoney` float precision in PO PDF** — [COMPLETED] swapped for `Decimal`. **Effort:** S.
+- **L4 — `VENDOR_JWT_EXPIRES_IN` default "24h"** — [ACCEPTED]; documented in `vendor-auth.ts`. **Effort:** 0.
+- **L5 — Redundant `SELECT COUNT(*)`** — [COMPLETED] variables deleted from `channels.routes.ts`. **Effort:** S.
 - **L6 — Dead HMAC bypass** — addressed in P0-a-4.
-- **L7 — `parseFloat` on CSV `unit_cost`:** route through `Decimal`. **Effort:** S. **Depends on:** B1.
-- **L8 — `completeAllLines` backfill semantics:** add a unit test pinning current behavior, then document. **Effort:** S.
+- **L7 — `parseFloat` on CSV `unit_cost`:** [COMPLETED] routed through `Decimal.js` in `bulkImportLines`. **Effort:** S. **Depends on:** B1.
+- **L8 — `completeAllLines` backfill semantics:** [COMPLETED] added unit test pinning current behavior. **Effort:** S.
 
 ---
 

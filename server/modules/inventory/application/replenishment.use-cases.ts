@@ -1697,7 +1697,7 @@ export class ReplenishmentUseCases {
   async getSettingsForWarehouse(warehouseId?: number): Promise<WarehouseSettings | null> {
     // Delegates to the shared resolver so every service gets identical
     // fallback behavior. See server/modules/warehouse/settings.resolver.ts.
-    return sharedGetSettingsForWarehouse(warehouseId, this.db);
+    return sharedGetSettingsForWarehouse(warehouseId, this.db as any);
   }
 
   /**

@@ -29,6 +29,13 @@
       "when": 1776633938452,
       "tag": "0003_add_po_tolerance",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776690440225,
+      "tag": "0004_m6_subscription_overlap_prevent",
+      "breakpoints": true
     }
   ]
 }

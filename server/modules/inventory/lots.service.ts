@@ -27,6 +27,7 @@ type DrizzleDb = {
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
+  execute: (sql: any) => Promise<any>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
@@ -185,16 +186,21 @@ export class InventoryLotService {
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);
-
-      await this.db
-        .update(inventoryLots)
-        .set({
-          qtyReserved: sql`${inventoryLots.qtyReserved} + ${take}`,
-        })
-        .where(eq(inventoryLots.id, lot.id));
-
       allocations.push({ lotId: lot.id, qty: take, unitCostCents: lot.unitCostCents });
       remaining -= take;
+    }
+
+    if (allocations.length > 0) {
+      const updates = allocations.map(a => ({ lotId: a.lotId, qty: a.qty }));
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(updates)}::jsonb) AS x("lotId" int, qty int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_reserved = il.qty_reserved + u.qty
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
     }
 
     if (remaining > 0) {
@@ -232,19 +238,25 @@ export class InventoryLotService {
       .orderBy(sql`${inventoryLots.receivedAt} DESC`); // Newest first for release
 
     let remaining = params.qty;
+    const releases: Array<{ lotId: number; qty: number }> = [];
     for (const lot of lots) {
       if (remaining <= 0) break;
 
       const release = Math.min(lot.qtyReserved, remaining);
-
-      await this.db
-        .update(inventoryLots)
-        .set({
-          qtyReserved: sql`${inventoryLots.qtyReserved} - ${release}`,
-        })
-        .where(eq(inventoryLots.id, lot.id));
-
+      releases.push({ lotId: lot.id, qty: release });
       remaining -= release;
+    }
+
+    if (releases.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(releases)}::jsonb) AS x("lotId" int, qty int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_reserved = il.qty_reserved - u.qty
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
     }
   }
 
@@ -279,6 +291,8 @@ export class InventoryLotService {
 
     let remaining = params.qty;
     const costAllocations: Array<{ lotId: number; qty: number; unitCostCents: number }> = [];
+    const pickUpdates: Array<{ lotId: number; take: number; fromReserved: number }> = [];
+    const newCosts: Array<any> = [];
 
     for (const lot of lots) {
       if (remaining <= 0) break;
@@ -292,19 +306,11 @@ export class InventoryLotService {
       const take = Math.min(totalPickable, remaining);
       const fromReserved = Math.min(reservedAvailable, take);
 
-      // Decrement on-hand + reserved, increment picked
-      await this.db
-        .update(inventoryLots)
-        .set({
-          qtyOnHand: sql`${inventoryLots.qtyOnHand} - ${take}`,
-          qtyReserved: sql`${inventoryLots.qtyReserved} - ${fromReserved}`,
-          qtyPicked: sql`${inventoryLots.qtyPicked} + ${take}`,
-        })
-        .where(eq(inventoryLots.id, lot.id));
+      pickUpdates.push({ lotId: lot.id, take, fromReserved });
 
       // Record cost for this lot allocation
       if (params.orderItemId) {
-        await this.db.insert(orderItemCosts).values({
+        newCosts.push({
           orderId: params.orderId,
           orderItemId: params.orderItemId,
           inventoryLotId: lot.id,
@@ -312,11 +318,29 @@ export class InventoryLotService {
           qty: take,
           unitCostCents: lot.unitCostCents,
           totalCostCents: take * lot.unitCostCents,
-        } as any);
+        });
       }
 
       costAllocations.push({ lotId: lot.id, qty: take, unitCostCents: lot.unitCostCents });
       remaining -= take;
+    }
+
+    if (pickUpdates.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(pickUpdates)}::jsonb) AS x("lotId" int, take int, "fromReserved" int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_on_hand = il.qty_on_hand - u.take,
+            qty_reserved = il.qty_reserved - u."fromReserved",
+            qty_picked = il.qty_picked + u.take
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
+    }
+
+    if (newCosts.length > 0) {
+      await this.db.insert(orderItemCosts).values(newCosts);
     }
 
     return costAllocations;
@@ -349,28 +373,26 @@ export class InventoryLotService {
       .orderBy(asc(inventoryLots.receivedAt));
 
     let remaining = params.qty;
+    const pickedUpdates: Array<{ lotId: number; take: number }> = [];
     for (const lot of lots) {
       if (remaining <= 0) break;
 
       const take = Math.min(lot.qtyPicked, remaining);
-
-      const [updated] = await this.db
-        .update(inventoryLots)
-        .set({
-          qtyPicked: sql`${inventoryLots.qtyPicked} - ${take}`,
-        })
-        .where(eq(inventoryLots.id, lot.id))
-        .returning();
-
-      // Check for depletion
-      if (updated && updated.qtyOnHand === 0 && updated.qtyReserved === 0 && updated.qtyPicked === 0) {
-        await this.db
-          .update(inventoryLots)
-          .set({ status: "depleted" })
-          .where(eq(inventoryLots.id, lot.id));
-      }
-
+      pickedUpdates.push({ lotId: lot.id, take });
       remaining -= take;
+    }
+
+    if (pickedUpdates.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(pickedUpdates)}::jsonb) AS x("lotId" int, take int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_picked = il.qty_picked - u.take,
+            status = CASE WHEN il.qty_on_hand = 0 AND il.qty_reserved = 0 AND (il.qty_picked - u.take) = 0 THEN 'depleted' ELSE il.status END
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
     }
 
     // If shipped without pick (direct ship), consume from on-hand lots
@@ -388,6 +410,8 @@ export class InventoryLotService {
         )
         .orderBy(asc(inventoryLots.receivedAt));
 
+      const onHandUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
+
       for (const lot of onHandLots) {
         if (remaining <= 0) break;
         const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
@@ -396,23 +420,22 @@ export class InventoryLotService {
         const take = Math.min(available, remaining);
         const reservedRelease = Math.min(lot.qtyReserved, take);
 
-        const [updated] = await this.db
-          .update(inventoryLots)
-          .set({
-            qtyOnHand: sql`${inventoryLots.qtyOnHand} - ${take}`,
-            ...(reservedRelease > 0 ? { qtyReserved: sql`${inventoryLots.qtyReserved} - ${reservedRelease}` } : {}),
-          })
-          .where(eq(inventoryLots.id, lot.id))
-          .returning();
-
-        if (updated && updated.qtyOnHand === 0 && updated.qtyReserved === 0 && updated.qtyPicked === 0) {
-          await this.db
-            .update(inventoryLots)
-            .set({ status: "depleted" })
-            .where(eq(inventoryLots.id, lot.id));
-        }
-
+        onHandUpdates.push({ lotId: lot.id, take, reservedRelease });
         remaining -= take;
+      }
+
+      if (onHandUpdates.length > 0) {
+        await this.db.execute(sql`
+          WITH updates AS (
+            SELECT * FROM jsonb_to_recordset(${JSON.stringify(onHandUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
+          )
+          UPDATE inventory.inventory_lots AS il
+          SET qty_on_hand = il.qty_on_hand - u.take,
+              qty_reserved = il.qty_reserved - u."reservedRelease",
+              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+          FROM updates u
+          WHERE il.id = u."lotId"
+        `);
       }
     }
   }
@@ -448,6 +471,7 @@ export class InventoryLotService {
       );
 
       let remaining = Math.abs(params.qtyDelta);
+      const adjustUpdates: Array<{ lotId: number; take: number }> = [];
       for (const lot of lots) {
         if (remaining <= 0) break;
 
@@ -455,23 +479,21 @@ export class InventoryLotService {
         if (available <= 0) continue;
 
         const take = Math.min(available, remaining);
-
-        const [updated] = await this.db
-          .update(inventoryLots)
-          .set({
-            qtyOnHand: sql`${inventoryLots.qtyOnHand} - ${take}`,
-          })
-          .where(eq(inventoryLots.id, lot.id))
-          .returning();
-
-        if (updated && updated.qtyOnHand === 0 && updated.qtyReserved === 0 && updated.qtyPicked === 0) {
-          await this.db
-            .update(inventoryLots)
-            .set({ status: "depleted" })
-            .where(eq(inventoryLots.id, lot.id));
-        }
-
+        adjustUpdates.push({ lotId: lot.id, take });
         remaining -= take;
+      }
+
+      if (adjustUpdates.length > 0) {
+        await this.db.execute(sql`
+          WITH updates AS (
+            SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int)
+          )
+          UPDATE inventory.inventory_lots AS il
+          SET qty_on_hand = il.qty_on_hand - u.take,
+              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+          FROM updates u
+          WHERE il.id = u."lotId"
+        `);
       }
     }
   }
@@ -500,6 +522,7 @@ export class InventoryLotService {
     let remaining = params.qty;
     let totalCostCents = 0;
     let totalQty = 0;
+    const transferUpdates: Array<{ lotId: number; take: number }> = [];
 
     for (const lot of lots) {
       if (remaining <= 0) break;
@@ -508,25 +531,24 @@ export class InventoryLotService {
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);
-
-      const [updated] = await this.db
-        .update(inventoryLots)
-        .set({
-          qtyOnHand: sql`${inventoryLots.qtyOnHand} - ${take}`,
-        })
-        .where(eq(inventoryLots.id, lot.id))
-        .returning();
-
-      if (updated && updated.qtyOnHand === 0 && updated.qtyReserved === 0 && updated.qtyPicked === 0) {
-        await this.db
-          .update(inventoryLots)
-          .set({ status: "depleted" })
-          .where(eq(inventoryLots.id, lot.id));
-      }
+      transferUpdates.push({ lotId: lot.id, take });
 
       totalCostCents += take * lot.unitCostCents;
       totalQty += take;
       remaining -= take;
+    }
+
+    if (transferUpdates.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_on_hand = il.qty_on_hand - u.take,
+            status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
     }
 
     // Create a new lot at the destination with weighted average cost

@@ -2,14 +2,20 @@
 // Critical: Shopify does NOT auto-bill. We must trigger billing.
 import * as storage from "./infrastructure/subscription.repository";
 import { createBillingAttempt } from "./infrastructure/shopify.adapter";
+import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
 
 const BATCH_DELAY_MS = 500; // 500ms between billing attempts to respect rate limits
+const BILLING_LOCK_ID = 54321;
 
 /**
  * Process all subscriptions due for billing.
  * Should run daily at 6am ET (11:00 UTC) or on an hourly schedule.
  */
 export async function processDueBillings(): Promise<{ processed: number; succeeded: number; failed: number; errors: string[] }> {
+  // First, reconcile memberships (M7)
+  const reconcileStats = await storage.reconcileCurrentMemberships();
+  console.log(`[BillingScheduler] M7 Reconcile check complete: ${reconcileStats.upserted} members aligned`);
+
   const due = await storage.getDueBillings();
   const errors: string[] = [];
   let processed = 0;
@@ -86,7 +92,9 @@ export function startBillingScheduler(): void {
   // Run after a 2 minute startup delay
   setTimeout(async () => {
     try {
-      await processDueBillings();
+      await withAdvisoryLock(BILLING_LOCK_ID, async () => {
+        await processDueBillings();
+      });
     } catch (err: any) {
       console.error(`[BillingScheduler] Startup run error: ${err.message}`);
     }
@@ -94,12 +102,14 @@ export function startBillingScheduler(): void {
     // Then run every hour
     setInterval(async () => {
       try {
-        await processDueBillings();
+        await withAdvisoryLock(BILLING_LOCK_ID, async () => {
+          await processDueBillings();
+        });
       } catch (err: any) {
         console.error(`[BillingScheduler] Scheduled run error: ${err.message}`);
       }
     }, INTERVAL_MS);
 
-    console.log("[BillingScheduler] Billing scheduler started (runs every hour)");
+    console.log("[BillingScheduler] Billing scheduler started (runs every hour, dyno-safe lock)");
   }, 2 * 60 * 1000);
 }

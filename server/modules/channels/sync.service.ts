@@ -127,7 +127,7 @@ class ChannelSyncService {
    */
   async refreshSyncEnabled(): Promise<boolean> {
     try {
-      const row = await getSettingsForWarehouse(null, this.db);
+      const row = await getSettingsForWarehouse(null, this.db as any);
       this._syncEnabled = (row?.channelSyncEnabled ?? 0) === 1;
     } catch {
       this._syncEnabled = false; // Fail safe: don't push if we can't read settings

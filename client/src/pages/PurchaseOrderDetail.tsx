@@ -70,16 +70,7 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
 };
 
 /** Convert a dollar string to cents without floating-point artifacts */
-function dollarsToCents(dollars: string): number {
-  const parts = dollars.split(".");
-  const whole = parseInt(parts[0] || "0", 10) * 100;
-  if (!parts[1]) return whole;
-  // Pad or trim fractional part to work in cents
-  const frac = parts[1].padEnd(2, "0");
-  const cents = parseInt(frac.slice(0, 2), 10);
-  const subCent = frac.length > 2 ? parseInt(frac.slice(2), 10) / Math.pow(10, frac.length - 2) : 0;
-  return whole + cents + subCent;
-}
+
 
 function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
   if (!cents && cents !== 0) return "$0.00";

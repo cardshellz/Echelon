@@ -6,6 +6,7 @@ import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
 import { requirePermission, requireAuth, requireInternalApiKey, upload } from "../../routes/middleware";
+import { requireIdempotency } from "../../middleware/idempotency";
 import { PurchasingError } from "./purchasing.service";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
@@ -223,7 +224,7 @@ export function registerPurchasingRoutes(app: Express) {
   });
   
   // Close/complete a receiving order - updates inventory
-  app.post("/api/receiving/:id/close", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/receiving/:id/close", requirePermission("inventory", "adjust"), requireIdempotency(), async (req, res) => {
     try {
       const { receiving: rcvService } = req.app.locals.services;
       const result = await rcvService.close(parseInt(req.params.id), req.session.user?.id || null);
@@ -3012,7 +3013,7 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/ap-payments", requirePermission("purchasing", "approve"), async (req, res) => {
+  app.post("/api/ap-payments", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
     try {
       const body = req.body;
       if (!body.vendorId || !body.paymentDate || !body.paymentMethod || body.totalAmountCents == null) {
@@ -3040,7 +3041,7 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/ap-payments/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
+  app.post("/api/ap-payments/:id/void", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
     try {
       const { reason } = req.body;
       if (!reason) return res.status(400).json({ error: "reason is required" });

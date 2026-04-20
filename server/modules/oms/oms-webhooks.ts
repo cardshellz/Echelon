@@ -25,6 +25,7 @@ import { warehouseStorage } from "../warehouse";
 import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
+import rateLimit from "express-rate-limit";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -336,6 +337,14 @@ export function registerOmsWebhooks(
   shipStationService: ShipStationService | null,
   wmsSyncService?: any, // WmsSyncService - will be set from server/index.ts
 ) {
+  const webhookLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 100, // Limit each IP to 100 webhook requests per `window`
+    message: "Too many webhooks from this IP, please try again later",
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
   // Helper: verify HMAC using rawBody from express.json verify callback, return parsed body or null
   function verifyAndParse(req: Request, res: Response): any | null {
     const hmac = req.headers["x-shopify-hmac-sha256"] as string | undefined;
@@ -401,7 +410,7 @@ export function registerOmsWebhooks(
   // =========================================================================
   // 1. POST /api/oms/webhooks/orders/paid
   // =========================================================================
-  app.post("/api/oms/webhooks/orders/paid", async (req: Request, res: Response) => {
+  app.post("/api/oms/webhooks/orders/paid", webhookLimiter, async (req: Request, res: Response) => {
     const shopifyOrder = verifyAndParse(req, res);
     if (!shopifyOrder) return;
 
@@ -471,6 +480,9 @@ export function registerOmsWebhooks(
 
       console.log(`${LOG_PREFIX} ✅ Processed new order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
       pushToMissionControl(omsOrder.id, "order.created");
+      
+      // M18: Trigger real-time backfill bridge
+      await db.execute(sql`NOTIFY shopify_order_ingested`);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/paid error for ${shopifyOrder.name}: ${err.message}`);
       await db.insert(webhookRetryQueue).values({
@@ -485,7 +497,7 @@ export function registerOmsWebhooks(
   // =========================================================================
   // 2. POST /api/oms/webhooks/orders/updated
   // =========================================================================
-  app.post("/api/oms/webhooks/orders/updated", async (req: Request, res: Response) => {
+  app.post("/api/oms/webhooks/orders/updated", webhookLimiter, async (req: Request, res: Response) => {
     const shopifyOrder = verifyAndParse(req, res);
     if (!shopifyOrder) return;
 
@@ -622,6 +634,9 @@ export function registerOmsWebhooks(
 
       console.log(`${LOG_PREFIX} ✅ Updated order ${shopifyOrder.name} (OMS id=${existing.id})`);
       pushToMissionControl(existing.id, "order.updated");
+
+      // M18: Trigger real-time backfill bridge
+      await db.execute(sql`NOTIFY shopify_order_ingested`);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/updated error for ${shopifyOrder.name}: ${err.message}`);
       await db.insert(webhookRetryQueue).values({
@@ -636,7 +651,7 @@ export function registerOmsWebhooks(
   // =========================================================================
   // 3. POST /api/oms/webhooks/orders/cancelled
   // =========================================================================
-  app.post("/api/oms/webhooks/orders/cancelled", async (req: Request, res: Response) => {
+  app.post("/api/oms/webhooks/orders/cancelled", webhookLimiter, async (req: Request, res: Response) => {
     const shopifyOrder = verifyAndParse(req, res);
     if (!shopifyOrder) return;
 
@@ -710,6 +725,9 @@ export function registerOmsWebhooks(
 
       console.log(`${LOG_PREFIX} ✅ Cancelled order ${shopifyOrder.name} (OMS id=${existing.id})`);
       pushToMissionControl(existing.id, "order.cancelled");
+
+      // M18: Trigger real-time backfill bridge
+      await db.execute(sql`NOTIFY shopify_order_ingested`);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/cancelled error for ${shopifyOrder.name}: ${err.message}`);
       await db.insert(webhookRetryQueue).values({
@@ -724,7 +742,7 @@ export function registerOmsWebhooks(
   // =========================================================================
   // 4. POST /api/oms/webhooks/orders/fulfilled
   // =========================================================================
-  app.post("/api/oms/webhooks/orders/fulfilled", async (req: Request, res: Response) => {
+  app.post("/api/oms/webhooks/orders/fulfilled", webhookLimiter, async (req: Request, res: Response) => {
     const shopifyOrder = verifyAndParse(req, res);
     if (!shopifyOrder) return;
 
@@ -803,6 +821,9 @@ export function registerOmsWebhooks(
 
       console.log(`${LOG_PREFIX} ✅ Fulfilled order ${shopifyOrder.name} (tracking: ${trackingNumber || "none"})`);
       pushToMissionControl(existing.id, "order.fulfilled");
+
+      // M18: Trigger real-time backfill bridge
+      await db.execute(sql`NOTIFY shopify_order_ingested`);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/fulfilled error for ${shopifyOrder.name}: ${err.message}`);
       await db.insert(webhookRetryQueue).values({

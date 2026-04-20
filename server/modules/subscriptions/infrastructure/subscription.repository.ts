@@ -313,6 +313,25 @@ export async function clearCurrentMembership(memberId: number): Promise<void> {
   );
 }
 
+// ─── Reconciliation (M7) ─────────────────────────────────────────────
+
+export async function reconcileCurrentMemberships(): Promise<{ upserted: number }> {
+  // Sync the materialized table with ground-truth active subscriptions
+  const result = await pool.query(`
+    INSERT INTO member_current_membership (member_id, plan_id, plan_name, updated_at)
+    SELECT ms.member_id, p.id, p.name, NOW()
+    FROM membership.member_subscriptions ms
+    JOIN membership.plans p ON p.id = ms.plan_id
+    WHERE ms.status = 'active'
+    ON CONFLICT (member_id) DO UPDATE 
+      SET plan_id = EXCLUDED.plan_id, 
+          plan_name = EXCLUDED.plan_name, 
+          updated_at = EXCLUDED.updated_at
+  `);
+  
+  return { upserted: result.rowCount || 0 };
+}
+
 // ─── Billing Log ─────────────────────────────────────────────────────
 
 export async function insertBillingLog(entry: {

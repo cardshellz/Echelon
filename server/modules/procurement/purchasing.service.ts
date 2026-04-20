@@ -531,7 +531,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (tier) {
       // Needs approval
       assertTransition(po.status, "pending_approval");
-      await storage.updatePurchaseOrder(id, {
+      return await storage.updatePurchaseOrder(id, {
         status: "pending_approval",
         approvalTierId: tier.id,
         updatedBy: userId,
@@ -544,7 +544,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     } else {
       // Auto-approve (no tier matches)
       assertTransition(po.status, "approved");
-      await storage.updatePurchaseOrderStatusWithHistory(id, {
+      return await storage.updatePurchaseOrderStatusWithHistory(id, {
         status: "approved",
         approvedBy: userId,
         approvedAt: new Date(),
@@ -557,8 +557,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changeNotes: "Auto-approved (below threshold)"
       });
     }
-
-    return await storage.getPurchaseOrderById(id);
   }
 
   async function returnToDraft(id: number, userId?: string, notes?: string) {
@@ -566,7 +564,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "draft");
 
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "draft",
       approvalTierId: null,
       approvedBy: null,
@@ -579,7 +577,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: notes || "Returned to draft"
       });
-    return await storage.getPurchaseOrderById(id);
   }
 
   async function approve(id: number, userId?: string, notes?: string) {
@@ -587,7 +584,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "approved");
 
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "approved",
       approvedBy: userId,
       approvedAt: new Date(),
@@ -599,7 +596,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: notes || "Approved"
       });
-    return await storage.getPurchaseOrderById(id);
   }
 
   async function send(id: number, userId?: string) {
@@ -607,7 +603,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "sent");
 
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "sent",
       orderDate: new Date(),
       sentToVendorAt: new Date(),
@@ -618,7 +614,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: "Sent to vendor"
       });
-    return await storage.getPurchaseOrderById(id);
   }
 
   /**
@@ -674,7 +669,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     // Now send
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "sent",
       orderDate: new Date(),
       sentToVendorAt: new Date(),
@@ -685,8 +680,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: "Sent to vendor (solo mode)"
       });
-
-    return await storage.getPurchaseOrderById(id);
   }
 
   async function acknowledge(id: number, data: { vendorRefNumber?: string; confirmedDeliveryDate?: Date }, userId?: string) {
@@ -694,7 +687,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "acknowledged");
 
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "acknowledged",
       vendorAckDate: new Date(),
       vendorRefNumber: data.vendorRefNumber,
@@ -706,7 +699,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: "Vendor acknowledged"
       });
-    return await storage.getPurchaseOrderById(id);
   }
 
   async function cancel(id: number, reason: string, userId?: string) {
@@ -727,7 +719,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     }
 
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "cancelled",
       cancelledAt: new Date(),
       cancelledBy: userId,
@@ -739,7 +731,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: reason
       });
-    return await storage.getPurchaseOrderById(id);
   }
 
   async function close(id: number, userId?: string, notes?: string) {
@@ -747,7 +738,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "closed");
 
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "closed",
       closedAt: new Date(),
       closedBy: userId,
@@ -758,7 +749,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: notes || "PO closed"
       });
-    return await storage.getPurchaseOrderById(id);
   }
 
   async function closeShort(id: number, reason: string, userId?: string) {
@@ -781,7 +771,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     }
 
-    await storage.updatePurchaseOrderStatusWithHistory(id, {
+    return await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "closed",
       closedAt: new Date(),
       closedBy: userId,
@@ -792,7 +782,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         changeNotes: `Closed short: ${reason}`
       });
-    return await storage.getPurchaseOrderById(id);
   }
 
   // ── RECEIVING INTEGRATION ───────────────────────────────────────

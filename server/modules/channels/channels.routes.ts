@@ -865,9 +865,6 @@ export function registerChannelRoutes(app: Express) {
           FROM channel_connections WHERE channel_id = 36
         `);
 
-        const totalResult = await client.query(`SELECT COUNT(*) FROM catalog.product_assets WHERE url LIKE 'https://%'`);
-        const prodWithShopifyId = await client.query(`SELECT COUNT(*) FROM catalog.products WHERE shopify_product_id IS NOT NULL`);
-
         // Check channel_listings for fresh Shopify IDs
         const listingsCheck = await client.query(`
           SELECT p.id, p.name, p.shopify_product_id AS products_shopify_id, cl.external_product_id AS listings_shopify_id
@@ -886,8 +883,6 @@ export function registerChannelRoutes(app: Express) {
         res.json({
           envVarsSet: { shopDomain: !!shopDomain, accessToken: !!accessToken },
           shopDomainValue: shopDomain || "NOT SET",
-          totalAssets: parseInt(totalResult.rows[0].count),
-          productsWithShopifyId: parseInt(prodWithShopifyId.rows[0].count),
           sampleProducts: result.rows,
           channelCredentials: connCheck.rows,
           shopifyIdComparison: listingsCheck.rows,

@@ -541,7 +541,7 @@ export class OperationsDashboardService {
     // params.warehouseId is optional — null falls through to DEFAULT.
     const wsRow = await getSettingsForWarehouse(
       (params as any)?.warehouseId ?? null,
-      this.db,
+      this.db as any,
     );
     const lookbackDays = (wsRow?.velocityLookbackDays as number | null | undefined) ?? 14;
 
