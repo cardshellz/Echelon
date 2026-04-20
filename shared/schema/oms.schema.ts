@@ -49,8 +49,9 @@ export const omsOrders = omsSchema.table("oms_orders", {
   shipToCountry: varchar("ship_to_country", { length: 100 }),
 
   // Delivery SLA & Shipping logic
-  shippingMethod: varchar("shipping_method", { length: 200 }),
-  shippingMethodCode: varchar("shipping_method_code", { length: 100 }),
+  shippingMethod: varchar("shipping_method", { length: 200 }), // free-form customer-facing label (do NOT use for routing)
+  shippingMethodCode: varchar("shipping_method_code", { length: 100 }), // platform-provided code (stable, still not business intent)
+  shippingServiceLevel: varchar("shipping_service_level", { length: 20 }).notNull().default("standard"), // normalized fulfillment intent: standard | expedited | overnight
 
   // Totals (cents)
   subtotalCents: bigint("subtotal_cents", { mode: "number" }).notNull().default(0),
