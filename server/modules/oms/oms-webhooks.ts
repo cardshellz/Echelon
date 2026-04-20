@@ -183,9 +183,13 @@ async function createWmsOrderFromShopify(
   const omsIdStr = String(omsOrderId);
 
   // Dedup: check if WMS order already exists for this OMS order
+  // Dedup: match either source='oms' (new wms-sync.service path) or legacy
+  // source='shopify' (createWmsOrderFromShopify fallback). New orders flow
+  // through the first path; the second is for backfilled historical rows.
   const existing = await db.execute<{ id: number }>(sql`
     SELECT id FROM wms.orders
-    WHERE source = 'shopify' AND source_table_id = ${omsIdStr}
+    WHERE (source = 'oms' AND oms_fulfillment_order_id = ${omsIdStr})
+       OR (source = 'shopify' AND source_table_id = ${omsIdStr})
     LIMIT 1
   `);
   if (existing.rows.length > 0) {
@@ -599,7 +603,9 @@ export function registerOmsWebhooks(
 
         // Update WMS order items if they exist
         const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+          SELECT id FROM wms.orders
+          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
+             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
           LIMIT 1
         `);
         if (wmsOrder.rows.length > 0) {
@@ -690,7 +696,9 @@ export function registerOmsWebhooks(
       if (wmsServices) {
         // Find WMS order
         const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+          SELECT id FROM wms.orders
+          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
+             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
           LIMIT 1
         `);
         if (wmsOrder.rows.length > 0) {
@@ -792,7 +800,9 @@ export function registerOmsWebhooks(
 
       // Update WMS order tracking
       const wmsOrder = await db.execute<{ id: number }>(sql`
-        SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+        SELECT id FROM wms.orders
+        WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
+           OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
         LIMIT 1
       `);
       if (wmsOrder.rows.length > 0) {
@@ -916,7 +926,9 @@ export function registerOmsWebhooks(
         if (restockItems.length > 0) {
           // Find WMS order
           const wmsOrder = await db.execute<{ id: number }>(sql`
-            SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+            SELECT id FROM wms.orders
+            WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
+               OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
             LIMIT 1
           `);
 
