@@ -1095,7 +1095,7 @@ export default function Picking() {
   
   // Search, sort, and filter state
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("age");
+  const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("priority");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold" | "exceptions" | "combined">("all");
   
@@ -2870,9 +2870,10 @@ export default function Picking() {
               </Card>
             ))
           ) : (
-            (sortedQueue as SingleOrder[]).map((order) => (
+            (sortedQueue as SingleOrder[]).map((order, queueIndex) => (
               <Card 
-                key={order.id} 
+                key={order.id}
+                data-queue-rank={queueIndex + 1}
                 className={cn(
                   "cursor-pointer hover:border-primary/50 transition-all active:scale-[0.99]",
                   order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20",
@@ -2953,6 +2954,12 @@ export default function Picking() {
                         ) : (
                           <>
                             <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
+                              {/* Pick queue rank — matches ShipStation Custom Field 1 sort */}
+                              {sortBy === "priority" && sortDirection === "desc" && (
+                                <span className="inline-flex items-center justify-center min-w-[22px] h-[18px] px-1.5 rounded bg-slate-900 text-white text-[10px] font-mono font-semibold" title="Pick queue rank">
+                                  #{queueIndex + 1}
+                                </span>
+                              )}
                               {order.orderNumber}
                               <span className="text-xs text-muted-foreground font-normal flex items-center gap-0.5">
                                 <Clock size={10} /> {order.age}
