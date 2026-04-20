@@ -25,6 +25,7 @@ import {
   channelWarehouseAssignments,
   channelAllocationRules,
   channelProductLines,
+  channelVariantOverrides,
   productVariants,
   productLineProducts,
   allocationAuditLog,
@@ -307,6 +308,23 @@ class AllocationEngine {
       }
     }
 
+    // 6.5 Load channel variant overrides (is_listed = false blocks allocation)
+    const variantOverrides = await this.db
+      .select({
+        channelId: channelVariantOverrides.channelId,
+        productVariantId: channelVariantOverrides.productVariantId,
+        isListed: channelVariantOverrides.isListed,
+      })
+      .from(channelVariantOverrides)
+      .where(inArray(channelVariantOverrides.channelId, channelIds));
+
+    const listedOverridesByChannelVariant = new Map<string, boolean>();
+    for (const row of variantOverrides) {
+      if (row.channelId && row.productVariantId) {
+        listedOverridesByChannelVariant.set(`${row.channelId}:${row.productVariantId}`, row.isListed ?? true);
+      }
+    }
+
     // 7. For each channel, compute ATP independently (parallel model)
     for (const channel of activeChannels) {
       // Product line gate
@@ -393,6 +411,25 @@ class AllocationEngine {
 
       // Per-variant allocation
       for (const variant of globalVariantAtp) {
+        // Consult channel variant override
+        const isListed = listedOverridesByChannelVariant.get(`${channel.id}:${variant.productVariantId}`);
+        if (isListed === false) {
+          result.allocations.push({
+            channelId: channel.id,
+            channelName: channel.name,
+            channelProvider: channel.provider,
+            channelPriority: channel.priority,
+            productVariantId: variant.productVariantId,
+            sku: variant.sku,
+            unitsPerVariant: variant.unitsPerVariant,
+            allocatedUnits: 0,
+            allocatedBase: 0,
+            method: "zero",
+            reason: "Variant is explicitly unlisted for this channel (via overrides)"
+          });
+          continue;
+        }
+
         // Find variant-level rule (per-channel > global)
         const variantRule = channelRules.find(
           (r) => r.productVariantId === variant.productVariantId,
