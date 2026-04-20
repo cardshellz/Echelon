@@ -2,6 +2,8 @@ import type { Express } from "express";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
+import { db } from "../../db";
+import { sql } from "drizzle-orm";
 const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
@@ -366,6 +368,26 @@ export function registerPickingRoutes(app: Express) {
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+
+      // Mirror hold state to ShipStation so packer's grid doesn't show it.
+      // Non-blocking — local state is authoritative, SS sync is best effort.
+      (async () => {
+        try {
+          const { shipStation } = req.app.locals.services || {};
+          if (!shipStation?.isConfigured()) return;
+          const ssRow = await db.execute<{ shipstation_order_id: number | null }>(sql`
+            SELECT oms.shipstation_order_id
+            FROM oms.oms_orders oms
+            JOIN wms.orders w ON w.source = 'oms' AND w.oms_fulfillment_order_id = oms.id::text
+            WHERE w.id = ${id}
+            LIMIT 1
+          `);
+          const ssId = ssRow.rows[0]?.shipstation_order_id;
+          if (ssId) await shipStation.putOrderOnHold(Number(ssId));
+        } catch (err: any) {
+          console.warn(`[Hold] ShipStation mirror failed for order ${id}:`, err.message);
+        }
+      })();
       
       // Log the hold action (non-blocking)
       storage.createPickingLog({
@@ -403,6 +425,25 @@ export function registerPickingRoutes(app: Express) {
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+
+      // Mirror release to ShipStation.
+      (async () => {
+        try {
+          const { shipStation } = req.app.locals.services || {};
+          if (!shipStation?.isConfigured()) return;
+          const ssRow = await db.execute<{ shipstation_order_id: number | null }>(sql`
+            SELECT oms.shipstation_order_id
+            FROM oms.oms_orders oms
+            JOIN wms.orders w ON w.source = 'oms' AND w.oms_fulfillment_order_id = oms.id::text
+            WHERE w.id = ${id}
+            LIMIT 1
+          `);
+          const ssId = ssRow.rows[0]?.shipstation_order_id;
+          if (ssId) await shipStation.releaseOrderFromHold(Number(ssId));
+        } catch (err: any) {
+          console.warn(`[ReleaseHold] ShipStation mirror failed for order ${id}:`, err.message);
+        }
+      })();
       
       // Log the unhold action (non-blocking)
       storage.createPickingLog({

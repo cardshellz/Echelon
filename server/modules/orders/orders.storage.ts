@@ -11,6 +11,35 @@ import {
 } from "@shared/schema";
 import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
+import { computeSortRank } from "./sort-rank";
+
+/**
+ * Recompute sort_rank from the current DB row. Called after any
+ * change to priority or onHold so the flattened ShipStation sort key
+ * stays in step with Echelon's pick queue.
+ */
+async function recomputeSortRank(orderId: number): Promise<string | null> {
+  const rows = await db
+    .select({
+      priority: orders.priority,
+      onHold: orders.onHold,
+      slaDueAt: orders.slaDueAt,
+      orderPlacedAt: orders.orderPlacedAt,
+    })
+    .from(orders)
+    .where(eq(orders.id, orderId))
+    .limit(1);
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  const rank = computeSortRank({
+    priority: row.priority,
+    onHold: row.onHold,
+    slaDueAt: row.slaDueAt as any,
+    orderPlacedAt: row.orderPlacedAt as any,
+  });
+  await db.update(orders).set({ sortRank: rank }).where(eq(orders.id, orderId));
+  return rank;
+}
 
 export interface IOrderStorage {
   getOrderByExternalId(externalOrderId: string): Promise<Order | undefined>;
@@ -680,6 +709,7 @@ export const orderMethods: IOrderStorage = {
       .set({ onHold: 1, heldAt: new Date() })
       .where(eq(orders.id, orderId))
       .returning();
+    if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
 
@@ -689,6 +719,7 @@ export const orderMethods: IOrderStorage = {
       .set({ onHold: 0, heldAt: null })
       .where(eq(orders.id, orderId))
       .returning();
+    if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
 
@@ -699,6 +730,7 @@ export const orderMethods: IOrderStorage = {
       .set({ priority: finalPriority })
       .where(eq(orders.id, orderId))
       .returning();
+    if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
 

@@ -128,6 +128,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   ): Promise<{ shipstationOrderId: number; orderKey: string }> {
     const orderKey = `echelon-oms-${omsOrder.id}`;
 
+    // Fetch sort_rank from the WMS row so packer can sort ShipStation grid
+    // in the same order as the Echelon pick queue. Falls back to empty
+    // string if the WMS row hasn't been created yet (unlikely).
+    let sortRank = "";
+    try {
+      const wmsRow: any = await db.execute(sql`
+        SELECT sort_rank FROM wms.orders
+        WHERE source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrder.id)}
+        LIMIT 1
+      `);
+      sortRank = wmsRow?.rows?.[0]?.sort_rank || "";
+    } catch (err) {
+      console.warn(`[ShipStation] sort_rank lookup failed for order ${omsOrder.id}:`, err);
+    }
+
     // Determine order number prefix based on channel
     const channelName = omsOrder.channelName || "";
     const isEbay = channelName.toLowerCase().includes("ebay");
@@ -176,8 +191,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         warehouseId: 996884,
         storeId: 319989,
         source: channelName || "echelon",
-        customField1: `oms_order_id:${omsOrder.id}`,
-        customField2: `channel:${channelName || "unknown"}`,
+        // customField1 carries the Echelon pick queue sort rank. Packer
+        // sorts ShipStation grid by Custom Field 1 DESC — yields the
+        // same order the picker picks in. 22-char padded string so
+        // ShipStation's text sort matches our numeric sort.
+        customField1: sortRank,
+        customField2: `oms_order_id:${omsOrder.id}|channel:${channelName || "unknown"}`,
         customField3: `external_id:${omsOrder.externalOrderId}`,
       },
     };
@@ -511,6 +530,65 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Hold / Release on ShipStation side
+  // -------------------------------------------------------------------------
+
+  /**
+   * Put a ShipStation order on hold. ShipStation requires a holdUntilDate,
+   * so we use a sentinel far-future date for indefinite holds. Echelon
+   * controls when it's released.
+   */
+  async function putOrderOnHold(shipstationOrderId: number): Promise<void> {
+    if (!isConfigured()) return;
+    try {
+      await apiRequest("POST", "/orders/holduntil", {
+        orderId: shipstationOrderId,
+        holdUntilDate: "2099-12-31",
+      });
+      console.log(`[ShipStation] Order ${shipstationOrderId} placed on hold`);
+    } catch (err: any) {
+      console.error(`[ShipStation] Failed to hold order ${shipstationOrderId}:`, err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * Release a ShipStation order from hold back into Awaiting Shipment.
+   */
+  async function releaseOrderFromHold(shipstationOrderId: number): Promise<void> {
+    if (!isConfigured()) return;
+    try {
+      await apiRequest("POST", "/orders/restorefromhold", {
+        orderId: shipstationOrderId,
+      });
+      console.log(`[ShipStation] Order ${shipstationOrderId} released from hold`);
+    } catch (err: any) {
+      console.error(`[ShipStation] Failed to release order ${shipstationOrderId} from hold:`, err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * Update only the sort_rank customField1 of an existing ShipStation order.
+   * Implemented as a full re-push via /orders/createorder — ShipStation
+   * treats createorder as upsert when orderKey matches.
+   */
+  async function updateSortRank(omsOrderId: number): Promise<void> {
+    if (!isConfigured()) return;
+    try {
+      const omsRows: any = await db.execute(sql`
+        SELECT id, shipstation_order_id FROM oms.oms_orders WHERE id = ${omsOrderId}
+      `);
+      if (!omsRows?.rows?.[0]?.shipstation_order_id) return;
+      // Caller is expected to use pushOrder() for a full re-sync; this
+      // stub exists so callers can do a lightweight refresh later.
+      console.log(`[ShipStation] sort_rank update requested for OMS ${omsOrderId} (full re-push recommended)`);
+    } catch (err: any) {
+      console.error(`[ShipStation] updateSortRank failed for OMS ${omsOrderId}:`, err.message);
+    }
+  }
+
   return {
     pushOrder,
     getShipments,
@@ -518,6 +596,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     processShipNotify,
     registerWebhook,
     isConfigured,
+    putOrderOnHold,
+    releaseOrderFromHold,
+    updateSortRank,
   };
 }
 

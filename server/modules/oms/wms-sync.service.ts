@@ -15,6 +15,7 @@ import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import { wmsOrders, wmsOrderItems } from "@shared/schema";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
+import { computeSortRank } from "../orders/sort-rank";
 
 interface WmsSyncServices {
   inventoryCore: any;
@@ -87,6 +88,12 @@ export class WmsSyncService {
         ? this.determineWarehouseStatus(omsOrder)
         : "completed"; // Pure digital/donation/membership → skip pick queue
       const { priority, memberPlanName, memberPlanColor } = await this.determinePriority(omsOrder);
+      const sortRank = computeSortRank({
+        priority,
+        onHold: false,
+        slaDueAt: (omsOrder as any).slaDueAt ?? null,
+        orderPlacedAt: omsOrder.orderedAt,
+      });
 
       const wmsOrderData: InsertWmsOrder = {
         channelId: omsOrder.channelId,
@@ -106,6 +113,7 @@ export class WmsSyncService {
         shippingServiceLevel: ((omsOrder as any).shippingServiceLevel as string | null) || "standard",
         memberPlanName,
         memberPlanColor,
+        sortRank,
         warehouseStatus,
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
