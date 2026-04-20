@@ -1807,6 +1807,28 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // Spec A: preload endpoint for the new-PO editor. MUST be registered before
+  // /api/purchase-orders/:id so Express doesn't match 'new-preload' as an id.
+  app.get("/api/purchase-orders/new-preload", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const vendorId = req.query.vendor_id ? Number(req.query.vendor_id) : undefined;
+      const duplicateFrom = req.query.duplicate_from ? Number(req.query.duplicate_from) : undefined;
+      let variantIds: number[] | undefined;
+      if (req.query.variant_ids) {
+        const raw = String(req.query.variant_ids);
+        variantIds = raw
+          .split(",")
+          .map((s) => Number(s.trim()))
+          .filter((n) => Number.isInteger(n) && n > 0);
+      }
+      const preload = await purchasing.getNewPoPreload({ vendorId, variantIds, duplicateFrom });
+      res.json(preload);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/purchase-orders/:id", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
@@ -1822,19 +1844,204 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/purchase-orders", requirePermission("purchasing", "create"), async (req, res) => {
-    try {
-      const po = await purchasing.createPO({
-        ...req.body,
-        expectedDeliveryDate: req.body.expectedDeliveryDate ? new Date(req.body.expectedDeliveryDate) : undefined,
-        createdBy: req.session.user?.id,
-      });
-      res.status(201).json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
+  // POST /api/purchase-orders
+  //
+  // Dual-mode to preserve the legacy "create empty PO" flow while enabling the
+  // Spec A inline flow:
+  //   - If req.body.lines is a non-empty array:
+  //       Use createPurchaseOrderWithLines. If req.body.advance_to_sent === true,
+  //       immediately call sendPurchaseOrder and return the combined result.
+  //       Idempotent: requires an Idempotency-Key header (Rule #6).
+  //   - Else:
+  //       Fall through to the legacy createPO path (empty PO, lines added later).
+  //
+  // Idempotency must be enforced for the mutating path. Because the middleware
+  // short-circuits only when the key is present, and legacy clients don't send
+  // one, we mount idempotency as a conditional guard: present lines => required.
+  app.post(
+    "/api/purchase-orders",
+    requirePermission("purchasing", "create"),
+    (req, res, next) => {
+      // Spec A: only enforce idempotency when the inline-lines flow is invoked.
+      // Legacy empty-create callers continue to work without a key.
+      if (Array.isArray(req.body?.lines) && req.body.lines.length > 0) {
+        return requireIdempotency()(req, res, next);
+      }
+      return next();
+    },
+    async (req, res) => {
+      try {
+        const userId = req.session.user?.id;
+        const hasInlineLines =
+          Array.isArray(req.body?.lines) && req.body.lines.length > 0;
+
+        if (!hasInlineLines) {
+          // Legacy empty-create path — unchanged behavior.
+          const po = await purchasing.createPO({
+            ...req.body,
+            expectedDeliveryDate: req.body.expectedDeliveryDate
+              ? new Date(req.body.expectedDeliveryDate)
+              : undefined,
+            createdBy: userId,
+          });
+          return res.status(201).json(po);
+        }
+
+        // Inline-lines path. Map snake_case wire format to service's
+        // camelCase. Money stays in integer cents end-to-end.
+        const lines = (req.body.lines as any[]).map((l) => ({
+          productVariantId: Number(l.product_variant_id ?? l.productVariantId),
+          orderQty: Number(l.quantity_ordered ?? l.orderQty),
+          unitCostCents: Number(l.unit_cost_cents ?? l.unitCostCents),
+          vendorProductId: l.vendor_product_id ?? l.vendorProductId ?? undefined,
+          description: l.description ?? undefined,
+        }));
+        const created = await purchasing.createPurchaseOrderWithLines(
+          {
+            vendorId: Number(req.body.vendor_id ?? req.body.vendorId),
+            poType: req.body.po_type ?? req.body.poType,
+            priority: req.body.priority,
+            expectedDeliveryDate: req.body.expected_delivery_date
+              ? new Date(req.body.expected_delivery_date)
+              : req.body.expectedDeliveryDate
+                ? new Date(req.body.expectedDeliveryDate)
+                : null,
+            incoterms: req.body.incoterms ?? null,
+            vendorNotes: req.body.vendor_notes ?? req.body.vendorNotes ?? null,
+            internalNotes: req.body.internal_notes ?? req.body.internalNotes ?? null,
+            lines,
+          },
+          userId,
+        );
+
+        const advanceToSent = req.body.advance_to_sent === true;
+        if (!advanceToSent) {
+          return res.status(201).json({ po: created });
+        }
+
+        const sendResult = await purchasing.sendPurchaseOrder(created.id, userId);
+        return res.status(201).json({
+          po: sendResult.po,
+          status: sendResult.status,
+          pdf: sendResult.pdf,
+          pending_approval: sendResult.pendingApproval,
+        });
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message });
+        }
+        console.error("[POST /api/purchase-orders] error:", error);
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
+  // Spec A: one-click send for an already-saved draft.
+  // Returns { po, status, pdf, pending_approval } in the same shape the
+  // inline create endpoint uses so the client can handle both uniformly.
+  app.post(
+    "/api/purchase-orders/:id/send-pdf",
+    requirePermission("purchasing", "edit"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const result = await purchasing.sendPurchaseOrder(
+          Number(req.params.id),
+          req.session.user?.id,
+        );
+        res.json({
+          po: result.po,
+          status: result.status,
+          pdf: result.pdf,
+          pending_approval: result.pendingApproval,
+        });
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message });
+        }
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
+  // Spec A: duplicate an existing PO into a new draft.
+  app.post(
+    "/api/purchase-orders/:id/duplicate",
+    requirePermission("purchasing", "create"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const overrides: { vendorId?: number; expectedDeliveryDate?: Date | null } = {};
+        if (req.body?.vendor_id !== undefined) overrides.vendorId = Number(req.body.vendor_id);
+        if (req.body?.expected_delivery_date) {
+          overrides.expectedDeliveryDate = new Date(req.body.expected_delivery_date);
+        }
+        const created = await purchasing.duplicatePurchaseOrder(
+          Number(req.params.id),
+          overrides,
+          req.session.user?.id,
+        );
+        res.status(201).json({ id: created.id, po_number: created.poNumber });
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message });
+        }
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
+  // Spec A: procurement settings CRUD.
+  app.get(
+    "/api/settings/procurement",
+    requirePermission("purchasing", "view"),
+    async (_req, res) => {
+      try {
+        const settings = await purchasing.getProcurementSettings();
+        res.json(settings);
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message });
+        }
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/settings/procurement",
+    requirePermission("inventory", "adjust"), // admin-scope gate (reuse existing admin perm)
+    async (req, res) => {
+      try {
+        const userId = req.session.user?.id;
+        // Accept either { key, value } or { updates: [{ key, value }, ...] }.
+        const updates: Array<{ key: string; value: boolean }> = [];
+        if (req.body && typeof req.body.key === "string") {
+          updates.push({ key: req.body.key, value: req.body.value });
+        }
+        if (Array.isArray(req.body?.updates)) {
+          for (const u of req.body.updates) {
+            if (u && typeof u.key === "string") {
+              updates.push({ key: u.key, value: u.value });
+            }
+          }
+        }
+        if (updates.length === 0) {
+          return res.status(400).json({ error: "Request must include { key, value } or { updates: [...] }" });
+        }
+        let latest: any = null;
+        for (const u of updates) {
+          latest = await purchasing.updateProcurementSetting(u.key, u.value, userId);
+        }
+        res.json(latest);
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message });
+        }
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
 
   app.patch("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
