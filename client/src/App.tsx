@@ -57,6 +57,7 @@ import APInvoiceDetail from "@/pages/APInvoiceDetail";
 import APPayments from "@/pages/APPayments";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
+import ProcurementSettings from "@/pages/ProcurementSettings";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
 import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
@@ -327,6 +328,11 @@ function Router() {
         <Route path="/purchasing/:id"><Redirect to="/purchase-orders/:id" /></Route>
         <Route path="/purchasing">
           <ProtectedRoute component={PurchasingDashboard} allowedRoles={["admin", "lead"]} />
+        </Route>
+        {/* Spec A: procurement settings page. MUST be registered before
+            /settings so wouter does not fall through to the general page. */}
+        <Route path="/settings/procurement">
+          <ProtectedRoute component={ProcurementSettings} allowedRoles={["admin"]} />
         </Route>
         <Route path="/settings">
           <ProtectedRoute component={Settings} allowedRoles={["admin"]} />

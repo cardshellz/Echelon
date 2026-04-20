@@ -455,6 +455,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                       General Settings
                     </Link>
                   </DropdownMenuItem>
+                  <DropdownMenuItem asChild data-testid="link-procurement-settings">
+                    <Link href="/settings/procurement" className="w-full cursor-pointer">
+                      <ShoppingBag className="mr-2 h-4 w-4" />
+                      Procurement
+                    </Link>
+                  </DropdownMenuItem>
                   <DropdownMenuItem asChild data-testid="link-integrations">
                     <Link href="/integrations" className="w-full cursor-pointer">
                       <Cable className="mr-2 h-4 w-4" />
