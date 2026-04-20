@@ -434,13 +434,14 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     log("[eBay Reconcile] Scheduled reconciliation started (every 30 min)", "ebay-reconcile");
   }, 2 * 60 * 1000);
 
-  // Register ShipStation SHIP_NOTIFY webhook (idempotent, non-blocking)
+  // Register ShipStation SHIP_NOTIFY webhook if environment variables are configured (idempotent, non-blocking)
   setTimeout(async () => {
     try {
-      if (services.shipStation.isConfigured()) {
-        await services.shipStation.registerWebhook(
-          "https://cardshellz-echelon-f21ea7da3008.herokuapp.com/api/shipstation/webhooks/ship-notify",
-        );
+      const webhookUrl = process.env.SHIPSTATION_WEBHOOK_URL;
+      if (services.shipStation.isConfigured() && webhookUrl) {
+        await services.shipStation.registerWebhook(webhookUrl);
+      } else if (services.shipStation.isConfigured() && !webhookUrl) {
+        console.log(`[ShipStation] Skipping webhook registration - SHIPSTATION_WEBHOOK_URL unset.`);
       }
     } catch (err: any) {
       console.error(`[ShipStation] Webhook registration error: ${err.message}`);
@@ -488,10 +489,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       }
     }
 
-    const fixRes = await db.execute(sql`UPDATE wms.order_items SET picked_quantity = quantity, fulfilled_quantity = quantity WHERE status = 'completed' AND quantity > 0 AND picked_quantity = 0`);
-    if ((fixRes as any).rowCount > 0) {
-      console.log(`[Startup Fix] Fixed ${(fixRes as any).rowCount} dangling 0/x completed line items.`);
-    }
+    // P1-18 extracted: Startup fix for dangling completed items has been moved to scripts/backfill/fix-dangling-order-items.ts
   } catch (err) {
     console.error("[Startup Fix] Failed to clear negative inventory balances or dangling items", err);
   }
