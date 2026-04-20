@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
@@ -852,10 +853,10 @@ export default function PurchaseOrderDetail() {
                 <Input type="number" min="0" step="0.01" value={discountDollars}
                   onChange={e => setDiscountDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ discountCents: Math.round(parseFloat(discountDollars || "0") * 100) }); if (e.key === "Escape") setEditingDiscount(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ discountCents: dollarsToCents(discountDollars || "0") }); if (e.key === "Escape") setEditingDiscount(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ discountCents: Math.round(parseFloat(discountDollars || "0") * 100) })}
+                  onClick={() => updateChargesMutation.mutate({ discountCents: dollarsToCents(discountDollars || "0") })}
                 >
                   <Check className="h-3 w-3" />
                 </Button>
@@ -887,10 +888,10 @@ export default function PurchaseOrderDetail() {
                 <Input type="number" min="0" step="0.01" value={taxDollars}
                   onChange={e => setTaxDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ taxCents: Math.round(parseFloat(taxDollars || "0") * 100) }); if (e.key === "Escape") setEditingTax(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ taxCents: dollarsToCents(taxDollars || "0") }); if (e.key === "Escape") setEditingTax(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ taxCents: Math.round(parseFloat(taxDollars || "0") * 100) })}
+                  onClick={() => updateChargesMutation.mutate({ taxCents: dollarsToCents(taxDollars || "0") })}
                 >
                   <Check className="h-3 w-3" />
                 </Button>
@@ -925,10 +926,10 @@ export default function PurchaseOrderDetail() {
                 <Input type="number" min="0" step="0.01" value={shippingDollars}
                   onChange={e => setShippingDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ shippingCostCents: Math.round(parseFloat(shippingDollars || "0") * 100) }); if (e.key === "Escape") setEditingShipping(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ shippingCostCents: dollarsToCents(shippingDollars || "0") }); if (e.key === "Escape") setEditingShipping(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ shippingCostCents: Math.round(parseFloat(shippingDollars || "0") * 100) })}
+                  onClick={() => updateChargesMutation.mutate({ shippingCostCents: dollarsToCents(shippingDollars || "0") })}
                 >
                   <Check className="h-3 w-3" />
                 </Button>

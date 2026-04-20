@@ -13,6 +13,7 @@
 
 import { eq } from "drizzle-orm";
 import { inboundShipmentLines, landedCostSnapshots, vendorInvoiceLines } from "@shared/schema";
+import { Decimal } from "decimal.js";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -22,9 +23,9 @@ interface Storage {
   getPurchaseOrdersCount(filters?: { status?: string; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number): Promise<any>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<any>;
-  createPurchaseOrder(data: any): Promise<any>;
-  updatePurchaseOrder(id: number, updates: any): Promise<any>;
-  updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any): Promise<any>;
+  createPurchaseOrder(data: any, historyData?: any): Promise<any>;
+  updatePurchaseOrder(id: number, updates: any, historyData?: any): Promise<any>;
+  updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData?: any): Promise<any>;
   deletePurchaseOrder(id: number): Promise<boolean>;
   generatePoNumber(): Promise<string>;
 
@@ -114,51 +115,55 @@ export function createPurchasingService(db: any, storage: Storage) {
 
   // ── Helpers ─────────────────────────────────────────────────────
 
-  function calculateLineTotal(line: { orderQty: number; unitCostCents: number; discountPercent?: string | number; taxRatePercent?: string | number }): number {
-    const subtotal = line.orderQty * line.unitCostCents;
-    const discountPct = Number(line.discountPercent || 0);
-    const discount = Math.round(subtotal * discountPct / 100);
-    const taxable = subtotal - discount;
-    const taxPct = Number(line.taxRatePercent || 0);
-    const tax = Math.round(taxable * taxPct / 100);
-    return taxable + tax;
+  function calculateLineCosts(line: { orderQty: number; unitCostCents: number; discountPercent?: string | number; taxRatePercent?: string | number }) {
+    const subtotal = new Decimal(line.orderQty || 0).times(line.unitCostCents || 0);
+    const discountPct = new Decimal(line.discountPercent || 0);
+    const discount = subtotal.times(discountPct).dividedBy(100).round();
+    const taxable = subtotal.minus(discount);
+    const taxPct = new Decimal(line.taxRatePercent || 0);
+    const tax = taxable.times(taxPct).dividedBy(100).round();
+    
+    return {
+      subtotalCents: subtotal.toNumber(),
+      discountCents: discount.toNumber(),
+      taxCents: tax.toNumber(),
+      lineTotalCents: taxable.plus(tax).toNumber()
+    };
   }
 
   async function recalculateTotals(purchaseOrderId: number, userId?: string): Promise<any> {
     const lines = await storage.getPurchaseOrderLines(purchaseOrderId);
-    let subtotal = 0;
+    let subtotalCents = BigInt(0);
     let lineCount = 0;
     let receivedLineCount = 0;
 
     for (const line of lines) {
       if (line.status === "cancelled") continue;
-      const lt = calculateLineTotal(line);
-      subtotal += lt;
+      const costs = calculateLineCosts(line);
+      subtotalCents += BigInt(costs.lineTotalCents);
       lineCount++;
       if (line.status === "received") receivedLineCount++;
 
       // Update line total if changed
-      if (line.lineTotalCents !== lt) {
+      if (line.lineTotalCents !== costs.lineTotalCents) {
         await storage.updatePurchaseOrderLine(line.id, {
-          lineTotalCents: lt,
-          discountCents: Math.round(line.orderQty * line.unitCostCents * Number(line.discountPercent || 0) / 100),
-          taxCents: Math.round(
-            (line.orderQty * line.unitCostCents - Math.round(line.orderQty * line.unitCostCents * Number(line.discountPercent || 0) / 100))
-            * Number(line.taxRatePercent || 0) / 100
-          ),
+          lineTotalCents: costs.lineTotalCents,
+          discountCents: costs.discountCents,
+          taxCents: costs.taxCents,
         });
       }
     }
 
     const po = await storage.getPurchaseOrderById(purchaseOrderId);
-    const headerDiscount = Number(po?.discountCents || 0);
-    const headerTax = Number(po?.taxCents || 0);
-    const headerShipping = Number(po?.shippingCostCents || 0);
-    const total = subtotal - headerDiscount + headerTax + headerShipping;
+    const headerDiscount = BigInt(po?.discountCents || 0);
+    const headerTax = BigInt(po?.taxCents || 0);
+    const headerShipping = BigInt(po?.shippingCostCents || 0);
+    
+    const totalCents = subtotalCents - headerDiscount + headerTax + headerShipping;
 
     return await storage.updatePurchaseOrderStatusWithHistory(purchaseOrderId, {
-      subtotalCents: Math.round(subtotal),
-      totalCents: Math.round(total),
+      subtotalCents: Number(subtotalCents),
+      totalCents: Number(totalCents),
       lineCount,
       receivedLineCount,
       updatedBy: userId,
@@ -343,7 +348,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       ? Math.max(...existingLines.map((l: any) => l.lineNumber)) + 1
       : 1;
 
-    const lineTotal = calculateLineTotal({
+    const costs = calculateLineCosts({
       orderQty: data.orderQty,
       unitCostCents: data.unitCostCents,
       discountPercent: data.discountPercent,
@@ -366,9 +371,9 @@ export function createPurchasingService(db: any, storage: Storage) {
       unitCostCents: data.unitCostCents,
       discountPercent: String(data.discountPercent || 0),
       taxRatePercent: String(data.taxRatePercent || 0),
-      discountCents: Math.round(data.orderQty * data.unitCostCents * (data.discountPercent || 0) / 100),
-      taxCents: 0,
-      lineTotalCents: lineTotal,
+      discountCents: costs.discountCents,
+      taxCents: costs.taxCents,
+      lineTotalCents: costs.lineTotalCents,
       expectedDeliveryDate: data.expectedDeliveryDate,
       notes: data.notes,
       status: "open",
@@ -405,7 +410,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       const product = await storage.getProductById(line.productId);
       if (!variant || !product) continue;
 
-      const lineTotal = calculateLineTotal({
+      const costs = calculateLineCosts({
         orderQty: line.orderQty,
         unitCostCents: line.unitCostCents,
       });
@@ -424,7 +429,9 @@ export function createPurchasingService(db: any, storage: Storage) {
         unitsPerUom: variant.unitsPerVariant || 1,
         orderQty: line.orderQty,
         unitCostCents: line.unitCostCents,
-        lineTotalCents: lineTotal,
+        lineTotalCents: costs.lineTotalCents,
+        discountCents: costs.discountCents,
+        taxCents: costs.taxCents,
         status: "open",
       });
     }

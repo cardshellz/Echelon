@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
@@ -92,13 +93,13 @@ export default function APPayments() {
         referenceNumber: newPayment.referenceNumber || undefined,
         checkNumber: newPayment.checkNumber || undefined,
         bankAccountLabel: newPayment.bankAccountLabel || undefined,
-        totalAmountCents: Math.round(parseFloat(newPayment.totalAmountDollars || "0") * 100),
+        totalAmountCents: dollarsToCents(newPayment.totalAmountDollars || "0"),
         notes: newPayment.notes || undefined,
         allocations: Object.entries(allocations)
           .filter(([, val]) => parseFloat(val) > 0)
           .map(([invId, val]) => ({
             vendorInvoiceId: parseInt(invId),
-            appliedAmountCents: Math.round(parseFloat(val) * 100),
+            appliedAmountCents: dollarsToCents(val),
           })),
       };
       const res = await fetch("/api/ap-payments", {

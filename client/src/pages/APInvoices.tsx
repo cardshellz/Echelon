@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
@@ -138,7 +139,7 @@ export default function APInvoices() {
       vendorId,
       invoiceNumber: newInvoice.invoiceNumber,
       ourReference: newInvoice.ourReference || undefined,
-      invoicedAmountCents: hasLinkedPo ? undefined : Math.round(parseFloat(newInvoice.invoicedAmountDollars) * 100),
+      invoicedAmountCents: hasLinkedPo ? undefined : dollarsToCents(newInvoice.invoicedAmountDollars),
       invoiceDate: newInvoice.invoiceDate || undefined,
       dueDate: newInvoice.dueDate || undefined,
       paymentTermsDays: newInvoice.paymentTermsDays ? parseInt(newInvoice.paymentTermsDays) : undefined,

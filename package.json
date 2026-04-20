@@ -58,6 +58,7 @@
     "connect-pg-simple": "^10.0.0",
     "cookie-parser": "^1.4.7",
     "date-fns": "^3.6.0",
+    "decimal.js": "^10.6.0",
     "drizzle-orm": "^0.39.3",
     "drizzle-zod": "^0.5.1",
     "embla-carousel-react": "^8.6.0",

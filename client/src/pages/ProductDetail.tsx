@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
@@ -2484,7 +2485,7 @@ export default function ProductDetail() {
                       </div>
                       <div>
                         <Label className="text-sm">Unit Cost ($)</Label>
-                        <Input className="h-11" type="number" step="0.0001" value={String(supplierForm.unitCostCents / 100)} onChange={(e) => setSupplierForm(prev => ({ ...prev, unitCostCents: parseFloat(e.target.value || "0") * 100 }))} />
+                        <Input className="h-11" type="number" step="0.0001" value={String(supplierForm.unitCostCents / 100)} onChange={(e) => setSupplierForm(prev => ({ ...prev, unitCostCents: dollarsToCents(e.target.value || "0") }))} />
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-4">

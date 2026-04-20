@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import React, { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, Link, useLocation } from "wouter";
@@ -284,11 +285,11 @@ export default function APInvoiceDetail() {
         referenceNumber: payment.referenceNumber || undefined,
         checkNumber: payment.checkNumber || undefined,
         bankAccountLabel: payment.bankAccountLabel || undefined,
-        totalAmountCents: Math.round(parseFloat(payment.amountDollars || "0") * 100),
+        totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
         notes: payment.notes || undefined,
         allocations: [{
           vendorInvoiceId: invoiceId,
-          appliedAmountCents: Math.round(parseFloat(payment.amountDollars || "0") * 100),
+          appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
         }],
       }),
     }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
@@ -313,7 +314,7 @@ export default function APInvoiceDetail() {
         productName: newLine.productName || undefined,
         description: newLine.description || undefined,
         qtyInvoiced: parseInt(newLine.qtyInvoiced) || 1,
-        unitCostCents: Math.round(parseFloat(newLine.unitCostDollars || "0") * 100),
+        unitCostCents: dollarsToCents(newLine.unitCostDollars || "0"),
       }),
     }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
     onSuccess: () => {

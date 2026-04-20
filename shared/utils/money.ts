@@ -1,0 +1,1 @@
+export function dollarsToCents(dollars: string | number): number { const val = String(dollars).trim(); if (!val) return 0; const parts = val.replace(/[^0-9.-]/g, '').split('.'); const whole = parseInt(parts[0] || '0', 10); const frac = (parts[1] || '00').padEnd(2, '0').slice(0, 2); const cents = parseInt(frac, 10); return whole * 100 + (whole < 0 ? -cents : cents); }

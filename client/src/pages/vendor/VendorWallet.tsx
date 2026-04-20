@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -167,8 +168,8 @@ export default function VendorWallet() {
   };
 
   const handleAutoReloadSave = () => {
-    const thresholdCents = Math.round(parseFloat(autoReloadThreshold) * 100);
-    const amountCents = Math.round(parseFloat(autoReloadAmount) * 100);
+    const thresholdCents = dollarsToCents(autoReloadThreshold);
+    const amountCents = dollarsToCents(autoReloadAmount);
     if (isNaN(thresholdCents) || isNaN(amountCents)) return;
     autoReloadMutation.mutate({
       enabled: autoReloadEnabled,

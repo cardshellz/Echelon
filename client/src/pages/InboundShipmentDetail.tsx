@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
@@ -430,7 +431,7 @@ export default function InboundShipmentDetail() {
   const addCostMutation = useMutation({
     mutationFn: async (data: any) => {
       const { amount, costDate, ...rest } = data;
-      const cents = Math.round(parseFloat(amount || "0") * 100);
+      const cents = dollarsToCents(amount || "0");
       const payload = {
         ...rest,
         estimatedCents: cents,
@@ -456,7 +457,7 @@ export default function InboundShipmentDetail() {
   const updateCostMutation = useMutation({
     mutationFn: async ({ costId, data }: { costId: number; data: any }) => {
       const { amount, costDate, ...rest } = data;
-      const cents = Math.round(parseFloat(amount || "0") * 100);
+      const cents = dollarsToCents(amount || "0");
       const payload = {
         ...rest,
         estimatedCents: cents,

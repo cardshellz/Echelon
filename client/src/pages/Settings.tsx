@@ -1,3 +1,4 @@
+import { dollarsToCents } from "@shared/utils/money";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
@@ -125,7 +126,7 @@ export default function Settings() {
     mutationFn: async () => {
       const body = {
         tierName: tierForm.tierName,
-        thresholdCents: Math.round(parseFloat(tierForm.thresholdDollars || "0") * 100),
+        thresholdCents: dollarsToCents(tierForm.thresholdDollars || "0"),
         approverRole: tierForm.approverRole,
         sortOrder: parseInt(tierForm.sortOrder || "0"),
         active: tierForm.active ? 1 : 0,
