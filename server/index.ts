@@ -578,4 +578,41 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       }
     }, 4 * 60 * 60 * 1000); // Every 4 hours
   }
+
+  // OMS<->WMS reconciliation — catches webhook delivery failures where
+  // an OMS order got cancelled/shipped/refunded but the WMS row is
+  // still sitting in ready/in_progress. Hourly sweep.
+  if (process.env.DISABLE_SCHEDULERS !== 'true') {
+    const runOmsWmsReconcile = async () => {
+      try {
+        const result = await db.execute(sql`
+          UPDATE wms.orders w
+          SET warehouse_status = CASE
+                WHEN oms.status = 'cancelled' THEN 'cancelled'
+                WHEN oms.status = 'shipped'   THEN 'shipped'
+                ELSE w.warehouse_status
+              END,
+              assigned_picker_id = NULL,
+              cancelled_at = CASE WHEN oms.status = 'cancelled' THEN COALESCE(w.cancelled_at, NOW()) ELSE w.cancelled_at END,
+              updated_at = NOW()
+          FROM oms.oms_orders oms
+          WHERE (
+                  (w.source = 'oms'     AND w.oms_fulfillment_order_id = oms.id::text)
+              OR  (w.source = 'shopify' AND w.source_table_id = oms.id::text)
+                )
+            AND oms.status IN ('cancelled', 'shipped', 'refunded')
+            AND w.warehouse_status IN ('ready', 'in_progress')
+          RETURNING w.id, w.order_number, oms.status AS oms_status
+        `);
+        if (result.rows.length > 0) {
+          console.warn(`[OMS<->WMS Reconcile] Corrected ${result.rows.length} divergent order(s):`,
+            result.rows.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", "));
+        }
+      } catch (err: any) {
+        console.warn("[OMS<->WMS Reconcile] Sweep error:", err?.message);
+      }
+    };
+    setTimeout(runOmsWmsReconcile, 15_000);
+    setInterval(runOmsWmsReconcile, 60 * 60 * 1000);
+  }
 })();

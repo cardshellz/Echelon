@@ -193,7 +193,16 @@ export const orderMethods: IOrderStorage = {
       SELECT o.*
       FROM wms.orders o
       LEFT JOIN warehouse.echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
+      -- BELT & SUSPENDERS: Reject any order whose OMS parent is
+      -- cancelled/refunded/shipped even if WMS status didn't get updated.
+      -- Protects against webhook delivery failures.
+      LEFT JOIN oms.oms_orders oms ON (
+        (o.source = 'oms'     AND o.oms_fulfillment_order_id = oms.id::text)
+        OR (o.source = 'shopify' AND o.source_table_id = oms.id::text)
+      )
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
+        AND (oms.status IS NULL OR oms.status NOT IN ('cancelled', 'refunded', 'shipped'))
+        AND (oms.financial_status IS NULL OR oms.financial_status NOT IN ('refunded', 'voided'))
         AND (
           -- Ready/in_progress orders: show in pick queue
           o.warehouse_status IN ('ready', 'in_progress')
