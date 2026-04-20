@@ -26,8 +26,10 @@ export function registerSettingsRoutes(app: Express) {
     "company_name", "company_address", "company_city", "company_state", 
     "company_postal_code", "company_country", "default_timezone", 
     "default_warehouse_id",
-    "allow_multiple_skus_per_bin", "picking_batch_size",
-    "auto_release_delay_minutes", "default_lead_time_days", "default_safety_stock_days",
+    "allow_multiple_skus_per_bin",
+    // picking_batch_size and auto_release_delay_minutes removed — now live
+    // on inventory.warehouse_settings (per-warehouse). See PickingSettings.tsx.
+    "default_lead_time_days", "default_safety_stock_days",
     "cycle_count_auto_approve_tolerance", "cycle_count_approval_threshold"
   ] as const;
 
