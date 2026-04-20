@@ -2011,6 +2011,30 @@ export function registerInventoryRoutes(app: Express) {
     res.status(410).json({ error: "Order sync listener removed - orders now sync via OMS webhooks" });
   });
 
+  /**
+   * Backfill OMS → WMS bridge.
+   * Finds oms_orders rows that don't have a matching wms.orders row and
+   * creates the WMS order for each. This is the recovery path after a
+   * downtime window where the webhook → wms bridge didn't run.
+   */
+  app.post("/api/sync/backfill-oms-to-wms", requireAuth, async (req, res) => {
+    try {
+      const wmsSync = (req.app.locals.services as any)?.wmsSync;
+      if (!wmsSync?.backfillUnsynced) {
+        return res.status(500).json({ error: "wmsSync service unavailable" });
+      }
+      const limit = Math.min(
+        Math.max(parseInt(String(req.body?.limit || req.query?.limit || "200"), 10) || 200, 1),
+        1000
+      );
+      const synced = await wmsSync.backfillUnsynced(limit);
+      res.json({ synced, limit });
+    } catch (error: any) {
+      console.error("[Backfill] OMS→WMS failed:", error);
+      res.status(500).json({ error: error?.message || "Failed to backfill OMS to WMS" });
+    }
+  });
+
   app.get("/api/sync/health", requireAuth, async (req, res) => {
     try {
       // DISABLED: order-sync-listener deleted
