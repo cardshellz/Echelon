@@ -570,10 +570,24 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   /**
+   * Helper: fetch a ShipStation order by ID.
+   * Used to hydrate the existing order shape so createorder upsert
+   * only changes what we want and doesn't blank other fields.
+   */
+  async function getOrderById(shipstationOrderId: number): Promise<any | null> {
+    if (!isConfigured()) return null;
+    try {
+      return await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
+    } catch (err: any) {
+      console.warn(`[ShipStation] getOrderById ${shipstationOrderId} failed:`, err.message);
+      return null;
+    }
+  }
+
+  /**
    * Mark a ShipStation order as shipped without actually printing a label.
-   * Used when the order was fulfilled in Shopify (by the native Shopify
-   * connector, or by an admin marking it manually) so Echelon's copy of
-   * the order gets moved out of Awaiting Shipment.
+   * Uses POST /orders/createorder (upsert by orderKey) with orderStatus='shipped'
+   * — the legacy /orders/markasshipped endpoint returned 404 on our account.
    */
   async function markAsShipped(
     shipstationOrderId: number,
@@ -586,19 +600,28 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   ): Promise<void> {
     if (!isConfigured()) return;
     try {
+      const existing = await getOrderById(shipstationOrderId);
+      if (!existing) {
+        console.warn(`[ShipStation] markAsShipped skipped — order ${shipstationOrderId} not found`);
+        return;
+      }
+
       const shipDate =
         opts.shipDate instanceof Date
           ? opts.shipDate.toISOString()
           : opts.shipDate || new Date().toISOString();
-      await apiRequest("POST", "/orders/markasshipped", {
-        orderId: shipstationOrderId,
-        carrierCode: opts.carrierCode || "other",
+
+      // Upsert with new orderStatus + tracking. Include all required fields
+      // from the existing order (orderKey is the idempotency key).
+      await apiRequest("POST", "/orders/createorder", {
+        ...existing,
+        orderStatus: "shipped",
         shipDate,
-        trackingNumber: opts.trackingNumber || null,
-        notifyCustomer: !!opts.notifyCustomer,
-        notifySalesChannel: false, // our Shopify connector already knows
+        carrierCode: opts.carrierCode || existing.carrierCode || "other",
+        trackingNumber: opts.trackingNumber || existing.trackingNumber || null,
       });
-      console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped`);
+
+      console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped via createorder upsert`);
     } catch (err: any) {
       console.error(
         `[ShipStation] Failed to mark order ${shipstationOrderId} shipped:`,
@@ -609,17 +632,26 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   /**
-   * Cancel a ShipStation order. ShipStation doesn't have a direct cancel
-   * endpoint; the API convention is to POST /orders/removefromstore which
-   * moves the order out of the active queue and into a 'cancelled' state.
+   * Cancel a ShipStation order. Uses POST /orders/createorder (upsert) with
+   * orderStatus='cancelled' since ShipStation doesn't expose a direct
+   * cancel endpoint on the v1 API. This moves the order out of the
+   * Awaiting Shipment queue and into the Cancelled tab.
    */
   async function cancelOrder(shipstationOrderId: number): Promise<void> {
     if (!isConfigured()) return;
     try {
-      await apiRequest("POST", "/orders/removefromstore", {
-        orderId: shipstationOrderId,
+      const existing = await getOrderById(shipstationOrderId);
+      if (!existing) {
+        console.warn(`[ShipStation] cancelOrder skipped — order ${shipstationOrderId} not found`);
+        return;
+      }
+
+      await apiRequest("POST", "/orders/createorder", {
+        ...existing,
+        orderStatus: "cancelled",
       });
-      console.log(`[ShipStation] Order ${shipstationOrderId} cancelled (removed from store)`);
+
+      console.log(`[ShipStation] Order ${shipstationOrderId} cancelled via createorder upsert`);
     } catch (err: any) {
       console.error(
         `[ShipStation] Failed to cancel order ${shipstationOrderId}:`,

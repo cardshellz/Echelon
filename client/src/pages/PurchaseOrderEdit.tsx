@@ -94,6 +94,37 @@ type LineDraft = {
   orderQty: number;
   unitCostCents: number; // integer cents, always
   vendorProductId?: number | null;
+  // Spec A follow-up: tracks whether the selected product was NOT in the
+  // vendor's catalog at the time of selection. Drives the "Add to catalog?"
+  // modal on PO save. `null` for lines whose origin we don't know (e.g.
+  // preloaded draft rows, legacy edit-mode rows).
+  catalogOriginallyAbsent?: boolean | null;
+};
+
+// Spec A follow-up: vendor-scoped catalog-search response.
+type CatalogSearchResponse = {
+  inCatalog: Array<{
+    vendorProductId: number;
+    productId: number;
+    productVariantId: number | null;
+    sku: string | null;
+    productName: string;
+    variantName: string | null;
+    vendorSku: string | null;
+    vendorProductName: string | null;
+    unitCostCents: number;
+    packSize: number | null;
+    moq: number | null;
+    leadTimeDays: number | null;
+    isPreferred: boolean;
+  }>;
+  outOfCatalog: Array<{
+    productId: number;
+    productVariantId: number | null;
+    sku: string | null;
+    productName: string;
+    variantName: string | null;
+  }>;
 };
 
 type PreloadResponse = {
@@ -304,20 +335,49 @@ export default function PurchaseOrderEdit() {
       .slice(0, 30);
   }, [allVendors, vendorSearch]);
 
-  // ── Products typeahead (per-row) ──────────────────────────────────────
+  // ── Products typeahead (per-row) ──────────────────────
   const [productSearch, setProductSearch] = useState<Record<string, string>>({});
   const [productPopoverOpen, setProductPopoverOpen] = useState<Record<string, boolean>>({});
 
-  // Shared product list fetch (by search query). Small query cache.
-  function useProductSearch(q: string) {
-    return useQuery<ProductLite[]>({
-      queryKey: ["/api/products", { q }],
+  // Spec A follow-up: vendor-scoped typeahead. When a vendor is selected we
+  // hit /api/vendors/:id/catalog-search to get a two-bucket response. When
+  // no vendor is selected yet (rare, Add-line is disabled) we fall back to
+  // /api/products?q= so the user can still search the global catalog.
+  function useVendorCatalogSearch(vendorId: number | null, q: string) {
+    return useQuery<CatalogSearchResponse>({
+      queryKey: ["/api/vendors/catalog-search", { vendorId, q }],
       queryFn: async () => {
-        const url = q ? `/api/products?q=${encodeURIComponent(q)}` : "/api/products";
+        if (vendorId) {
+          const url = `/api/vendors/${vendorId}/catalog-search${
+            q ? `?q=${encodeURIComponent(q)}` : ""
+          }`;
+          const res = await fetch(url);
+          if (!res.ok) throw new Error("Failed to load vendor catalog");
+          return res.json();
+        }
+        // Fallback: global product search, coerced into the two-bucket shape
+        // with an empty inCatalog section. Lets the user start typing before
+        // a vendor is picked.
+        const url = q ? `/api/products?q=${encodeURIComponent(q)}` : "/api/products?limit=50";
         const res = await fetch(url);
         if (!res.ok) throw new Error("Failed to load products");
-        const data = await res.json();
-        return Array.isArray(data) ? data : (data.products ?? []);
+        const data = (await res.json()) as ProductLite[];
+        const products: ProductLite[] = Array.isArray(data) ? data : (data as any).products ?? [];
+        const outOfCatalog: CatalogSearchResponse["outOfCatalog"] = [];
+        for (const p of products) {
+          const variants = p.variants ?? [];
+          if (variants.length === 0) continue;
+          for (const v of variants) {
+            outOfCatalog.push({
+              productId: p.id,
+              productVariantId: v.id,
+              sku: v.sku ?? p.sku ?? null,
+              productName: p.name,
+              variantName: v.name,
+            });
+          }
+        }
+        return { inCatalog: [], outOfCatalog };
       },
       staleTime: 30_000,
     });
@@ -720,8 +780,9 @@ export default function PurchaseOrderEdit() {
                   setPopoverOpen={(b) =>
                     setProductPopoverOpen((prev) => ({ ...prev, [line.clientId]: b }))
                   }
-                  useProductSearch={useProductSearch}
+                  useVendorCatalogSearch={useVendorCatalogSearch}
                   vendorId={selectedVendor?.id ?? null}
+                  vendorName={selectedVendor?.name ?? null}
                 />
               ))}
             </div>
@@ -857,8 +918,12 @@ type LineRowProps = {
   setProductSearch: (q: string) => void;
   popoverOpen: boolean;
   setPopoverOpen: (b: boolean) => void;
-  useProductSearch: (q: string) => ReturnType<typeof useQuery<ProductLite[]>>;
+  useVendorCatalogSearch: (
+    vendorId: number | null,
+    q: string,
+  ) => ReturnType<typeof useQuery<CatalogSearchResponse>>;
   vendorId: number | null;
+  vendorName: string | null;
 };
 
 function LineRow(props: LineRowProps) {
@@ -871,33 +936,16 @@ function LineRow(props: LineRowProps) {
     setProductSearch,
     popoverOpen,
     setPopoverOpen,
-    useProductSearch,
+    useVendorCatalogSearch,
     vendorId,
+    vendorName,
   } = props;
 
-  const productsQuery = useProductSearch(productSearch);
-  const products = productsQuery.data || [];
+  const catalogQuery = useVendorCatalogSearch(vendorId, productSearch);
+  const inCatalog = catalogQuery.data?.inCatalog ?? [];
+  const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
 
   const lineTotalCents = (Number(line.orderQty) || 0) * (Number(line.unitCostCents) || 0);
-
-  async function prefillFromVendorCatalog(variantId: number, productId: number | null) {
-    if (!vendorId) return;
-    try {
-      const res = await fetch(`/api/vendors/${vendorId}/products`);
-      if (!res.ok) return;
-      const list = (await res.json()) as Array<any>;
-      const match = list.find(
-        (vp) =>
-          vp.productVariantId === variantId ||
-          (vp.productId === productId && !vp.productVariantId),
-      );
-      if (match && typeof match.unitCostCents === "number") {
-        onChange({ unitCostCents: match.unitCostCents, vendorProductId: match.id });
-      }
-    } catch {
-      // Non-fatal
-    }
-  }
 
   return (
     <div className="grid grid-cols-12 gap-2 items-start">
@@ -926,34 +974,104 @@ function LineRow(props: LineRowProps) {
               />
               <CommandList>
                 <CommandEmpty>No products found.</CommandEmpty>
-                <CommandGroup>
-                  {products.slice(0, 30).flatMap((p) => {
-                    const variants = p.variants ?? [];
-                    if (variants.length === 0) return [];
-                    return variants.map((v) => (
-                      <CommandItem
-                        key={`${p.id}-${v.id}`}
-                        value={`${p.id}-${v.id}`}
-                        onSelect={() => {
-                          onChange({
-                            productId: p.id,
-                            productVariantId: v.id,
-                            productName: p.name,
-                            sku: v.sku,
-                          });
-                          setPopoverOpen(false);
-                          setProductSearch("");
-                          prefillFromVendorCatalog(v.id, p.id);
-                        }}
-                      >
-                        <span className="font-mono text-xs mr-2 text-muted-foreground">
-                          {v.sku}
-                        </span>
-                        <span className="truncate">{p.name}</span>
-                      </CommandItem>
-                    ));
-                  })}
-                </CommandGroup>
+                {vendorId && inCatalog.length > 0 && (
+                  <CommandGroup heading={`In ${vendorName ?? "vendor"}'s catalog`}>
+                    {inCatalog.slice(0, 30).map((row) => {
+                      const key = `cat-${row.vendorProductId}`;
+                      const hints: string[] = [];
+                      if (row.packSize && row.packSize > 1) hints.push(`pack ${row.packSize}`);
+                      if (row.moq && row.moq > 1) hints.push(`MOQ ${row.moq}`);
+                      return (
+                        <CommandItem
+                          key={key}
+                          value={key}
+                          onSelect={() => {
+                            onChange({
+                              productId: row.productId,
+                              productVariantId: row.productVariantId ?? null,
+                              productName: row.productName,
+                              sku: row.sku ?? null,
+                              // From catalog: authoritative cost.
+                              unitCostCents: row.unitCostCents,
+                              vendorProductId: row.vendorProductId,
+                              catalogOriginallyAbsent: false,
+                            });
+                            setPopoverOpen(false);
+                            setProductSearch("");
+                          }}
+                        >
+                          <span
+                            className="mr-2 text-amber-500"
+                            aria-label="In vendor catalog"
+                            title="In vendor catalog"
+                          >
+                            ★
+                          </span>
+                          <span className="font-mono text-xs mr-2 text-muted-foreground">
+                            {row.sku ?? "—"}
+                          </span>
+                          <span className="truncate flex-1">
+                            {row.productName}
+                            {row.variantName ? ` · ${row.variantName}` : ""}
+                          </span>
+                          <span className="ml-2 text-xs tabular-nums">
+                            {formatCents(row.unitCostCents)}
+                            {hints.length > 0 && (
+                              <span className="text-muted-foreground"> · {hints.join(", ")}</span>
+                            )}
+                          </span>
+                        </CommandItem>
+                      );
+                    })}
+                  </CommandGroup>
+                )}
+                {outOfCatalog.length > 0 && (
+                  <CommandGroup
+                    heading={
+                      vendorId
+                        ? "All products (not in catalog)"
+                        : "All products"
+                    }
+                  >
+                    {outOfCatalog.slice(0, 30).map((row) => {
+                      const key = `pv-${row.productId}-${row.productVariantId ?? "null"}`;
+                      return (
+                        <CommandItem
+                          key={key}
+                          value={key}
+                          onSelect={() => {
+                            onChange({
+                              productId: row.productId,
+                              productVariantId: row.productVariantId ?? null,
+                              productName: row.productName,
+                              sku: row.sku ?? null,
+                              // Not in catalog. Leave the existing unit cost
+                              // (blank/zero) — the user will type it, and it
+                              // becomes the "suggest-at-save" candidate cost.
+                              vendorProductId: null,
+                              catalogOriginallyAbsent: vendorId ? true : null,
+                            });
+                            setPopoverOpen(false);
+                            setProductSearch("");
+                          }}
+                        >
+                          <span className="font-mono text-xs mr-2 text-muted-foreground">
+                            {row.sku ?? "—"}
+                          </span>
+                          <span className="truncate flex-1">
+                            {row.productName}
+                            {row.variantName ? ` · ${row.variantName}` : ""}
+                          </span>
+                          {vendorId && (
+                            <span className="ml-2 text-[10px] text-muted-foreground italic">
+                              not in catalog
+                            </span>
+                          )}
+                        </CommandItem>
+                      );
+                    })}
+                  </CommandGroup>
+                )}
               </CommandList>
             </Command>
           </PopoverContent>
