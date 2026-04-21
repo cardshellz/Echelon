@@ -170,7 +170,11 @@ export function createPurchasingService(db: any, storage: Storage) {
     
     const totalCents = subtotalCents - headerDiscount + headerTax + headerShipping;
 
-    return await storage.updatePurchaseOrderStatusWithHistory(purchaseOrderId, {
+    // recalculateTotals does NOT change PO status; it only refreshes totals.
+    // Use the plain update helper so we don't write a spurious po_status_history
+    // row (which would violate the to_status NOT NULL constraint when called
+    // with no historyData). Regression of commit 4c0a3cc.
+    return await storage.updatePurchaseOrder(purchaseOrderId, {
       subtotalCents: Number(subtotalCents),
       totalCents: Number(totalCents),
       lineCount,
