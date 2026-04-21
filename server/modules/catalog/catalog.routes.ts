@@ -19,7 +19,40 @@ export async function registerProductRoutes(app: Express) {
   app.get("/api/products", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const includeInactive = req.query.includeInactive === "true";
-      const allProducts = await storage.getAllProducts(includeInactive);
+
+      // Spec A follow-up: honour ?q= for server-side filtering.
+      // When q is absent, preserve the legacy full-list response shape so
+      // existing consumers (inventory page, reports) stay unchanged.
+      const qRaw = typeof req.query.q === "string" ? req.query.q : "";
+      const q = qRaw.trim();
+      const limitRaw = Number(req.query.limit);
+      // Legacy full-list path has no implicit cap; only apply the cap when
+      // a query or explicit limit is supplied.
+      const hasLimit = Number.isFinite(limitRaw) && limitRaw > 0;
+      const limit = hasLimit ? Math.min(100, Math.floor(limitRaw)) : q ? 50 : 0;
+
+      let allProducts;
+      if (q || hasLimit) {
+        // Narrow via storage.searchProducts → keep ordering by rank.
+        const ranked = await storage.searchProducts({
+          q,
+          limit: limit || 50,
+          includeInactive,
+        });
+        if (ranked.length === 0) {
+          res.json([]);
+          return;
+        }
+        const byId = new Map<number, number>();
+        ranked.forEach((r, idx) => byId.set(r.id, idx));
+        const hydrated = await storage.getProductsByIds(ranked.map((r) => r.id));
+        // Preserve the rank ordering returned by searchProducts.
+        allProducts = hydrated
+          .filter((p) => byId.has(p.id))
+          .sort((a, b) => (byId.get(a.id)! - byId.get(b.id)!));
+      } else {
+        allProducts = await storage.getAllProducts(includeInactive);
+      }
       const allVariants = await storage.getAllProductVariants(includeInactive);
 
       // Bulk-fetch primary images (one query instead of N)

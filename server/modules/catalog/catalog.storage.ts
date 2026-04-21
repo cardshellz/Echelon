@@ -118,6 +118,18 @@ export interface IProductStorage {
     product_title: string | null;
     image_url: string | null;
   }[]>;
+
+  /**
+   * Server-side product search (Spec A follow-up).
+   * Returns product IDs matching a free-text query on product.sku, product.name,
+   * or any variant.sku. Ranking: exact SKU prefix > SKU contains > name contains
+   > alphabetical name. Caller is responsible for hydrating variants / assets.
+   */
+  searchProducts(opts: {
+    q: string;
+    limit: number;
+    includeInactive?: boolean;
+  }): Promise<Array<{ id: number }>>;
 }
 
 export const productMethods: IProductStorage = {
@@ -485,6 +497,58 @@ export const productMethods: IProductStorage = {
       variantQtyDelta: 0,
       notes: `Merged from variant ${sourceSku || sourceId} (id=${sourceId}): ${movedInventory} inventory records, ${movedLocations} location assignments`,
     });
+  },
+
+  async searchProducts(opts: { q: string; limit: number; includeInactive?: boolean }): Promise<Array<{ id: number }>> {
+    // Rule #1: DB-side search lives in the storage layer.
+    // Rule #12: q is parameterised — no interpolation into raw SQL fragments.
+    const q = (opts.q ?? "").trim();
+    const limit = Math.max(1, Math.min(100, Math.floor(opts.limit) || 50));
+    if (q.length === 0) {
+      // Empty query: fall back to alphabetical product listing, respecting active-flag.
+      const rows = await db
+        .select({ id: products.id })
+        .from(products)
+        .where(opts.includeInactive ? sql`true` : eq(products.isActive, true))
+        .orderBy(asc(products.name))
+        .limit(limit);
+      return rows;
+    }
+    const like = `%${q.toLowerCase()}%`;
+    const prefix = `${q.toLowerCase()}%`;
+    // Rank: 0 = exact SKU prefix, 1 = SKU contains, 2 = name contains, 3 = other.
+    const rows = await db.execute<{ id: number }>(sql`
+      WITH matched AS (
+        SELECT
+          p.id,
+          MIN(
+            CASE
+              WHEN LOWER(p.sku) LIKE ${prefix} THEN 0
+              WHEN LOWER(pv.sku) LIKE ${prefix} THEN 0
+              WHEN LOWER(p.sku) LIKE ${like} THEN 1
+              WHEN LOWER(pv.sku) LIKE ${like} THEN 1
+              WHEN LOWER(p.name) LIKE ${like} THEN 2
+              ELSE 3
+            END
+          ) AS rank,
+          MIN(LOWER(p.name)) AS name_key
+        FROM catalog.products p
+        LEFT JOIN catalog.product_variants pv
+          ON pv.product_id = p.id
+          ${opts.includeInactive ? sql`` : sql`AND pv.is_active = true`}
+        WHERE ${opts.includeInactive ? sql`true` : sql`p.is_active = true`}
+          AND (
+            LOWER(COALESCE(p.sku, '')) LIKE ${like}
+            OR LOWER(p.name) LIKE ${like}
+            OR LOWER(COALESCE(pv.sku, '')) LIKE ${like}
+          )
+        GROUP BY p.id
+      )
+      SELECT id FROM matched
+      ORDER BY rank ASC, name_key ASC
+      LIMIT ${limit}
+    `);
+    return rows.rows.map((r) => ({ id: Number(r.id) }));
   },
 
   async searchCatalogProductsWithImage(searchPattern: string, limit: number): Promise<{
