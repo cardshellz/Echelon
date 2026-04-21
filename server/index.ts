@@ -657,7 +657,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             AND status IN ('shipped', 'cancelled', 'refunded')
             AND (shipstation_reconciled_at IS NULL OR shipstation_reconciled_at < updated_at)
           ORDER BY updated_at DESC  -- newest divergences first
-          LIMIT 500
+          LIMIT 1000
         `);
 
         if (!rows.rows?.length) return;
