@@ -623,18 +623,44 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           ? opts.shipDate.toISOString()
           : opts.shipDate || new Date().toISOString();
 
-      // Upsert with new orderStatus + tracking. Include all required fields
-      // from the existing order (orderKey is the idempotency key).
-      await apiRequest("POST", "/orders/createorder", {
-        ...existing,
+      // Build a minimal upsert payload from the existing order. createorder
+      // requires orderNumber, orderKey, orderDate, orderStatus, billTo, shipTo.
+      // Spreading the entire `existing` GET response sometimes includes
+      // computed/server-only fields that ShipStation rejects with empty 400.
+      // Picking only the documented mutable fields keeps the upsert clean.
+      const payload: any = {
+        orderNumber: existing.orderNumber,
+        orderKey: existing.orderKey,
+        orderDate: existing.orderDate,
+        paymentDate: existing.paymentDate,
         orderStatus: "shipped",
+        customerUsername: existing.customerUsername,
+        customerEmail: existing.customerEmail,
+        billTo: existing.billTo,
+        shipTo: existing.shipTo,
+        items: existing.items,
+        amountPaid: existing.amountPaid,
+        taxAmount: existing.taxAmount,
+        shippingAmount: existing.shippingAmount,
+        internalNotes: existing.internalNotes,
+        advancedOptions: existing.advancedOptions,
         shipDate,
         carrierCode: opts.carrierCode || existing.carrierCode || "other",
         trackingNumber: opts.trackingNumber || existing.trackingNumber || null,
-      });
+      };
 
-      console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped via createorder upsert`);
-      return { alreadyInState: false };
+      try {
+        await apiRequest("POST", "/orders/createorder", payload);
+        console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped via createorder upsert`);
+        return { alreadyInState: false };
+      } catch (postErr: any) {
+        // Dump the payload so we can see what's wrong if SS rejects.
+        console.error(
+          `[ShipStation] markAsShipped payload that failed for order ${shipstationOrderId}:`,
+          JSON.stringify(payload).slice(0, 800),
+        );
+        throw postErr;
+      }
     } catch (err: any) {
       console.error(
         `[ShipStation] Failed to mark order ${shipstationOrderId} shipped:`,
