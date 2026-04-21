@@ -2436,6 +2436,34 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // Spec A follow-up: two-layer catalog typeahead for the new PO editor.
+  // Returns vendor-catalog matches (top) and non-catalog product matches (bottom).
+  app.get(
+    "/api/vendors/:vendorId/catalog-search",
+    requirePermission("purchasing", "view"),
+    async (req, res) => {
+      try {
+        const vendorId = Number(req.params.vendorId);
+        if (!Number.isInteger(vendorId) || vendorId <= 0) {
+          return res.status(400).json({ error: "Invalid vendorId" });
+        }
+        const vendor = await storage.getVendorById(vendorId);
+        if (!vendor) return res.status(404).json({ error: "Vendor not found" });
+        const q = typeof req.query.q === "string" ? req.query.q : "";
+        const limitRaw = Number(req.query.limit);
+        const limit =
+          Number.isFinite(limitRaw) && limitRaw > 0
+            ? Math.min(100, Math.floor(limitRaw))
+            : 50;
+        const result = await storage.searchVendorCatalog({ vendorId, q, limit });
+        res.json(result);
+      } catch (error: any) {
+        console.error("[catalog-search] error:", error);
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
   // ── Approval Tiers ─────────────────────────────────────────────────
 
   app.get("/api/purchasing/approval-tiers", requirePermission("purchasing", "view"), async (req, res) => {

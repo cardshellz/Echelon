@@ -88,6 +88,40 @@ export interface IProcurementStorage {
   createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct>;
   updateVendorProduct(id: number, updates: Partial<InsertVendorProduct>): Promise<VendorProduct | null>;
   deleteVendorProduct(id: number): Promise<boolean>;
+
+  /**
+   * Spec A follow-up: two-layer catalog typeahead.
+   * Returns products in a vendor's catalog (top section) plus other products
+   * matching the query that aren't yet in this vendor's catalog (bottom section).
+   */
+  searchVendorCatalog(opts: {
+    vendorId: number;
+    q: string;
+    limit: number;
+  }): Promise<{
+    inCatalog: Array<{
+      vendorProductId: number;
+      productId: number;
+      productVariantId: number | null;
+      sku: string | null;
+      productName: string;
+      variantName: string | null;
+      vendorSku: string | null;
+      vendorProductName: string | null;
+      unitCostCents: number;
+      packSize: number | null;
+      moq: number | null;
+      leadTimeDays: number | null;
+      isPreferred: boolean;
+    }>;
+    outOfCatalog: Array<{
+      productId: number;
+      productVariantId: number | null;
+      sku: string | null;
+      productName: string;
+      variantName: string | null;
+    }>;
+  }>;
   getAllPoApprovalTiers(): Promise<PoApprovalTier[]>;
   getPoApprovalTierById(id: number): Promise<PoApprovalTier | undefined>;
   getMatchingApprovalTier(totalCents: number): Promise<PoApprovalTier | undefined>;
@@ -367,6 +401,192 @@ export const procurementMethods: IProcurementStorage = {
   async deleteVendorProduct(id: number): Promise<boolean> {
     const result = await db.delete(vendorProducts).where(eq(vendorProducts.id, id)).returning();
     return result.length > 0;
+  },
+
+  async searchVendorCatalog(opts: { vendorId: number; q: string; limit: number }) {
+    // Rule #1: DB search stays in the storage layer.
+    // Rule #12: q is parameterised — never interpolated into raw SQL.
+    const vendorId = Number(opts.vendorId);
+    const qTrim = (opts.q ?? "").trim().toLowerCase();
+    const combined = Math.max(1, Math.min(100, Math.floor(opts.limit) || 50));
+    const like = qTrim.length > 0 ? `%${qTrim}%` : "%";
+    const prefix = qTrim.length > 0 ? `${qTrim}%` : "";
+    // rank: 0 SKU prefix, 1 SKU contains, 2 name contains, 3 other.
+    // inCatalog gets priority — we fetch up to `combined` rows, then fill
+    // outOfCatalog with the remainder.
+    const inCatalogRows = await db.execute<{
+      vendor_product_id: number;
+      product_id: number;
+      product_variant_id: number | null;
+      sku: string | null;
+      product_name: string;
+      variant_name: string | null;
+      vendor_sku: string | null;
+      vendor_product_name: string | null;
+      unit_cost_cents: number | string | null;
+      pack_size: number | null;
+      moq: number | null;
+      lead_time_days: number | null;
+      is_preferred: number | null;
+    }>(sql`
+      SELECT
+        vp.id              AS vendor_product_id,
+        vp.product_id      AS product_id,
+        vp.product_variant_id AS product_variant_id,
+        COALESCE(pv.sku, p.sku) AS sku,
+        p.name             AS product_name,
+        pv.name            AS variant_name,
+        vp.vendor_sku      AS vendor_sku,
+        vp.vendor_product_name AS vendor_product_name,
+        vp.unit_cost_cents AS unit_cost_cents,
+        vp.pack_size       AS pack_size,
+        vp.moq             AS moq,
+        vp.lead_time_days  AS lead_time_days,
+        vp.is_preferred    AS is_preferred,
+        MIN(
+          CASE
+            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
+            WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
+            WHEN LOWER(COALESCE(vp.vendor_sku, '')) LIKE ${like} THEN 1
+            WHEN LOWER(p.name) LIKE ${like} THEN 2
+            WHEN LOWER(COALESCE(pv.name, '')) LIKE ${like} THEN 2
+            WHEN LOWER(COALESCE(vp.vendor_product_name, '')) LIKE ${like} THEN 2
+            ELSE 3
+          END
+        ) AS rank
+      FROM procurement.vendor_products vp
+      JOIN catalog.products p ON p.id = vp.product_id
+      LEFT JOIN catalog.product_variants pv ON pv.id = vp.product_variant_id
+      WHERE vp.vendor_id = ${vendorId}
+        AND vp.is_active = 1
+        ${qTrim.length === 0 ? sql`` : sql`AND (
+          LOWER(COALESCE(p.sku, '')) LIKE ${like}
+          OR LOWER(COALESCE(pv.sku, '')) LIKE ${like}
+          OR LOWER(COALESCE(vp.vendor_sku, '')) LIKE ${like}
+          OR LOWER(p.name) LIKE ${like}
+          OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
+          OR LOWER(COALESCE(vp.vendor_product_name, '')) LIKE ${like}
+        )`}
+      GROUP BY vp.id, p.id, pv.id
+      ORDER BY rank ASC, vp.is_preferred DESC NULLS LAST, p.name ASC
+      LIMIT ${combined}
+    `);
+
+    const inCatalog = inCatalogRows.rows.map((r) => ({
+      vendorProductId: Number(r.vendor_product_id),
+      productId: Number(r.product_id),
+      productVariantId: r.product_variant_id != null ? Number(r.product_variant_id) : null,
+      sku: r.sku,
+      productName: r.product_name,
+      variantName: r.variant_name,
+      vendorSku: r.vendor_sku,
+      vendorProductName: r.vendor_product_name,
+      unitCostCents: Number(r.unit_cost_cents ?? 0),
+      packSize: r.pack_size != null ? Number(r.pack_size) : null,
+      moq: r.moq != null ? Number(r.moq) : null,
+      leadTimeDays: r.lead_time_days != null ? Number(r.lead_time_days) : null,
+      isPreferred: Number(r.is_preferred ?? 0) === 1,
+    }));
+
+    const remaining = combined - inCatalog.length;
+    if (remaining <= 0) {
+      return { inCatalog, outOfCatalog: [] as Array<{
+        productId: number;
+        productVariantId: number | null;
+        sku: string | null;
+        productName: string;
+        variantName: string | null;
+      }> };
+    }
+
+    // Build the "exclude" set: all (productId, productVariantId) pairs this
+    // vendor already stocks, not just the ones that matched q. Overlord wants
+    // the "other" section to be truly non-catalog products.
+    const exclusionRows = await db.execute<{ product_id: number; product_variant_id: number | null }>(sql`
+      SELECT product_id, product_variant_id
+      FROM procurement.vendor_products
+      WHERE vendor_id = ${vendorId} AND is_active = 1
+    `);
+    const excludedVariantIds = new Set<number>();
+    const excludedProductIds = new Set<number>();
+    for (const row of exclusionRows.rows) {
+      if (row.product_variant_id != null) {
+        excludedVariantIds.add(Number(row.product_variant_id));
+      } else {
+        excludedProductIds.add(Number(row.product_id));
+      }
+    }
+
+    const outOfCatalogRows = await db.execute<{
+      product_id: number;
+      product_variant_id: number | null;
+      sku: string | null;
+      product_name: string;
+      variant_name: string | null;
+      rank: number;
+    }>(sql`
+      SELECT
+        p.id AS product_id,
+        pv.id AS product_variant_id,
+        COALESCE(pv.sku, p.sku) AS sku,
+        p.name AS product_name,
+        pv.name AS variant_name,
+        (
+          CASE
+            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
+            WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
+            WHEN LOWER(p.name) LIKE ${like} THEN 2
+            WHEN LOWER(COALESCE(pv.name, '')) LIKE ${like} THEN 2
+            ELSE 3
+          END
+        ) AS rank
+      FROM catalog.products p
+      LEFT JOIN catalog.product_variants pv
+        ON pv.product_id = p.id AND pv.is_active = true
+      WHERE p.is_active = true
+        ${qTrim.length === 0 ? sql`` : sql`AND (
+          LOWER(COALESCE(p.sku, '')) LIKE ${like}
+          OR LOWER(COALESCE(pv.sku, '')) LIKE ${like}
+          OR LOWER(p.name) LIKE ${like}
+          OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
+        )`}
+      ORDER BY rank ASC, p.name ASC, pv.sku ASC
+      LIMIT ${remaining * 3}
+    `);
+
+    const outOfCatalog: Array<{
+      productId: number;
+      productVariantId: number | null;
+      sku: string | null;
+      productName: string;
+      variantName: string | null;
+    }> = [];
+    const seenKeys = new Set<string>();
+    for (const row of outOfCatalogRows.rows) {
+      if (outOfCatalog.length >= remaining) break;
+      const pid = Number(row.product_id);
+      const vid = row.product_variant_id != null ? Number(row.product_variant_id) : null;
+      // Skip rows already in this vendor's catalog. A product-level vendor
+      // entry (vid IS NULL on vendor_products) blocks every variant of that
+      // product, so check both the variant set and the product set.
+      if (vid != null && excludedVariantIds.has(vid)) continue;
+      if (excludedProductIds.has(pid)) continue;
+      // Dedupe on the (productId, variantId) key — a LEFT JOIN with no
+      // variant rows produces a (pid, null) row which shouldn't collide with
+      // actual variant rows.
+      const key = `${pid}:${vid ?? 'null'}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      outOfCatalog.push({
+        productId: pid,
+        productVariantId: vid,
+        sku: row.sku,
+        productName: row.product_name,
+        variantName: row.variant_name,
+      });
+    }
+
+    return { inCatalog, outOfCatalog };
   },
 
   async getAllPoApprovalTiers(): Promise<PoApprovalTier[]> {
