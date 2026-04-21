@@ -159,7 +159,7 @@ export function registerPickPriorityRoutes(app: Express): void {
   app.get(
     "/api/admin/pick-priority",
     requireAuth,
-    requirePermission("shellz", "admin"),
+    requirePermission("settings", "view"),
     async (_req: Request, res: Response) => {
       try {
         const [{ shippingBase, slaDefaultDays }, plans] = await Promise.all([
@@ -181,7 +181,7 @@ export function registerPickPriorityRoutes(app: Express): void {
   app.patch(
     "/api/admin/pick-priority",
     requireAuth,
-    requirePermission("shellz", "admin"),
+    requirePermission("settings", "edit"),
     async (req: Request, res: Response) => {
       try {
         const body = (req.body ?? {}) as PickPriorityUpdate;
