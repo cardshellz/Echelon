@@ -74,19 +74,72 @@ async function main() {
   `);
   console.log(`[Backfill] Recomputed priority on ${priorityResult?.rows?.length ?? 0} orders`);
 
-  // 4. Recompute sort_rank for all orders in pick queue
-  console.log("[Backfill] Step 4: recomputing sort_rank for all active orders...");
+  // 4a. Backfill channel_ship_by_date on eBay orders from raw_payload.
+  //     eBay order payload carries fulfillmentStartInstructions[0].shippingStep.shipByDate.
+  //     Without this, historical eBay orders have no platform deadline and fall back
+  //     to the generic channel-default SLA.
+  console.log("[Backfill] Step 4a: extracting eBay shipByDate from raw_payload...");
+  const ebayCandidates: any = await db.execute(sql`
+    SELECT oms.id, oms.raw_payload
+    FROM oms.oms_orders oms
+    INNER JOIN channels c ON c.id = oms.channel_id
+    WHERE oms.channel_ship_by_date IS NULL
+      AND oms.raw_payload IS NOT NULL
+      AND oms.status NOT IN ('cancelled')
+      AND LOWER(c.provider) = 'ebay'
+  `);
+  let ebayStamped = 0;
+  for (const row of ebayCandidates.rows ?? []) {
+    try {
+      const raw = typeof row.raw_payload === "string" ? JSON.parse(row.raw_payload) : row.raw_payload;
+      const shipByRaw = raw?.fulfillmentStartInstructions?.[0]?.shippingStep?.shipByDate;
+      if (!shipByRaw) continue;
+      const shipBy = new Date(shipByRaw);
+      if (isNaN(shipBy.getTime())) continue;
+      await db.execute(sql`
+        UPDATE oms.oms_orders
+        SET channel_ship_by_date = ${shipBy.toISOString()}
+        WHERE id = ${row.id}
+      `);
+      ebayStamped++;
+    } catch {
+      // skip malformed payload
+    }
+  }
+  console.log(`[Backfill] Stamped channel_ship_by_date on ${ebayStamped} eBay orders`);
+
+  // 4b. Mirror channel_ship_by_date from oms → wms for any active WMS row
+  //     that doesn't have one yet.
+  const mirrorResult: any = await db.execute(sql`
+    UPDATE wms.orders w
+    SET channel_ship_by_date = oms.channel_ship_by_date
+    FROM oms.oms_orders oms
+    WHERE (
+            (w.source = 'oms'     AND w.oms_fulfillment_order_id = oms.id::text)
+         OR (w.source = 'shopify' AND w.source_table_id = oms.id::text)
+          )
+      AND oms.channel_ship_by_date IS NOT NULL
+      AND w.channel_ship_by_date IS NULL
+      AND w.warehouse_status NOT IN ('shipped', 'cancelled')
+    RETURNING w.id
+  `);
+  console.log(`[Backfill] Mirrored channel_ship_by_date onto ${mirrorResult?.rows?.length ?? 0} WMS rows`);
+
+  // 4c. Recompute sort_rank for all active orders, now using channel_ship_by_date.
+  console.log("[Backfill] Step 4c: recomputing sort_rank for all active orders...");
   const activeRows: any = await db.execute(sql`
-    SELECT id, priority, on_hold, sla_due_at, order_placed_at, created_at
+    SELECT id, priority, on_hold, channel_ship_by_date, sla_due_at, order_placed_at, created_at
     FROM wms.orders
     WHERE warehouse_status IN ('ready', 'in_progress')
   `);
   let rankUpdated = 0;
   for (const row of activeRows.rows ?? []) {
+    // Prefer channel_ship_by_date over generic sla_due_at for the SLA slot
+    const slaValue = row.channel_ship_by_date || row.sla_due_at;
     const rank = computeSortRank({
       priority: row.priority,
       onHold: row.on_hold,
-      slaDueAt: row.sla_due_at,
+      slaDueAt: slaValue,
       orderPlacedAt: row.order_placed_at || row.created_at,
     });
     await db.execute(sql`UPDATE wms.orders SET sort_rank = ${rank} WHERE id = ${row.id}`);
