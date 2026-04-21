@@ -28,7 +28,7 @@ import { warehouseStorage } from "../warehouse";
 
 const EBAY_CHANNEL_ID = 67;
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes — NON-NEGOTIABLE
-const POLL_WINDOW_MINUTES = 30; // Look back 30 minutes each poll
+const POLL_WINDOW_MINUTES = 240; // Look back 4 hours each poll (deploys/restarts shouldn't drop orders)
 
 // ---------------------------------------------------------------------------
 // eBay Order → OMS OrderData mapping
@@ -465,6 +465,61 @@ export async function pollEbayOrders(
  * - Challenge validation (GET with challenge_code)
  * - ORDER_CONFIRMATION notifications (POST)
  */
+/**
+ * Manually re-ingest a single eBay order by orderId. Used when the poll
+ * window missed it (e.g. deploy took the app down past the lookback) or
+ * when debugging. Fetches the live order from eBay and pipes it through
+ * the same ingestion path webhooks use.
+ */
+export async function reingestEbayOrder(
+  orderId: string,
+  omsService: OmsService,
+  ebayApiClient: EbayApiClient,
+): Promise<{ status: "ingested" | "already_existed"; omsOrderId: number }> {
+  const ebayOrder = await ebayApiClient.getOrder(orderId);
+  if (!ebayOrder) throw new Error(`eBay order ${orderId} not found on platform`);
+
+  const orderData = mapEbayOrderToOrderData(ebayOrder);
+  const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
+
+  const wasCreated =
+    result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
+
+  if (wasCreated) {
+    // Full post-ingest pipeline: WMS sync, reserve, assign, push.
+    try {
+      if (_wmsSyncService) {
+        await _wmsSyncService.syncOmsOrderToWms(result.id);
+      } else {
+        await createWmsOrderFromEbay(result.id, orderData, orderId);
+      }
+    } catch (err: any) {
+      console.error(`[eBay Reingest] WMS sync failed for ${orderId}: ${err.message}`);
+    }
+
+    try {
+      await omsService.reserveInventory(result.id);
+      await omsService.assignWarehouse(result.id);
+    } catch (err: any) {
+      console.error(`[eBay Reingest] Post-ingest (reserve/assign) failed for ${orderId}: ${err.message}`);
+    }
+
+    if (_shipStationService?.isConfigured()) {
+      try {
+        const fullOrder = await omsService.getOrderById(result.id);
+        if (fullOrder) await _shipStationService.pushOrder(fullOrder);
+      } catch (err: any) {
+        console.error(`[eBay Reingest] ShipStation push failed for ${orderId}: ${err.message}`);
+      }
+    }
+  }
+
+  return {
+    status: wasCreated ? "ingested" : "already_existed",
+    omsOrderId: result.id,
+  };
+}
+
 export function createEbayOrderWebhookHandler(
   omsService: OmsService,
   ebayApiClient: EbayApiClient,

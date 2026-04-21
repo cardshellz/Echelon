@@ -16,7 +16,7 @@ import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyn
 import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationService, setDropshipWmsServices } from "./modules/dropship/vendor-order-polling";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { startWebhookRetryWorker } from "./modules/oms/webhook-retry.worker";
-import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
+import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
@@ -328,6 +328,27 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     const webhookHandler = createEbayOrderWebhookHandler(services.oms, ebayApiClient);
     app.get("/api/ebay/webhooks/order", requireAuth, webhookHandler);
     app.post("/api/ebay/webhooks/order", requireAuth, webhookHandler);
+
+    // Admin: manually reingest an eBay order that the poller missed.
+    // POST /api/admin/ebay/reingest { orderId: '21-14508-76944' }
+    app.post("/api/admin/ebay/reingest", requireAuth, async (req, res) => {
+      try {
+        const role = (req.session as any)?.user?.role;
+        if (role !== "admin" && role !== "lead") {
+          return res.status(403).json({ error: "admin/lead only" });
+        }
+        const { orderId } = req.body || {};
+        if (!orderId || typeof orderId !== "string") {
+          return res.status(400).json({ error: "orderId (string) required" });
+        }
+        const result = await reingestEbayOrder(orderId, services.oms, ebayApiClient);
+        res.json(result);
+      } catch (err: any) {
+        console.error(`[eBay Reingest] ${err.message}`);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     log("eBay order polling and webhook registered", "oms");
   } catch (err: any) {
     log(`eBay order polling not started (config missing): ${err.message}`, "oms");
