@@ -13,6 +13,7 @@ import { db } from "../server/db";
 import { sql } from "drizzle-orm";
 import { computeSortRank } from "../server/modules/orders/sort-rank";
 import { createShipStationService } from "../server/modules/oms/shipstation.service";
+import { createOmsService } from "../server/modules/oms/oms.service";
 
 async function main() {
   console.log("[Backfill] Starting priority + ShipStation refresh...");
@@ -102,31 +103,33 @@ async function main() {
     return;
   }
 
-  const orders: any = await db.execute(sql`
-    SELECT oms.*
+  const omsService = createOmsService(db);
+  const idRows: any = await db.execute(sql`
+    SELECT oms.id
     FROM oms.oms_orders oms
     WHERE oms.status NOT IN ('shipped', 'cancelled')
       AND oms.shipstation_order_id IS NOT NULL
     ORDER BY oms.id ASC
   `);
-  console.log(`[Backfill] Re-pushing ${orders.rows?.length ?? 0} orders to ShipStation...`);
+  console.log(`[Backfill] Re-pushing ${idRows.rows?.length ?? 0} orders to ShipStation...`);
 
   let success = 0;
   let failed = 0;
-  for (const row of orders.rows ?? []) {
+  for (const idRow of idRows.rows ?? []) {
     try {
-      // Load line items for this OMS order
-      const lines: any = await db.execute(sql`
-        SELECT * FROM oms.oms_order_lines WHERE order_id = ${row.id}
-      `);
-      const fullOrder = { ...row, lines: lines.rows ?? [] };
-      await shipStation.pushOrder(fullOrder as any);
+      // Load via OMS service — gives us camelCase object + mapped lines
+      const fullOrder = await omsService.getOrderById(idRow.id);
+      if (!fullOrder) {
+        failed++;
+        continue;
+      }
+      await shipStation.pushOrder(fullOrder);
       success++;
       if (success % 25 === 0) console.log(`[Backfill]   ...${success} pushed`);
       // Rate limit \u2014 ShipStation allows ~40 req/min
       await new Promise((r) => setTimeout(r, 2000));
     } catch (err: any) {
-      console.warn(`[Backfill] Failed to push OMS order ${row.id}: ${err.message}`);
+      console.warn(`[Backfill] Failed to push OMS order ${idRow.id}: ${err.message}`);
       failed++;
     }
   }
