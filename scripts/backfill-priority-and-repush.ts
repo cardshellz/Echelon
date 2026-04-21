@@ -22,8 +22,7 @@ async function main() {
   const planResult: any = await db.execute(sql`
     UPDATE wms.orders o
     SET member_plan_name = p.name,
-        member_plan_color = p.primary_color,
-        updated_at = NOW()
+        member_plan_color = p.primary_color
     FROM membership.members m
     JOIN membership.member_subscriptions ms ON ms.member_id = m.id AND ms.status = 'active'
     JOIN membership.plans p ON p.id = ms.plan_id
@@ -61,8 +60,7 @@ async function main() {
           WHEN COALESCE(oms.shipping_service_level, 'standard') = 'overnight' THEN 500
           WHEN COALESCE(oms.shipping_service_level, 'standard') = 'expedited' THEN 300
           ELSE 100
-        END + COALESCE(p.priority_modifier, 0),
-        updated_at = NOW()
+        END + COALESCE(p.priority_modifier, 0)
     FROM oms.oms_orders oms
     LEFT JOIN membership.plans p ON p.name = oms.member_plan_name
     WHERE (
