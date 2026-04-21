@@ -79,3 +79,112 @@ export function computeSortRank(input: SortRankInput): string {
 
   return `${H}-${B}-${P}-${S}-${A}`;
 }
+
+// ---------------------------------------------------------------------------
+// Pick-priority settings (echelon_settings) — shipping base + SLA fallback.
+// Cached 30s in-memory so the WMS sync hot path doesn't hit the DB on every
+// order. Admins rarely change these; 30s staleness is fine.
+// ---------------------------------------------------------------------------
+
+export type ShippingServiceLevel = "standard" | "expedited" | "overnight";
+
+export const DEFAULT_SHIPPING_BASE: Record<ShippingServiceLevel, number> = {
+  standard: 100,
+  expedited: 300,
+  overnight: 500,
+};
+
+export const DEFAULT_SLA_DAYS = 3;
+
+interface PickPrioritySettingsCache {
+  shippingBase: Record<ShippingServiceLevel, number>;
+  slaDefaultDays: number;
+  expiresAt: number;
+}
+
+const SETTINGS_CACHE_TTL_MS = 30_000;
+let settingsCache: PickPrioritySettingsCache | null = null;
+
+interface SettingsRow { key: string; value: string | null }
+
+// We accept any Drizzle-like db with an `execute` method. Kept loose to avoid
+// tight coupling to a specific Drizzle driver (NodePg vs NeonHttp) and to keep
+// sort-rank.ts easy to unit-test with a stub.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type PickPrioritySettingsDb = { execute: (query: any) => Promise<{ rows: any[] }> };
+
+async function loadSettings(dbHandle: PickPrioritySettingsDb): Promise<PickPrioritySettingsCache> {
+  const now = Date.now();
+  if (settingsCache && settingsCache.expiresAt > now) {
+    return settingsCache;
+  }
+
+  const shippingBase: Record<ShippingServiceLevel, number> = { ...DEFAULT_SHIPPING_BASE };
+  let slaDefaultDays = DEFAULT_SLA_DAYS;
+
+  try {
+    // Lazy import to avoid circular imports / allow callers to pass their own db.
+    const { sql } = await import("drizzle-orm");
+    const result = await dbHandle.execute(sql`
+      SELECT key, value
+      FROM warehouse.echelon_settings
+      WHERE key IN (
+        'priority.shipping_base.standard',
+        'priority.shipping_base.expedited',
+        'priority.shipping_base.overnight',
+        'priority.sla_default_days'
+      )
+    `);
+    for (const raw of result.rows as SettingsRow[]) {
+      const row = raw;
+      const n = row.value == null ? NaN : Number(row.value);
+      if (!Number.isFinite(n)) continue;
+      switch (row.key) {
+        case "priority.shipping_base.standard": shippingBase.standard = n; break;
+        case "priority.shipping_base.expedited": shippingBase.expedited = n; break;
+        case "priority.shipping_base.overnight": shippingBase.overnight = n; break;
+        case "priority.sla_default_days": slaDefaultDays = n; break;
+      }
+    }
+  } catch (err) {
+    // Swallow — we always have the hardcoded fallback.
+    // eslint-disable-next-line no-console
+    console.warn("[sort-rank] Failed to load pick-priority settings, using defaults:", (err as Error).message);
+  }
+
+  settingsCache = {
+    shippingBase,
+    slaDefaultDays,
+    expiresAt: now + SETTINGS_CACHE_TTL_MS,
+  };
+  return settingsCache;
+}
+
+/** Invalidate the in-memory settings cache. Call after an admin update. */
+export function invalidatePickPrioritySettingsCache(): void {
+  settingsCache = null;
+}
+
+/**
+ * Look up the shipping-service-level base priority score from echelon_settings.
+ * Falls back to DEFAULT_SHIPPING_BASE on miss or DB error so sort_rank computation
+ * stays resilient.
+ */
+export async function getShippingBase(
+  level: ShippingServiceLevel | string | null | undefined,
+  dbHandle: PickPrioritySettingsDb,
+): Promise<number> {
+  const key = (level as ShippingServiceLevel) || "standard";
+  const cached = await loadSettings(dbHandle).catch(() => null);
+  const table = cached?.shippingBase ?? DEFAULT_SHIPPING_BASE;
+  return table[key as ShippingServiceLevel] ?? table.standard ?? DEFAULT_SHIPPING_BASE.standard;
+}
+
+/**
+ * Look up the default SLA fallback (business days) from echelon_settings.
+ * Falls back to DEFAULT_SLA_DAYS on miss or DB error.
+ */
+export async function getSlaDefaultDays(dbHandle: PickPrioritySettingsDb): Promise<number> {
+  const cached = await loadSettings(dbHandle).catch(() => null);
+  return cached?.slaDefaultDays ?? DEFAULT_SLA_DAYS;
+}

@@ -5,6 +5,7 @@ import {
   partnerProfiles,
   warehouses,
 } from "@shared/schema";
+import { getSlaDefaultDays } from "./sort-rank";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -90,7 +91,9 @@ class SLAMonitorService {
     }
 
     if (!dueAt) {
-      let slaDays = this.DEFAULT_SLA_DAYS;
+      // Fallback SLA days = admin-configurable default (warehouse.echelon_settings
+      // key `priority.sla_default_days`), then channel partner_profile override.
+      let slaDays = await getSlaDefaultDays(this.db as any).catch(() => this.DEFAULT_SLA_DAYS);
       if (order.channelId) {
         const [profile] = await this.db
           .select()

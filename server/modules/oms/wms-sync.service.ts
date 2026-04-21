@@ -15,7 +15,7 @@ import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import { wmsOrders, wmsOrderItems } from "@shared/schema";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
-import { computeSortRank } from "../orders/sort-rank";
+import { computeSortRank, getShippingBase, type ShippingServiceLevel } from "../orders/sort-rank";
 
 interface WmsSyncServices {
   inventoryCore: any;
@@ -229,13 +229,9 @@ export class WmsSyncService {
     //    shipping_method string. The method label is zone-dependent and
     //    unreliable (e.g. "USPS Priority Mail" is a carrier service class,
     //    not a customer-paid expedite).
-    const baseByLevel: Record<string, number> = {
-      standard: 100,
-      expedited: 300,
-      overnight: 500,
-    };
-    const level = ((omsOrder as any).shippingServiceLevel as string | null) || "standard";
-    const base = baseByLevel[level] ?? 100;
+    //    Base scores are admin-configurable via /pick-priority (warehouse.echelon_settings).
+    const level = (((omsOrder as any).shippingServiceLevel as string | null) || "standard") as ShippingServiceLevel;
+    const base = await getShippingBase(level, db);
 
     // 2. Dynamic Tier Modifier + plan metadata snapshot.
     //    Fetches priority_modifier for sort math AND plan name/primary_color
