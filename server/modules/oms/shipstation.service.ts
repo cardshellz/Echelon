@@ -597,15 +597,27 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       carrierCode?: string | null;
       notifyCustomer?: boolean;
     } = {},
-  ): Promise<void> {
-    if (!isConfigured()) return;
-    try {
-      const existing = await getOrderById(shipstationOrderId);
-      if (!existing) {
-        console.warn(`[ShipStation] markAsShipped skipped — order ${shipstationOrderId} not found`);
-        return;
-      }
+  ): Promise<{ alreadyInState: boolean }> {
+    if (!isConfigured()) return { alreadyInState: false };
+    const existing = await getOrderById(shipstationOrderId);
+    if (!existing) {
+      console.warn(`[ShipStation] markAsShipped skipped — order ${shipstationOrderId} not found`);
+      return { alreadyInState: false };
+    }
 
+    // Per ShipStation docs: orders in 'shipped' or 'cancelled' state cannot
+    // be updated via createorder. If the order is already shipped, treat
+    // as success (it's in the correct state) and let caller stamp reconciled_at.
+    if (existing.orderStatus === "shipped") {
+      console.log(`[ShipStation] Order ${shipstationOrderId} already shipped — no-op`);
+      return { alreadyInState: true };
+    }
+    if (existing.orderStatus === "cancelled") {
+      console.log(`[ShipStation] Order ${shipstationOrderId} is cancelled — cannot mark shipped`);
+      return { alreadyInState: true };
+    }
+
+    try {
       const shipDate =
         opts.shipDate instanceof Date
           ? opts.shipDate.toISOString()
@@ -622,6 +634,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       });
 
       console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped via createorder upsert`);
+      return { alreadyInState: false };
     } catch (err: any) {
       console.error(
         `[ShipStation] Failed to mark order ${shipstationOrderId} shipped:`,
@@ -637,21 +650,32 @@ export function createShipStationService(db: any, inventoryCore?: any) {
    * cancel endpoint on the v1 API. This moves the order out of the
    * Awaiting Shipment queue and into the Cancelled tab.
    */
-  async function cancelOrder(shipstationOrderId: number): Promise<void> {
-    if (!isConfigured()) return;
-    try {
-      const existing = await getOrderById(shipstationOrderId);
-      if (!existing) {
-        console.warn(`[ShipStation] cancelOrder skipped — order ${shipstationOrderId} not found`);
-        return;
-      }
+  async function cancelOrder(shipstationOrderId: number): Promise<{ alreadyInState: boolean }> {
+    if (!isConfigured()) return { alreadyInState: false };
+    const existing = await getOrderById(shipstationOrderId);
+    if (!existing) {
+      console.warn(`[ShipStation] cancelOrder skipped — order ${shipstationOrderId} not found`);
+      return { alreadyInState: false };
+    }
 
+    // Same restriction: cancelled/shipped orders can't be updated.
+    if (existing.orderStatus === "cancelled") {
+      console.log(`[ShipStation] Order ${shipstationOrderId} already cancelled — no-op`);
+      return { alreadyInState: true };
+    }
+    if (existing.orderStatus === "shipped") {
+      console.log(`[ShipStation] Order ${shipstationOrderId} already shipped — cannot cancel`);
+      return { alreadyInState: true };
+    }
+
+    try {
       await apiRequest("POST", "/orders/createorder", {
         ...existing,
         orderStatus: "cancelled",
       });
 
       console.log(`[ShipStation] Order ${shipstationOrderId} cancelled via createorder upsert`);
+      return { alreadyInState: false };
     } catch (err: any) {
       console.error(
         `[ShipStation] Failed to cancel order ${shipstationOrderId}:`,

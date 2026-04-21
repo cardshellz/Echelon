@@ -59,8 +59,8 @@ interface ShipStationService {
     trackingNumber?: string | null;
     carrierCode?: string | null;
     notifyCustomer?: boolean;
-  }) => Promise<void>;
-  cancelOrder: (shipstationOrderId: number) => Promise<void>;
+  }) => Promise<{ alreadyInState: boolean } | void>;
+  cancelOrder: (shipstationOrderId: number) => Promise<{ alreadyInState: boolean } | void>;
 }
 
 // ---------------------------------------------------------------------------
