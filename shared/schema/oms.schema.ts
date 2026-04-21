@@ -54,6 +54,7 @@ export const omsOrders = omsSchema.table("oms_orders", {
   shippingServiceLevel: varchar("shipping_service_level", { length: 20 }).notNull().default("standard"), // normalized: standard | expedited | overnight
   memberPlanName: varchar("member_plan_name", { length: 20 }),
   memberPlanColor: varchar("member_plan_color", { length: 20 }),
+  channelShipByDate: timestamp("channel_ship_by_date"), // platform-provided ship-by deadline (eBay shipByDate, etc.)
 
   // Totals (cents)
   subtotalCents: bigint("subtotal_cents", { mode: "number" }).notNull().default(0),

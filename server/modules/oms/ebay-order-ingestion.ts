@@ -40,9 +40,16 @@ function dollarsToCents(value: string | undefined | null): number {
 }
 
 function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
-  const shipTo = ebayOrder.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo;
+  const shippingStep = ebayOrder.fulfillmentStartInstructions?.[0]?.shippingStep;
+  const shipTo = shippingStep?.shipTo;
   const address = shipTo?.contactAddress;
   const pricingSummary = ebayOrder.pricingSummary;
+
+  // eBay's per-order ship-by deadline — the platform's hard commitment for
+  // this order. Feeds the SLA slot of sort_rank so urgent ship-by orders
+  // outrank generic 3-day-default orders.
+  const channelShipByRaw = (shippingStep as any)?.shipByDate;
+  const channelShipByDate = channelShipByRaw ? new Date(channelShipByRaw) : null;
 
   const lineItems: LineItemData[] = (ebayOrder.lineItems || []).map((item) => {
     // lineItemCost = total product cost for this line (unit price × qty)
@@ -121,6 +128,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     currency: pricingSummary?.total?.currency || "USD",
     rawPayload: ebayOrder as unknown,
     orderedAt: new Date(ebayOrder.creationDate),
+    channelShipByDate,
     lineItems,
   };
 }

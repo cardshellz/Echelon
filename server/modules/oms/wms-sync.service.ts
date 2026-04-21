@@ -88,10 +88,15 @@ export class WmsSyncService {
         ? this.determineWarehouseStatus(omsOrder)
         : "completed"; // Pure digital/donation/membership → skip pick queue
       const { priority, memberPlanName, memberPlanColor } = await this.determinePriority(omsOrder);
+      // Prefer platform ship-by-date over any channel-default SLA for the
+      // sort_rank SLA slot. sla-monitor will also set sla_due_at later,
+      // but we compute sort_rank now so new orders are ranked correctly
+      // the moment they land in WMS.
+      const channelShipBy = (omsOrder as any).channelShipByDate as Date | string | null | undefined;
       const sortRank = computeSortRank({
         priority,
         onHold: false,
-        slaDueAt: (omsOrder as any).slaDueAt ?? null,
+        slaDueAt: channelShipBy ?? (omsOrder as any).slaDueAt ?? null,
         orderPlacedAt: omsOrder.orderedAt,
       });
 
@@ -113,6 +118,7 @@ export class WmsSyncService {
         shippingServiceLevel: ((omsOrder as any).shippingServiceLevel as string | null) || "standard",
         memberPlanName,
         memberPlanColor,
+        channelShipByDate: channelShipBy ? new Date(channelShipBy as any) : null,
         sortRank,
         warehouseStatus,
         itemCount: omsLines.length,

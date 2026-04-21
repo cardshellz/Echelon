@@ -78,22 +78,33 @@ class SLAMonitorService {
     // Only set SLA for orders that don't already have one
     if (order.slaDueAt) return;
 
-    // Get SLA days from partner profile (if channel has one)
-    let slaDays = this.DEFAULT_SLA_DAYS;
-    if (order.channelId) {
-      const [profile] = await this.db
-        .select()
-        .from(partnerProfiles)
-        .where(eq(partnerProfiles.channelId, order.channelId))
-        .limit(1);
-
-      if (profile?.slaDays) {
-        slaDays = profile.slaDays;
-      }
+    // Priority order for the due date:
+    //   1. Platform-provided ship-by deadline (eBay shipByDate, etc.) — hardest
+    //      commitment, always wins when present.
+    //   2. Channel partner_profiles.sla_days — per-channel default.
+    //   3. DEFAULT_SLA_DAYS — global fallback (3 business days).
+    let dueAt: Date | null = null;
+    const channelShipBy = (order as any).channelShipByDate as Date | string | null;
+    if (channelShipBy) {
+      dueAt = channelShipBy instanceof Date ? channelShipBy : new Date(channelShipBy);
     }
 
-    const placedAt = order.orderPlacedAt || order.createdAt;
-    const dueAt = this.addBusinessDays(new Date(placedAt), slaDays);
+    if (!dueAt) {
+      let slaDays = this.DEFAULT_SLA_DAYS;
+      if (order.channelId) {
+        const [profile] = await this.db
+          .select()
+          .from(partnerProfiles)
+          .where(eq(partnerProfiles.channelId, order.channelId))
+          .limit(1);
+
+        if (profile?.slaDays) {
+          slaDays = profile.slaDays;
+        }
+      }
+      const placedAt = order.orderPlacedAt || order.createdAt;
+      dueAt = this.addBusinessDays(new Date(placedAt), slaDays);
+    }
 
     await this.db
       .update(orders)

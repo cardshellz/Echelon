@@ -35,6 +35,7 @@ export interface OrderData {
   shippingMethod?: string | null;
   shippingMethodCode?: string | null;
   shippingServiceLevel?: "standard" | "expedited" | "overnight";
+  channelShipByDate?: Date | string | null;
   subtotalCents?: number;
   shippingCents?: number;
   taxCents?: number;
@@ -125,6 +126,11 @@ export function createOmsService(db: any, reservationService?: any) {
         shippingMethod: data.shippingMethod || null,
         shippingMethodCode: data.shippingMethodCode || null,
         shippingServiceLevel: data.shippingServiceLevel || "standard",
+        channelShipByDate: data.channelShipByDate
+          ? (data.channelShipByDate instanceof Date
+              ? data.channelShipByDate
+              : new Date(data.channelShipByDate))
+          : null,
         orderedAt: data.orderedAt,
       } satisfies InsertOmsOrder)
       .onConflictDoNothing({ target: [omsOrders.channelId, omsOrders.externalOrderId] })

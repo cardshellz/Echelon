@@ -107,6 +107,7 @@ export const orders = wmsSchema.table("orders", {
   shippingServiceLevel: varchar("shipping_service_level", { length: 20 }).notNull().default("standard"), // normalized: standard | expedited | overnight
   memberPlanName: varchar("member_plan_name", { length: 20 }),
   memberPlanColor: varchar("member_plan_color", { length: 20 }),
+  channelShipByDate: timestamp("channel_ship_by_date"), // platform-provided ship-by deadline, preferred over generic channel SLA
   sortRank: varchar("sort_rank", { length: 32 }), // flattened pick queue sort key (26 chars), pushed to ShipStation customField1
   warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
