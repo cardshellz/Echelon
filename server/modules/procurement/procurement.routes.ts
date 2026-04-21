@@ -2436,6 +2436,35 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // Spec A follow-up: bulk upsert vendor catalog entries. Backs the
+  // "Add to catalog?" modal on PO save. Idempotent (Idempotency-Key header).
+  app.post(
+    "/api/vendors/:vendorId/catalog/bulk-upsert",
+    requirePermission("purchasing", "edit"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const vendorId = Number(req.params.vendorId);
+        if (!Number.isInteger(vendorId) || vendorId <= 0) {
+          return res.status(400).json({ error: "Invalid vendorId" });
+        }
+        const entries = Array.isArray(req.body?.entries) ? req.body.entries : null;
+        if (!entries || entries.length === 0) {
+          return res.status(400).json({ error: "entries must be a non-empty array" });
+        }
+        const userId = req.session.user?.id;
+        const result = await purchasing.bulkUpsertVendorCatalog(vendorId, entries, userId);
+        res.json(result);
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message });
+        }
+        console.error("[catalog bulk-upsert] error:", error);
+        res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
   // Spec A follow-up: two-layer catalog typeahead for the new PO editor.
   // Returns vendor-catalog matches (top) and non-catalog product matches (bottom).
   app.get(

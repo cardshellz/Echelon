@@ -11,7 +11,7 @@
  * - Reorder-to-PO generation
  */
 
-import { eq, sql } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import {
   inboundShipmentLines,
   landedCostSnapshots,
@@ -20,6 +20,7 @@ import {
   purchaseOrderLines as purchaseOrderLinesTable,
   poStatusHistory as poStatusHistoryTable,
   poEvents as poEventsTable,
+  vendorProducts as vendorProductsTable,
   warehouseSettings as warehouseSettingsTable,
 } from "@shared/schema";
 import { Decimal } from "decimal.js";
@@ -1598,6 +1599,244 @@ export function createPurchasingService(db: any, storage: Storage) {
     return created;
   }
 
+  // ── BULK UPSERT VENDOR CATALOG (Spec A follow-up) ─────────────────
+  //
+  // Idempotent bulk upsert of entries into procurement.vendor_products for a
+  // single vendor. Backs the "Add to catalog?" modal on PO save.
+  //
+  // Rule #3: unitCostCents is a required integer — no floats.
+  // Rule #6: idempotency is enforced at the route layer via Idempotency-Key.
+  // Rule #7: the whole batch runs inside one transaction; a failure on any
+  //          entry rolls back the batch.
+  // Rule #8: every create/update emits a structured audit log line with the
+  //          actor and before/after state.
+
+  type BulkCatalogEntry = {
+    productId: number;
+    productVariantId?: number | null;
+    unitCostCents: number;
+    packSize?: number;
+    moq?: number;
+    leadTimeDays?: number;
+    vendorSku?: string | null;
+    vendorProductName?: string | null;
+    isPreferred?: boolean;
+  };
+
+  type BulkCatalogResult = {
+    created: Array<{
+      vendorProductId: number;
+      productId: number;
+      productVariantId: number | null;
+    }>;
+    updated: Array<{
+      vendorProductId: number;
+      productId: number;
+      productVariantId: number | null;
+    }>;
+    skipped: Array<{
+      productId: number;
+      productVariantId: number | null;
+      reason: string;
+    }>;
+  };
+
+  async function bulkUpsertVendorCatalog(
+    vendorId: number,
+    entries: BulkCatalogEntry[],
+    userId: string | null | undefined,
+  ): Promise<BulkCatalogResult> {
+    if (!Number.isInteger(vendorId) || vendorId <= 0) {
+      throw new PurchasingError("vendorId is required", 400);
+    }
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new PurchasingError("entries must be a non-empty array", 400);
+    }
+
+    // Boundary validation (Rule #4). Reject the whole request on any bad
+    // entry so partial writes can't happen.
+    for (const [idx, e] of entries.entries()) {
+      if (!Number.isInteger(e.productId) || e.productId <= 0) {
+        throw new PurchasingError(`entries[${idx}].productId must be a positive integer`, 400);
+      }
+      if (
+        e.productVariantId !== undefined &&
+        e.productVariantId !== null &&
+        (!Number.isInteger(e.productVariantId) || e.productVariantId <= 0)
+      ) {
+        throw new PurchasingError(
+          `entries[${idx}].productVariantId must be a positive integer or null`,
+          400,
+        );
+      }
+      if (!Number.isInteger(e.unitCostCents) || e.unitCostCents < 0) {
+        // Rule #3: integer cents only.
+        throw new PurchasingError(
+          `entries[${idx}].unitCostCents must be a non-negative integer (cents)`,
+          400,
+        );
+      }
+      if (e.packSize !== undefined && (!Number.isInteger(e.packSize) || e.packSize <= 0)) {
+        throw new PurchasingError(`entries[${idx}].packSize must be a positive integer`, 400);
+      }
+      if (e.moq !== undefined && (!Number.isInteger(e.moq) || e.moq <= 0)) {
+        throw new PurchasingError(`entries[${idx}].moq must be a positive integer`, 400);
+      }
+      if (
+        e.leadTimeDays !== undefined &&
+        (!Number.isInteger(e.leadTimeDays) || e.leadTimeDays < 0)
+      ) {
+        throw new PurchasingError(
+          `entries[${idx}].leadTimeDays must be a non-negative integer`,
+          400,
+        );
+      }
+    }
+
+    const vendor = await storage.getVendorById(vendorId);
+    if (!vendor) throw new PurchasingError("Vendor not found", 404);
+
+    const { actorType, actorId } = resolveActor(userId);
+    const timestamp = new Date().toISOString();
+
+    const result: BulkCatalogResult = { created: [], updated: [], skipped: [] };
+    const auditLogs: Array<Record<string, unknown>> = [];
+
+    await db.transaction(async (tx: any) => {
+      for (const entry of entries) {
+        const variantId =
+          entry.productVariantId === undefined || entry.productVariantId === null
+            ? null
+            : entry.productVariantId;
+
+        // Look up existing row by (vendorId, productId, productVariantId).
+        // The unique index vendor_products_vendor_product_variant_idx
+        // guarantees at most one match.
+        const matchConditions = [
+          eq(vendorProductsTable.vendorId, vendorId),
+          eq(vendorProductsTable.productId, entry.productId),
+          variantId === null
+            ? sql`${vendorProductsTable.productVariantId} IS NULL`
+            : eq(vendorProductsTable.productVariantId, variantId),
+        ];
+        const existingRows = await tx
+          .select()
+          .from(vendorProductsTable)
+          .where(and(...matchConditions))
+          .limit(1);
+        const existing = existingRows[0];
+
+        if (existing) {
+          // Don't overwrite non-null fields with null (per spec). Only
+          // fields explicitly provided (not undefined) overwrite.
+          const patch: Record<string, unknown> = {
+            unitCostCents: entry.unitCostCents,
+            isActive: 1,
+            updatedAt: new Date(),
+          };
+          if (entry.packSize !== undefined) patch.packSize = entry.packSize;
+          if (entry.moq !== undefined) patch.moq = entry.moq;
+          if (entry.leadTimeDays !== undefined) patch.leadTimeDays = entry.leadTimeDays;
+          if (entry.vendorSku !== undefined && entry.vendorSku !== null) {
+            patch.vendorSku = entry.vendorSku;
+          }
+          if (
+            entry.vendorProductName !== undefined &&
+            entry.vendorProductName !== null
+          ) {
+            patch.vendorProductName = entry.vendorProductName;
+          }
+          if (entry.isPreferred !== undefined) {
+            patch.isPreferred = entry.isPreferred ? 1 : 0;
+          }
+
+          const updatedRows = await tx
+            .update(vendorProductsTable)
+            .set(patch)
+            .where(eq(vendorProductsTable.id, existing.id))
+            .returning();
+          const row = updatedRows[0];
+          result.updated.push({
+            vendorProductId: row.id,
+            productId: row.productId,
+            productVariantId: row.productVariantId ?? null,
+          });
+          auditLogs.push({
+            event: "vendor_catalog.updated",
+            actorType,
+            actorId,
+            timestamp,
+            vendorId,
+            vendorProductId: row.id,
+            productId: row.productId,
+            productVariantId: row.productVariantId ?? null,
+            before: {
+              unitCostCents: existing.unitCostCents,
+              packSize: existing.packSize,
+              moq: existing.moq,
+              leadTimeDays: existing.leadTimeDays,
+              isPreferred: existing.isPreferred,
+              vendorSku: existing.vendorSku,
+            },
+            after: {
+              unitCostCents: row.unitCostCents,
+              packSize: row.packSize,
+              moq: row.moq,
+              leadTimeDays: row.leadTimeDays,
+              isPreferred: row.isPreferred,
+              vendorSku: row.vendorSku,
+            },
+          });
+        } else {
+          const insertedRows = await tx
+            .insert(vendorProductsTable)
+            .values({
+              vendorId,
+              productId: entry.productId,
+              productVariantId: variantId,
+              vendorSku: entry.vendorSku ?? null,
+              vendorProductName: entry.vendorProductName ?? null,
+              unitCostCents: entry.unitCostCents,
+              packSize: entry.packSize ?? 1,
+              moq: entry.moq ?? 1,
+              leadTimeDays: entry.leadTimeDays ?? null,
+              isPreferred: entry.isPreferred ? 1 : 0,
+              isActive: 1,
+            })
+            .returning();
+          const row = insertedRows[0];
+          result.created.push({
+            vendorProductId: row.id,
+            productId: row.productId,
+            productVariantId: row.productVariantId ?? null,
+          });
+          auditLogs.push({
+            event: "vendor_catalog.created",
+            actorType,
+            actorId,
+            timestamp,
+            vendorId,
+            vendorProductId: row.id,
+            productId: row.productId,
+            productVariantId: row.productVariantId ?? null,
+            unitCostCents: row.unitCostCents,
+            packSize: row.packSize,
+            moq: row.moq,
+            leadTimeDays: row.leadTimeDays,
+            isPreferred: row.isPreferred,
+          });
+        }
+      }
+    });
+
+    // Emit audit trail AFTER the tx commits. Rule #8: structured JSON.
+    for (const line of auditLogs) {
+      console.log(JSON.stringify(line));
+    }
+
+    return result;
+  }
+
   // ── NEW-PO PRELOAD (Spec A §10.1) ───────────────────────────────────
   //
   // Returns vendor + suggested lines in one round trip so the editor page
@@ -1809,6 +2048,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     createVendorProduct: (data: any) => (storage as any).createVendorProduct(data),
     updateVendorProduct: (id: number, updates: any) => (storage as any).updateVendorProduct(id, updates),
     deleteVendorProduct: (id: number) => (storage as any).deleteVendorProduct(id),
+    bulkUpsertVendorCatalog,
 
     // Spec A: inline create, one-click send, duplicate, preload, settings.
     createPurchaseOrderWithLines,
