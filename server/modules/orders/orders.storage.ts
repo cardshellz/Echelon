@@ -236,6 +236,7 @@ export const orderMethods: IOrderStorage = {
       shippingServiceLevel: row.shipping_service_level || "standard",
       memberPlanName: row.member_plan_name,
       memberPlanColor: row.member_plan_color,
+      channelShipByDate: row.channel_ship_by_date,
       sortRank: row.sort_rank,
       warehouseStatus: row.warehouse_status,
       onHold: row.on_hold,

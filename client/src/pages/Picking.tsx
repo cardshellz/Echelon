@@ -3017,10 +3017,33 @@ export default function Picking() {
                                 </Badge>
                               )}
                             </div>
+                            {/* SLA / Ship-by deadline surfaced to every picker */}
+                            {(order as any).channelShipByDate && (
+                              (() => {
+                                const shipBy = new Date((order as any).channelShipByDate);
+                                const now = new Date();
+                                const hoursLeft = (shipBy.getTime() - now.getTime()) / (1000 * 60 * 60);
+                                const urgent = hoursLeft <= 24;
+                                const critical = hoursLeft <= 6;
+                                const overdue = hoursLeft < 0;
+                                return (
+                                  <div className={cn(
+                                    "text-[10px] font-semibold flex items-center gap-1 mt-0.5",
+                                    overdue ? "text-red-700" :
+                                    critical ? "text-red-600" :
+                                    urgent ? "text-amber-600" : "text-muted-foreground"
+                                  )}>
+                                    <Clock size={10} />
+                                    {overdue ? "OVERDUE" : urgent ? "SHIP BY" : "Ship by"} {shipBy.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                                    {urgent && ` · ${Math.round(Math.abs(hoursLeft))}h ${overdue ? "ago" : "left"}`}
+                                  </div>
+                                );
+                              })()
+                            )}
                             {isAdminOrLead && (
                               <div className="text-[9px] text-muted-foreground/70 font-mono mt-0.5">
                                 ship={order.shippingServiceLevel || "std"}
-                                {" · "}plan={order.memberPlanName || "none"}
+                                {" · "}plan={(order.memberPlanName && order.memberPlanName.toLowerCase() !== ".core" && order.memberPlanName.toLowerCase() !== "core") ? order.memberPlanName : "none"}
                                 {" · "}age={parseAgeToMinutes(order.age)}m
                                 {order.onHold && " · HOLD"}
                                 {order.priority >= 9999 && " · BUMPED"}
