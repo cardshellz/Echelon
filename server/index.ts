@@ -656,7 +656,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           WHERE shipstation_order_id IS NOT NULL
             AND status IN ('shipped', 'cancelled', 'refunded')
             AND (shipstation_reconciled_at IS NULL OR shipstation_reconciled_at < updated_at)
-          LIMIT 100
+          ORDER BY updated_at DESC  -- newest divergences first
+          LIMIT 500
         `);
 
         if (!rows.rows?.length) return;
@@ -682,8 +683,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             await db.execute(sql`
               UPDATE oms.oms_orders SET shipstation_reconciled_at = NOW() WHERE id = ${row.id}
             `);
-            // Rate limit — ShipStation allows ~40 req/min
-            await new Promise(r => setTimeout(r, 1500));
+            // Rate limit — ShipStation allows ~40 req/min; keep under that.
+            await new Promise(r => setTimeout(r, 1000));
           } catch (err: any) {
             console.warn(`[ShipStation Reconcile] Failed for OMS ${row.id}:`, err?.message);
           }
