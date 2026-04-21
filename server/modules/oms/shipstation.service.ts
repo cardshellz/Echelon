@@ -570,6 +570,66 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   /**
+   * Mark a ShipStation order as shipped without actually printing a label.
+   * Used when the order was fulfilled in Shopify (by the native Shopify
+   * connector, or by an admin marking it manually) so Echelon's copy of
+   * the order gets moved out of Awaiting Shipment.
+   */
+  async function markAsShipped(
+    shipstationOrderId: number,
+    opts: {
+      shipDate?: Date | string;
+      trackingNumber?: string | null;
+      carrierCode?: string | null;
+      notifyCustomer?: boolean;
+    } = {},
+  ): Promise<void> {
+    if (!isConfigured()) return;
+    try {
+      const shipDate =
+        opts.shipDate instanceof Date
+          ? opts.shipDate.toISOString()
+          : opts.shipDate || new Date().toISOString();
+      await apiRequest("POST", "/orders/markasshipped", {
+        orderId: shipstationOrderId,
+        carrierCode: opts.carrierCode || "other",
+        shipDate,
+        trackingNumber: opts.trackingNumber || null,
+        notifyCustomer: !!opts.notifyCustomer,
+        notifySalesChannel: false, // our Shopify connector already knows
+      });
+      console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped`);
+    } catch (err: any) {
+      console.error(
+        `[ShipStation] Failed to mark order ${shipstationOrderId} shipped:`,
+        err.message,
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * Cancel a ShipStation order. ShipStation doesn't have a direct cancel
+   * endpoint; the API convention is to POST /orders/removefromstore which
+   * moves the order out of the active queue and into a 'cancelled' state.
+   */
+  async function cancelOrder(shipstationOrderId: number): Promise<void> {
+    if (!isConfigured()) return;
+    try {
+      await apiRequest("POST", "/orders/removefromstore", {
+        orderId: shipstationOrderId,
+      });
+      console.log(`[ShipStation] Order ${shipstationOrderId} cancelled (removed from store)`);
+    } catch (err: any) {
+      console.error(
+        `[ShipStation] Failed to cancel order ${shipstationOrderId}:`,
+        err.message,
+      );
+      throw err;
+    }
+  }
+
+  /**
    * Update only the sort_rank customField1 of an existing ShipStation order.
    * Implemented as a full re-push via /orders/createorder — ShipStation
    * treats createorder as upsert when orderKey matches.
@@ -598,6 +658,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     isConfigured,
     putOrderOnHold,
     releaseOrderFromHold,
+    markAsShipped,
+    cancelOrder,
     updateSortRank,
   };
 }

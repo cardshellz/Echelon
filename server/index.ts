@@ -636,4 +636,66 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     setTimeout(runOmsWmsReconcile, 15_000);
     setInterval(runOmsWmsReconcile, 60 * 60 * 1000);
   }
+
+  // OMS<->ShipStation reconciliation — catches cases where an order got
+  // shipped/cancelled/refunded in Shopify (native connector shipped it, or
+  // customer cancelled) but Echelon's copy in ShipStation is still in
+  // Awaiting Shipment. Hourly sweep.
+  if (process.env.DISABLE_SCHEDULERS !== 'true') {
+    const runShipStationReconcile = async () => {
+      try {
+        const ss = (services as any).shipStation;
+        if (!ss?.isConfigured()) return;
+
+        // Find OMS orders that are shipped/cancelled/refunded in our DB but
+        // still have a shipstation_order_id and no reconciliation marker.
+        const rows: any = await db.execute(sql`
+          SELECT id, external_order_number, status, shipstation_order_id,
+                 tracking_number, tracking_carrier, shipped_at
+          FROM oms.oms_orders
+          WHERE shipstation_order_id IS NOT NULL
+            AND status IN ('shipped', 'cancelled', 'refunded')
+            AND (shipstation_reconciled_at IS NULL OR shipstation_reconciled_at < updated_at)
+          LIMIT 100
+        `);
+
+        if (!rows.rows?.length) return;
+
+        let markedShipped = 0;
+        let cancelled = 0;
+        for (const row of rows.rows) {
+          try {
+            if (row.status === 'shipped') {
+              await ss.markAsShipped(Number(row.shipstation_order_id), {
+                shipDate: row.shipped_at || new Date(),
+                trackingNumber: row.tracking_number || null,
+                carrierCode: row.tracking_carrier?.toLowerCase() || 'other',
+                notifyCustomer: false,
+              });
+              markedShipped++;
+            } else {
+              // cancelled or refunded — remove from ShipStation store
+              await ss.cancelOrder(Number(row.shipstation_order_id));
+              cancelled++;
+            }
+            // Stamp reconciliation marker so we don't re-hit this row next sweep
+            await db.execute(sql`
+              UPDATE oms.oms_orders SET shipstation_reconciled_at = NOW() WHERE id = ${row.id}
+            `);
+            // Rate limit — ShipStation allows ~40 req/min
+            await new Promise(r => setTimeout(r, 1500));
+          } catch (err: any) {
+            console.warn(`[ShipStation Reconcile] Failed for OMS ${row.id}:`, err?.message);
+          }
+        }
+        if (markedShipped || cancelled) {
+          console.warn(`[ShipStation Reconcile] Swept ${rows.rows.length} divergent order(s): ${markedShipped} marked shipped, ${cancelled} cancelled`);
+        }
+      } catch (err: any) {
+        console.warn("[ShipStation Reconcile] Sweep error:", err?.message);
+      }
+    };
+    setTimeout(runShipStationReconcile, 30_000);
+    setInterval(runShipStationReconcile, 60 * 60 * 1000);
+  }
 })();

@@ -54,6 +54,13 @@ interface WmsServices {
 interface ShipStationService {
   isConfigured: () => boolean;
   pushOrder: (order: any) => Promise<any>;
+  markAsShipped: (shipstationOrderId: number, opts?: {
+    shipDate?: Date | string;
+    trackingNumber?: string | null;
+    carrierCode?: string | null;
+    notifyCustomer?: boolean;
+  }) => Promise<void>;
+  cancelOrder: (shipstationOrderId: number) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +727,16 @@ export function registerOmsWebhooks(
         }
       }
 
+      // Mirror to ShipStation: remove the order from the store so it leaves
+      // Awaiting Shipment. Non-blocking.
+      if (shipStationService?.isConfigured() && existing.shipstationOrderId) {
+        try {
+          await shipStationService.cancelOrder(existing.shipstationOrderId);
+        } catch (err: any) {
+          console.error(`${LOG_PREFIX} ShipStation cancelOrder failed for ${shopifyOrder.name}: ${err.message}`);
+        }
+      }
+
       // Log event
       await db.insert(omsOrderEvents).values({
         orderId: existing.id,
@@ -815,6 +832,21 @@ export function registerOmsWebhooks(
             END
           WHERE id = ${wmsOrder.rows[0].id}
         `);
+      }
+
+      // Mirror to ShipStation: mark the Echelon-pushed order shipped so it
+      // leaves Awaiting Shipment. Non-blocking — local state is authoritative.
+      if (shipStationService?.isConfigured() && existing.shipstationOrderId) {
+        try {
+          await shipStationService.markAsShipped(existing.shipstationOrderId, {
+            shipDate: now,
+            trackingNumber,
+            carrierCode: carrier?.toLowerCase() || "other",
+            notifyCustomer: false,
+          });
+        } catch (err: any) {
+          console.error(`${LOG_PREFIX} ShipStation markAsShipped failed for ${shopifyOrder.name}: ${err.message}`);
+        }
       }
 
       // Log event
