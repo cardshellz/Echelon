@@ -56,6 +56,11 @@ import {
   ShoppingCart,
   AlertCircle,
 } from "lucide-react";
+import {
+  AddToCatalogDialog,
+  type AddToCatalogDecision,
+  type CatalogCandidate,
+} from "@/features/po-edit/AddToCatalogDialog";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -252,6 +257,16 @@ export default function PurchaseOrderEdit() {
 
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Spec A follow-up: "Add to catalog?" modal state.
+  // Populated right before a save when any line was selected from the
+  // non-catalog bucket. The resolver inside the dialog flow hands control
+  // back to the originating save handler via a ref-held Promise.
+  const [catalogDialogOpen, setCatalogDialogOpen] = useState(false);
+  const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
+  const [catalogSubmitting, setCatalogSubmitting] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const catalogResolverRef = useRef<((ok: boolean) => void) | null>(null);
 
   // Remember the initial snapshot so we only flip dirty on real changes.
   const snapshotRef = useRef<string>("");
@@ -506,6 +521,138 @@ export default function PurchaseOrderEdit() {
     return null;
   }
 
+  // ── Add-to-catalog gate (Spec A follow-up) ────────────────────
+  //
+  // Computes the candidate list (lines selected from the "not in catalog"
+  // bucket that have a valid productVariantId and a non-negative cost). If
+  // none: resolves true immediately so the caller proceeds to save. If any:
+  // opens the dialog and waits for the user's decision. On "Add all" or
+  // "Add N selected" we POST to the bulk-upsert endpoint BEFORE returning;
+  // a failure there leaves the dialog open with an error and returns false,
+  // so the caller does NOT attempt the PO save.
+  function computeCatalogCandidates(): CatalogCandidate[] {
+    if (!selectedVendor) return [];
+    const out: CatalogCandidate[] = [];
+    for (const l of lines) {
+      if (l.catalogOriginallyAbsent !== true) continue;
+      if (!l.productVariantId || !l.productId) continue;
+      if (!Number.isInteger(l.unitCostCents) || l.unitCostCents < 0) continue;
+      out.push({
+        clientId: l.clientId,
+        productId: l.productId,
+        productVariantId: l.productVariantId,
+        productName: l.productName || "(unnamed)",
+        sku: l.sku,
+        unitCostCents: l.unitCostCents,
+      });
+    }
+    return out;
+  }
+
+  async function maybePromptAddToCatalog(): Promise<boolean> {
+    if (!selectedVendor) return true;
+    const candidates = computeCatalogCandidates();
+    if (candidates.length === 0) return true;
+    setCatalogCandidates(candidates);
+    setCatalogError(null);
+    setCatalogSubmitting(false);
+    setCatalogDialogOpen(true);
+    return new Promise<boolean>((resolve) => {
+      catalogResolverRef.current = resolve;
+    });
+  }
+
+  async function handleCatalogDecision(decision: AddToCatalogDecision) {
+    if (!selectedVendor) return;
+    const resolver = catalogResolverRef.current;
+    if (decision.action === "add-none") {
+      setCatalogDialogOpen(false);
+      catalogResolverRef.current = null;
+      resolver?.(true);
+      setLines((prev) =>
+        prev.map((l) =>
+          catalogCandidates.some((c) => c.clientId === l.clientId)
+            ? { ...l, catalogOriginallyAbsent: false }
+            : l,
+        ),
+      );
+      return;
+    }
+    const toSend: CatalogCandidate[] =
+      decision.action === "add-all"
+        ? catalogCandidates
+        : catalogCandidates.filter((c) =>
+            decision.selectedClientIds.includes(c.clientId),
+          );
+    if (toSend.length === 0) {
+      setCatalogDialogOpen(false);
+      catalogResolverRef.current = null;
+      resolver?.(true);
+      setLines((prev) =>
+        prev.map((l) =>
+          catalogCandidates.some((c) => c.clientId === l.clientId)
+            ? { ...l, catalogOriginallyAbsent: false }
+            : l,
+        ),
+      );
+      return;
+    }
+    setCatalogSubmitting(true);
+    setCatalogError(null);
+    try {
+      const body = {
+        entries: toSend.map((c) => ({
+          productId: c.productId,
+          productVariantId: c.productVariantId,
+          unitCostCents: c.unitCostCents, // integer cents, always
+        })),
+      };
+      const res = await fetch(
+        `/api/vendors/${selectedVendor.id}/catalog/bulk-upsert`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": genIdempotencyKey(),
+          },
+          body: JSON.stringify(body),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || "Catalog upsert failed");
+      }
+      const upsertedClientIds = new Set(toSend.map((c) => c.clientId));
+      setLines((prev) =>
+        prev.map((l) => {
+          if (!upsertedClientIds.has(l.clientId)) return l;
+          const match = [
+            ...(data?.created ?? []),
+            ...(data?.updated ?? []),
+          ].find(
+            (row: any) =>
+              row.productId === l.productId &&
+              (row.productVariantId ?? null) === (l.productVariantId ?? null),
+          );
+          return {
+            ...l,
+            catalogOriginallyAbsent: false,
+            vendorProductId: match?.vendorProductId ?? l.vendorProductId ?? null,
+          };
+        }),
+      );
+      setCatalogDialogOpen(false);
+      setCatalogSubmitting(false);
+      catalogResolverRef.current = null;
+      resolver?.(true);
+    } catch (e: any) {
+      setCatalogError(e?.message || "Catalog upsert failed");
+      setCatalogSubmitting(false);
+      // Leave the dialog open. The user can retry, pick "Add none", or cancel.
+      // Do NOT resolve the pending save promise yet — the caller is still awaiting.
+    }
+  }
+
   // ── Save ──────────────────────────────────────────────────────────────
   const saveMutation = useMutation({
     mutationFn: async (advanceToSent: boolean) => {
@@ -548,6 +695,12 @@ export default function PurchaseOrderEdit() {
     }
     setSaving(true);
     try {
+      const proceed = await maybePromptAddToCatalog();
+      if (!proceed) {
+        // User cancelled the catalog upsert or the upsert failed.
+        // Do NOT save the PO in that case.
+        return;
+      }
       const result = await saveMutation.mutateAsync(false);
       const po = result?.po ?? result;
       toast({ title: "Saved as draft", description: po?.poNumber ?? "" });
@@ -578,6 +731,10 @@ export default function PurchaseOrderEdit() {
     }
     setSaving(true);
     try {
+      const proceed = await maybePromptAddToCatalog();
+      if (!proceed) {
+        return;
+      }
       const result = await saveMutation.mutateAsync(true);
       const po = result?.po ?? result;
       if (result?.pending_approval) {
@@ -903,6 +1060,18 @@ export default function PurchaseOrderEdit() {
           Send PDF
         </Button>
       </div>
+
+      {/* Spec A follow-up: "Add to catalog?" modal. Mounted at the page root
+          so it overlays on every save path. The dialog itself blocks Esc /
+          backdrop dismissal (see AddToCatalogDialog). */}
+      <AddToCatalogDialog
+        open={catalogDialogOpen}
+        vendorName={selectedVendor?.name ?? ""}
+        candidates={catalogCandidates}
+        submitting={catalogSubmitting}
+        error={catalogError}
+        onDecide={handleCatalogDecision}
+      />
     </div>
   );
 }
