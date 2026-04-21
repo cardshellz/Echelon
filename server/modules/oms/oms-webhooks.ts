@@ -595,7 +595,7 @@ export function registerOmsWebhooks(
               variantTitle: item.variant_title,
               quantity: item.quantity || 1,
               totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
-            });
+            }).onConflictDoNothing({ target: [omsOrderLines.orderId, omsOrderLines.externalLineItemId] });
           }
         }
 
