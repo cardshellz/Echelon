@@ -39,6 +39,7 @@ import {
   Tag,
   Crown,
   Map as MapIcon,
+  ArrowUpDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -120,6 +121,7 @@ const navStructure: NavEntry[] = [
       { label: "Orders (OMS)", icon: Globe, href: "/oms/orders", roles: ["admin", "lead"] },
       { label: "WMS Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
       { label: "Picking", icon: ClipboardList, href: "/picking" },
+      { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", roles: ["admin", "lead"] },
       { label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
       { label: "Returns", icon: RotateCcw, href: "/returns", roles: ["admin", "lead"] },
       { label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },

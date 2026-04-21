@@ -23,6 +23,7 @@ import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
 import Subscriptions from "@/pages/Subscriptions";
 import PickingPage from "@/pages/PickingPage";
+import PickPriority from "@/pages/PickPriority";
 import OrderHistory from "@/pages/OrderHistory";
 import WarehousePage from "@/pages/WarehousePage";
 import PickZones from "@/pages/PickZones";
@@ -210,6 +211,9 @@ function Router() {
         <Route path="/picking/logs" component={PickingPage} />
         <Route path="/picking/metrics" component={PickingPage} />
         <Route path="/picking/settings" component={PickingPage} />
+        <Route path="/pick-priority">
+          <ProtectedRoute component={PickPriority} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route path="/order-history">
           <ProtectedRoute component={OrderHistory} allowedRoles={["admin", "lead"]} />
         </Route>
