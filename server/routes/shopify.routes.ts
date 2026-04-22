@@ -926,6 +926,18 @@ export function registerShopifyRoutes(app: Express) {
           const trackingNumber = payload.tracking_number || null;
           const now = new Date();
 
+          // Update OMS order status so ShipStation reconcile picks it up
+          await db.execute(sql`
+            UPDATE oms.oms_orders SET
+              status = 'shipped',
+              fulfillment_status = 'fulfilled',
+              tracking_number = ${trackingNumber},
+              shipped_at = ${now},
+              updated_at = ${now}
+            WHERE external_order_id = ${shopifyOrderId}
+              AND status NOT IN ('shipped', 'cancelled', 'refunded')
+          `);
+
           const wmsOrder = (await db.execute(sql`
             SELECT id FROM wms.orders
             WHERE (oms_fulfillment_order_id = ${shopifyOrderId}
