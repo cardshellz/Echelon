@@ -1,4 +1,8 @@
-import { dollarsToCents } from "@shared/utils/money";
+import {
+  dollarsToCents,
+  formatMills,
+  centsToMills,
+} from "@shared/utils/money";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
@@ -80,6 +84,20 @@ function formatCents(cents: number | null | undefined, opts?: { unitCost?: boole
     return `$${n.toFixed(4).replace(/0+$/, "")}`;
   }
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// Format per-unit cost at 4 decimals. Prefers unit_cost_mills when the line
+// carries it; falls back to centsToMills for legacy NULL-mills rows so the
+// display always shows exactly 4 decimals per spec.
+function formatLineUnitCost(line: {
+  unitCostMills?: number | null;
+  unitCostCents?: number | null;
+}): string {
+  const mills =
+    line.unitCostMills != null
+      ? Number(line.unitCostMills)
+      : centsToMills(Number(line.unitCostCents ?? 0));
+  return formatMills(mills);
 }
 
 export default function PurchaseOrderDetail() {
@@ -1061,7 +1079,7 @@ export default function PurchaseOrderDetail() {
                               className={canEditLines ? "cursor-pointer underline decoration-dotted" : ""}
                               onClick={() => canEditLines && startLineEdit(line.id, "unitCost", line.unitCostCents)}
                             >
-                              @ {formatCents(line.unitCostCents, { unitCost: true })}/pc
+                              @ {formatLineUnitCost(line)}/pc
                             </span>
                           )}
                           <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
@@ -1223,7 +1241,7 @@ export default function PurchaseOrderDetail() {
                             className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
                             onClick={() => canEditLines && startLineEdit(line.id, "unitCost", line.unitCostCents)}
                           >
-                            {formatCents(line.unitCostCents, { unitCost: true })}
+                            {formatLineUnitCost(line)}
                           </span>
                         )}
                       </TableCell>
@@ -1280,8 +1298,20 @@ export default function PurchaseOrderDetail() {
                       <TableCell>Line #{r.purchaseOrderLineId}</TableCell>
                       <TableCell>RO #{r.receivingOrderId}</TableCell>
                       <TableCell className="text-right">{r.qtyReceived}</TableCell>
-                      <TableCell className="text-right font-mono">{formatCents(r.poUnitCostCents, { unitCost: true })}</TableCell>
-                      <TableCell className="text-right font-mono">{formatCents(r.actualUnitCostCents, { unitCost: true })}</TableCell>
+                      <TableCell className="text-right font-mono">
+                        {r.poUnitCostMills != null
+                          ? formatMills(Number(r.poUnitCostMills))
+                          : r.poUnitCostCents != null
+                            ? formatMills(centsToMills(Number(r.poUnitCostCents)))
+                            : "$0.0000"}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {r.actualUnitCostMills != null
+                          ? formatMills(Number(r.actualUnitCostMills))
+                          : r.actualUnitCostCents != null
+                            ? formatMills(centsToMills(Number(r.actualUnitCostCents)))
+                            : "$0.0000"}
+                      </TableCell>
                       <TableCell className={`text-right font-mono ${(r.varianceCents || 0) > 0 ? "text-red-500" : (r.varianceCents || 0) < 0 ? "text-green-500" : ""}`}>
                         {formatCents(r.varianceCents)}
                       </TableCell>

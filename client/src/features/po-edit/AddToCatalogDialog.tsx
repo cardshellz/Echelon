@@ -14,6 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AlertCircle } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
+import { formatMills, centsToMills } from "@shared/utils/money";
 
 export type CatalogCandidate = {
   clientId: string;
@@ -27,12 +28,15 @@ export type CatalogCandidate = {
   unitCostMills?: number;
 };
 
-function formatCents(cents: number): string {
-  const sign = cents < 0 ? "-" : "";
-  const abs = Math.abs(cents);
-  const dollars = Math.floor(abs / 100);
-  const frac = abs % 100;
-  return `${sign}$${dollars.toLocaleString()}.${String(frac).padStart(2, "0")}`;
+// Render per-unit cost at 4 decimals so the dialog matches what will
+// actually be stored on the vendor_products row. If the candidate doesn't
+// carry mills (legacy producer), we derive them from cents (exact).
+function formatCandidateCost(c: CatalogCandidate): string {
+  const mills =
+    typeof c.unitCostMills === "number"
+      ? c.unitCostMills
+      : centsToMills(Math.max(0, c.unitCostCents | 0));
+  return formatMills(mills);
 }
 
 export type AddToCatalogDecision =
@@ -145,7 +149,7 @@ export function AddToCatalogDialog(props: Props) {
                     )}
                   </span>
                   <span className="tabular-nums text-xs">
-                    {formatCents(c.unitCostCents)}/ea
+                    {formatCandidateCost(c)}/ea
                   </span>
                 </div>
               ))}

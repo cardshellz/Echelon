@@ -102,6 +102,9 @@ type VendorProduct = {
   vendorSku: string | null;
   vendorProductName: string | null;
   unitCostCents: number | null;
+  // Present on rows written by the new mills-aware code path. Legacy rows
+  // (pre-migration 0561) are NULL.
+  unitCostMills?: number | null;
   packSize: number | null;
   moq: number | null;
   leadTimeDays: number | null;
@@ -136,6 +139,15 @@ type ProductVariant = {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Re-exported mills helpers for catalog per-unit cost (4-decimal precision).
+import {
+  dollarsToMills,
+  millsToDollarString,
+  formatMills,
+  millsToCents,
+  centsToMills,
+} from "@shared/utils/money";
+
 function formatCents(cents: number | null | undefined): string {
   if (cents == null || cents === 0) return "$0.00";
   return `$${(Number(cents) / 100).toLocaleString("en-US", {
@@ -144,16 +156,38 @@ function formatCents(cents: number | null | undefined): string {
   })}`;
 }
 
+// Legacy cents parser — rounded input to the nearest cent via parseFloat
+// (floating point!). The catalog editor now uses parseMillsInput instead;
+// this function is retained for other forms (vendor-level dollar fields).
 function parseDollarsInput(val: string): number | null {
   const n = parseFloat(val);
   if (isNaN(n) || n < 0) return null;
   return n * 100;
 }
 
+// Integer mills parser for the catalog unit-cost field. Returns null on
+// blank / non-numeric / negative input so mutations can skip bad values.
+function parseMillsInput(val: string): number | null {
+  const trimmed = (val ?? "").trim();
+  if (!trimmed) return null;
+  try {
+    return dollarsToMills(trimmed);
+  } catch {
+    return null;
+  }
+}
+
 function centsToInputStr(cents: number | null | undefined): string {
   if (cents == null) return "";
   const dollars = cents / 100;
   return String(dollars);
+}
+
+// Render mills as a 4-decimal string for the vendor-product form input.
+// Empty mills → "" so the placeholder shows.
+function millsToInputStr(mills: number | null | undefined): string {
+  if (mills == null) return "";
+  return millsToDollarString(mills);
 }
 
 const VENDOR_TYPE_BADGES: Record<
@@ -470,13 +504,20 @@ export default function Suppliers() {
 
   const createVPMutation = useMutation({
     mutationFn: async (form: typeof vpForm & { vendorId: number }) => {
+      // Per-unit cost: parse to mills (4-decimal precision). Cents is
+      // derived (half-up) and sent for back-compat. Server validator
+      // rejects disagreeing pairs.
+      const unitCostMills = parseMillsInput(form.unitCostDollars);
+      const unitCostCents =
+        unitCostMills !== null ? millsToCents(unitCostMills) : null;
       const res = await apiRequest("POST", "/api/vendor-products", {
         vendorId: form.vendorId,
         productId: form.productId,
         productVariantId: form.productVariantId || null,
         vendorSku: form.vendorSku || null,
         vendorProductName: form.vendorProductName || null,
-        unitCostCents: parseDollarsInput(form.unitCostDollars),
+        unitCostMills,
+        unitCostCents,
         packSize: form.packSize ? parseInt(form.packSize) : null,
         moq: form.moq ? parseInt(form.moq) : null,
         leadTimeDays: form.leadTimeDays ? parseInt(form.leadTimeDays) : null,
@@ -510,12 +551,16 @@ export default function Suppliers() {
       id: number;
       form: typeof vpForm;
     }) => {
+      const unitCostMills = parseMillsInput(form.unitCostDollars);
+      const unitCostCents =
+        unitCostMills !== null ? millsToCents(unitCostMills) : null;
       const res = await apiRequest("PATCH", `/api/vendor-products/${id}`, {
         productId: form.productId,
         productVariantId: form.productVariantId || null,
         vendorSku: form.vendorSku || null,
         vendorProductName: form.vendorProductName || null,
-        unitCostCents: parseDollarsInput(form.unitCostDollars),
+        unitCostMills,
+        unitCostCents,
         packSize: form.packSize ? parseInt(form.packSize) : null,
         moq: form.moq ? parseInt(form.moq) : null,
         leadTimeDays: form.leadTimeDays ? parseInt(form.leadTimeDays) : null,
@@ -613,7 +658,15 @@ export default function Suppliers() {
       productVariantId: vp.productVariantId,
       vendorSku: vp.vendorSku || "",
       vendorProductName: vp.vendorProductName || "",
-      unitCostDollars: centsToInputStr(vp.unitCostCents),
+      // Preserve 4-decimal precision when editing. Prefer server-provided
+      // unit_cost_mills; fall back to centsToMills for legacy (NULL mills)
+      // rows so the editor never silently widens precision by accident.
+      unitCostDollars:
+        (vp as any).unitCostMills != null
+          ? millsToInputStr((vp as any).unitCostMills)
+          : vp.unitCostCents != null
+            ? millsToInputStr(centsToMills(vp.unitCostCents))
+            : "",
       packSize: vp.packSize != null ? String(vp.packSize) : "",
       moq: vp.moq != null ? String(vp.moq) : "",
       leadTimeDays: vp.leadTimeDays != null ? String(vp.leadTimeDays) : "",
@@ -930,9 +983,13 @@ export default function Suppliers() {
                                     {vp.vendorSku && (
                                       <span>Vendor: {vp.vendorSku}</span>
                                     )}
-                                    {vp.unitCostCents != null && (
+                                    {(vp.unitCostMills != null ||
+                                      vp.unitCostCents != null) && (
                                       <span>
-                                        {formatCents(vp.unitCostCents)}
+                                        {formatMills(
+                                          vp.unitCostMills ??
+                                            centsToMills(vp.unitCostCents ?? 0),
+                                        )}
                                       </span>
                                     )}
                                     {vp.moq != null && (
@@ -1187,9 +1244,13 @@ export default function Suppliers() {
                                             resolveProductName(vp)}
                                         </TableCell>
                                         <TableCell className="text-right font-mono text-sm">
-                                          {vp.unitCostCents != null
-                                            ? formatCents(vp.unitCostCents)
-                                            : "-"}
+                                          {vp.unitCostMills != null
+                                            ? formatMills(vp.unitCostMills)
+                                            : vp.unitCostCents != null
+                                              ? formatMills(
+                                                  centsToMills(vp.unitCostCents),
+                                                )
+                                              : "-"}
                                         </TableCell>
                                         <TableCell className="text-right">
                                           {vp.packSize ?? "-"}
