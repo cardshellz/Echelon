@@ -885,9 +885,27 @@ export function createPurchasingService(db: any, storage: Storage) {
       // Non-critical — if product_locations lookup fails, just skip auto-assign
     }
 
-    // Create receiving lines from PO lines
+    // Create receiving lines from PO lines.
+    //
+    // Stamp BOTH cents and mills on the new receiving_line so receive-time
+    // precision matches the PO line. Mills is authoritative when present;
+    // otherwise we derive mills from cents via centsToMills (no rounding).
+    // Keeps receiving_lines consistent with the (post-0562) contract in
+    // receiving.service.ts: mills is the source of truth, cents mirrors.
     const receivingLineData = receivableLines.map((poLine: any) => {
       const autoLocationId = productLocationMap.get(poLine.productVariantId) || null;
+      const hasPoMills =
+        typeof poLine.unitCostMills === "number" &&
+        Number.isInteger(poLine.unitCostMills) &&
+        poLine.unitCostMills >= 0;
+      const unitCostMills = hasPoMills
+        ? (poLine.unitCostMills as number)
+        : (typeof poLine.unitCostCents === "number" && poLine.unitCostCents >= 0
+            ? centsToMills(poLine.unitCostCents)
+            : null);
+      const unitCost = hasPoMills
+        ? millsToCents(poLine.unitCostMills as number)
+        : (typeof poLine.unitCostCents === "number" ? poLine.unitCostCents : null);
       return {
         receivingOrderId: receivingOrder.id,
         productVariantId: poLine.productVariantId,
@@ -901,7 +919,8 @@ export function createPurchasingService(db: any, storage: Storage) {
         receivedQty: 0,
         damagedQty: 0,
         purchaseOrderLineId: poLine.id,
-        unitCost: poLine.unitCostCents,
+        unitCost,
+        unitCostMills,
         putawayLocationId: autoLocationId,
         status: "pending",
       };

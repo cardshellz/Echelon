@@ -15,6 +15,56 @@ import * as emailService from "../notifications/email.service";
 import * as notificationService from "../notifications/notifications.service";
 import { sql } from "drizzle-orm";
 import { db } from "../../db";
+import { millsToCents, centsToMills } from "@shared/utils/money";
+
+/**
+ * Resolve an incoming (mills?, cents?) pair on a receiving-line request
+ * body into a canonical (cents, mills) pair. Mills is authoritative when
+ * provided; cents is derived via `millsToCents` (half-up) if not supplied,
+ * or validated to match if it is. Mirrors the contract used for PO lines
+ * in `purchasing.service.validateCreateWithLinesInput`.
+ *
+ * Integer math throughout (coding-standards.md Rule #3). Returns the error
+ * message as a string so the caller can emit a 400 — we don't throw here
+ * because this is a thin request-parsing helper, not a domain boundary.
+ */
+function resolveUnitCostPair(
+  millsIn: number | string | null | undefined,
+  centsIn: number | string | null | undefined,
+): { cents: number | null; mills: number | null; error?: string } {
+  const normInt = (v: unknown): number | null | undefined => {
+    if (v === undefined) return undefined;
+    if (v === null || v === "") return null;
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return NaN as any;
+    return n;
+  };
+  const mills = normInt(millsIn);
+  const cents = normInt(centsIn);
+  if (Number.isNaN(mills as number) || Number.isNaN(cents as number)) {
+    return { cents: null, mills: null, error: "unit_cost_mills/unit_cost must be non-negative integers" };
+  }
+  // Both undefined → nothing to set.
+  if ((mills === undefined || mills === null) && (cents === undefined || cents === null)) {
+    return { cents: null, mills: null };
+  }
+  if (typeof mills === "number" && typeof cents === "number") {
+    const expected = millsToCents(mills);
+    if (expected !== cents) {
+      return {
+        cents: null,
+        mills: null,
+        error: `unit_cost_mills (${mills}) and unit_cost (${cents}) disagree; expected cents=${expected}`,
+      };
+    }
+    return { cents, mills };
+  }
+  if (typeof mills === "number") {
+    return { cents: millsToCents(mills), mills };
+  }
+  // cents-only (legacy caller).
+  return { cents: cents as number, mills: centsToMills(cents as number) };
+}
 
 export function registerPurchasingRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
@@ -265,7 +315,32 @@ export function registerPurchasingRoutes(app: Express) {
   app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
-      const { sku, productName, expectedQty, receivedQty, status, productVariantId, productId, barcode, unitCost, putawayLocationId } = req.body;
+      const {
+        sku,
+        productName,
+        expectedQty,
+        receivedQty,
+        status,
+        productVariantId,
+        productId,
+        barcode,
+        unitCost,
+        unit_cost_mills,
+        unitCostMills,
+        putawayLocationId,
+      } = req.body;
+
+      // Accept both snake_case (API idiom) and camelCase (internal idiom).
+      // Mills is authoritative when provided; cents is either independently
+      // provided or derived. Disagreeing pairs are rejected to match the PO
+      // contract (purchasing.service.validateCreateWithLinesInput).
+      const resolved = resolveUnitCostPair(
+        unit_cost_mills ?? unitCostMills,
+        unitCost,
+      );
+      if (resolved.error) {
+        return res.status(400).json({ error: resolved.error });
+      }
 
       await storage.createReceivingLine({
         receivingOrderId: orderId,
@@ -277,7 +352,8 @@ export function registerPurchasingRoutes(app: Express) {
         productVariantId: productVariantId || null,
         productId: productId || null,
         barcode: barcode || null,
-        unitCost: unitCost || null,
+        unitCost: resolved.cents,
+        unitCostMills: resolved.mills,
         putawayLocationId: putawayLocationId || null,
         status: status || "pending",
       });
@@ -302,8 +378,29 @@ export function registerPurchasingRoutes(app: Express) {
   app.patch("/api/receiving/lines/:lineId", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const lineId = parseInt(req.params.lineId);
-      const updates = req.body;
-      
+      const updates = { ...req.body } as Record<string, any>;
+
+      // Mills-aware cost update: if the caller sent unit_cost_mills (snake)
+      // or unitCostMills (camel), treat mills as authoritative and stamp
+      // the cents mirror. If the caller sent ONLY cents, derive mills. If
+      // both are provided and disagree, reject.
+      const hasAnyCost =
+        updates.unitCost !== undefined ||
+        updates.unitCostMills !== undefined ||
+        updates.unit_cost_mills !== undefined;
+      if (hasAnyCost) {
+        const millsIn = updates.unit_cost_mills ?? updates.unitCostMills;
+        const resolved = resolveUnitCostPair(millsIn, updates.unitCost);
+        if (resolved.error) {
+          return res.status(400).json({ error: resolved.error });
+        }
+        // Delete the snake_case key so Drizzle doesn't see an unknown field,
+        // then normalize to camelCase the schema expects.
+        delete updates.unit_cost_mills;
+        updates.unitCost = resolved.cents ?? null;
+        updates.unitCostMills = resolved.mills ?? null;
+      }
+
       // Calculate status based on quantities
       if (updates.receivedQty !== undefined) {
         const line = await storage.getReceivingLineById(lineId);

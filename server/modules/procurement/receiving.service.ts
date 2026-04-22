@@ -16,7 +16,11 @@ type DrizzleDb = {
 // Import sql tagged template for raw queries
 import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
-import { millsToCents } from "@shared/utils/money";
+import {
+  millsToCents,
+  centsToMills,
+  dollarsToMills,
+} from "@shared/utils/money";
 
 interface InventoryCore {
   receiveInventory(params: {
@@ -101,6 +105,88 @@ export class ReceivingReconciliationError extends ReceivingError {
     this.name = "ReceivingReconciliationError";
   }
 }
+
+// ── Helper: resolve receiving-line unit cost (mills authoritative) ──
+
+/**
+ * Resolve a receiving line's per-unit cost to a (cents, mills) pair.
+ *
+ * Invariants (coding-standards.md Rule #3 — integer math only, no floats):
+ *   * Mills is authoritative when present. Cents mirror is derived via
+ *     `millsToCents` (half-up at the sub-cent boundary).
+ *   * Never fabricates a value. Returns `{ cents: undefined, mills: undefined }`
+ *     when no source is available, so the caller can decide whether to
+ *     proceed (e.g. inventoryCore accepts undefined unitCostCents).
+ *
+ * Source priority:
+ *   1. `line.unitCostMills` set on the receiving line → authoritative.
+ *   2. `line.unitCost` (cents) set on the receiving line → derive mills
+ *      exactly via `centsToMills` (1 cent = 100 mills, no rounding).
+ *   3. Linked PO line (`purchase_order_lines`) — prefer `unitCostMills`,
+ *      fall back to `unitCostCents`. Same derivation rules.
+ *
+ * Any thrown error from the storage lookup is swallowed and the pair
+ * returns undefined/undefined so the caller can apply its own fallback
+ * (landed cost, inventoryCore default). This matches the prior behavior.
+ */
+async function resolveReceivingLineCost(
+  line: { unitCost?: number | null; unitCostMills?: number | null; purchaseOrderLineId?: number | null },
+  storage: { getPurchaseOrderLineById?(id: number): Promise<any> },
+): Promise<{ cents: number | undefined; mills: number | undefined }> {
+  // 1. Explicit mills on the receiving line.
+  if (
+    typeof line.unitCostMills === "number" &&
+    Number.isInteger(line.unitCostMills) &&
+    line.unitCostMills >= 0
+  ) {
+    return { cents: millsToCents(line.unitCostMills), mills: line.unitCostMills };
+  }
+
+  // 2. Explicit cents on the receiving line — derive mills exactly.
+  if (
+    typeof line.unitCost === "number" &&
+    Number.isInteger(line.unitCost) &&
+    line.unitCost >= 0
+  ) {
+    return { cents: line.unitCost, mills: centsToMills(line.unitCost) };
+  }
+
+  // 3. Linked PO line — pull the 4-decimal mills (authoritative) or cents.
+  if (line.purchaseOrderLineId && typeof storage.getPurchaseOrderLineById === "function") {
+    try {
+      const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
+      if (poLine) {
+        if (
+          typeof poLine.unitCostMills === "number" &&
+          Number.isInteger(poLine.unitCostMills) &&
+          poLine.unitCostMills >= 0
+        ) {
+          return {
+            cents: millsToCents(poLine.unitCostMills),
+            mills: poLine.unitCostMills,
+          };
+        }
+        if (
+          typeof poLine.unitCostCents === "number" &&
+          Number.isInteger(poLine.unitCostCents) &&
+          poLine.unitCostCents >= 0
+        ) {
+          return {
+            cents: poLine.unitCostCents,
+            mills: centsToMills(poLine.unitCostCents),
+          };
+        }
+      }
+    } catch {
+      // Non-fatal — fall through so the caller can use its own fallback.
+    }
+  }
+
+  return { cents: undefined, mills: undefined };
+}
+
+// Exported for unit tests.
+export const __testing__ = { resolveReceivingLineCost };
 
 // ── Helper: fuzzy location code matching ────────────────────────────
 
@@ -222,39 +308,22 @@ export class ReceivingService {
       if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
         const qtyToAdd = line.receivedQty;
 
-        // Determine unit cost: landed cost (if finalized) > PO line cost > receiving line cost
+        // Determine unit cost: landed cost (if finalized) > receiving line
+        // override > PO line cost.
         //
-        // Precision: when the receipt is linked to a PO line and that line
-        // carries 4-decimal unit_cost_mills, use it as the authoritative
-        // source and round to cents via millsToCents (half-up). This prevents
-        // precision loss at receive time on costs like $0.0375 that would
-        // otherwise collapse to 4 cents silently. (Only applied when neither
-        // the receiving_line.unit_cost nor a finalized landed cost has
-        // already been resolved.)
-        let unitCostCents = (line as any).unitCost || undefined;
-        if (
-          (unitCostCents === undefined || unitCostCents === null) &&
-          line.purchaseOrderLineId &&
-          typeof (this.storage as any).getPurchaseOrderLineById === "function"
-        ) {
-          try {
-            const poLine = await (this.storage as any).getPurchaseOrderLineById(
-              line.purchaseOrderLineId,
-            );
-            if (poLine) {
-              if (
-                typeof poLine.unitCostMills === "number" &&
-                poLine.unitCostMills >= 0
-              ) {
-                unitCostCents = millsToCents(poLine.unitCostMills);
-              } else if (typeof poLine.unitCostCents === "number") {
-                unitCostCents = poLine.unitCostCents;
-              }
-            }
-          } catch {
-            // Non-fatal: fall through to landed-cost / receipt-line fallbacks.
-          }
-        }
+        // Precision: mills (4-decimal) is authoritative whenever present —
+        // from either the receiving_line itself (manual override) or the
+        // linked PO line. Cents is derived via millsToCents (half-up) so
+        // downstream consumers that only speak cents stay correct.
+        //
+        // We resolve BOTH cents and mills up front so we can also persist
+        // the mills value back on the receiving_line row after successful
+        // receive. Today (pre-0562) only cents was stamped; mills makes
+        // $0.0375 survive round-trip for damaged-unit / freight-allocation
+        // overrides where the PO line isn't the right source.
+        const resolved = await resolveReceivingLineCost(line, this.storage as any);
+        let unitCostCents = resolved.cents;
+        let unitCostMills = resolved.mills;
         let costProvisional = 0;
         let inboundShipmentId: number | undefined;
 
@@ -262,7 +331,13 @@ export class ReceivingService {
           try {
             const landedCost = await this.shipmentTracking.getLandedCostForPoLine(line.purchaseOrderLineId);
             if (landedCost !== null) {
+              // Landed cost is delivered in cents (shipment-tracking does
+              // its own rounding over freight + duties). We don't have a
+              // mills-precision variant of landed cost yet, so mirror
+              // cents → mills exactly (no precision loss — just *100).
+              // If landed-cost ever migrates to mills, update here.
               unitCostCents = landedCost;
+              unitCostMills = centsToMills(landedCost);
             } else if (order.inboundShipmentId) {
               // Shipment exists but costs not finalized — mark provisional
               costProvisional = 1;
@@ -291,11 +366,21 @@ export class ReceivingService {
           costProvisional,
         }, tx);
 
-        // Mark line as put away
-        await this.storage.updateReceivingLine(line.id, {
+        // Mark line as put away and persist the resolved cost pair so
+        // the receiving_line row matches what inventoryCore was stamped
+        // with. Only write mills/cents when we actually resolved them
+        // (don't overwrite null → 0 on a costless receipt).
+        const lineUpdates: Record<string, unknown> = {
           putawayComplete: 1,
           status: "complete",
-        }, tx);
+        };
+        if (typeof unitCostCents === "number") {
+          lineUpdates.unitCost = unitCostCents;
+        }
+        if (typeof unitCostMills === "number") {
+          lineUpdates.unitCostMills = unitCostMills;
+        }
+        await this.storage.updateReceivingLine(line.id, lineUpdates, tx);
 
         totalReceived += qtyToAdd;
         linesReceived++;
@@ -314,6 +399,16 @@ export class ReceivingService {
           const baseVariant = allVariants.find((v: any) => v.hierarchyLevel === 1);
           if (baseVariant && baseVariant.id !== line.productVariantId) {
             const totalUnits = line.receivedQty * (variant as any).unitsPerVariant;
+            // Auto-break: child (base) units inherit per-unit cost from the
+            // parent case on a mills basis when available. Per-unit cost at
+            // the base level is (parent mills / unitsPerVariant) — for now
+            // we simply pass through cents unchanged (the parent mills is
+            // the "case" cost, not per-base-unit; inventory_lots tracks
+            // cost per variant, and the child lot gets the same cost basis
+            // as the parent). If/when base-unit mills is desired, compute:
+            //   baseMills = round_half_up(parentMills, unitsPerVariant)
+            // and plumb it through inventoryCore.
+            const breakCost = await resolveReceivingLineCost(line, this.storage as any);
             await this.inventoryCore.receiveInventory({
               productVariantId: baseVariant.id,
               warehouseLocationId: line.putawayLocationId,
@@ -321,7 +416,7 @@ export class ReceivingService {
               referenceId: `BREAK-${batchId}-${line.id}`,
               notes: `Auto-break: ${line.receivedQty}× ${variant.sku} → ${totalUnits}× ${baseVariant.sku}`,
               userId: userId || undefined,
-              unitCostCents: (line as any).unitCost || undefined,
+              unitCostCents: breakCost.cents,
               receivingOrderId: orderId,
             }, tx);
 
@@ -676,10 +771,38 @@ export class ReceivingService {
         }
       }
 
-      // Parse numeric values
+      // Parse numeric values.
+      //
+      // Unit cost is parsed at 4-decimal (mills) precision and then mirrored
+      // to cents via millsToCents (half-up). Integer math throughout (Rule
+      // #3: no floating point on the money path). `dollarsToMills` rejects
+      // negatives and non-numeric input — we fall back to null on parse
+      // error rather than failing the whole CSV row, and surface it as a
+      // warning; the Decimal path is kept as a defensive fallback for cents
+      // so we preserve prior behavior if mills parsing somehow rejects a
+      // value that Decimal accepts.
       const parsedQty = parseInt(String(qty)) || 0;
       const parsedDamagedQty = parseInt(String(damaged_qty)) || 0;
-      const parsedUnitCost = unit_cost ? new Decimal(String(unit_cost)).times(100).round().toNumber() : null;
+      let parsedUnitCostMills: number | null = null;
+      let parsedUnitCost: number | null = null;
+      if (unit_cost !== undefined && unit_cost !== null && String(unit_cost).trim() !== "") {
+        try {
+          parsedUnitCostMills = dollarsToMills(String(unit_cost));
+          parsedUnitCost = millsToCents(parsedUnitCostMills);
+        } catch (err: any) {
+          warnings.push(`SKU ${sku}: invalid unit_cost "${unit_cost}" — ignored (${err?.message || "parse error"})`);
+          parsedUnitCostMills = null;
+          // Defensive: try the cents-only Decimal path as a last resort so
+          // we don't regress CSVs that worked pre-mills. Still no floats:
+          // Decimal.times(100).round() returns an integer.
+          try {
+            parsedUnitCost = new Decimal(String(unit_cost)).times(100).round().toNumber();
+            if (!Number.isInteger(parsedUnitCost) || parsedUnitCost < 0) parsedUnitCost = null;
+          } catch {
+            parsedUnitCost = null;
+          }
+        }
+      }
 
       // Build notes: append CSV location if unmatched for resolution UI
       let lineNotes = notes || null;
@@ -700,6 +823,7 @@ export class ReceivingService {
             receivedQty: parsedQty,
             damagedQty: parsedDamagedQty,
             unitCost: parsedUnitCost,
+            unitCostMills: parsedUnitCostMills,
             productVariantId,
             productId,
             putawayLocationId,
@@ -719,6 +843,7 @@ export class ReceivingService {
           receivedQty: parsedQty,
           damagedQty: parsedDamagedQty,
           unitCost: parsedUnitCost,
+          unitCostMills: parsedUnitCostMills,
           productVariantId,
           productId,
           putawayLocationId,
