@@ -660,14 +660,6 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           FROM wms.orders w
           JOIN oms.oms_orders o ON o.id = w.oms_fulfillment_order_id::int
           WHERE o.shipstation_order_id IS NOT NULL
-            -- Guard the ::int cast: wms.orders.oms_fulfillment_order_id is a
-            -- varchar that occasionally holds non-numeric values (e.g. Shopify
-            -- GIDs of the form gid://shopify/Order/NNN). Without this
-            -- predicate a single poison row throws 'invalid input syntax for
-            -- integer' and the outer try/catch aborts the entire hourly sweep.
-            -- See shipstation-sync-audit.md section 4 H3. Widening coverage to
-            -- include GID rows is a separate concern (P1).
-            AND w.oms_fulfillment_order_id ~ '^[0-9]+$'
             AND w.warehouse_status IN ('shipped', 'cancelled')
             AND (o.shipstation_reconciled_at IS NULL OR o.shipstation_reconciled_at < w.completed_at)
           ORDER BY w.updated_at DESC
