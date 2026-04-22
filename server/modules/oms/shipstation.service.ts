@@ -334,7 +334,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
               warehouse_status = 'shipped',
               completed_at = ${now},
               tracking_number = ${trackingNumber},
-              tracking_url = ${trackingUrl}
+              updated_at = ${now}
             WHERE id = ${wmsOrderId}
           `);
 

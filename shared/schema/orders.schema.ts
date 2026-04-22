@@ -138,6 +138,8 @@ export const orders = wmsSchema.table("orders", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   startedAt: timestamp("started_at"), // Picking started
   completedAt: timestamp("completed_at"), // Picking completed
+  trackingNumber: varchar("tracking_number", { length: 200 }), // Tracking number from shipping carrier
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 
   // ===== SLA TRACKING (3PL orders) =====
   slaDueAt: timestamp("sla_due_at"), // When 3PL must fulfill by (orderPlacedAt + partner slaDays)
