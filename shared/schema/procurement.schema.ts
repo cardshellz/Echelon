@@ -123,7 +123,8 @@ export const vendorProducts = procurementSchema.table("vendor_products", {
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }), // Specific variant if vendor sells at variant level
   vendorSku: varchar("vendor_sku", { length: 100 }), // Vendor's own catalog number
   vendorProductName: text("vendor_product_name"), // Vendor's product name
-  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).default(0), // Negotiated cost per unit
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).default(0), // Negotiated cost per unit (cents; kept in sync with unit_cost_mills for back-compat)
+  unitCostMills: bigint("unit_cost_mills", { mode: "number" }), // Negotiated cost per unit in mills (4-decimal precision). Authoritative when non-null.
   packSize: integer("pack_size").default(1), // Units in vendor's selling unit
   moq: integer("moq").default(1), // Minimum order quantity
   leadTimeDays: integer("lead_time_days"), // Vendor-specific override
@@ -405,6 +406,9 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
 
   // Cost
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull().default(0),
+  // Per-unit cost in mills (1/10000 of a dollar). Authoritative when non-null.
+  // unit_cost_cents is kept in sync (rounded, half-up) for back-compat.
+  unitCostMills: bigint("unit_cost_mills", { mode: "number" }),
   discountPercent: numeric("discount_percent", { precision: 5, scale: 2 }).default("0"),
   discountCents: bigint("discount_cents", { mode: "number" }).default(0), // Computed
   taxRatePercent: numeric("tax_rate_percent", { precision: 5, scale: 2 }).default("0"),
@@ -500,8 +504,10 @@ export const poReceipts = procurementSchema.table("po_receipts", {
   receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
   receivingLineId: integer("receiving_line_id").notNull().references(() => receivingLines.id, { onDelete: "cascade" }),
   qtyReceived: integer("qty_received").notNull().default(0),
-  poUnitCostCents: bigint("po_unit_cost_cents", { mode: "number" }), // Cost on PO
-  actualUnitCostCents: bigint("actual_unit_cost_cents", { mode: "number" }), // Actual receipt cost
+  poUnitCostCents: bigint("po_unit_cost_cents", { mode: "number" }), // Cost on PO (cents; rounded from po_unit_cost_mills)
+  poUnitCostMills: bigint("po_unit_cost_mills", { mode: "number" }), // Cost on PO in mills (4-decimal). Authoritative when non-null.
+  actualUnitCostCents: bigint("actual_unit_cost_cents", { mode: "number" }), // Actual receipt cost (cents; rounded from actual_unit_cost_mills)
+  actualUnitCostMills: bigint("actual_unit_cost_mills", { mode: "number" }), // Actual receipt cost in mills. Authoritative when non-null.
   varianceCents: bigint("variance_cents", { mode: "number" }), // actual - po
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
@@ -844,6 +850,8 @@ export const vendorInvoiceLines = procurementSchema.table("vendor_invoice_lines"
   qtyOrdered: integer("qty_ordered"),
   qtyReceived: integer("qty_received"),
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull(),
+  // Per-unit invoiced cost in mills (4-decimal). Authoritative when non-null.
+  unitCostMills: bigint("unit_cost_mills", { mode: "number" }),
   lineTotalCents: bigint("line_total_cents", { mode: "number" }).notNull(),
   matchStatus: varchar("match_status", { length: 20 }).notNull().default("pending"),
   notes: text("notes"),
