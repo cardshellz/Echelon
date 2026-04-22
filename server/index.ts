@@ -653,10 +653,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         // Join wms.orders → oms.oms_orders via oms_fulfillment_order_id.
         const rows: any = await db.execute(sql`
           SELECT w.id AS wms_id, w.order_number AS wms_order_number,
-                 w.warehouse_status, w.tracking_number, w.completed_at,
+                 w.warehouse_status, w.completed_at,
                  o.id AS oms_id, o.status AS oms_status,
                  o.shipstation_order_id, o.shipstation_reconciled_at,
-                 o.tracking_carrier
+                 o.tracking_number, o.tracking_carrier
           FROM wms.orders w
           JOIN oms.oms_orders o ON o.id = w.oms_fulfillment_order_id::int
           WHERE o.shipstation_order_id IS NOT NULL
