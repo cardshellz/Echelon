@@ -637,26 +637,32 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     setInterval(runOmsWmsReconcile, 60 * 60 * 1000);
   }
 
-  // OMS<->ShipStation reconciliation — catches cases where an order got
+  // WMS<->ShipStation reconciliation — catches cases where an order got
   // shipped/cancelled/refunded in Shopify (native connector shipped it, or
   // customer cancelled) but Echelon's copy in ShipStation is still in
-  // Awaiting Shipment. Hourly sweep.
+  // Awaiting Shipment. Reads from WMS (source of truth) and syncs to
+  // ShipStation. Hourly sweep.
   if (process.env.DISABLE_SCHEDULERS !== 'true') {
     const runShipStationReconcile = async () => {
       try {
         const ss = (services as any).shipStation;
         if (!ss?.isConfigured()) return;
 
-        // Find OMS orders that are shipped/cancelled/refunded in our DB but
-        // still have a shipstation_order_id and no reconciliation marker.
+        // Find WMS orders that are shipped/cancelled but their linked OMS
+        // order still has a shipstation_order_id that hasn't been reconciled.
+        // Join wms.orders → oms.oms_orders via oms_fulfillment_order_id.
         const rows: any = await db.execute(sql`
-          SELECT id, external_order_number, status, shipstation_order_id,
-                 tracking_number, tracking_carrier, shipped_at
-          FROM oms.oms_orders
-          WHERE shipstation_order_id IS NOT NULL
-            AND status IN ('shipped', 'cancelled', 'refunded')
-            AND (shipstation_reconciled_at IS NULL OR shipstation_reconciled_at < updated_at)
-          ORDER BY updated_at DESC  -- newest divergences first
+          SELECT w.id AS wms_id, w.order_number AS wms_order_number,
+                 w.warehouse_status, w.tracking_number, w.completed_at,
+                 o.id AS oms_id, o.status AS oms_status,
+                 o.shipstation_order_id, o.shipstation_reconciled_at,
+                 o.tracking_carrier
+          FROM wms.orders w
+          JOIN oms.oms_orders o ON o.id = w.oms_fulfillment_order_id::int
+          WHERE o.shipstation_order_id IS NOT NULL
+            AND w.warehouse_status IN ('shipped', 'cancelled')
+            AND (o.shipstation_reconciled_at IS NULL OR o.shipstation_reconciled_at < w.updated_at)
+          ORDER BY w.updated_at DESC
           LIMIT 1000
         `);
 
@@ -666,27 +672,27 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         let cancelled = 0;
         for (const row of rows.rows) {
           try {
-            if (row.status === 'shipped') {
+            if (row.warehouse_status === 'shipped') {
               await ss.markAsShipped(Number(row.shipstation_order_id), {
-                shipDate: row.shipped_at || new Date(),
+                shipDate: row.completed_at || new Date(),
                 trackingNumber: row.tracking_number || null,
                 carrierCode: row.tracking_carrier?.toLowerCase() || 'other',
                 notifyCustomer: false,
               });
               markedShipped++;
             } else {
-              // cancelled or refunded — remove from ShipStation store
+              // cancelled — remove from ShipStation store
               await ss.cancelOrder(Number(row.shipstation_order_id));
               cancelled++;
             }
             // Stamp reconciliation marker so we don't re-hit this row next sweep
             await db.execute(sql`
-              UPDATE oms.oms_orders SET shipstation_reconciled_at = NOW() WHERE id = ${row.id}
+              UPDATE oms.oms_orders SET shipstation_reconciled_at = NOW() WHERE id = ${row.oms_id}
             `);
             // Rate limit — ShipStation allows ~40 req/min; keep under that.
             await new Promise(r => setTimeout(r, 1000));
           } catch (err: any) {
-            console.warn(`[ShipStation Reconcile] Failed for OMS ${row.id}:`, err?.message);
+            console.warn(`[ShipStation Reconcile] Failed for OMS ${row.oms_id}:`, err?.message);
           }
         }
         if (markedShipped || cancelled) {

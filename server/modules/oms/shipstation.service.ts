@@ -300,112 +300,83 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           continue;
         }
 
-        // Check if already shipped
-        const [order] = await db
-          .select()
-          .from(omsOrders)
-          .where(eq(omsOrders.id, omsOrderId))
-          .limit(1);
-
-        if (!order) {
-          console.warn(`[ShipStation Webhook] OMS order ${omsOrderId} not found`);
-          continue;
-        }
-
-        if (order.status === "shipped" && order.trackingNumber === trackingNumber) {
-          console.log(`[ShipStation Webhook] Order ${omsOrderId} already shipped with same tracking`);
-          continue;
-        }
-
-        // Mark shipped — this triggers eBay fulfillment push via the existing flow
         const now = new Date();
-        await db
-          .update(omsOrders)
-          .set({
-            status: "shipped",
-            fulfillmentStatus: "fulfilled",
-            trackingNumber,
-            trackingCarrier: carrier,
-            shippedAt: now,
-            updatedAt: now,
-          })
-          .where(eq(omsOrders.id, omsOrderId));
 
-        // Update line items
-        await db
-          .update(omsOrderLines)
-          .set({ fulfillmentStatus: "fulfilled" })
-          .where(eq(omsOrderLines.orderId, omsOrderId));
+        // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
+        const wmsOrderResult: any = await db.execute(sql`
+          SELECT id, warehouse_status FROM wms.orders
+          WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
+            AND source IN ('oms', 'ebay')
+          LIMIT 1
+        `);
 
-        // Record event
-        await db.insert(omsOrderEvents).values({
-          orderId: omsOrderId,
-          eventType: "shipped_via_shipstation",
-          details: {
-            shipmentId: shipment.shipmentId,
-            trackingNumber,
-            carrier,
-            carrierCode: shipment.carrierCode,
-            serviceCode: shipment.serviceCode,
-            shipDate: shipment.shipDate,
-          },
-        });
+        const hasWmsOrder = wmsOrderResult.rows && wmsOrderResult.rows.length > 0;
 
-        console.log(
-          `[ShipStation Webhook] Order ${omsOrderId} shipped: ${carrier} ${trackingNumber}`,
-        );
+        if (hasWmsOrder) {
+          const wmsOrderId = wmsOrderResult.rows[0].id;
+          const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
 
-        // Update corresponding WMS order if it exists (eBay orders now have WMS rows)
-        // Also handles inventory deduction for orders without WMS rows (legacy path)
-        if (inventoryCore) {
-          try {
-            // Check if this OMS order has a corresponding WMS order
-            const wmsOrderResult: any = await db.execute(sql`
-              SELECT id, warehouse_status FROM wms.orders
-              WHERE oms_fulfillment_order_id = ${String(omsOrderId)} AND source IN ('ebay')
-              LIMIT 1
-            `);
+          // Idempotency: skip if WMS order already shipped
+          if (wmsStatus === "shipped") {
+            console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — skipping`);
+            continue;
+          }
 
-            const hasWmsOrder = wmsOrderResult.rows && wmsOrderResult.rows.length > 0;
+          if (wmsStatus === "cancelled") {
+            console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} is cancelled — skipping`);
+            continue;
+          }
 
-            if (hasWmsOrder) {
-              const wmsOrderId = wmsOrderResult.rows[0].id;
-              const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
+          // Update WMS order (primary source of truth)
+          const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
+          await db.execute(sql`
+            UPDATE wms.orders SET
+              warehouse_status = 'shipped',
+              completed_at = ${now},
+              tracking_number = ${trackingNumber},
+              tracking_url = ${trackingUrl}
+            WHERE id = ${wmsOrderId}
+          `);
 
-              // Mark WMS order as shipped (unless already shipped/cancelled)
-              if (wmsStatus !== "shipped" && wmsStatus !== "cancelled") {
-                const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
+          // Mark all order items as completed
+          await db.execute(sql`
+            UPDATE wms.order_items SET
+              status = 'completed',
+              picked_quantity = quantity,
+              fulfilled_quantity = quantity
+            WHERE wms_order_id = ${wmsOrderId}
+              AND status NOT IN ('completed', 'short', 'cancelled')
+          `);
 
-                await db.execute(sql`
-                  UPDATE wms.orders SET
-                    warehouse_status = 'shipped',
-                    completed_at = ${now},
-                    tracking_number = ${trackingNumber},
-                    tracking_url = ${trackingUrl}
-                  WHERE id = ${wmsOrderId}
-                `);
+          console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
 
-                // Mark all order items as completed
-                await db.execute(sql`
-                  UPDATE wms.order_items SET
-                    status = 'completed',
-                    picked_quantity = quantity,
-                    fulfilled_quantity = quantity
-                  WHERE wms_order_id = ${wmsOrderId}
-                    AND status NOT IN ('completed', 'short', 'cancelled')
-                `);
+          // Create shipment record for the WMS order
+          await db.execute(sql`
+            INSERT INTO wms.outbound_shipments (wms_order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
+            VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
+            ON CONFLICT DO NOTHING
+          `);
+        } else {
+          // No WMS order — check OMS for idempotency (legacy path)
+          const [omsOrder] = await db
+            .select()
+            .from(omsOrders)
+            .where(eq(omsOrders.id, omsOrderId))
+            .limit(1);
 
-                console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
-              }
+          if (!omsOrder) {
+            console.warn(`[ShipStation Webhook] Neither WMS nor OMS order found for OMS ID ${omsOrderId}`);
+            continue;
+          }
 
-              // Create shipment record for the WMS order (now bounded to WMS context)
-              await db.execute(sql`
-                INSERT INTO wms.outbound_shipments (wms_order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
-                VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
-                ON CONFLICT DO NOTHING
-              `);
-            } else {
-              // No WMS order — legacy OMS-only path, deduct inventory directly
+          if (omsOrder.status === "shipped" && omsOrder.trackingNumber === trackingNumber) {
+            console.log(`[ShipStation Webhook] OMS order ${omsOrderId} already shipped with same tracking`);
+            continue;
+          }
+
+          // Legacy: deduct inventory directly for orders without WMS rows
+          if (inventoryCore) {
+            try {
               const lines = await db
                 .select()
                 .from(omsOrderLines)
@@ -425,7 +396,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
                   continue;
                 }
 
-                const warehouseLocationId = order.warehouseId;
+                const warehouseLocationId = omsOrder.warehouseId;
                 const [level] = warehouseLocationId
                   ? await db
                       .select()
@@ -460,11 +431,49 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
                 console.log(`[ShipStation Webhook] Recorded shipment for ${line.quantity}x ${line.sku} (order ${omsOrderId})`);
               }
+            } catch (invErr: any) {
+              console.error(`[ShipStation Webhook] Legacy inventory deduction failed for order ${omsOrderId}: ${invErr.message}`);
             }
-          } catch (invErr: any) {
-            console.error(`[ShipStation Webhook] Failed to process shipment for order ${omsOrderId}: ${invErr.message}`);
           }
         }
+
+        // ---- OMS DERIVED: Update OMS from WMS state ----
+        await db
+          .update(omsOrders)
+          .set({
+            status: "shipped",
+            fulfillmentStatus: "fulfilled",
+            trackingNumber,
+            trackingCarrier: carrier,
+            shippedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(omsOrders.id, omsOrderId));
+
+        // Update OMS line items
+        await db
+          .update(omsOrderLines)
+          .set({ fulfillmentStatus: "fulfilled" })
+          .where(eq(omsOrderLines.orderId, omsOrderId));
+
+        // Record event on OMS
+        await db.insert(omsOrderEvents).values({
+          orderId: omsOrderId,
+          eventType: "shipped_via_shipstation",
+          details: {
+            shipmentId: shipment.shipmentId,
+            trackingNumber,
+            carrier,
+            carrierCode: shipment.carrierCode,
+            serviceCode: shipment.serviceCode,
+            shipDate: shipment.shipDate,
+            wmsFirst: hasWmsOrder,
+          },
+        });
+
+        console.log(
+          `[ShipStation Webhook] Order ${omsOrderId} shipped: ${carrier} ${trackingNumber}`,
+        );
 
         // Push tracking to the originating channel (eBay, etc.)
         try {

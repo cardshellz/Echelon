@@ -21,7 +21,10 @@ export type CatalogCandidate = {
   productVariantId: number;
   productName: string;
   sku: string | null;
+  // Per-unit cost. Mills (4-decimal) is authoritative when present; cents
+  // remains for back-compat display of legacy candidates.
   unitCostCents: number;
+  unitCostMills?: number;
 };
 
 function formatCents(cents: number): string {

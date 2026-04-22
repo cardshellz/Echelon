@@ -18,9 +18,19 @@
 //   Cmd+Enter — Save & Send PDF
 //   Esc     — Cancel (with confirm if dirty)
 //
-// Money stays in integer cents. Floats are never used for currency.
+// Per-unit cost carries 4-decimal precision via mills (1/10000 of a dollar).
+// Everything else (line totals, PO totals) stays in cents. Floats are never
+// used for currency.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  dollarsToMills,
+  millsToDollarString,
+  formatMills,
+  millsToCents,
+  centsToMills,
+  computeLineTotalCentsFromMills,
+} from "@shared/utils/money";
 import { useLocation, useParams } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 
@@ -97,7 +107,10 @@ type LineDraft = {
   productName: string;
   sku: string | null;
   orderQty: number;
-  unitCostCents: number; // integer cents, always
+  // Per-unit cost in mills (1/10000 of a dollar). Authoritative on this
+  // draft. Cents is derived (rounded half-up) for display totals and for
+  // the back-compat unit_cost_cents field on the wire.
+  unitCostMills: number;
   vendorProductId?: number | null;
   // Spec A follow-up: tracks whether the selected product was NOT in the
   // vendor's catalog at the time of selection. Drives the "Add to catalog?"
@@ -118,6 +131,7 @@ type CatalogSearchResponse = {
     vendorSku: string | null;
     vendorProductName: string | null;
     unitCostCents: number;
+    unitCostMills: number;
     packSize: number | null;
     moq: number | null;
     leadTimeDays: number | null;
@@ -142,6 +156,7 @@ type PreloadResponse = {
     uomLabel: string | null;
     suggestedQty: number;
     unitCostCents: number;
+    unitCostMills?: number;
     catalogSource: string;
   }>;
   sourcePo: { poNumber: string; note: string } | null;
@@ -161,28 +176,9 @@ type ProcurementSettings = {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function dollarsToCents(dollars: string): number {
-  // Accepts "12.34", "12", ".34", "-5.00". Returns integer cents.
-  // Handles negatives defensively (we clamp to >=0 later).
-  const trimmed = (dollars || "").trim();
-  if (!trimmed) return 0;
-  const sign = trimmed.startsWith("-") ? -1 : 1;
-  const abs = trimmed.replace(/^-/, "");
-  const parts = abs.split(".");
-  const whole = parseInt(parts[0] || "0", 10);
-  const fracRaw = parts[1] ?? "";
-  const frac = fracRaw.padEnd(2, "0").slice(0, 2);
-  const fracNum = parseInt(frac || "0", 10);
-  if (!Number.isFinite(whole) || !Number.isFinite(fracNum)) return 0;
-  return sign * (whole * 100 + fracNum);
-}
-
-function centsToInputString(cents: number): string {
-  const n = Math.abs(cents || 0);
-  const d = Math.floor(n / 100);
-  const f = n % 100;
-  return `${cents < 0 ? "-" : ""}${d}.${String(f).padStart(2, "0")}`;
-}
+// (Legacy cents parse helpers removed; per-unit cost now uses the mills
+// helpers imported from @shared/utils/money. Line totals are still
+// displayed in cents via formatCents below.)
 
 // Uncontrolled-ish quantity input. Same pattern as UnitCostInput below —
 // keeps the raw typing buffer so backspace/delete don't bounce the caret and
@@ -236,36 +232,39 @@ function QuantityInput({
   );
 }
 
-// Uncontrolled-ish unit cost input.
+// Uncontrolled-ish unit cost input (mills — 4-decimal precision).
 //
-// Problem this solves: if we render `value={centsToInputString(cents)}` and
-// normalize on every keystroke, the input string gets rewritten while the user
-// is mid-edit (e.g. backspacing `50000.00` → `5000.00` → `5000.0` but the
-// normalizer rewrites it back to `5000.00` each time and the caret jumps to
-// the end). We keep the raw typing buffer locally and only coerce to integer
-// cents on blur. The parent stays the source of truth for the cents value;
-// when it changes (from preload, paste, etc.) and we're not focused, we
-// re-sync the buffer from the new cents.
+// Problem this solves: if we render a normalized value on every keystroke,
+// the input string gets rewritten mid-edit and the caret jumps. We keep the
+// raw typing buffer locally and only coerce to integer mills on blur. The
+// parent stays the source of truth for the mills value; when it changes
+// (from preload, paste, etc.) and we're not focused, we re-sync the buffer.
+//
+// Typing rules:
+//   * Accepts digits, a single dot, and up to 4 fractional digits.
+//   * Rejects a 5th decimal at the keystroke level so the user always sees
+//     exactly what will be stored (no silent rounding on blur).
+//   * Empty / lone dot is allowed mid-edit — coerced to 0 on blur.
 function UnitCostInput({
-  cents,
-  onChangeCents,
+  mills,
+  onChangeMills,
   ariaLabel,
 }: {
-  cents: number;
-  onChangeCents: (cents: number) => void;
+  mills: number;
+  onChangeMills: (mills: number) => void;
   ariaLabel: string;
 }) {
-  const [buffer, setBuffer] = useState<string>(() => centsToInputString(cents));
+  const [buffer, setBuffer] = useState<string>(() => millsToDollarString(mills));
   const [focused, setFocused] = useState(false);
 
   // When the parent's value changes from outside (preload, programmatic edit)
   // and we're not currently focused, pull the new value into the buffer.
   useEffect(() => {
     if (!focused) {
-      setBuffer(centsToInputString(cents));
+      setBuffer(millsToDollarString(mills));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cents, focused]);
+  }, [mills, focused]);
 
   return (
     <Input
@@ -273,22 +272,24 @@ function UnitCostInput({
       value={buffer}
       onFocus={() => setFocused(true)}
       onChange={(e) => {
-        // Allow any in-progress typing: digits, single dot, leading minus,
-        // empty string. We do NOT normalize here — that would cause the caret
-        // to jump on every keystroke. Just store the raw string.
         const raw = e.target.value;
-        // Light whitelist so pasted garbage doesn't stick; still permissive
-        // enough to allow intermediate states like "", ".", "5.", "5.0".
-        if (raw === "" || /^-?\d*\.?\d*$/.test(raw)) {
+        // digits + optional single dot + up to 4 fractional digits.
+        // Intermediate states ("", ".", "5.", "5.1234") all match.
+        if (raw === "" || /^\d*\.?\d{0,4}$/.test(raw)) {
           setBuffer(raw);
         }
       }}
       onBlur={() => {
         setFocused(false);
-        // Coerce on blur. Clamp to >= 0; empty/invalid becomes 0.
-        const nextCents = Math.max(0, dollarsToCents(buffer));
-        setBuffer(centsToInputString(nextCents));
-        if (nextCents !== cents) onChangeCents(nextCents);
+        let nextMills = mills;
+        try {
+          nextMills = dollarsToMills(buffer);
+        } catch {
+          // Unparseable — revert to last known good.
+          nextMills = mills;
+        }
+        setBuffer(millsToDollarString(nextMills));
+        if (nextMills !== mills) onChangeMills(nextMills);
       }}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
@@ -320,7 +321,7 @@ function emptyLine(): LineDraft {
     productName: "",
     sku: null,
     orderQty: 1,
-    unitCostCents: 0,
+    unitCostMills: 0,
   };
 }
 
@@ -547,7 +548,12 @@ export default function PurchaseOrderEdit() {
           productName: l.productName,
           sku: l.sku,
           orderQty: l.suggestedQty > 0 ? l.suggestedQty : 1,
-          unitCostCents: l.unitCostCents,
+          // Prefer server-provided mills; fall back to cents × 100 for
+          // legacy responses that don't yet include unit_cost_mills.
+          unitCostMills:
+            typeof l.unitCostMills === "number"
+              ? l.unitCostMills
+              : centsToMills(Number(l.unitCostCents) || 0),
         })),
       );
     }
@@ -588,27 +594,39 @@ export default function PurchaseOrderEdit() {
     if (existingPo.internalNotes) setInternalNotes(existingPo.internalNotes);
     if (Array.isArray(existingPo.lines)) {
       setLines(
-        existingPo.lines.map((l: any) => ({
-          clientId: newClientId(),
-          productVariantId: l.productVariantId,
-          productId: l.productId,
-          productName: l.productName ?? "",
-          sku: l.sku ?? null,
-          orderQty: l.orderQty,
-          unitCostCents: Number(l.unitCostCents) || 0,
-        })),
+        existingPo.lines.map((l: any) => {
+          const serverMills =
+            typeof l.unitCostMills === "number" ? l.unitCostMills : null;
+          const unitCostMills =
+            serverMills !== null && serverMills >= 0
+              ? serverMills
+              : centsToMills(Number(l.unitCostCents) || 0);
+          return {
+            clientId: newClientId(),
+            productVariantId: l.productVariantId,
+            productId: l.productId,
+            productName: l.productName ?? "",
+            sku: l.sku ?? null,
+            orderQty: l.orderQty,
+            unitCostMills,
+          };
+        }),
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [existingPo]);
 
   // ── Totals ────────────────────────────────────────────────────────────
+  // Line total = round_half_up(unit_cost_mills * order_qty / 100) — integer
+  // math only. Subtotal is the sum of line totals in cents.
   const subtotalCents = useMemo(
     () =>
-      lines.reduce(
-        (acc, l) => acc + (Number(l.orderQty) || 0) * (Number(l.unitCostCents) || 0),
-        0,
-      ),
+      lines.reduce((acc, l) => {
+        const qty = Number(l.orderQty) || 0;
+        const mills = Number(l.unitCostMills) || 0;
+        if (qty <= 0 || mills <= 0) return acc;
+        return acc + computeLineTotalCentsFromMills(mills, qty);
+      }, 0),
     [lines],
   );
 
@@ -631,7 +649,7 @@ export default function PurchaseOrderEdit() {
       if (!l.productVariantId) return `Line ${idx + 1}: pick a product.`;
       if (!Number.isInteger(l.orderQty) || l.orderQty <= 0)
         return `Line ${idx + 1}: quantity must be a positive integer.`;
-      if (!Number.isInteger(l.unitCostCents) || l.unitCostCents < 0)
+      if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0)
         return `Line ${idx + 1}: unit cost must be zero or more.`;
     }
     return null;
@@ -652,14 +670,16 @@ export default function PurchaseOrderEdit() {
     for (const l of lines) {
       if (l.catalogOriginallyAbsent !== true) continue;
       if (!l.productVariantId || !l.productId) continue;
-      if (!Number.isInteger(l.unitCostCents) || l.unitCostCents < 0) continue;
+      if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0) continue;
       out.push({
         clientId: l.clientId,
         productId: l.productId,
         productVariantId: l.productVariantId,
         productName: l.productName || "(unnamed)",
         sku: l.sku,
-        unitCostCents: l.unitCostCents,
+        // Dialog displays 4-decimal mills; cents derived for back-compat.
+        unitCostMills: l.unitCostMills,
+        unitCostCents: millsToCents(l.unitCostMills),
       });
     }
     return out;
@@ -720,7 +740,10 @@ export default function PurchaseOrderEdit() {
         entries: toSend.map((c) => ({
           productId: c.productId,
           productVariantId: c.productVariantId,
-          unitCostCents: c.unitCostCents, // integer cents, always
+          // Mills is authoritative; cents is sent for back-compat. Server
+          // validator rejects the pair if they disagree.
+          unitCostMills: c.unitCostMills,
+          unitCostCents: c.unitCostCents,
         })),
       };
       const res = await fetch(
@@ -784,7 +807,11 @@ export default function PurchaseOrderEdit() {
         lines: lines.map((l) => ({
           product_variant_id: l.productVariantId,
           quantity_ordered: l.orderQty,
-          unit_cost_cents: l.unitCostCents,
+          // Mills is authoritative (4-decimal). Cents is sent for back-
+          // compat — derived via half-up rounding. Server validator rejects
+          // a disagreeing pair with 400.
+          unit_cost_mills: l.unitCostMills,
+          unit_cost_cents: millsToCents(l.unitCostMills),
           vendor_product_id: l.vendorProductId ?? null,
         })),
         advance_to_sent: advanceToSent,
@@ -1230,7 +1257,15 @@ function LineRow(props: LineRowProps) {
   const inCatalog = catalogQuery.data?.inCatalog ?? [];
   const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
 
-  const lineTotalCents = (Number(line.orderQty) || 0) * (Number(line.unitCostCents) || 0);
+  // Line total in cents is derived from mills (authoritative), half-up at
+  // the sub-cent boundary so the displayed total matches what we'll store.
+  const lineTotalCents =
+    Number(line.orderQty) > 0 && Number(line.unitCostMills) > 0
+      ? computeLineTotalCentsFromMills(
+          Number(line.unitCostMills),
+          Number(line.orderQty),
+        )
+      : 0;
 
   return (
     <div className="grid grid-cols-12 gap-2 items-start">
@@ -1276,8 +1311,13 @@ function LineRow(props: LineRowProps) {
                               productVariantId: row.productVariantId ?? null,
                               productName: row.productName,
                               sku: row.sku ?? null,
-                              // From catalog: authoritative cost.
-                              unitCostCents: row.unitCostCents,
+                              // From catalog: authoritative cost. Prefer
+                              // mills; fall back to cents × 100 for legacy
+                              // rows where unit_cost_mills is still NULL.
+                              unitCostMills:
+                                typeof row.unitCostMills === "number"
+                                  ? row.unitCostMills
+                                  : centsToMills(row.unitCostCents),
                               vendorProductId: row.vendorProductId,
                               catalogOriginallyAbsent: false,
                             });
@@ -1300,7 +1340,11 @@ function LineRow(props: LineRowProps) {
                             {row.variantName ? ` · ${row.variantName}` : ""}
                           </span>
                           <span className="ml-2 text-xs tabular-nums">
-                            {formatCents(row.unitCostCents)}
+                            {formatMills(
+                              typeof row.unitCostMills === "number"
+                                ? row.unitCostMills
+                                : centsToMills(row.unitCostCents),
+                            )}
                             {hints.length > 0 && (
                               <span className="text-muted-foreground"> · {hints.join(", ")}</span>
                             )}
@@ -1375,8 +1419,8 @@ function LineRow(props: LineRowProps) {
       {/* Unit cost */}
       <div className="col-span-4 md:col-span-2">
         <UnitCostInput
-          cents={line.unitCostCents}
-          onChangeCents={(cents) => onChange({ unitCostCents: Math.max(0, cents) })}
+          mills={line.unitCostMills}
+          onChangeMills={(mills) => onChange({ unitCostMills: Math.max(0, mills) })}
           ariaLabel={`Line ${idx + 1} unit cost`}
         />
       </div>

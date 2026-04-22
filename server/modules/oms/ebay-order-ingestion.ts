@@ -423,17 +423,7 @@ export async function pollEbayOrders(
             console.error(`[eBay Orders] Post-ingest processing failed for ${ebayOrder.orderId}: ${e.message}`);
           }
 
-          // Auto-push to ShipStation
-          if (_shipStationService?.isConfigured()) {
-            try {
-              const fullOrder = await omsService.getOrderById(result.id);
-              if (fullOrder) {
-                await _shipStationService.pushOrder(fullOrder);
-              }
-            } catch (e: any) {
-              console.error(`[eBay Orders] ShipStation push failed for ${ebayOrder.orderId}: ${e.message}`);
-            }
-          }
+          // ShipStation push handled by wmsSyncService.syncOmsOrderToWms()
 
           totalIngested++;
         }
@@ -503,15 +493,7 @@ export async function reingestEbayOrder(
     } catch (err: any) {
       console.error(`[eBay Reingest] Post-ingest (reserve/assign) failed for ${orderId}: ${err.message}`);
     }
-
-    if (_shipStationService?.isConfigured()) {
-      try {
-        const fullOrder = await omsService.getOrderById(result.id);
-        if (fullOrder) await _shipStationService.pushOrder(fullOrder);
-      } catch (err: any) {
-        console.error(`[eBay Reingest] ShipStation push failed for ${orderId}: ${err.message}`);
-      }
-    }
+    // ShipStation push handled by wmsSyncService.syncOmsOrderToWms()
   }
 
   return {
@@ -577,18 +559,7 @@ export function createEbayOrderWebhookHandler(
 
               await omsService.reserveInventory(result.id);
               await omsService.assignWarehouse(result.id);
-
-              // Auto-push to ShipStation
-              if (_shipStationService?.isConfigured()) {
-                try {
-                  const fullOrder = await omsService.getOrderById(result.id);
-                  if (fullOrder) {
-                    await _shipStationService.pushOrder(fullOrder);
-                  }
-                } catch (e: any) {
-                  console.error(`[eBay Webhook] ShipStation push failed for ${orderId}: ${e.message}`);
-                }
-              }
+              // ShipStation push handled by wmsSyncService (via polling path) or hourly reconcile
             }
 
             console.log(`[eBay Webhook] Processed order ${orderId}`);

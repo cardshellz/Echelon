@@ -474,19 +474,6 @@ export function registerOmsWebhooks(
         console.error(`${LOG_PREFIX} Post-ingest processing failed for ${shopifyOrder.name}: ${e.message}`);
       }
 
-      // Push to ShipStation
-      if (shipStationService?.isConfigured()) {
-        try {
-          const fullOrder = await omsService.getOrderById(omsOrder.id);
-          if (fullOrder) {
-            await shipStationService.pushOrder(fullOrder);
-            console.log(`${LOG_PREFIX} Pushed ${shopifyOrder.name} to ShipStation`);
-          }
-        } catch (e: any) {
-          console.error(`${LOG_PREFIX} ShipStation push failed for ${shopifyOrder.name}: ${e.message}`);
-        }
-      }
-
       console.log(`${LOG_PREFIX} ✅ Processed new order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
       pushToMissionControl(omsOrder.id, "order.created");
       
