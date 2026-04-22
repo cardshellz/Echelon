@@ -231,6 +231,8 @@ export function createServices(db: any) {
     inventoryCore: inventoryCore as any,
     reservation,
     fulfillmentRouter,
+    shipStation,
+    omsService: oms,
   });
 
   // SyncRecovery — unified order-pipeline gap recovery (Shopify → shopify_orders

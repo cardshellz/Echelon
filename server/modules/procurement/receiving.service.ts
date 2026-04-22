@@ -16,6 +16,7 @@ type DrizzleDb = {
 // Import sql tagged template for raw queries
 import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
+import { millsToCents } from "@shared/utils/money";
 
 interface InventoryCore {
   receiveInventory(params: {
@@ -59,6 +60,10 @@ interface Storage {
   updateReceivingOrder(id: number, updates: any, tx?: any): Promise<any>;
   updateReceivingLine(lineId: number, updates: any, tx?: any): Promise<any>;
   bulkCreateReceivingLines(lines: any[], tx?: any): Promise<any[]>;
+  // PO line lookup — used to pull the 4-decimal unit_cost_mills when
+  // stamping per-unit cost on lots/receipts, so receive-time precision
+  // matches the PO line (spec 2026-04-22).
+  getPurchaseOrderLineById?(id: number): Promise<any>;
   getVendorById(id: number): Promise<any>;
   // Inventory lookups
   getProductVariantBySku(sku: string): Promise<any>;
@@ -218,7 +223,38 @@ export class ReceivingService {
         const qtyToAdd = line.receivedQty;
 
         // Determine unit cost: landed cost (if finalized) > PO line cost > receiving line cost
+        //
+        // Precision: when the receipt is linked to a PO line and that line
+        // carries 4-decimal unit_cost_mills, use it as the authoritative
+        // source and round to cents via millsToCents (half-up). This prevents
+        // precision loss at receive time on costs like $0.0375 that would
+        // otherwise collapse to 4 cents silently. (Only applied when neither
+        // the receiving_line.unit_cost nor a finalized landed cost has
+        // already been resolved.)
         let unitCostCents = (line as any).unitCost || undefined;
+        if (
+          (unitCostCents === undefined || unitCostCents === null) &&
+          line.purchaseOrderLineId &&
+          typeof (this.storage as any).getPurchaseOrderLineById === "function"
+        ) {
+          try {
+            const poLine = await (this.storage as any).getPurchaseOrderLineById(
+              line.purchaseOrderLineId,
+            );
+            if (poLine) {
+              if (
+                typeof poLine.unitCostMills === "number" &&
+                poLine.unitCostMills >= 0
+              ) {
+                unitCostCents = millsToCents(poLine.unitCostMills);
+              } else if (typeof poLine.unitCostCents === "number") {
+                unitCostCents = poLine.unitCostCents;
+              }
+            }
+          } catch {
+            // Non-fatal: fall through to landed-cost / receipt-line fallbacks.
+          }
+        }
         let costProvisional = 0;
         let inboundShipmentId: number | undefined;
 

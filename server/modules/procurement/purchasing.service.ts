@@ -24,6 +24,11 @@ import {
   warehouseSettings as warehouseSettingsTable,
 } from "@shared/schema";
 import { Decimal } from "decimal.js";
+import {
+  centsToMills,
+  millsToCents,
+  computeLineTotalCentsFromMills,
+} from "@shared/utils/money";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -125,19 +130,50 @@ export function createPurchasingService(db: any, storage: Storage) {
 
   // ── Helpers ─────────────────────────────────────────────────────
 
-  function calculateLineCosts(line: { orderQty: number; unitCostCents: number; discountPercent?: string | number; taxRatePercent?: string | number }) {
-    const subtotal = new Decimal(line.orderQty || 0).times(line.unitCostCents || 0);
+  // calculateLineCosts
+  //
+  // Unit cost source-of-truth resolution:
+  //   * If `unitCostMills` is provided and > 0, it is authoritative and the
+  //     line subtotal is computed via computeLineTotalCentsFromMills (integer
+  //     half-up at the sub-cent boundary). `unitCostCents` (if also passed)
+  //     is IGNORED here — the caller is responsible for cross-checking
+  //     mills vs. cents agreement at the input boundary (e.g.
+  //     validateCreateWithLinesInput rejects disagreeing pairs with 400).
+  //   * Otherwise (legacy callers, or mills = 0), we fall back to the
+  //     cents-based Decimal path. Preserves back-compat with every existing
+  //     caller that still passes unit_cost_cents only.
+  //
+  // Discount and tax continue to apply at the cent-subtotal level — those
+  // fields stay in cents per spec ("Everything else stays in CENTS").
+  function calculateLineCosts(line: {
+    orderQty: number;
+    unitCostCents: number;
+    unitCostMills?: number | null;
+    discountPercent?: string | number;
+    taxRatePercent?: string | number;
+  }) {
+    const qty = Number(line.orderQty) || 0;
+    const millsAuthoritative =
+      typeof line.unitCostMills === "number" &&
+      Number.isInteger(line.unitCostMills) &&
+      line.unitCostMills > 0;
+
+    const subtotalCents = millsAuthoritative
+      ? computeLineTotalCentsFromMills(line.unitCostMills as number, qty)
+      : qty * (Number(line.unitCostCents) || 0);
+
+    const subtotal = new Decimal(subtotalCents);
     const discountPct = new Decimal(line.discountPercent || 0);
     const discount = subtotal.times(discountPct).dividedBy(100).round();
     const taxable = subtotal.minus(discount);
     const taxPct = new Decimal(line.taxRatePercent || 0);
     const tax = taxable.times(taxPct).dividedBy(100).round();
-    
+
     return {
       subtotalCents: subtotal.toNumber(),
       discountCents: discount.toNumber(),
       taxCents: tax.toNumber(),
-      lineTotalCents: taxable.plus(tax).toNumber()
+      lineTotalCents: taxable.plus(tax).toNumber(),
     };
   }
 
@@ -1235,7 +1271,12 @@ export function createPurchasingService(db: any, storage: Storage) {
     lines: Array<{
       productVariantId: number;
       orderQty: number;
-      unitCostCents: number;
+      // Per-unit cost. Either or both may be provided:
+      //   * unitCostMills is authoritative (4-decimal precision).
+      //   * unitCostCents is accepted for legacy/back-compat callers.
+      //   * If both are provided, they MUST agree (cents == round(mills/100)).
+      unitCostCents?: number;
+      unitCostMills?: number;
       vendorProductId?: number | null;
       description?: string | null;
     }>;
@@ -1262,8 +1303,46 @@ export function createPurchasingService(db: any, storage: Storage) {
       if (!Number.isInteger(line.orderQty) || line.orderQty <= 0) {
         throw new PurchasingError(`${label}.quantity_ordered must be a positive integer`, 400);
       }
-      if (!Number.isInteger(line.unitCostCents) || line.unitCostCents < 0) {
-        throw new PurchasingError(`${label}.unit_cost_cents must be a non-negative integer`, 400);
+
+      const hasCents =
+        line.unitCostCents !== undefined && line.unitCostCents !== null;
+      const hasMills =
+        line.unitCostMills !== undefined && line.unitCostMills !== null;
+
+      if (!hasCents && !hasMills) {
+        throw new PurchasingError(
+          `${label}.unit_cost_cents or unit_cost_mills is required`,
+          400,
+        );
+      }
+      if (hasMills) {
+        if (!Number.isInteger(line.unitCostMills) || (line.unitCostMills as number) < 0) {
+          throw new PurchasingError(
+            `${label}.unit_cost_mills must be a non-negative integer`,
+            400,
+          );
+        }
+      }
+      if (hasCents) {
+        if (!Number.isInteger(line.unitCostCents) || (line.unitCostCents as number) < 0) {
+          throw new PurchasingError(
+            `${label}.unit_cost_cents must be a non-negative integer`,
+            400,
+          );
+        }
+      }
+      // If both are provided, reject a disagreeing pair up front (Rule #3).
+      // The mills precision is authoritative; cents must be the half-up
+      // rounding of it. This prevents a client from drifting the two
+      // values and silently corrupting the stored cost.
+      if (hasMills && hasCents) {
+        const expectedCents = millsToCents(line.unitCostMills as number);
+        if (expectedCents !== (line.unitCostCents as number)) {
+          throw new PurchasingError(
+            `${label}: unit_cost_mills (${line.unitCostMills}) and unit_cost_cents (${line.unitCostCents}) disagree; expected cents=${expectedCents}`,
+            400,
+          );
+        }
       }
     }
   }
@@ -1279,6 +1358,8 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     // Resolve product + variant info up-front (outside the txn) so we can
     // cache SKU + product name on each line and fail fast on missing refs.
+    // Per-unit cost: mills is authoritative; cents is derived (rounded
+    // half-up) for back-compat writes into unit_cost_cents.
     const resolvedLines = await Promise.all(
       input.lines.map(async (line) => {
         const variant = await storage.getProductVariantById(line.productVariantId);
@@ -1289,11 +1370,22 @@ export function createPurchasingService(db: any, storage: Storage) {
         if (!product) {
           throw new PurchasingError(`Product ${variant.productId} not found`, 404);
         }
+        // Normalize to BOTH mills and cents. Whichever the caller sent
+        // becomes the anchor; the other is derived.
+        const hasMills =
+          typeof line.unitCostMills === "number" && line.unitCostMills >= 0;
+        const unitCostMills = hasMills
+          ? (line.unitCostMills as number)
+          : centsToMills(Number(line.unitCostCents) || 0);
+        const unitCostCents = hasMills
+          ? millsToCents(unitCostMills)
+          : Number(line.unitCostCents) || 0;
         const costs = calculateLineCosts({
           orderQty: line.orderQty,
-          unitCostCents: line.unitCostCents,
+          unitCostCents,
+          unitCostMills,
         });
-        return { line, variant, product, costs };
+        return { line, variant, product, costs, unitCostMills, unitCostCents };
       }),
     );
 
@@ -1343,7 +1435,10 @@ export function createPurchasingService(db: any, storage: Storage) {
         unitOfMeasure: r.variant.name?.split(" ")[0]?.toLowerCase() ?? "each",
         unitsPerUom: r.variant.unitsPerVariant || 1,
         orderQty: r.line.orderQty,
-        unitCostCents: r.line.unitCostCents,
+        // Write BOTH mills and cents on INSERT (spec): mills is authoritative,
+        // cents is the rounded back-compat mirror.
+        unitCostCents: r.unitCostCents,
+        unitCostMills: r.unitCostMills,
         discountCents: r.costs.discountCents,
         taxCents: r.costs.taxCents,
         lineTotalCents: r.costs.lineTotalCents,
@@ -1549,15 +1644,24 @@ export function createPurchasingService(db: any, storage: Storage) {
     const targetVendorId = overrides?.vendorId ?? source.vendorId;
 
     // Refresh costs from the current vendor catalog when available.
+    // Mills-aware: prefer catalog mills → source mills → derive from cents.
     const dupLines: CreatePurchaseOrderWithLinesInput["lines"] = [];
     for (const src of sourceLines) {
       if (src.status === "cancelled") continue;
-      let unitCostCents: number = Number(src.unitCostCents || 0);
+      // Start from source line's mills when present, else derive from cents.
+      let unitCostMills: number =
+        typeof src.unitCostMills === "number" && src.unitCostMills >= 0
+          ? src.unitCostMills
+          : centsToMills(Number(src.unitCostCents || 0));
       let vendorProductId: number | null = null;
       try {
         const vp = await storage.getPreferredVendorProduct(src.productId, src.productVariantId);
-        if (vp && vp.vendorId === targetVendorId && typeof vp.unitCostCents === "number") {
-          unitCostCents = vp.unitCostCents;
+        if (vp && vp.vendorId === targetVendorId) {
+          if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
+            unitCostMills = vp.unitCostMills;
+          } else if (typeof vp.unitCostCents === "number") {
+            unitCostMills = centsToMills(vp.unitCostCents);
+          }
           vendorProductId = vp.id ?? null;
         }
       } catch {
@@ -1566,7 +1670,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       dupLines.push({
         productVariantId: src.productVariantId,
         orderQty: src.orderQty,
-        unitCostCents,
+        unitCostMills,
+        // Include cents (derived) so downstream validators that still look
+        // at cents don't choke. They must agree per validator rule.
+        unitCostCents: millsToCents(unitCostMills),
         vendorProductId,
         description: src.description ?? null,
       });
@@ -1614,7 +1721,12 @@ export function createPurchasingService(db: any, storage: Storage) {
   type BulkCatalogEntry = {
     productId: number;
     productVariantId?: number | null;
-    unitCostCents: number;
+    // Per-unit cost. Either or both may be provided:
+    //   * unitCostMills is authoritative (4-decimal precision).
+    //   * unitCostCents is accepted for legacy/back-compat callers.
+    // If both are provided they must agree (cents == millsToCents(mills)).
+    unitCostCents?: number;
+    unitCostMills?: number;
     packSize?: number;
     moq?: number;
     leadTimeDays?: number;
@@ -1669,12 +1781,35 @@ export function createPurchasingService(db: any, storage: Storage) {
           400,
         );
       }
-      if (!Number.isInteger(e.unitCostCents) || e.unitCostCents < 0) {
+      const hasCents = e.unitCostCents !== undefined && e.unitCostCents !== null;
+      const hasMills = e.unitCostMills !== undefined && e.unitCostMills !== null;
+      if (!hasCents && !hasMills) {
+        throw new PurchasingError(
+          `entries[${idx}].unitCostCents or unitCostMills is required`,
+          400,
+        );
+      }
+      if (hasCents && (!Number.isInteger(e.unitCostCents) || (e.unitCostCents as number) < 0)) {
         // Rule #3: integer cents only.
         throw new PurchasingError(
           `entries[${idx}].unitCostCents must be a non-negative integer (cents)`,
           400,
         );
+      }
+      if (hasMills && (!Number.isInteger(e.unitCostMills) || (e.unitCostMills as number) < 0)) {
+        throw new PurchasingError(
+          `entries[${idx}].unitCostMills must be a non-negative integer (mills)`,
+          400,
+        );
+      }
+      if (hasCents && hasMills) {
+        const expected = millsToCents(e.unitCostMills as number);
+        if (expected !== (e.unitCostCents as number)) {
+          throw new PurchasingError(
+            `entries[${idx}]: unitCostMills (${e.unitCostMills}) and unitCostCents (${e.unitCostCents}) disagree; expected cents=${expected}`,
+            400,
+          );
+        }
       }
       if (e.packSize !== undefined && (!Number.isInteger(e.packSize) || e.packSize <= 0)) {
         throw new PurchasingError(`entries[${idx}].packSize must be a positive integer`, 400);
@@ -1726,11 +1861,24 @@ export function createPurchasingService(db: any, storage: Storage) {
           .limit(1);
         const existing = existingRows[0];
 
+        // Normalize to both precisions. Mills is authoritative when
+        // provided; cents is derived. If only cents is provided, derive
+        // mills exactly (cents × 100).
+        const entryHasMills =
+          typeof entry.unitCostMills === "number" && entry.unitCostMills >= 0;
+        const entryMills = entryHasMills
+          ? (entry.unitCostMills as number)
+          : centsToMills(Number(entry.unitCostCents) || 0);
+        const entryCents = entryHasMills
+          ? millsToCents(entryMills)
+          : Number(entry.unitCostCents) || 0;
+
         if (existing) {
           // Don't overwrite non-null fields with null (per spec). Only
           // fields explicitly provided (not undefined) overwrite.
           const patch: Record<string, unknown> = {
-            unitCostCents: entry.unitCostCents,
+            unitCostCents: entryCents,
+            unitCostMills: entryMills,
             isActive: 1,
             updatedAt: new Date(),
           };
@@ -1796,7 +1944,8 @@ export function createPurchasingService(db: any, storage: Storage) {
               productVariantId: variantId,
               vendorSku: entry.vendorSku ?? null,
               vendorProductName: entry.vendorProductName ?? null,
-              unitCostCents: entry.unitCostCents,
+              unitCostCents: entryCents,
+              unitCostMills: entryMills,
               packSize: entry.packSize ?? 1,
               moq: entry.moq ?? 1,
               leadTimeDays: entry.leadTimeDays ?? null,
@@ -1849,7 +1998,10 @@ export function createPurchasingService(db: any, storage: Storage) {
     variantDescription: string | null;
     uomLabel: string | null;
     suggestedQty: number;
+    // Per-unit cost is returned in BOTH units so the editor can use mills
+    // directly while legacy readers can continue consuming cents.
     unitCostCents: number;
+    unitCostMills: number;
     catalogSource: "vendor_catalog" | "product_default" | "duplicate" | "manual";
   };
 
@@ -1875,13 +2027,24 @@ export function createPurchasingService(db: any, storage: Storage) {
       const lines: PreloadLine[] = [];
       for (const src of srcLines) {
         if (src.status === "cancelled") continue;
-        let unitCostCents: number = Number(src.unitCostCents || 0);
+        // Source priority (duplicate path):
+        //   source line.unit_cost_mills → centsToMills(source line.unit_cost_cents)
+        //   overridden by matching vendor_products.unit_cost_mills / cents.
+        let unitCostMills: number =
+          typeof src.unitCostMills === "number" && src.unitCostMills >= 0
+            ? src.unitCostMills
+            : centsToMills(Number(src.unitCostCents || 0));
         let catalogSource: PreloadLine["catalogSource"] = "duplicate";
         try {
           const vp = await storage.getPreferredVendorProduct(src.productId, src.productVariantId);
-          if (vp && vp.vendorId === source.vendorId && typeof vp.unitCostCents === "number") {
-            unitCostCents = vp.unitCostCents;
-            catalogSource = "vendor_catalog";
+          if (vp && vp.vendorId === source.vendorId) {
+            if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
+              unitCostMills = vp.unitCostMills;
+              catalogSource = "vendor_catalog";
+            } else if (typeof vp.unitCostCents === "number") {
+              unitCostMills = centsToMills(vp.unitCostCents);
+              catalogSource = "vendor_catalog";
+            }
           }
         } catch {
           // non-fatal
@@ -1893,7 +2056,8 @@ export function createPurchasingService(db: any, storage: Storage) {
           variantDescription: null,
           uomLabel: src.unitOfMeasure ?? null,
           suggestedQty: src.orderQty,
-          unitCostCents,
+          unitCostCents: millsToCents(unitCostMills),
+          unitCostMills,
           catalogSource,
         });
       }
@@ -1917,18 +2081,27 @@ export function createPurchasingService(db: any, storage: Storage) {
         if (!variant) continue;
         const product = await storage.getProductById(variant.productId);
         if (!product) continue;
-        // Default cost: vendor catalog wins; else variant.standardCostCents;
-        // else variant.lastCostCents; else 0 (user will fill in manually).
-        let unitCostCents: number = Number(
-          variant.standardCostCents ?? variant.lastCostCents ?? 0,
+        // Source priority (variant path) per spec:
+        //   vendor_products.unit_cost_mills
+        //   → centsToMills(vendor_products.unit_cost_cents)
+        //   → centsToMills(variant.standardCostCents)
+        //   → centsToMills(variant.lastCostCents)
+        //   → 0
+        let unitCostMills: number = centsToMills(
+          Number(variant.standardCostCents ?? variant.lastCostCents ?? 0),
         );
         let catalogSource: PreloadLine["catalogSource"] = "product_default";
         if (vendorId) {
           try {
             const vp = await storage.getPreferredVendorProduct(product.id, variant.id);
-            if (vp && vp.vendorId === vendorId && typeof vp.unitCostCents === "number") {
-              unitCostCents = vp.unitCostCents;
-              catalogSource = "vendor_catalog";
+            if (vp && vp.vendorId === vendorId) {
+              if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
+                unitCostMills = vp.unitCostMills;
+                catalogSource = "vendor_catalog";
+              } else if (typeof vp.unitCostCents === "number") {
+                unitCostMills = centsToMills(vp.unitCostCents);
+                catalogSource = "vendor_catalog";
+              }
             }
           } catch {
             // non-fatal
@@ -1943,7 +2116,8 @@ export function createPurchasingService(db: any, storage: Storage) {
           // No reorder_quantity column today. Default to 1 so the row is
           // usable; users edit qty in the lines editor.
           suggestedQty: 1,
-          unitCostCents,
+          unitCostCents: millsToCents(unitCostMills),
+          unitCostMills,
           catalogSource,
         });
       }

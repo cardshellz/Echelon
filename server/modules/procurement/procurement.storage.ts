@@ -109,6 +109,9 @@ export interface IProcurementStorage {
       vendorSku: string | null;
       vendorProductName: string | null;
       unitCostCents: number;
+      // Per-unit cost in mills (4-decimal). Derived from unit_cost_cents
+      // when unit_cost_mills is NULL (legacy rows).
+      unitCostMills: number;
       packSize: number | null;
       moq: number | null;
       leadTimeDays: number | null;
@@ -424,6 +427,7 @@ export const procurementMethods: IProcurementStorage = {
       vendor_sku: string | null;
       vendor_product_name: string | null;
       unit_cost_cents: number | string | null;
+      unit_cost_mills: number | string | null;
       pack_size: number | null;
       moq: number | null;
       lead_time_days: number | null;
@@ -439,6 +443,7 @@ export const procurementMethods: IProcurementStorage = {
         vp.vendor_sku      AS vendor_sku,
         vp.vendor_product_name AS vendor_product_name,
         vp.unit_cost_cents AS unit_cost_cents,
+        vp.unit_cost_mills AS unit_cost_mills,
         vp.pack_size       AS pack_size,
         vp.moq             AS moq,
         vp.lead_time_days  AS lead_time_days,
@@ -482,6 +487,13 @@ export const procurementMethods: IProcurementStorage = {
       vendorSku: r.vendor_sku,
       vendorProductName: r.vendor_product_name,
       unitCostCents: Number(r.unit_cost_cents ?? 0),
+      // unit_cost_mills is the 4-decimal source of truth when present.
+      // If NULL (legacy row), fall back to cents × 100 so the client
+      // still gets a usable mills value.
+      unitCostMills:
+        r.unit_cost_mills != null
+          ? Number(r.unit_cost_mills)
+          : Number(r.unit_cost_cents ?? 0) * 100,
       packSize: r.pack_size != null ? Number(r.pack_size) : null,
       moq: r.moq != null ? Number(r.moq) : null,
       leadTimeDays: r.lead_time_days != null ? Number(r.lead_time_days) : null,

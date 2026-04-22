@@ -21,6 +21,8 @@ interface WmsSyncServices {
   inventoryCore: any;
   reservation: any;
   fulfillmentRouter: any;
+  shipStation?: any;
+  omsService?: any;
 }
 
 export class WmsSyncService {
@@ -193,6 +195,25 @@ export class WmsSyncService {
         await this.services.fulfillmentRouter.routeOrder(newWmsOrder.id);
       } catch (err: any) {
         console.warn(`[WMS Sync] Warehouse routing skipped for order ${newWmsOrder.id}: ${err.message}`);
+      }
+
+      // 8. Push to ShipStation (originates from WMS, not OMS)
+      if (this.services.shipStation?.isConfigured()) {
+        try {
+          // Fetch full OMS order with lines for ShipStation payload
+          const omsService = this.services.omsService;
+          if (omsService) {
+            const fullOmsOrder = await omsService.getOrderById(omsOrderId);
+            if (fullOmsOrder) {
+              await this.services.shipStation.pushOrder(fullOmsOrder);
+              console.log(`[WMS Sync] Pushed OMS order ${omsOrderId} to ShipStation from WMS`);
+            } else {
+              console.warn(`[WMS Sync] Could not fetch OMS order ${omsOrderId} for ShipStation push`);
+            }
+          }
+        } catch (err: any) {
+          console.error(`[WMS Sync] ShipStation push failed for OMS order ${omsOrderId}: ${err.message}`);
+        }
       }
 
       return newWmsOrder.id;

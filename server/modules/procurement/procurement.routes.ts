@@ -1888,14 +1888,25 @@ export function registerPurchasingRoutes(app: Express) {
         }
 
         // Inline-lines path. Map snake_case wire format to service's
-        // camelCase. Money stays in integer cents end-to-end.
-        const lines = (req.body.lines as any[]).map((l) => ({
-          productVariantId: Number(l.product_variant_id ?? l.productVariantId),
-          orderQty: Number(l.quantity_ordered ?? l.orderQty),
-          unitCostCents: Number(l.unit_cost_cents ?? l.unitCostCents),
-          vendorProductId: l.vendor_product_id ?? l.vendorProductId ?? undefined,
-          description: l.description ?? undefined,
-        }));
+        // camelCase. Per-unit cost supports both cents (legacy) and mills
+        // (4-decimal); the service validator rejects disagreeing pairs.
+        const lines = (req.body.lines as any[]).map((l) => {
+          const rawCents = l.unit_cost_cents ?? l.unitCostCents;
+          const rawMills = l.unit_cost_mills ?? l.unitCostMills;
+          const out: any = {
+            productVariantId: Number(l.product_variant_id ?? l.productVariantId),
+            orderQty: Number(l.quantity_ordered ?? l.orderQty),
+            vendorProductId: l.vendor_product_id ?? l.vendorProductId ?? undefined,
+            description: l.description ?? undefined,
+          };
+          if (rawCents !== undefined && rawCents !== null) {
+            out.unitCostCents = Number(rawCents);
+          }
+          if (rawMills !== undefined && rawMills !== null) {
+            out.unitCostMills = Number(rawMills);
+          }
+          return out;
+        });
         const created = await purchasing.createPurchaseOrderWithLines(
           {
             vendorId: Number(req.body.vendor_id ?? req.body.vendorId),
@@ -2448,10 +2459,29 @@ export function registerPurchasingRoutes(app: Express) {
         if (!Number.isInteger(vendorId) || vendorId <= 0) {
           return res.status(400).json({ error: "Invalid vendorId" });
         }
-        const entries = Array.isArray(req.body?.entries) ? req.body.entries : null;
-        if (!entries || entries.length === 0) {
+        const rawEntries = Array.isArray(req.body?.entries) ? req.body.entries : null;
+        if (!rawEntries || rawEntries.length === 0) {
           return res.status(400).json({ error: "entries must be a non-empty array" });
         }
+        // Normalize snake_case and carry through both unit_cost_cents and
+        // unit_cost_mills. The service validator enforces pair agreement.
+        const entries = rawEntries.map((e: any) => {
+          const out: any = {
+            productId: e.productId ?? e.product_id,
+            productVariantId: e.productVariantId ?? e.product_variant_id ?? null,
+            packSize: e.packSize ?? e.pack_size,
+            moq: e.moq,
+            leadTimeDays: e.leadTimeDays ?? e.lead_time_days,
+            vendorSku: e.vendorSku ?? e.vendor_sku,
+            vendorProductName: e.vendorProductName ?? e.vendor_product_name,
+            isPreferred: e.isPreferred ?? e.is_preferred,
+          };
+          const cents = e.unitCostCents ?? e.unit_cost_cents;
+          const mills = e.unitCostMills ?? e.unit_cost_mills;
+          if (cents !== undefined && cents !== null) out.unitCostCents = Number(cents);
+          if (mills !== undefined && mills !== null) out.unitCostMills = Number(mills);
+          return out;
+        });
         const userId = req.session.user?.id;
         const result = await purchasing.bulkUpsertVendorCatalog(vendorId, entries, userId);
         res.json(result);
