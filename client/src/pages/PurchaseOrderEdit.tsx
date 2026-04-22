@@ -184,6 +184,122 @@ function centsToInputString(cents: number): string {
   return `${cents < 0 ? "-" : ""}${d}.${String(f).padStart(2, "0")}`;
 }
 
+// Uncontrolled-ish quantity input. Same pattern as UnitCostInput below —
+// keeps the raw typing buffer so backspace/delete don't bounce the caret and
+// empty intermediate states ("") don't get coerced to 0 mid-type.
+function QuantityInput({
+  qty,
+  onChangeQty,
+  ariaLabel,
+}: {
+  qty: number;
+  onChangeQty: (q: number) => void;
+  ariaLabel: string;
+}) {
+  const [buffer, setBuffer] = useState<string>(() => (qty > 0 ? String(qty) : ""));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) {
+      setBuffer(qty > 0 ? String(qty) : "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qty, focused]);
+
+  return (
+    <Input
+      type="text"
+      inputMode="numeric"
+      value={buffer}
+      onFocus={() => setFocused(true)}
+      onChange={(e) => {
+        const raw = e.target.value;
+        // Allow empty or digits only — no decimals, no negatives.
+        if (raw === "" || /^\d+$/.test(raw)) {
+          setBuffer(raw);
+        }
+      }}
+      onBlur={() => {
+        setFocused(false);
+        const n = parseInt(buffer || "0", 10);
+        const next = Number.isFinite(n) && n > 0 ? n : 0;
+        setBuffer(next > 0 ? String(next) : "");
+        if (next !== qty) onChangeQty(next);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+      aria-label={ariaLabel}
+    />
+  );
+}
+
+// Uncontrolled-ish unit cost input.
+//
+// Problem this solves: if we render `value={centsToInputString(cents)}` and
+// normalize on every keystroke, the input string gets rewritten while the user
+// is mid-edit (e.g. backspacing `50000.00` → `5000.00` → `5000.0` but the
+// normalizer rewrites it back to `5000.00` each time and the caret jumps to
+// the end). We keep the raw typing buffer locally and only coerce to integer
+// cents on blur. The parent stays the source of truth for the cents value;
+// when it changes (from preload, paste, etc.) and we're not focused, we
+// re-sync the buffer from the new cents.
+function UnitCostInput({
+  cents,
+  onChangeCents,
+  ariaLabel,
+}: {
+  cents: number;
+  onChangeCents: (cents: number) => void;
+  ariaLabel: string;
+}) {
+  const [buffer, setBuffer] = useState<string>(() => centsToInputString(cents));
+  const [focused, setFocused] = useState(false);
+
+  // When the parent's value changes from outside (preload, programmatic edit)
+  // and we're not currently focused, pull the new value into the buffer.
+  useEffect(() => {
+    if (!focused) {
+      setBuffer(centsToInputString(cents));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cents, focused]);
+
+  return (
+    <Input
+      inputMode="decimal"
+      value={buffer}
+      onFocus={() => setFocused(true)}
+      onChange={(e) => {
+        // Allow any in-progress typing: digits, single dot, leading minus,
+        // empty string. We do NOT normalize here — that would cause the caret
+        // to jump on every keystroke. Just store the raw string.
+        const raw = e.target.value;
+        // Light whitelist so pasted garbage doesn't stick; still permissive
+        // enough to allow intermediate states like "", ".", "5.", "5.0".
+        if (raw === "" || /^-?\d*\.?\d*$/.test(raw)) {
+          setBuffer(raw);
+        }
+      }}
+      onBlur={() => {
+        setFocused(false);
+        // Coerce on blur. Clamp to >= 0; empty/invalid becomes 0.
+        const nextCents = Math.max(0, dollarsToCents(buffer));
+        setBuffer(centsToInputString(nextCents));
+        if (nextCents !== cents) onChangeCents(nextCents);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+      aria-label={ariaLabel}
+    />
+  );
+}
+
 function formatCents(cents: number | null | undefined): string {
   const n = Number(cents) || 0;
   return `$${(n / 100).toLocaleString("en-US", {
@@ -1249,29 +1365,19 @@ function LineRow(props: LineRowProps) {
 
       {/* Qty */}
       <div className="col-span-4 md:col-span-2">
-        <Input
-          type="number"
-          inputMode="numeric"
-          min={1}
-          step={1}
-          value={line.orderQty}
-          onChange={(e) => {
-            const n = parseInt(e.target.value || "0", 10);
-            onChange({ orderQty: Number.isFinite(n) ? Math.max(0, n) : 0 });
-          }}
-          aria-label={`Line ${idx + 1} quantity`}
+        <QuantityInput
+          qty={line.orderQty}
+          onChangeQty={(q) => onChange({ orderQty: q })}
+          ariaLabel={`Line ${idx + 1} quantity`}
         />
       </div>
 
       {/* Unit cost */}
       <div className="col-span-4 md:col-span-2">
-        <Input
-          inputMode="decimal"
-          value={centsToInputString(line.unitCostCents)}
-          onChange={(e) => {
-            onChange({ unitCostCents: Math.max(0, dollarsToCents(e.target.value)) });
-          }}
-          aria-label={`Line ${idx + 1} unit cost`}
+        <UnitCostInput
+          cents={line.unitCostCents}
+          onChangeCents={(cents) => onChange({ unitCostCents: Math.max(0, cents) })}
+          ariaLabel={`Line ${idx + 1} unit cost`}
         />
       </div>
 
