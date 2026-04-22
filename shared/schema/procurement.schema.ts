@@ -256,8 +256,13 @@ export const receivingLines = procurementSchema.table("receiving_lines", {
   // PO line linkage
   purchaseOrderLineId: integer("purchase_order_line_id"), // FK to purchase_order_lines (added post-definition)
 
-  // Cost tracking
+  // Cost tracking.
+  // `unitCost` (cents) is kept for back-compat; `unitCostMills` (4-decimal
+  // precision, 1/10000 of a dollar) is authoritative when present. See
+  // migration 0562_receiving_lines_unit_cost_mills.sql and
+  // shared/utils/money.ts (millsToCents / centsToMills).
   unitCost: bigint("unit_cost", { mode: "number" }), // Cost per unit in cents
+  unitCostMills: bigint("unit_cost_mills", { mode: "number" }), // Cost per unit in mills (4-decimal)
 
   // Put-away location (where it goes after receiving)
   putawayLocationId: integer("putaway_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
