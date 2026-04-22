@@ -661,7 +661,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           JOIN oms.oms_orders o ON o.id = w.oms_fulfillment_order_id::int
           WHERE o.shipstation_order_id IS NOT NULL
             AND w.warehouse_status IN ('shipped', 'cancelled')
-            AND (o.shipstation_reconciled_at IS NULL OR o.shipstation_reconciled_at < w.updated_at)
+            AND (o.shipstation_reconciled_at IS NULL OR o.shipstation_reconciled_at < w.completed_at)
           ORDER BY w.updated_at DESC
           LIMIT 1000
         `);
