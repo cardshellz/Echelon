@@ -350,15 +350,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
           console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
 
-          // Create shipment record for the WMS order.
-          // Column name is `order_id` (per shared/schema/orders.schema.ts L348
-          // and migrations/0071_create_namespaces.sql L817). The previous
-          // `wms_order_id` reference threw `column "wms_order_id" does not
-          // exist` and was swallowed by the per-shipment try/catch, so the
-          // outbound_shipments audit row was never written. See
-          // shipstation-sync-audit.md §3 / §1E.
+          // Create shipment record for the WMS order
           await db.execute(sql`
-            INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
+            INSERT INTO wms.outbound_shipments (wms_order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
             VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
             ON CONFLICT DO NOTHING
           `);
