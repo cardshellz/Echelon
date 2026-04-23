@@ -651,6 +651,34 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         // Find WMS orders that are shipped/cancelled but their linked OMS
         // order still has a shipstation_order_id that hasn't been reconciled.
         // Join wms.orders → oms.oms_orders via oms_fulfillment_order_id.
+        //
+        // The JOIN is disjunctive — `wms.orders.oms_fulfillment_order_id` is a
+        // varchar(128) that historically holds TWO distinct shapes:
+        //
+        //   Path A (numeric) — the canonical, current shape. Populated by
+        //     wms-sync.service.ts:syncOmsOrderToWms() as `omsOrder.id` cast to
+        //     text. JOIN on `o.id = w.oms_fulfillment_order_id::int`.
+        //
+        //   Path B (Shopify GID) — ~53k historical shopify-source rows +
+        //     ~9 ebay-source rows store `gid://shopify/Order/NNN`. These were
+        //     invisible to the reconcile prior to this change. JOIN on
+        //     `o.external_order_id = w.oms_fulfillment_order_id` (the OMS
+        //     column stores the same GID; see oms-webhooks.ts:280 via
+        //     mapShopifyOrderToOrderData using admin_graphql_api_id).
+        //
+        // Why a disjunctive JOIN and not two separate queries:
+        //   AND short-circuits in Postgres; the `::int` cast only runs for
+        //   rows matching the numeric regex, so the cast-crash P0 bug
+        //   (shipstation-sync-audit.md §4 H3) cannot recur. The regex is no
+        //   longer needed in WHERE — the JOIN itself gates both cast and
+        //   equality. NULLs are excluded (NULL ~ anything and NULL = anything
+        //   are both NULL → falsy). Non-numeric non-GID values (46 rows per
+        //   audit) match neither branch and are safely excluded.
+        //
+        // Index support for Path B: `idx_oms_orders_external` on
+        // `oms.oms_orders(external_order_id)` exists
+        // (migrations/0071_create_namespaces.sql:1524) — the planner will use
+        // it for the GID equality lookup.
         const rows: any = await db.execute(sql`
           SELECT w.id AS wms_id, w.order_number AS wms_order_number,
                  w.warehouse_status, w.completed_at, w.tracking_number,
@@ -658,16 +686,13 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                  o.shipstation_order_id, o.shipstation_reconciled_at,
                  o.tracking_carrier
           FROM wms.orders w
-          JOIN oms.oms_orders o ON o.id = w.oms_fulfillment_order_id::int
+          JOIN oms.oms_orders o ON (
+                 (w.oms_fulfillment_order_id ~ '^[0-9]+$'
+                    AND o.id = w.oms_fulfillment_order_id::int)
+              OR (w.oms_fulfillment_order_id LIKE 'gid://shopify/Order/%'
+                    AND o.external_order_id = w.oms_fulfillment_order_id)
+          )
           WHERE o.shipstation_order_id IS NOT NULL
-            -- Guard the ::int cast: wms.orders.oms_fulfillment_order_id is a
-            -- varchar that occasionally holds non-numeric values (e.g. Shopify
-            -- GIDs of the form gid://shopify/Order/NNN). Without this
-            -- predicate a single poison row throws 'invalid input syntax for
-            -- integer' and the outer try/catch aborts the entire hourly sweep.
-            -- See shipstation-sync-audit.md section 4 H3. Widening coverage to
-            -- include GID rows is a separate concern (P1).
-            AND w.oms_fulfillment_order_id ~ '^[0-9]+$'
             AND w.warehouse_status IN ('shipped', 'cancelled')
             AND (o.shipstation_reconciled_at IS NULL OR o.shipstation_reconciled_at < w.completed_at)
           ORDER BY w.updated_at DESC
