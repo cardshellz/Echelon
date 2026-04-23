@@ -434,9 +434,43 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   // Meta
   weightGrams: integer("weight_grams"), // For freight estimation
   notes: text("notes"),
+
+  // Line taxonomy (migration 0563) — enables discount/fee/tax/rebate/adjustment
+  // lines alongside product lines. See PO_LINE_TYPES below for the full set.
+  // 'product' is the default for back-compat; existing rows are implicitly
+  // product. parent_line_id is an optional self-reference used by non-product
+  // lines to target a specific product line (e.g. "10% off line 2"). Parent
+  // must be a product line; no chains.
+  lineType: varchar("line_type", { length: 20 }).notNull().default("product"),
+  parentLineId: integer("parent_line_id"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
+
+// ---------------------------------------------------------------------------
+// PO line taxonomy (migration 0563)
+// ---------------------------------------------------------------------------
+// product     — ordered goods. requires product_variant_id. cost_mills >= 0, qty > 0.
+// discount    — flat/percent discount line. no variant. cost_mills <= 0, qty == 1.
+// fee         — freight, tooling, surcharge. no variant. cost_mills >= 0, qty >= 1.
+// tax         — itemized tax. no variant. cost_mills >= 0, qty == 1.
+// rebate      — forward-looking rebate. no variant. cost_mills <= 0, qty == 1.
+// adjustment  — catch-all. signed. qty == 1.
+export const PO_LINE_TYPES = [
+  "product",
+  "discount",
+  "fee",
+  "tax",
+  "rebate",
+  "adjustment",
+] as const;
+
+export type PoLineType = (typeof PO_LINE_TYPES)[number];
+
+export function isPoLineType(value: unknown): value is PoLineType {
+  return typeof value === "string" && (PO_LINE_TYPES as readonly string[]).includes(value);
+}
 
 export const insertPurchaseOrderLineSchema = createInsertSchema(purchaseOrderLines).omit({
   id: true,
