@@ -342,25 +342,64 @@ export type CombinedOrderGroup = typeof combinedOrderGroups.$inferSelect;
 // SHIPMENTS & FULFILLMENT
 // ============================================
 
-// Shipments - tracks fulfillment from warehouse through carrier delivery
+// Shipments - tracks fulfillment from warehouse through carrier delivery.
+//
+// Plan reference: shipstation-flow-refactor-plan.md §2 (invariant #3 —
+// shipment is a first-class entity), §4.3, §6 Group A Commit 4.
+//
+// The `status` column is backed by the PG enum `wms.shipment_status`
+// (created in migration 060). Drizzle does not natively map PG enum
+// types, so we keep the TS column type as varchar(20) here and narrow to
+// the `ShipmentStatus` union (from shared/enums/order-status.ts) at the
+// application layer. The full enum set is:
+//   planned, queued, labeled, shipped,
+//   on_hold, voided, cancelled, returned, lost
 export const outboundShipments = wmsSchema.table("outbound_shipments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   orderId: integer("order_id").references(() => orders.id),
   channelId: integer("channel_id").references(() => channels.id),
   externalFulfillmentId: varchar("external_fulfillment_id", { length: 200 }), // Shopify fulfillment ID or external reference
   source: varchar("source", { length: 30 }).notNull().default("shopify_webhook"), // shopify_webhook, manual, api
-  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, packed, shipped, delivered
+  // DB-level enum: wms.shipment_status. See header comment above for values.
+  status: varchar("status", { length: 20 }).notNull().default("planned"),
   carrier: varchar("carrier", { length: 100 }),
   trackingNumber: varchar("tracking_number", { length: 200 }),
   trackingUrl: text("tracking_url"),
   shippedAt: timestamp("shipped_at"),
   deliveredAt: timestamp("delivered_at"),
-  
+
   // Shipping costs (for dropship invoicing & profitability)
   carrierCostCents: bigint("carrier_cost_cents", { mode: "number" }).default(0), // Actual carrier charge
   dunnageCostCents: bigint("dunnage_cost_cents", { mode: "number" }).default(0), // Packaging materials
   // totalShippingCostCents computed column added via migration
-  
+
+  // ===== SHIPSTATION ↔ SHOPIFY LINKAGE =====
+  // Canonical pointers to the shipment's external-system counterparts.
+  // Added by migration 060 (§4.3). Populated by Group C (SS push) and
+  // Group E (Shopify fulfillment push) respectively.
+  shipstationOrderId: integer("shipstation_order_id"),
+  shipstationOrderKey: varchar("shipstation_order_key", { length: 100 }),
+  shopifyFulfillmentId: varchar("shopify_fulfillment_id", { length: 100 }),
+
+  // ===== OPS REVIEW FLAGS =====
+  // Set when the shipment needs warehouse-ops attention (e.g. customer
+  // cancel arrived after the label was printed, or the ship-to address
+  // changed post-label). Added by migration 060 (§4.3).
+  requiresReview: boolean("requires_review").notNull().default(false),
+  reviewReason: varchar("review_reason", { length: 100 }),
+  addressChangedAfterLabel: boolean("address_changed_after_label").notNull().default(false),
+
+  // ===== LIFECYCLE TIMESTAMPS =====
+  // Stamped on the state-machine transitions defined in §2.4. Added by
+  // migration 060 (§4.3). `lastReconciledAt` is set by the hourly
+  // reconcile sweep (Group F).
+  voidedAt: timestamp("voided_at"),
+  voidedReason: varchar("voided_reason", { length: 200 }),
+  onHoldReason: varchar("on_hold_reason", { length: 200 }),
+  cancelledAt: timestamp("cancelled_at"),
+  returnedAt: timestamp("returned_at"),
+  lastReconciledAt: timestamp("last_reconciled_at"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
