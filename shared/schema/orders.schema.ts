@@ -124,6 +124,19 @@ export const orders = wmsSchema.table("orders", {
   unitCount: integer("unit_count").notNull().default(0), // Total units (sum of quantities)
   pickedCount: integer("picked_count").notNull().default(0), // Units picked so far
 
+  // ===== FINANCIAL SNAPSHOT (migration 058) =====
+  // Snapshot of OMS financial data at sync time — WMS owns this after
+  // creation (invariant #2: "WMS is the sole source of truth for fulfillment").
+  // Populated by wmsSyncService in Group B; read by ShipStation push in
+  // Group C. Integer cents; no floats. Defaults are 0 / 'USD' so existing
+  // rows stay valid until backfill.
+  amountPaidCents: bigint("amount_paid_cents", { mode: "number" }).notNull().default(0),
+  taxCents: bigint("tax_cents", { mode: "number" }).notNull().default(0),
+  shippingCents: bigint("shipping_cents", { mode: "number" }).notNull().default(0),
+  discountCents: bigint("discount_cents", { mode: "number" }).notNull().default(0),
+  totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+
   // ===== NOTES =====
   notes: text("notes"), // Internal notes
   shortReason: text("short_reason"),
