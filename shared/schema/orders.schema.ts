@@ -197,6 +197,14 @@ export const orderItems = wmsSchema.table("order_items", {
   pickedQuantity: integer("picked_quantity").notNull().default(0),
   fulfilledQuantity: integer("fulfilled_quantity").notNull().default(0), // Shipped to channel
 
+  // ===== PRICING SNAPSHOT (migration 059 — §4.2 of shipstation-flow-refactor-plan.md) =====
+  // Populated by OMS→WMS sync (Group B) from oms.oms_order_lines (oms.schema.ts:109-110).
+  // WMS owns these values once set; ShipStation push reads unitPriceCents as SS unitPrice.
+  // Defaults are zero until sync lands; no backfill in this commit.
+  unitPriceCents: bigint("unit_price_cents", { mode: "number" }).notNull().default(0),
+  paidPriceCents: bigint("paid_price_cents", { mode: "number" }).notNull().default(0),
+  totalPriceCents: bigint("total_price_cents", { mode: "number" }).notNull().default(0),
+
   // ===== WAREHOUSE OPERATIONS =====
   status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, picked, shorted, cancelled
   location: varchar("location", { length: 50 }).notNull().default("UNASSIGNED"),
