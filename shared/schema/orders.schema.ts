@@ -200,15 +200,6 @@ export const orderItems = wmsSchema.table("order_items", {
   pickedQuantity: integer("picked_quantity").notNull().default(0),
   fulfilledQuantity: integer("fulfilled_quantity").notNull().default(0), // Shipped to channel
 
-  // ===== LINE PRICES (migration 059) =====
-  // Snapshot of OMS line prices at sync time — WMS becomes the read
-  // source for ShipStation push (closes audit bug B1). Integer cents.
-  // Populated by wmsSyncService in Group B (Commit 7); read by SS push
-  // validator in Group C (Commit 11). Defaults to 0 until backfill.
-  unitPriceCents: bigint("unit_price_cents", { mode: "number" }).notNull().default(0),
-  paidPriceCents: bigint("paid_price_cents", { mode: "number" }).notNull().default(0),
-  totalPriceCents: bigint("total_price_cents", { mode: "number" }).notNull().default(0),
-
   // ===== WAREHOUSE OPERATIONS =====
   status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, picked, shorted, cancelled
   location: varchar("location", { length: 50 }).notNull().default("UNASSIGNED"),
