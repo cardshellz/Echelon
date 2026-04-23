@@ -132,16 +132,6 @@ export const orders = wmsSchema.table("orders", {
   // ===== DISPLAY (legacy, for order cards) =====
   legacyOrderId: varchar("legacy_order_id", { length: 100 }), // Legacy order ID from external systems
 
-  // ===== FINANCIAL SNAPSHOT (migration 058 — §4.1 of shipstation-flow-refactor-plan.md) =====
-  // Populated by OMS→WMS sync (Group B). WMS owns these values once set.
-  // Defaults are zero / 'USD' until sync lands; no backfill in this commit.
-  amountPaidCents: bigint("amount_paid_cents", { mode: "number" }).notNull().default(0),
-  taxCents: bigint("tax_cents", { mode: "number" }).notNull().default(0),
-  shippingCents: bigint("shipping_cents", { mode: "number" }).notNull().default(0),
-  discountCents: bigint("discount_cents", { mode: "number" }).notNull().default(0),
-  totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
-  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
-
   // ===== TIMESTAMPS =====
   orderPlacedAt: timestamp("order_placed_at"), // When placed in channel
   shopifyCreatedAt: timestamp("shopify_created_at"), // Legacy
