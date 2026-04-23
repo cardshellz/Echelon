@@ -90,6 +90,14 @@ export default function PurchasingDashboard() {
     refetchInterval: 5 * 60 * 1000,
   });
 
+  // Feature flag: when new PO editor is enabled, draft "Review" buttons
+  // should open the inline editor (/edit) instead of the old detail page.
+  const { data: procurementSettings } = useQuery<{ useNewPoEditor?: boolean }>({
+    queryKey: ["/api/settings/procurement"],
+    staleTime: 60_000,
+  });
+  const useNewPoEditor = procurementSettings?.useNewPoEditor === true;
+
   const runAutoDraftMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch("/api/purchasing/auto-draft/run", { method: "POST" });
@@ -270,7 +278,7 @@ export default function PurchasingDashboard() {
                         <div className="text-[10px] text-muted-foreground">estimated</div>
                       </div>
                     )}
-                    <Button size="sm" variant="outline" className="text-[11px] h-7 bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100 flex-shrink-0" onClick={() => navigate(`/purchase-orders/${po.id}`)}>
+                    <Button size="sm" variant="outline" className="text-[11px] h-7 bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100 flex-shrink-0" onClick={() => navigate(useNewPoEditor ? `/purchase-orders/${po.id}/edit` : `/purchase-orders/${po.id}`)}>
                       Review
                     </Button>
                   </div>

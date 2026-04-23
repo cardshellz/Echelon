@@ -131,6 +131,18 @@ export default function PurchaseOrders() {
     setShowCreateDialog(true);
   }
 
+  // Choose the right destination for clicking a PO row or card.
+  // When the new editor flag is on, drafts open in the inline editor (same
+  // flow as creation). Everything else (sent, received, etc.) opens in the
+  // existing detail page where receipts/invoices/shipments/history tabs
+  // still live.
+  function poHref(po: PurchaseOrder): string {
+    if (useNewPoEditor && po.status === "draft") {
+      return `/purchase-orders/${po.id}/edit`;
+    }
+    return `/purchase-orders/${po.id}`;
+  }
+
   // Create dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [vendorOpen, setVendorOpen] = useState(false);
@@ -314,6 +326,8 @@ export default function PurchaseOrders() {
       } else {
         toast({ title: "Purchase order created", description: `${po.poNumber} created as draft` });
       }
+      // This dialog only runs when the new editor flag is OFF; send users
+      // to the detail page as today.
       navigate(`/purchase-orders/${po.id}`);
     },
     onError: (err: Error) => {
@@ -522,7 +536,7 @@ export default function PurchaseOrders() {
             <Card
               key={po.id}
               className="cursor-pointer active:bg-accent/50"
-              onClick={() => navigate(`/purchase-orders/${po.id}`)}
+              onClick={() => navigate(poHref(po))}
             >
               <CardContent className="p-3">
                 <div className="flex items-start justify-between gap-2">
@@ -598,7 +612,7 @@ export default function PurchaseOrders() {
                 <TableRow
                   key={po.id}
                   className="cursor-pointer"
-                  onClick={() => navigate(`/purchase-orders/${po.id}`)}
+                  onClick={() => navigate(poHref(po))}
                 >
                   <TableCell className="font-mono font-medium">
                     <div className="flex items-center gap-2">

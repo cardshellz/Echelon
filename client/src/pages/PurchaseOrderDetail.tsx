@@ -3,7 +3,7 @@ import {
   formatMills,
   centsToMills,
 } from "@shared/utils/money";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -174,6 +174,24 @@ export default function PurchaseOrderDetail() {
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
+
+  // Feature-flag redirect: when the new PO editor is enabled, land-on-draft
+  // via direct URL should hop over to the new inline editor. Keeps this
+  // page as the home for non-draft POs (receipts/invoices/shipments/history
+  // tabs still live here).
+  const { data: procurementSettings } = useQuery<{ useNewPoEditor?: boolean }>({
+    queryKey: ["/api/settings/procurement"],
+    staleTime: 60_000,
+  });
+  useEffect(() => {
+    if (
+      procurementSettings?.useNewPoEditor === true &&
+      po?.id &&
+      po?.status === "draft"
+    ) {
+      navigate(`/purchase-orders/${po.id}/edit`, { replace: true });
+    }
+  }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, navigate]);
 
   const { data: historyData } = useQuery<{ history: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/history`],
