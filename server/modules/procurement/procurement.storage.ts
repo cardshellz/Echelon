@@ -714,6 +714,23 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>): Promise<PurchaseOrder | null> {
+    // Defensive validation: this helper writes to po_status_history, which
+    // has to_status NOT NULL. Callers must supply valid historyData with at
+    // least `toStatus`. If you just need to update PO fields without a
+    // status transition, use updatePurchaseOrder() instead.
+    if (!historyData || typeof historyData !== "object") {
+      throw new Error(
+        "updatePurchaseOrderStatusWithHistory requires historyData. Use updatePurchaseOrder() for non-status updates.",
+      );
+    }
+    if (!historyData.toStatus) {
+      throw new Error(
+        "updatePurchaseOrderStatusWithHistory requires historyData.toStatus. " +
+        "Received keys: " + Object.keys(historyData).join(",") + ". " +
+        "Use updatePurchaseOrder() for non-status updates.",
+      );
+    }
+
     return await db.transaction(async (tx) => {
       const result = await tx.update(purchaseOrders)
         .set({ ...updates, updatedAt: new Date() })

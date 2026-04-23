@@ -275,10 +275,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       createdBy: data.createdBy,
       updatedBy: data.createdBy,
     }, {
-        oldStatus: null,
-        newStatus: "draft",
+        fromStatus: null,
+        toStatus: "draft",
         changedBy: data.createdBy,
-        changeNotes: "PO created"
+        notes: "PO created"
       });
     return po;
   }
@@ -291,7 +291,12 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot edit PO in '${po.status}' status`, 400);
     }
 
-    return await storage.updatePurchaseOrderStatusWithHistory(id, { ...updates, updatedBy: userId });
+    // updatePO is a generic edit (notes, priority, etc.). No status change,
+    // so we use the plain update helper. Previously used
+    // updatePurchaseOrderStatusWithHistory which required historyData we
+    // weren't supplying, causing to_status NOT NULL violations on any
+    // non-status field edit.
+    return await storage.updatePurchaseOrder(id, { ...updates, updatedBy: userId });
   }
 
   async function deletePO(id: number) {
@@ -354,12 +359,13 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (changes.length === 0) return po;
 
     patch.updatedBy = userId;
-    await storage.updatePurchaseOrderStatusWithHistory(id, patch, {
-      oldStatus: null,
-      newStatus: po.status,
-      changedBy: userId,
-      changeNotes: changes.join("; ")
-    });
+    // No status transition here — incoterms/charges edits don't change PO
+    // status, they just modify header fields. Use the plain update helper.
+    // (The earlier call site passed historyData with wrong field names
+    // oldStatus/newStatus/changeNotes that don't map to po_status_history
+    // columns, so to_status stayed NULL and the insert blew up.)
+    // Audit trail is still captured on po_events via the parent mutation.
+    await storage.updatePurchaseOrder(id, patch);
     return await recalculateTotals(id, userId);
   }
 
@@ -586,10 +592,10 @@ export function createPurchasingService(db: any, storage: Storage) {
         approvalTierId: tier.id,
         updatedBy: userId,
       }, {
-        oldStatus: po.status,
-        newStatus: "pending_approval",
+        fromStatus: po.status,
+        toStatus: "pending_approval",
         changedBy: userId,
-        changeNotes: `Approval required: ${tier.tierName}`
+        notes: `Approval required: ${tier.tierName}`
       });
     } else {
       // Auto-approve (no tier matches)
@@ -601,10 +607,10 @@ export function createPurchasingService(db: any, storage: Storage) {
         approvalNotes: "Auto-approved (below approval threshold)",
         updatedBy: userId,
       }, {
-        oldStatus: po.status,
-        newStatus: "approved",
+        fromStatus: po.status,
+        toStatus: "approved",
         changedBy: userId,
-        changeNotes: "Auto-approved (below threshold)"
+        notes: "Auto-approved (below threshold)"
       });
     }
   }
@@ -622,10 +628,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       approvalNotes: null,
       updatedBy: userId,
     }, {
-        oldStatus: po.status,
-        newStatus: "draft",
+        fromStatus: po.status,
+        toStatus: "draft",
         changedBy: userId,
-        changeNotes: notes || "Returned to draft"
+        notes: notes || "Returned to draft"
       });
   }
 
@@ -641,10 +647,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       approvalNotes: notes,
       updatedBy: userId,
     }, {
-        oldStatus: po.status,
-        newStatus: "approved",
+        fromStatus: po.status,
+        toStatus: "approved",
         changedBy: userId,
-        changeNotes: notes || "Approved"
+        notes: notes || "Approved"
       });
   }
 
@@ -659,10 +665,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       sentToVendorAt: new Date(),
       updatedBy: userId,
     }, {
-        oldStatus: po.status,
-        newStatus: "sent",
+        fromStatus: po.status,
+        toStatus: "sent",
         changedBy: userId,
-        changeNotes: "Sent to vendor"
+        notes: "Sent to vendor"
       });
   }
 
@@ -711,10 +717,10 @@ export function createPurchasingService(db: any, storage: Storage) {
         approvalNotes: "Auto-approved (solo mode — no approval tiers)",
         updatedBy: userId,
       }, {
-        oldStatus: "draft",
-        newStatus: "approved",
+        fromStatus: "draft",
+        toStatus: "approved",
         changedBy: userId,
-        changeNotes: "Auto-approved (solo mode)"
+        notes: "Auto-approved (solo mode)"
       });
     }
 
@@ -725,10 +731,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       sentToVendorAt: new Date(),
       updatedBy: userId,
     }, {
-        oldStatus: "approved",
-        newStatus: "sent",
+        fromStatus: "approved",
+        toStatus: "sent",
         changedBy: userId,
-        changeNotes: "Sent to vendor (solo mode)"
+        notes: "Sent to vendor (solo mode)"
       });
   }
 
@@ -744,10 +750,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       confirmedDeliveryDate: data.confirmedDeliveryDate,
       updatedBy: userId,
     }, {
-        oldStatus: po.status,
-        newStatus: "acknowledged",
+        fromStatus: po.status,
+        toStatus: "acknowledged",
         changedBy: userId,
-        changeNotes: "Vendor acknowledged"
+        notes: "Vendor acknowledged"
       });
   }
 
@@ -776,10 +782,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       cancelReason: reason,
       updatedBy: userId,
     }, {
-        oldStatus: po.status,
-        newStatus: "cancelled",
+        fromStatus: po.status,
+        toStatus: "cancelled",
         changedBy: userId,
-        changeNotes: reason
+        notes: reason
       });
   }
 
@@ -794,10 +800,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       closedBy: userId,
       updatedBy: userId,
     }, {
-        oldStatus: po.status,
-        newStatus: "closed",
+        fromStatus: po.status,
+        toStatus: "closed",
         changedBy: userId,
-        changeNotes: notes || "PO closed"
+        notes: notes || "PO closed"
       });
   }
 
@@ -827,10 +833,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       closedBy: userId,
       updatedBy: userId,
     }, {
-        oldStatus: po.status,
-        newStatus: "closed",
+        fromStatus: po.status,
+        toStatus: "closed",
         changedBy: userId,
-        changeNotes: `Closed short: ${reason}`
+        notes: `Closed short: ${reason}`
       });
   }
 
@@ -1017,17 +1023,17 @@ export function createPurchasingService(db: any, storage: Storage) {
         status: "received",
         actualDeliveryDate: new Date(),
       }, {
-        oldStatus: po.status,
-        newStatus: "received",
+        fromStatus: po.status,
+        toStatus: "received",
         changedBy: undefined,
-        changeNotes: "All lines fully received"
+        notes: "All lines fully received"
       });
     } else if (someReceived && po.status !== "partially_received") {
       await storage.updatePurchaseOrderStatusWithHistory(poId, { status: "partially_received" }, {
-        oldStatus: po.status,
-        newStatus: "partially_received",
+        fromStatus: po.status,
+        toStatus: "partially_received",
         changedBy: undefined,
-        changeNotes: "Partial receipt"
+        notes: "Partial receipt"
       });
     }
   }
@@ -1471,7 +1477,7 @@ export function createPurchasingService(db: any, storage: Storage) {
         fromStatus: null,
         toStatus: "draft",
         changedBy: userId ?? null,
-        changeNotes: "PO created (inline)",
+        notes: "PO created (inline)",
       });
 
       // Event stream.
@@ -1552,7 +1558,7 @@ export function createPurchasingService(db: any, storage: Storage) {
             fromStatus: po.status,
             toStatus: "pending_approval",
             changedBy: userId ?? null,
-            changeNotes: `Submitted for approval (tier: ${tier.tierName})`,
+            notes: `Submitted for approval (tier: ${tier.tierName})`,
           });
           await emitPoEventTx(tx, poId, "submitted", userId, {
             tier_id: tier.id,
@@ -1592,7 +1598,7 @@ export function createPurchasingService(db: any, storage: Storage) {
           fromStatus: currentStatus,
           toStatus: "approved",
           changedBy: userId ?? null,
-          changeNotes: settings.requireApproval
+          notes: settings.requireApproval
             ? "Auto-approved (no matching tier)"
             : "Auto-approved (approval not required)",
         });
@@ -1620,7 +1626,7 @@ export function createPurchasingService(db: any, storage: Storage) {
         fromStatus: currentStatus,
         toStatus: "sent",
         changedBy: userId ?? null,
-        changeNotes: "Sent to vendor (PDF placeholder)",
+        notes: "Sent to vendor (PDF placeholder)",
       });
       await emitPoEventTx(tx, poId, "sent_to_vendor", userId, {
         method: "pdf_placeholder",
