@@ -34,7 +34,9 @@ export function registerDropshipAdminRoutes(app: Express) {
         const vendorResult = await client.query(
           `SELECT v.id, v.name, v.company_name, v.email, v.status, v.tier,
                   v.wallet_balance_cents, v.ebay_user_id, v.created_at,
-                  (SELECT COUNT(*) FROM oms.oms_orders o WHERE o.vendor_id = v.id) as total_orders
+                  (SELECT COUNT(*) FROM oms.oms_orders o WHERE o.vendor_id = v.id) as total_orders,
+                  (SELECT COUNT(*) FROM oms.oms_orders o WHERE o.vendor_id = v.id AND o.status IN ('pending', 'confirmed')) as pending_orders,
+                  (SELECT COUNT(*) FROM dropship_vendor_products p WHERE p.vendor_id = v.id) as listings_count
            FROM dropship_vendors v
            ${where}
            ORDER BY v.created_at DESC
@@ -52,6 +54,8 @@ export function registerDropshipAdminRoutes(app: Express) {
             tier: v.tier,
             wallet_balance_cents: v.wallet_balance_cents,
             total_orders: parseInt(v.total_orders) || 0,
+            pending_orders: parseInt(v.pending_orders) || 0,
+            listings_count: parseInt(v.listings_count) || 0,
             ebay_connected: !!v.ebay_user_id,
             ebay_user_id: v.ebay_user_id,
             created_at: v.created_at,
@@ -209,11 +213,11 @@ export function registerDropshipAdminRoutes(app: Express) {
     }
   });
 
-  // PUT /api/admin/products/:id/dropship-eligible — toggle dropship eligibility
-  app.put("/api/admin/products/:id/dropship-eligible", requireAuth, async (req, res) => {
+  // PUT /api/admin/variants/:id/dropship-eligible — toggle dropship eligibility
+  app.put("/api/admin/variants/:id/dropship-eligible", requireAuth, async (req, res) => {
     try {
-      const productId = parseInt(req.params.id);
-      if (isNaN(productId)) return res.status(400).json({ error: "invalid_id" });
+      const variantId = parseInt(req.params.id);
+      if (isNaN(variantId)) return res.status(400).json({ error: "invalid_id" });
 
       const { eligible } = req.body;
       if (typeof eligible !== "boolean") {
@@ -223,8 +227,8 @@ export function registerDropshipAdminRoutes(app: Express) {
       const client = await pool.connect();
       try {
         const result = await client.query(
-          `UPDATE catalog.products SET dropship_eligible = $1 WHERE id = $2 RETURNING id, name, dropship_eligible`,
-          [eligible, productId]
+          `UPDATE catalog.product_variants SET dropship_eligible = $1 WHERE id = $2 RETURNING id, name, dropship_eligible`,
+          [eligible, variantId]
         );
 
         if (result.rows.length === 0) {
@@ -245,12 +249,12 @@ export function registerDropshipAdminRoutes(app: Express) {
     }
   });
 
-  // POST /api/admin/products/bulk-dropship-eligible — bulk toggle
-  app.post("/api/admin/products/bulk-dropship-eligible", requireAuth, async (req, res) => {
+  // POST /api/admin/variants/bulk-dropship-eligible — bulk toggle
+  app.post("/api/admin/variants/bulk-dropship-eligible", requireAuth, async (req, res) => {
     try {
-      const { productIds, eligible } = req.body;
-      if (!Array.isArray(productIds) || productIds.length === 0) {
-        return res.status(400).json({ error: "invalid_body", message: "productIds must be a non-empty array" });
+      const { variantIds, eligible } = req.body;
+      if (!Array.isArray(variantIds) || variantIds.length === 0) {
+        return res.status(400).json({ error: "invalid_body", message: "variantIds must be a non-empty array" });
       }
       if (typeof eligible !== "boolean") {
         return res.status(400).json({ error: "invalid_body", message: "eligible must be a boolean" });
@@ -259,13 +263,13 @@ export function registerDropshipAdminRoutes(app: Express) {
       const client = await pool.connect();
       try {
         const result = await client.query(
-          `UPDATE catalog.products SET dropship_eligible = $1 WHERE id = ANY($2::int[]) RETURNING id`,
-          [eligible, productIds]
+          `UPDATE catalog.product_variants SET dropship_eligible = $1 WHERE id = ANY($2::int[]) RETURNING id`,
+          [eligible, variantIds]
         );
 
         return res.json({
           updated: result.rowCount,
-          product_ids: result.rows.map((r: any) => r.id),
+          variant_ids: result.rows.map((r: any) => r.id),
         });
       } finally {
         client.release();

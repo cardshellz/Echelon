@@ -25,6 +25,8 @@ import {
   ChevronsUpDown,
   Check
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 
 interface Product {
   id: number;
@@ -46,6 +48,7 @@ interface ProductVariant {
   barcode: string | null;
   shopifyVariantId: string | null;
   isActive: boolean;
+  dropshipEligible?: boolean;
 }
 
 export default function Variants() {
@@ -53,6 +56,7 @@ export default function Variants() {
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
   const [linkFilter, setLinkFilter] = useState<string>("all");
+  const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>([]);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
@@ -134,6 +138,45 @@ export default function Variants() {
     onError: (error) => {
       if (error.message === "SKU_CONFLICT") return;
       toast({ title: "Failed to link variant", variant: "destructive" });
+    },
+  });
+
+  const dropshipMutation = useMutation({
+    mutationFn: async ({ variantId, eligible }: { variantId: number; eligible: boolean }) => {
+      const res = await fetch(`/api/admin/variants/${variantId}/dropship-eligible`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eligible }),
+      });
+      if (!res.ok) throw new Error("Failed to update dropship eligibility");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      toast({ title: "Dropship eligibility updated" });
+    },
+    onError: () => {
+      toast({ title: "Failed to update dropship eligibility", variant: "destructive" });
+    },
+  });
+
+  const bulkDropshipMutation = useMutation({
+    mutationFn: async ({ variantIds, eligible }: { variantIds: number[]; eligible: boolean }) => {
+      const res = await fetch("/api/admin/variants/bulk-dropship-eligible", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ variantIds, eligible }),
+      });
+      if (!res.ok) throw new Error("Failed to update bulk dropship eligibility");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      setSelectedVariantIds([]);
+      toast({ title: "Bulk dropship eligibility updated" });
+    },
+    onError: () => {
+      toast({ title: "Failed to update bulk dropship eligibility", variant: "destructive" });
     },
   });
 
@@ -491,6 +534,18 @@ export default function Variants() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-12">
+                    <Checkbox 
+                      checked={filteredVariants.length > 0 && selectedVariantIds.length === filteredVariants.length}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          setSelectedVariantIds(filteredVariants.map(v => v.id));
+                        } else {
+                          setSelectedVariantIds([]);
+                        }
+                      }}
+                    />
+                  </TableHead>
                   <TableHead>Variant SKU</TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>Units</TableHead>
@@ -498,6 +553,7 @@ export default function Variants() {
                   <TableHead>Breaks Into</TableHead>
                   <TableHead>Linked Product</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Dropship</TableHead>
                   <TableHead className="w-24">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -507,6 +563,18 @@ export default function Variants() {
                   const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1;
                   return (
                   <TableRow key={variant.id} data-testid={`variant-row-${variant.id}`}>
+                    <TableCell>
+                      <Checkbox 
+                        checked={selectedVariantIds.includes(variant.id)}
+                        onCheckedChange={(checked) => {
+                          if (checked) {
+                            setSelectedVariantIds(prev => [...prev, variant.id]);
+                          } else {
+                            setSelectedVariantIds(prev => prev.filter(id => id !== variant.id));
+                          }
+                        }}
+                      />
+                    </TableCell>
                     <TableCell className="font-mono text-sm">{variant.sku || '-'}</TableCell>
                     <TableCell>{variant.name}</TableCell>
                     <TableCell>{variant.unitsPerVariant}</TableCell>
@@ -541,6 +609,14 @@ export default function Variants() {
                       </Badge>
                     </TableCell>
                     <TableCell>
+                      <Switch
+                        checked={!!variant.dropshipEligible}
+                        onCheckedChange={(checked) => {
+                          dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell>
                       <Button
                         variant="outline"
                         size="sm"
@@ -568,6 +644,31 @@ export default function Variants() {
       <div className="text-xs md:text-sm text-muted-foreground">
         Showing {filteredVariants.length} of {allVariants.length} variants
       </div>
+
+      {selectedVariantIds.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-4 z-50 border border-slate-700 animate-in slide-in-from-bottom-10 fade-in duration-300">
+          <span className="text-sm font-medium">{selectedVariantIds.length} Variants Selected</span>
+          <div className="h-4 w-px bg-slate-600"></div>
+          <Button 
+            size="sm" 
+            variant="ghost" 
+            className="hover:bg-slate-800 text-green-400 hover:text-green-300 transition-colors"
+            onClick={() => bulkDropshipMutation.mutate({ variantIds: selectedVariantIds, eligible: true })}
+            disabled={bulkDropshipMutation.isPending}
+          >
+            Enable Dropship
+          </Button>
+          <Button 
+            size="sm" 
+            variant="ghost" 
+            className="hover:bg-slate-800 text-red-400 hover:text-red-300 transition-colors"
+            onClick={() => bulkDropshipMutation.mutate({ variantIds: selectedVariantIds, eligible: false })}
+            disabled={bulkDropshipMutation.isPending}
+          >
+            Disable Dropship
+          </Button>
+        </div>
+      )}
 
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">

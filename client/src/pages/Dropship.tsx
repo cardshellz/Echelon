@@ -76,14 +76,16 @@ export default function Dropship() {
     status: v.status === "active" ? "Active" : v.status === "suspended" ? "Suspended" : "Pending",
     platform: v.ebay_connected ? "eBay" : "Shopify",
     lastSync: new Date(v.created_at).toLocaleDateString(),
-    health: 100,
-    listings: 0,
+    health: 100, // API health still hardcoded for now
+    listings: v.listings_count || 0,
     balance: "$" + ((v.wallet_balance_cents || 0) / 100).toFixed(2),
+    pendingOrders: v.pending_orders || 0,
   }));
 
   const syncCatalog = catalogResponse?.catalog || [];
 
   const totalUnsettled = vendorsList.reduce((acc: number, v: any) => acc + (v.wallet_balance_cents || 0), 0);
+  const totalPendingOrders = vendorsList.reduce((acc: number, v: any) => acc + (v.pending_orders || 0), 0);
   const formattedUnsettled = "$" + (totalUnsettled / 100).toFixed(2);
 
   return (
@@ -177,7 +179,7 @@ export default function Dropship() {
           </div>
           <div className="bg-muted/30 p-2 md:p-3 rounded-md border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Pending Orders</div>
-            <div className="text-xl md:text-2xl font-bold font-mono text-primary mt-1" data-testid="text-pending-orders">0</div>
+            <div className="text-xl md:text-2xl font-bold font-mono text-primary mt-1" data-testid="text-pending-orders">{totalPendingOrders}</div>
           </div>
           <div className="bg-muted/30 p-2 md:p-3 rounded-md border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Unsettled Balance</div>

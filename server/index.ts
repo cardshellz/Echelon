@@ -262,7 +262,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
 (async () => {
   // Run startup migrations to ensure database schema is up to date
-  await runStartupMigrations();
+  try {
+    await runStartupMigrations();
+  } catch (err) {
+    console.error("Startup migrations failed, continuing anyway:", err);
+  }
 
   // Create WMS service container and attach to app for route handlers
   const services = createServices(db);

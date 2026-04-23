@@ -54,7 +54,6 @@ interface Product {
   shopifyProductId: string | null;
   status: string | null;
   isActive: boolean;
-  dropshipEligible: boolean;
   createdAt: string;
   updatedAt: string;
   variants: ProductVariant[];
