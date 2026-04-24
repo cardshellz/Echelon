@@ -14,8 +14,260 @@ import { eq, and, sql } from "drizzle-orm";
 import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels } from "@shared/schema";
 import type { OmsOrderWithLines } from "./oms.service";
 import { buildTrackingUrl } from "./tracking-url.util";
+import { isLineSumWithinTolerance } from "@shared/validation/currency";
 
 const EBAY_CHANNEL_ID = 67;
+
+// ---------------------------------------------------------------------------
+// Structured push error (Commit 11 — §6 shipstation-flow-refactor-plan.md)
+// ---------------------------------------------------------------------------
+//
+// Thrown by pushShipment / validateShipmentForPush when a shipment cannot
+// safely be pushed to ShipStation. The whole point of Commit 11 is to stop
+// silently pushing $0 orders; callers SHOULD let this bubble and rely on the
+// reconcile loop (Group H) to retry after the underlying data is fixed.
+//
+// Structured context follows coding-standards Rule #5:
+//   { code, shipmentId?, field?, value? }
+// `code` is a stable SCREAMING_SNAKE identifier so logs / dashboards can
+// filter without regex-matching human-readable messages.
+
+export class ShipStationPushError extends Error {
+  constructor(
+    message: string,
+    public readonly context: {
+      code: string;
+      shipmentId?: number;
+      field?: string;
+      value?: unknown;
+    },
+  ) {
+    super(message);
+    this.name = "ShipStationPushError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shapes consumed by the WMS-only push path. Intentionally narrow — just
+// the columns pushShipment reads — so the validator can be unit-tested
+// without dragging in the full drizzle row types.
+// ---------------------------------------------------------------------------
+
+export interface WmsShipmentRow {
+  id: number;
+  order_id: number;
+  channel_id: number | null;
+  status: string;
+}
+
+export interface WmsOrderRow {
+  id: number;
+  order_number: string;
+  channel_id: number | null;
+  oms_fulfillment_order_id: string | null;
+  sort_rank: string | null;
+  customer_name: string | null;
+  customer_email: string | null;
+  shipping_name: string | null;
+  shipping_address: string | null;
+  shipping_city: string | null;
+  shipping_state: string | null;
+  shipping_postal_code: string | null;
+  shipping_country: string | null;
+  amount_paid_cents: number;
+  tax_cents: number;
+  shipping_cents: number;
+  total_cents: number;
+  currency: string;
+  order_placed_at: Date | string | null;
+  external_order_id: string | null;
+}
+
+export interface WmsShipmentItemRow {
+  id: number; // outbound_shipment_items.id (used for lineItemKey)
+  order_item_id: number;
+  sku: string;
+  name: string;
+  qty: number;
+  unit_price_cents: number;
+}
+
+// Shipment statuses that are eligible to be pushed to ShipStation. Any
+// other state (shipped, voided, cancelled, returned, lost, labeled,
+// on_hold) means we MUST NOT push — either it's terminal or ShipStation
+// already has it. Mirrors the shipment state machine in plan §2.4.
+const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued"]);
+
+// ---------------------------------------------------------------------------
+// validateShipmentForPush — pure function, exported for tests.
+// ---------------------------------------------------------------------------
+//
+// Per §6 Commit 11 step 4. Throws ShipStationPushError on the first
+// violation so the caller's error message always points at one concrete
+// field — no aggregated "multiple errors" output that makes on-call
+// guess which field to fix first. Order of checks is deliberate:
+//
+//   1. items non-empty (structural)
+//   2. per-line unit_price_cents positive integer (catches the $0 bug)
+//   3. amount_paid_cents > 0  (header-level paid-order invariant)
+//   4. line sum ≈ total_cents within 1¢/line tolerance
+//   5. shipping address present
+//   6. customer email present
+//
+// A single `code` constant lets log pipelines pattern-match one event.
+
+export const SS_PUSH_INVALID_SHIPMENT = "SS_PUSH_INVALID_SHIPMENT";
+
+export function validateShipmentForPush(
+  shipment: Pick<WmsShipmentRow, "id">,
+  order: Pick<
+    WmsOrderRow,
+    | "amount_paid_cents"
+    | "total_cents"
+    | "shipping_address"
+    | "customer_email"
+  >,
+  items: ReadonlyArray<
+    Pick<WmsShipmentItemRow, "unit_price_cents" | "qty">
+  >,
+): void {
+  const shipmentId = shipment.id;
+
+  // 1. Items must be non-empty. Pushing a shipment with no lines yields
+  //    a $0 SS order — exactly the failure mode we're fixing.
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new ShipStationPushError("shipment has no items", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "items",
+      value: items?.length ?? 0,
+    });
+  }
+
+  // 2. Every line's unit_price_cents must be a positive integer. Zero or
+  //    negative values are the exact bug class that motivated this refactor.
+  for (let i = 0; i < items.length; i++) {
+    const line = items[i];
+    const unit = line.unit_price_cents;
+    if (
+      typeof unit !== "number" ||
+      !Number.isFinite(unit) ||
+      !Number.isInteger(unit) ||
+      unit <= 0
+    ) {
+      throw new ShipStationPushError(
+        `line ${i} has invalid unit_price_cents`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: `items[${i}].unit_price_cents`,
+          value: unit,
+        },
+      );
+    }
+
+    const qty = line.qty;
+    if (
+      typeof qty !== "number" ||
+      !Number.isInteger(qty) ||
+      qty < 0
+    ) {
+      throw new ShipStationPushError(
+        `line ${i} has invalid qty`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: `items[${i}].qty`,
+          value: qty,
+        },
+      );
+    }
+  }
+
+  // 3. amount_paid_cents must be > 0 on a paid order. We don't yet
+  //    distinguish "known zero-charge" channels (Gift, promo) — if that
+  //    category ever exists, a dedicated allowlist comes in later work.
+  //    For now, every order we push must have a positive amount paid.
+  if (
+    typeof order.amount_paid_cents !== "number" ||
+    !Number.isInteger(order.amount_paid_cents) ||
+    order.amount_paid_cents <= 0
+  ) {
+    throw new ShipStationPushError("order has invalid amount_paid_cents", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.amount_paid_cents",
+      value: order.amount_paid_cents,
+    });
+  }
+
+  // 4. Sum of line extensions must reconcile with order-level total_cents
+  //    within 1¢ per line. Tolerance accounts for channel-side rounding
+  //    (e.g. tax distributed per-line at half-even rounding).
+  if (
+    typeof order.total_cents !== "number" ||
+    !Number.isInteger(order.total_cents) ||
+    order.total_cents < 0
+  ) {
+    throw new ShipStationPushError("order has invalid total_cents", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.total_cents",
+      value: order.total_cents,
+    });
+  }
+
+  const linesSumCents = items.reduce(
+    (sum, line) => sum + line.unit_price_cents * line.qty,
+    0,
+  );
+  if (
+    !isLineSumWithinTolerance(
+      order.total_cents,
+      linesSumCents,
+      items.length,
+      1,
+    )
+  ) {
+    throw new ShipStationPushError(
+      "line sum does not match order.total_cents within tolerance",
+      {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "items.sum(unit_price_cents*qty)",
+        value: { linesSumCents, totalCents: order.total_cents },
+      },
+    );
+  }
+
+  // 5. Shipping address — at least the single-line shipping_address must
+  //    be present. We don't validate per-field granularity here because
+  //    upstream channels vary in how they split address lines.
+  if (
+    typeof order.shipping_address !== "string" ||
+    order.shipping_address.trim().length === 0
+  ) {
+    throw new ShipStationPushError("order has no shipping_address", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.shipping_address",
+      value: order.shipping_address,
+    });
+  }
+
+  // 6. Customer email — required so SS can send tracking notifications.
+  if (
+    typeof order.customer_email !== "string" ||
+    order.customer_email.trim().length === 0
+  ) {
+    throw new ShipStationPushError("order has no customer_email", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.customer_email",
+      value: order.customer_email,
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -746,8 +998,214 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // pushShipment — WMS-only reader (Commit 11 — §6 refactor plan).
+  // -------------------------------------------------------------------------
+  //
+  // The replacement for legacy pushOrder(omsOrder). Reads every field it
+  // needs from the wms.* namespace — which, post-Commit 7, carries a full
+  // financial snapshot (amount_paid_cents, tax_cents, shipping_cents,
+  // total_cents, unit_price_cents per line, currency). No OMS reads.
+  //
+  // Fails loudly via ShipStationPushError on invalid data rather than
+  // silently emitting $0 to ShipStation (the bug from audit B1 / #56430).
+  //
+  // Not wired into any caller in this commit — Commit 12 flips the
+  // PUSH_FROM_WMS flag and routes wms-sync at this. Until then, pushOrder
+  // remains the live path.
+
+  async function pushShipment(
+    shipmentId: number,
+  ): Promise<{ shipstationOrderId: number; orderKey: string }> {
+    if (
+      !Number.isInteger(shipmentId) ||
+      shipmentId <= 0
+    ) {
+      throw new ShipStationPushError("shipmentId must be a positive integer", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "shipmentId",
+        value: shipmentId,
+      });
+    }
+
+    // ─── 1. Load shipment header (WMS only) ─────────────────────────
+    const shipmentResult: any = await db.execute(sql`
+      SELECT id, order_id, channel_id, status
+      FROM wms.outbound_shipments
+      WHERE id = ${shipmentId}
+      LIMIT 1
+    `);
+    const shipmentRow: WmsShipmentRow | undefined = shipmentResult?.rows?.[0];
+    if (!shipmentRow) {
+      throw new ShipStationPushError("shipment not found", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "shipment",
+        value: null,
+      });
+    }
+    if (!PUSHABLE_SHIPMENT_STATUSES.has(shipmentRow.status)) {
+      // Already labeled / shipped / voided / cancelled — re-pushing
+      // would either collide with SS or clobber a legitimate final state.
+      throw new ShipStationPushError(
+        `shipment status '${shipmentRow.status}' is not pushable`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "shipment.status",
+          value: shipmentRow.status,
+        },
+      );
+    }
+
+    // ─── 2. Load order (WMS only, with financial snapshot) ──────────
+    const orderResult: any = await db.execute(sql`
+      SELECT
+        id, order_number, channel_id, oms_fulfillment_order_id,
+        sort_rank, external_order_id,
+        customer_name, customer_email,
+        shipping_name, shipping_address, shipping_city, shipping_state,
+        shipping_postal_code, shipping_country,
+        amount_paid_cents, tax_cents, shipping_cents, total_cents, currency,
+        order_placed_at
+      FROM wms.orders
+      WHERE id = ${shipmentRow.order_id}
+      LIMIT 1
+    `);
+    const orderRow: WmsOrderRow | undefined = orderResult?.rows?.[0];
+    if (!orderRow) {
+      throw new ShipStationPushError("wms order not found for shipment", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "order",
+        value: shipmentRow.order_id,
+      });
+    }
+
+    // ─── 3. Load items (WMS only, joined to order_items for pricing) ─
+    const itemsResult: any = await db.execute(sql`
+      SELECT
+        osi.id                    AS id,
+        osi.order_item_id         AS order_item_id,
+        oi.sku                    AS sku,
+        oi.name                   AS name,
+        osi.qty                   AS qty,
+        oi.unit_price_cents       AS unit_price_cents
+      FROM wms.outbound_shipment_items osi
+      JOIN wms.order_items oi ON oi.id = osi.order_item_id
+      WHERE osi.shipment_id = ${shipmentId}
+      ORDER BY osi.id ASC
+    `);
+    const itemRows: WmsShipmentItemRow[] = itemsResult?.rows ?? [];
+    if (itemRows.length === 0) {
+      throw new ShipStationPushError("shipment has no items", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "items",
+        value: 0,
+      });
+    }
+
+    // ─── 4. Validate (throws ShipStationPushError on violation) ─────
+    validateShipmentForPush(shipmentRow, orderRow, itemRows);
+
+    // ─── 5. Build SS payload ────────────────────────────────────────
+    const orderKey = `echelon-wms-shp-${shipmentId}`;
+
+    // eBay keeps the "EB-" prefix convention from pushOrder so packer-
+    // facing order numbers stay stable across the flag flip.
+    const isEbay = orderRow.channel_id === EBAY_CHANNEL_ID;
+    const baseOrderNumber =
+      orderRow.order_number || orderRow.external_order_id || "";
+    const orderNumber = isEbay ? `EB-${baseOrderNumber}` : baseOrderNumber;
+
+    const orderDateIso = orderRow.order_placed_at
+      ? new Date(orderRow.order_placed_at).toISOString()
+      : new Date().toISOString();
+
+    const payload = {
+      orderNumber,
+      orderKey,
+      orderDate: orderDateIso,
+      paymentDate: orderDateIso,
+      orderStatus: "awaiting_shipment",
+      customerUsername: orderRow.customer_name || "",
+      customerEmail: orderRow.customer_email || "",
+      billTo: {
+        name: orderRow.customer_name || "",
+      },
+      shipTo: {
+        name: orderRow.shipping_name || orderRow.customer_name || "",
+        street1: orderRow.shipping_address || "",
+        street2: "",
+        city: orderRow.shipping_city || "",
+        state: orderRow.shipping_state || "",
+        postalCode: orderRow.shipping_postal_code || "",
+        country: orderRow.shipping_country || "US",
+        phone: "",
+      },
+      items: itemRows.map((item) => ({
+        lineItemKey: `wms-item-${item.id}`,
+        sku: item.sku || "",
+        name: item.name || "",
+        quantity: item.qty,
+        // Validation above guarantees unit_price_cents is a positive
+        // integer, so this division cannot produce NaN or Infinity.
+        // Using /100 directly (no toFixed) because ShipStation accepts
+        // the number as-is; SS does the string formatting server-side.
+        unitPrice: item.unit_price_cents / 100,
+        options: [] as unknown[],
+      })),
+      amountPaid: orderRow.amount_paid_cents / 100,
+      taxAmount: orderRow.tax_cents / 100,
+      shippingAmount: orderRow.shipping_cents / 100,
+      internalNotes: `Source: wms shipment ${shipmentId} (channel ${orderRow.channel_id ?? "unknown"}) via Echelon WMS`,
+      advancedOptions: {
+        warehouseId: 996884,
+        storeId: 319989,
+        source: "echelon-wms",
+        // customField1 — sort_rank for packer pick-order sort. Padded
+        // string so ShipStation's text sort matches our numeric sort.
+        customField1: orderRow.sort_rank || "",
+        // customField2 — dual reference to wms order + shipment for
+        // webhook back-resolution and audit.
+        customField2: `wms_order_id:${orderRow.id}|shipment_id:${shipmentId}`,
+        // customField3 — legacy OMS pointer so operators can cross-
+        // reference against pre-refactor tooling during the deprecation
+        // window. May be empty for orders that never had an OMS row.
+        customField3: `oms_order_id:${orderRow.oms_fulfillment_order_id ?? ""}`,
+      },
+    };
+
+    // ─── 6. Push to ShipStation. No swallowing — reconcile retries. ─
+    const result = await apiRequest<ShipStationCreateOrderResponse>(
+      "POST",
+      "/orders/createorder",
+      payload,
+    );
+
+    // ─── 7. Mark shipment queued + persist SS pointers ──────────────
+    const now = new Date();
+    await db.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET shipstation_order_id = ${result.orderId},
+          shipstation_order_key = ${orderKey},
+          status = 'queued',
+          updated_at = ${now}
+      WHERE id = ${shipmentId}
+    `);
+
+    console.log(
+      `[ShipStation] Pushed WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})`,
+    );
+
+    return { shipstationOrderId: result.orderId, orderKey };
+  }
+
   return {
     pushOrder,
+    pushShipment,
     getShipments,
     getOrderByKey,
     processShipNotify,
