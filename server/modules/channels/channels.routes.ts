@@ -1474,10 +1474,15 @@ export function registerChannelRoutes(app: Express) {
 
   // --- Product Lines CRUD ---
 
-  // List all product lines
+  // List all product lines.
+  // Accepts an optional `status` query param ("active" | "draft" | "archived"
+  // | "all"). The product counts on each line honor the same scope filter
+  // that the center list view uses, so the sidebar badge and the list
+  // contents can never disagree. See product-line-scope.ts.
   app.get("/api/product-lines", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const result = await storage.getProductLinesWithCounts();
+      const status = typeof req.query.status === "string" ? req.query.status : undefined;
+      const result = await storage.getProductLinesWithCounts(status);
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1628,8 +1633,10 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Aggregate stats for a line (or the virtual "unassigned" bucket)
-  // :id can be a numeric line id or the string "unassigned"
+  // Aggregate stats for a line (or the virtual "unassigned" bucket).
+  // :id can be a numeric line id or the string "unassigned".
+  // Accepts an optional `status` query param so the stats panel and the
+  // Unassigned sidebar badge stay in lockstep with the list view.
   app.get("/api/product-lines/:id/stats", requirePermission("channels", "view"), async (req, res) => {
     try {
       const raw = req.params.id;
@@ -1637,7 +1644,8 @@ export function registerChannelRoutes(app: Express) {
       if (typeof target === "number" && !Number.isInteger(target)) {
         return res.status(400).json({ error: "Invalid line id" });
       }
-      const stats = await storage.getProductLineInventoryStats(target);
+      const status = typeof req.query.status === "string" ? req.query.status : undefined;
+      const stats = await storage.getProductLineInventoryStats(target, status);
       if (typeof target === "number") {
         const assignedChannels = await storage.getProductLineAssignedChannels(target);
         return res.json({ ...stats, channelCount: assignedChannels.filter((c) => c.isActive).length });
