@@ -17,11 +17,8 @@ import type { Request, Response, Express } from "express";
 import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
-import type { InsertOrderItem } from "@shared/schema";
 import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections, webhookRetryQueue } from "@shared/schema";
 import { db } from "../../db";
-import { ordersStorage } from "../orders";
-import { warehouseStorage } from "../warehouse";
 import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
@@ -175,169 +172,13 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
 }
 
 // ---------------------------------------------------------------------------
-// Create WMS order from Shopify (same pattern as eBay in ebay-order-ingestion.ts)
-// ---------------------------------------------------------------------------
-
-async function createWmsOrderFromShopify(
-  channelId: number,
-  omsOrderId: number,
-  orderData: OrderData,
-  shopifyOrder: any,
-  wmsServices: WmsServices | null,
-): Promise<number | null> {
-  const shopifyGid = String(shopifyOrder.admin_graphql_api_id || shopifyOrder.id);
-  const omsIdStr = String(omsOrderId);
-
-  // Dedup: check if WMS order already exists for this OMS order.
-  // Match both paths: new wms-sync.service (source='oms' + oms_fulfillment_order_id)
-  // and legacy direct-write (source='shopify' + source_table_id).
-  const existing = await db.execute<{ id: number }>(sql`
-    SELECT id FROM wms.orders
-    WHERE (source = 'oms' AND oms_fulfillment_order_id = ${omsIdStr})
-       OR (source = 'shopify' AND source_table_id = ${omsIdStr})
-    LIMIT 1
-  `);
-  if (existing.rows.length > 0) {
-    return existing.rows[0].id;
-  }
-
-  // Also check by Shopify GID (in case old flow already created it)
-  const existingByGid = await db.execute<{ id: number }>(sql`
-    SELECT id FROM wms.orders
-    WHERE source = 'shopify' AND (
-      source_table_id = ${shopifyGid}
-      OR shopify_order_id = ${shopifyGid}
-      OR external_order_id = ${shopifyGid}
-    )
-    LIMIT 1
-  `);
-  if (existingByGid.rows.length > 0) {
-    return existingByGid.rows[0].id;
-  }
-
-  // Skip non-paid / cancelled orders
-  if (orderData.status === "cancelled" || orderData.financialStatus === "voided") {
-    console.log(`${LOG_PREFIX} Skipping WMS order for ${orderData.externalOrderNumber} (status: ${orderData.status})`);
-    return null;
-  }
-
-  // Build order items with bin locations
-  const enrichedItems: InsertOrderItem[] = [];
-  for (const line of orderData.lineItems) {
-    const binLocation = await warehouseStorage.getBinLocationFromInventoryBySku(line.sku || "");
-
-    // Look up image
-    let imageUrl = binLocation?.imageUrl || null;
-    if (!imageUrl && line.sku) {
-      const imageResult = await db.execute<{ image_url: string | null }>(sql`
-        SELECT image_url FROM (
-          SELECT pl.image_url FROM warehouse.product_locations pl
-          WHERE UPPER(pl.sku) = ${line.sku.toUpperCase()} AND pl.image_url IS NOT NULL
-          UNION ALL
-          SELECT pa.url as image_url
-          FROM catalog.product_variants pv
-          LEFT JOIN catalog.products p ON pv.product_id = p.id
-          LEFT JOIN catalog.product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
-          WHERE UPPER(pv.sku) = ${line.sku.toUpperCase()}
-            AND pa.url IS NOT NULL
-        ) sub
-        LIMIT 1
-      `);
-      if (imageResult.rows.length > 0 && imageResult.rows[0].image_url) {
-        imageUrl = imageResult.rows[0].image_url;
-      }
-    }
-
-    // Propagate requiresShipping from Shopify (false = donation/membership/digital)
-    const itemRequiresShipping = line.requiresShipping !== false;
-
-    enrichedItems.push({
-      orderId: 0, // Set by createOrderWithItems
-      sourceItemId: line.externalLineItemId || null,
-      sku: line.sku || "UNKNOWN",
-      name: line.title || "Unknown Item",
-      quantity: line.quantity,
-      pickedQuantity: 0,
-      fulfilledQuantity: 0,
-      status: itemRequiresShipping ? "pending" : "completed",
-      location: binLocation?.location || "UNASSIGNED",
-      zone: binLocation?.zone || "U",
-      imageUrl,
-      barcode: binLocation?.barcode || null,
-      requiresShipping: itemRequiresShipping ? 1 : 0,
-    });
-  }
-
-  const totalUnits = enrichedItems.reduce((sum, item) => sum + item.quantity, 0);
-  const orderNumber = orderData.externalOrderNumber || String(shopifyOrder.order_number);
-
-  // Check if any item requires shipping
-  const hasShippableItems = enrichedItems.some(item => item.requiresShipping === 1);
-
-  const newOrder = await ordersStorage.createOrderWithItems({
-    channelId,
-    source: "shopify",
-    externalOrderId: shopifyGid,
-    sourceTableId: omsIdStr,
-    orderNumber,
-    customerName: orderData.customerName || orderData.shipToName || orderNumber,
-    customerEmail: orderData.customerEmail || null,
-    shippingName: orderData.shipToName || orderData.customerName || null,
-    shippingAddress: orderData.shipToAddress1 || null,
-    shippingCity: orderData.shipToCity || null,
-    shippingState: orderData.shipToState || null,
-    shippingPostalCode: orderData.shipToZip || null,
-    shippingCountry: orderData.shipToCountry || null,
-    financialStatus: orderData.financialStatus || "paid",
-    priority: 50,
-    warehouseStatus: hasShippableItems ? "ready" : "completed", // Non-shippable orders skip pick queue
-    itemCount: enrichedItems.length,
-    unitCount: totalUnits,
-    orderPlacedAt: orderData.orderedAt || new Date(),
-  }, enrichedItems);
-
-  console.log(`${LOG_PREFIX} Created WMS order ${newOrder.id} (${orderNumber}) with ${enrichedItems.length} items`);
-
-  // Route to warehouse + reserve via WMS
-  if (wmsServices) {
-    try {
-      const routingCtx = {
-        channelId,
-        skus: enrichedItems.map(i => i.sku).filter(s => s !== "UNKNOWN"),
-        country: orderData.shipToCountry,
-      };
-      const routing = await wmsServices.fulfillmentRouter.routeOrder(routingCtx);
-      if (routing) {
-        await wmsServices.fulfillmentRouter.assignWarehouseToOrder(newOrder.id, routing);
-        console.log(`${LOG_PREFIX} Routed ${orderNumber} → warehouse ${routing.warehouseCode}`);
-
-        try {
-          await wmsServices.slaMonitor.setSLAForOrder(newOrder.id);
-        } catch (slaErr: any) {
-          console.error(`${LOG_PREFIX} SLA setup failed for ${orderNumber}: ${slaErr.message}`);
-        }
-      }
-    } catch (routingErr: any) {
-      console.error(`${LOG_PREFIX} Routing failed for ${orderNumber}: ${routingErr.message}`);
-    }
-
-    // Reserve inventory through WMS (ATP-gated)
-    try {
-      const reserveResult = await wmsServices.reservation.reserveOrder(newOrder.id);
-      if (reserveResult.failed?.length > 0) {
-        console.log(`${LOG_PREFIX} Reservation partial for ${orderNumber}: ${reserveResult.failed.length} items could not be reserved`);
-      }
-    } catch (resErr: any) {
-      console.error(`${LOG_PREFIX} Reservation failed for ${orderNumber}: ${resErr.message}`);
-    }
-  }
-
-  return newOrder.id;
-}
-
-// ---------------------------------------------------------------------------
 // Register Webhook Routes
 // ---------------------------------------------------------------------------
+//
+// §6 C9b: legacy `createWmsOrderFromShopify` direct-write helper was
+// deleted. Shopify → WMS now goes exclusively through
+// wmsSyncService.syncOmsOrderToWms. If wmsSyncService is unwired the
+// webhook handlers throw loudly so the missing wiring is diagnosable.
 
 export function registerOmsWebhooks(
   app: Express,
@@ -449,21 +290,18 @@ export function registerOmsWebhooks(
         console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
       });
 
-      // Sync to WMS via sync service (replaces createWmsOrderFromShopify dual-write)
-      if (wmsSyncService) {
-        try {
-          await wmsSyncService.syncOmsOrderToWms(omsOrder.id);
-          console.log(`${LOG_PREFIX} Synced ${shopifyOrder.name} to WMS`);
-        } catch (e: any) {
-          console.error(`${LOG_PREFIX} WMS sync failed for ${shopifyOrder.name}: ${e.message}`);
-        }
-      } else {
-        console.warn(`${LOG_PREFIX} WMS sync service not available, falling back to direct write`);
-        try {
-          await createWmsOrderFromShopify(channelId, omsOrder.id, orderData, shopifyOrder, wmsServices);
-        } catch (e: any) {
-          console.error(`${LOG_PREFIX} WMS order creation failed for ${shopifyOrder.name}: ${e.message}`);
-        }
+      // Sync to WMS via sync service. §6 C9b: legacy
+      // createWmsOrderFromShopify fallback removed (unreachable in
+      // prod per Overlord Q2 decision). If wmsSyncService is absent
+      // we fail loudly so the missing wiring is diagnosable.
+      if (!wmsSyncService) {
+        throw new Error("wmsSyncService required; legacy createWmsOrderFromShopify fallback removed (§6 C9b)");
+      }
+      try {
+        await wmsSyncService.syncOmsOrderToWms(omsOrder.id);
+        console.log(`${LOG_PREFIX} Synced ${shopifyOrder.name} to WMS`);
+      } catch (e: any) {
+        console.error(`${LOG_PREFIX} WMS sync failed for ${shopifyOrder.name}: ${e.message}`);
       }
 
       // OMS-level reservation (delegates to WMS reservation service)

@@ -21,11 +21,19 @@ import {
   buildWmsOrderFinancialSnapshot,
   buildWmsItemFinancialSnapshot,
 } from "./wms-sync-financials";
+import { createShipmentForOrder } from "../wms/create-shipment";
 
 // Feature flag: gates §6 Commit 7 behavior (financial snapshot at
 // OMS→WMS sync). Default false; new wms.orders / wms.order_items cents
 // columns stay at schema defaults (0 / 'USD') until flipped on.
 const WMS_FINANCIAL_SNAPSHOT = process.env.WMS_FINANCIAL_SNAPSHOT === "true";
+
+// Feature flag: gates §6 Commit 8 (creation of a wms.outbound_shipments
+// row + per-item wms.outbound_shipment_items rows at sync time). Default
+// false — when off, no shipment rows are written by the sync path and
+// downstream Group C/D/E handlers continue to use whatever legacy
+// creation path they relied on. Flip on once Group C is wired.
+const WMS_SHIPMENT_AT_SYNC = process.env.WMS_SHIPMENT_AT_SYNC === "true";
 
 interface WmsSyncServices {
   inventoryCore: any;
@@ -234,6 +242,53 @@ export class WmsSyncService {
       const newWmsOrder = await ordersStorage.createOrderWithItems(wmsOrderData, wmsLineItems);
 
       console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
+
+      // 5b. §6 Commit 8 — create a planned wms.outbound_shipments row
+      // with per-item rows. Flag-gated; failure is non-fatal so a
+      // broken shipment insert never blocks order sync (the hourly
+      // reconcile sweep in Group H will retry).
+      if (WMS_SHIPMENT_AT_SYNC) {
+        try {
+          // createOrderWithItems does not return per-item ids, so we
+          // query them back keyed on oms_order_line_id — the sync
+          // path guarantees a 1:1 pairing between omsLines and the
+          // just-inserted wms.order_items rows.
+          const insertedItems = await db
+            .select({ id: wmsOrderItems.id, omsOrderLineId: wmsOrderItems.omsOrderLineId })
+            .from(wmsOrderItems)
+            .where(eq(wmsOrderItems.orderId, newWmsOrder.id));
+
+          const itemsByOmsLineId = new Map<number, number>();
+          for (const row of insertedItems) {
+            if (row.omsOrderLineId != null) itemsByOmsLineId.set(row.omsOrderLineId, row.id);
+          }
+
+          const shipmentItemInputs = omsLines
+            .map((line) => {
+              const id = itemsByOmsLineId.get(line.id);
+              return id != null
+                ? { id, quantity: line.quantity ?? 0 }
+                : null;
+            })
+            .filter((x): x is { id: number; quantity: number } => x !== null);
+
+          const { shipmentId, created } = await createShipmentForOrder(
+            db as any,
+            newWmsOrder.id,
+            omsOrder.channelId,
+            shipmentItemInputs,
+          );
+          console.log(
+            `[WMS Sync] ${created ? "Created" : "Reused"} shipment ${shipmentId} for WMS order ${newWmsOrder.id}`,
+          );
+        } catch (err: any) {
+          console.error(
+            `[WMS Sync] Failed to create shipment for WMS order ${newWmsOrder.id}: ${err.message}`,
+          );
+          // Non-fatal: order synced, shipment creation can be retried
+          // by the reconcile sweep (Group H). Don't block the sync.
+        }
+      }
 
       // 6. Reserve inventory
       if (warehouseStatus === "ready") {

@@ -15,12 +15,9 @@ import type { WmsSyncService } from "./wms-sync.service";
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { EbayAuthService } from "../channels/adapters/ebay/ebay-auth.service";
 import type { EbayOrder, EbayNotificationPayload } from "../channels/adapters/ebay/ebay-types";
-import type { InsertOrderItem } from "@shared/schema";
 import type { ReservationResult } from "../../services";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
-import { ordersStorage } from "../orders";
-import { warehouseStorage } from "../warehouse";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -154,150 +151,6 @@ export function setWmsServices(svc: typeof _wmsServices) {
   _wmsServices = svc;
 }
 
-// ---------------------------------------------------------------------------
-// Create WMS order from eBay OMS order data
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a WMS `orders` row + `order_items` rows from eBay order data,
- * following the same pattern as order-sync-listener.ts does for Shopify.
- * Idempotent — deduplicates by source='ebay' + sourceTableId=omsOrderId.
- */
-async function createWmsOrderFromEbay(
-  omsOrderId: number,
-  orderData: OrderData,
-  externalOrderId: string,
-): Promise<number | null> {
-  const omsIdStr = String(omsOrderId);
-
-  // Dedup: check if WMS order already exists for this OMS order
-  const existing = await db.execute<{ id: number }>(sql`
-    SELECT id FROM wms.orders
-    WHERE source = 'ebay' AND source_table_id = ${omsIdStr}
-    LIMIT 1
-  `);
-  if (existing.rows.length > 0) {
-    return existing.rows[0].id;
-  }
-
-  // Skip non-paid / cancelled orders
-  if (orderData.status === "cancelled" || orderData.financialStatus === "failed") {
-    console.log(`[eBay→WMS] Skipping WMS order for ${externalOrderId} (status: ${orderData.status}, financial: ${orderData.financialStatus})`);
-    return null;
-  }
-
-  // Build order items with bin locations
-  const enrichedItems: InsertOrderItem[] = [];
-  for (const line of orderData.lineItems) {
-    const binLocation = await warehouseStorage.getBinLocationFromInventoryBySku(line.sku || "");
-
-    // Look up image
-    let imageUrl = binLocation?.imageUrl || null;
-    if (!imageUrl && line.sku) {
-      const imageResult = await db.execute<{ image_url: string | null }>(sql`
-        SELECT image_url FROM (
-          SELECT pl.image_url FROM warehouse.product_locations pl
-          WHERE UPPER(pl.sku) = ${line.sku.toUpperCase()} AND pl.image_url IS NOT NULL
-          UNION ALL
-          SELECT pa.url as image_url
-          FROM catalog.product_variants pv
-          LEFT JOIN catalog.products p ON pv.product_id = p.id
-          LEFT JOIN catalog.product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
-          WHERE UPPER(pv.sku) = ${line.sku.toUpperCase()}
-            AND pa.url IS NOT NULL
-        ) sub
-        LIMIT 1
-      `);
-      if (imageResult.rows.length > 0 && imageResult.rows[0].image_url) {
-        imageUrl = imageResult.rows[0].image_url;
-      }
-    }
-
-    enrichedItems.push({
-      orderId: 0, // Will be set by createOrderWithItems
-      sourceItemId: line.externalLineItemId || null,
-      sku: line.sku || "UNKNOWN",
-      name: line.title || "Unknown Item",
-      quantity: line.quantity,
-      pickedQuantity: 0,
-      fulfilledQuantity: 0,
-      status: "pending",
-      location: binLocation?.location || "UNASSIGNED",
-      zone: binLocation?.zone || "U",
-      imageUrl,
-      barcode: binLocation?.barcode || null,
-      requiresShipping: 1,
-    });
-  }
-
-  const totalUnits = enrichedItems.reduce((sum, item) => sum + item.quantity, 0);
-  const warehouseStatus = orderData.financialStatus === "paid" ? "ready" : "ready";
-
-  const orderNumber = externalOrderId;
-
-  const newOrder = await ordersStorage.createOrderWithItems({
-    channelId: EBAY_CHANNEL_ID,
-    source: "ebay",
-    externalOrderId: externalOrderId,
-    sourceTableId: omsIdStr, // Link to OMS order for dedup + ship confirm
-    orderNumber,
-    customerName: orderData.customerName || orderData.shipToName || orderNumber,
-    customerEmail: orderData.customerEmail || null,
-    shippingName: orderData.shipToName || orderData.customerName || null,
-    shippingAddress: orderData.shipToAddress1 || null,
-    shippingCity: orderData.shipToCity || null,
-    shippingState: orderData.shipToState || null,
-    shippingPostalCode: orderData.shipToZip || null,
-    shippingCountry: orderData.shipToCountry || null,
-    financialStatus: orderData.financialStatus || "paid",
-    priority: 50,
-    warehouseStatus,
-    itemCount: enrichedItems.length,
-    unitCount: totalUnits,
-    orderPlacedAt: orderData.orderedAt || new Date(),
-  }, enrichedItems);
-
-  console.log(`[eBay→WMS] Created WMS order ${newOrder.id} (${orderNumber}) with ${enrichedItems.length} items`);
-
-  // Route to warehouse + reserve via WMS reservation
-  if (_wmsServices) {
-    try {
-      const routingCtx = {
-        channelId: EBAY_CHANNEL_ID,
-        skus: enrichedItems.map(i => i.sku).filter(s => s !== "UNKNOWN"),
-        country: orderData.shipToCountry,
-      };
-      const routing = await _wmsServices.fulfillmentRouter.routeOrder(routingCtx);
-      if (routing) {
-        await _wmsServices.fulfillmentRouter.assignWarehouseToOrder(newOrder.id, routing);
-        console.log(`[eBay→WMS] Routed ${orderNumber} → warehouse ${routing.warehouseCode}`);
-
-        try {
-          await _wmsServices.slaMonitor.setSLAForOrder(newOrder.id);
-        } catch (slaErr: any) {
-          console.error(`[eBay→WMS] SLA setup failed for ${orderNumber}: ${slaErr.message}`);
-        }
-      }
-    } catch (routingErr: any) {
-      console.error(`[eBay→WMS] Routing failed for ${orderNumber}: ${routingErr.message}`);
-    }
-
-    // Reserve inventory through WMS reservation service (ATP-gated)
-    if (warehouseStatus === "ready") {
-      try {
-        const reserveResult = await _wmsServices.reservation.reserveOrder(newOrder.id);
-        if (reserveResult.failed.length > 0) {
-          console.log(`[eBay→WMS] Reservation partial for ${orderNumber}: ${reserveResult.failed.length} items could not be reserved`);
-        }
-      } catch (resErr: any) {
-        console.error(`[eBay→WMS] Reservation failed for ${orderNumber}: ${resErr.message}`);
-      }
-    }
-  }
-
-  return newOrder.id;
-}
-
 export function setWmsSyncService(wmsSyncService: WmsSyncService) {
   _wmsSyncService = wmsSyncService;
 }
@@ -399,20 +252,16 @@ export async function pollEbayOrders(
 
         // If this was a new order (not a duplicate), sync to WMS for fulfillment
         if (isNew) {
-          // Sync OMS → WMS (replaces old createWmsOrderFromEbay dual-write)
-          if (_wmsSyncService) {
-            try {
-              await _wmsSyncService.syncOmsOrderToWms(result.id);
-            } catch (e: any) {
-              console.error(`[eBay Orders] WMS sync failed for ${ebayOrder.orderId}: ${e.message}`);
-            }
-          } else {
-            console.warn(`[eBay Orders] WMS sync service not initialized — falling back to old dual-write`);
-            try {
-              await createWmsOrderFromEbay(result.id, orderData, ebayOrder.orderId);
-            } catch (e: any) {
-              console.error(`[eBay Orders] WMS order creation failed for ${ebayOrder.orderId}: ${e.message}`);
-            }
+          // Sync OMS → WMS (single path — plan §6 C10)
+          if (!_wmsSyncService) {
+            throw new Error(
+              "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
+            );
+          }
+          try {
+            await _wmsSyncService.syncOmsOrderToWms(result.id);
+          } catch (e: any) {
+            console.error(`[eBay Orders] WMS sync failed for ${ebayOrder.orderId}: ${e.message}`);
           }
 
           // OMS-level reservation (delegates to WMS reservation service)
@@ -477,12 +326,13 @@ export async function reingestEbayOrder(
 
   if (wasCreated) {
     // Full post-ingest pipeline: WMS sync, reserve, assign, push.
+    if (!_wmsSyncService) {
+      throw new Error(
+        "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
+      );
+    }
     try {
-      if (_wmsSyncService) {
-        await _wmsSyncService.syncOmsOrderToWms(result.id);
-      } else {
-        await createWmsOrderFromEbay(result.id, orderData, orderId);
-      }
+      await _wmsSyncService.syncOmsOrderToWms(result.id);
     } catch (err: any) {
       console.error(`[eBay Reingest] WMS sync failed for ${orderId}: ${err.message}`);
     }
@@ -548,18 +398,29 @@ export function createEbayOrderWebhookHandler(
             const orderData = mapEbayOrderToOrderData(ebayOrder);
             const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
 
-            // Post-ingest if newly created
-            if (result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000) {
-              // Create WMS order for pick queue
+            // Post-ingest if newly created — mirrors the polling path (plan §6 C10)
+            const isNew = result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
+            if (isNew) {
+              // Sync OMS → WMS (single path — plan §6 C10)
+              if (!_wmsSyncService) {
+                throw new Error(
+                  "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
+                );
+              }
               try {
-                await createWmsOrderFromEbay(result.id, orderData, orderId);
+                await _wmsSyncService.syncOmsOrderToWms(result.id);
               } catch (e: any) {
-                console.error(`[eBay Webhook] WMS order creation failed for ${orderId}: ${e.message}`);
+                console.error(`[eBay Webhook] WMS sync failed for ${orderId}: ${e.message}`);
               }
 
-              await omsService.reserveInventory(result.id);
-              await omsService.assignWarehouse(result.id);
-              // ShipStation push handled by wmsSyncService (via polling path) or hourly reconcile
+              // OMS-level reservation (delegates to WMS reservation service)
+              try {
+                await omsService.reserveInventory(result.id);
+                await omsService.assignWarehouse(result.id);
+              } catch (e: any) {
+                console.error(`[eBay Webhook] Post-ingest processing failed for ${orderId}: ${e.message}`);
+              }
+              // ShipStation push handled by wmsSyncService.syncOmsOrderToWms()
             }
 
             console.log(`[eBay Webhook] Processed order ${orderId}`);
