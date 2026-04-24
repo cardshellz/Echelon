@@ -16,6 +16,16 @@ import { wmsOrders, wmsOrderItems } from "@shared/schema";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, type ShippingServiceLevel } from "../orders/sort-rank";
+import {
+  validateOmsOrderFinancials,
+  buildWmsOrderFinancialSnapshot,
+  buildWmsItemFinancialSnapshot,
+} from "./wms-sync-financials";
+
+// Feature flag: gates §6 Commit 7 behavior (financial snapshot at
+// OMS→WMS sync). Default false; new wms.orders / wms.order_items cents
+// columns stay at schema defaults (0 / 'USD') until flipped on.
+const WMS_FINANCIAL_SNAPSHOT = process.env.WMS_FINANCIAL_SNAPSHOT === "true";
 
 interface WmsSyncServices {
   inventoryCore: any;
@@ -82,6 +92,40 @@ export class WmsSyncService {
         return null;
       }
 
+      // §6 Commit 7: optionally snapshot financials into the WMS row.
+      // Flag-gated so existing behavior is preserved until we flip it on.
+      let orderFinancialSnapshot:
+        | ReturnType<typeof buildWmsOrderFinancialSnapshot>
+        | undefined;
+      if (WMS_FINANCIAL_SNAPSHOT) {
+        validateOmsOrderFinancials(
+          {
+            id: omsOrder.id,
+            subtotalCents: omsOrder.subtotalCents ?? 0,
+            shippingCents: omsOrder.shippingCents ?? 0,
+            taxCents: omsOrder.taxCents ?? 0,
+            discountCents: omsOrder.discountCents ?? 0,
+            totalCents: omsOrder.totalCents ?? 0,
+            currency: omsOrder.currency ?? "USD",
+          },
+          omsLines.map((l) => ({
+            id: l.id,
+            quantity: l.quantity ?? 0,
+            paidPriceCents: (l as any).paidPriceCents ?? 0,
+            totalPriceCents: (l as any).totalPriceCents ?? 0,
+          })),
+        );
+        orderFinancialSnapshot = buildWmsOrderFinancialSnapshot({
+          id: omsOrder.id,
+          subtotalCents: omsOrder.subtotalCents ?? 0,
+          shippingCents: omsOrder.shippingCents ?? 0,
+          taxCents: omsOrder.taxCents ?? 0,
+          discountCents: omsOrder.discountCents ?? 0,
+          totalCents: omsOrder.totalCents ?? 0,
+          currency: omsOrder.currency ?? "USD",
+        });
+      }
+
       // 3. Check if order has any shippable items
       const hasShippableItems = omsLines.some(line => line.requiresShipping !== false);
 
@@ -126,6 +170,7 @@ export class WmsSyncService {
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
         orderPlacedAt: omsOrder.orderedAt,
+        ...(orderFinancialSnapshot ?? {}),
       };
 
       // 4. Map line items
@@ -156,6 +201,17 @@ export class WmsSyncService {
         // Propagate requiresShipping from OMS (false = donation/membership/digital)
         const itemRequiresShipping = line.requiresShipping !== false;
 
+        // §6 Commit 7: optional per-line financial snapshot. When flag is
+        // off the spread is a no-op and schema defaults (0) take effect.
+        const itemSnapshot = WMS_FINANCIAL_SNAPSHOT
+          ? buildWmsItemFinancialSnapshot({
+              id: line.id,
+              quantity: line.quantity ?? 0,
+              paidPriceCents: (line as any).paidPriceCents ?? 0,
+              totalPriceCents: (line as any).totalPriceCents ?? 0,
+            })
+          : undefined;
+
         wmsLineItems.push({
           orderId: 0, // Will be set by createOrderWithItems
           omsOrderLineId: line.id,
@@ -169,6 +225,7 @@ export class WmsSyncService {
           zone: binLocation?.zone || "U",
           productId: variantId, // Temporary mapping to satisfy schema
           requiresShipping: itemRequiresShipping ? 1 : 0,
+          ...(itemSnapshot ?? {}),
         });
       }
 
