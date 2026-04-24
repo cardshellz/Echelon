@@ -1,1 +1,0 @@
-import { db } from '../server/db'; import { products } from '../shared/schema'; db.select().from(products).limit(1).then(r => console.log('OK', r)).catch(e => console.error('ERROR', e)).finally(() => process.exit(0));

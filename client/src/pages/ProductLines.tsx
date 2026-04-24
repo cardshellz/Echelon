@@ -14,7 +14,15 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
+  DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -166,44 +174,201 @@ function ProductLineDialog({
   );
 }
 
+interface Product {
+  id: number;
+  sku: string | null;
+  name: string;
+  category: string | null;
+  status: string | null;
+  isActive: boolean;
+}
+
+function ManageProductsModal({
+  lineId,
+  lineName,
+  assignedProductIds,
+  onChanged,
+}: {
+  lineId: number;
+  lineName: string;
+  assignedProductIds: Set<number>;
+  onChanged: () => void;
+}) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [assignmentFilter, setAssignmentFilter] = useState("all");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  const { data: products = [], isLoading } = useQuery<Product[]>({
+    queryKey: ["/api/products", { includeInactive: true }],
+    queryFn: async () => {
+      const res = await fetch("/api/products?includeInactive=true", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load products");
+      return res.json();
+    },
+    enabled: open,
+  });
+
+  useEffect(() => {
+    if (open) {
+      setSelectedIds(new Set(assignedProductIds));
+    }
+  }, [open, assignedProductIds]);
+
+  const saveMutation = useMutation({
+    mutationFn: async (productIds: number[]) => {
+      const res = await fetch(`/api/product-lines/${lineId}/products`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ productIds }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || res.statusText);
+    },
+    onSuccess: () => {
+      setOpen(false);
+      onChanged();
+      toast({ title: "Product assignments updated" });
+    },
+    onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
+  });
+
+  const categories = Array.from(new Set(products.map((p) => p.category).filter(Boolean))) as string[];
+
+  const filteredProducts = products.filter((p) => {
+    const matchesSearch = !search || p.name.toLowerCase().includes(search.toLowerCase()) || p.sku?.toLowerCase().includes(search.toLowerCase());
+    const matchesCategory = categoryFilter === "all" || p.category === categoryFilter;
+    const matchesAssignment = assignmentFilter === "all" || (assignmentFilter === "assigned" && selectedIds.has(p.id)) || (assignmentFilter === "unassigned" && !selectedIds.has(p.id));
+    return matchesSearch && matchesCategory && matchesAssignment;
+  });
+
+  const allFilteredSelected = filteredProducts.length > 0 && filteredProducts.every((p) => selectedIds.has(p.id));
+
+  const toggleAll = (checked: boolean) => {
+    const next = new Set(selectedIds);
+    if (checked) {
+      filteredProducts.forEach((p) => next.add(p.id));
+    } else {
+      filteredProducts.forEach((p) => next.delete(p.id));
+    }
+    setSelectedIds(next);
+  };
+
+  const toggleOne = (id: number, checked: boolean) => {
+    const next = new Set(selectedIds);
+    if (checked) next.add(id);
+    else next.delete(id);
+    setSelectedIds(next);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" className="w-full">
+          <Package className="h-4 w-4 mr-2" />
+          Manage Products
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col p-0">
+        <DialogHeader className="px-6 py-4 border-b">
+          <DialogTitle>Manage Products: {lineName}</DialogTitle>
+        </DialogHeader>
+
+        <div className="flex flex-wrap gap-3 px-6 py-4 bg-muted/30 border-b">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search by name or SKU..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9 h-10"
+              autoComplete="off"
+            />
+          </div>
+          <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+            <SelectTrigger className="w-40 h-10">
+              <SelectValue placeholder="Category" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Categories</SelectItem>
+              {categories.map((c) => (
+                <SelectItem key={c} value={c}>{c}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={assignmentFilter} onValueChange={setAssignmentFilter}>
+            <SelectTrigger className="w-40 h-10">
+              <SelectValue placeholder="Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Status</SelectItem>
+              <SelectItem value="assigned">Assigned</SelectItem>
+              <SelectItem value="unassigned">Unassigned</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          {isLoading ? (
+            <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
+          ) : filteredProducts.length === 0 ? (
+            <div className="text-center py-12 text-muted-foreground">No products found matching filters.</div>
+          ) : (
+            <Table>
+              <TableHeader className="sticky top-0 bg-background z-10 shadow-sm">
+                <TableRow>
+                  <TableHead className="w-12 text-center">
+                    <Checkbox checked={allFilteredSelected} onCheckedChange={toggleAll} />
+                  </TableHead>
+                  <TableHead>Product Name</TableHead>
+                  <TableHead>SKU</TableHead>
+                  <TableHead>Category</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filteredProducts.map((p) => (
+                  <TableRow key={p.id} className="cursor-pointer" onClick={() => toggleOne(p.id, !selectedIds.has(p.id))}>
+                    <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
+                      <Checkbox checked={selectedIds.has(p.id)} onCheckedChange={(checked) => toggleOne(p.id, !!checked)} />
+                    </TableCell>
+                    <TableCell className="font-medium">{p.name}</TableCell>
+                    <TableCell className="font-mono text-xs">{p.sku || "-"}</TableCell>
+                    <TableCell>{p.category || "-"}</TableCell>
+                    <TableCell>
+                      <Badge variant={p.isActive ? "default" : "secondary"}>{p.isActive ? "Active" : "Inactive"}</Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+
+        <DialogFooter className="px-6 py-4 border-t bg-muted/10 gap-2">
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button onClick={() => saveMutation.mutate(Array.from(selectedIds))} disabled={saveMutation.isPending}>
+            {saveMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+            Save Assignments ({selectedIds.size})
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // --- Product assignment panel ---
 
-function ProductAssignmentPanel({ lineId, assignedProducts, onChanged }: {
+function ProductAssignmentPanel({ lineId, lineName, assignedProducts, onChanged }: {
   lineId: number;
+  lineName: string;
   assignedProducts: Array<{ productId: number; productName: string; sku: string }>;
   onChanged: () => void;
 }) {
   const { toast } = useToast();
-  const [search, setSearch] = useState("");
-
-  // Search all products for adding
-  const { data: searchResults } = useQuery<ProductOption[]>({
-    queryKey: ["/api/products/search", search],
-    queryFn: async () => {
-      if (search.length < 2) return [];
-      const res = await fetch(`/api/products?search=${encodeURIComponent(search)}&limit=20`, { credentials: "include" });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return (data.products || data || []).map((p: any) => ({ id: p.id, name: p.name, sku: p.sku }));
-    },
-    enabled: search.length >= 2,
-  });
-
   const assignedIds = new Set(assignedProducts.map((p) => p.productId));
-
-  const addMutation = useMutation({
-    mutationFn: async (productId: number) => {
-      const res = await fetch(`/api/product-lines/${lineId}/products`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ productId }),
-      });
-      if (!res.ok) throw new Error((await res.text()) || res.statusText);
-    },
-    onSuccess: () => { onChanged(); toast({ title: "Product added" }); },
-    onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
-  });
 
   const removeMutation = useMutation({
     mutationFn: async (productId: number) => {
@@ -217,45 +382,10 @@ function ProductAssignmentPanel({ lineId, assignedProducts, onChanged }: {
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
-  const unassigned = (searchResults || []).filter((p) => !assignedIds.has(p.id));
-
   return (
-    <div className="space-y-3">
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          placeholder="Search products to add..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="pl-9"
-          autoComplete="off"
-        />
-      </div>
+    <div className="space-y-4">
+      <ManageProductsModal lineId={lineId} lineName={lineName} assignedProductIds={assignedIds} onChanged={onChanged} />
 
-      {/* Search results — products to add */}
-      {unassigned.length > 0 && (
-        <div className="border rounded-md max-h-40 overflow-y-auto">
-          {unassigned.map((p) => (
-            <div key={p.id} className="flex items-center justify-between px-3 py-2 border-b last:border-b-0 hover:bg-muted/50">
-              <div>
-                <span className="text-sm font-medium">{p.name}</span>
-                <span className="text-xs text-muted-foreground ml-2 font-mono">{p.sku}</span>
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => addMutation.mutate(p.id)}
-                disabled={addMutation.isPending}
-              >
-                <Plus className="h-3 w-3 mr-1" /> Add
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Currently assigned */}
       <div>
         <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
           Assigned ({assignedProducts.length})
@@ -265,7 +395,7 @@ function ProductAssignmentPanel({ lineId, assignedProducts, onChanged }: {
         ) : (
           <div className="border rounded-md max-h-60 overflow-y-auto">
             {assignedProducts.map((p) => (
-              <div key={p.productId} className="flex items-center justify-between px-3 py-1.5 border-b last:border-b-0">
+              <div key={p.productId} className="flex items-center justify-between px-3 py-1.5 border-b last:border-b-0 hover:bg-muted/50">
                 <div>
                   <span className="text-sm">{p.productName}</span>
                   <span className="text-xs text-muted-foreground ml-2 font-mono">{p.sku}</span>
@@ -432,7 +562,7 @@ function ProductLineDetail({ lineId }: { lineId: number }) {
         <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
           <Package className="h-4 w-4" /> Products
         </h3>
-        <ProductAssignmentPanel lineId={lineId} assignedProducts={detail.products} onChanged={invalidate} />
+        <ProductAssignmentPanel lineId={lineId} lineName={detail.name} assignedProducts={detail.products} onChanged={invalidate} />
       </div>
       <div>
         <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
