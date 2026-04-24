@@ -12,6 +12,7 @@ import {
 import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { computeSortRank } from "./sort-rank";
+import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 
 /**
  * Recompute sort_rank from the current DB row. Called after any
@@ -438,11 +439,26 @@ export const orderMethods: IOrderStorage = {
       }
     }
     
-    const [newOrder] = await db.insert(orders).values({
+    // §6 C9b: route through insertWmsOrder so the non-null
+    // channelId + omsFulfillmentOrderId invariant is enforced at
+    // every caller. The `as WmsOrderInsert` cast is safe because
+    // the factory's runtime guards throw WmsOrderInvariantError if
+    // the caller contract is violated. A later commit can tighten
+    // this function's signature once all direct callers are migrated.
+    const payload = {
       ...order,
       itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
-    }).returning();
-    
+    } as WmsOrderInsert;
+    const { id: newOrderId } = await insertWmsOrder(db, payload);
+    const [newOrder] = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, newOrderId))
+      .limit(1);
+    if (!newOrder) {
+      throw new Error(`createOrderWithItems: failed to re-fetch inserted order ${newOrderId}`);
+    }
+
     if (items.length > 0) {
       const itemsWithOrderId = items.map((item: any) => {
         const { orderId, ...rest } = item;

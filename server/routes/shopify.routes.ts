@@ -239,6 +239,7 @@ export function registerShopifyRoutes(app: Express) {
           shopifyOrderId: rawOrder.external_order_id,
           externalOrderId: rawOrder.external_order_id || rawOrder.id,
           sourceTableId: rawOrder.id, // Links to oms_orders.id for JOINs
+          omsFulfillmentOrderId: String(rawOrder.id), // §6 C9: required non-null linkage to OMS
           channelId: rawOrder.channel_id || defaultChannelId,
           source: "oms", // Updated to reflect it comes from the unified hub
           orderNumber: rawOrder.order_number,

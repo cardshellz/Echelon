@@ -240,6 +240,7 @@ async function createWmsOrderFromEbay(
     source: "ebay",
     externalOrderId: externalOrderId,
     sourceTableId: omsIdStr, // Link to OMS order for dedup + ship confirm
+    omsFulfillmentOrderId: omsIdStr, // §6 C9: required non-null linkage to OMS
     orderNumber,
     customerName: orderData.customerName || orderData.shipToName || orderNumber,
     customerEmail: orderData.customerEmail || null,

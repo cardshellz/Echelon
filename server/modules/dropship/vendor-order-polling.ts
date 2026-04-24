@@ -495,6 +495,7 @@ async function createDropshipWmsOrder(
     source: "ebay",
     externalOrderId,
     sourceTableId: String(omsOrderId),
+    omsFulfillmentOrderId: String(omsOrderId), // §6 C9: required non-null linkage to OMS
     orderNumber,
     customerName: shipTo?.fullName || orderNumber,
     customerEmail: shipTo?.email || null,
