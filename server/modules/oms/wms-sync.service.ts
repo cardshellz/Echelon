@@ -35,6 +35,12 @@ const WMS_FINANCIAL_SNAPSHOT = process.env.WMS_FINANCIAL_SNAPSHOT === "true";
 // creation path they relied on. Flip on once Group C is wired.
 const WMS_SHIPMENT_AT_SYNC = process.env.WMS_SHIPMENT_AT_SYNC === "true";
 
+// Feature flag: gates §6 Commit 12 (route WMS sync's ShipStation push
+// through pushShipment(shipmentId) which reads WMS only + validates).
+// Default false. Requires WMS_SHIPMENT_AT_SYNC=true to work, because
+// pushShipment needs a shipment row to exist.
+const PUSH_FROM_WMS = process.env.PUSH_FROM_WMS === "true";
+
 interface WmsSyncServices {
   inventoryCore: any;
   reservation: any;
@@ -247,6 +253,11 @@ export class WmsSyncService {
       // with per-item rows. Flag-gated; failure is non-fatal so a
       // broken shipment insert never blocks order sync (the hourly
       // reconcile sweep in Group H will retry).
+      // Captured outside the try/catch so step 8 (push) can pass it to
+      // pushShipment when PUSH_FROM_WMS is on. Stays null if the flag is
+      // off or shipment creation failed — in either case step 8 falls
+      // back to the legacy pushOrder path.
+      let shipmentIdForPush: number | null = null;
       if (WMS_SHIPMENT_AT_SYNC) {
         try {
           // createOrderWithItems does not return per-item ids, so we
@@ -278,6 +289,7 @@ export class WmsSyncService {
             omsOrder.channelId,
             shipmentItemInputs,
           );
+          shipmentIdForPush = shipmentId;
           console.log(
             `[WMS Sync] ${created ? "Created" : "Reused"} shipment ${shipmentId} for WMS order ${newWmsOrder.id}`,
           );
@@ -310,21 +322,47 @@ export class WmsSyncService {
       }
 
       // 8. Push to ShipStation (originates from WMS, not OMS)
+      // Plan §6 Commit 12: when PUSH_FROM_WMS is on AND a shipment row
+      // was created in step 5b, push via the new pushShipment(shipmentId)
+      // path which reads WMS only and validates. Otherwise fall back to
+      // the legacy pushOrder(omsOrder) path. Push failures never block
+      // the sync — Group H reconcile retries.
       if (this.services.shipStation?.isConfigured()) {
-        try {
-          // Fetch full OMS order with lines for ShipStation payload
-          const omsService = this.services.omsService;
-          if (omsService) {
-            const fullOmsOrder = await omsService.getOrderById(omsOrderId);
-            if (fullOmsOrder) {
-              await this.services.shipStation.pushOrder(fullOmsOrder);
-              console.log(`[WMS Sync] Pushed OMS order ${omsOrderId} to ShipStation from WMS`);
-            } else {
-              console.warn(`[WMS Sync] Could not fetch OMS order ${omsOrderId} for ShipStation push`);
-            }
+        if (PUSH_FROM_WMS && shipmentIdForPush !== null) {
+          // New path (plan §6 C12): push via WMS-only pushShipment.
+          try {
+            await this.services.shipStation.pushShipment(shipmentIdForPush);
+            console.log(
+              `[WMS Sync] Pushed shipment ${shipmentIdForPush} to ShipStation via pushShipment (PUSH_FROM_WMS=true)`,
+            );
+          } catch (err: any) {
+            // Don't block the sync — reconcile will retry the push.
+            console.error(
+              `[WMS Sync] pushShipment failed for shipment ${shipmentIdForPush} (OMS order ${omsOrderId}): ${err.message}`,
+            );
           }
-        } catch (err: any) {
-          console.error(`[WMS Sync] ShipStation push failed for OMS order ${omsOrderId}: ${err.message}`);
+        } else {
+          // Legacy path: push via pushOrder reading OMS.
+          if (PUSH_FROM_WMS && shipmentIdForPush === null) {
+            console.log(
+              `[WMS Sync] PUSH_FROM_WMS enabled but no shipmentId available for OMS order ${omsOrderId} — using legacy path`,
+            );
+          }
+          try {
+            // Fetch full OMS order with lines for ShipStation payload
+            const omsService = this.services.omsService;
+            if (omsService) {
+              const fullOmsOrder = await omsService.getOrderById(omsOrderId);
+              if (fullOmsOrder) {
+                await this.services.shipStation.pushOrder(fullOmsOrder);
+                console.log(`[WMS Sync] Pushed OMS order ${omsOrderId} to ShipStation (legacy pushOrder)`);
+              } else {
+                console.warn(`[WMS Sync] Could not fetch OMS order ${omsOrderId} for ShipStation push`);
+              }
+            }
+          } catch (err: any) {
+            console.error(`[WMS Sync] ShipStation push failed for OMS order ${omsOrderId}: ${err.message}`);
+          }
         }
       }
 
