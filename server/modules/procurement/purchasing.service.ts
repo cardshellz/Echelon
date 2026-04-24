@@ -939,6 +939,10 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     const lines = await storage.getPurchaseOrderLines(purchaseOrderId);
     const receivableLines = lines.filter((l: any) =>
+      // Only product lines are physically received. Discount/fee/tax/rebate/
+      // adjustment lines are accounting-only and never create inventory.
+      // Rows without lineType (pre-migration-0563) default to 'product'.
+      ((l.lineType ?? "product") === "product") &&
       (l.status === "open" || l.status === "partially_received") &&
       (l.orderQty - (l.receivedQty || 0) - (l.cancelledQty || 0)) > 0
     );
@@ -1053,6 +1057,12 @@ export function createPurchasingService(db: any, storage: Storage) {
       if (!rl.purchaseOrderLineId) continue;
       const poLine = await storage.getPurchaseOrderLineById(rl.purchaseOrderLineId);
       if (!poLine) continue;
+      // Skip non-product PO lines. Discount/fee/tax/rebate/adjustment lines
+      // are accounting entries and cannot be physically received. A receiving
+      // line pointing at one is either a data bug or a vendor sent something
+      // we weren't expecting; let receiving surface the anomaly on its own UI.
+      // Rows without lineType (pre-migration-0563) default to product.
+      if ((poLine.lineType ?? "product") !== "product") continue;
 
       const unitsPerUom = poLine.unitsPerUom || 1;
       const receivedPieces = rl.receivedQty * unitsPerUom;
@@ -1096,9 +1106,15 @@ export function createPurchasingService(db: any, storage: Storage) {
     // Recalculate totals
     await recalculateTotals(poId);
 
-    // Auto-transition PO status
+    // Auto-transition PO status. Only product lines gate this — non-product
+    // lines (discount/fee/tax/rebate/adjustment) have no physical qty to
+    // receive, so they shouldn't block closure. Rows without lineType
+    // (pre-migration-0563) default to product.
     const allLines = await storage.getPurchaseOrderLines(poId);
-    const activeLines = allLines.filter((l: any) => l.status !== "cancelled");
+    const activeLines = allLines.filter(
+      (l: any) =>
+        l.status !== "cancelled" && ((l.lineType ?? "product") === "product"),
+    );
     const allReceived = activeLines.every((l: any) => l.status === "received");
     const someReceived = activeLines.some((l: any) =>
       l.status === "received" || l.status === "partially_received"
