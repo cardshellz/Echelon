@@ -472,5 +472,27 @@ export const shipmentTrackingHistory = wmsSchema.table("shipment_tracking_histor
 export type ShipmentTrackingHistory = typeof shipmentTrackingHistory.$inferSelect;
 export type InsertShipmentTrackingHistory = typeof shipmentTrackingHistory.$inferInsert;
 
+// Returns - minimal stub for return records.
+// Added by migration 062 (§4.5). Written by Group D on Shopify refunds/create.
+// Full RMA workflow is a later project per plan §1.3 non-goal.
+// Until Group D lands, this table is inert (no writer, no reader).
+export const returns = wmsSchema.table("returns", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  shipmentId: integer("shipment_id").notNull().references(() => outboundShipments.id, { onDelete: "cascade" }),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  source: varchar("source", { length: 30 }).notNull().default("shopify_webhook"),
+  reason: varchar("reason", { length: 200 }),
+  refundExternalId: varchar("refund_external_id", { length: 100 }),
+  restocked: boolean("restocked").notNull().default(false),
+  receivedAt: timestamp("received_at"),
+  refundedAt: timestamp("refunded_at"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type Return = typeof returns.$inferSelect;
+export type InsertReturn = typeof returns.$inferInsert;
+
 
 

@@ -1,0 +1,26 @@
+-- Reverse migration: 062_returns
+-- Reverses migrations/062_returns.sql.
+--
+-- Plan reference: shipstation-flow-refactor-plan.md §4.5, §6 Group A
+-- Commit 6, §7 (migration table).
+--
+-- !!! DATA-LOSS WARNING !!!
+--   Dropping wms.returns destroys every recorded return event
+--   (Shopify refunds, manual returns, carrier returns) along with
+--   restock flags and timestamps.
+--
+--   - SAFE to run at this commit: no writer exists yet, so the table
+--     is guaranteed empty.
+--   - DANGEROUS once Group D lands: Group D adds the writer that
+--     inserts a row on every Shopify refunds/create event (and later
+--     commits extend it to manual / carrier returns). Running this
+--     reverse after that point permanently LOSES the return history;
+--     customer-support and finance reconciliation will no longer be
+--     able to answer "was this order refunded, when, and was it
+--     restocked?".
+--
+-- Idempotent: DROP TABLE IF EXISTS ... CASCADE. CASCADE also removes
+-- the idx_returns_shipment_id, idx_returns_order_id, and
+-- idx_returns_refund_external_id indexes automatically.
+
+DROP TABLE IF EXISTS wms.returns CASCADE;
