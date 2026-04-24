@@ -21,6 +21,9 @@ import {
 import { pool } from "../../db";
 import { channelConnections } from "@shared/schema";
 import { ShopifyAdapter } from "./adapters/shopify.adapter";
+import { createOmsService } from "../oms/oms.service";
+import { WmsOrderInvariantError } from "../wms/insert-order";
+import { randomBytes } from "crypto";
 
 export function registerChannelRoutes(app: Express) {
 
@@ -160,13 +163,22 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Create a manual order
+  // Create a manual order.
+  //
+  // §6 C9c: the WMS factory (server/modules/wms/insert-order.ts) requires
+  // every wms.orders row to link back to an oms_orders row via a non-null
+  // omsFulfillmentOrderId + positive channelId. Manual orders therefore
+  // must create an OMS parent first (source-of-truth for the order) and
+  // then insert the WMS fulfillment row pointing at it.
+  //
+  // channelId is now REQUIRED (was optional.nullable()) to satisfy the
+  // factory invariant. OMS orders also need channelId (non-null in schema).
   const createOrderSchema = z.object({
     orderNumber: z.string().min(1, "Order number required"),
     customerName: z.string().min(1, "Customer name required"),
     customerEmail: z.string().email().optional().or(z.literal("")),
     customerPhone: z.string().optional(),
-    channelId: z.number().optional().nullable(),
+    channelId: z.number().int().positive("channelId required (positive integer)"),
     source: z.enum(["shopify", "ebay", "amazon", "etsy", "manual", "api"]).default("manual"),
     priority: z.enum(["rush", "high", "normal"]).default("normal"),
     currency: z.string().default("USD"),
@@ -197,13 +209,71 @@ export function registerChannelRoutes(app: Express) {
 
       const data = parseResult.data;
 
-      // Create order
+      // ----------------------------------------------------------------
+      // Step 1: create the OMS parent order (source-of-truth for a manual
+      // order). Reuses omsService.ingestOrder so manual orders benefit
+      // from the same line-item normalization (SKU → product_variant
+      // lookup, idempotency via (channelId, externalOrderId) unique
+      // index) as channel-ingested orders.
+      //
+      // oms_orders has no `source` column — the channel_id FK is the
+      // discriminator. The `source: 'manual'` enum lives on wms.orders
+      // and is stamped below.
+      // ----------------------------------------------------------------
+      const omsService = createOmsService(db);
+      const externalOrderId = `MANUAL-${Date.now()}-${randomBytes(4).toString("hex")}`;
+
+      const omsOrder = await omsService.ingestOrder(
+        data.channelId,
+        externalOrderId,
+        {
+          externalOrderNumber: data.orderNumber,
+          status: "pending",
+          financialStatus: "paid",
+          fulfillmentStatus: "unfulfilled",
+          customerName: data.customerName,
+          customerEmail: data.customerEmail || undefined,
+          customerPhone: data.customerPhone || undefined,
+          shipToName: data.customerName,
+          shipToAddress1: data.shippingAddress || undefined,
+          shipToCity: data.shippingCity || undefined,
+          shipToState: data.shippingState || undefined,
+          shipToZip: data.shippingPostalCode || undefined,
+          shipToCountry: data.shippingCountry || undefined,
+          currency: data.currency,
+          subtotalCents: 0,
+          shippingCents: 0,
+          taxCents: 0,
+          discountCents: 0,
+          totalCents: 0,
+          notes: data.notes || undefined,
+          orderedAt: new Date(),
+          lineItems: data.items.map((item) => ({
+            sku: item.sku,
+            title: item.name,
+            quantity: item.quantity,
+            paidPriceCents: 0,
+            totalCents: 0,
+            taxable: true,
+            requiresShipping: true,
+          })),
+        },
+      );
+
+      const omsIdStr = String(omsOrder.id);
+
+      // ----------------------------------------------------------------
+      // Step 2: create the WMS fulfillment row linked to the OMS parent.
+      // The factory (routed via storage.createOrderWithItems →
+      // insertWmsOrder) enforces non-null omsFulfillmentOrderId +
+      // channelId at runtime.
+      // ----------------------------------------------------------------
       const orderData = {
         orderNumber: data.orderNumber,
         customerName: data.customerName,
         customerEmail: data.customerEmail || null,
         customerPhone: data.customerPhone || null,
-        channelId: data.channelId || null,
+        channelId: data.channelId, // §6 C9: required non-null linkage
         source: data.source,
         priority: data.priority,
         currency: data.currency,
@@ -218,6 +288,8 @@ export function registerChannelRoutes(app: Express) {
         orderPlacedAt: new Date(),
         shopifyOrderId: null, // Manual orders don't have Shopify ID
         externalOrderId: null, // Manual orders don't have external ID
+        sourceTableId: omsIdStr, // link to OMS order for dedup + ship confirm
+        omsFulfillmentOrderId: omsIdStr, // §6 C9: required non-null linkage to OMS
       };
 
       // Create items
@@ -234,6 +306,14 @@ export function registerChannelRoutes(app: Express) {
 
       res.status(201).json(order);
     } catch (error) {
+      if (error instanceof WmsOrderInvariantError) {
+        console.error("[manual-order] WMS invariant violation:", error);
+        return res.status(500).json({
+          error: "WMS order invariant violation",
+          field: error.field,
+          message: error.message,
+        });
+      }
       console.error("Error creating manual order:", error);
       res.status(500).json({ error: "Failed to create order" });
     }
