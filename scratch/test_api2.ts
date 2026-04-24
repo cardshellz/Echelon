@@ -1,1 +1,0 @@
-import { productMethods } from '../server/modules/catalog/catalog.storage'; productMethods.getAllProductVariants(true).then(r => console.log('Variants:', r.length)).catch(e => console.error('Variant Error', e));
