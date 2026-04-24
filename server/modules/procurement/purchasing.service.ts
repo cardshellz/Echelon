@@ -23,6 +23,8 @@ import {
   vendorProducts as vendorProductsTable,
   warehouseSettings as warehouseSettingsTable,
 } from "@shared/schema";
+import type { PoLineType } from "@shared/schema/procurement.schema";
+import { PO_LINE_TYPES, isPoLineType } from "@shared/schema/procurement.schema";
 import { Decimal } from "decimal.js";
 import {
   centsToMills,
@@ -122,6 +124,33 @@ const LINE_AMENDABLE_STATUSES = new Set(["draft", "pending_approval", "approved"
 const CANCELLABLE_FROM = new Set(["draft", "pending_approval", "approved"]);
 const VOIDABLE_FROM = new Set(["sent", "acknowledged"]);
 
+// Signed mills <-> cents helpers for the typed-PO-lines pipeline.
+//
+// The shared millsToCents/centsToMills helpers reject negatives by design
+// (main money path is always non-negative). Discount/rebate/adjustment
+// lines have legitimately signed costs, so we wrap via absolute value +
+// re-apply sign. Math still all integer; Rule #3 preserved.
+//
+// Keeping these local to the service instead of loosening the shared
+// helper preserves the guard for everywhere else that consumes money.
+function signedMillsToCents(mills: number): number {
+  if (!Number.isInteger(mills)) {
+    throw new RangeError("signedMillsToCents requires an integer");
+  }
+  const sign = mills < 0 ? -1 : 1;
+  const abs = Math.abs(mills);
+  // Half-up toward +infinity for the absolute value; sign reapplied below.
+  const cents = Math.floor((abs + 50) / 100);
+  return sign * cents;
+}
+
+function signedCentsToMills(cents: number): number {
+  if (!Number.isInteger(cents)) {
+    throw new RangeError("signedCentsToMills requires an integer");
+  }
+  return cents * 100;
+}
+
 // ── Service ─────────────────────────────────────────────────────────
 
 export type PurchasingService = ReturnType<typeof createPurchasingService>;
@@ -174,6 +203,63 @@ export function createPurchasingService(db: any, storage: Storage) {
       discountCents: discount.toNumber(),
       taxCents: tax.toNumber(),
       lineTotalCents: taxable.plus(tax).toNumber(),
+    };
+  }
+
+  // Totals breakdown by line type. Pure function — takes a list of lines
+  // and returns the net totals in cents. The math is sign-aware via
+  // line_total_cents (discounts/rebates have negative lineTotalCents,
+  // adjustments are signed).
+  //
+  // Used by recalculateTotals and by callers that want the type-by-type
+  // breakdown without round-tripping through the DB.
+  type PoTotalsBreakdown = {
+    productSubtotalCents: number;
+    discountTotalCents: number;
+    feeTotalCents: number;
+    taxTotalCents: number;
+    adjustmentTotalCents: number;
+    totalCents: number;
+  };
+
+  function computePoTotalsFromLines(lines: any[]): PoTotalsBreakdown {
+    let productSubtotal = BigInt(0);
+    let discountTotal = BigInt(0);
+    let feeTotal = BigInt(0);
+    let taxTotal = BigInt(0);
+    let adjustmentTotal = BigInt(0);
+    for (const line of lines) {
+      if (line.status === "cancelled") continue;
+      const lineTotal = BigInt(Number(line.lineTotalCents) || 0);
+      const type: PoLineType = (line.lineType as PoLineType) ?? "product";
+      switch (type) {
+        case "product":
+          productSubtotal += lineTotal;
+          break;
+        case "discount":
+        case "rebate":
+          discountTotal += lineTotal;
+          break;
+        case "fee":
+          feeTotal += lineTotal;
+          break;
+        case "tax":
+          taxTotal += lineTotal;
+          break;
+        case "adjustment":
+          adjustmentTotal += lineTotal;
+          break;
+      }
+    }
+    const total =
+      productSubtotal + discountTotal + feeTotal + taxTotal + adjustmentTotal;
+    return {
+      productSubtotalCents: Number(productSubtotal),
+      discountTotalCents: Number(discountTotal),
+      feeTotalCents: Number(feeTotal),
+      taxTotalCents: Number(taxTotal),
+      adjustmentTotalCents: Number(adjustmentTotal),
+      totalCents: Number(total),
     };
   }
 
@@ -1294,19 +1380,58 @@ export function createPurchasingService(db: any, storage: Storage) {
     vendorNotes?: string | null;
     internalNotes?: string | null;
     lines: Array<{
-      productVariantId: number;
+      // Request-time identifier used to link child lines (discount/adjustment)
+      // to a parent product line before the parent has a DB id.
+      // Optional; if absent for a line that is referenced by a child, server
+      // auto-generates one.
+      clientId?: string;
+
+      // Line taxonomy (migration 0563). Defaults to 'product'.
+      // See PO_LINE_TYPES in procurement.schema for the full set.
+      lineType?: PoLineType;
+
+      // Only valid on non-product lines. References another line's
+      // clientId in the SAME request payload. Parent must resolve to a
+      // product line; no chains.
+      parentClientId?: string | null;
+
+      // Required on non-product lines; ignored on product lines (which
+      // cache product_name/sku from the variant lookup).
+      description?: string | null;
+
+      // Required on product lines only. Must be null/absent on other types.
+      productVariantId?: number | null;
+
+      // Product lines: qty > 0. Fee: qty >= 1. All other types: qty == 1.
       orderQty: number;
+
       // Per-unit cost. Either or both may be provided:
       //   * unitCostMills is authoritative (4-decimal precision).
       //   * unitCostCents is accepted for legacy/back-compat callers.
       //   * If both are provided, they MUST agree (cents == round(mills/100)).
+      // Sign constraints vary by lineType (see validateCreateWithLinesInput).
       unitCostCents?: number;
       unitCostMills?: number;
+
       vendorProductId?: number | null;
-      description?: string | null;
     }>;
   };
 
+  // Type-aware line validation (migration 0563).
+  //
+  // Rules per line_type:
+  //
+  //   product     requires productVariantId; cost >= 0; qty > 0.
+  //   discount    no variant; cost <= 0; qty == 1.
+  //   fee         no variant; cost >= 0; qty >= 1.
+  //   tax         no variant; cost >= 0; qty == 1.
+  //   rebate      no variant; cost <= 0; qty == 1.
+  //   adjustment  no variant; cost signed (any integer); qty == 1.
+  //
+  // Non-product lines ALSO require a non-empty description. clientId and
+  // parentClientId are request-scoped and resolved to DB ids inside the
+  // insert transaction; parent must resolve to a product line in the same
+  // payload (no chains, no cycles).
   function validateCreateWithLinesInput(input: CreatePurchaseOrderWithLinesInput): void {
     if (!input || typeof input !== "object") {
       throw new PurchasingError("Request body is required", 400);
@@ -1317,18 +1442,86 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!Array.isArray(input.lines) || input.lines.length === 0) {
       throw new PurchasingError("At least one line is required", 400);
     }
+
+    // First pass: per-line shape + type rules. Build clientId->index map
+    // for the second pass (parent resolution).
+    const clientIdToIndex = new Map<string, number>();
     for (const [idx, line] of input.lines.entries()) {
       const label = `lines[${idx}]`;
       if (!line || typeof line !== "object") {
         throw new PurchasingError(`${label} is invalid`, 400);
       }
-      if (!Number.isInteger(line.productVariantId) || line.productVariantId <= 0) {
-        throw new PurchasingError(`${label}.product_variant_id is required`, 400);
-      }
-      if (!Number.isInteger(line.orderQty) || line.orderQty <= 0) {
-        throw new PurchasingError(`${label}.quantity_ordered must be a positive integer`, 400);
+
+      const lineType: PoLineType = line.lineType ?? "product";
+      if (!isPoLineType(lineType)) {
+        throw new PurchasingError(
+          `${label}.line_type must be one of ${PO_LINE_TYPES.join(", ")}`,
+          400,
+        );
       }
 
+      // Description rule: required on non-product lines, optional on product.
+      if (lineType !== "product") {
+        const desc = typeof line.description === "string" ? line.description.trim() : "";
+        if (desc.length === 0) {
+          throw new PurchasingError(
+            `${label}.description is required for ${lineType} lines`,
+            400,
+          );
+        }
+      }
+
+      // Variant rule.
+      if (lineType === "product") {
+        if (
+          !Number.isInteger(line.productVariantId) ||
+          (line.productVariantId as number) <= 0
+        ) {
+          throw new PurchasingError(`${label}.product_variant_id is required`, 400);
+        }
+      } else {
+        if (
+          line.productVariantId !== undefined &&
+          line.productVariantId !== null
+        ) {
+          throw new PurchasingError(
+            `${label}.product_variant_id is only valid on product lines`,
+            400,
+          );
+        }
+      }
+
+      // Qty rule.
+      if (!Number.isInteger(line.orderQty)) {
+        throw new PurchasingError(
+          `${label}.quantity_ordered must be an integer`,
+          400,
+        );
+      }
+      if (lineType === "product") {
+        if (line.orderQty <= 0) {
+          throw new PurchasingError(
+            `${label}.quantity_ordered must be > 0 for product lines`,
+            400,
+          );
+        }
+      } else if (lineType === "fee") {
+        if (line.orderQty < 1) {
+          throw new PurchasingError(
+            `${label}.quantity_ordered must be >= 1 for fee lines`,
+            400,
+          );
+        }
+      } else {
+        if (line.orderQty !== 1) {
+          throw new PurchasingError(
+            `${label}.quantity_ordered must be 1 for ${lineType} lines`,
+            400,
+          );
+        }
+      }
+
+      // Cost rule — integer; sign varies by type.
       const hasCents =
         line.unitCostCents !== undefined && line.unitCostCents !== null;
       const hasMills =
@@ -1340,34 +1533,112 @@ export function createPurchasingService(db: any, storage: Storage) {
           400,
         );
       }
-      if (hasMills) {
-        if (!Number.isInteger(line.unitCostMills) || (line.unitCostMills as number) < 0) {
-          throw new PurchasingError(
-            `${label}.unit_cost_mills must be a non-negative integer`,
-            400,
-          );
-        }
+      if (hasMills && !Number.isInteger(line.unitCostMills)) {
+        throw new PurchasingError(
+          `${label}.unit_cost_mills must be an integer`,
+          400,
+        );
       }
-      if (hasCents) {
-        if (!Number.isInteger(line.unitCostCents) || (line.unitCostCents as number) < 0) {
-          throw new PurchasingError(
-            `${label}.unit_cost_cents must be a non-negative integer`,
-            400,
-          );
-        }
+      if (hasCents && !Number.isInteger(line.unitCostCents)) {
+        throw new PurchasingError(
+          `${label}.unit_cost_cents must be an integer`,
+          400,
+        );
       }
-      // If both are provided, reject a disagreeing pair up front (Rule #3).
-      // The mills precision is authoritative; cents must be the half-up
-      // rounding of it. This prevents a client from drifting the two
-      // values and silently corrupting the stored cost.
+
+      // Sign check (type-specific). Use mills if present, else cents.
+      const primaryCost = hasMills
+        ? (line.unitCostMills as number)
+        : (line.unitCostCents as number);
+      switch (lineType) {
+        case "product":
+        case "fee":
+        case "tax":
+          if (primaryCost < 0) {
+            throw new PurchasingError(
+              `${label}: ${lineType} lines require a non-negative cost`,
+              400,
+            );
+          }
+          break;
+        case "discount":
+        case "rebate":
+          if (primaryCost > 0) {
+            throw new PurchasingError(
+              `${label}: ${lineType} lines require a non-positive cost`,
+              400,
+            );
+          }
+          break;
+        case "adjustment":
+          // signed; either sign allowed.
+          break;
+      }
+
+      // Cents/mills agreement check (authoritative source is mills).
+      // Signed-aware so discount/rebate/adjustment pairs validate too.
       if (hasMills && hasCents) {
-        const expectedCents = millsToCents(line.unitCostMills as number);
+        const expectedCents = signedMillsToCents(line.unitCostMills as number);
         if (expectedCents !== (line.unitCostCents as number)) {
           throw new PurchasingError(
             `${label}: unit_cost_mills (${line.unitCostMills}) and unit_cost_cents (${line.unitCostCents}) disagree; expected cents=${expectedCents}`,
             400,
           );
         }
+      }
+
+      // Register clientId for parent resolution (second pass).
+      if (typeof line.clientId === "string" && line.clientId.length > 0) {
+        if (clientIdToIndex.has(line.clientId)) {
+          throw new PurchasingError(
+            `${label}.clientId "${line.clientId}" is duplicated in this request`,
+            400,
+          );
+        }
+        clientIdToIndex.set(line.clientId, idx);
+      }
+    }
+
+    // Second pass: parentClientId resolution.
+    for (const [idx, line] of input.lines.entries()) {
+      const label = `lines[${idx}]`;
+      const parentClientId = line.parentClientId;
+      if (parentClientId === undefined || parentClientId === null || parentClientId === "") {
+        continue;
+      }
+      const lineType: PoLineType = line.lineType ?? "product";
+      if (lineType === "product") {
+        throw new PurchasingError(
+          `${label}.parent_client_id is only valid on non-product lines`,
+          400,
+        );
+      }
+      if (typeof parentClientId !== "string") {
+        throw new PurchasingError(
+          `${label}.parent_client_id must be a string`,
+          400,
+        );
+      }
+      if (parentClientId === line.clientId) {
+        throw new PurchasingError(
+          `${label}.parent_client_id cannot reference itself`,
+          400,
+        );
+      }
+      const parentIdx = clientIdToIndex.get(parentClientId);
+      if (parentIdx === undefined) {
+        throw new PurchasingError(
+          `${label}.parent_client_id "${parentClientId}" does not match any line in this request`,
+          400,
+        );
+      }
+      const parent = input.lines[parentIdx];
+      const parentType: PoLineType = parent.lineType ?? "product";
+      if (parentType !== "product") {
+        throw new PurchasingError(
+          `${label}.parent_client_id must reference a product line (found '${parentType}')`,
+          400,
+        );
       }
     }
   }
@@ -1381,36 +1652,58 @@ export function createPurchasingService(db: any, storage: Storage) {
     const vendor = await storage.getVendorById(input.vendorId);
     if (!vendor) throw new PurchasingError("Vendor not found", 404);
 
-    // Resolve product + variant info up-front (outside the txn) so we can
-    // cache SKU + product name on each line and fail fast on missing refs.
+    // Resolve product + variant info up-front for PRODUCT lines. Non-product
+    // lines don't reference a variant; they carry a user-entered description
+    // and signed cost.
+    //
     // Per-unit cost: mills is authoritative; cents is derived (rounded
-    // half-up) for back-compat writes into unit_cost_cents.
+    // half-up) for back-compat writes into unit_cost_cents. Non-product
+    // lines can have negative cost (discount/rebate/adjustment); the
+    // validator has already enforced per-type sign rules.
     const resolvedLines = await Promise.all(
       input.lines.map(async (line) => {
-        const variant = await storage.getProductVariantById(line.productVariantId);
-        if (!variant) {
-          throw new PurchasingError(`Product variant ${line.productVariantId} not found`, 404);
+        const lineType: PoLineType = line.lineType ?? "product";
+        let variant: any = null;
+        let product: any = null;
+        if (lineType === "product") {
+          variant = await storage.getProductVariantById(line.productVariantId as number);
+          if (!variant) {
+            throw new PurchasingError(
+              `Product variant ${line.productVariantId} not found`,
+              404,
+            );
+          }
+          product = await storage.getProductById(variant.productId);
+          if (!product) {
+            throw new PurchasingError(`Product ${variant.productId} not found`, 404);
+          }
         }
-        const product = await storage.getProductById(variant.productId);
-        if (!product) {
-          throw new PurchasingError(`Product ${variant.productId} not found`, 404);
-        }
+
         // Normalize to BOTH mills and cents. Whichever the caller sent
-        // becomes the anchor; the other is derived.
+        // becomes the anchor; the other is derived. Signed-aware: discount,
+        // rebate, and some adjustment lines carry negative values.
         const hasMills =
-          typeof line.unitCostMills === "number" && line.unitCostMills >= 0;
+          typeof line.unitCostMills === "number";
         const unitCostMills = hasMills
           ? (line.unitCostMills as number)
-          : centsToMills(Number(line.unitCostCents) || 0);
+          : signedCentsToMills(Number(line.unitCostCents) || 0);
         const unitCostCents = hasMills
-          ? millsToCents(unitCostMills)
+          ? signedMillsToCents(unitCostMills)
           : Number(line.unitCostCents) || 0;
         const costs = calculateLineCosts({
           orderQty: line.orderQty,
           unitCostCents,
           unitCostMills,
         });
-        return { line, variant, product, costs, unitCostMills, unitCostCents };
+        return {
+          line,
+          lineType,
+          variant,
+          product,
+          costs,
+          unitCostMills,
+          unitCostCents,
+        };
       }),
     );
 
@@ -1448,28 +1741,71 @@ export function createPurchasingService(db: any, storage: Storage) {
         })
         .returning();
 
-      const lineRows = resolvedLines.map((r, idx) => ({
-        purchaseOrderId: header.id,
-        lineNumber: idx + 1,
-        productId: r.variant.productId,
-        productVariantId: r.variant.id,
-        vendorProductId: r.line.vendorProductId ?? null,
-        sku: r.variant.sku,
-        productName: r.product.name,
-        description: r.line.description ?? null,
-        unitOfMeasure: r.variant.name?.split(" ")[0]?.toLowerCase() ?? "each",
-        unitsPerUom: r.variant.unitsPerVariant || 1,
-        orderQty: r.line.orderQty,
-        // Write BOTH mills and cents on INSERT (spec): mills is authoritative,
-        // cents is the rounded back-compat mirror.
-        unitCostCents: r.unitCostCents,
-        unitCostMills: r.unitCostMills,
-        discountCents: r.costs.discountCents,
-        taxCents: r.costs.taxCents,
-        lineTotalCents: r.costs.lineTotalCents,
-        status: "open" as const,
-      }));
-      await tx.insert(purchaseOrderLinesTable).values(lineRows);
+      // Build line rows. Product lines pull cached product info from the
+      // variant lookup; non-product lines carry only the description. Both
+      // record line_type (migration 0563) so downstream consumers can filter.
+      const lineRows = resolvedLines.map((r, idx) => {
+        const isProduct = r.lineType === "product";
+        return {
+          purchaseOrderId: header.id,
+          lineNumber: idx + 1,
+          productId: isProduct ? r.variant.productId : null,
+          productVariantId: isProduct ? r.variant.id : null,
+          vendorProductId: isProduct ? (r.line.vendorProductId ?? null) : null,
+          sku: isProduct ? r.variant.sku : null,
+          productName: isProduct ? r.product.name : null,
+          description: r.line.description ?? null,
+          unitOfMeasure: isProduct
+            ? (r.variant.name?.split(" ")[0]?.toLowerCase() ?? "each")
+            : null,
+          unitsPerUom: isProduct ? (r.variant.unitsPerVariant || 1) : 1,
+          orderQty: r.line.orderQty,
+          // Write BOTH mills and cents on INSERT (spec): mills is authoritative,
+          // cents is the rounded back-compat mirror. Signed for non-product.
+          unitCostCents: r.unitCostCents,
+          unitCostMills: r.unitCostMills,
+          discountCents: r.costs.discountCents,
+          taxCents: r.costs.taxCents,
+          lineTotalCents: r.costs.lineTotalCents,
+          lineType: r.lineType,
+          // parent_line_id resolved in a second pass after insert.
+          parentLineId: null as number | null,
+          status: "open" as const,
+        };
+      });
+      const insertedLines = await tx
+        .insert(purchaseOrderLinesTable)
+        .values(lineRows)
+        .returning({
+          id: purchaseOrderLinesTable.id,
+          lineNumber: purchaseOrderLinesTable.lineNumber,
+        });
+
+      // Second pass: resolve parentClientId -> parent_line_id. Iterate in
+      // insertion order so we can map line_number back to DB id.
+      // Validator has already checked that every parentClientId points to a
+      // valid PRODUCT line in this same request, so no extra guards here.
+      const clientIdToLineId = new Map<string, number>();
+      resolvedLines.forEach((r, idx) => {
+        const cid = r.line.clientId;
+        if (typeof cid === "string" && cid.length > 0) {
+          const dbId = insertedLines[idx]?.id;
+          if (typeof dbId === "number") clientIdToLineId.set(cid, dbId);
+        }
+      });
+      for (let i = 0; i < resolvedLines.length; i++) {
+        const r = resolvedLines[i];
+        const parentClientId = r.line.parentClientId;
+        if (!parentClientId) continue;
+        const parentDbId = clientIdToLineId.get(parentClientId);
+        if (!parentDbId) continue; // validator prevents this, defensive only
+        const childDbId = insertedLines[i]?.id;
+        if (typeof childDbId !== "number") continue;
+        await tx
+          .update(purchaseOrderLinesTable)
+          .set({ parentLineId: parentDbId })
+          .where(eq(purchaseOrderLinesTable.id, childDbId));
+      }
 
       // Status history: creation row (from NULL -> 'draft').
       await tx.insert(poStatusHistoryTable).values({
@@ -1670,35 +2006,65 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     // Refresh costs from the current vendor catalog when available.
     // Mills-aware: prefer catalog mills → source mills → derive from cents.
+    //
+    // Preserve line_type + parent relationships from the source. Since the
+    // duplicated PO gets new DB ids, we remap parents via client-side ids.
+    // Source line.id → synthesized clientId; child lines reference their
+    // parent's synthesized clientId.
+    const clientIdBySourceId = new Map<number, string>();
+    for (const src of sourceLines) {
+      if (src.status === "cancelled") continue;
+      clientIdBySourceId.set(src.id, `dup-${src.id}`);
+    }
+
     const dupLines: CreatePurchaseOrderWithLinesInput["lines"] = [];
     for (const src of sourceLines) {
       if (src.status === "cancelled") continue;
+      const srcLineType: PoLineType = (src.lineType as PoLineType) ?? "product";
+
       // Start from source line's mills when present, else derive from cents.
       let unitCostMills: number =
-        typeof src.unitCostMills === "number" && src.unitCostMills >= 0
+        typeof src.unitCostMills === "number"
           ? src.unitCostMills
           : centsToMills(Number(src.unitCostCents || 0));
       let vendorProductId: number | null = null;
-      try {
-        const vp = await storage.getPreferredVendorProduct(src.productId, src.productVariantId);
-        if (vp && vp.vendorId === targetVendorId) {
-          if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
-            unitCostMills = vp.unitCostMills;
-          } else if (typeof vp.unitCostCents === "number") {
-            unitCostMills = centsToMills(vp.unitCostCents);
+
+      // Vendor catalog refresh is only meaningful on product lines.
+      if (srcLineType === "product") {
+        try {
+          const vp = await storage.getPreferredVendorProduct(
+            src.productId,
+            src.productVariantId,
+          );
+          if (vp && vp.vendorId === targetVendorId) {
+            if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
+              unitCostMills = vp.unitCostMills;
+            } else if (typeof vp.unitCostCents === "number") {
+              unitCostMills = centsToMills(vp.unitCostCents);
+            }
+            vendorProductId = vp.id ?? null;
           }
-          vendorProductId = vp.id ?? null;
+        } catch {
+          // Non-fatal: fall back to source cost.
         }
-      } catch {
-        // Non-fatal: fall back to source cost.
       }
+
+      const parentClientId =
+        typeof src.parentLineId === "number"
+          ? clientIdBySourceId.get(src.parentLineId) ?? null
+          : null;
+
       dupLines.push({
-        productVariantId: src.productVariantId,
+        clientId: clientIdBySourceId.get(src.id),
+        lineType: srcLineType,
+        parentClientId,
+        productVariantId: srcLineType === "product" ? src.productVariantId : null,
         orderQty: src.orderQty,
         unitCostMills,
         // Include cents (derived) so downstream validators that still look
         // at cents don't choke. They must agree per validator rule.
-        unitCostCents: millsToCents(unitCostMills),
+        // Signed conversion for discount/rebate/adjustment lines.
+        unitCostCents: signedMillsToCents(unitCostMills),
         vendorProductId,
         description: src.description ?? null,
       });
@@ -2217,6 +2583,7 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     // Recalculate
     recalculateTotals,
+    computePoTotalsFromLines,
 
     // Receiving integration
     createReceiptFromPO,

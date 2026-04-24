@@ -112,7 +112,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
         vendorId: 1,
         lines: [{ productVariantId: 1, orderQty: -5, unitCostCents: 100 }],
       } as any),
-    ).rejects.toThrow(/positive integer/);
+    ).rejects.toThrow(/must be > 0/);
   });
 
   it("rejects non-integer unit cost (floating point guard)", async () => {
@@ -121,7 +121,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
         vendorId: 1,
         lines: [{ productVariantId: 1, orderQty: 1, unitCostCents: 10.5 }],
       } as any),
-    ).rejects.toThrow(/non-negative integer/);
+    ).rejects.toThrow(/must be an integer/);
   });
 
   it("404s when vendor does not exist", async () => {
