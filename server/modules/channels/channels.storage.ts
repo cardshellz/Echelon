@@ -32,6 +32,11 @@ import {
   eq, and, asc, desc, sql, inArray, notInArray, gt, or, ilike, isNull,
 } from "../../storage/base";
 import { count } from "drizzle-orm";
+import {
+  normalizeProductScope,
+  buildProductScopeCondition,
+  type ProductScope,
+} from "./product-line-scope";
 
 export interface IChannelStorage {
   getAllChannels(): Promise<Channel[]>;
@@ -76,7 +81,7 @@ export interface IChannelStorage {
   getChannelReservationsByVariantIds(variantIds: number[]): Promise<ChannelReservation[]>;
 
   // Product lines CRUD
-  getProductLinesWithCounts(): Promise<(ProductLine & { productCount: number; channelCount: number })[]>;
+  getProductLinesWithCounts(scope?: ProductScope): Promise<(ProductLine & { productCount: number; channelCount: number })[]>;
   getProductLineById(id: number): Promise<ProductLine | undefined>;
   getProductLineAssignedProducts(lineId: number): Promise<{ productId: number; productName: string; sku: string | null }[]>;
   getProductLineAssignedChannels(lineId: number): Promise<{ channelId: number; channelName: string; provider: string | null; isActive: boolean | null }[]>;
@@ -110,7 +115,7 @@ export interface IChannelStorage {
     }>;
     total: number;
   }>;
-  getProductLineInventoryStats(lineId: number | "unassigned"): Promise<{
+  getProductLineInventoryStats(lineId: number | "unassigned", scope?: ProductScope): Promise<{
     productCount: number;
     variantCount: number;
     inventoryQty: number;
@@ -394,12 +399,21 @@ export const channelMethods: IChannelStorage = {
 
   // --- Product lines CRUD ---
 
-  async getProductLinesWithCounts(): Promise<(ProductLine & { productCount: number; channelCount: number })[]> {
+  async getProductLinesWithCounts(scope?: ProductScope): Promise<(ProductLine & { productCount: number; channelCount: number })[]> {
     const lines = await db.select().from(productLines).orderBy(productLines.sortOrder, productLines.name);
+
+    // Per-line product counts MUST honor the same scope filter that the
+    // product list view uses, otherwise the sidebar badge disagrees with the
+    // list below it (e.g. badge=55 while the list shows 36 Active products).
+    // See ./product-line-scope.ts for the single source of truth.
+    const normalizedScope = normalizeProductScope(scope);
+    const scopeCond = buildProductScopeCondition(normalizedScope);
 
     const productCounts = await db
       .select({ productLineId: productLineProducts.productLineId, count: count() })
       .from(productLineProducts)
+      .innerJoin(products, eq(products.id, productLineProducts.productId))
+      .where(scopeCond)
       .groupBy(productLineProducts.productLineId);
     const countMap = new Map(productCounts.map((r: any) => [r.productLineId, Number(r.count)]));
 
@@ -554,7 +568,7 @@ export const channelMethods: IChannelStorage = {
       if (assignedIds.length > 0) {
         conds.push(notInArray(products.id, assignedIds));
       }
-    } else if (filter !== "all") {
+    } else if (typeof filter === "object" && filter !== null && "lineId" in filter) {
       const lineProductIds = await db
         .select({ productId: productLineProducts.productId })
         .from(productLineProducts)
@@ -574,9 +588,11 @@ export const channelMethods: IChannelStorage = {
       ));
     }
 
-    if (status && status !== "all") {
-      conds.push(eq(products.status, status));
-    }
+    // Use the shared scope predicate so the list, the sidebar counts, and
+    // the stats panel all agree on what "Active" means. The predicate also
+    // enforces `isActive=true` (soft-delete) so deleted products never leak
+    // into any product-line view.
+    conds.push(buildProductScopeCondition(normalizeProductScope(status)));
 
     if (vendor && vendor.trim()) {
       conds.push(or(
@@ -676,12 +692,18 @@ export const channelMethods: IChannelStorage = {
     return { rows, total };
   },
 
-  async getProductLineInventoryStats(lineId: number | "unassigned"): Promise<{
+  async getProductLineInventoryStats(lineId: number | "unassigned", scope?: ProductScope): Promise<{
     productCount: number;
     variantCount: number;
     inventoryQty: number;
     inventoryValueCents: number;
   }> {
+    // Scope (Active / Draft / Archived / all) MUST match what the list view
+    // is using so the sidebar badge and the list contents can never drift.
+    // See ./product-line-scope.ts.
+    const normalizedScope = normalizeProductScope(scope);
+    const scopeCond = buildProductScopeCondition(normalizedScope);
+
     let productIds: number[];
 
     if (lineId === "unassigned") {
@@ -689,10 +711,19 @@ export const channelMethods: IChannelStorage = {
         .selectDistinct({ productId: productLineProducts.productId })
         .from(productLineProducts);
       const assigned = new Set<number>(assignedRows.map((r: any) => r.productId as number));
-      const allRows = await db.select({ id: products.id }).from(products).where(eq(products.isActive, true));
+      const allRows = await db.select({ id: products.id }).from(products).where(scopeCond);
       productIds = (allRows as any[]).map((r) => r.id as number).filter((id) => !assigned.has(id));
     } else {
-      productIds = await this.getProductLineProductIds(lineId);
+      const assignedIds = await this.getProductLineProductIds(lineId);
+      if (assignedIds.length > 0) {
+        const scopedRows = await db
+          .select({ id: products.id })
+          .from(products)
+          .where(and(inArray(products.id, assignedIds), scopeCond));
+        productIds = (scopedRows as any[]).map((r) => r.id as number);
+      } else {
+        productIds = [];
+      }
     }
 
     if (productIds.length === 0) {

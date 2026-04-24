@@ -1171,10 +1171,17 @@ export default function ProductLinesPage() {
   };
 
   // ---------- Data: all lines ----------
+  // The sidebar per-line counts and the sidebar "Unassigned" badge MUST
+  // honor the same `status` scope that the product list below them uses,
+  // otherwise the badges disagree with the list contents. See the shared
+  // `product-line-scope` helper on the server side.
   const { data: lines = [], isLoading: linesLoading } = useQuery<ProductLine[]>({
-    queryKey: ["/api/product-lines"],
+    queryKey: ["/api/product-lines", status],
     queryFn: async () => {
-      const res = await fetch("/api/product-lines", {
+      const params = new URLSearchParams();
+      if (status) params.set("status", status);
+      const qs = params.toString();
+      const res = await fetch(`/api/product-lines${qs ? `?${qs}` : ""}`, {
         credentials: "include",
       });
       if (!res.ok) throw new Error("Failed to load product lines");
@@ -1254,7 +1261,7 @@ export default function ProductLinesPage() {
         : "all";
 
   const { data: stats } = useQuery<LineStats>({
-    queryKey: ["/api/product-lines/stats", statsKey],
+    queryKey: ["/api/product-lines/stats", statsKey, status],
     queryFn: async () => {
       if (statsKey === "all") {
         // Aggregate from all lines data (no dedicated endpoint for "all active")
@@ -1270,11 +1277,14 @@ export default function ProductLinesPage() {
           channelCount: lines.reduce((a, l) => a + (l.channelCount ?? 0), 0),
         };
       }
-      const path =
+      const basePath =
         statsKey === "unassigned"
           ? "/api/product-lines/unassigned/stats"
           : `/api/product-lines/${statsKey}/stats`;
-      const res = await fetch(path, { credentials: "include" });
+      const params = new URLSearchParams();
+      if (status) params.set("status", status);
+      const qs = params.toString();
+      const res = await fetch(`${basePath}${qs ? `?${qs}` : ""}`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to load stats");
       return res.json();
     },
@@ -1296,13 +1306,18 @@ export default function ProductLinesPage() {
     };
   }, [selection.kind, stats, lines]);
 
-  // Unassigned count for sidebar (query stats whenever lines load)
+  // Unassigned count for sidebar (query stats whenever lines load).
+  // Must pass `status` so the badge matches the list view's scope.
   const { data: unassignedStats } = useQuery<LineStats>({
-    queryKey: ["/api/product-lines/stats", "unassigned"],
+    queryKey: ["/api/product-lines/stats", "unassigned", status],
     queryFn: async () => {
-      const res = await fetch("/api/product-lines/unassigned/stats", {
-        credentials: "include",
-      });
+      const params = new URLSearchParams();
+      if (status) params.set("status", status);
+      const qs = params.toString();
+      const res = await fetch(
+        `/api/product-lines/unassigned/stats${qs ? `?${qs}` : ""}`,
+        { credentials: "include" },
+      );
       if (!res.ok) throw new Error("Failed to load unassigned stats");
       return res.json();
     },
@@ -1340,26 +1355,32 @@ export default function ProductLinesPage() {
     toLineId: number,
     mode: "move" | "duplicate",
   ) => {
-    // Lines list: bump counts
-    queryClient.setQueryData<ProductLine[]>(["/api/product-lines"], (prev) => {
-      if (!prev) return prev;
-      return prev.map((l) => {
-        if (l.id === toLineId) {
-          return { ...l, productCount: l.productCount + productIds.length };
-        }
-        if (
-          mode === "move" &&
-          typeof fromLineId === "number" &&
-          l.id === fromLineId
-        ) {
-          return {
-            ...l,
-            productCount: Math.max(0, l.productCount - productIds.length),
-          };
-        }
-        return l;
-      });
-    });
+    // Lines list: bump counts.
+    // The query key now includes `status`, so we match by key prefix
+    // instead of an exact key so every cached variant (active / draft /
+    // archived / all) gets the same optimistic patch.
+    queryClient.setQueriesData<ProductLine[]>(
+      { queryKey: ["/api/product-lines"] },
+      (prev) => {
+        if (!prev) return prev;
+        return prev.map((l) => {
+          if (l.id === toLineId) {
+            return { ...l, productCount: l.productCount + productIds.length };
+          }
+          if (
+            mode === "move" &&
+            typeof fromLineId === "number" &&
+            l.id === fromLineId
+          ) {
+            return {
+              ...l,
+              productCount: Math.max(0, l.productCount - productIds.length),
+            };
+          }
+          return l;
+        });
+      },
+    );
 
     // Current products page: if moving (not duplicating) and we are NOT
     // looking at the target line, remove the rows that no longer belong here.
@@ -1485,11 +1506,13 @@ export default function ProductLinesPage() {
       return res.json();
     },
     onMutate: (productIds) => {
-      // Decrement target-line count if viewing a specific line
+      // Decrement target-line count if viewing a specific line.
+      // Patch every cached status-variant because the query key now
+      // includes the `status` scope.
       if (selection.kind === "line") {
         const viewedId = selection.lineId;
-        queryClient.setQueryData<ProductLine[]>(
-          ["/api/product-lines"],
+        queryClient.setQueriesData<ProductLine[]>(
+          { queryKey: ["/api/product-lines"] },
           (prev) =>
             prev?.map((l) =>
               l.id === viewedId
