@@ -20,7 +20,7 @@ export function registerVendorPortalRoutes(app: Express) {
 
       const client = await pool.connect();
       try {
-        let where = `WHERE p.dropship_eligible = true AND p.is_active = true`;
+        let where = `WHERE p.is_active = true AND EXISTS (SELECT 1 FROM catalog.product_variants pv WHERE pv.product_id = p.id AND pv.dropship_eligible = true AND pv.is_active = true)`;
         const params: any[] = [vendorId];
 
         if (search) {
@@ -136,7 +136,7 @@ export function registerVendorPortalRoutes(app: Express) {
       try {
         // Validate all products exist and are eligible
         const validResult = await client.query(
-          `SELECT id FROM catalog.products WHERE id = ANY($1::int[]) AND dropship_eligible = true AND is_active = true`,
+          `SELECT p.id FROM catalog.products p WHERE p.id = ANY($1::int[]) AND p.is_active = true AND EXISTS (SELECT 1 FROM catalog.product_variants pv WHERE pv.product_id = p.id AND pv.dropship_eligible = true AND pv.is_active = true)`,
           [productIds]
         );
         const validIds = new Set(validResult.rows.map((r: any) => r.id));

@@ -44,7 +44,7 @@ export class CatalogRepository {
         JOIN product_variants pv ON pv.product_id = p.id
         WHERE p.is_active = true 
           AND pv.is_active = true 
-          AND p.tags ? 'dropship_eligible'
+          AND pv.dropship_eligible = true
         ORDER BY p.name ASC, pv.position ASC
       `);
 
