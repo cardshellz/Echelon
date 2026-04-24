@@ -14,8 +14,318 @@ import { eq, and, sql } from "drizzle-orm";
 import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels } from "@shared/schema";
 import type { OmsOrderWithLines } from "./oms.service";
 import { buildTrackingUrl } from "./tracking-url.util";
+import { isLineSumWithinTolerance } from "@shared/validation/currency";
 
 const EBAY_CHANNEL_ID = 67;
+
+// ---------------------------------------------------------------------------
+// Structured push error (Commit 11 — §6 shipstation-flow-refactor-plan.md)
+// ---------------------------------------------------------------------------
+//
+// Thrown by pushShipment / validateShipmentForPush when a shipment cannot
+// safely be pushed to ShipStation. The whole point of Commit 11 is to stop
+// silently pushing $0 orders; callers SHOULD let this bubble and rely on the
+// reconcile loop (Group H) to retry after the underlying data is fixed.
+//
+// Structured context follows coding-standards Rule #5:
+//   { code, shipmentId?, field?, value? }
+// `code` is a stable SCREAMING_SNAKE identifier so logs / dashboards can
+// filter without regex-matching human-readable messages.
+
+export class ShipStationPushError extends Error {
+  constructor(
+    message: string,
+    public readonly context: {
+      code: string;
+      shipmentId?: number;
+      field?: string;
+      value?: unknown;
+    },
+  ) {
+    super(message);
+    this.name = "ShipStationPushError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// parseEchelonOrderKey — pure function, exported for tests.
+// ---------------------------------------------------------------------------
+//
+// Per §6 Commit 13. Two legal formats for orderKeys emitted by Echelon:
+//
+//   - Legacy (pushOrder):     "echelon-oms-<omsOrderId>"
+//   - New    (pushShipment):  "echelon-wms-shp-<shipmentId>"
+//
+// During the PUSH_FROM_WMS rollout, SHIP_NOTIFY webhooks can carry either
+// prefix: orders pushed before the flag flip come back with the legacy
+// key, orders pushed after come back with the shipment-native key.
+// processShipNotify dispatches on the parsed source.
+//
+// Returns null for any key we do not own (e.g. Shopify-native SS
+// integration), including malformed or non-positive numeric suffixes.
+// A returned `null` is the signal to skip the shipment — never throw
+// here, since the webhook payload may mix our orders with third-party ones.
+//
+// The IDs are strictly validated as positive integers. Zero, negative,
+// non-numeric, and empty-suffix forms all return null so downstream
+// lookups can rely on the tagged union being well-formed.
+
+export function parseEchelonOrderKey(
+  orderKey: string | undefined | null,
+):
+  | { source: "oms"; omsOrderId: number }
+  | { source: "wms-shipment"; shipmentId: number }
+  | null {
+  if (typeof orderKey !== "string" || orderKey.length === 0) return null;
+
+  // Order matters: check the longer prefix first so that
+  // "echelon-wms-shp-" is not accidentally matched against the shorter
+  // "echelon-" stem via a looser check. Both prefixes are unique so
+  // the explicit startsWith guards are safe.
+  const WMS_SHP = "echelon-wms-shp-";
+  if (orderKey.startsWith(WMS_SHP)) {
+    const suffix = orderKey.substring(WMS_SHP.length);
+    if (suffix.length === 0) return null;
+    const n = parseInt(suffix, 10);
+    // parseInt is permissive ("12abc" → 12), so re-stringify and
+    // compare to reject anything that isn't a clean integer literal.
+    if (!Number.isInteger(n) || n <= 0 || String(n) !== suffix) return null;
+    return { source: "wms-shipment", shipmentId: n };
+  }
+
+  const OMS = "echelon-oms-";
+  if (orderKey.startsWith(OMS)) {
+    const suffix = orderKey.substring(OMS.length);
+    if (suffix.length === 0) return null;
+    const n = parseInt(suffix, 10);
+    if (!Number.isInteger(n) || n <= 0 || String(n) !== suffix) return null;
+    return { source: "oms", omsOrderId: n };
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Shapes consumed by the WMS-only push path. Intentionally narrow — just
+// the columns pushShipment reads — so the validator can be unit-tested
+// without dragging in the full drizzle row types.
+// ---------------------------------------------------------------------------
+
+export interface WmsShipmentRow {
+  id: number;
+  order_id: number;
+  channel_id: number | null;
+  status: string;
+}
+
+export interface WmsOrderRow {
+  id: number;
+  order_number: string;
+  channel_id: number | null;
+  oms_fulfillment_order_id: string | null;
+  sort_rank: string | null;
+  customer_name: string | null;
+  customer_email: string | null;
+  shipping_name: string | null;
+  shipping_address: string | null;
+  shipping_city: string | null;
+  shipping_state: string | null;
+  shipping_postal_code: string | null;
+  shipping_country: string | null;
+  amount_paid_cents: number;
+  tax_cents: number;
+  shipping_cents: number;
+  total_cents: number;
+  currency: string;
+  order_placed_at: Date | string | null;
+  external_order_id: string | null;
+}
+
+export interface WmsShipmentItemRow {
+  id: number; // outbound_shipment_items.id (used for lineItemKey)
+  order_item_id: number;
+  sku: string;
+  name: string;
+  qty: number;
+  unit_price_cents: number;
+}
+
+// Shipment statuses that are eligible to be pushed to ShipStation. Any
+// other state (shipped, voided, cancelled, returned, lost, labeled,
+// on_hold) means we MUST NOT push — either it's terminal or ShipStation
+// already has it. Mirrors the shipment state machine in plan §2.4.
+const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued"]);
+
+// ---------------------------------------------------------------------------
+// validateShipmentForPush — pure function, exported for tests.
+// ---------------------------------------------------------------------------
+//
+// Per §6 Commit 11 step 4. Throws ShipStationPushError on the first
+// violation so the caller's error message always points at one concrete
+// field — no aggregated "multiple errors" output that makes on-call
+// guess which field to fix first. Order of checks is deliberate:
+//
+//   1. items non-empty (structural)
+//   2. per-line unit_price_cents positive integer (catches the $0 bug)
+//   3. amount_paid_cents > 0  (header-level paid-order invariant)
+//   4. line sum ≈ total_cents within 1¢/line tolerance
+//   5. shipping address present
+//   6. customer email present
+//
+// A single `code` constant lets log pipelines pattern-match one event.
+
+export const SS_PUSH_INVALID_SHIPMENT = "SS_PUSH_INVALID_SHIPMENT";
+
+export function validateShipmentForPush(
+  shipment: Pick<WmsShipmentRow, "id">,
+  order: Pick<
+    WmsOrderRow,
+    | "amount_paid_cents"
+    | "total_cents"
+    | "shipping_address"
+    | "customer_email"
+  >,
+  items: ReadonlyArray<
+    Pick<WmsShipmentItemRow, "unit_price_cents" | "qty">
+  >,
+): void {
+  const shipmentId = shipment.id;
+
+  // 1. Items must be non-empty. Pushing a shipment with no lines yields
+  //    a $0 SS order — exactly the failure mode we're fixing.
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new ShipStationPushError("shipment has no items", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "items",
+      value: items?.length ?? 0,
+    });
+  }
+
+  // 2. Every line's unit_price_cents must be a positive integer. Zero or
+  //    negative values are the exact bug class that motivated this refactor.
+  for (let i = 0; i < items.length; i++) {
+    const line = items[i];
+    const unit = line.unit_price_cents;
+    if (
+      typeof unit !== "number" ||
+      !Number.isFinite(unit) ||
+      !Number.isInteger(unit) ||
+      unit <= 0
+    ) {
+      throw new ShipStationPushError(
+        `line ${i} has invalid unit_price_cents`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: `items[${i}].unit_price_cents`,
+          value: unit,
+        },
+      );
+    }
+
+    const qty = line.qty;
+    if (
+      typeof qty !== "number" ||
+      !Number.isInteger(qty) ||
+      qty < 0
+    ) {
+      throw new ShipStationPushError(
+        `line ${i} has invalid qty`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: `items[${i}].qty`,
+          value: qty,
+        },
+      );
+    }
+  }
+
+  // 3. amount_paid_cents must be > 0 on a paid order. We don't yet
+  //    distinguish "known zero-charge" channels (Gift, promo) — if that
+  //    category ever exists, a dedicated allowlist comes in later work.
+  //    For now, every order we push must have a positive amount paid.
+  if (
+    typeof order.amount_paid_cents !== "number" ||
+    !Number.isInteger(order.amount_paid_cents) ||
+    order.amount_paid_cents <= 0
+  ) {
+    throw new ShipStationPushError("order has invalid amount_paid_cents", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.amount_paid_cents",
+      value: order.amount_paid_cents,
+    });
+  }
+
+  // 4. Sum of line extensions must reconcile with order-level total_cents
+  //    within 1¢ per line. Tolerance accounts for channel-side rounding
+  //    (e.g. tax distributed per-line at half-even rounding).
+  if (
+    typeof order.total_cents !== "number" ||
+    !Number.isInteger(order.total_cents) ||
+    order.total_cents < 0
+  ) {
+    throw new ShipStationPushError("order has invalid total_cents", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.total_cents",
+      value: order.total_cents,
+    });
+  }
+
+  const linesSumCents = items.reduce(
+    (sum, line) => sum + line.unit_price_cents * line.qty,
+    0,
+  );
+  if (
+    !isLineSumWithinTolerance(
+      order.total_cents,
+      linesSumCents,
+      items.length,
+      1,
+    )
+  ) {
+    throw new ShipStationPushError(
+      "line sum does not match order.total_cents within tolerance",
+      {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "items.sum(unit_price_cents*qty)",
+        value: { linesSumCents, totalCents: order.total_cents },
+      },
+    );
+  }
+
+  // 5. Shipping address — at least the single-line shipping_address must
+  //    be present. We don't validate per-field granularity here because
+  //    upstream channels vary in how they split address lines.
+  if (
+    typeof order.shipping_address !== "string" ||
+    order.shipping_address.trim().length === 0
+  ) {
+    throw new ShipStationPushError("order has no shipping_address", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.shipping_address",
+      value: order.shipping_address,
+    });
+  }
+
+  // 6. Customer email — required so SS can send tracking notifications.
+  if (
+    typeof order.customer_email !== "string" ||
+    order.customer_email.trim().length === 0
+  ) {
+    throw new ShipStationPushError("order has no customer_email", {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      shipmentId,
+      field: "order.customer_email",
+      value: order.customer_email,
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -275,20 +585,20 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
     for (const shipment of shipments) {
       try {
-        if (!shipment.orderKey?.startsWith("echelon-oms-")) {
+        // --- Parse the orderKey. SHIP_NOTIFY carries a mix of Echelon
+        //     orders (legacy OMS-level + new shipment-level) and other
+        //     sources we don't own. parseEchelonOrderKey returns null for
+        //     non-Echelon keys; those are simply skipped.
+        const parsed = parseEchelonOrderKey(shipment.orderKey);
+        if (!parsed) {
           continue; // Not our order
         }
 
-        // Parse OMS order ID from orderKey
-        const omsOrderId = parseInt(shipment.orderKey.replace("echelon-oms-", ""), 10);
-        if (isNaN(omsOrderId)) {
-          console.warn(`[ShipStation Webhook] Invalid orderKey: ${shipment.orderKey}`);
-          continue;
-        }
-
-        // Skip voided shipments
+        // Skip voided shipments (shared for both prefixes)
         if (shipment.voidDate) {
-          console.log(`[ShipStation Webhook] Skipping voided shipment for order ${omsOrderId}`);
+          console.log(
+            `[ShipStation Webhook] Skipping voided shipment (orderKey=${shipment.orderKey})`,
+          );
           continue;
         }
 
@@ -296,150 +606,299 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         const carrier = mapShipStationCarrier(shipment.carrierCode);
 
         if (!trackingNumber) {
-          console.warn(`[ShipStation Webhook] No tracking number for order ${omsOrderId}`);
+          console.warn(
+            `[ShipStation Webhook] No tracking number for ${shipment.orderKey}`,
+          );
           continue;
         }
 
         const now = new Date();
 
-        // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
-        const wmsOrderResult: any = await db.execute(sql`
-          SELECT id, warehouse_status FROM wms.orders
-          WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
-            AND source IN ('oms', 'ebay')
-          LIMIT 1
-        `);
+        // Resolved by whichever branch we take. omsOrderId is the join
+        // key to OMS tables; wmsFirst signals whether the WMS cascade
+        // actually ran (legacy-OMS-only orders skip it).
+        let omsOrderId: number;
+        let wmsFirst: boolean;
 
-        const hasWmsOrder = wmsOrderResult.rows && wmsOrderResult.rows.length > 0;
+        if (parsed.source === "wms-shipment") {
+          // =====================================================
+          // NEW PATH (§6 Commit 13): SHIP_NOTIFY carried a
+          // shipment-level orderKey. Look up the outbound_shipments
+          // row directly by id, derive wmsOrderId + omsOrderId
+          // from it, then run the same cascade as the legacy
+          // hasWmsOrder branch.
+          // =====================================================
+          const shipmentId = parsed.shipmentId;
 
-        if (hasWmsOrder) {
-          const wmsOrderId = wmsOrderResult.rows[0].id;
-          const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
+          const shipmentResult: any = await db.execute(sql`
+            SELECT id, order_id, status
+            FROM wms.outbound_shipments
+            WHERE id = ${shipmentId}
+            LIMIT 1
+          `);
+          const shipmentRow: any = shipmentResult?.rows?.[0];
 
-          // Idempotency: skip if WMS order already shipped
-          if (wmsStatus === "shipped") {
-            console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — skipping`);
+          if (!shipmentRow) {
+            console.warn(
+              `[ShipStation Webhook] WMS shipment ${shipmentId} not found (orderKey=${shipment.orderKey})`,
+            );
             continue;
           }
 
-          if (wmsStatus === "cancelled") {
-            console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} is cancelled — skipping`);
+          // Idempotency: terminal shipment states are not re-applied.
+          // Matches shipment-level semantics introduced in C11 (see
+          // PUSHABLE_SHIPMENT_STATUSES invariant in §6 Commit 11).
+          if (shipmentRow.status === "shipped") {
+            console.log(
+              `[ShipStation Webhook] WMS shipment ${shipmentId} already shipped — skipping`,
+            );
+            continue;
+          }
+          if (shipmentRow.status === "cancelled") {
+            console.log(
+              `[ShipStation Webhook] WMS shipment ${shipmentId} is cancelled — skipping`,
+            );
             continue;
           }
 
-          // Update WMS order (primary source of truth)
-          const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
-          await db.execute(sql`
-            UPDATE wms.orders SET
-              warehouse_status = 'shipped',
-              completed_at = ${now},
-              tracking_number = ${trackingNumber},
-              updated_at = ${now}
+          const wmsOrderId = shipmentRow.order_id;
+
+          // Pull the owning order so we can cascade status + derive
+          // the OMS pointer. After C9 every wms.orders row has a
+          // non-null oms_fulfillment_order_id, but we still guard
+          // defensively — better to log and continue than to trip
+          // the outer catch and lose the whole batch.
+          const orderResult: any = await db.execute(sql`
+            SELECT id, warehouse_status, oms_fulfillment_order_id
+            FROM wms.orders
             WHERE id = ${wmsOrderId}
+            LIMIT 1
           `);
+          const orderRow: any = orderResult?.rows?.[0];
 
-          // Mark all order items as completed
+          if (!orderRow) {
+            console.warn(
+              `[ShipStation Webhook] WMS order ${wmsOrderId} not found for shipment ${shipmentId}`,
+            );
+            continue;
+          }
+
+          const omsPointer = orderRow.oms_fulfillment_order_id;
+          if (!omsPointer) {
+            console.warn(
+              `[ShipStation Webhook] WMS order ${wmsOrderId} has no oms_fulfillment_order_id — cannot derive OMS update (shipment=${shipmentId})`,
+            );
+            continue;
+          }
+          const parsedOmsPointer = parseInt(String(omsPointer), 10);
+          if (!Number.isInteger(parsedOmsPointer) || parsedOmsPointer <= 0) {
+            console.warn(
+              `[ShipStation Webhook] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${shipmentId})`,
+            );
+            continue;
+          }
+          omsOrderId = parsedOmsPointer;
+
+          // 1. Update the shipment row itself. This is the
+          //    shipment-native primary source of truth.
           await db.execute(sql`
-            UPDATE wms.order_items SET
-              status = 'completed',
-              picked_quantity = quantity,
-              fulfilled_quantity = quantity
-            WHERE wms_order_id = ${wmsOrderId}
-              AND status NOT IN ('completed', 'short', 'cancelled')
+            UPDATE wms.outbound_shipments SET
+              status = 'shipped',
+              carrier = ${carrier},
+              tracking_number = ${trackingNumber},
+              shipped_at = ${now},
+              updated_at = ${now}
+            WHERE id = ${shipmentId}
           `);
 
-          console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
+          // 2. Cascade to the owning wms.orders row. Multi-shipment
+          //    semantics (§6 Commit 15+) will replace this with
+          //    recomputeOrderStatusFromShipments; for C13 we retain
+          //    the flat "shipped" write to match legacy behavior.
+          if (
+            orderRow.warehouse_status !== "shipped" &&
+            orderRow.warehouse_status !== "cancelled"
+          ) {
+            await db.execute(sql`
+              UPDATE wms.orders SET
+                warehouse_status = 'shipped',
+                completed_at = ${now},
+                tracking_number = ${trackingNumber},
+                updated_at = ${now}
+              WHERE id = ${wmsOrderId}
+            `);
 
-          // Create shipment record for the WMS order.
-          // Column name is `order_id` (per shared/schema/orders.schema.ts L348
-          // and migrations/0071_create_namespaces.sql L817). The previous
-          // `wms_order_id` reference threw `column "wms_order_id" does not
-          // exist` and was swallowed by the per-shipment try/catch, so the
-          // outbound_shipments audit row was never written. See
-          // shipstation-sync-audit.md §3 / §1E.
-          await db.execute(sql`
-            INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
-            VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
-            ON CONFLICT DO NOTHING
-          `);
+            // 3. Mark all still-in-flight order items completed.
+            //    Same guard as the legacy branch: never overwrite
+            //    items that are already in a terminal state.
+            await db.execute(sql`
+              UPDATE wms.order_items SET
+                status = 'completed',
+                picked_quantity = quantity,
+                fulfilled_quantity = quantity
+              WHERE wms_order_id = ${wmsOrderId}
+                AND status NOT IN ('completed', 'short', 'cancelled')
+            `);
+          }
+
+          console.log(
+            `[ShipStation Webhook] Updated WMS shipment ${shipmentId} (order ${wmsOrderId}) to shipped`,
+          );
+
+          wmsFirst = true;
         } else {
-          // No WMS order — check OMS for idempotency (legacy path)
-          const [omsOrder] = await db
-            .select()
-            .from(omsOrders)
-            .where(eq(omsOrders.id, omsOrderId))
-            .limit(1);
+          // =====================================================
+          // LEGACY PATH: SHIP_NOTIFY carried echelon-oms-<omsId>.
+          // Unchanged from pre-C13 behavior. Will run through the
+          // deprecation window for orders pushed before the
+          // PUSH_FROM_WMS flag flip.
+          // =====================================================
+          omsOrderId = parsed.omsOrderId;
 
-          if (!omsOrder) {
-            console.warn(`[ShipStation Webhook] Neither WMS nor OMS order found for OMS ID ${omsOrderId}`);
-            continue;
-          }
+          // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
+          const wmsOrderResult: any = await db.execute(sql`
+            SELECT id, warehouse_status FROM wms.orders
+            WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
+              AND source IN ('oms', 'ebay')
+            LIMIT 1
+          `);
 
-          if (omsOrder.status === "shipped" && omsOrder.trackingNumber === trackingNumber) {
-            console.log(`[ShipStation Webhook] OMS order ${omsOrderId} already shipped with same tracking`);
-            continue;
-          }
+          const hasWmsOrder =
+            wmsOrderResult.rows && wmsOrderResult.rows.length > 0;
 
-          // Legacy: deduct inventory directly for orders without WMS rows
-          if (inventoryCore) {
-            try {
-              const lines = await db
-                .select()
-                .from(omsOrderLines)
-                .where(eq(omsOrderLines.orderId, omsOrderId));
+          if (hasWmsOrder) {
+            const wmsOrderId = wmsOrderResult.rows[0].id;
+            const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
 
-              for (const line of lines) {
-                if (!line.sku || !line.quantity) continue;
-
-                const [variant] = await db
-                  .select()
-                  .from(productVariants)
-                  .where(eq(sql`UPPER(${productVariants.sku})`, line.sku.toUpperCase()))
-                  .limit(1);
-
-                if (!variant) {
-                  console.warn(`[ShipStation Webhook] SKU ${line.sku} not found — skipping inventory deduction for order ${omsOrderId}`);
-                  continue;
-                }
-
-                const warehouseLocationId = omsOrder.warehouseId;
-                const [level] = warehouseLocationId
-                  ? await db
-                      .select()
-                      .from(inventoryLevels)
-                      .where(
-                        and(
-                          eq(inventoryLevels.productVariantId, variant.id),
-                          eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
-                        ),
-                      )
-                      .limit(1)
-                  : await db
-                      .select()
-                      .from(inventoryLevels)
-                      .where(eq(inventoryLevels.productVariantId, variant.id))
-                      .limit(1);
-
-                if (!level) {
-                  console.warn(`[ShipStation Webhook] No inventory level for variant ${variant.id} (SKU ${line.sku}) — skipping for order ${omsOrderId}`);
-                  continue;
-                }
-
-                await inventoryCore.recordShipment({
-                  productVariantId: variant.id,
-                  warehouseLocationId: level.warehouseLocationId,
-                  qty: line.quantity,
-                  orderId: omsOrderId,
-                  orderItemId: line.id,
-                  shipmentId: String(shipment.shipmentId),
-                  userId: "system:shipstation",
-                });
-
-                console.log(`[ShipStation Webhook] Recorded shipment for ${line.quantity}x ${line.sku} (order ${omsOrderId})`);
-              }
-            } catch (invErr: any) {
-              console.error(`[ShipStation Webhook] Legacy inventory deduction failed for order ${omsOrderId}: ${invErr.message}`);
+            // Idempotency: skip if WMS order already shipped
+            if (wmsStatus === "shipped") {
+              console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — skipping`);
+              continue;
             }
+
+            if (wmsStatus === "cancelled") {
+              console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} is cancelled — skipping`);
+              continue;
+            }
+
+            // Update WMS order (primary source of truth)
+            const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
+            await db.execute(sql`
+              UPDATE wms.orders SET
+                warehouse_status = 'shipped',
+                completed_at = ${now},
+                tracking_number = ${trackingNumber},
+                updated_at = ${now}
+              WHERE id = ${wmsOrderId}
+            `);
+
+            // Mark all order items as completed
+            await db.execute(sql`
+              UPDATE wms.order_items SET
+                status = 'completed',
+                picked_quantity = quantity,
+                fulfilled_quantity = quantity
+              WHERE wms_order_id = ${wmsOrderId}
+                AND status NOT IN ('completed', 'short', 'cancelled')
+            `);
+
+            console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
+
+            // Create shipment record for the WMS order.
+            // Column name is `order_id` (per shared/schema/orders.schema.ts L348
+            // and migrations/0071_create_namespaces.sql L817). The previous
+            // `wms_order_id` reference threw `column "wms_order_id" does not
+            // exist` and was swallowed by the per-shipment try/catch, so the
+            // outbound_shipments audit row was never written. See
+            // shipstation-sync-audit.md §3 / §1E.
+            await db.execute(sql`
+              INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
+              VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
+              ON CONFLICT DO NOTHING
+            `);
+
+            wmsFirst = true;
+          } else {
+            // No WMS order — check OMS for idempotency (legacy path)
+            const [omsOrder] = await db
+              .select()
+              .from(omsOrders)
+              .where(eq(omsOrders.id, omsOrderId))
+              .limit(1);
+
+            if (!omsOrder) {
+              console.warn(`[ShipStation Webhook] Neither WMS nor OMS order found for OMS ID ${omsOrderId}`);
+              continue;
+            }
+
+            if (omsOrder.status === "shipped" && omsOrder.trackingNumber === trackingNumber) {
+              console.log(`[ShipStation Webhook] OMS order ${omsOrderId} already shipped with same tracking`);
+              continue;
+            }
+
+            // Legacy: deduct inventory directly for orders without WMS rows
+            if (inventoryCore) {
+              try {
+                const lines = await db
+                  .select()
+                  .from(omsOrderLines)
+                  .where(eq(omsOrderLines.orderId, omsOrderId));
+
+                for (const line of lines) {
+                  if (!line.sku || !line.quantity) continue;
+
+                  const [variant] = await db
+                    .select()
+                    .from(productVariants)
+                    .where(eq(sql`UPPER(${productVariants.sku})`, line.sku.toUpperCase()))
+                    .limit(1);
+
+                  if (!variant) {
+                    console.warn(`[ShipStation Webhook] SKU ${line.sku} not found — skipping inventory deduction for order ${omsOrderId}`);
+                    continue;
+                  }
+
+                  const warehouseLocationId = omsOrder.warehouseId;
+                  const [level] = warehouseLocationId
+                    ? await db
+                        .select()
+                        .from(inventoryLevels)
+                        .where(
+                          and(
+                            eq(inventoryLevels.productVariantId, variant.id),
+                            eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+                          ),
+                        )
+                        .limit(1)
+                    : await db
+                        .select()
+                        .from(inventoryLevels)
+                        .where(eq(inventoryLevels.productVariantId, variant.id))
+                        .limit(1);
+
+                  if (!level) {
+                    console.warn(`[ShipStation Webhook] No inventory level for variant ${variant.id} (SKU ${line.sku}) — skipping for order ${omsOrderId}`);
+                    continue;
+                  }
+
+                  await inventoryCore.recordShipment({
+                    productVariantId: variant.id,
+                    warehouseLocationId: level.warehouseLocationId,
+                    qty: line.quantity,
+                    orderId: omsOrderId,
+                    orderItemId: line.id,
+                    shipmentId: String(shipment.shipmentId),
+                    userId: "system:shipstation",
+                  });
+
+                  console.log(`[ShipStation Webhook] Recorded shipment for ${line.quantity}x ${line.sku} (order ${omsOrderId})`);
+                }
+              } catch (invErr: any) {
+                console.error(`[ShipStation Webhook] Legacy inventory deduction failed for order ${omsOrderId}: ${invErr.message}`);
+              }
+            }
+
+            wmsFirst = false;
           }
         }
 
@@ -473,7 +932,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
             carrierCode: shipment.carrierCode,
             serviceCode: shipment.serviceCode,
             shipDate: shipment.shipDate,
-            wmsFirst: hasWmsOrder,
+            wmsFirst,
           },
         });
 
@@ -746,8 +1205,214 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // pushShipment — WMS-only reader (Commit 11 — §6 refactor plan).
+  // -------------------------------------------------------------------------
+  //
+  // The replacement for legacy pushOrder(omsOrder). Reads every field it
+  // needs from the wms.* namespace — which, post-Commit 7, carries a full
+  // financial snapshot (amount_paid_cents, tax_cents, shipping_cents,
+  // total_cents, unit_price_cents per line, currency). No OMS reads.
+  //
+  // Fails loudly via ShipStationPushError on invalid data rather than
+  // silently emitting $0 to ShipStation (the bug from audit B1 / #56430).
+  //
+  // Not wired into any caller in this commit — Commit 12 flips the
+  // PUSH_FROM_WMS flag and routes wms-sync at this. Until then, pushOrder
+  // remains the live path.
+
+  async function pushShipment(
+    shipmentId: number,
+  ): Promise<{ shipstationOrderId: number; orderKey: string }> {
+    if (
+      !Number.isInteger(shipmentId) ||
+      shipmentId <= 0
+    ) {
+      throw new ShipStationPushError("shipmentId must be a positive integer", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "shipmentId",
+        value: shipmentId,
+      });
+    }
+
+    // ─── 1. Load shipment header (WMS only) ─────────────────────────
+    const shipmentResult: any = await db.execute(sql`
+      SELECT id, order_id, channel_id, status
+      FROM wms.outbound_shipments
+      WHERE id = ${shipmentId}
+      LIMIT 1
+    `);
+    const shipmentRow: WmsShipmentRow | undefined = shipmentResult?.rows?.[0];
+    if (!shipmentRow) {
+      throw new ShipStationPushError("shipment not found", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "shipment",
+        value: null,
+      });
+    }
+    if (!PUSHABLE_SHIPMENT_STATUSES.has(shipmentRow.status)) {
+      // Already labeled / shipped / voided / cancelled — re-pushing
+      // would either collide with SS or clobber a legitimate final state.
+      throw new ShipStationPushError(
+        `shipment status '${shipmentRow.status}' is not pushable`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "shipment.status",
+          value: shipmentRow.status,
+        },
+      );
+    }
+
+    // ─── 2. Load order (WMS only, with financial snapshot) ──────────
+    const orderResult: any = await db.execute(sql`
+      SELECT
+        id, order_number, channel_id, oms_fulfillment_order_id,
+        sort_rank, external_order_id,
+        customer_name, customer_email,
+        shipping_name, shipping_address, shipping_city, shipping_state,
+        shipping_postal_code, shipping_country,
+        amount_paid_cents, tax_cents, shipping_cents, total_cents, currency,
+        order_placed_at
+      FROM wms.orders
+      WHERE id = ${shipmentRow.order_id}
+      LIMIT 1
+    `);
+    const orderRow: WmsOrderRow | undefined = orderResult?.rows?.[0];
+    if (!orderRow) {
+      throw new ShipStationPushError("wms order not found for shipment", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "order",
+        value: shipmentRow.order_id,
+      });
+    }
+
+    // ─── 3. Load items (WMS only, joined to order_items for pricing) ─
+    const itemsResult: any = await db.execute(sql`
+      SELECT
+        osi.id                    AS id,
+        osi.order_item_id         AS order_item_id,
+        oi.sku                    AS sku,
+        oi.name                   AS name,
+        osi.qty                   AS qty,
+        oi.unit_price_cents       AS unit_price_cents
+      FROM wms.outbound_shipment_items osi
+      JOIN wms.order_items oi ON oi.id = osi.order_item_id
+      WHERE osi.shipment_id = ${shipmentId}
+      ORDER BY osi.id ASC
+    `);
+    const itemRows: WmsShipmentItemRow[] = itemsResult?.rows ?? [];
+    if (itemRows.length === 0) {
+      throw new ShipStationPushError("shipment has no items", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "items",
+        value: 0,
+      });
+    }
+
+    // ─── 4. Validate (throws ShipStationPushError on violation) ─────
+    validateShipmentForPush(shipmentRow, orderRow, itemRows);
+
+    // ─── 5. Build SS payload ────────────────────────────────────────
+    const orderKey = `echelon-wms-shp-${shipmentId}`;
+
+    // eBay keeps the "EB-" prefix convention from pushOrder so packer-
+    // facing order numbers stay stable across the flag flip.
+    const isEbay = orderRow.channel_id === EBAY_CHANNEL_ID;
+    const baseOrderNumber =
+      orderRow.order_number || orderRow.external_order_id || "";
+    const orderNumber = isEbay ? `EB-${baseOrderNumber}` : baseOrderNumber;
+
+    const orderDateIso = orderRow.order_placed_at
+      ? new Date(orderRow.order_placed_at).toISOString()
+      : new Date().toISOString();
+
+    const payload = {
+      orderNumber,
+      orderKey,
+      orderDate: orderDateIso,
+      paymentDate: orderDateIso,
+      orderStatus: "awaiting_shipment",
+      customerUsername: orderRow.customer_name || "",
+      customerEmail: orderRow.customer_email || "",
+      billTo: {
+        name: orderRow.customer_name || "",
+      },
+      shipTo: {
+        name: orderRow.shipping_name || orderRow.customer_name || "",
+        street1: orderRow.shipping_address || "",
+        street2: "",
+        city: orderRow.shipping_city || "",
+        state: orderRow.shipping_state || "",
+        postalCode: orderRow.shipping_postal_code || "",
+        country: orderRow.shipping_country || "US",
+        phone: "",
+      },
+      items: itemRows.map((item) => ({
+        lineItemKey: `wms-item-${item.id}`,
+        sku: item.sku || "",
+        name: item.name || "",
+        quantity: item.qty,
+        // Validation above guarantees unit_price_cents is a positive
+        // integer, so this division cannot produce NaN or Infinity.
+        // Using /100 directly (no toFixed) because ShipStation accepts
+        // the number as-is; SS does the string formatting server-side.
+        unitPrice: item.unit_price_cents / 100,
+        options: [] as unknown[],
+      })),
+      amountPaid: orderRow.amount_paid_cents / 100,
+      taxAmount: orderRow.tax_cents / 100,
+      shippingAmount: orderRow.shipping_cents / 100,
+      internalNotes: `Source: wms shipment ${shipmentId} (channel ${orderRow.channel_id ?? "unknown"}) via Echelon WMS`,
+      advancedOptions: {
+        warehouseId: 996884,
+        storeId: 319989,
+        source: "echelon-wms",
+        // customField1 — sort_rank for packer pick-order sort. Padded
+        // string so ShipStation's text sort matches our numeric sort.
+        customField1: orderRow.sort_rank || "",
+        // customField2 — dual reference to wms order + shipment for
+        // webhook back-resolution and audit.
+        customField2: `wms_order_id:${orderRow.id}|shipment_id:${shipmentId}`,
+        // customField3 — legacy OMS pointer so operators can cross-
+        // reference against pre-refactor tooling during the deprecation
+        // window. May be empty for orders that never had an OMS row.
+        customField3: `oms_order_id:${orderRow.oms_fulfillment_order_id ?? ""}`,
+      },
+    };
+
+    // ─── 6. Push to ShipStation. No swallowing — reconcile retries. ─
+    const result = await apiRequest<ShipStationCreateOrderResponse>(
+      "POST",
+      "/orders/createorder",
+      payload,
+    );
+
+    // ─── 7. Mark shipment queued + persist SS pointers ──────────────
+    const now = new Date();
+    await db.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET shipstation_order_id = ${result.orderId},
+          shipstation_order_key = ${orderKey},
+          status = 'queued',
+          updated_at = ${now}
+      WHERE id = ${shipmentId}
+    `);
+
+    console.log(
+      `[ShipStation] Pushed WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})`,
+    );
+
+    return { shipstationOrderId: result.orderId, orderKey };
+  }
+
   return {
     pushOrder,
+    pushShipment,
     getShipments,
     getOrderByKey,
     processShipNotify,
