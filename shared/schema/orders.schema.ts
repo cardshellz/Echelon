@@ -453,5 +453,24 @@ export const insertOutboundShipmentItemSchema = createInsertSchema(outboundShipm
 export type InsertOutboundShipmentItem = z.infer<typeof insertOutboundShipmentItemSchema>;
 export type OutboundShipmentItem = typeof outboundShipmentItems.$inferSelect;
 
+// Shipment tracking history - audit trail of every tracking number a
+// shipment has ever carried, including voided / replaced values.
+// Added by migration 061 (§4.4). Written by Group D on void / replace.
+// Until Group D lands, this table is inert (no writer, no reader).
+export const shipmentTrackingHistory = wmsSchema.table("shipment_tracking_history", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  shipmentId: integer("shipment_id").notNull().references(() => outboundShipments.id, { onDelete: "cascade" }),
+  trackingNumber: varchar("tracking_number", { length: 200 }).notNull(),
+  carrier: varchar("carrier", { length: 100 }),
+  voidedAt: timestamp("voided_at"),
+  voidedReason: varchar("voided_reason", { length: 200 }),
+  replacedAt: timestamp("replaced_at"),
+  replacedByTrackingNumber: varchar("replaced_by_tracking_number", { length: 200 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type ShipmentTrackingHistory = typeof shipmentTrackingHistory.$inferSelect;
+export type InsertShipmentTrackingHistory = typeof shipmentTrackingHistory.$inferInsert;
+
 
 

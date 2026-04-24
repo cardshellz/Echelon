@@ -1,0 +1,22 @@
+-- Reverse migration: 061_shipment_tracking_history
+-- Reverses migrations/061_shipment_tracking_history.sql.
+--
+-- Plan reference: shipstation-flow-refactor-plan.md §4.4, §6 Group A
+-- Commit 5, §7 (migration table).
+--
+-- !!! DATA-LOSS WARNING !!!
+--   Dropping wms.shipment_tracking_history destroys the full audit trail
+--   of voided / replaced tracking numbers for every shipment.
+--
+--   - SAFE to run at this commit: no writer exists yet, so the table is
+--     guaranteed empty.
+--   - DANGEROUS once Group D lands: Group D adds the writer that records
+--     a history row on every void / replace. Running this reverse after
+--     that point permanently LOSES the audit history; customer-support
+--     and ops will no longer be able to answer "what was the prior
+--     tracking and why was it voided?".
+--
+-- Idempotent: DROP TABLE IF EXISTS ... CASCADE. CASCADE also removes the
+-- idx_shipment_tracking_history_shipment_id index automatically.
+
+DROP TABLE IF EXISTS wms.shipment_tracking_history CASCADE;
