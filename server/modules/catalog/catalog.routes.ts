@@ -64,6 +64,16 @@ export async function registerProductRoutes(app: Express) {
         }
       }
 
+      // Bulk-fetch product line mappings
+      const plpResult = await db.execute(sql`SELECT product_id, product_line_id FROM catalog.product_line_products`);
+      const productLinesByProductId = new Map<number, number[]>();
+      for (const row of plpResult.rows as any[]) {
+        const pId = row.product_id;
+        if (!productLinesByProductId.has(pId)) productLinesByProductId.set(pId, []);
+        productLinesByProductId.get(pId)!.push(row.product_line_id);
+      }
+
+
       // Build variant lookup
       const variantsByProductId = new Map<number, typeof allVariants>();
       for (const v of allVariants) {
@@ -79,6 +89,7 @@ export async function registerProductRoutes(app: Express) {
         name: p.name, // Use internal name, not Shopify title
         active: p.status === "active" ? 1 : 0,
         imageUrl: primaryImageByProductId.get(p.id) || null,
+        productLineIds: productLinesByProductId.get(p.id) || [],
         variantCount: variantsByProductId.get(p.id)?.length || 0,
         variants: variantsByProductId.get(p.id) || [],
       }));

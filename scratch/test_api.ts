@@ -1,0 +1,1 @@
+import { productMethods } from '../server/modules/catalog/catalog.storage'; productMethods.getAllProducts(true).then(r => console.log('Products:', r.length)).catch(e => console.error('Product Error', e));
