@@ -28,7 +28,8 @@ import {
   productLines,
   productLineProducts,
   inventoryLevels,
-  eq, and, asc, desc, sql, inArray, gt, or, ilike,
+  productAssets,
+  eq, and, asc, desc, sql, inArray, notInArray, gt, or, ilike, isNull,
 } from "../../storage/base";
 import { count } from "drizzle-orm";
 
@@ -83,8 +84,38 @@ export interface IChannelStorage {
   updateProductLine(id: number, updates: { name?: string; description?: string | null; isActive?: boolean; sortOrder?: number }): Promise<ProductLine | undefined>;
   replaceProductLineProducts(lineId: number, productIds: number[]): Promise<void>;
   addProductToProductLine(lineId: number, productId: number): Promise<ProductLineProduct | null>;
+  addProductsToProductLine(lineId: number, productIds: number[]): Promise<number>;
+  removeProductsFromLine(lineId: number, productIds: number[]): Promise<number>;
+  removeProductsFromAllLines(productIds: number[]): Promise<number>;
   removeProductFromProductLine(lineId: number, productId: number): Promise<void>;
   getProductLineProductIds(lineId: number): Promise<number[]>;
+  listProductsForLineView(opts: {
+    filter: "all" | "unassigned" | { lineId: number };
+    search?: string;
+    status?: string;
+    vendor?: string;
+    page: number;
+    limit: number;
+  }): Promise<{
+    rows: Array<{
+      id: number;
+      name: string;
+      sku: string | null;
+      status: string | null;
+      brand: string | null;
+      imageUrl: string | null;
+      inventoryQty: number;
+      inventoryValueCents: number;
+      lineIds: number[];
+    }>;
+    total: number;
+  }>;
+  getProductLineInventoryStats(lineId: number | "unassigned"): Promise<{
+    productCount: number;
+    variantCount: number;
+    inventoryQty: number;
+    inventoryValueCents: number;
+  }>;
 
   // Grid/allocation helper queries
   getActiveProductLinesForDropdown(): Promise<{ id: number; code: string; name: string }[]>;
@@ -452,12 +483,254 @@ export const channelMethods: IChannelStorage = {
     );
   },
 
+  async addProductsToProductLine(lineId: number, productIds: number[]): Promise<number> {
+    if (productIds.length === 0) return 0;
+    const result = await db.insert(productLineProducts).values(
+      productIds.map((pid: number) => ({ productLineId: lineId, productId: pid }))
+    ).onConflictDoNothing().returning({ id: productLineProducts.id });
+    return result.length;
+  },
+
+  async removeProductsFromLine(lineId: number, productIds: number[]): Promise<number> {
+    if (productIds.length === 0) return 0;
+    const result = await db.delete(productLineProducts).where(
+      and(
+        eq(productLineProducts.productLineId, lineId),
+        inArray(productLineProducts.productId, productIds),
+      )
+    ).returning({ id: productLineProducts.id });
+    return result.length;
+  },
+
+  async removeProductsFromAllLines(productIds: number[]): Promise<number> {
+    if (productIds.length === 0) return 0;
+    const result = await db.delete(productLineProducts)
+      .where(inArray(productLineProducts.productId, productIds))
+      .returning({ id: productLineProducts.id });
+    return result.length;
+  },
+
   async getProductLineProductIds(lineId: number): Promise<number[]> {
     const rows = await db
       .select({ productId: productLineProducts.productId })
       .from(productLineProducts)
       .where(eq(productLineProducts.productLineId, lineId));
     return rows.map((r: any) => r.productId);
+  },
+
+  async listProductsForLineView(opts: {
+    filter: "all" | "unassigned" | { lineId: number };
+    search?: string;
+    status?: string;
+    vendor?: string;
+    page: number;
+    limit: number;
+  }): Promise<{
+    rows: Array<{
+      id: number;
+      name: string;
+      sku: string | null;
+      status: string | null;
+      brand: string | null;
+      imageUrl: string | null;
+      inventoryQty: number;
+      inventoryValueCents: number;
+      lineIds: number[];
+    }>;
+    total: number;
+  }> {
+    const { filter, search, status, vendor } = opts;
+    const page = Math.max(1, opts.page);
+    const limit = Math.min(500, Math.max(1, opts.limit));
+    const offset = (page - 1) * limit;
+
+    const conds: any[] = [];
+
+    if (filter === "unassigned") {
+      const assignedIdsRows = await db
+        .selectDistinct({ productId: productLineProducts.productId })
+        .from(productLineProducts);
+      const assignedIds = assignedIdsRows.map((r: any) => r.productId);
+      if (assignedIds.length > 0) {
+        conds.push(notInArray(products.id, assignedIds));
+      }
+    } else if (filter !== "all") {
+      const lineProductIds = await db
+        .select({ productId: productLineProducts.productId })
+        .from(productLineProducts)
+        .where(eq(productLineProducts.productLineId, filter.lineId));
+      const ids = lineProductIds.map((r: any) => r.productId);
+      if (ids.length === 0) {
+        return { rows: [], total: 0 };
+      }
+      conds.push(inArray(products.id, ids));
+    }
+
+    if (search && search.trim()) {
+      const pattern = `%${search.trim().toLowerCase()}%`;
+      conds.push(or(
+        ilike(products.name, pattern),
+        ilike(products.sku, pattern),
+      ));
+    }
+
+    if (status && status !== "all") {
+      conds.push(eq(products.status, status));
+    }
+
+    if (vendor && vendor.trim()) {
+      conds.push(or(
+        eq(products.brand, vendor.trim()),
+        eq(products.manufacturer, vendor.trim()),
+      ));
+    }
+
+    const whereExpr = conds.length > 0 ? and(...conds) : undefined;
+
+    const totalRows = await db
+      .select({ c: count() })
+      .from(products)
+      .where(whereExpr as any);
+    const total = Number((totalRows[0] as any)?.c ?? 0);
+
+    if (total === 0) return { rows: [], total: 0 };
+
+    const pageRows = await db
+      .select({
+        id: products.id,
+        name: products.name,
+        sku: products.sku,
+        status: products.status,
+        brand: products.brand,
+      })
+      .from(products)
+      .where(whereExpr as any)
+      .orderBy(asc(products.name), asc(products.id))
+      .limit(limit)
+      .offset(offset);
+
+    if (pageRows.length === 0) return { rows: [], total };
+
+    const productIds = pageRows.map((p: any) => p.id);
+
+    const imageRows = await db
+      .select({ productId: productAssets.productId, url: productAssets.url })
+      .from(productAssets)
+      .where(and(
+        inArray(productAssets.productId, productIds),
+        isNull(productAssets.productVariantId),
+        eq(productAssets.isPrimary, 1),
+      ));
+    const imageByProductId = new Map<number, string>();
+    for (const r of imageRows as any[]) {
+      if (r.url) imageByProductId.set(r.productId, r.url);
+    }
+
+    const invRows = await db
+      .select({
+        productId: productVariants.productId,
+        variantId: productVariants.id,
+        qty: inventoryLevels.variantQty,
+        avgCostCents: productVariants.avgCostCents,
+      })
+      .from(inventoryLevels)
+      .innerJoin(productVariants, eq(productVariants.id, inventoryLevels.productVariantId))
+      .where(inArray(productVariants.productId, productIds));
+
+    const invByProduct = new Map<number, { qty: number; valueCents: number }>();
+    for (const r of invRows as any[]) {
+      const qty = Number(r.qty ?? 0);
+      const cost = Number(r.avgCostCents ?? 0);
+      const existing = invByProduct.get(r.productId) ?? { qty: 0, valueCents: 0 };
+      existing.qty += qty;
+      existing.valueCents += qty * cost;
+      invByProduct.set(r.productId, existing);
+    }
+
+    const lineRows = await db
+      .select({ productId: productLineProducts.productId, lineId: productLineProducts.productLineId })
+      .from(productLineProducts)
+      .where(inArray(productLineProducts.productId, productIds));
+    const linesByProduct = new Map<number, number[]>();
+    for (const r of lineRows as any[]) {
+      const arr = linesByProduct.get(r.productId) ?? [];
+      arr.push(r.lineId);
+      linesByProduct.set(r.productId, arr);
+    }
+
+    const rows = pageRows.map((p: any) => {
+      const inv = invByProduct.get(p.id) ?? { qty: 0, valueCents: 0 };
+      return {
+        id: p.id,
+        name: p.name,
+        sku: p.sku ?? null,
+        status: p.status ?? null,
+        brand: p.brand ?? null,
+        imageUrl: imageByProductId.get(p.id) ?? null,
+        inventoryQty: inv.qty,
+        inventoryValueCents: inv.valueCents,
+        lineIds: linesByProduct.get(p.id) ?? [],
+      };
+    });
+
+    return { rows, total };
+  },
+
+  async getProductLineInventoryStats(lineId: number | "unassigned"): Promise<{
+    productCount: number;
+    variantCount: number;
+    inventoryQty: number;
+    inventoryValueCents: number;
+  }> {
+    let productIds: number[];
+
+    if (lineId === "unassigned") {
+      const assignedRows = await db
+        .selectDistinct({ productId: productLineProducts.productId })
+        .from(productLineProducts);
+      const assigned = new Set<number>(assignedRows.map((r: any) => r.productId as number));
+      const allRows = await db.select({ id: products.id }).from(products).where(eq(products.isActive, true));
+      productIds = (allRows as any[]).map((r) => r.id as number).filter((id) => !assigned.has(id));
+    } else {
+      productIds = await this.getProductLineProductIds(lineId);
+    }
+
+    if (productIds.length === 0) {
+      return { productCount: 0, variantCount: 0, inventoryQty: 0, inventoryValueCents: 0 };
+    }
+
+    const variantRows = await db
+      .select({ id: productVariants.id, avgCostCents: productVariants.avgCostCents })
+      .from(productVariants)
+      .where(inArray(productVariants.productId, productIds));
+    const variantIds = (variantRows as any[]).map((v) => v.id as number);
+    const costById = new Map<number, number>();
+    for (const v of variantRows as any[]) costById.set(v.id, Number(v.avgCostCents ?? 0));
+
+    if (variantIds.length === 0) {
+      return { productCount: productIds.length, variantCount: 0, inventoryQty: 0, inventoryValueCents: 0 };
+    }
+
+    const invRows = await db
+      .select({ variantId: inventoryLevels.productVariantId, qty: inventoryLevels.variantQty })
+      .from(inventoryLevels)
+      .where(inArray(inventoryLevels.productVariantId, variantIds));
+
+    let qtyTotal = 0;
+    let valueTotal = 0;
+    for (const r of invRows as any[]) {
+      const qty = Number(r.qty ?? 0);
+      const cost = costById.get(r.variantId) ?? 0;
+      qtyTotal += qty;
+      valueTotal += qty * cost;
+    }
+
+    return {
+      productCount: productIds.length,
+      variantCount: variantIds.length,
+      inventoryQty: qtyTotal,
+      inventoryValueCents: valueTotal,
+    };
   },
 
   // --- Grid/allocation helper queries ---

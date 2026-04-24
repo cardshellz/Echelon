@@ -152,10 +152,15 @@ async function resolveReceivingLineCost(
   }
 
   // 3. Linked PO line — pull the 4-decimal mills (authoritative) or cents.
+  //    Defensive: only resolve against PRODUCT PO lines. Non-product lines
+  //    (discount/fee/tax/rebate/adjustment, migration 0563) cannot be
+  //    physically received; if a receipt line accidentally references one
+  //    we'd rather return undefined and fall through to the caller's
+  //    fallback than stamp bogus cost onto inventory.
   if (line.purchaseOrderLineId && typeof storage.getPurchaseOrderLineById === "function") {
     try {
       const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
-      if (poLine) {
+      if (poLine && ((poLine.lineType ?? "product") === "product")) {
         if (
           typeof poLine.unitCostMills === "number" &&
           Number.isInteger(poLine.unitCostMills) &&

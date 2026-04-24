@@ -35,6 +35,8 @@ interface Product {
   category: string | null;
   brand: string | null;
   isActive: boolean;
+  status: string | null;
+  productLineIds?: number[];
 }
 
 interface ProductVariant {
@@ -56,6 +58,9 @@ export default function Variants() {
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
   const [linkFilter, setLinkFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [productLineFilter, setProductLineFilter] = useState<string>("all");
   const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>([]);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
@@ -94,7 +99,9 @@ export default function Variants() {
       name: p.name, 
       category: p.category, 
       brand: p.brand, 
-      isActive: p.isActive 
+      isActive: p.isActive,
+      status: p.status,
+      productLineIds: p.productLineIds,
     })),
   });
 
@@ -103,6 +110,15 @@ export default function Variants() {
     queryFn: async () => {
       const res = await fetch("/api/product-variants?includeInactive=true");
       if (!res.ok) throw new Error("Failed to fetch variants");
+      return res.json();
+    },
+  });
+
+  const { data: productLines = [] } = useQuery<{id: number, name: string}[]>({
+    queryKey: ["/api/product-lines"],
+    queryFn: async () => {
+      const res = await fetch("/api/product-lines");
+      if (!res.ok) throw new Error("Failed to fetch product lines");
       return res.json();
     },
   });
@@ -346,9 +362,27 @@ export default function Variants() {
     const matchesLink = linkFilter === "all" || 
       (linkFilter === "linked" && variant.productId) ||
       (linkFilter === "unlinked" && !variant.productId);
+
+    const product = products.find(p => p.id === variant.productId);
     
-    return matchesSearch && matchesLink;
+    const matchesStatus = statusFilter === "all" ||
+      (statusFilter === "active" && variant.isActive) ||
+      (statusFilter === "inactive" && !variant.isActive) ||
+      (statusFilter === "archived" && product?.status === "archived");
+
+    const matchesCategory = categoryFilter === "all" || 
+      product?.category === categoryFilter;
+
+    const matchesProductLine = productLineFilter === "all" ||
+      (product && product.productLineIds?.includes(parseInt(productLineFilter)));
+    
+    return matchesSearch && matchesLink && matchesStatus && matchesCategory && matchesProductLine;
   });
+
+  const categories = Array.from(new Set(products
+    .map(p => p.category)
+    .filter((c): c is string => Boolean(c))
+  ));
 
   const getProductName = (productId: number) => {
     const product = products.find(p => p.id === productId);
@@ -457,12 +491,49 @@ export default function Variants() {
               data-testid="input-search-variants"
             />
           </div>
-          <Select value={linkFilter} onValueChange={setLinkFilter}>
-            <SelectTrigger className="w-28 md:w-36 h-10" data-testid="select-link-filter">
-              <SelectValue placeholder="Filter" />
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="w-28 md:w-36 h-10" data-testid="select-status-filter">
+              <SelectValue placeholder="Status" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="all">All Status</SelectItem>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="inactive">Inactive</SelectItem>
+              <SelectItem value="archived">Archived</SelectItem>
+            </SelectContent>
+          </Select>
+          {categories.length > 0 && (
+            <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+              <SelectTrigger className="w-32 md:w-40 h-10" data-testid="select-category-filter">
+                <SelectValue placeholder="Category" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Categories</SelectItem>
+                {categories.map(cat => (
+                  <SelectItem key={cat} value={cat!}>{cat}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {productLines.length > 0 && (
+            <Select value={productLineFilter} onValueChange={setProductLineFilter}>
+              <SelectTrigger className="w-32 md:w-40 h-10" data-testid="select-productline-filter">
+                <SelectValue placeholder="Product Line" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Product Lines</SelectItem>
+                {productLines.map((pl) => (
+                  <SelectItem key={pl.id} value={pl.id.toString()}>{pl.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <Select value={linkFilter} onValueChange={setLinkFilter}>
+            <SelectTrigger className="w-28 md:w-36 h-10" data-testid="select-link-filter">
+              <SelectValue placeholder="Link Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Links</SelectItem>
               <SelectItem value="linked">Linked</SelectItem>
               <SelectItem value="unlinked">Unlinked</SelectItem>
             </SelectContent>

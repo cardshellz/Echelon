@@ -56,6 +56,7 @@ interface Product {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  productLineIds?: number[];
   variants: ProductVariant[];
 }
 
@@ -67,6 +68,7 @@ export default function Products() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [productLineFilter, setProductLineFilter] = useState<string>("all");
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newProduct, setNewProduct] = useState({
     name: "",
@@ -85,6 +87,15 @@ export default function Products() {
       const url = includeInactive ? "/api/products?includeInactive=true" : "/api/products";
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch products");
+      return res.json();
+    },
+  });
+
+  const { data: productLines = [] } = useQuery<{id: number, name: string}[]>({
+    queryKey: ["/api/product-lines"],
+    queryFn: async () => {
+      const res = await fetch("/api/product-lines");
+      if (!res.ok) throw new Error("Failed to fetch product lines");
       return res.json();
     },
   });
@@ -148,8 +159,11 @@ export default function Products() {
     
     const matchesCategory = categoryFilter === "all" || 
       product.category === categoryFilter;
+
+    const matchesProductLine = productLineFilter === "all" ||
+      product.productLineIds?.includes(parseInt(productLineFilter));
     
-    return matchesSearch && matchesStatus && matchesCategory;
+    return matchesSearch && matchesStatus && matchesCategory && matchesProductLine;
   });
 
   const categories = Array.from(new Set(products
@@ -251,6 +265,19 @@ export default function Products() {
                 <SelectItem value="all">All Categories</SelectItem>
                 {categories.map(cat => (
                   <SelectItem key={cat} value={cat!}>{cat}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {productLines.length > 0 && (
+            <Select value={productLineFilter} onValueChange={setProductLineFilter}>
+              <SelectTrigger className="w-32 md:w-40 h-10" data-testid="select-productline-filter">
+                <SelectValue placeholder="Product Line" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Product Lines</SelectItem>
+                {productLines.map((pl) => (
+                  <SelectItem key={pl.id} value={pl.id.toString()}>{pl.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>

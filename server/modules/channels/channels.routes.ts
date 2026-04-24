@@ -1484,7 +1484,62 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Get single product line with details
+  // Unified product list for the Product Lines page center table.
+  // Registered BEFORE :id so the literal "products" segment wins.
+  // ?filter=all|unassigned|line:<id>  [&search=] [&status=active|draft|archived|all] [&vendor=]
+  // [&page=1] [&limit=50]
+  app.get("/api/product-lines/products", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const filterRaw = (req.query.filter as string) || "all";
+      const search = (req.query.search as string) || "";
+      const status = (req.query.status as string) || "";
+      const vendor = (req.query.vendor as string) || "";
+      const page = Math.max(1, parseInt((req.query.page as string) || "1"));
+      const limit = Math.min(500, Math.max(1, parseInt((req.query.limit as string) || "50")));
+
+      let filter: "all" | "unassigned" | { lineId: number };
+      if (filterRaw === "all") {
+        filter = "all";
+      } else if (filterRaw === "unassigned") {
+        filter = "unassigned";
+      } else if (filterRaw.startsWith("line:")) {
+        const lineId = parseInt(filterRaw.slice("line:".length));
+        if (!Number.isInteger(lineId) || lineId <= 0) {
+          return res.status(400).json({ error: "Invalid line id in filter" });
+        }
+        filter = { lineId };
+      } else {
+        return res.status(400).json({ error: "filter must be 'all', 'unassigned', or 'line:<id>'" });
+      }
+
+      const result = await storage.listProductsForLineView({ filter, search, status, vendor, page, limit });
+      res.json({ ...result, page, limit });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Bulk unassign: remove these products from every product line.
+  // Registered BEFORE :id/... so the literal "bulk-unassign" segment wins.
+  // Body: { productIds: number[] }
+  app.post("/api/product-lines/bulk-unassign", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const body = req.body as { productIds?: number[] };
+      const productIds = Array.isArray(body.productIds)
+        ? body.productIds.filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+      if (productIds.length === 0) {
+        return res.status(400).json({ error: "productIds must be a non-empty array" });
+      }
+      const removed = await storage.removeProductsFromAllLines(productIds);
+      res.json({ requested: productIds.length, removed });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get single product line with details.
+  // :id can be a numeric line id or the string "unassigned" (when combined with /stats below).
   app.get("/api/product-lines/:id", requirePermission("channels", "view"), async (req, res) => {
     try {
       const lineId = parseInt(req.params.id);
@@ -1548,15 +1603,100 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Add single product to a product line
+  // Add product(s) to a product line.
+  // Accepts either { productId: number } (legacy single add) or { productIds: number[] } (bulk add).
   app.post("/api/product-lines/:id/products", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const lineId = parseInt(req.params.id);
-      const { productId } = req.body;
-      if (!productId) return res.status(400).json({ error: "productId required" });
+      const body = req.body as { productId?: number; productIds?: number[] };
 
-      const created = await storage.addProductToProductLine(lineId, productId);
-      res.json(created || { productLineId: lineId, productId, alreadyAssigned: true });
+      if (Array.isArray(body.productIds)) {
+        const ids = body.productIds.filter((n) => Number.isInteger(n) && n > 0);
+        if (ids.length === 0) return res.status(400).json({ error: "productIds must be a non-empty array of positive integers" });
+        const added = await storage.addProductsToProductLine(lineId, ids);
+        return res.json({ productLineId: lineId, requested: ids.length, added, alreadyAssigned: ids.length - added });
+      }
+
+      if (body.productId && Number.isInteger(body.productId)) {
+        const created = await storage.addProductToProductLine(lineId, body.productId);
+        return res.json(created || { productLineId: lineId, productId: body.productId, alreadyAssigned: true });
+      }
+
+      return res.status(400).json({ error: "productId or productIds required" });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Aggregate stats for a line (or the virtual "unassigned" bucket)
+  // :id can be a numeric line id or the string "unassigned"
+  app.get("/api/product-lines/:id/stats", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const raw = req.params.id;
+      const target: number | "unassigned" = raw === "unassigned" ? "unassigned" : parseInt(raw);
+      if (typeof target === "number" && !Number.isInteger(target)) {
+        return res.status(400).json({ error: "Invalid line id" });
+      }
+      const stats = await storage.getProductLineInventoryStats(target);
+      if (typeof target === "number") {
+        const assignedChannels = await storage.getProductLineAssignedChannels(target);
+        return res.json({ ...stats, channelCount: assignedChannels.filter((c) => c.isActive).length });
+      }
+      return res.json({ ...stats, channelCount: 0 });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Bulk move products from source (a line id, "unassigned", or "any") to target line.
+  // Body: { productIds: number[], fromLineId?: number | "unassigned" | "any" }
+  //   - fromLineId = number        → remove from that line, add to target
+  //   - fromLineId = "unassigned"  → just add to target (they weren't on any line)
+  //   - fromLineId = "any" | absent → remove from ALL other lines, add to target (true move)
+  app.post("/api/product-lines/:id/products/bulk-move", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const targetLineId = parseInt(req.params.id);
+      if (!Number.isInteger(targetLineId) || targetLineId <= 0) {
+        return res.status(400).json({ error: "Invalid target line id" });
+      }
+      const body = req.body as { productIds?: number[]; fromLineId?: number | string };
+      const productIds = Array.isArray(body.productIds)
+        ? body.productIds.filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+      if (productIds.length === 0) {
+        return res.status(400).json({ error: "productIds must be a non-empty array" });
+      }
+
+      const target = await storage.getProductLineById(targetLineId);
+      if (!target) return res.status(404).json({ error: "Target product line not found" });
+
+      const from = body.fromLineId;
+      let removed = 0;
+      if (from === "any" || from === undefined || from === null) {
+        // Remove from every line they're currently on, then add to target
+        const allRemoved = await storage.removeProductsFromAllLines(productIds);
+        removed = allRemoved;
+      } else if (from === "unassigned") {
+        // No-op on removal; just add to target
+      } else if (typeof from === "number" || (typeof from === "string" && /^\d+$/.test(from))) {
+        const fromId = typeof from === "number" ? from : parseInt(from);
+        if (fromId === targetLineId) {
+          return res.status(400).json({ error: "fromLineId and target are the same" });
+        }
+        removed = await storage.removeProductsFromLine(fromId, productIds);
+      } else {
+        return res.status(400).json({ error: "fromLineId must be a line id, 'unassigned', or 'any'" });
+      }
+
+      const added = await storage.addProductsToProductLine(targetLineId, productIds);
+
+      res.json({
+        targetLineId,
+        fromLineId: from ?? "any",
+        requested: productIds.length,
+        removedFromSource: removed,
+        addedToTarget: added,
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
