@@ -240,7 +240,7 @@ function ManageProductsModal({
   const filteredProducts = products.filter((p) => {
     const matchesSearch = !search || p.name.toLowerCase().includes(search.toLowerCase()) || p.sku?.toLowerCase().includes(search.toLowerCase());
     const matchesCategory = categoryFilter === "all" || p.category === categoryFilter;
-    const matchesAssignment = assignmentFilter === "all" || (assignmentFilter === "assigned" && selectedIds.has(p.id)) || (assignmentFilter === "unassigned" && !selectedIds.has(p.id));
+    const matchesAssignment = assignmentFilter === "all" || (assignmentFilter === "assigned" && assignedProductIds.has(p.id)) || (assignmentFilter === "unassigned" && !assignedProductIds.has(p.id));
     return matchesSearch && matchesCategory && matchesAssignment;
   });
 
