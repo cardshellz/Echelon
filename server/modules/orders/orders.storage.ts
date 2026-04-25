@@ -13,6 +13,20 @@ import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { computeSortRank } from "./sort-rank";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
+import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
+
+/**
+ * Order statuses that are DERIVED from the underlying shipments via
+ * `recomputeOrderStatusFromShipments`. Callers asking to set one of
+ * these directly are routed through the recompute so the order state
+ * always reflects reality of its shipments.
+ *
+ * Plan ref: shipstation-flow-refactor-plan.md §6 Commit 16.
+ */
+const SHIPMENT_DERIVED_STATUSES = new Set<OrderStatus>([
+  "shipped" as OrderStatus,
+  "partially_shipped" as OrderStatus,
+]);
 
 /**
  * Recompute sort_rank from the current DB row. Called after any
@@ -598,6 +612,32 @@ export const orderMethods: IOrderStorage = {
   },
 
   async updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null> {
+    // Shipment-derived statuses must come from the rollup so the order
+    // state always reflects its shipments' states. If a caller asks
+    // for `shipped` but shipments aren't all shipped yet, the rollup
+    // will compute (and honor) the correct intermediate state like
+    // `partially_shipped`. Plan §6 Commit 16.
+    if (SHIPMENT_DERIVED_STATUSES.has(status)) {
+      const { warehouseStatus } = await recomputeOrderStatusFromShipments(db, orderId);
+      if (warehouseStatus !== status) {
+        console.warn(
+          `[updateOrderStatus] Caller requested ${status} for order ${orderId} but recompute produced ${warehouseStatus}. Honored recompute result.`,
+        );
+      }
+      // Still cascade item completion for shipped-family transitions.
+      if (warehouseStatus === "shipped" || warehouseStatus === "partially_shipped") {
+        await db.execute(sql`
+          UPDATE wms.order_items SET status = 'completed'
+          WHERE order_id = ${orderId}
+            AND status NOT IN ('completed', 'short')
+        `);
+      }
+      const [updated] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      return updated || null;
+    }
+
+    // Ops-owned statuses (ready, picking, picked, packing, packed,
+    // ready_to_ship, completed, exception, cancelled) — direct write.
     const updates: any = { warehouseStatus: status };
     if (status === "completed" || status === "ready_to_ship") {
       updates.completedAt = new Date();
@@ -609,7 +649,7 @@ export const orderMethods: IOrderStorage = {
       .where(eq(orders.id, orderId))
       .returning();
 
-    if (status === "shipped" || status === "completed" || status === "cancelled") {
+    if (status === "completed" || status === "cancelled") {
       await db.execute(sql`
         UPDATE wms.order_items SET status = 'completed'
         WHERE order_id = ${orderId}
