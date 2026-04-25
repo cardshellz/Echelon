@@ -424,7 +424,7 @@ describe("Allocation Engine (Parallel Model)", () => {
       const result = await engine.allocateProduct(1);
 
       expect(result.allocations[0].allocatedUnits).toBe(300);
-      expect(result.allocations[0].reason).toContain("ceiling capped");
+      expect(result.allocations[0].reason).toContain("Ceiling Cap");
     });
   });
 
