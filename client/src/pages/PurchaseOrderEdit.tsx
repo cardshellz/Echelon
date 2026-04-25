@@ -772,6 +772,86 @@ export default function PurchaseOrderEdit() {
   // product lines uses just productSubtotalCents (matches old behavior).
   const subtotalCents = totals.productSubtotalCents;
 
+  // ── Client-side line validation ──────────────────────────────
+  //
+  // Mirrors the server-side validateCreateWithLinesInput rules from
+  // purchasing.service.ts so the user sees inline errors before submit.
+  // The backend is still authoritative; this just gives faster feedback
+  // and disables the Save buttons when something obvious is wrong.
+  //
+  // Returns a map of clientId -> error message. Empty map = all valid.
+  const lineErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    for (const l of lines) {
+      const qty = Number(l.orderQty) || 0;
+      const mills = Number(l.unitCostMills) || 0;
+      const description = (l.description ?? "").trim();
+
+      if (l.lineType === "product") {
+        if (!l.productVariantId) {
+          errors[l.clientId] = "Pick a product";
+          continue;
+        }
+        if (qty <= 0) {
+          errors[l.clientId] = "Quantity must be greater than 0";
+          continue;
+        }
+        if (mills < 0) {
+          errors[l.clientId] = "Unit cost cannot be negative";
+          continue;
+        }
+        continue;
+      }
+
+      // Non-product lines: description required.
+      if (description.length === 0) {
+        errors[l.clientId] = "Description required";
+        continue;
+      }
+
+      // Per-type sign + qty rules.
+      if (l.lineType === "discount" || l.lineType === "rebate") {
+        if (mills > 0) {
+          errors[l.clientId] = `${l.lineType.charAt(0).toUpperCase()}${l.lineType.slice(1)} amount must be ≤ 0`;
+          continue;
+        }
+        if (qty !== 1) {
+          errors[l.clientId] = `${l.lineType.charAt(0).toUpperCase()}${l.lineType.slice(1)} quantity must be 1`;
+          continue;
+        }
+      } else if (l.lineType === "fee") {
+        if (mills < 0) {
+          errors[l.clientId] = "Fee amount must be ≥ 0";
+          continue;
+        }
+        if (qty < 1) {
+          errors[l.clientId] = "Fee quantity must be ≥ 1";
+          continue;
+        }
+      } else if (l.lineType === "tax") {
+        if (mills < 0) {
+          errors[l.clientId] = "Tax amount must be ≥ 0";
+          continue;
+        }
+        if (qty !== 1) {
+          errors[l.clientId] = "Tax quantity must be 1";
+          continue;
+        }
+      } else if (l.lineType === "adjustment") {
+        if (qty !== 1) {
+          errors[l.clientId] = "Adjustment quantity must be 1";
+          continue;
+        }
+      }
+    }
+    return errors;
+  }, [lines]);
+
+  const hasLineErrors = Object.keys(lineErrors).length > 0;
+  const hasNoLines = lines.length === 0;
+  const noVendor = !selectedVendor;
+  const canSave = !saving && !hasLineErrors && !hasNoLines && !noVendor;
+
   // ── Dirty nav prompt ──────────────────────────────────────────────────
   useEffect(() => {
     if (!dirty) return;
@@ -1115,10 +1195,35 @@ export default function PurchaseOrderEdit() {
           <Button variant="ghost" onClick={handleCancel} disabled={saving}>
             Cancel
           </Button>
-          <Button variant="secondary" onClick={handleSaveDraft} disabled={saving}>
+          <Button
+            variant="secondary"
+            onClick={handleSaveDraft}
+            disabled={!canSave}
+            title={
+              hasLineErrors
+                ? "Fix line errors before saving"
+                : noVendor
+                ? "Pick a vendor before saving"
+                : hasNoLines
+                ? "Add at least one line before saving"
+                : undefined
+            }
+          >
             Save draft
           </Button>
-          <Button onClick={handleSaveAndSend} disabled={saving}>
+          <Button
+            onClick={handleSaveAndSend}
+            disabled={!canSave}
+            title={
+              hasLineErrors
+                ? "Fix line errors before sending"
+                : noVendor
+                ? "Pick a vendor before sending"
+                : hasNoLines
+                ? "Add at least one line before sending"
+                : undefined
+            }
+          >
             Save &amp; Send PDF
           </Button>
         </div>
@@ -1271,27 +1376,46 @@ export default function PurchaseOrderEdit() {
                         ? `${l.sku ? `${l.sku} · ` : ""}${l.productName || "(unnamed)"}`
                         : `Line ${productIdx + 1}`,
                   }));
-                return lines.map((line, idx) => (
-                  <LineRow
-                    key={line.clientId}
-                    line={line}
-                    idx={idx}
-                    onChange={(patch) => updateLine(line.clientId, patch)}
-                    onRemove={() => removeLine(line.clientId)}
-                    productSearch={productSearch[line.clientId] || ""}
-                    setProductSearch={(q) =>
-                      setProductSearch((prev) => ({ ...prev, [line.clientId]: q }))
-                    }
-                    popoverOpen={!!productPopoverOpen[line.clientId]}
-                    setPopoverOpen={(b) =>
-                      setProductPopoverOpen((prev) => ({ ...prev, [line.clientId]: b }))
-                    }
-                    useVendorCatalogSearch={useVendorCatalogSearch}
-                    vendorId={selectedVendor?.id ?? null}
-                    vendorName={selectedVendor?.name ?? null}
-                    productLineOptions={productLineOptions}
-                  />
-                ));
+                return lines.map((line, idx) => {
+                  const err = lineErrors[line.clientId];
+                  return (
+                    <div key={line.clientId} className="space-y-1">
+                      <LineRow
+                        line={line}
+                        idx={idx}
+                        onChange={(patch) => updateLine(line.clientId, patch)}
+                        onRemove={() => removeLine(line.clientId)}
+                        productSearch={productSearch[line.clientId] || ""}
+                        setProductSearch={(q) =>
+                          setProductSearch((prev) => ({
+                            ...prev,
+                            [line.clientId]: q,
+                          }))
+                        }
+                        popoverOpen={!!productPopoverOpen[line.clientId]}
+                        setPopoverOpen={(b) =>
+                          setProductPopoverOpen((prev) => ({
+                            ...prev,
+                            [line.clientId]: b,
+                          }))
+                        }
+                        useVendorCatalogSearch={useVendorCatalogSearch}
+                        vendorId={selectedVendor?.id ?? null}
+                        vendorName={selectedVendor?.name ?? null}
+                        productLineOptions={productLineOptions}
+                      />
+                      {err && (
+                        <div
+                          className="text-xs text-destructive pl-1"
+                          data-testid={`error-line-${idx}`}
+                          role="alert"
+                        >
+                          {err}
+                        </div>
+                      )}
+                    </div>
+                  );
+                });
               })()}
             </div>
           )}
@@ -1481,10 +1605,37 @@ export default function PurchaseOrderEdit() {
         <Button variant="ghost" onClick={handleCancel} disabled={saving} className="flex-1">
           Cancel
         </Button>
-        <Button variant="secondary" onClick={handleSaveDraft} disabled={saving} className="flex-1">
+        <Button
+          variant="secondary"
+          onClick={handleSaveDraft}
+          disabled={!canSave}
+          className="flex-1"
+          title={
+            hasLineErrors
+              ? "Fix line errors before saving"
+              : noVendor
+              ? "Pick a vendor before saving"
+              : hasNoLines
+              ? "Add at least one line before saving"
+              : undefined
+          }
+        >
           Save draft
         </Button>
-        <Button onClick={handleSaveAndSend} disabled={saving} className="flex-1">
+        <Button
+          onClick={handleSaveAndSend}
+          disabled={!canSave}
+          className="flex-1"
+          title={
+            hasLineErrors
+              ? "Fix line errors before sending"
+              : noVendor
+              ? "Pick a vendor before sending"
+              : hasNoLines
+              ? "Add at least one line before sending"
+              : undefined
+          }
+        >
           Send PDF
         </Button>
       </div>
