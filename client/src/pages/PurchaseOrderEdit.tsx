@@ -719,16 +719,58 @@ export default function PurchaseOrderEdit() {
   // ── Totals ────────────────────────────────────────────────────────────
   // Line total = round_half_up(unit_cost_mills * order_qty / 100) — integer
   // math only. Subtotal is the sum of line totals in cents.
-  const subtotalCents = useMemo(
-    () =>
-      lines.reduce((acc, l) => {
-        const qty = Number(l.orderQty) || 0;
-        const mills = Number(l.unitCostMills) || 0;
-        if (qty <= 0 || mills <= 0) return acc;
-        return acc + computeLineTotalCentsFromMills(mills, qty);
-      }, 0),
-    [lines],
-  );
+  // Sign-aware totals breakdown by line_type. Mirrors server-side
+  // computePoTotalsFromLines so the displayed totals match exactly what
+  // the backend will record on save.
+  const totals = useMemo(() => {
+    let productSubtotal = 0;
+    let discountTotal = 0;
+    let feeTotal = 0;
+    let taxTotal = 0;
+    let adjustmentTotal = 0;
+    for (const l of lines) {
+      const qty = Number(l.orderQty) || 0;
+      const mills = Number(l.unitCostMills) || 0;
+      if (qty === 0 || mills === 0) continue;
+      const lineTotal = signedComputeLineTotalCents(mills, qty);
+      switch (l.lineType) {
+        case "product":
+          productSubtotal += lineTotal;
+          break;
+        case "discount":
+        case "rebate":
+          discountTotal += lineTotal;
+          break;
+        case "fee":
+          feeTotal += lineTotal;
+          break;
+        case "tax":
+          taxTotal += lineTotal;
+          break;
+        case "adjustment":
+          adjustmentTotal += lineTotal;
+          break;
+      }
+    }
+    return {
+      productSubtotalCents: productSubtotal,
+      discountTotalCents: discountTotal,
+      feeTotalCents: feeTotal,
+      taxTotalCents: taxTotal,
+      adjustmentTotalCents: adjustmentTotal,
+      totalCents:
+        productSubtotal +
+        discountTotal +
+        feeTotal +
+        taxTotal +
+        adjustmentTotal,
+      hasNonProductLines: lines.some((l) => l.lineType !== "product"),
+    };
+  }, [lines]);
+
+  // Back-compat alias — simple subtotal display when there are no non-
+  // product lines uses just productSubtotalCents (matches old behavior).
+  const subtotalCents = totals.productSubtotalCents;
 
   // ── Dirty nav prompt ──────────────────────────────────────────────────
   useEffect(() => {
@@ -1255,10 +1297,87 @@ export default function PurchaseOrderEdit() {
           )}
 
           <div className="pt-2 border-t text-right space-y-1">
-            <div className="text-sm">
-              <span className="text-muted-foreground mr-2">Subtotal</span>
-              <span className="font-semibold">{formatCents(subtotalCents)}</span>
-            </div>
+            {totals.hasNonProductLines ? (
+              // Mixed-type PO: render the full breakdown so the user can
+              // verify discount / fee / tax / adjustment math line by line.
+              // Only non-zero rows render (avoids visual clutter).
+              <div className="text-sm space-y-0.5 inline-block text-left">
+                <div className="grid grid-cols-[auto_auto] gap-x-4">
+                  <span className="text-muted-foreground">Products subtotal</span>
+                  <span
+                    className="font-medium tabular-nums text-right"
+                    data-testid="totals-products"
+                  >
+                    {signedFormatCents(totals.productSubtotalCents)}
+                  </span>
+                  {totals.discountTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Discounts</span>
+                      <span
+                        className="font-medium tabular-nums text-right text-destructive"
+                        data-testid="totals-discounts"
+                      >
+                        {signedFormatCents(totals.discountTotalCents)}
+                      </span>
+                    </>
+                  )}
+                  {totals.feeTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Fees</span>
+                      <span
+                        className="font-medium tabular-nums text-right"
+                        data-testid="totals-fees"
+                      >
+                        {signedFormatCents(totals.feeTotalCents)}
+                      </span>
+                    </>
+                  )}
+                  {totals.taxTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Tax</span>
+                      <span
+                        className="font-medium tabular-nums text-right"
+                        data-testid="totals-tax"
+                      >
+                        {signedFormatCents(totals.taxTotalCents)}
+                      </span>
+                    </>
+                  )}
+                  {totals.adjustmentTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Adjustments</span>
+                      <span
+                        className={`font-medium tabular-nums text-right ${
+                          totals.adjustmentTotalCents < 0
+                            ? "text-destructive"
+                            : ""
+                        }`}
+                        data-testid="totals-adjustments"
+                      >
+                        {signedFormatCents(totals.adjustmentTotalCents)}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div className="grid grid-cols-[auto_auto] gap-x-4 pt-1 mt-1 border-t">
+                  <span className="font-semibold">Total</span>
+                  <span
+                    className="font-bold tabular-nums text-right"
+                    data-testid="totals-grand"
+                  >
+                    {signedFormatCents(totals.totalCents)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              // Product-only PO: keep the existing simple subtotal display.
+              <div className="text-sm">
+                <span className="text-muted-foreground mr-2">Subtotal</span>
+                <span className="font-semibold" data-testid="totals-subtotal">
+                  {formatCents(subtotalCents)}
+                </span>
+              </div>
+            )}
             <div className="text-xs text-muted-foreground">
               Shipping &amp; tax are added at receive time.
             </div>
