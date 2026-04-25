@@ -23,6 +23,14 @@ import {
 
 const EBAY_CHANNEL_ID = 67;
 
+// Feature flag: push Shopify fulfillments after a WMS shipment is marked
+// shipped via SHIP_NOTIFY V2. Default OFF — enabling this turns on the
+// customer-facing Shopify fulfillment email + order page tracking link
+// once C22d has been validated in staging. Per Overlord D7.
+function isShopifyFulfillmentPushEnabled(): boolean {
+  return process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED === "true";
+}
+
 // ---------------------------------------------------------------------------
 // Structured push error (Commit 11 — §6 shipstation-flow-refactor-plan.md)
 // ---------------------------------------------------------------------------
@@ -751,6 +759,71 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         console.error(
           `[ShipStation Webhook V2] Failed to push tracking for order ${omsOrderId}: ${pushErr.message}`,
         );
+      }
+    }
+
+    // C22d — D7: sync-try-once Shopify fulfillment push after the
+    // shipment commits. Only fires for `shipped` events that actually
+    // changed shipment state (idempotent no-ops are skipped). On
+    // failure, enqueue a retry to webhook_retry_queue so the DLQ worker
+    // can re-dispatch (D6). Idempotency lives in pushShopifyFulfillment
+    // itself (C22c shopping_fulfillment_id check), so the call site can
+    // stay naive about duplicate triggers (D1).
+    if (
+      isShopifyFulfillmentPushEnabled() &&
+      event.kind === "shipped" &&
+      changed
+    ) {
+      try {
+        const fulfillmentPush = (db as any).__fulfillmentPush;
+        if (fulfillmentPush?.pushShopifyFulfillment) {
+          const result = await fulfillmentPush.pushShopifyFulfillment(
+            wmsShipmentRow.id,
+          );
+          if (result?.alreadyPushed) {
+            console.log(
+              `[ShipStation Webhook V2] shipment ${wmsShipmentRow.id} Shopify push idempotent skip (already pushed, fulfillment=${result.shopifyFulfillmentId})`,
+            );
+          } else {
+            console.log(
+              `[ShipStation Webhook V2] shipment ${wmsShipmentRow.id} Shopify fulfillment ${result?.shopifyFulfillmentId ?? "<none>"}`,
+            );
+          }
+        } else {
+          // Service handle missing: don't pretend success and don't
+          // enqueue a retry the worker can't service either. Just warn
+          // — the next webhook will trigger a fresh attempt once boot
+          // order is fixed.
+          console.warn(
+            `[ShipStation Webhook V2] pushShopifyFulfillment not wired on db.__fulfillmentPush — skipping push for shipment ${wmsShipmentRow.id}`,
+          );
+        }
+      } catch (pushErr: any) {
+        console.error(
+          `[ShipStation Webhook V2] Shopify fulfillment push failed for shipment ${wmsShipmentRow.id}: ${pushErr?.message ?? pushErr} — enqueueing for retry`,
+        );
+        try {
+          // Dynamic import keeps the static graph minimal so consumers
+          // of this service don't need to satisfy the worker's own
+          // imports at module-load time. Vitest/ESM-friendly (a plain
+          // `require` would not work under the test ESM loader).
+          const { enqueueShopifyFulfillmentRetry } = await import(
+            "./webhook-retry.worker"
+          );
+          await enqueueShopifyFulfillmentRetry(
+            db,
+            wmsShipmentRow.id,
+            pushErr,
+          );
+        } catch (enqueueErr: any) {
+          // If even the enqueue fails we've lost the retry signal —
+          // log loudly so an operator can pick this up out-of-band.
+          // No further action: the SS webhook itself succeeded and the
+          // shipment commit must not roll back over a Shopify push.
+          console.error(
+            `[ShipStation Webhook V2] retry enqueue failed for shipment ${wmsShipmentRow.id}: ${enqueueErr?.message ?? enqueueErr}`,
+          );
+        }
       }
     }
 

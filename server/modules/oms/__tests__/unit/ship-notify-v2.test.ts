@@ -497,6 +497,286 @@ describe("processShipNotify :: SHIP_NOTIFY_V2 disabled → legacy path", () => {
   });
 });
 
+// ─── V2 Shopify fulfillment push wiring (C22d) ───────────────────────
+
+describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+    process.env.SHIP_NOTIFY_V2 = "true";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    delete process.env.SHIP_NOTIFY_V2;
+    delete process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED;
+    vi.restoreAllMocks();
+  });
+
+  /** Happy-path execute queue for a shipped V2 event. */
+  function happyPathRows() {
+    return [
+      // 1. shipstation_order_id lookup
+      { rows: [{ id: 501, order_id: 42, status: "planned" }] },
+      // 2. markShipmentShipped load-current
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "planned",
+            tracking_number: null,
+            carrier: null,
+            tracking_url: null,
+          },
+        ],
+      },
+      // 3. UPDATE outbound_shipments
+      { rows: [] },
+      // 4. SELECT wms.orders for rollup
+      {
+        rows: [
+          { id: 42, warehouse_status: "ready_to_ship", completed_at: null },
+        ],
+      },
+      // 5. SELECT shipment statuses
+      { rows: [{ status: "shipped" }] },
+      // 6. UPDATE wms.orders
+      { rows: [] },
+      // 7. SELECT oms_fulfillment_order_id
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+    ];
+  }
+
+  /** Build a db with __fulfillmentPush stash + happy-path execute queue. */
+  function makeDbWithPush(opts: {
+    pushShopifyFulfillment?: ReturnType<typeof vi.fn>;
+    pushTracking?: ReturnType<typeof vi.fn>;
+    omitPushFn?: boolean; // attach the stash but without the function
+    omitStash?: boolean; // don't attach the stash at all
+  } = {}) {
+    const mock = makeDb(happyPathRows());
+    if (!opts.omitStash) {
+      const stash: any = {
+        pushTracking: opts.pushTracking ?? vi.fn(async () => undefined),
+      };
+      if (!opts.omitPushFn) {
+        stash.pushShopifyFulfillment =
+          opts.pushShopifyFulfillment ??
+          vi.fn(async (_id: number) => ({
+            shopifyFulfillmentId: "gid://shopify/Fulfillment/123",
+            alreadyPushed: false,
+          }));
+      }
+      (mock.db as any).__fulfillmentPush = stash;
+    }
+    return mock;
+  }
+
+  it("flag OFF → pushShopifyFulfillment is NOT called even when pushed", async () => {
+    delete process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED;
+    const pushShopifyFulfillment = vi.fn(async () => ({
+      shopifyFulfillmentId: "x",
+      alreadyPushed: false,
+    }));
+    const mock = makeDbWithPush({ pushShopifyFulfillment });
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    const svc = createShipStationService(mock.db);
+    await svc.processShipNotify("/foo");
+
+    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
+    // No retry insert either.
+    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1); // only the audit event
+  });
+
+  it("flag explicitly 'false' → pushShopifyFulfillment is NOT called", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "false";
+    const pushShopifyFulfillment = vi.fn();
+    const mock = makeDbWithPush({
+      pushShopifyFulfillment: pushShopifyFulfillment as any,
+    });
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+    await createShipStationService(mock.db).processShipNotify("/foo");
+    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
+  });
+
+  it("flag ON + push success → calls pushShopifyFulfillment(shipmentId), no retry insert", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const pushShopifyFulfillment = vi.fn(async () => ({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/777",
+      alreadyPushed: false,
+    }));
+    const mock = makeDbWithPush({ pushShopifyFulfillment });
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
+    // wmsShipmentRow.id from the lookup is 501
+    expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
+
+    // Only the audit event insert; no DLQ enqueue.
+    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
+  });
+
+  it("flag ON + alreadyPushed=true → logs idempotent skip, no retry insert", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const pushShopifyFulfillment = vi.fn(async () => ({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/preexisting",
+      alreadyPushed: true,
+    }));
+    const logSpy = vi.spyOn(console, "log");
+    const mock = makeDbWithPush({ pushShopifyFulfillment });
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
+    const idempotentLogged = logSpy.mock.calls.some((args) =>
+      String(args[0] ?? "").includes("idempotent skip"),
+    );
+    expect(idempotentLogged).toBe(true);
+    // Only the audit event insert.
+    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
+  });
+
+  it("flag ON + push throws → enqueues a webhook_retry_queue row", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const pushShopifyFulfillment = vi.fn(async () => {
+      throw new Error("shopify 500");
+    });
+    const errSpy = vi.spyOn(console, "error");
+    const mock = makeDbWithPush({ pushShopifyFulfillment });
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
+    // Two inserts: the audit event AND the retry-queue row.
+    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(2);
+
+    const failureLogged = errSpy.mock.calls.some((args) =>
+      String(args[0] ?? "").includes("Shopify fulfillment push failed"),
+    );
+    expect(failureLogged).toBe(true);
+  });
+
+  it("flag ON + fulfillmentPush stash missing pushShopifyFulfillment fn → warn, no retry", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const warnSpy = vi.spyOn(console, "warn");
+    const mock = makeDbWithPush({ omitPushFn: true });
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    const warned = warnSpy.mock.calls.some((args) =>
+      String(args[0] ?? "").includes("pushShopifyFulfillment not wired"),
+    );
+    expect(warned).toBe(true);
+    // Only the audit event insert.
+    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
+  });
+
+  it("flag ON + voided event → push NOT triggered (only shipped triggers it)", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const pushShopifyFulfillment = vi.fn();
+
+    // Reuse the void-path execute queue from the existing void test.
+    const mock = makeDb([
+      { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "shipped",
+            tracking_number: "OLD",
+            carrier: "UPS",
+            tracking_url: null,
+          },
+        ],
+      },
+      { rows: [] },
+      {
+        rows: [
+          {
+            id: 42,
+            warehouse_status: "shipped",
+            completed_at: new Date("2026-04-20T00:00:00Z"),
+          },
+        ],
+      },
+      { rows: [{ status: "voided" }] },
+      { rows: [] },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+    ]);
+    (mock.db as any).__fulfillmentPush = {
+      pushShopifyFulfillment,
+      pushTracking: vi.fn(),
+    };
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload({ voidDate: "2026-04-24T13:00:00Z" })],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
+  });
+
+  it("flag ON + already-shipped idempotent shipment → push NOT triggered (changed=false)", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const pushShopifyFulfillment = vi.fn();
+
+    // Same as the existing idempotent test: marks-shipped sees no
+    // change, dispatchShipmentEvent returns changed=false, the V2
+    // handler bails before the push branch.
+    const mock = makeDb([
+      { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "shipped",
+            tracking_number: "1Z12345",
+            carrier: "UPS",
+            tracking_url: null,
+          },
+        ],
+      },
+    ]);
+    (mock.db as any).__fulfillmentPush = {
+      pushShopifyFulfillment,
+      pushTracking: vi.fn(),
+    };
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
+  });
+});
+
 // ─── V2 error-resilience ─────────────────────────────────────────────
 
 describe("processShipNotify V2 :: error resilience", () => {
