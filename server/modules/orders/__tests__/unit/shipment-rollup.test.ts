@@ -159,7 +159,10 @@ describe("markShipmentShipped", () => {
     expect(mock.getCallCount()).toBe(1);
   });
 
-  it("re-writes tracking when shipment was shipped but tracking differs (re-label flow)", async () => {
+  it("re-writes tracking when shipment was shipped but tracking differs (re-label flow, §6 Commit 18)", async () => {
+    // §6 Commit 18: re-labeling a shipped shipment writes a history row
+    // linking the OLD tracking (as replaced_at + replaced_by_tracking_number)
+    // BEFORE running the UPDATE.
     const mock = makeDb([
       {
         rows: [
@@ -170,6 +173,7 @@ describe("markShipmentShipped", () => {
           }),
         ],
       },
+      { rows: [] }, // history insert
       { rows: [] }, // UPDATE
     ]);
 
@@ -181,10 +185,16 @@ describe("markShipmentShipped", () => {
     );
 
     expect(result).toEqual({ wmsOrderId: 42, changed: true });
-    expect(mock.getCallCount()).toBe(2);
+    // 3 DB calls: load + history insert + UPDATE.
+    expect(mock.getCallCount()).toBe(3);
+    // Call index 1 is the history row, index 2 is the UPDATE.
+    expect(mock.calls[1].sqlText).toContain("shipment_tracking_history");
+    expect(mock.calls[1].sqlText).toContain("replaced_at");
+    expect(mock.calls[1].sqlText).toContain("replaced_by_tracking_number");
+    expect(mock.calls[2].sqlText).toContain("UPDATE wms.outbound_shipments");
   });
 
-  it("re-writes when shipment was shipped but carrier differs", async () => {
+  it("re-writes when shipment was shipped but carrier differs (no history row — same tracking is a mapping fix, not a re-label)", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -204,6 +214,88 @@ describe("markShipmentShipped", () => {
       { now: NOW },
     );
     expect(result.changed).toBe(true);
+    // Exactly 2 calls: load + UPDATE. NO history insert, because the
+    // tracking number didn't change (re-tracking history is
+    // tracking-number-indexed, not carrier-indexed).
+    expect(mock.getCallCount()).toBe(2);
+    expect(mock.calls[1].sqlText).toContain("UPDATE wms.outbound_shipments");
+  });
+
+  it("first ship (no prior tracking) writes the UPDATE but NO history row", async () => {
+    // §6 Commit 18: a first-time ship has nothing to audit. Planned
+    // shipment → shipped must be exactly 2 DB calls (load + UPDATE).
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "planned", tracking_number: null })] },
+      { rows: [] }, // UPDATE
+    ]);
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "1Z999", carrier: "UPS", shipDate: NOW },
+      { now: NOW },
+    );
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(mock.getCallCount()).toBe(2);
+    expect(mock.calls[1].sqlText).toContain("UPDATE wms.outbound_shipments");
+    // Sanity: no history insert fired.
+    expect(mock.calls.some((c) => c.sqlText.includes("shipment_tracking_history"))).toBe(false);
+  });
+
+  it("ships a previously-voided shipment that had its tracking cleared — no history row (void already wrote one, §6 Commit 17)", async () => {
+    // Post-void re-label: markShipmentVoided set tracking_number=NULL
+    // and already wrote a history row for the voided tracking. When
+    // the new label ships, the prior tracking_number is NULL so
+    // markShipmentShipped does NOT double-audit — only the void-side
+    // history row exists for the original tracking.
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "queued", tracking_number: null })] },
+      { rows: [] }, // UPDATE
+    ]);
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "NEW-LABEL-789", carrier: "UPS", shipDate: NOW },
+      { now: NOW },
+    );
+    expect(result.changed).toBe(true);
+    expect(mock.getCallCount()).toBe(2);
+    expect(mock.calls.some((c) => c.sqlText.includes("shipment_tracking_history"))).toBe(false);
+  });
+
+  it("history-insert failure does NOT block the shipment UPDATE (non-blocking audit, §6 Commit 18)", async () => {
+    const loadResponse = {
+      rows: [
+        shipmentRow({
+          status: "shipped",
+          tracking_number: "OLD-123",
+          carrier: "UPS",
+        }),
+      ],
+    };
+    const updateResponse = { rows: [] };
+    let callIdx = 0;
+    const execute = vi.fn(async () => {
+      const i = callIdx++;
+      if (i === 0) return loadResponse;
+      if (i === 1) throw new Error("history table locked");
+      return updateResponse;
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await markShipmentShipped(
+      { execute } as any,
+      501,
+      { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
+      { now: NOW },
+    );
+
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    // Still 3 execute attempts: the history-insert threw, but the
+    // UPDATE ran afterwards.
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(errSpy).toHaveBeenCalledOnce();
+    expect(errSpy.mock.calls[0][0]).toContain("history insert failed");
+    errSpy.mockRestore();
   });
 
   it("throws SHIPMENT_NOT_FOUND when shipment row is missing", async () => {

@@ -156,10 +156,19 @@ export interface WmsShipmentItemRow {
 }
 
 // Shipment statuses that are eligible to be pushed to ShipStation. Any
-// other state (shipped, voided, cancelled, returned, lost, labeled,
-// on_hold) means we MUST NOT push — either it's terminal or ShipStation
-// already has it. Mirrors the shipment state machine in plan §2.4.
-const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued"]);
+// other state (shipped, cancelled, returned, lost, labeled, on_hold)
+// means we MUST NOT push — either it's terminal or ShipStation already
+// has it. Mirrors the shipment state machine in plan §2.4.
+//
+// `voided` is pushable (§6 Commit 18 — re-label flow): when an operator
+// voids a label on ShipStation (§6 Commit 17) and then re-pushes, SS
+// upserts on the same orderKey and our WMS state transitions back to
+// `queued`. The UPDATE below also clears `voided_at` + `voided_reason`
+// on the transition so stale void metadata doesn't linger on a freshly
+// re-queued shipment; NULLing already-NULL columns is a no-op for the
+// planned/queued paths, so one UPDATE covers every re-push-eligible
+// state.
+const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued", "voided"]);
 
 // ---------------------------------------------------------------------------
 // validateShipmentForPush — pure function, exported for tests.
@@ -1694,12 +1703,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     // ─── 7. Mark shipment queued + persist SS pointers ──────────────
+    // Also clears voided_at/voided_reason for the re-label flow (§6
+    // Commit 18). NULL on already-null columns is a no-op, so this
+    // single UPDATE works for planned/queued/voided inputs alike.
     const now = new Date();
     await db.execute(sql`
       UPDATE wms.outbound_shipments
       SET shipstation_order_id = ${result.orderId},
           shipstation_order_key = ${orderKey},
           status = 'queued',
+          voided_at = NULL,
+          voided_reason = NULL,
           updated_at = ${now}
       WHERE id = ${shipmentId}
     `);

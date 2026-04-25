@@ -142,6 +142,20 @@ function assertPositiveInt(value: unknown, field: string): number {
  * columns (covers re-label flows where the carrier was swapped without
  * voiding the original label — rare but observed in production).
  *
+ * Side effects beyond the shipment row (§6 Commit 18):
+ *   - If the shipment already carried a `tracking_number` that DIFFERS
+ *     from the incoming one, an audit row is inserted into
+ *     `wms.shipment_tracking_history` with `replaced_at` + the new
+ *     tracking number in `replaced_by_tracking_number`. This closes
+ *     the re-label loop started by markShipmentVoided (§6 Commit 17):
+ *     history now captures the full chain of tracking numbers.
+ *   - Tracking-match idempotent replays write nothing (no history).
+ *   - Carrier-only changes (same tracking) are NOT history-worthy;
+ *     they're a mapping fix, not a label replacement.
+ *   - History-insert failure is logged but does NOT block the UPDATE,
+ *     matching the non-blocking contract used in markShipmentVoided.
+ *     Reconcile (Group F) catches any gaps.
+ *
  * Does NOT recompute the owning order's warehouse_status; the caller
  * orchestrates via `recomputeOrderStatusFromShipments`.
  */
@@ -187,6 +201,32 @@ export async function markShipmentShipped(
     (current.carrier ?? "") === meta.carrier
   ) {
     return { wmsOrderId: current.order_id, changed: false };
+  }
+
+  // Re-tracking audit (§6 Commit 18). Only write a history row when the
+  // shipment had a PRIOR tracking number AND it differs from the incoming
+  // one. Exact-match comparison on tracking_number is deliberate — a
+  // carrier-only swap is a mapping fix, not a label replacement, and the
+  // idempotent replay above already covers the same-tracking-same-carrier
+  // case. Failure is logged, not thrown: reaching the shipped state matters
+  // more than the audit row, and reconcile (Group F) spots gaps.
+  if (
+    typeof current.tracking_number === "string" &&
+    current.tracking_number.length > 0 &&
+    current.tracking_number !== meta.trackingNumber
+  ) {
+    try {
+      await db.execute(sql`
+        INSERT INTO wms.shipment_tracking_history
+          (shipment_id, tracking_number, carrier, replaced_at, replaced_by_tracking_number, created_at)
+        VALUES
+          (${shipmentId}, ${current.tracking_number}, ${current.carrier}, ${now}, ${meta.trackingNumber}, ${now})
+      `);
+    } catch (err: any) {
+      console.error(
+        `[markShipmentShipped] history insert failed for shipment ${shipmentId} (old=${current.tracking_number}, new=${meta.trackingNumber}): ${err?.message ?? err}`,
+      );
+    }
   }
 
   const trackingUrl = meta.trackingUrl ?? null;
