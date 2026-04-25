@@ -68,6 +68,12 @@ import {
   AlertCircle,
 } from "lucide-react";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   AddToCatalogDialog,
   type AddToCatalogDecision,
   type CatalogCandidate,
@@ -1136,15 +1142,53 @@ export default function PurchaseOrderEdit() {
         <CardContent className="p-4 space-y-3">
           <div className="flex items-center justify-between">
             <Label className="text-base">Lines</Label>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => addLine("product")}
-              disabled={!selectedVendor}
-            >
-              <Plus className="h-4 w-4 mr-1" />
-              Add line
-            </Button>
+            <div className="inline-flex items-stretch">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => addLine("product")}
+                disabled={!selectedVendor}
+                className="rounded-r-none border-r-0"
+                data-testid="button-add-product-line"
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Add product
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!selectedVendor}
+                    className="rounded-l-none px-2"
+                    aria-label="Add line of another type"
+                    data-testid="button-add-line-menu"
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => addLine("product")}>
+                    Product
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("discount")}>
+                    Discount
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("fee")}>
+                    Fee
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("tax")}>
+                    Tax
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("rebate")}>
+                    Rebate
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("adjustment")}>
+                    Adjustment
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
           {lines.length === 0 ? (
             <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
