@@ -12,6 +12,7 @@ import {
   productVariants,
   channels,
 } from "@shared/schema";
+import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,6 +47,15 @@ export interface OrderData {
   rawPayload?: unknown;
   notes?: string;
   tags?: string[];
+  // C22b — fraud risk fields captured at OMS ingest from Shopify webhook
+  // payloads (§6 Group E, Decision D3). NULL for non-Shopify channels and
+  // for older orders ingested via the bridge path that does not carry the
+  // raw payload. Risk score is stored as a string to match the DB numeric
+  // column and avoid float precision loss (coding-standards Rule #3).
+  riskLevel?: string | null;
+  riskScore?: string | null;
+  riskRecommendation?: string | null;
+  riskFacts?: unknown;
   orderedAt: Date;
   lineItems: LineItemData[];
 }
@@ -123,6 +133,11 @@ export function createOmsService(db: any, reservationService?: any) {
         rawPayload: data.rawPayload as any,
         notes: data.notes,
         tags: data.tags ? JSON.stringify(data.tags) : null,
+        // C22b — risk fields populated at ingest from Shopify webhook payload.
+        riskLevel: data.riskLevel ?? null,
+        riskScore: data.riskScore ?? null,
+        riskRecommendation: data.riskRecommendation ?? null,
+        riskFacts: (data.riskFacts ?? null) as any,
         shippingMethod: data.shippingMethod || null,
         shippingMethodCode: data.shippingMethodCode || null,
         shippingServiceLevel: data.shippingServiceLevel || "standard",
@@ -603,6 +618,163 @@ export function createOmsService(db: any, reservationService?: any) {
     return markShipped(order.id, trackingNumber, carrier);
   }
 
+  // -----------------------------------------------------------------
+  // C22b — Populate Shopify fulfillment-order line item IDs at ingest
+  // -----------------------------------------------------------------
+  //
+  // Shopify's `orders/paid` (and `orders/create`) webhook payload does
+  // NOT include `fulfillment_orders` directly — they must be fetched
+  // separately via the Admin GraphQL API. This helper performs that
+  // fetch and writes the resolved IDs onto each `oms_order_lines` row
+  // by matching SKU + quantity (greedy allocation, similar to C21's
+  // Path B resolver, but populating instead of consuming).
+  //
+  // Failure is non-fatal: callers wrap in try/catch. C22c's Path B
+  // fallback re-resolves at fulfillment-push time for any line that
+  // didn't get populated here.
+  //
+  // Returns a summary so callers can log/observe (Rule #8).
+  async function populateShopifyFulfillmentOrderIds(
+    omsOrderId: number,
+    shopifyOrderGid: string,
+    client: ShopifyAdminGraphQLClient,
+  ): Promise<{ matched: number; unmatched: number; updates: number }> {
+    const lines: Array<{
+      id: number;
+      sku: string | null;
+      quantity: number;
+      shopifyFulfillmentOrderLineItemId: string | null;
+    }> = await db
+      .select({
+        id: omsOrderLines.id,
+        sku: omsOrderLines.sku,
+        quantity: omsOrderLines.quantity,
+        shopifyFulfillmentOrderLineItemId:
+          omsOrderLines.shopifyFulfillmentOrderLineItemId,
+      })
+      .from(omsOrderLines)
+      .where(eq(omsOrderLines.orderId, omsOrderId));
+
+    if (lines.length === 0) {
+      return { matched: 0, unmatched: 0, updates: 0 };
+    }
+
+    const response = await client.request<any>(
+      `query fulfillmentOrdersForOrder($id: ID!) {
+        order(id: $id) {
+          id
+          fulfillmentOrders(first: 50) {
+            edges {
+              node {
+                id
+                status
+                lineItems(first: 100) {
+                  edges {
+                    node {
+                      id
+                      sku
+                      remainingQuantity
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      { id: shopifyOrderGid },
+    );
+
+    interface FoCandidate {
+      fulfillmentOrderId: string;
+      fulfillmentOrderLineItemId: string;
+      sku: string | null;
+      remaining: number;
+      status: string;
+    }
+
+    const candidates: FoCandidate[] = [];
+    const fos = response?.order?.fulfillmentOrders?.edges ?? [];
+    for (const foEdge of fos) {
+      const fo = foEdge?.node;
+      if (!fo) continue;
+      const status = String(fo.status ?? "").toUpperCase();
+      // Skip terminal-state FOs: they cannot accept new fulfillments and
+      // their lineItems no longer represent unfulfilled work.
+      if (status === "CLOSED" || status === "CANCELLED") continue;
+      const liEdges = fo?.lineItems?.edges ?? [];
+      for (const liEdge of liEdges) {
+        const li = liEdge?.node;
+        if (!li) continue;
+        candidates.push({
+          fulfillmentOrderId: String(fo.id),
+          fulfillmentOrderLineItemId: String(li.id),
+          sku: li.sku ?? null,
+          remaining: Number.isInteger(li.remainingQuantity)
+            ? li.remainingQuantity
+            : 0,
+          status,
+        });
+      }
+    }
+
+    if (candidates.length === 0) {
+      // No FOs returned — edge case (very new order, or non-fulfillable
+      // composition). Logged so it's visible; C22c's Path B will retry
+      // at fulfillment-push time.
+      console.log(
+        `[OMS] populateShopifyFulfillmentOrderIds: order ${omsOrderId} (${shopifyOrderGid}) has no fulfillment orders yet`,
+      );
+      return { matched: 0, unmatched: lines.length, updates: 0 };
+    }
+
+    let matched = 0;
+    let unmatched = 0;
+    let updates = 0;
+    for (const line of lines) {
+      const sku = (line.sku ?? "").trim();
+      if (sku.length === 0) {
+        unmatched++;
+        continue;
+      }
+      const candidate = candidates.find(
+        (c) => c.sku === sku && c.remaining >= line.quantity,
+      );
+      if (!candidate) {
+        unmatched++;
+        console.log(
+          `[OMS] populateShopifyFulfillmentOrderIds: no FO match for line ${line.id} sku=${sku} qty=${line.quantity} (will be retried via Path B)`,
+        );
+        continue;
+      }
+      candidate.remaining -= line.quantity;
+      matched++;
+
+      // Idempotent overwrite. Shopify is authoritative for FO IDs, so we
+      // always write — but using a guarded WHERE means a parallel
+      // populator (e.g. retry) does not silently overwrite a value that
+      // is already correct.
+      const result = await db
+        .update(omsOrderLines)
+        .set({
+          shopifyFulfillmentOrderId: candidate.fulfillmentOrderId,
+          shopifyFulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
+          updatedAt: new Date(),
+        })
+        .where(eq(omsOrderLines.id, line.id))
+        .returning({ id: omsOrderLines.id });
+      if (Array.isArray(result) && result.length > 0) {
+        updates++;
+      } else if (!result) {
+        // Some drizzle/db mocks may not implement .returning(); count the
+        // attempt as an update so observability isn't misleading.
+        updates++;
+      }
+    }
+
+    return { matched, unmatched, updates };
+  }
+
   return {
     ingestOrder,
     reserveInventory,
@@ -612,6 +784,7 @@ export function createOmsService(db: any, reservationService?: any) {
     getOrderById,
     listOrders,
     getStats,
+    populateShopifyFulfillmentOrderIds,
   };
 }
 

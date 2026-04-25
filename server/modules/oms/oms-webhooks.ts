@@ -23,6 +23,7 @@ import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 import rateLimit from "express-rate-limit";
+import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -88,6 +89,129 @@ function dollarsToCents(value: string | number | undefined | null): number {
   return Math.round(parseFloat(String(value)) * 100);
 }
 
+// ---------------------------------------------------------------------------
+// C22b — Shopify fraud-risk extraction (§6 Group E, Decision D3)
+// ---------------------------------------------------------------------------
+//
+// Shopify exposes risk in two shapes depending on Admin API version:
+//
+//   - Modern (2024-10+): `risk_assessments` array, each entry carrying
+//     `risk_level` (LOW/MEDIUM/HIGH), optional `recommendation`, optional
+//     numeric `score`, and a `facts` array.
+//   - Legacy: a single `risk` object with `level` + `recommendation` and
+//     no numeric score.
+//
+// We collect whichever shape is present, defensively, and fall back to
+// NULL on absent / malformed data. Severity ordering for the modern
+// payload picks the highest-risk assessment so a single HIGH assessment
+// can't be hidden by a LOW one.
+//
+// Pure: no DB, no network, no globals. Exported via __test__ for unit
+// tests (Rule #9, Rule #13).
+
+const RISK_LEVEL_SEVERITY: Record<string, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+};
+
+function normalizeRiskLevel(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.length === 0) return null;
+  return trimmed;
+}
+
+function normalizeRiskRecommendation(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.length === 0) return null;
+  return trimmed;
+}
+
+function parseRiskScore(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return null;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) return String(parsed);
+  }
+  return null;
+}
+
+export interface ExtractedRisk {
+  riskLevel: string | null;
+  riskScore: string | null;
+  riskRecommendation: string | null;
+  riskFacts: unknown;
+}
+
+function extractShopifyRisk(shopifyOrder: any): ExtractedRisk {
+  const empty: ExtractedRisk = {
+    riskLevel: null,
+    riskScore: null,
+    riskRecommendation: null,
+    riskFacts: null,
+  };
+  if (!shopifyOrder || typeof shopifyOrder !== "object") return empty;
+
+  // Modern payload: risk_assessments array.
+  const assessments = (shopifyOrder as any).risk_assessments;
+  if (Array.isArray(assessments) && assessments.length > 0) {
+    let bestLevel: string | null = null;
+    let bestSeverity = -1;
+    let bestRecommendation: string | null = null;
+    let bestScore: string | null = null;
+
+    for (const a of assessments) {
+      if (!a || typeof a !== "object") continue;
+      const level = normalizeRiskLevel((a as any).risk_level ?? (a as any).level);
+      const severity = level !== null ? RISK_LEVEL_SEVERITY[level] ?? -1 : -1;
+      if (severity > bestSeverity) {
+        bestSeverity = severity;
+        bestLevel = level;
+        bestRecommendation = normalizeRiskRecommendation((a as any).recommendation);
+        bestScore = parseRiskScore((a as any).score);
+      }
+    }
+
+    return {
+      riskLevel: bestLevel,
+      riskScore: bestScore,
+      riskRecommendation: bestRecommendation,
+      riskFacts: assessments,
+    };
+  }
+
+  // Legacy payload: single risk object with level + recommendation.
+  const legacy = (shopifyOrder as any).risk;
+  if (legacy && typeof legacy === "object") {
+    const level = normalizeRiskLevel(legacy.level);
+    const recommendation = normalizeRiskRecommendation(legacy.recommendation);
+    if (level === null && recommendation === null) {
+      return empty;
+    }
+    return {
+      riskLevel: level,
+      riskScore: parseRiskScore(legacy.score),
+      riskRecommendation: recommendation,
+      riskFacts: legacy,
+    };
+  }
+
+  return empty;
+}
+
+// Exposed for unit testing the extractor in isolation. Keeping the
+// helper private to the module avoids leaking an internal contract;
+// `__test__` is the conventional escape hatch in this codebase
+// (mirrors fulfillment-push.service.ts).
+export const __test__ = { extractShopifyRisk };
+
 function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
   const shipping = shopifyOrder.shipping_address || {};
   const customer = shopifyOrder.customer || {};
@@ -135,11 +259,19 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
     shopifyOrder.name;
 
+  // C22b — capture fraud risk from the webhook payload (§6 Group E D3).
+  // Defensive: if no risk data is present we leave all fields null.
+  const risk = extractShopifyRisk(shopifyOrder);
+
   return {
     externalOrderNumber: shopifyOrder.name || shopifyOrder.order_number?.toString(),
     status,
     financialStatus,
     fulfillmentStatus,
+    riskLevel: risk.riskLevel,
+    riskScore: risk.riskScore,
+    riskRecommendation: risk.riskRecommendation,
+    riskFacts: risk.riskFacts,
     customerName,
     customerEmail: shopifyOrder.email || customer.email,
     customerPhone: shipping.phone || customer.phone,
@@ -194,6 +326,17 @@ export function registerOmsWebhooks(
     standardHeaders: true,
     legacyHeaders: false,
   });
+
+  // C22b — lazily create a single default Shopify Admin GraphQL client
+  // for FO ID population at ingest. Lazy because tests don't need it and
+  // because the env may not be wired at module-load time.
+  let _shopifyAdminClient: ShopifyAdminGraphQLClient | null = null;
+  function getShopifyAdminClient(): ShopifyAdminGraphQLClient {
+    if (_shopifyAdminClient === null) {
+      _shopifyAdminClient = createDefaultShopifyAdminClient();
+    }
+    return _shopifyAdminClient;
+  }
 
   // Helper: verify HMAC using rawBody from express.json verify callback, return parsed body or null
   function verifyAndParse(req: Request, res: Response): any | null {
@@ -310,6 +453,31 @@ export function registerOmsWebhooks(
         await omsService.assignWarehouse(omsOrder.id);
       } catch (e: any) {
         console.error(`${LOG_PREFIX} Post-ingest processing failed for ${shopifyOrder.name}: ${e.message}`);
+      }
+
+      // C22b — populate Shopify fulfillment-order line item IDs at ingest
+      // (§6 Group E D2/D4). Failure is non-fatal: C22c's Path B fallback
+      // re-resolves at push time. We swallow errors here so a Shopify GQL
+      // hiccup doesn't block ingestion of an otherwise good order.
+      try {
+        const externalGid = String(
+          shopifyOrder.admin_graphql_api_id ??
+            (shopifyOrder.id ? `gid://shopify/Order/${shopifyOrder.id}` : externalOrderId),
+        );
+        const summary = await (omsService as any).populateShopifyFulfillmentOrderIds?.(
+          omsOrder.id,
+          externalGid,
+          getShopifyAdminClient(),
+        );
+        if (summary) {
+          console.log(
+            `${LOG_PREFIX} FO IDs populated for ${shopifyOrder.name}: matched=${summary.matched} unmatched=${summary.unmatched} updates=${summary.updates}`,
+          );
+        }
+      } catch (err: any) {
+        console.error(
+          `${LOG_PREFIX} populateShopifyFulfillmentOrderIds failed for ${shopifyOrder.name}: ${err?.message ?? String(err)} (non-fatal; Path B fallback will retry at push)`,
+        );
       }
 
       console.log(`${LOG_PREFIX} ✅ Processed new order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
