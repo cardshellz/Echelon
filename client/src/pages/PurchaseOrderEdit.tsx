@@ -267,22 +267,36 @@ function UnitCostInput({
   mills,
   onChangeMills,
   ariaLabel,
+  allowNegative = false,
 }: {
   mills: number;
   onChangeMills: (mills: number) => void;
   ariaLabel: string;
+  // Discount / rebate / adjustment lines may carry negative cost. The default
+  // is false so the existing product-line behavior is unchanged (Rule #3 main
+  // money path is non-negative). When true the buffer accepts a leading
+  // minus and the parsed result preserves the sign.
+  allowNegative?: boolean;
 }) {
-  const [buffer, setBuffer] = useState<string>(() => millsToDollarString(mills));
+  const [buffer, setBuffer] = useState<string>(() =>
+    signedMillsToDollarString(mills),
+  );
   const [focused, setFocused] = useState(false);
 
   // When the parent's value changes from outside (preload, programmatic edit)
   // and we're not currently focused, pull the new value into the buffer.
   useEffect(() => {
     if (!focused) {
-      setBuffer(millsToDollarString(mills));
+      setBuffer(signedMillsToDollarString(mills));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mills, focused]);
+
+  // Typing-time regex: optional minus only when allowNegative; otherwise
+  // unchanged from the original strict-non-negative behavior.
+  const inputRegex = allowNegative
+    ? /^-?\d*\.?\d{0,4}$/
+    : /^\d*\.?\d{0,4}$/;
 
   return (
     <Input
@@ -291,9 +305,10 @@ function UnitCostInput({
       onFocus={() => setFocused(true)}
       onChange={(e) => {
         const raw = e.target.value;
-        // digits + optional single dot + up to 4 fractional digits.
-        // Intermediate states ("", ".", "5.", "5.1234") all match.
-        if (raw === "" || /^\d*\.?\d{0,4}$/.test(raw)) {
+        // digits + optional single dot + up to 4 fractional digits, with an
+        // optional leading minus when allowNegative=true. Intermediate
+        // states ("", ".", "5.", "-", "-.", "-5", "-5.1234") all match.
+        if (raw === "" || inputRegex.test(raw)) {
           setBuffer(raw);
         }
       }}
@@ -301,12 +316,15 @@ function UnitCostInput({
         setFocused(false);
         let nextMills = mills;
         try {
-          nextMills = dollarsToMills(buffer);
+          nextMills = signedDollarsToMills(buffer);
+          if (!allowNegative && nextMills < 0) {
+            nextMills = 0; // safety net; should not happen given regex.
+          }
         } catch {
           // Unparseable — revert to last known good.
           nextMills = mills;
         }
-        setBuffer(millsToDollarString(nextMills));
+        setBuffer(signedMillsToDollarString(nextMills));
         if (nextMills !== mills) onChangeMills(nextMills);
       }}
       onKeyDown={(e) => {
@@ -1198,26 +1216,41 @@ export default function PurchaseOrderEdit() {
             </div>
           ) : (
             <div className="space-y-2">
-              {lines.map((line, idx) => (
-                <LineRow
-                  key={line.clientId}
-                  line={line}
-                  idx={idx}
-                  onChange={(patch) => updateLine(line.clientId, patch)}
-                  onRemove={() => removeLine(line.clientId)}
-                  productSearch={productSearch[line.clientId] || ""}
-                  setProductSearch={(q) =>
-                    setProductSearch((prev) => ({ ...prev, [line.clientId]: q }))
-                  }
-                  popoverOpen={!!productPopoverOpen[line.clientId]}
-                  setPopoverOpen={(b) =>
-                    setProductPopoverOpen((prev) => ({ ...prev, [line.clientId]: b }))
-                  }
-                  useVendorCatalogSearch={useVendorCatalogSearch}
-                  vendorId={selectedVendor?.id ?? null}
-                  vendorName={selectedVendor?.name ?? null}
-                />
-              ))}
+              {(() => {
+                // Compute the set of product lines exactly once per render,
+                // so each non-product LineRow has a stable list to populate
+                // its "Applies to" dropdown.
+                const productLineOptions = lines
+                  .filter((l) => l.lineType === "product")
+                  .map((l, productIdx) => ({
+                    clientId: l.clientId,
+                    label:
+                      l.sku || l.productName
+                        ? `${l.sku ? `${l.sku} · ` : ""}${l.productName || "(unnamed)"}`
+                        : `Line ${productIdx + 1}`,
+                  }));
+                return lines.map((line, idx) => (
+                  <LineRow
+                    key={line.clientId}
+                    line={line}
+                    idx={idx}
+                    onChange={(patch) => updateLine(line.clientId, patch)}
+                    onRemove={() => removeLine(line.clientId)}
+                    productSearch={productSearch[line.clientId] || ""}
+                    setProductSearch={(q) =>
+                      setProductSearch((prev) => ({ ...prev, [line.clientId]: q }))
+                    }
+                    popoverOpen={!!productPopoverOpen[line.clientId]}
+                    setPopoverOpen={(b) =>
+                      setProductPopoverOpen((prev) => ({ ...prev, [line.clientId]: b }))
+                    }
+                    useVendorCatalogSearch={useVendorCatalogSearch}
+                    vendorId={selectedVendor?.id ?? null}
+                    vendorName={selectedVendor?.name ?? null}
+                    productLineOptions={productLineOptions}
+                  />
+                ));
+              })()}
             </div>
           )}
 
@@ -1369,9 +1402,177 @@ type LineRowProps = {
   ) => ReturnType<typeof useQuery<CatalogSearchResponse>>;
   vendorId: number | null;
   vendorName: string | null;
+  // Product lines on this PO that a discount/rebate line can target via
+  // its parent_line_id. Sent from the parent because it depends on sibling
+  // lines, which the LineRow does not have access to on its own.
+  productLineOptions?: Array<{ clientId: string; label: string }>;
 };
 
+// Rendered above non-product line rows so the user can tell at a glance
+// what type of line they're editing. Reuses existing tailwind classes.
+function LineTypeChip({ lineType }: { lineType: PoLineType }) {
+  const label = lineType.charAt(0).toUpperCase() + lineType.slice(1);
+  return (
+    <span
+      className="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium text-muted-foreground bg-muted/40"
+      data-testid={`chip-line-type-${lineType}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+// Non-product line row (discount / fee / tax / rebate / adjustment).
+// Layout differs from product lines: free-text description instead of a
+// SKU typeahead, qty visible-but-fixed for most types, signed amount for
+// discount/rebate/adjustment. Discount/rebate also expose an "Applies to"
+// dropdown that targets a specific product line via parentClientId.
+function NonProductLineRow({
+  line,
+  idx,
+  onChange,
+  onRemove,
+  productLineOptions,
+}: {
+  line: LineDraft;
+  idx: number;
+  onChange: (patch: Partial<LineDraft>) => void;
+  onRemove: () => void;
+  productLineOptions: Array<{ clientId: string; label: string }>;
+}) {
+  const lineType = line.lineType;
+  const allowNegative =
+    lineType === "discount" ||
+    lineType === "rebate" ||
+    lineType === "adjustment";
+  const qtyEditable = lineType === "fee";
+  const showAppliesTo = lineType === "discount" || lineType === "rebate";
+
+  const lineTotalCents =
+    Number(line.orderQty) !== 0 && Number(line.unitCostMills) !== 0
+      ? signedComputeLineTotalCents(
+          Number(line.unitCostMills),
+          Number(line.orderQty),
+        )
+      : 0;
+
+  const totalIsNegative = lineTotalCents < 0;
+
+  return (
+    <div className="grid grid-cols-12 gap-2 items-start bg-muted/20 border border-dashed rounded-md p-2">
+      {/* Description + chip */}
+      <div className="col-span-12 md:col-span-6 space-y-1">
+        <div className="flex items-center gap-2">
+          <LineTypeChip lineType={lineType} />
+          {showAppliesTo && (
+            <Select
+              value={line.parentClientId ?? "__all__"}
+              onValueChange={(v) =>
+                onChange({ parentClientId: v === "__all__" ? null : v })
+              }
+            >
+              <SelectTrigger
+                className="h-7 w-auto px-2 text-xs"
+                data-testid={`select-parent-line-${idx}`}
+              >
+                <SelectValue placeholder="Applies to..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All product lines</SelectItem>
+                {productLineOptions.map((opt) => (
+                  <SelectItem key={opt.clientId} value={opt.clientId}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+        <Input
+          value={line.description}
+          onChange={(e) => onChange({ description: e.target.value })}
+          placeholder={
+            lineType === "discount"
+              ? "Vendor promo, volume discount, etc."
+              : lineType === "fee"
+              ? "Freight, tooling, small-order fee, etc."
+              : lineType === "tax"
+              ? "Sales tax, VAT, etc."
+              : lineType === "rebate"
+              ? "Loyalty / volume rebate"
+              : "Reason for adjustment"
+          }
+          aria-label={`Line ${idx + 1} description`}
+          data-testid={`input-line-description-${idx}`}
+        />
+      </div>
+
+      {/* Qty */}
+      <div className="col-span-4 md:col-span-2">
+        {qtyEditable ? (
+          <QuantityInput
+            qty={line.orderQty}
+            onChangeQty={(q) => onChange({ orderQty: q })}
+            ariaLabel={`Line ${idx + 1} quantity`}
+          />
+        ) : (
+          <Input
+            value={line.orderQty}
+            disabled
+            className="text-center text-muted-foreground"
+            aria-label={`Line ${idx + 1} quantity (fixed at 1)`}
+          />
+        )}
+      </div>
+
+      {/* Amount (signed for discount/rebate/adjustment) */}
+      <div className="col-span-4 md:col-span-2">
+        <UnitCostInput
+          mills={line.unitCostMills}
+          onChangeMills={(mills) => onChange({ unitCostMills: mills })}
+          ariaLabel={`Line ${idx + 1} amount`}
+          allowNegative={allowNegative}
+        />
+      </div>
+
+      {/* Line total */}
+      <div
+        className={`col-span-3 md:col-span-1 text-right text-sm pt-2 font-mono ${
+          totalIsNegative ? "text-destructive" : ""
+        }`}
+      >
+        {signedFormatCents(lineTotalCents)}
+      </div>
+
+      {/* Remove */}
+      <div className="col-span-1 text-right">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onRemove}
+          aria-label={`Remove line ${idx + 1}`}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function LineRow(props: LineRowProps) {
+  // Dispatch on line_type. Product lines keep the existing typeahead-driven
+  // layout; non-product types render the simpler description + amount form.
+  if (props.line.lineType !== "product") {
+    return (
+      <NonProductLineRow
+        line={props.line}
+        idx={props.idx}
+        onChange={props.onChange}
+        onRemove={props.onRemove}
+        productLineOptions={props.productLineOptions ?? []}
+      />
+    );
+  }
   const {
     line,
     idx,
