@@ -85,6 +85,21 @@ export const SHOPIFY_PUSH_USER_ERRORS = "shopify_push_user_errors";
 export const SHOPIFY_PUSH_NETWORK_ERROR = "shopify_push_network_error";
 export const SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS = "shopify_push_no_fulfillment_orders";
 export const SHOPIFY_PUSH_NO_OUR_LOCATIONS = "shopify_push_no_our_locations";
+export const SHOPIFY_CANCEL_INVALID_INPUT = "shopify_cancel_invalid_input";
+export const SHOPIFY_CANCEL_USER_ERRORS = "shopify_cancel_user_errors";
+export const SHOPIFY_CANCEL_NETWORK_ERROR = "shopify_cancel_network_error";
+
+/**
+ * Result returned by `cancelShopifyFulfillment`. The `alreadyCancelled`
+ * discriminator lets callers distinguish a fresh cancel from an idempotent
+ * skip without parsing log strings. See §6 Commit 23 for the idempotency
+ * contract — userErrors mentioning "already cancelled" / "cancelled state"
+ * are treated as success rather than thrown.
+ */
+export interface ShopifyFulfillmentCancelResult {
+  fulfillmentGid: string;
+  alreadyCancelled: boolean;
+}
 
 /**
  * Result returned by `pushShopifyFulfillment`. The `alreadyPushed`
@@ -797,7 +812,154 @@ export function createFulfillmentPushService(
     return { shopifyFulfillmentId: fulfillmentGid, alreadyPushed: false };
   }
 
-  return { pushTracking, setEbayClient, setShopifyClient, pushShopifyFulfillment };
+  /**
+   * Cancel a Shopify fulfillment via the Admin GraphQL `fulfillmentCancel`
+   * mutation (§6 Commit 23). Called by `markShipmentVoided` (C17) when a
+   * WMS shipment is voided and we need to tell Shopify to drop the
+   * fulfillment record so the customer-facing order page reflects reality.
+   *
+   * Idempotent: if Shopify reports the fulfillment is already cancelled,
+   * we return `alreadyCancelled: true` instead of throwing — the caller
+   * (markShipmentVoided) catches all errors anyway, but the structured
+   * idempotency signal lets future retry/alerting layers tell apart "first
+   * cancel" from "already done" without parsing log strings.
+   *
+   * `opts.notifyCustomer` is accepted for API parity with `pushTracking`
+   * (Overlord D10 — default true), but the current Shopify Admin
+   * `fulfillmentCancel(id: ID!)` mutation does NOT take a notifyCustomer
+   * parameter — cancellation notifications follow the merchant's order
+   * settings. The option is preserved on the signature so a future Shopify
+   * API change (or a different cancel flow that does take it) can wire it
+   * through without a caller change.
+   *
+   * Failure modes (each throws a structured `ShopifyFulfillmentPushError`):
+   *   - SHOPIFY_CANCEL_INVALID_INPUT  — fulfillmentGid is not a non-empty
+   *     string starting with `gid://shopify/Fulfillment/`.
+   *   - SHOPIFY_PUSH_CLIENT_NOT_SET   — `setShopifyClient` was never called.
+   *   - SHOPIFY_CANCEL_USER_ERRORS    — Shopify returned non-idempotent
+   *     userErrors.
+   *   - SHOPIFY_CANCEL_NETWORK_ERROR  — request threw (5xx, fetch reject,
+   *     timeout, etc.).
+   */
+  async function cancelShopifyFulfillment(
+    fulfillmentGid: string,
+    opts: { notifyCustomer?: boolean } = {},
+  ): Promise<ShopifyFulfillmentCancelResult> {
+    // ---- 1. Validate input -------------------------------------------
+    if (
+      typeof fulfillmentGid !== "string" ||
+      fulfillmentGid.length === 0 ||
+      !fulfillmentGid.startsWith("gid://shopify/Fulfillment/")
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "cancelShopifyFulfillment: fulfillmentGid must be a non-empty string starting with 'gid://shopify/Fulfillment/'",
+        {
+          code: SHOPIFY_CANCEL_INVALID_INPUT,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    // notifyCustomer is intentionally not threaded into variables — see
+    // jsdoc above. Read it so TypeScript / linters don't flag it unused
+    // and so a future change can hook it up here.
+    const notifyCustomer =
+      typeof opts.notifyCustomer === "boolean" ? opts.notifyCustomer : true;
+    void notifyCustomer;
+
+    // ---- 2. Client must be wired -------------------------------------
+    if (!_shopifyClient) {
+      throw new ShopifyFulfillmentPushError(
+        "cancelShopifyFulfillment: Shopify client not set",
+        {
+          code: SHOPIFY_PUSH_CLIENT_NOT_SET,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    // ---- 3. Issue cancel mutation ------------------------------------
+    const mutation = `
+      mutation cancelFulfillment($id: ID!) {
+        fulfillmentCancel(id: $id) {
+          fulfillment { id status }
+          userErrors { field message }
+        }
+      }
+    `;
+    const variables = { id: fulfillmentGid };
+
+    let mutationResult: any;
+    try {
+      mutationResult = await _shopifyClient.request<any>(mutation, variables);
+    } catch (err: any) {
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentCancel transport error: ${err?.message ?? String(err)}`,
+        {
+          code: SHOPIFY_CANCEL_NETWORK_ERROR,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          cause: err?.message ?? String(err),
+        },
+      );
+    }
+
+    // ---- 4. Inspect response -----------------------------------------
+    const payload = mutationResult?.fulfillmentCancel;
+    const userErrors: ShopifyUserError[] = payload?.userErrors ?? [];
+
+    if (userErrors.length > 0) {
+      // Idempotent shapes: case-insensitive substring match. Shopify has
+      // returned each of these phrasings in production:
+      //   "Fulfillment is already cancelled."
+      //   "Fulfillment is in CANCELLED state."
+      const isAlreadyCancelled = userErrors.some((e) => {
+        const m = (e?.message ?? "").toLowerCase();
+        return (
+          m.includes("already cancelled") ||
+          m.includes("already canceled") ||
+          m.includes("cancelled state") ||
+          m.includes("canceled state")
+        );
+      });
+
+      if (isAlreadyCancelled) {
+        console.log(
+          `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} already cancelled — idempotent skip`,
+        );
+        return { fulfillmentGid, alreadyCancelled: true };
+      }
+
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentCancel userErrors: ${userErrors.map((e) => e.message).join("; ")}`,
+        {
+          code: SHOPIFY_CANCEL_USER_ERRORS,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          userErrors,
+        },
+      );
+    }
+
+    console.log(
+      `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} cancelled (status=${payload?.fulfillment?.status ?? "unknown"})`,
+    );
+    return { fulfillmentGid, alreadyCancelled: false };
+  }
+
+  return {
+    pushTracking,
+    setEbayClient,
+    setShopifyClient,
+    pushShopifyFulfillment,
+    cancelShopifyFulfillment,
+  };
 }
 
 // ---------------------------------------------------------------------------
