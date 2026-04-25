@@ -31,6 +31,7 @@ import {
   centsToMills,
   computeLineTotalCentsFromMills,
 } from "@shared/utils/money";
+import { PoLineType, PO_LINE_TYPES } from "@shared/schema/procurement.schema";
 import { useLocation, useParams } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 
@@ -100,8 +101,18 @@ type ProductLite = {
 };
 
 type LineDraft = {
-  // Client-local id for React key. NOT sent to the server.
+  // Client-local id for React key. Sent to server so parent_line_id can be
+  // resolved — backend route must be updated to pass it through (see note in
+  // saveMutation below).
   clientId: string;
+  // Line taxonomy (migration 0563). One of PO_LINE_TYPES. Default: "product".
+  lineType: PoLineType;
+  // Required for non-product lines; optional for product lines.
+  description: string;
+  // clientId of another line in this draft that this line "belongs to".
+  // Only valid on discount/rebate lines. null means "applies to all product
+  // lines" (no specific parent_line_id stored on the server).
+  parentClientId: string | null;
   productVariantId: number | null;
   productId: number | null;
   productName: string;
@@ -110,6 +121,7 @@ type LineDraft = {
   // Per-unit cost in mills (1/10000 of a dollar). Authoritative on this
   // draft. Cents is derived (rounded half-up) for display totals and for
   // the back-compat unit_cost_cents field on the wire.
+  // Signed: discount/rebate/adjustment lines may carry a negative value.
   unitCostMills: number;
   vendorProductId?: number | null;
   // Spec A follow-up: tracks whether the selected product was NOT in the
@@ -309,13 +321,58 @@ function formatCents(cents: number | null | undefined): string {
   })}`;
 }
 
+// ─── Signed money helpers ──────────────────────────────────────────────────
+// Discount / rebate / adjustment lines carry negative unitCostMills. The
+// shared money helpers reject negatives (they were designed for per-unit
+// cost which is always >= 0). These wrappers handle the sign and delegate
+// to the authoritative shared helpers for the magnitude.
+
+function signedMillsToDollarString(mills: number): string {
+  if (mills < 0) return `-${millsToDollarString(-mills)}`;
+  return millsToDollarString(mills);
+}
+
+function signedDollarsToMills(input: string): number {
+  const raw = String(input).trim();
+  if (!raw || raw === "-" || raw === "." || raw === "-.") return 0;
+  if (raw.startsWith("-")) {
+    return -(dollarsToMills(raw.slice(1)));
+  }
+  return dollarsToMills(raw);
+}
+
+function signedMillsToCents(mills: number): number {
+  if (mills < 0) return -(millsToCents(-mills));
+  return millsToCents(mills);
+}
+
+function signedComputeLineTotalCents(mills: number, qty: number): number {
+  if (mills === 0 || qty === 0) return 0;
+  if (mills < 0) return -(computeLineTotalCentsFromMills(-mills, qty));
+  return computeLineTotalCentsFromMills(mills, qty);
+}
+
+function signedFormatCents(cents: number | null | undefined): string {
+  const n = Number(cents) || 0;
+  if (n < 0) {
+    return `-$${((-n) / 100).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
+  return formatCents(n);
+}
+
 function newClientId(): string {
   return `ln-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function emptyLine(): LineDraft {
+function emptyLine(lineType: PoLineType = "product"): LineDraft {
   return {
     clientId: newClientId(),
+    lineType,
+    description: "",
+    parentClientId: null,
     productVariantId: null,
     productId: null,
     productName: "",
@@ -543,6 +600,11 @@ export default function PurchaseOrderEdit() {
       setLines(
         preload.lines.map((l) => ({
           clientId: newClientId(),
+          // Preloaded lines are always product lines (the preload endpoint
+          // returns catalog suggestions, not typed non-product lines).
+          lineType: "product" as PoLineType,
+          description: "",
+          parentClientId: null,
           productVariantId: l.productVariantId,
           productId: null, // filled if user re-selects; not strictly needed for submit
           productName: l.productName,
@@ -595,16 +657,30 @@ export default function PurchaseOrderEdit() {
     if (Array.isArray(existingPo.lines)) {
       setLines(
         existingPo.lines.map((l: any) => {
+          const lineType: PoLineType =
+            typeof l.lineType === "string" && PO_LINE_TYPES.includes(l.lineType as PoLineType)
+              ? (l.lineType as PoLineType)
+              : "product";
           const serverMills =
             typeof l.unitCostMills === "number" ? l.unitCostMills : null;
-          const unitCostMills =
-            serverMills !== null && serverMills >= 0
-              ? serverMills
-              : centsToMills(Number(l.unitCostCents) || 0);
+          // For non-product lines (discount/rebate/adjustment), cost may be
+          // negative. We preserve the sign from the server value.
+          let unitCostMills: number;
+          if (serverMills !== null) {
+            unitCostMills = serverMills;
+          } else {
+            // Fall back to cents→mills. Non-negative only (legacy rows).
+            unitCostMills = centsToMills(Number(l.unitCostCents) || 0);
+          }
           return {
             clientId: newClientId(),
-            productVariantId: l.productVariantId,
-            productId: l.productId,
+            lineType,
+            description: typeof l.description === "string" ? l.description : "",
+            parentClientId: null, // parent_line_id is a DB id; we don't
+            // resolve it back to a clientId on edit load. Rendered as
+            // "All product lines" for existing discount/rebate rows.
+            productVariantId: l.productVariantId ?? null,
+            productId: l.productId ?? null,
             productName: l.productName ?? "",
             sku: l.sku ?? null,
             orderQty: l.orderQty,
@@ -805,13 +881,26 @@ export default function PurchaseOrderEdit() {
         vendor_notes: vendorNotes || null,
         internal_notes: internalNotes || null,
         lines: lines.map((l) => ({
-          product_variant_id: l.productVariantId,
+          // NOTE: the procurement route handler (procurement.routes.ts) does
+          // not yet pass line_type, client_id, or parent_client_id through to
+          // the service layer. These fields are included here so the request
+          // is correct once that route gap is closed. Until then, all lines
+          // are treated as "product" by the backend. See completion report.
+          line_type: l.lineType,
+          client_id: l.clientId,
+          parent_client_id: l.parentClientId ?? null,
+          description: l.description || null,
+          // Only send product_variant_id for product lines — the server
+          // validator rejects a non-null variant on non-product lines.
+          ...(l.lineType === "product"
+            ? { product_variant_id: l.productVariantId }
+            : { product_variant_id: null }),
           quantity_ordered: l.orderQty,
-          // Mills is authoritative (4-decimal). Cents is sent for back-
-          // compat — derived via half-up rounding. Server validator rejects
-          // a disagreeing pair with 400.
+          // Mills is authoritative (4-decimal). Cents is sent for back-compat
+          // — derived via half-up rounding (sign-aware for discount/rebate/
+          // adjustment). Server validator rejects a disagreeing pair with 400.
           unit_cost_mills: l.unitCostMills,
-          unit_cost_cents: millsToCents(l.unitCostMills),
+          unit_cost_cents: signedMillsToCents(l.unitCostMills),
           vendor_product_id: l.vendorProductId ?? null,
         })),
         advance_to_sent: advanceToSent,
@@ -938,8 +1027,8 @@ export default function PurchaseOrderEdit() {
   function removeLine(clientId: string) {
     setLines((prev) => prev.filter((l) => l.clientId !== clientId));
   }
-  function addLine() {
-    setLines((prev) => [...prev, emptyLine()]);
+  function addLine(lineType: PoLineType = "product") {
+    setLines((prev) => [...prev, emptyLine(lineType)]);
   }
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -1050,7 +1139,7 @@ export default function PurchaseOrderEdit() {
             <Button
               size="sm"
               variant="outline"
-              onClick={addLine}
+              onClick={() => addLine("product")}
               disabled={!selectedVendor}
             >
               <Plus className="h-4 w-4 mr-1" />
