@@ -91,6 +91,7 @@ function shipmentRow(
     tracking_number: string | null;
     carrier: string | null;
     tracking_url: string | null;
+    shopify_fulfillment_id: string | null;
   }> = {},
 ) {
   return {
@@ -100,6 +101,7 @@ function shipmentRow(
     tracking_number: null,
     carrier: null,
     tracking_url: null,
+    shopify_fulfillment_id: null,
     ...overrides,
   };
 }
@@ -348,13 +350,152 @@ describe("markShipmentVoided", () => {
           }),
         ],
       },
-      { rows: [] },
+      { rows: [] }, // history insert
+      { rows: [] }, // shipment UPDATE
     ]);
     const result = await markShipmentVoided(mock.db, 501, "ss_void", {
       now: NOW,
     });
     expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    // 3 DB calls now: load + history insert + UPDATE (§6 Commit 17).
+    expect(mock.getCallCount()).toBe(3);
+    // History insert is call index 1; UPDATE is index 2.
+    expect(mock.calls[1].sqlText).toContain("shipment_tracking_history");
+    expect(mock.calls[2].sqlText).toContain("UPDATE wms.outbound_shipments");
+  });
+
+  it("skips history insert when shipment has no prior tracking number", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "planned", tracking_number: null })] },
+      { rows: [] },
+    ]);
+    const result = await markShipmentVoided(mock.db, 501, undefined, {
+      now: NOW,
+    });
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    // Only 2 calls: load + UPDATE. No history insert because no tracking.
     expect(mock.getCallCount()).toBe(2);
+    expect(mock.calls[1].sqlText).toContain("UPDATE wms.outbound_shipments");
+  });
+
+  it("proceeds with void even if history insert fails", async () => {
+    // Make the mock throw on the second call (history insert)
+    const loadResponse = { rows: [shipmentRow({ status: "shipped", tracking_number: "T1", carrier: "UPS" })] };
+    const updateResponse = { rows: [] };
+    let callIdx = 0;
+    const execute = vi.fn(async () => {
+      const i = callIdx++;
+      if (i === 0) return loadResponse;
+      if (i === 1) throw new Error("history table locked");
+      return updateResponse;
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await markShipmentVoided({ execute } as any, 501, "ss_void", {
+      now: NOW,
+    });
+
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(errSpy).toHaveBeenCalledOnce();
+    expect(errSpy.mock.calls[0][0]).toContain("history insert failed");
+    errSpy.mockRestore();
+  });
+
+  it("invokes fulfillmentPush.cancelShopifyFulfillment when shipment has shopify_fulfillment_id AND hook provided", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "T1",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] }, // history
+      { rows: [] }, // UPDATE
+    ]);
+    const cancel = vi.fn(async (_id: string) => {});
+    const result = await markShipmentVoided(mock.db, 501, "ss_void", {
+      now: NOW,
+      fulfillmentPush: { cancelShopifyFulfillment: cancel },
+    });
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith("gid://shopify/Fulfillment/999");
+  });
+
+  it("does not call cancelShopifyFulfillment when hook is not provided", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "T1",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ]);
+    // No fulfillmentPush in opts
+    const result = await markShipmentVoided(mock.db, 501, "ss_void", { now: NOW });
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+  });
+
+  it("does not call cancelShopifyFulfillment when shipment has no shopify_fulfillment_id", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "T1",
+            shopify_fulfillment_id: null,
+          }),
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ]);
+    const cancel = vi.fn(async () => {});
+    const result = await markShipmentVoided(mock.db, 501, "ss_void", {
+      now: NOW,
+      fulfillmentPush: { cancelShopifyFulfillment: cancel },
+    });
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("proceeds with void even if Shopify cancel throws", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "T1",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ]);
+    const cancel = vi.fn(async () => {
+      throw new Error("shopify api 500");
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await markShipmentVoided(mock.db, 501, "ss_void", {
+      now: NOW,
+      fulfillmentPush: { cancelShopifyFulfillment: cancel },
+    });
+
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(errSpy).toHaveBeenCalledOnce();
+    expect(errSpy.mock.calls[0][0]).toContain("Shopify fulfillment cancel failed");
+    errSpy.mockRestore();
   });
 
   it("is idempotent when shipment is already voided", async () => {

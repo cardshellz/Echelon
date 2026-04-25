@@ -677,10 +677,16 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       return { processed: false, fallback: false };
     }
 
+    // Forward the Shopify fulfillment-push handle so the void path
+    // can hook `cancelShopifyFulfillment` (§6 Commit 17). The handle
+    // is stashed on `db.__fulfillmentPush` by the outer SHIP_NOTIFY
+    // wrapper — the legacy V1 path already reads it for pushTracking.
+    const fulfillmentPush = (db as any).__fulfillmentPush;
     const { wmsOrderId, changed } = await dispatchShipmentEvent(
       db,
       wmsShipmentRow.id,
       event,
+      { fulfillmentPush },
     );
     if (!changed) {
       console.log(

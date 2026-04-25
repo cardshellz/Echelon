@@ -87,6 +87,7 @@ interface CurrentShipmentRow {
   tracking_number: string | null;
   carrier: string | null;
   tracking_url: string | null;
+  shopify_fulfillment_id: string | null;
 }
 
 /**
@@ -99,7 +100,8 @@ async function loadShipment(
   shipmentId: number,
 ): Promise<CurrentShipmentRow> {
   const result: any = await db.execute(sql`
-    SELECT id, order_id, status, tracking_number, carrier, tracking_url
+    SELECT id, order_id, status, tracking_number, carrier, tracking_url,
+           shopify_fulfillment_id
     FROM wms.outbound_shipments
     WHERE id = ${shipmentId}
     LIMIT 1
@@ -251,6 +253,18 @@ export async function markShipmentCancelled(
  * tracking_number / tracking_url so the re-label flow picks up clean.
  * Idempotent: already-voided is a no-op.
  *
+ * Side effects beyond the shipment row (§6 Commit 17):
+ *   - If the shipment had a `tracking_number` before this void, an
+ *     audit row is inserted into `wms.shipment_tracking_history`
+ *     capturing the number + carrier + void timestamp + reason.
+ *   - If `opts.fulfillmentPush.cancelShopifyFulfillment` is provided
+ *     AND the shipment carries a `shopify_fulfillment_id`, the hook
+ *     is invoked so Shopify sees the fulfillment cancelled in sync.
+ *     Pre-Group-E callers don't wire the hook, and it no-ops cleanly.
+ * Both side effects are best-effort: failures are logged, not thrown,
+ * so reaching the voided terminal state is never blocked by an audit
+ * or push failure (reconcile catches drift).
+ *
  * Per §2.4 state machine, `voided` is NOT terminal — the shipment can
  * transition back to `planned` when a new push is attempted. Marking
  * voided here only writes the shipment-level columns; the owning
@@ -260,7 +274,12 @@ export async function markShipmentVoided(
   db: any,
   shipmentId: number,
   reason?: string,
-  opts: { now?: Date } = {},
+  opts: {
+    now?: Date;
+    fulfillmentPush?: {
+      cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
+    };
+  } = {},
 ): Promise<MarkShipmentResult> {
   assertPositiveInt(shipmentId, "shipmentId");
 
@@ -275,6 +294,30 @@ export async function markShipmentVoided(
     ? reason.slice(0, 200)
     : "ss_label_void";
 
+  // Audit trail BEFORE we clear the tracking columns (§6 Commit 17).
+  // Only write a history row when there is a tracking number to
+  // preserve; voiding a shipment that never got a label has nothing
+  // to audit. History-insert failure is logged but does NOT block the
+  // void — reaching the voided terminal state matters more than the
+  // audit row, and reconcile (Group F) will spot gaps.
+  if (
+    typeof current.tracking_number === "string" &&
+    current.tracking_number.length > 0
+  ) {
+    try {
+      await db.execute(sql`
+        INSERT INTO wms.shipment_tracking_history
+          (shipment_id, tracking_number, carrier, voided_at, voided_reason, created_at)
+        VALUES
+          (${shipmentId}, ${current.tracking_number}, ${current.carrier}, ${now}, ${safeReason}, ${now})
+      `);
+    } catch (err: any) {
+      console.error(
+        `[markShipmentVoided] history insert failed for shipment ${shipmentId} (tracking=${current.tracking_number}): ${err?.message ?? err}`,
+      );
+    }
+  }
+
   await db.execute(sql`
     UPDATE wms.outbound_shipments SET
       status = 'voided',
@@ -285,6 +328,27 @@ export async function markShipmentVoided(
       updated_at = ${now}
     WHERE id = ${shipmentId}
   `);
+
+  // Shopify fulfillment cancel hook (§6 Commit 17). Guarded so callers
+  // that do not wire `fulfillmentPush` (tests, pre-Group-E paths) skip
+  // silently. Cancel failures are logged but do NOT block; Group F
+  // reconcile retries.
+  const shopifyFulfillmentId = current.shopify_fulfillment_id;
+  if (
+    typeof shopifyFulfillmentId === "string" &&
+    shopifyFulfillmentId.length > 0 &&
+    typeof opts.fulfillmentPush?.cancelShopifyFulfillment === "function"
+  ) {
+    try {
+      await opts.fulfillmentPush.cancelShopifyFulfillment(
+        shopifyFulfillmentId,
+      );
+    } catch (err: any) {
+      console.error(
+        `[markShipmentVoided] Shopify fulfillment cancel failed for shipment ${shipmentId} (fulfillment ${shopifyFulfillmentId}): ${err?.message ?? err}`,
+      );
+    }
+  }
 
   return { wmsOrderId: current.order_id, changed: true };
 }
@@ -399,7 +463,12 @@ export async function dispatchShipmentEvent(
   db: any,
   shipmentId: number,
   event: ShipmentEvent,
-  opts: { now?: Date } = {},
+  opts: {
+    now?: Date;
+    fulfillmentPush?: {
+      cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
+    };
+  } = {},
 ): Promise<MarkShipmentResult> {
   switch (event.kind) {
     case "shipped":
@@ -412,10 +481,12 @@ export async function dispatchShipmentEvent(
           shipDate: event.shipDate,
           trackingUrl: event.trackingUrl ?? null,
         },
-        opts,
+        { now: opts.now },
       );
     case "cancelled":
-      return markShipmentCancelled(db, shipmentId, event.reason, opts);
+      return markShipmentCancelled(db, shipmentId, event.reason, {
+        now: opts.now,
+      });
     case "voided":
       return markShipmentVoided(db, shipmentId, event.reason, opts);
     default: {
