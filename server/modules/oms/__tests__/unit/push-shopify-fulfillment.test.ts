@@ -1,21 +1,22 @@
 /**
- * Unit tests for `pushShopifyFulfillment` (§6 Commit 21).
+ * Unit tests for `pushShopifyFulfillment` (§6 Group E).
  *
- * Scope: this commit lands scaffolding only — no callers wire the
- * function in production yet. These tests protect the contract C22 and
- * later commits will rely on:
- *
- *   - Reads strictly from WMS (post-WMS-source-of-truth refactor)
- *   - Resolves Shopify fulfillment-order line items via the GQL
- *     `fulfillmentOrders` query (Path B — schema does not carry the
- *     stored mapping yet; see commit body)
- *   - Calls `fulfillmentCreateV2` with a payload grouped by
- *     fulfillmentOrderId
- *   - Persists the returned Fulfillment GID back into
- *     `wms.outbound_shipments.shopify_fulfillment_id`
- *   - Throws `ShopifyFulfillmentPushError` (with structured `context`)
- *     on every documented failure mode so the C22 retry/DLQ wrapper
- *     can classify without parsing message strings
+ * Coverage scopes:
+ *   - C21 contract: WMS-only reads, GQL resolver + create, persists
+ *     Fulfillment GID into wms.outbound_shipments.shopify_fulfillment_id,
+ *     structured ShopifyFulfillmentPushError on every documented failure.
+ *   - C22c upgrades:
+ *       D1  Idempotency: skip push when shipment already has
+ *           shopify_fulfillment_id; return alreadyPushed:true.
+ *       D2/D4 Path A primary: when oms.oms_order_lines carry FO line
+ *           item ids (populated by C22b ingest), use them directly and
+ *           skip the live Shopify FO resolution query.
+ *       D2  Self-healing back-write: when Path B resolves IDs, write
+ *           them to oms_order_lines so the next push uses Path A.
+ *           Failure here is non-fatal.
+ *       D13 Location filter: only push for FOs assigned to OUR
+ *           warehouse/channel `shopify_location_id`. 3PL-assigned FOs
+ *           are skipped (they handle their own Shopify fulfillments).
  *
  * Mocks: in-memory db.execute that scripts SQL responses in call order,
  * and an in-memory ShopifyAdminGraphQLClient. No fetch, no real DB.
@@ -33,6 +34,7 @@ import {
   SHOPIFY_PUSH_USER_ERRORS,
   SHOPIFY_PUSH_NETWORK_ERROR,
   SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
+  __test__,
 } from "../../fulfillment-push.service";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
 
@@ -40,13 +42,18 @@ import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-clien
 
 const SHIPMENT_ID = 9001;
 const ORDER_ID = 4242;
+const CHANNEL_ID = 7;
 const SHOPIFY_ORDER_GID = "gid://shopify/Order/123456789";
+const FO_GID = "gid://shopify/FulfillmentOrder/777";
+const OUR_LOCATION_GID = "gid://shopify/Location/100100";
+const OUR_LOCATION_NUMERIC = "100100";
+const SHIPMONK_LOCATION_GID = "gid://shopify/Location/200200";
 
 function okShipmentRow(overrides: Partial<any> = {}) {
   return {
     id: SHIPMENT_ID,
     order_id: ORDER_ID,
-    channel_id: 7,
+    channel_id: CHANNEL_ID,
     status: "labeled",
     carrier: "USPS",
     tracking_number: "9400110000000000000001",
@@ -59,7 +66,7 @@ function okShipmentRow(overrides: Partial<any> = {}) {
 function okOrderRow(overrides: Partial<any> = {}) {
   return {
     id: ORDER_ID,
-    channel_id: 7,
+    channel_id: CHANNEL_ID,
     source: "shopify",
     external_order_id: SHOPIFY_ORDER_GID,
     oms_fulfillment_order_id: "100",
@@ -86,6 +93,46 @@ function okItems() {
   ];
 }
 
+/** Path A read with both rows populated (Path A usable). */
+function pathAFullyPopulatedRows() {
+  return [
+    {
+      shipment_item_id: 1,
+      quantity: 2,
+      oms_order_line_id: 8001,
+      shopify_fulfillment_order_id: FO_GID,
+      shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+    },
+    {
+      shipment_item_id: 2,
+      quantity: 1,
+      oms_order_line_id: 8002,
+      shopify_fulfillment_order_id: FO_GID,
+      shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-2",
+    },
+  ];
+}
+
+/** Path A read with one row missing FO line item id (forces Path B fallback). */
+function pathAPartialRows() {
+  return [
+    {
+      shipment_item_id: 1,
+      quantity: 2,
+      oms_order_line_id: 8001,
+      shopify_fulfillment_order_id: FO_GID,
+      shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+    },
+    {
+      shipment_item_id: 2,
+      quantity: 1,
+      oms_order_line_id: 8002,
+      shopify_fulfillment_order_id: null,
+      shopify_fulfillment_order_line_item_id: null,
+    },
+  ];
+}
+
 function okFulfillmentOrdersResponse() {
   return {
     order: {
@@ -94,7 +141,7 @@ function okFulfillmentOrdersResponse() {
         edges: [
           {
             node: {
-              id: "gid://shopify/FulfillmentOrder/777",
+              id: FO_GID,
               status: "OPEN",
               lineItems: {
                 edges: [
@@ -122,6 +169,29 @@ function okFulfillmentOrdersResponse() {
   };
 }
 
+/** Location-filter response: FO_GID assigned to OUR location. */
+function okLocationFilterResponse(
+  fulfillmentOrders: Array<{ id: string; locationGid: string | null }> = [
+    { id: FO_GID, locationGid: OUR_LOCATION_GID },
+  ],
+) {
+  return {
+    order: {
+      id: SHOPIFY_ORDER_GID,
+      fulfillmentOrders: {
+        edges: fulfillmentOrders.map((fo) => ({
+          node: {
+            id: fo.id,
+            assignedLocation: fo.locationGid
+              ? { location: { id: fo.locationGid } }
+              : null,
+          },
+        })),
+      },
+    },
+  };
+}
+
 function okFulfillmentCreateV2Response(
   fulfillmentGid = "gid://shopify/Fulfillment/55555",
 ) {
@@ -143,23 +213,26 @@ interface ScriptedDb {
 /**
  * Build a db mock that returns each scripted result in call order.
  *
- * The fulfillment-push service issues these queries (in this order) for
- * a Shopify push:
- *   1. SELECT shipment row
- *   2. SELECT order row
- *   3. SELECT channel.provider          (only if order.channel_id is set)
- *   4. SELECT shipment items (joined)
- *   5. UPDATE wms.outbound_shipments    (returns nothing meaningful)
+ * For a Shopify push (Path B end-to-end), the service issues these
+ * queries in order:
+ *
+ *   1. Idempotency SELECT  on wms.outbound_shipments.shopify_fulfillment_id
+ *   2. SELECT shipment row on wms.outbound_shipments
+ *   3. SELECT order row    on wms.orders
+ *   4. SELECT channel.provider on channels.channels (if channel_id set)
+ *   5. SELECT shipment items joined to wms.order_items
+ *   6. SELECT Path A rows joined through oms.oms_order_lines
+ *   7. UPDATE oms.oms_order_lines for each back-write (Path B only)
+ *   8. SELECT warehouse.warehouses.shopify_location_id
+ *   9. SELECT channels.channels.shopify_location_id
+ *  10. UPDATE wms.outbound_shipments.shopify_fulfillment_id
+ *
+ * Path A drops step 7 (no back-writes). Idempotency hits return after step 1.
  */
 function makeDb(scripted: Array<{ rows: any[] }>): ScriptedDb {
   const remaining = [...scripted];
   const captured: ScriptedDb["capturedQueries"] = [];
   const execute = vi.fn(async (query: any) => {
-    // drizzle's `sql` template returns an object whose `queryChunks` is
-    // an array of mixed StringChunk + Param entries. Stringify each
-    // chunk's `.value` (StringChunk) and skip Param objects so the
-    // resulting text reflects the SQL identifiers/keywords we care
-    // about for assertions. Order-based scripting handles the rest.
     let sqlText = "";
     try {
       const chunks = (query as any)?.queryChunks;
@@ -168,7 +241,6 @@ function makeDb(scripted: Array<{ rows: any[] }>): ScriptedDb {
           .map((c: any) => {
             if (c == null) return "";
             if (typeof c === "string") return c;
-            // drizzle StringChunk: { value: string[] }
             if (Array.isArray(c.value)) return c.value.join("");
             if (typeof c.value === "string") return c.value;
             return "";
@@ -211,23 +283,45 @@ function makeShopifyClient(
   };
 }
 
+/** Convenience: warehouse + channel rows for the location filter step. */
+function locationConfigRows() {
+  return [
+    { rows: [{ shopify_location_id: OUR_LOCATION_NUMERIC }] }, // warehouses
+    { rows: [{ shopify_location_id: null }] },                  // channels
+  ];
+}
+
+/** No-locations-configured rows (skip filter path). */
+function emptyLocationConfigRows() {
+  return [
+    { rows: [] }, // warehouses
+    { rows: [{ shopify_location_id: null }] }, // channels
+  ];
+}
+
 // ─── Test suite ──────────────────────────────────────────────────────
 
-describe("pushShopifyFulfillment :: happy path", () => {
+describe("pushShopifyFulfillment :: happy path (Path B end-to-end)", () => {
   let db: ScriptedDb;
   let client: MockClient;
 
   beforeEach(() => {
     db = makeDb([
-      { rows: [okShipmentRow()] },        // 1. shipment
-      { rows: [okOrderRow()] },           // 2. order
-      { rows: [{ provider: "shopify" }] }, // 3. channel.provider
-      { rows: okItems() },                 // 4. shipment items
-      { rows: [] },                        // 5. UPDATE
+      { rows: [{ shopify_fulfillment_id: null }] },     // 1. idempotency
+      { rows: [okShipmentRow()] },                       // 2. shipment
+      { rows: [okOrderRow()] },                          // 3. order
+      { rows: [{ provider: "shopify" }] },               // 4. channel.provider
+      { rows: okItems() },                               // 5. shipment items
+      { rows: pathAPartialRows() },                      // 6. Path A read (partial → Path B)
+      { rows: [] },                                      // 7. back-write item 1
+      { rows: [] },                                      // 7. back-write item 2
+      ...locationConfigRows(),                           // 8-9. location config
+      { rows: [] },                                      // 10. UPDATE shipment
     ]);
     client = makeShopifyClient([
-      okFulfillmentOrdersResponse(),
-      okFulfillmentCreateV2Response(),
+      okFulfillmentOrdersResponse(),       // Path B resolver
+      okLocationFilterResponse(),          // location filter
+      okFulfillmentCreateV2Response(),     // mutation
     ]);
   });
 
@@ -237,14 +331,21 @@ describe("pushShopifyFulfillment :: happy path", () => {
 
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
 
-    expect(result).toBe("gid://shopify/Fulfillment/55555");
-    // 5 db.execute calls in order
-    expect(db.db.execute).toHaveBeenCalledTimes(5);
-    // 2 Shopify GQL calls: fulfillmentOrders, then fulfillmentCreateV2
-    expect(client.calls).toHaveLength(2);
+    expect(result).toEqual({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/55555",
+      alreadyPushed: false,
+    });
+    // 11 db.execute calls: idem, shipment, order, channel.provider, items,
+    // path-A read, 2 back-writes (one per item), warehouses, channels (loc),
+    // UPDATE shipment.
+    expect(db.db.execute).toHaveBeenCalledTimes(11);
+    // 3 Shopify GQL calls: fulfillmentOrders (resolve), fulfillmentOrders (location), fulfillmentCreateV2
+    expect(client.calls).toHaveLength(3);
     expect(client.calls[0].query).toContain("fulfillmentOrders");
+    expect(client.calls[0].query).toContain("remainingQuantity");
     expect(client.calls[0].variables).toEqual({ id: SHOPIFY_ORDER_GID });
-    expect(client.calls[1].query).toContain("fulfillmentCreateV2");
+    expect(client.calls[1].query).toContain("assignedLocation");
+    expect(client.calls[2].query).toContain("fulfillmentCreateV2");
   });
 
   it("builds a correctly-grouped lineItemsByFulfillmentOrder payload", async () => {
@@ -253,7 +354,7 @@ describe("pushShopifyFulfillment :: happy path", () => {
 
     await svc.pushShopifyFulfillment(SHIPMENT_ID);
 
-    const mutationVars = client.calls[1].variables as any;
+    const mutationVars = client.calls[2].variables as any;
     const fulfillment = mutationVars.fulfillment;
 
     expect(fulfillment.notifyCustomer).toBe(true);
@@ -265,7 +366,7 @@ describe("pushShopifyFulfillment :: happy path", () => {
 
     expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
     const fo = fulfillment.lineItemsByFulfillmentOrder[0];
-    expect(fo.fulfillmentOrderId).toBe("gid://shopify/FulfillmentOrder/777");
+    expect(fo.fulfillmentOrderId).toBe(FO_GID);
     expect(fo.fulfillmentOrderLineItems).toEqual([
       { id: "gid://shopify/FulfillmentOrderLineItem/777-1", quantity: 2 },
       { id: "gid://shopify/FulfillmentOrderLineItem/777-2", quantity: 1 },
@@ -278,7 +379,6 @@ describe("pushShopifyFulfillment :: happy path", () => {
 
     await svc.pushShopifyFulfillment(SHIPMENT_ID);
 
-    // Last db.execute call is the UPDATE
     const updateCall = db.capturedQueries[db.capturedQueries.length - 1];
     expect(updateCall.sqlText).toContain("UPDATE wms.outbound_shipments");
     expect(updateCall.sqlText).toContain("shopify_fulfillment_id");
@@ -287,14 +387,20 @@ describe("pushShopifyFulfillment :: happy path", () => {
 
   it("omits trackingInfo.url when shipment has no tracking_url", async () => {
     db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow({ tracking_url: null })] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
       { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] },
+      { rows: [] },
+      ...locationConfigRows(),
       { rows: [] },
     ]);
     client = makeShopifyClient([
       okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
       okFulfillmentCreateV2Response(),
     ]);
     const svc = createFulfillmentPushService(db.db, null);
@@ -302,7 +408,7 @@ describe("pushShopifyFulfillment :: happy path", () => {
 
     await svc.pushShopifyFulfillment(SHIPMENT_ID);
 
-    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
     expect(fulfillment.trackingInfo).toEqual({
       number: "9400110000000000000001",
       company: "USPS",
@@ -329,7 +435,10 @@ describe("pushShopifyFulfillment :: validation failures", () => {
   });
 
   it("throws when shipment row is missing", async () => {
-    const db = makeDb([{ rows: [] }]);
+    const db = makeDb([
+      { rows: [] }, // idempotency: no row
+      { rows: [] }, // shipment SELECT: no row → throws
+    ]);
     const svc = createFulfillmentPushService(db.db, null);
     svc.setShopifyClient(makeShopifyClient([]));
 
@@ -346,6 +455,7 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 
   it("throws when tracking_number is missing", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow({ tracking_number: null })] },
     ]);
     const svc = createFulfillmentPushService(db.db, null);
@@ -363,6 +473,7 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 
   it("throws when tracking_number is empty string", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow({ tracking_number: "   " })] },
     ]);
     const svc = createFulfillmentPushService(db.db, null);
@@ -375,6 +486,7 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 
   it("throws when carrier is missing", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow({ carrier: null })] },
     ]);
     const svc = createFulfillmentPushService(db.db, null);
@@ -392,6 +504,7 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 
   it("returns null (noop) when channel is non-Shopify", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow({ source: "ebay", channel_id: 8 })] },
       { rows: [{ provider: "ebay" }] },
@@ -400,17 +513,17 @@ describe("pushShopifyFulfillment :: validation failures", () => {
     svc.setShopifyClient(makeShopifyClient([]));
 
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
-    expect(result).toBeNull();
+    expect(result).toEqual({ shopifyFulfillmentId: null, alreadyPushed: false });
   });
 
   it("throws when Shopify client is not set", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
     ]);
     const svc = createFulfillmentPushService(db.db, null);
-    // intentionally do NOT call setShopifyClient
 
     let err: ShopifyFulfillmentPushError | undefined;
     try {
@@ -425,6 +538,7 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 
   it("throws when shipment has zero items", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
@@ -445,6 +559,7 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 
   it("throws when all items have non-positive quantity", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
@@ -464,6 +579,7 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 
   it("throws when external_order_id is missing", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow({ external_order_id: null })] },
       { rows: [{ provider: "shopify" }] },
@@ -485,13 +601,18 @@ describe("pushShopifyFulfillment :: validation failures", () => {
 describe("pushShopifyFulfillment :: GraphQL failures", () => {
   it("throws SHOPIFY_PUSH_USER_ERRORS when fulfillmentCreateV2 returns userErrors", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
       { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] }, { rows: [] }, // back-writes
+      ...locationConfigRows(),
     ]);
     const client = makeShopifyClient([
       okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
       {
         fulfillmentCreateV2: {
           fulfillment: null,
@@ -518,13 +639,18 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
 
   it("throws SHOPIFY_PUSH_NETWORK_ERROR when fulfillmentCreateV2 transport fails", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
       { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] }, { rows: [] },
+      ...locationConfigRows(),
     ]);
     const client = makeShopifyClient([
       okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
       new Error("ECONNRESET"),
     ]);
     const svc = createFulfillmentPushService(db.db, null);
@@ -543,10 +669,12 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
 
   it("throws SHOPIFY_PUSH_NETWORK_ERROR when fulfillmentOrders lookup transport fails", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
       { rows: okItems() },
+      { rows: pathAPartialRows() },
     ]);
     const client = makeShopifyClient([
       new Error("ETIMEDOUT"),
@@ -566,10 +694,12 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
 
   it("throws SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS when Shopify returns no fulfillment orders", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
       { rows: okItems() },
+      { rows: pathAPartialRows() },
     ]);
     const client = makeShopifyClient([
       { order: { id: SHOPIFY_ORDER_GID, fulfillmentOrders: { edges: [] } } },
@@ -588,6 +718,7 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
 
   it("throws SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS when no fulfillment-order line matches a sku", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
@@ -596,6 +727,7 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
           { shipment_item_id: 1, order_item_id: 500, oms_order_line_id: 8001, sku: "MYSTERY-SKU", qty: 1 },
         ],
       },
+      { rows: [] }, // Path A: no row joined → null → Path B
     ]);
     const client = makeShopifyClient([
       okFulfillmentOrdersResponse(), // only has ABC-1 and XYZ-9
@@ -615,6 +747,7 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
 
   it("skips CLOSED fulfillment orders when matching", async () => {
     const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
       { rows: [okOrderRow()] },
       { rows: [{ provider: "shopify" }] },
@@ -623,8 +756,11 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
           { shipment_item_id: 1, order_item_id: 500, oms_order_line_id: 8001, sku: "ABC-1", qty: 1 },
         ],
       },
+      { rows: [] },                                      // Path A null → Path B
+      { rows: [] },                                      // back-write
+      ...locationConfigRows(),
+      { rows: [] },                                      // UPDATE shipment
     ]);
-    // Two FOs: a CLOSED one (must be skipped) and an OPEN one we should match
     const client = makeShopifyClient([
       {
         order: {
@@ -657,6 +793,10 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
           },
         },
       },
+      // Location filter: only the OPEN one is reported, assigned to OUR location
+      okLocationFilterResponse([
+        { id: "gid://shopify/FulfillmentOrder/OPEN", locationGid: OUR_LOCATION_GID },
+      ]),
       okFulfillmentCreateV2Response(),
     ]);
     const svc = createFulfillmentPushService(db.db, null);
@@ -664,10 +804,456 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
 
     await svc.pushShopifyFulfillment(SHIPMENT_ID);
 
-    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
     expect(fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderId).toBe(
       "gid://shopify/FulfillmentOrder/OPEN",
     );
+  });
+});
+
+// ─── C22c: Idempotency (D1) ─────────────────────────────────────────
+
+describe("pushShopifyFulfillment :: idempotency (D1)", () => {
+  it("skips push and returns existing GID when shopify_fulfillment_id is already set", async () => {
+    const existing = "gid://shopify/Fulfillment/already-pushed-001";
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: existing }] },
+    ]);
+    const client = makeShopifyClient([]); // no GQL calls expected
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(result).toEqual({
+      shopifyFulfillmentId: existing,
+      alreadyPushed: true,
+    });
+    // Only the idempotency SELECT fired
+    expect(db.db.execute).toHaveBeenCalledTimes(1);
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("treats empty-string shopify_fulfillment_id as not pushed and proceeds", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: "" }] },        // 1. idempotency: empty → not pushed
+      { rows: [okShipmentRow()] },                       // 2. shipment
+      { rows: [okOrderRow()] },                          // 3. order
+      { rows: [{ provider: "shopify" }] },               // 4. channel
+      { rows: okItems() },                               // 5. items
+      { rows: pathAFullyPopulatedRows() },               // 6. Path A (full)
+      ...locationConfigRows(),                           // 7-8. location config
+      { rows: [] },                                      // 9. UPDATE
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result.alreadyPushed).toBe(false);
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+  });
+
+  it("proceeds with push when shopify_fulfillment_id is null", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result).toEqual({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/55555",
+      alreadyPushed: false,
+    });
+  });
+});
+
+// ─── C22c: Path A primary (D2/D4) ───────────────────────────────────
+
+describe("pushShopifyFulfillment :: Path A primary (D2/D4)", () => {
+  it("uses Path A and skips the fulfillmentOrders resolver query when all FO IDs are stored", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },               // ← Path A usable
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      // No fulfillmentOrders resolver query — Path A skipped it.
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+    // Exactly 2 GQL calls (location filter + create), NOT 3.
+    expect(client.calls).toHaveLength(2);
+    expect(client.calls[0].query).toContain("assignedLocation");
+    expect(client.calls[1].query).toContain("fulfillmentCreateV2");
+
+    // Mutation payload uses the stored IDs from Path A.
+    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
+    expect(fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderId).toBe(FO_GID);
+  });
+
+  it("falls back to Path B when some oms_order_lines have null FO line item IDs", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAPartialRows() },                      // ← partial → fallback
+      { rows: [] }, { rows: [] },                        // back-writes (Path B)
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),                     // Path B resolver fires
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(client.calls).toHaveLength(3);
+    expect(client.calls[0].query).toContain("remainingQuantity");
+  });
+
+  it("falls back to Path B when Path A read returns no rows (defensive)", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: [] },                                      // ← Path A empty
+      { rows: [] }, { rows: [] },                        // back-writes
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(client.calls).toHaveLength(3);
+  });
+});
+
+// ─── C22c: Self-healing back-write (D2) ─────────────────────────────
+
+describe("pushShopifyFulfillment :: self-healing back-write (D2)", () => {
+  it("writes resolved FO IDs back to oms_order_lines when Path B succeeds", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] }, { rows: [] },                        // back-writes
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    // Find the back-write UPDATE statements among captured queries.
+    const backWrites = db.capturedQueries.filter((q) =>
+      q.sqlText.includes("UPDATE oms.oms_order_lines"),
+    );
+    expect(backWrites).toHaveLength(2);
+    expect(backWrites[0].sqlText).toContain("shopify_fulfillment_order_id");
+    expect(backWrites[0].sqlText).toContain("shopify_fulfillment_order_line_item_id");
+    // Idempotency guard
+    expect(backWrites[0].sqlText).toContain("IS NULL");
+  });
+
+  it("does NOT issue back-write UPDATEs when Path A is used (already populated)", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    const backWrites = db.capturedQueries.filter((q) =>
+      q.sqlText.includes("UPDATE oms.oms_order_lines"),
+    );
+    expect(backWrites).toHaveLength(0);
+  });
+
+  it("push still succeeds when a back-write UPDATE throws (non-fatal)", async () => {
+    // Build a db whose 7th + 8th calls (the back-writes) throw.
+    let callIdx = 0;
+    const remaining: Array<{ rows: any[] }> = [
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] }, { rows: [] },                        // ignored — overridden below
+      ...locationConfigRows(),
+      { rows: [] },
+    ];
+    const captured: Array<{ sqlText: string }> = [];
+    const execute = vi.fn(async (query: any) => {
+      const chunks = (query as any)?.queryChunks;
+      let sqlText = "";
+      if (Array.isArray(chunks)) {
+        sqlText = chunks
+          .map((c: any) => {
+            if (c == null) return "";
+            if (typeof c === "string") return c;
+            if (Array.isArray(c.value)) return c.value.join("");
+            if (typeof c.value === "string") return c.value;
+            return "";
+          })
+          .join("");
+      }
+      captured.push({ sqlText });
+      const i = callIdx++;
+      // Calls 7 and 8 (zero-indexed 6 and 7) are the back-writes.
+      if (sqlText.includes("UPDATE oms.oms_order_lines")) {
+        throw new Error("simulated DB hiccup");
+      }
+      return remaining[i] ?? { rows: [] };
+    });
+    const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService({ execute }, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+    expect(result.alreadyPushed).toBe(false);
+    // Two failed back-write attempts (each item)
+    const backWrites = captured.filter((q) =>
+      q.sqlText.includes("UPDATE oms.oms_order_lines"),
+    );
+    expect(backWrites).toHaveLength(2);
+  });
+});
+
+// ─── C22c: Location filtering (D13) ─────────────────────────────────
+
+describe("pushShopifyFulfillment :: location filtering (D13)", () => {
+  it("pushes when all FOs are assigned to OUR locations", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse([{ id: FO_GID, locationGid: OUR_LOCATION_GID }]),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+
+    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
+  });
+
+  it("returns null no-op when ALL FOs are assigned to a 3PL (ShipMonk) location", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...locationConfigRows(),
+      // No UPDATE — we early-return before persisting.
+    ]);
+    const client = makeShopifyClient([
+      // FO assigned to ShipMonk, NOT in our locations.
+      okLocationFilterResponse([{ id: FO_GID, locationGid: SHIPMONK_LOCATION_GID }]),
+      // No create call expected.
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result).toEqual({ shopifyFulfillmentId: null, alreadyPushed: false });
+    // Only one GQL call (the location-filter query) — no create.
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].query).toContain("assignedLocation");
+  });
+
+  it("filters out 3PL FOs when some are ours and some are not (mixed)", async () => {
+    // Two FOs split across our location + a 3PL location.
+    const ourFo = "gid://shopify/FulfillmentOrder/ours";
+    const threePlFo = "gid://shopify/FulfillmentOrder/3pl";
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      // Path A: item 1 -> ourFo, item 2 -> threePlFo
+      {
+        rows: [
+          {
+            shipment_item_id: 1,
+            quantity: 2,
+            oms_order_line_id: 8001,
+            shopify_fulfillment_order_id: ourFo,
+            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/ours-1",
+          },
+          {
+            shipment_item_id: 2,
+            quantity: 1,
+            oms_order_line_id: 8002,
+            shopify_fulfillment_order_id: threePlFo,
+            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/3pl-1",
+          },
+        ],
+      },
+      ...locationConfigRows(),
+      { rows: [] }, // UPDATE
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse([
+        { id: ourFo, locationGid: OUR_LOCATION_GID },
+        { id: threePlFo, locationGid: SHIPMONK_LOCATION_GID },
+      ]),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+
+    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
+    expect(fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderId).toBe(ourFo);
+  });
+
+  it("skips the location filter and proceeds when no warehouses or channels carry shopify_location_id", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...emptyLocationConfigRows(),                      // ← empty config
+      { rows: [] }, // UPDATE
+    ]);
+    const client = makeShopifyClient([
+      // No location-filter query expected (skipped due to empty config).
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+    // Only the create call fires (filter skipped, Path A)
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].query).toContain("fulfillmentCreateV2");
+  });
+
+  it("matches numeric stored shopify_location_id against Shopify's gid form", async () => {
+    // warehouses stores numeric "100100"; Shopify returns gid://shopify/Location/100100.
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      { rows: [{ shopify_location_id: OUR_LOCATION_NUMERIC }] }, // stored numeric
+      { rows: [{ shopify_location_id: null }] },
+      { rows: [] }, // UPDATE
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse([{ id: FO_GID, locationGid: OUR_LOCATION_GID }]),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+  });
+});
+
+// ─── Helper unit tests (exported via __test__) ──────────────────────
+
+describe("normaliseShopifyLocationId", () => {
+  it("returns the gid tail when given a Shopify gid", () => {
+    expect(__test__.normaliseShopifyLocationId("gid://shopify/Location/12345")).toBe("12345");
+  });
+  it("returns the input verbatim when already numeric", () => {
+    expect(__test__.normaliseShopifyLocationId("12345")).toBe("12345");
+  });
+  it("trims surrounding whitespace before extracting the tail", () => {
+    expect(__test__.normaliseShopifyLocationId("  gid://shopify/Location/777  ")).toBe("777");
   });
 });
 

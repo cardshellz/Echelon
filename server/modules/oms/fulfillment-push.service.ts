@@ -84,6 +84,22 @@ export const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
 export const SHOPIFY_PUSH_USER_ERRORS = "shopify_push_user_errors";
 export const SHOPIFY_PUSH_NETWORK_ERROR = "shopify_push_network_error";
 export const SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS = "shopify_push_no_fulfillment_orders";
+export const SHOPIFY_PUSH_NO_OUR_LOCATIONS = "shopify_push_no_our_locations";
+
+/**
+ * Result returned by `pushShopifyFulfillment`. The `alreadyPushed`
+ * discriminator lets callers (C22d retry/DLQ) distinguish a fresh push
+ * from an idempotent skip without relying on log strings. Per D1.
+ *
+ * `shopifyFulfillmentId` is `null` only in the no-op cases:
+ *   - non-Shopify channel,
+ *   - no fulfillment orders left after location filtering (all FOs are
+ *     assigned to a 3PL location and not ours).
+ */
+export interface ShopifyFulfillmentPushResult {
+  shopifyFulfillmentId: string | null;
+  alreadyPushed: boolean;
+}
 
 /**
  * WMS shipment row shape used by `pushShopifyFulfillment`.
@@ -126,11 +142,16 @@ interface WmsShipmentItemForShopify {
  * Result of resolving a WMS shipment item to a Shopify fulfillment-order
  * line item. One Shopify fulfillment-order can supply multiple of our
  * shipment items, so the caller groups by `fulfillmentOrderId`.
+ *
+ * `omsOrderLineId` is carried through so the self-healing back-write
+ * (D2) can update the matched `oms.oms_order_lines` row when Path B
+ * resolves the IDs from a live Shopify query.
  */
 interface ResolvedFulfillmentOrderLine {
   fulfillmentOrderId: string;
   fulfillmentOrderLineItemId: string;
   quantity: number;
+  omsOrderLineId: number | null;
 }
 
 /**
@@ -384,16 +405,52 @@ export function createFulfillmentPushService(
   /**
    * Push a single WMS shipment to Shopify as a `fulfillmentCreateV2`.
    *
-   * Returns the Shopify Fulfillment GID on success. Throws
-   * `ShopifyFulfillmentPushError` on any failure; the caller (C22) is
-   * responsible for retry-vs-DLQ classification based on `context.code`.
+   * Returns `{ shopifyFulfillmentId, alreadyPushed }`:
+   *   - `alreadyPushed: true` — shipment row already had a
+   *     `shopify_fulfillment_id`; we returned it without contacting Shopify
+   *     (idempotent skip per D1).
+   *   - `alreadyPushed: false, shopifyFulfillmentId: <gid>` — fresh push.
+   *   - `alreadyPushed: false, shopifyFulfillmentId: null` — silent
+   *     no-op: non-Shopify channel, or every FO is assigned to a 3PL
+   *     location after D13 filtering.
+   *
+   * Throws `ShopifyFulfillmentPushError` on any other failure; the
+   * caller (C22d) is responsible for retry-vs-DLQ classification based
+   * on `context.code`.
    */
-  async function pushShopifyFulfillment(shipmentId: number): Promise<string | null> {
+  async function pushShopifyFulfillment(
+    shipmentId: number,
+  ): Promise<ShopifyFulfillmentPushResult> {
     if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
       throw new ShopifyFulfillmentPushError(
         "pushShopifyFulfillment: shipmentId must be a positive integer",
         { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "shipmentId", value: shipmentId },
       );
+    }
+
+    // ---- 0. Idempotency check (D1) -------------------------------------
+    // If this shipment was already pushed to Shopify, return the existing
+    // fulfillment id instead of pushing again. Protects against
+    // retry-after-success (e.g. transport glitch) creating duplicate
+    // Shopify fulfillments. We only consult the shipment row for this
+    // check — none of the downstream queries fire when the row says we
+    // already pushed.
+    const idempotencyResult: any = await db.execute(sql`
+      SELECT shopify_fulfillment_id
+      FROM wms.outbound_shipments
+      WHERE id = ${shipmentId}
+      LIMIT 1
+    `);
+    const existingFulfillmentId: string | null =
+      idempotencyResult?.rows?.[0]?.shopify_fulfillment_id ?? null;
+    if (existingFulfillmentId && existingFulfillmentId.trim().length > 0) {
+      console.log(
+        `[pushShopifyFulfillment] shipment ${shipmentId} already has Shopify fulfillment ${existingFulfillmentId} — idempotent skip`,
+      );
+      return {
+        shopifyFulfillmentId: existingFulfillmentId,
+        alreadyPushed: true,
+      };
     }
 
     // ---- 1. Load WMS shipment ------------------------------------------
@@ -484,7 +541,7 @@ export function createFulfillmentPushService(
     if (!sourceIsShopify && !providerIsShopify) {
       // Non-Shopify channel — silent no-op per brief. The eBay path is
       // owned by `pushTracking`/`pushToEbay` above.
-      return null;
+      return { shopifyFulfillmentId: null, alreadyPushed: false };
     }
 
     if (!order.external_order_id || order.external_order_id.trim().length === 0) {
@@ -529,18 +586,133 @@ export function createFulfillmentPushService(
     }
 
     // ---- 7. Resolve Shopify fulfillment-order line items ---------------
-    // Path A (oms_order_lines column) is not available — see commit body.
-    // Path B: query Shopify Admin GQL `order.fulfillmentOrders` and match
-    // each WMS shipment item to a fulfillment-order line by SKU + remaining
-    // quantity. We only consider fulfillment orders in OPEN/IN_PROGRESS
-    // status (Shopify's `assignedStatus`), since CLOSED ones cannot accept
-    // new fulfillments.
-    const resolved = await resolveFulfillmentOrderLines(
-      _shopifyClient,
-      order.external_order_id.trim(),
-      positiveItems,
-      shipmentId,
+    // Path A (D2/D4): read FO line item IDs from oms.oms_order_lines
+    // populated by C22b. Cheap (single join on existing data), no
+    // Shopify GQL call needed for the resolution step.
+    //
+    // Path B (fallback): live Shopify GQL `order.fulfillmentOrders`
+    // query + greedy SKU/qty matching (the C21 behaviour). Used when
+    // any item's stored FO line item id is null — typical for orders
+    // ingested before C22a/b shipped, or when C22b's populate step hit
+    // a transient Shopify error.
+    const pathARead = await tryReadPathA(db, shipmentId);
+    let resolved: ResolvedFulfillmentOrderLine[] = [];
+    let pathAUsed = false;
+    let pathAReason = "";
+
+    if (pathARead === null) {
+      pathAReason = "no rows joinable to oms_order_lines";
+    } else if (pathARead.length !== positiveItems.length) {
+      pathAReason = `row count mismatch (path A=${pathARead.length}, items=${positiveItems.length})`;
+    } else if (pathARead.some((r) => !r.fulfillmentOrderId || !r.fulfillmentOrderLineItemId)) {
+      pathAReason = "some oms_order_lines have null FO line item id";
+    } else {
+      // All rows usable — go Path A.
+      resolved = pathARead.map((r) => ({
+        fulfillmentOrderId: r.fulfillmentOrderId!,
+        fulfillmentOrderLineItemId: r.fulfillmentOrderLineItemId!,
+        quantity: r.quantity,
+        omsOrderLineId: r.omsOrderLineId,
+      }));
+      pathAUsed = true;
+      console.log(
+        `[pushShopifyFulfillment] shipment ${shipmentId} using Path A (stored FO line item ids from oms_order_lines)`,
+      );
+    }
+
+    if (!pathAUsed) {
+      console.log(
+        `[pushShopifyFulfillment] shipment ${shipmentId} using Path B (Shopify fulfillmentOrders GQL) — reason: ${pathAReason}`,
+      );
+      resolved = await resolveFulfillmentOrderLines(
+        _shopifyClient,
+        order.external_order_id.trim(),
+        positiveItems,
+        shipmentId,
+      );
+
+      // Self-healing back-write (D2): now that Path B has resolved
+      // these IDs, store them on oms_order_lines so the next push for
+      // this order uses Path A. The `WHERE shopify_fulfillment_order_line_item_id IS NULL`
+      // clause is the idempotency guard — it never overwrites an
+      // existing value, which keeps races between concurrent pushes
+      // and the C22b ingest-time populate harmless. Failures here are
+      // non-fatal: the actual push must still go through, and the
+      // next attempt will simply re-run Path B.
+      for (const r of resolved) {
+        if (
+          r.omsOrderLineId &&
+          r.fulfillmentOrderId &&
+          r.fulfillmentOrderLineItemId
+        ) {
+          try {
+            await db.execute(sql`
+              UPDATE oms.oms_order_lines
+                 SET shopify_fulfillment_order_id = ${r.fulfillmentOrderId},
+                     shopify_fulfillment_order_line_item_id = ${r.fulfillmentOrderLineItemId}
+               WHERE id = ${r.omsOrderLineId}
+                 AND shopify_fulfillment_order_line_item_id IS NULL
+            `);
+          } catch (err: any) {
+            console.error(
+              `[pushShopifyFulfillment] back-write failed for oms_order_line ${r.omsOrderLineId}: ${err?.message ?? String(err)}`,
+            );
+            // Non-fatal — continue with the actual push.
+          }
+        }
+      }
+    }
+
+    // ---- 7b. Location filtering (D13) ----------------------------------
+    // Only push for FOs assigned to OUR warehouse locations.
+    // 3PL-assigned FOs (ShipMonk etc.) handle themselves via their own
+    // Shopify apps and must not be touched here, otherwise we'd create
+    // duplicate / conflicting fulfillments.
+    //
+    // The FO -> location mapping isn't stored anywhere yet, so we make
+    // one extra GQL call (`fulfillmentOrders.assignedLocation.location.id`)
+    // even on Path A. Cost is ~1 small query; correctness wins.
+    //
+    // TODO(C22d+): add `oms_order_lines.shopify_fulfillment_order_location_id`
+    // (or cache on a per-shipment basis) so Path A can skip this query.
+    const ourLocationIds = await getOurShopifyLocationIds(
+      db,
+      order.channel_id ?? null,
     );
+
+    if (ourLocationIds.length === 0) {
+      // Misconfiguration: no warehouses or channel set up with
+      // shopify_location_id. We can't safely filter, so skip the filter
+      // (legacy behaviour) and warn loudly. Per D13 fallback note.
+      console.warn(
+        `[pushShopifyFulfillment] shipment ${shipmentId} — no warehouses.shopify_location_id (or channels.shopify_location_id) configured — skipping location filter`,
+      );
+    } else {
+      const foIds = Array.from(new Set(resolved.map((r) => r.fulfillmentOrderId)));
+      const allowedFoIds = await fetchOurFulfillmentOrderIds(
+        _shopifyClient,
+        order.external_order_id.trim(),
+        foIds,
+        ourLocationIds,
+        shipmentId,
+      );
+
+      const beforeCount = resolved.length;
+      resolved = resolved.filter((r) => allowedFoIds.has(r.fulfillmentOrderId));
+      const filteredCount = beforeCount - resolved.length;
+      if (filteredCount > 0) {
+        console.log(
+          `[pushShopifyFulfillment] shipment ${shipmentId} — filtered ${filteredCount}/${beforeCount} resolved items to 3PL/non-our locations (kept ${resolved.length})`,
+        );
+      }
+
+      if (resolved.length === 0) {
+        console.log(
+          `[pushShopifyFulfillment] shipment ${shipmentId} — all FOs assigned to 3PL/non-our locations; skipping push (3PL handles its own Shopify fulfillment)`,
+        );
+        return { shopifyFulfillmentId: null, alreadyPushed: false };
+      }
+    }
 
     // ---- 8. Group by fulfillmentOrderId for the mutation payload ------
     const grouped = new Map<
@@ -622,7 +794,7 @@ export function createFulfillmentPushService(
        WHERE id = ${shipmentId}
     `);
 
-    return fulfillmentGid;
+    return { shopifyFulfillmentId: fulfillmentGid, alreadyPushed: false };
   }
 
   return { pushTracking, setEbayClient, setShopifyClient, pushShopifyFulfillment };
@@ -783,6 +955,7 @@ async function resolveFulfillmentOrderLines(
       fulfillmentOrderId: candidate.fulfillmentOrderId,
       fulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
       quantity: item.qty,
+      omsOrderLineId: item.oms_order_line_id ?? null,
     });
     candidate.remaining -= item.qty;
   }
@@ -790,7 +963,221 @@ async function resolveFulfillmentOrderLines(
   return resolved;
 }
 
+// ---------------------------------------------------------------------------
+// Path A reader (D2/D4) — stored Shopify FO line item ids
+// ---------------------------------------------------------------------------
+//
+// Joins wms.outbound_shipment_items → wms.order_items → oms.oms_order_lines
+// and returns one row per shipment item with the stored FO + FO line
+// item GIDs (or null when C22b hasn't populated them yet).
+//
+// Returns null when the join produces no rows at all (defensive — the
+// caller's positiveItems check will already have caught zero-item
+// shipments, but if the WMS row layout drifts we want Path A to step
+// aside and let Path B handle it).
+// ---------------------------------------------------------------------------
+
+interface PathARow {
+  shipmentItemId: number;
+  quantity: number;
+  omsOrderLineId: number | null;
+  fulfillmentOrderId: string | null;
+  fulfillmentOrderLineItemId: string | null;
+}
+
+async function tryReadPathA(
+  db: any,
+  shipmentId: number,
+): Promise<PathARow[] | null> {
+  let result: any;
+  try {
+    result = await db.execute(sql`
+      SELECT
+        si.id  AS shipment_item_id,
+        si.qty AS quantity,
+        oi.oms_order_line_id AS oms_order_line_id,
+        ol.shopify_fulfillment_order_id AS shopify_fulfillment_order_id,
+        ol.shopify_fulfillment_order_line_item_id AS shopify_fulfillment_order_line_item_id
+      FROM wms.outbound_shipment_items si
+      JOIN wms.order_items wi ON wi.id = si.order_item_id
+      LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
+      LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+      WHERE si.shipment_id = ${shipmentId}
+        AND si.qty > 0
+    `);
+  } catch (err: any) {
+    console.warn(
+      `[pushShopifyFulfillment] Path A read failed for shipment ${shipmentId}: ${err?.message ?? String(err)} — falling back to Path B`,
+    );
+    return null;
+  }
+
+  const rows: any[] = result?.rows ?? [];
+  if (rows.length === 0) return null;
+
+  return rows.map((r) => ({
+    shipmentItemId: Number(r.shipment_item_id),
+    quantity: Number(r.quantity),
+    omsOrderLineId:
+      r.oms_order_line_id == null ? null : Number(r.oms_order_line_id),
+    fulfillmentOrderId:
+      typeof r.shopify_fulfillment_order_id === "string" &&
+      r.shopify_fulfillment_order_id.length > 0
+        ? r.shopify_fulfillment_order_id
+        : null,
+    fulfillmentOrderLineItemId:
+      typeof r.shopify_fulfillment_order_line_item_id === "string" &&
+      r.shopify_fulfillment_order_line_item_id.length > 0
+        ? r.shopify_fulfillment_order_line_item_id
+        : null,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Location filtering (D13) — OUR Shopify location ids
+// ---------------------------------------------------------------------------
+//
+// Returns the union of
+//   - all `warehouse.warehouses.shopify_location_id` (warehouses we run)
+//   - the channel row's primary `channels.channels.shopify_location_id`
+//
+// Empty array means no warehouses or channels carry the column — the
+// caller treats this as a misconfiguration warning + skips the filter.
+// ---------------------------------------------------------------------------
+
+async function getOurShopifyLocationIds(
+  db: any,
+  channelId: number | null,
+): Promise<string[]> {
+  const ids: string[] = [];
+
+  try {
+    const whResult: any = await db.execute(sql`
+      SELECT shopify_location_id
+      FROM warehouse.warehouses
+      WHERE shopify_location_id IS NOT NULL
+    `);
+    for (const r of whResult?.rows ?? []) {
+      const id = r?.shopify_location_id;
+      if (typeof id === "string" && id.length > 0) ids.push(id);
+    }
+  } catch (err: any) {
+    console.warn(
+      `[pushShopifyFulfillment] getOurShopifyLocationIds: warehouses query failed: ${err?.message ?? String(err)}`,
+    );
+  }
+
+  if (channelId != null) {
+    try {
+      const chResult: any = await db.execute(sql`
+        SELECT shopify_location_id
+        FROM channels.channels
+        WHERE id = ${channelId}
+        LIMIT 1
+      `);
+      const chId = chResult?.rows?.[0]?.shopify_location_id;
+      if (typeof chId === "string" && chId.length > 0) ids.push(chId);
+    } catch (err: any) {
+      console.warn(
+        `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${err?.message ?? String(err)}`,
+      );
+    }
+  }
+
+  return Array.from(new Set(ids));
+}
+
+// ---------------------------------------------------------------------------
+// FO -> location verification GQL query (D13)
+// ---------------------------------------------------------------------------
+//
+// Single small query. Returns the subset of `wantedFoIds` whose
+// `assignedLocation.location.id` is one of `ourLocationIds`. Used to
+// strip 3PL-assigned FOs from the resolved set even on Path A.
+//
+// We don't paginate — same `first: 50` cap as the C21 resolver. If a
+// Shopify order legitimately has more than 50 fulfillment orders we
+// have a much bigger problem than this filter missing rows.
+// ---------------------------------------------------------------------------
+
+const FULFILLMENT_ORDERS_LOCATION_QUERY = `
+  query fulfillmentOrderLocations($id: ID!) {
+    order(id: $id) {
+      id
+      fulfillmentOrders(first: 50) {
+        edges {
+          node {
+            id
+            assignedLocation { location { id } }
+          }
+        }
+      }
+    }
+  }
+`;
+
+async function fetchOurFulfillmentOrderIds(
+  client: ShopifyAdminGraphQLClient,
+  shopifyOrderGid: string,
+  wantedFoIds: string[],
+  ourLocationIds: string[],
+  shipmentId: number,
+): Promise<Set<string>> {
+  const ourLocSet = new Set(ourLocationIds.map(normaliseShopifyLocationId));
+  let response: any;
+  try {
+    response = await client.request<any>(FULFILLMENT_ORDERS_LOCATION_QUERY, {
+      id: shopifyOrderGid,
+    });
+  } catch (err: any) {
+    throw new ShopifyFulfillmentPushError(
+      `Shopify fulfillmentOrders location lookup transport error: ${err?.message ?? String(err)}`,
+      {
+        code: SHOPIFY_PUSH_NETWORK_ERROR,
+        shipmentId,
+        cause: err?.message ?? String(err),
+      },
+    );
+  }
+
+  const allowed = new Set<string>();
+  const edges: any[] = response?.order?.fulfillmentOrders?.edges ?? [];
+  for (const edge of edges) {
+    const node = edge?.node;
+    if (!node?.id) continue;
+    if (!wantedFoIds.includes(node.id)) continue;
+    const locGid: string | undefined = node?.assignedLocation?.location?.id;
+    if (typeof locGid !== "string" || locGid.length === 0) continue;
+    if (ourLocSet.has(normaliseShopifyLocationId(locGid))) {
+      allowed.add(node.id);
+    }
+  }
+  return allowed;
+}
+
+/**
+ * Compare Shopify location ids regardless of GID/numeric form.
+ *
+ * Shopify hands back `gid://shopify/Location/12345` from GQL but our
+ * `warehouses.shopify_location_id` column historically stores the
+ * numeric tail. Normalise both ends to the numeric tail for the set
+ * comparison so a stored `"12345"` matches an incoming
+ * `"gid://shopify/Location/12345"`.
+ */
+function normaliseShopifyLocationId(id: string): string {
+  const trimmed = id.trim();
+  if (trimmed.length === 0) return trimmed;
+  const slashIdx = trimmed.lastIndexOf("/");
+  return slashIdx >= 0 ? trimmed.slice(slashIdx + 1) : trimmed;
+}
+
 export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushService>;
 
 // Exposed for unit testing the resolver in isolation.
-export const __test__ = { resolveFulfillmentOrderLines };
+export const __test__ = {
+  resolveFulfillmentOrderLines,
+  tryReadPathA,
+  getOurShopifyLocationIds,
+  fetchOurFulfillmentOrderIds,
+  normaliseShopifyLocationId,
+};
