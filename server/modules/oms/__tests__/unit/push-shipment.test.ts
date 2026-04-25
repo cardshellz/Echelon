@@ -401,6 +401,63 @@ describe("pushShipment :: happy path", () => {
     expect(payload.customerEmail).toBe(orderRow.customer_email);
   });
 
+  it("re-pushes a previously-voided shipment and clears void columns on transition to queued", async () => {
+    // §6 Commit 18 re-label flow. The shipment comes back from a voided
+    // state; pushShipment must accept it and the UPDATE must NULL out
+    // voided_at + voided_reason so the freshly re-queued shipment has
+    // no stale void metadata for operators or reconcile to trip over.
+    const shipmentRow = okShipment({ status: "voided" });
+    const orderRow = okOrder();
+    const items = [okItem()];
+
+    const mock = makeDb([
+      { rows: [shipmentRow] }, // 1. shipment (status=voided)
+      { rows: [orderRow] },     // 2. order
+      { rows: items },          // 3. items
+      { rows: [] },             // 4. UPDATE
+    ]);
+
+    const fetchMock = mockFetchOnceOk({
+      // SS upserts on orderKey so the same orderId comes back.
+      orderId: 555000,
+      orderNumber: shipmentRow.id,
+      orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+      orderStatus: "awaiting_shipment",
+    });
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    const result = await svc.pushShipment(shipmentRow.id);
+
+    expect(result.shipstationOrderId).toBe(555000);
+    expect(result.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
+    // Same 4-call sequence as a fresh push — voided re-push doesn't
+    // add any reads/writes; the single UPDATE simply also NULLs the
+    // void columns.
+    expect(mock.getCallCount()).toBe(4);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Inspect the UPDATE's SQL text: must set status='queued' and must
+    // also clear voided_at + voided_reason so stale void state cannot
+    // survive a successful re-label push.
+    // The mock stores execute calls in order; index 3 is the UPDATE.
+    const updateQuery = mock.execute.mock.calls[3][0] as any;
+    const chunks: unknown[] = updateQuery?.queryChunks ?? [];
+    const sqlText = chunks
+      .map((c) => {
+        if (typeof c === "string") return c;
+        if (c && typeof c === "object" && Array.isArray((c as any).value)) {
+          return (c as any).value.join("");
+        }
+        return "";
+      })
+      .join("");
+    expect(sqlText).toContain("UPDATE wms.outbound_shipments");
+    expect(sqlText).toContain("status = 'queued'");
+    expect(sqlText).toMatch(/voided_at\s*=\s*NULL/);
+    expect(sqlText).toMatch(/voided_reason\s*=\s*NULL/);
+  });
+
   it("adds the EB- prefix for eBay channel orders", async () => {
     const EBAY_CHANNEL_ID = 67;
     const shipmentRow = okShipment({ channel_id: EBAY_CHANNEL_ID });
@@ -475,6 +532,34 @@ describe("pushShipment :: error cases", () => {
     await expect(svc.pushShipment(okShipment().id)).rejects.toBeInstanceOf(
       ShipStationPushError,
     );
+  });
+
+  it("does NOT throw when shipment status is 'voided' (re-label path, §6 Commit 18)", async () => {
+    // Sibling to the two terminal-state rejection cases above: `voided`
+    // is the ONE non-{planned,queued} status that pushShipment must
+    // accept, because a voided label is re-pushable. Validate we get
+    // past the status gate by providing the full scripted response
+    // chain a real push walks through — if voided were still rejected,
+    // execute would only be called once (the shipment SELECT).
+    const shipmentRow = okShipment({ status: "voided" });
+    const mock = makeDb([
+      { rows: [shipmentRow] },
+      { rows: [okOrder()] },
+      { rows: [okItem()] },
+      { rows: [] }, // UPDATE
+    ]);
+    globalThis.fetch = mockFetchOnceOk({
+      orderId: 42,
+      orderNumber: shipmentRow.id,
+      orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+      orderStatus: "awaiting_shipment",
+    }) as any;
+    const svc = createShipStationService(mock.db);
+    await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
+      shipstationOrderId: 42,
+    });
+    // All four execute calls fired: we went past the status gate.
+    expect(mock.getCallCount()).toBe(4);
   });
 
   it("throws when the wms order is not found", async () => {

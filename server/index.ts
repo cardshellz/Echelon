@@ -15,7 +15,7 @@ import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
 import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationService, setDropshipWmsServices } from "./modules/dropship/vendor-order-polling";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
-import { startWebhookRetryWorker } from "./modules/oms/webhook-retry.worker";
+import { startWebhookRetryWorker, enqueueShipStationRetry } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
@@ -279,20 +279,34 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
   // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware — unauthenticated) ---
   app.post("/api/shipstation/webhooks/ship-notify", async (req, res) => {
-    try {
-      const { resource_url, resource_type } = req.body || {};
-      if (resource_type !== "SHIP_NOTIFY" || !resource_url) {
-        return res.status(400).json({ error: "Invalid webhook payload" });
-      }
+    const { resource_url, resource_type } = req.body || {};
+    if (resource_type !== "SHIP_NOTIFY" || !resource_url || typeof resource_url !== "string") {
+      return res.status(400).json({ error: "Invalid webhook payload" });
+    }
 
+    try {
       console.log(`[ShipStation Webhook] Received SHIP_NOTIFY`);
       const processed = await services.shipStation.processShipNotify(resource_url);
       console.log(`[ShipStation Webhook] Processed ${processed} shipment(s)`);
 
-      res.status(200).json({ status: "ok", processed });
+      return res.status(200).json({ status: "ok", processed });
     } catch (err: any) {
-      console.error(`[ShipStation Webhook] Error: ${err.message}`);
-      res.status(500).json({ error: "Internal error" });
+      console.error(
+        `[ShipStation Webhook] processShipNotify failed, enqueueing for retry: ${err.message}`
+      );
+
+      // Enqueue for the webhook-retry worker. Best-effort: if the enqueue
+      // itself fails we still 500 so SS's own retry layer can take over —
+      // we don't want an enqueue blip to mask the original processing error.
+      try {
+        await enqueueShipStationRetry(db, { resource_url });
+      } catch (enqueueErr: any) {
+        console.error(
+          `[ShipStation Webhook] retry-queue enqueue failed: ${enqueueErr?.message || enqueueErr}`
+        );
+      }
+
+      return res.status(500).json({ error: "Internal error" });
     }
   });
 
@@ -305,6 +319,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
   // Wire fulfillment push into ShipStation service for tracking push on ship notify
   (db as any).__fulfillmentPush = services.fulfillmentPush;
+
+  // Stash ShipStation service for the webhook-retry worker to pick up
+  // (mirrors the __fulfillmentPush pattern — keeps the scheduler start
+  // surface free of service threading).
+  (db as any).__shipStationService = services.shipStation;
 
   // Inject ShipStation service into eBay ingestion for auto-push
   setShipStationService(services.shipStation);

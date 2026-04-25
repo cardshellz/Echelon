@@ -6,6 +6,7 @@ import {
   warehouseSettings,
   warehouses,
 } from "@shared/schema";
+import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import type {
   CombinedOrderGroup,
   Order,

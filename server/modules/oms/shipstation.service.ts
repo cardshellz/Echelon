@@ -15,6 +15,11 @@ import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, in
 import type { OmsOrderWithLines } from "./oms.service";
 import { buildTrackingUrl } from "./tracking-url.util";
 import { isLineSumWithinTolerance } from "@shared/validation/currency";
+import {
+  dispatchShipmentEvent,
+  recomputeOrderStatusFromShipments,
+  type ShipmentEvent,
+} from "../orders/shipment-rollup";
 
 const EBAY_CHANNEL_ID = 67;
 
@@ -151,10 +156,19 @@ export interface WmsShipmentItemRow {
 }
 
 // Shipment statuses that are eligible to be pushed to ShipStation. Any
-// other state (shipped, voided, cancelled, returned, lost, labeled,
-// on_hold) means we MUST NOT push — either it's terminal or ShipStation
-// already has it. Mirrors the shipment state machine in plan §2.4.
-const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued"]);
+// other state (shipped, cancelled, returned, lost, labeled, on_hold)
+// means we MUST NOT push — either it's terminal or ShipStation already
+// has it. Mirrors the shipment state machine in plan §2.4.
+//
+// `voided` is pushable (§6 Commit 18 — re-label flow): when an operator
+// voids a label on ShipStation (§6 Commit 17) and then re-pushes, SS
+// upserts on the same orderKey and our WMS state transitions back to
+// `queued`. The UPDATE below also clears `voided_at` + `voided_reason`
+// on the transition so stale void metadata doesn't linger on a freshly
+// re-queued shipment; NULLing already-NULL columns is a no-op for the
+// planned/queued paths, so one UPDATE covers every re-push-eligible
+// state.
+const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued", "voided"]);
 
 // ---------------------------------------------------------------------------
 // validateShipmentForPush — pure function, exported for tests.
@@ -572,6 +586,650 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   // -------------------------------------------------------------------------
   // Process SHIP_NOTIFY webhook
   // -------------------------------------------------------------------------
+  //
+  // §6 Commit 15 — SHIP_NOTIFY_V2 feature flag.
+  //
+  // When `SHIP_NOTIFY_V2=true`, the per-shipment handler dispatches to
+  // the shipment-native V2 branch (`processShipNotifyV2`) which:
+  //   1. Looks up the WMS shipment by `shipstation_order_id` (primary)
+  //      with a fallback to the legacy orderKey path for pre-cutover
+  //      orders (pushed via pushOrder / echelon-oms-<id>).
+  //   2. Dispatches the SS event (shipped / cancelled / voided) to the
+  //      single-purpose `markShipment*` helper in shipment-rollup.ts.
+  //   3. Rolls up order-level `warehouse_status` via
+  //      `recomputeOrderStatusFromShipments` — fixes the
+  //      single-shipment-flips-whole-order bug flagged in C13.
+  //   4. Derives the OMS state from the (post-rollup) WMS state and
+  //      writes to `oms.oms_orders`.
+  //
+  // When the flag is off (default), the legacy C13 path runs verbatim
+  // via `processShipNotifyLegacy`. No behavioral change on deploy.
+
+  function isShipNotifyV2Enabled(): boolean {
+    return process.env.SHIP_NOTIFY_V2 === "true";
+  }
+
+  /**
+   * Map a ShipStation shipment payload to a typed ShipmentEvent.
+   *
+   * Returns `null` for shipments with no actionable content (no
+   * tracking, no voidDate). Void detection is checked before ship
+   * detection: SS can report `orderStatus='shipped'` on a stale
+   * snapshot even after a label void, so voidDate wins.
+   */
+  function deriveEventFromSSShipment(
+    shipment: ShipStationShipment,
+    carrier: string,
+  ): ShipmentEvent | null {
+    if (shipment.voidDate) {
+      return { kind: "voided", reason: "ss_label_void" };
+    }
+
+    const trackingNumber = shipment.trackingNumber;
+    const shipDate = shipment.shipDate ? new Date(shipment.shipDate) : null;
+
+    if (
+      typeof trackingNumber === "string" &&
+      trackingNumber.length > 0 &&
+      shipDate !== null &&
+      !Number.isNaN(shipDate.getTime())
+    ) {
+      return {
+        kind: "shipped",
+        trackingNumber,
+        carrier,
+        shipDate,
+        trackingUrl: buildTrackingUrl(carrier, trackingNumber),
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * V2 per-shipment handler. Returns `{ processed, fallback }`:
+   *   - `fallback=true` means the shipment was NOT found by
+   *     `shipstation_order_id` — the caller should retry via the
+   *     legacy orderKey path.
+   *   - `processed=true` means at least one cascade step ran.
+   *   - Both false means the shipment was a deliberate skip (void
+   *     handled, already-in-state, or no actionable event).
+   */
+  async function processShipNotifyV2(
+    shipment: ShipStationShipment,
+  ): Promise<{ processed: boolean; fallback: boolean }> {
+    const ssOrderId = shipment.orderId;
+    if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) {
+      // Malformed SS id — fall back to legacy orderKey path.
+      return { processed: false, fallback: true };
+    }
+
+    const shipmentLookup: any = await db.execute(sql`
+      SELECT id, order_id, status
+      FROM wms.outbound_shipments
+      WHERE shipstation_order_id = ${ssOrderId}
+      LIMIT 1
+    `);
+    const wmsShipmentRow: any = shipmentLookup?.rows?.[0];
+    if (!wmsShipmentRow) {
+      // Pre-cutover order (pushed via pushOrder, no shipstation_order_id
+      // on outbound_shipments). Fall back to legacy orderKey path.
+      return { processed: false, fallback: true };
+    }
+
+    const carrier = mapShipStationCarrier(shipment.carrierCode);
+    const event = deriveEventFromSSShipment(shipment, carrier);
+    if (!event) {
+      console.log(
+        `[ShipStation Webhook V2] No actionable event for shipment ${wmsShipmentRow.id} (SS order ${ssOrderId}) — skipping`,
+      );
+      return { processed: false, fallback: false };
+    }
+
+    // Forward the Shopify fulfillment-push handle so the void path
+    // can hook `cancelShopifyFulfillment` (§6 Commit 17). The handle
+    // is stashed on `db.__fulfillmentPush` by the outer SHIP_NOTIFY
+    // wrapper — the legacy V1 path already reads it for pushTracking.
+    const fulfillmentPush = (db as any).__fulfillmentPush;
+    const { wmsOrderId, changed } = await dispatchShipmentEvent(
+      db,
+      wmsShipmentRow.id,
+      event,
+      { fulfillmentPush },
+    );
+    if (!changed) {
+      console.log(
+        `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already in target state — no-op`,
+      );
+      return { processed: false, fallback: false };
+    }
+
+    // Roll up order-level warehouse_status from ALL shipments. This is
+    // the fix for the single-shipment-flips-whole-order bug: the order
+    // status is now derived from the full shipment set, not from the
+    // one shipment that just updated.
+    const rollup = await recomputeOrderStatusFromShipments(db, wmsOrderId);
+    console.log(
+      `[ShipStation Webhook V2] WMS order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus} (changed=${rollup.changed})`,
+    );
+
+    // Derive the OMS pointer and update OMS.
+    const orderResult: any = await db.execute(sql`
+      SELECT oms_fulfillment_order_id
+      FROM wms.orders
+      WHERE id = ${wmsOrderId}
+      LIMIT 1
+    `);
+    const omsPointer = orderResult?.rows?.[0]?.oms_fulfillment_order_id;
+    if (!omsPointer) {
+      console.warn(
+        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has no oms_fulfillment_order_id — skipping OMS derived update (shipment=${wmsShipmentRow.id})`,
+      );
+      return { processed: true, fallback: false };
+    }
+    const omsOrderId = parseInt(String(omsPointer), 10);
+    if (!Number.isInteger(omsOrderId) || omsOrderId <= 0) {
+      console.warn(
+        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${wmsShipmentRow.id})`,
+      );
+      return { processed: true, fallback: false };
+    }
+
+    await updateOmsDerivedFromEvent(omsOrderId, event);
+    await recordShipmentEventV2(omsOrderId, event, shipment, {
+      wmsFirst: true,
+      wmsShipmentId: wmsShipmentRow.id,
+    });
+
+    if (event.kind === "shipped") {
+      try {
+        const fulfillmentPush = (db as any).__fulfillmentPush;
+        if (fulfillmentPush) {
+          await fulfillmentPush.pushTracking(omsOrderId);
+        }
+      } catch (pushErr: any) {
+        console.error(
+          `[ShipStation Webhook V2] Failed to push tracking for order ${omsOrderId}: ${pushErr.message}`,
+        );
+      }
+    }
+
+    console.log(
+      `[ShipStation Webhook V2] Processed shipment ${wmsShipmentRow.id} (event=${event.kind}) → OMS ${omsOrderId}`,
+    );
+    return { processed: true, fallback: false };
+  }
+
+  /**
+   * V2 OMS-side update derived from a ShipmentEvent. Mirrors the legacy
+   * tail (OMS update + line-items fulfillment flag). Kept separate
+   * from the legacy path so edits to V2 cannot silently diverge.
+   */
+  async function updateOmsDerivedFromEvent(
+    omsOrderId: number,
+    event: ShipmentEvent,
+  ): Promise<void> {
+    const now = new Date();
+    if (event.kind === "shipped") {
+      await db
+        .update(omsOrders)
+        .set({
+          status: "shipped",
+          fulfillmentStatus: "fulfilled",
+          trackingNumber: event.trackingNumber,
+          trackingCarrier: event.carrier,
+          shippedAt: event.shipDate,
+          updatedAt: now,
+        })
+        .where(eq(omsOrders.id, omsOrderId));
+
+      await db
+        .update(omsOrderLines)
+        .set({ fulfillmentStatus: "fulfilled" })
+        .where(eq(omsOrderLines.orderId, omsOrderId));
+      return;
+    }
+
+    if (event.kind === "cancelled") {
+      await db
+        .update(omsOrders)
+        .set({
+          status: "cancelled",
+          updatedAt: now,
+        })
+        .where(eq(omsOrders.id, omsOrderId));
+      return;
+    }
+
+    // kind === 'voided' — no OMS state change by design. The shipment
+    // can be re-labeled; OMS stays in its pre-ship state until a new
+    // ship event lands.
+  }
+
+  /**
+   * V2 audit event writer. Event type encodes the event kind so
+   * dashboards can filter ship vs. cancel vs. void.
+   */
+  async function recordShipmentEventV2(
+    omsOrderId: number,
+    event: ShipmentEvent,
+    shipment: ShipStationShipment,
+    meta: { wmsFirst: boolean; wmsShipmentId: number },
+  ): Promise<void> {
+    const eventType =
+      event.kind === "shipped"
+        ? "shipped_via_shipstation"
+        : event.kind === "cancelled"
+          ? "cancelled_via_shipstation"
+          : "voided_via_shipstation";
+
+    const details: Record<string, unknown> = {
+      shipmentId: shipment.shipmentId,
+      wmsShipmentId: meta.wmsShipmentId,
+      carrierCode: shipment.carrierCode,
+      serviceCode: shipment.serviceCode,
+      shipDate: shipment.shipDate,
+      wmsFirst: meta.wmsFirst,
+    };
+    if (event.kind === "shipped") {
+      details.trackingNumber = event.trackingNumber;
+      details.carrier = event.carrier;
+    } else if (event.kind === "cancelled" || event.kind === "voided") {
+      details.reason = event.reason ?? null;
+    }
+
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType,
+      details,
+    });
+  }
+
+  /**
+   * Legacy (pre-Commit 15) per-shipment handler. The body of the
+   * original `for (const shipment of shipments)` loop, extracted into
+   * a helper with `continue` rewritten as early returns. No behavioral
+   * change versus C13; every log string, DB operation, and branch
+   * guard is preserved.
+   *
+   * Returns `{ processed }` where `processed=true` matches the legacy
+   * `processed++` increment on the tail of the try block.
+   */
+  async function processShipNotifyLegacy(
+    shipment: ShipStationShipment,
+  ): Promise<{ processed: boolean }> {
+    // --- Parse the orderKey. SHIP_NOTIFY carries a mix of Echelon
+    //     orders (legacy OMS-level + new shipment-level) and other
+    //     sources we don't own. parseEchelonOrderKey returns null for
+    //     non-Echelon keys; those are simply skipped.
+    const parsed = parseEchelonOrderKey(shipment.orderKey);
+    if (!parsed) {
+      return { processed: false }; // Not our order
+    }
+
+    // Skip voided shipments (shared for both prefixes)
+    if (shipment.voidDate) {
+      console.log(
+        `[ShipStation Webhook] Skipping voided shipment (orderKey=${shipment.orderKey})`,
+      );
+      return { processed: false };
+    }
+
+    const trackingNumber = shipment.trackingNumber;
+    const carrier = mapShipStationCarrier(shipment.carrierCode);
+
+    if (!trackingNumber) {
+      console.warn(
+        `[ShipStation Webhook] No tracking number for ${shipment.orderKey}`,
+      );
+      return { processed: false };
+    }
+
+    const now = new Date();
+
+    // Resolved by whichever branch we take. omsOrderId is the join
+    // key to OMS tables; wmsFirst signals whether the WMS cascade
+    // actually ran (legacy-OMS-only orders skip it).
+    let omsOrderId: number;
+    let wmsFirst: boolean;
+
+    if (parsed.source === "wms-shipment") {
+          // =====================================================
+          // NEW PATH (§6 Commit 13): SHIP_NOTIFY carried a
+          // shipment-level orderKey. Look up the outbound_shipments
+          // row directly by id, derive wmsOrderId + omsOrderId
+          // from it, then run the same cascade as the legacy
+          // hasWmsOrder branch.
+          // =====================================================
+      const shipmentId = parsed.shipmentId;
+
+      const shipmentResult: any = await db.execute(sql`
+        SELECT id, order_id, status
+        FROM wms.outbound_shipments
+        WHERE id = ${shipmentId}
+        LIMIT 1
+      `);
+      const shipmentRow: any = shipmentResult?.rows?.[0];
+
+      if (!shipmentRow) {
+        console.warn(
+          `[ShipStation Webhook] WMS shipment ${shipmentId} not found (orderKey=${shipment.orderKey})`,
+        );
+        return { processed: false };
+      }
+
+      // Idempotency: terminal shipment states are not re-applied.
+      // Matches shipment-level semantics introduced in C11 (see
+      // PUSHABLE_SHIPMENT_STATUSES invariant in §6 Commit 11).
+      if (shipmentRow.status === "shipped") {
+        console.log(
+          `[ShipStation Webhook] WMS shipment ${shipmentId} already shipped — skipping`,
+        );
+        return { processed: false };
+      }
+      if (shipmentRow.status === "cancelled") {
+        console.log(
+          `[ShipStation Webhook] WMS shipment ${shipmentId} is cancelled — skipping`,
+        );
+        return { processed: false };
+      }
+
+      const wmsOrderId = shipmentRow.order_id;
+
+      // Pull the owning order so we can cascade status + derive
+      // the OMS pointer. After C9 every wms.orders row has a
+      // non-null oms_fulfillment_order_id, but we still guard
+      // defensively — better to log and continue than to trip
+      // the outer catch and lose the whole batch.
+      const orderResult: any = await db.execute(sql`
+        SELECT id, warehouse_status, oms_fulfillment_order_id
+        FROM wms.orders
+        WHERE id = ${wmsOrderId}
+        LIMIT 1
+      `);
+      const orderRow: any = orderResult?.rows?.[0];
+
+      if (!orderRow) {
+        console.warn(
+          `[ShipStation Webhook] WMS order ${wmsOrderId} not found for shipment ${shipmentId}`,
+        );
+        return { processed: false };
+      }
+
+      const omsPointer = orderRow.oms_fulfillment_order_id;
+      if (!omsPointer) {
+        console.warn(
+          `[ShipStation Webhook] WMS order ${wmsOrderId} has no oms_fulfillment_order_id — cannot derive OMS update (shipment=${shipmentId})`,
+        );
+        return { processed: false };
+      }
+      const parsedOmsPointer = parseInt(String(omsPointer), 10);
+      if (!Number.isInteger(parsedOmsPointer) || parsedOmsPointer <= 0) {
+        console.warn(
+          `[ShipStation Webhook] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${shipmentId})`,
+        );
+        return { processed: false };
+      }
+      omsOrderId = parsedOmsPointer;
+
+      // 1. Update the shipment row itself. This is the
+      //    shipment-native primary source of truth.
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments SET
+          status = 'shipped',
+          carrier = ${carrier},
+          tracking_number = ${trackingNumber},
+          shipped_at = ${now},
+          updated_at = ${now}
+        WHERE id = ${shipmentId}
+      `);
+
+      // 2. Cascade to the owning wms.orders row. Multi-shipment
+      //    semantics (§6 Commit 15+) will replace this with
+      //    recomputeOrderStatusFromShipments; for C13 we retain
+      //    the flat "shipped" write to match legacy behavior.
+      if (
+        orderRow.warehouse_status !== "shipped" &&
+        orderRow.warehouse_status !== "cancelled"
+      ) {
+        await db.execute(sql`
+          UPDATE wms.orders SET
+            warehouse_status = 'shipped',
+            completed_at = ${now},
+            tracking_number = ${trackingNumber},
+            updated_at = ${now}
+          WHERE id = ${wmsOrderId}
+        `);
+
+        // 3. Mark all still-in-flight order items completed.
+        //    Same guard as the legacy branch: never overwrite
+        //    items that are already in a terminal state.
+        await db.execute(sql`
+          UPDATE wms.order_items SET
+            status = 'completed',
+            picked_quantity = quantity,
+            fulfilled_quantity = quantity
+          WHERE wms_order_id = ${wmsOrderId}
+            AND status NOT IN ('completed', 'short', 'cancelled')
+        `);
+      }
+
+      console.log(
+        `[ShipStation Webhook] Updated WMS shipment ${shipmentId} (order ${wmsOrderId}) to shipped`,
+      );
+
+      wmsFirst = true;
+    } else {
+          // =====================================================
+          // LEGACY PATH: SHIP_NOTIFY carried echelon-oms-<omsId>.
+          // Unchanged from pre-C13 behavior. Will run through the
+          // deprecation window for orders pushed before the
+          // PUSH_FROM_WMS flag flip.
+          // =====================================================
+      omsOrderId = parsed.omsOrderId;
+
+      // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
+      const wmsOrderResult: any = await db.execute(sql`
+        SELECT id, warehouse_status FROM wms.orders
+        WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
+          AND source IN ('oms', 'ebay')
+        LIMIT 1
+      `);
+
+      const hasWmsOrder =
+        wmsOrderResult.rows && wmsOrderResult.rows.length > 0;
+
+      if (hasWmsOrder) {
+        const wmsOrderId = wmsOrderResult.rows[0].id;
+        const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
+
+        // Idempotency: skip if WMS order already shipped
+        if (wmsStatus === "shipped") {
+          console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — skipping`);
+          return { processed: false };
+        }
+
+        if (wmsStatus === "cancelled") {
+          console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} is cancelled — skipping`);
+          return { processed: false };
+        }
+
+        // Update WMS order (primary source of truth)
+        const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
+        void trackingUrl; // reserved for tracking_url column in a later commit
+        await db.execute(sql`
+          UPDATE wms.orders SET
+            warehouse_status = 'shipped',
+            completed_at = ${now},
+            tracking_number = ${trackingNumber},
+            updated_at = ${now}
+          WHERE id = ${wmsOrderId}
+        `);
+
+        // Mark all order items as completed
+        await db.execute(sql`
+          UPDATE wms.order_items SET
+            status = 'completed',
+            picked_quantity = quantity,
+            fulfilled_quantity = quantity
+          WHERE wms_order_id = ${wmsOrderId}
+            AND status NOT IN ('completed', 'short', 'cancelled')
+        `);
+
+        console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
+
+        // Create shipment record for the WMS order.
+        // Column name is `order_id` (per shared/schema/orders.schema.ts L348
+        // and migrations/0071_create_namespaces.sql L817). The previous
+        // `wms_order_id` reference threw `column "wms_order_id" does not
+        // exist` and was swallowed by the per-shipment try/catch, so the
+        // outbound_shipments audit row was never written. See
+        // shipstation-sync-audit.md §3 / §1E.
+        await db.execute(sql`
+          INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
+          VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
+          ON CONFLICT DO NOTHING
+        `);
+
+        wmsFirst = true;
+      } else {
+        // No WMS order — check OMS for idempotency (legacy path)
+        const [omsOrder] = await db
+          .select()
+          .from(omsOrders)
+          .where(eq(omsOrders.id, omsOrderId))
+          .limit(1);
+
+        if (!omsOrder) {
+          console.warn(`[ShipStation Webhook] Neither WMS nor OMS order found for OMS ID ${omsOrderId}`);
+          return { processed: false };
+        }
+
+        if (omsOrder.status === "shipped" && omsOrder.trackingNumber === trackingNumber) {
+          console.log(`[ShipStation Webhook] OMS order ${omsOrderId} already shipped with same tracking`);
+          return { processed: false };
+        }
+
+        // Legacy: deduct inventory directly for orders without WMS rows
+        if (inventoryCore) {
+          try {
+            const lines = await db
+              .select()
+              .from(omsOrderLines)
+              .where(eq(omsOrderLines.orderId, omsOrderId));
+
+            for (const line of lines) {
+              if (!line.sku || !line.quantity) continue;
+
+              const [variant] = await db
+                .select()
+                .from(productVariants)
+                .where(eq(sql`UPPER(${productVariants.sku})`, line.sku.toUpperCase()))
+                .limit(1);
+
+              if (!variant) {
+                console.warn(`[ShipStation Webhook] SKU ${line.sku} not found — skipping inventory deduction for order ${omsOrderId}`);
+                continue;
+              }
+
+              const warehouseLocationId = omsOrder.warehouseId;
+              const [level] = warehouseLocationId
+                ? await db
+                    .select()
+                    .from(inventoryLevels)
+                    .where(
+                      and(
+                        eq(inventoryLevels.productVariantId, variant.id),
+                        eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+                      ),
+                    )
+                    .limit(1)
+                : await db
+                    .select()
+                    .from(inventoryLevels)
+                    .where(eq(inventoryLevels.productVariantId, variant.id))
+                    .limit(1);
+
+              if (!level) {
+                console.warn(`[ShipStation Webhook] No inventory level for variant ${variant.id} (SKU ${line.sku}) — skipping for order ${omsOrderId}`);
+                continue;
+              }
+
+              await inventoryCore.recordShipment({
+                productVariantId: variant.id,
+                warehouseLocationId: level.warehouseLocationId,
+                qty: line.quantity,
+                orderId: omsOrderId,
+                orderItemId: line.id,
+                shipmentId: String(shipment.shipmentId),
+                userId: "system:shipstation",
+              });
+
+              console.log(`[ShipStation Webhook] Recorded shipment for ${line.quantity}x ${line.sku} (order ${omsOrderId})`);
+            }
+          } catch (invErr: any) {
+            console.error(`[ShipStation Webhook] Legacy inventory deduction failed for order ${omsOrderId}: ${invErr.message}`);
+          }
+        }
+
+        wmsFirst = false;
+      }
+    }
+
+    // ---- OMS DERIVED: Update OMS from WMS state ----
+    await db
+      .update(omsOrders)
+      .set({
+        status: "shipped",
+        fulfillmentStatus: "fulfilled",
+        trackingNumber,
+        trackingCarrier: carrier,
+        shippedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(omsOrders.id, omsOrderId));
+
+    // Update OMS line items
+    await db
+      .update(omsOrderLines)
+      .set({ fulfillmentStatus: "fulfilled" })
+      .where(eq(omsOrderLines.orderId, omsOrderId));
+
+    // Record event on OMS
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "shipped_via_shipstation",
+      details: {
+        shipmentId: shipment.shipmentId,
+        trackingNumber,
+        carrier,
+        carrierCode: shipment.carrierCode,
+        serviceCode: shipment.serviceCode,
+        shipDate: shipment.shipDate,
+        wmsFirst,
+      },
+    });
+
+    console.log(
+      `[ShipStation Webhook] Order ${omsOrderId} shipped: ${carrier} ${trackingNumber}`,
+    );
+
+    // Push tracking to the originating channel (eBay, etc.)
+    try {
+      const fulfillmentPush = (db as any).__fulfillmentPush;
+      if (fulfillmentPush) {
+        await fulfillmentPush.pushTracking(omsOrderId);
+      }
+    } catch (pushErr: any) {
+      console.error(
+        `[ShipStation Webhook] Failed to push tracking for order ${omsOrderId}: ${pushErr.message}`,
+      );
+    }
+
+    return { processed: true };
+  }
+
+  // ─── processShipNotify entry point (flag-gated) ────────────────
 
   async function processShipNotify(resourceUrl: string): Promise<number> {
     // Fetch the actual shipment data from ShipStation
@@ -581,378 +1239,30 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     const shipments = data.shipments || [];
+    const useV2 = isShipNotifyV2Enabled();
     let processed = 0;
 
     for (const shipment of shipments) {
       try {
-        // --- Parse the orderKey. SHIP_NOTIFY carries a mix of Echelon
-        //     orders (legacy OMS-level + new shipment-level) and other
-        //     sources we don't own. parseEchelonOrderKey returns null for
-        //     non-Echelon keys; those are simply skipped.
-        const parsed = parseEchelonOrderKey(shipment.orderKey);
-        if (!parsed) {
-          continue; // Not our order
-        }
-
-        // Skip voided shipments (shared for both prefixes)
-        if (shipment.voidDate) {
-          console.log(
-            `[ShipStation Webhook] Skipping voided shipment (orderKey=${shipment.orderKey})`,
-          );
-          continue;
-        }
-
-        const trackingNumber = shipment.trackingNumber;
-        const carrier = mapShipStationCarrier(shipment.carrierCode);
-
-        if (!trackingNumber) {
-          console.warn(
-            `[ShipStation Webhook] No tracking number for ${shipment.orderKey}`,
-          );
-          continue;
-        }
-
-        const now = new Date();
-
-        // Resolved by whichever branch we take. omsOrderId is the join
-        // key to OMS tables; wmsFirst signals whether the WMS cascade
-        // actually ran (legacy-OMS-only orders skip it).
-        let omsOrderId: number;
-        let wmsFirst: boolean;
-
-        if (parsed.source === "wms-shipment") {
-          // =====================================================
-          // NEW PATH (§6 Commit 13): SHIP_NOTIFY carried a
-          // shipment-level orderKey. Look up the outbound_shipments
-          // row directly by id, derive wmsOrderId + omsOrderId
-          // from it, then run the same cascade as the legacy
-          // hasWmsOrder branch.
-          // =====================================================
-          const shipmentId = parsed.shipmentId;
-
-          const shipmentResult: any = await db.execute(sql`
-            SELECT id, order_id, status
-            FROM wms.outbound_shipments
-            WHERE id = ${shipmentId}
-            LIMIT 1
-          `);
-          const shipmentRow: any = shipmentResult?.rows?.[0];
-
-          if (!shipmentRow) {
-            console.warn(
-              `[ShipStation Webhook] WMS shipment ${shipmentId} not found (orderKey=${shipment.orderKey})`,
-            );
+        if (useV2) {
+          const v2Result = await processShipNotifyV2(shipment);
+          if (v2Result.processed) {
+            processed++;
             continue;
           }
-
-          // Idempotency: terminal shipment states are not re-applied.
-          // Matches shipment-level semantics introduced in C11 (see
-          // PUSHABLE_SHIPMENT_STATUSES invariant in §6 Commit 11).
-          if (shipmentRow.status === "shipped") {
-            console.log(
-              `[ShipStation Webhook] WMS shipment ${shipmentId} already shipped — skipping`,
-            );
+          if (!v2Result.fallback) {
+            // V2 handled the shipment (deliberate skip / no-op) —
+            // do NOT fall through to legacy, or we'd double-process.
             continue;
           }
-          if (shipmentRow.status === "cancelled") {
-            console.log(
-              `[ShipStation Webhook] WMS shipment ${shipmentId} is cancelled — skipping`,
-            );
-            continue;
-          }
-
-          const wmsOrderId = shipmentRow.order_id;
-
-          // Pull the owning order so we can cascade status + derive
-          // the OMS pointer. After C9 every wms.orders row has a
-          // non-null oms_fulfillment_order_id, but we still guard
-          // defensively — better to log and continue than to trip
-          // the outer catch and lose the whole batch.
-          const orderResult: any = await db.execute(sql`
-            SELECT id, warehouse_status, oms_fulfillment_order_id
-            FROM wms.orders
-            WHERE id = ${wmsOrderId}
-            LIMIT 1
-          `);
-          const orderRow: any = orderResult?.rows?.[0];
-
-          if (!orderRow) {
-            console.warn(
-              `[ShipStation Webhook] WMS order ${wmsOrderId} not found for shipment ${shipmentId}`,
-            );
-            continue;
-          }
-
-          const omsPointer = orderRow.oms_fulfillment_order_id;
-          if (!omsPointer) {
-            console.warn(
-              `[ShipStation Webhook] WMS order ${wmsOrderId} has no oms_fulfillment_order_id — cannot derive OMS update (shipment=${shipmentId})`,
-            );
-            continue;
-          }
-          const parsedOmsPointer = parseInt(String(omsPointer), 10);
-          if (!Number.isInteger(parsedOmsPointer) || parsedOmsPointer <= 0) {
-            console.warn(
-              `[ShipStation Webhook] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${shipmentId})`,
-            );
-            continue;
-          }
-          omsOrderId = parsedOmsPointer;
-
-          // 1. Update the shipment row itself. This is the
-          //    shipment-native primary source of truth.
-          await db.execute(sql`
-            UPDATE wms.outbound_shipments SET
-              status = 'shipped',
-              carrier = ${carrier},
-              tracking_number = ${trackingNumber},
-              shipped_at = ${now},
-              updated_at = ${now}
-            WHERE id = ${shipmentId}
-          `);
-
-          // 2. Cascade to the owning wms.orders row. Multi-shipment
-          //    semantics (§6 Commit 15+) will replace this with
-          //    recomputeOrderStatusFromShipments; for C13 we retain
-          //    the flat "shipped" write to match legacy behavior.
-          if (
-            orderRow.warehouse_status !== "shipped" &&
-            orderRow.warehouse_status !== "cancelled"
-          ) {
-            await db.execute(sql`
-              UPDATE wms.orders SET
-                warehouse_status = 'shipped',
-                completed_at = ${now},
-                tracking_number = ${trackingNumber},
-                updated_at = ${now}
-              WHERE id = ${wmsOrderId}
-            `);
-
-            // 3. Mark all still-in-flight order items completed.
-            //    Same guard as the legacy branch: never overwrite
-            //    items that are already in a terminal state.
-            await db.execute(sql`
-              UPDATE wms.order_items SET
-                status = 'completed',
-                picked_quantity = quantity,
-                fulfilled_quantity = quantity
-              WHERE wms_order_id = ${wmsOrderId}
-                AND status NOT IN ('completed', 'short', 'cancelled')
-            `);
-          }
-
-          console.log(
-            `[ShipStation Webhook] Updated WMS shipment ${shipmentId} (order ${wmsOrderId}) to shipped`,
-          );
-
-          wmsFirst = true;
+          // Fallback: shipment not found by shipstation_order_id, run
+          // the legacy orderKey path so pre-cutover orders still work.
+          const legacyResult = await processShipNotifyLegacy(shipment);
+          if (legacyResult.processed) processed++;
         } else {
-          // =====================================================
-          // LEGACY PATH: SHIP_NOTIFY carried echelon-oms-<omsId>.
-          // Unchanged from pre-C13 behavior. Will run through the
-          // deprecation window for orders pushed before the
-          // PUSH_FROM_WMS flag flip.
-          // =====================================================
-          omsOrderId = parsed.omsOrderId;
-
-          // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
-          const wmsOrderResult: any = await db.execute(sql`
-            SELECT id, warehouse_status FROM wms.orders
-            WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
-              AND source IN ('oms', 'ebay')
-            LIMIT 1
-          `);
-
-          const hasWmsOrder =
-            wmsOrderResult.rows && wmsOrderResult.rows.length > 0;
-
-          if (hasWmsOrder) {
-            const wmsOrderId = wmsOrderResult.rows[0].id;
-            const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
-
-            // Idempotency: skip if WMS order already shipped
-            if (wmsStatus === "shipped") {
-              console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — skipping`);
-              continue;
-            }
-
-            if (wmsStatus === "cancelled") {
-              console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} is cancelled — skipping`);
-              continue;
-            }
-
-            // Update WMS order (primary source of truth)
-            const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
-            await db.execute(sql`
-              UPDATE wms.orders SET
-                warehouse_status = 'shipped',
-                completed_at = ${now},
-                tracking_number = ${trackingNumber},
-                updated_at = ${now}
-              WHERE id = ${wmsOrderId}
-            `);
-
-            // Mark all order items as completed
-            await db.execute(sql`
-              UPDATE wms.order_items SET
-                status = 'completed',
-                picked_quantity = quantity,
-                fulfilled_quantity = quantity
-              WHERE wms_order_id = ${wmsOrderId}
-                AND status NOT IN ('completed', 'short', 'cancelled')
-            `);
-
-            console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
-
-            // Create shipment record for the WMS order.
-            // Column name is `order_id` (per shared/schema/orders.schema.ts L348
-            // and migrations/0071_create_namespaces.sql L817). The previous
-            // `wms_order_id` reference threw `column "wms_order_id" does not
-            // exist` and was swallowed by the per-shipment try/catch, so the
-            // outbound_shipments audit row was never written. See
-            // shipstation-sync-audit.md §3 / §1E.
-            await db.execute(sql`
-              INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
-              VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
-              ON CONFLICT DO NOTHING
-            `);
-
-            wmsFirst = true;
-          } else {
-            // No WMS order — check OMS for idempotency (legacy path)
-            const [omsOrder] = await db
-              .select()
-              .from(omsOrders)
-              .where(eq(omsOrders.id, omsOrderId))
-              .limit(1);
-
-            if (!omsOrder) {
-              console.warn(`[ShipStation Webhook] Neither WMS nor OMS order found for OMS ID ${omsOrderId}`);
-              continue;
-            }
-
-            if (omsOrder.status === "shipped" && omsOrder.trackingNumber === trackingNumber) {
-              console.log(`[ShipStation Webhook] OMS order ${omsOrderId} already shipped with same tracking`);
-              continue;
-            }
-
-            // Legacy: deduct inventory directly for orders without WMS rows
-            if (inventoryCore) {
-              try {
-                const lines = await db
-                  .select()
-                  .from(omsOrderLines)
-                  .where(eq(omsOrderLines.orderId, omsOrderId));
-
-                for (const line of lines) {
-                  if (!line.sku || !line.quantity) continue;
-
-                  const [variant] = await db
-                    .select()
-                    .from(productVariants)
-                    .where(eq(sql`UPPER(${productVariants.sku})`, line.sku.toUpperCase()))
-                    .limit(1);
-
-                  if (!variant) {
-                    console.warn(`[ShipStation Webhook] SKU ${line.sku} not found — skipping inventory deduction for order ${omsOrderId}`);
-                    continue;
-                  }
-
-                  const warehouseLocationId = omsOrder.warehouseId;
-                  const [level] = warehouseLocationId
-                    ? await db
-                        .select()
-                        .from(inventoryLevels)
-                        .where(
-                          and(
-                            eq(inventoryLevels.productVariantId, variant.id),
-                            eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
-                          ),
-                        )
-                        .limit(1)
-                    : await db
-                        .select()
-                        .from(inventoryLevels)
-                        .where(eq(inventoryLevels.productVariantId, variant.id))
-                        .limit(1);
-
-                  if (!level) {
-                    console.warn(`[ShipStation Webhook] No inventory level for variant ${variant.id} (SKU ${line.sku}) — skipping for order ${omsOrderId}`);
-                    continue;
-                  }
-
-                  await inventoryCore.recordShipment({
-                    productVariantId: variant.id,
-                    warehouseLocationId: level.warehouseLocationId,
-                    qty: line.quantity,
-                    orderId: omsOrderId,
-                    orderItemId: line.id,
-                    shipmentId: String(shipment.shipmentId),
-                    userId: "system:shipstation",
-                  });
-
-                  console.log(`[ShipStation Webhook] Recorded shipment for ${line.quantity}x ${line.sku} (order ${omsOrderId})`);
-                }
-              } catch (invErr: any) {
-                console.error(`[ShipStation Webhook] Legacy inventory deduction failed for order ${omsOrderId}: ${invErr.message}`);
-              }
-            }
-
-            wmsFirst = false;
-          }
+          const legacyResult = await processShipNotifyLegacy(shipment);
+          if (legacyResult.processed) processed++;
         }
-
-        // ---- OMS DERIVED: Update OMS from WMS state ----
-        await db
-          .update(omsOrders)
-          .set({
-            status: "shipped",
-            fulfillmentStatus: "fulfilled",
-            trackingNumber,
-            trackingCarrier: carrier,
-            shippedAt: now,
-            updatedAt: now,
-          })
-          .where(eq(omsOrders.id, omsOrderId));
-
-        // Update OMS line items
-        await db
-          .update(omsOrderLines)
-          .set({ fulfillmentStatus: "fulfilled" })
-          .where(eq(omsOrderLines.orderId, omsOrderId));
-
-        // Record event on OMS
-        await db.insert(omsOrderEvents).values({
-          orderId: omsOrderId,
-          eventType: "shipped_via_shipstation",
-          details: {
-            shipmentId: shipment.shipmentId,
-            trackingNumber,
-            carrier,
-            carrierCode: shipment.carrierCode,
-            serviceCode: shipment.serviceCode,
-            shipDate: shipment.shipDate,
-            wmsFirst,
-          },
-        });
-
-        console.log(
-          `[ShipStation Webhook] Order ${omsOrderId} shipped: ${carrier} ${trackingNumber}`,
-        );
-
-        // Push tracking to the originating channel (eBay, etc.)
-        try {
-          const fulfillmentPush = (db as any).__fulfillmentPush;
-          if (fulfillmentPush) {
-            await fulfillmentPush.pushTracking(omsOrderId);
-          }
-        } catch (pushErr: any) {
-          console.error(
-            `[ShipStation Webhook] Failed to push tracking for order ${omsOrderId}: ${pushErr.message}`,
-          );
-        }
-
-        processed++;
       } catch (err: any) {
         console.error(
           `[ShipStation Webhook] Error processing shipment ${shipment.shipmentId}: ${err.message}`,
@@ -1393,12 +1703,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     // ─── 7. Mark shipment queued + persist SS pointers ──────────────
+    // Also clears voided_at/voided_reason for the re-label flow (§6
+    // Commit 18). NULL on already-null columns is a no-op, so this
+    // single UPDATE works for planned/queued/voided inputs alike.
     const now = new Date();
     await db.execute(sql`
       UPDATE wms.outbound_shipments
       SET shipstation_order_id = ${result.orderId},
           shipstation_order_key = ${orderKey},
           status = 'queued',
+          voided_at = NULL,
+          voided_reason = NULL,
           updated_at = ${now}
       WHERE id = ${shipmentId}
     `);
