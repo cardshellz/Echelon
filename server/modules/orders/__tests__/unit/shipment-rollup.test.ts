@@ -40,6 +40,8 @@ import {
   markShipmentVoided,
   recomputeOrderStatusFromShipments,
   dispatchShipmentEvent,
+  handleAddressChangeOnShipment,
+  handleCustomerCancelOnShipment,
 } from "../../shipment-rollup";
 
 // ─── Scripted DB mock ────────────────────────────────────────────────
@@ -92,6 +94,7 @@ function shipmentRow(
     carrier: string | null;
     tracking_url: string | null;
     shopify_fulfillment_id: string | null;
+    shipstation_order_id: number | null;
   }> = {},
 ) {
   return {
@@ -102,6 +105,7 @@ function shipmentRow(
     carrier: null,
     tracking_url: null,
     shopify_fulfillment_id: null,
+    shipstation_order_id: null,
     ...overrides,
   };
 }
@@ -425,6 +429,430 @@ describe("markShipmentCancelled", () => {
     await expect(
       markShipmentCancelled(mock.db, 501, "x", { now: NOW }),
     ).rejects.toMatchObject({ code: "SHIPMENT_NOT_FOUND" });
+  });
+
+  // §6 Commit 19: ShipStation removeFromList integration.
+
+  it("does NOT call ShipStation removeFromList when shipment was 'planned' (never pushed)", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "planned", shipstation_order_id: null })] },
+      { rows: [] }, // UPDATE
+    ]);
+    const removeFromList = vi.fn(async () => {});
+    const result = await markShipmentCancelled(
+      mock.db,
+      501,
+      "operator_cancel",
+      { now: NOW, shipstation: { removeFromList } },
+    );
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(removeFromList).not.toHaveBeenCalled();
+    // Exactly 2 DB calls: load + UPDATE.
+    expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("calls ShipStation removeFromList when shipment was 'queued' and ss_order_id is set", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "queued",
+            shipstation_order_id: 7777,
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE
+    ]);
+    const removeFromList = vi.fn(async () => {});
+    const result = await markShipmentCancelled(
+      mock.db,
+      501,
+      "operator_cancel",
+      { now: NOW, shipstation: { removeFromList } },
+    );
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(removeFromList).toHaveBeenCalledTimes(1);
+    expect(removeFromList).toHaveBeenCalledWith(7777);
+    expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("calls ShipStation removeFromList when shipment was 'labeled' and ss_order_id is set", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "labeled",
+            tracking_number: "1Z999",
+            carrier: "UPS",
+            shipstation_order_id: 8888,
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE
+    ]);
+    const removeFromList = vi.fn(async () => {});
+    const result = await markShipmentCancelled(
+      mock.db,
+      501,
+      "operator_cancel",
+      { now: NOW, shipstation: { removeFromList } },
+    );
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(removeFromList).toHaveBeenCalledTimes(1);
+    expect(removeFromList).toHaveBeenCalledWith(8888);
+  });
+
+  it("still cancels in WMS when ShipStation removeFromList throws (non-blocking)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "queued",
+            shipstation_order_id: 7777,
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE
+    ]);
+    const removeFromList = vi.fn(async () => {
+      throw new Error("ss api 500");
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await markShipmentCancelled(
+      mock.db,
+      501,
+      "operator_cancel",
+      { now: NOW, shipstation: { removeFromList } },
+    );
+
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    // Both DB calls (load + UPDATE) still ran.
+    expect(mock.getCallCount()).toBe(2);
+    expect(removeFromList).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalledOnce();
+    expect(errSpy.mock.calls[0][0]).toContain("removeFromList failed");
+    errSpy.mockRestore();
+  });
+
+  it("does not call ShipStation removeFromList when no shipstation hook is provided", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "queued",
+            shipstation_order_id: 7777,
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE
+    ]);
+    // No opts.shipstation — must still UPDATE WMS cleanly.
+    const result = await markShipmentCancelled(
+      mock.db,
+      501,
+      "operator_cancel",
+      { now: NOW },
+    );
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("does not call ShipStation removeFromList when ss_order_id is null even if hook provided", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "queued",
+            shipstation_order_id: null,
+          }),
+        ],
+      },
+      { rows: [] },
+    ]);
+    const removeFromList = vi.fn(async () => {});
+    const result = await markShipmentCancelled(
+      mock.db,
+      501,
+      "operator_cancel",
+      { now: NOW, shipstation: { removeFromList } },
+    );
+    expect(result.changed).toBe(true);
+    expect(removeFromList).not.toHaveBeenCalled();
+  });
+});
+
+// ─── handleAddressChangeOnShipment (§6 Commit 19) ──────────────────────
+
+describe("handleAddressChangeOnShipment", () => {
+  it("returns { mode: 'can_repush' } when shipment is 'planned' (no DB write)", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "planned" })] },
+    ]);
+    const result = await handleAddressChangeOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "can_repush", shipmentId: 501 });
+    // Only the load — no UPDATE for pre-label.
+    expect(mock.getCallCount()).toBe(1);
+  });
+
+  it("returns { mode: 'can_repush' } when shipment is 'queued' (no DB write)", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "queued" })] },
+    ]);
+    const result = await handleAddressChangeOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "can_repush", shipmentId: 501 });
+    expect(mock.getCallCount()).toBe(1);
+  });
+
+  it("sets review flags and returns 'requires_review' when shipment is 'labeled'", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "labeled",
+            tracking_number: "1Z999",
+            carrier: "UPS",
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE
+    ]);
+    const result = await handleAddressChangeOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "requires_review", shipmentId: 501 });
+    expect(mock.getCallCount()).toBe(2);
+    // Verify the UPDATE writes the right columns.
+    const update = mock.calls[1].sqlText;
+    expect(update).toContain("UPDATE wms.outbound_shipments");
+    expect(update).toContain("requires_review");
+    expect(update).toContain("address_changed_after_label");
+    expect(update).toContain("review_reason");
+  });
+
+  it("sets review flags and returns 'requires_review' when shipment is 'shipped'", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "1Z999",
+            carrier: "UPS",
+          }),
+        ],
+      },
+      { rows: [] },
+    ]);
+    const result = await handleAddressChangeOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "requires_review", shipmentId: 501 });
+    expect(mock.getCallCount()).toBe(2);
+    expect(mock.calls[1].sqlText).toContain("address_changed_after_label");
+  });
+
+  it("returns { mode: 'noop' } for terminal status 'cancelled' (no UPDATE)", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "cancelled" })] },
+    ]);
+    const result = await handleAddressChangeOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "noop", reason: "cancelled" });
+    expect(mock.getCallCount()).toBe(1);
+  });
+
+  it("returns { mode: 'noop' } for terminal status 'voided' (no UPDATE)", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "voided" })] },
+    ]);
+    const result = await handleAddressChangeOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "noop", reason: "voided" });
+    expect(mock.getCallCount()).toBe(1);
+  });
+
+  it("returns { mode: 'noop' } for status 'on_hold' (no UPDATE)", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "on_hold" })] },
+    ]);
+    const result = await handleAddressChangeOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "noop", reason: "on_hold" });
+  });
+
+  it("throws SHIPMENT_NOT_FOUND when shipment row is missing", async () => {
+    const mock = makeDb([{ rows: [] }]);
+    await expect(
+      handleAddressChangeOnShipment(mock.db, 9999, { now: NOW }),
+    ).rejects.toMatchObject({ code: "SHIPMENT_NOT_FOUND" });
+  });
+
+  it("rejects non-positive shipmentId without DB access", async () => {
+    const mock = makeDb([]);
+    await expect(
+      handleAddressChangeOnShipment(mock.db, 0, { now: NOW }),
+    ).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      field: "shipmentId",
+    });
+    expect(mock.getCallCount()).toBe(0);
+  });
+});
+
+// ─── handleCustomerCancelOnShipment (§6 Commit 19) ─────────────────────
+
+describe("handleCustomerCancelOnShipment", () => {
+  it("delegates to markShipmentCancelled when shipment is 'planned' (no SS call)", async () => {
+    // Two loadShipment calls happen here: one in handleCustomerCancel,
+    // one inside markShipmentCancelled. Then the UPDATE for the cancel.
+    const planned = shipmentRow({ status: "planned" });
+    const mock = makeDb([
+      { rows: [planned] }, // outer load
+      { rows: [planned] }, // inner load (delegated)
+      { rows: [] }, // UPDATE inside markShipmentCancelled
+    ]);
+    const removeFromList = vi.fn(async () => {});
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+      shipstation: { removeFromList },
+    });
+    expect(result).toEqual({ mode: "cancelled", wmsOrderId: 42 });
+    expect(removeFromList).not.toHaveBeenCalled();
+    expect(mock.getCallCount()).toBe(3);
+    // Last call is the UPDATE setting status='cancelled'.
+    expect(mock.calls[2].sqlText).toContain("UPDATE wms.outbound_shipments");
+    expect(mock.calls[2].sqlText).toContain("cancelled");
+  });
+
+  it("delegates to markShipmentCancelled when shipment is 'queued' AND threads SS hook", async () => {
+    const queued = shipmentRow({
+      status: "queued",
+      shipstation_order_id: 7777,
+    });
+    const mock = makeDb([
+      { rows: [queued] }, // outer load
+      { rows: [queued] }, // inner load
+      { rows: [] }, // UPDATE
+    ]);
+    const removeFromList = vi.fn(async () => {});
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+      shipstation: { removeFromList },
+    });
+    expect(result).toEqual({ mode: "cancelled", wmsOrderId: 42 });
+    // SS hook fired with the right id.
+    expect(removeFromList).toHaveBeenCalledTimes(1);
+    expect(removeFromList).toHaveBeenCalledWith(7777);
+  });
+
+  it("sets status='on_hold' + review flags when shipment is 'labeled' (Option B, NOT cancelled)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "labeled",
+            tracking_number: "1Z999",
+            carrier: "UPS",
+            shipstation_order_id: 8888,
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE
+    ]);
+    const removeFromList = vi.fn(async () => {});
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+      shipstation: { removeFromList },
+    });
+    expect(result).toEqual({ mode: "requires_review", shipmentId: 501 });
+    // SS removeFromList must NOT fire — operator decides.
+    expect(removeFromList).not.toHaveBeenCalled();
+    // Only 2 DB calls: load + UPDATE (no delegation).
+    expect(mock.getCallCount()).toBe(2);
+    const update = mock.calls[1].sqlText;
+    expect(update).toContain("UPDATE wms.outbound_shipments");
+    expect(update).toContain("on_hold");
+    expect(update).toContain("requires_review");
+    expect(update).toContain("customer_cancel_after_label");
+    // Critically: not the cancelled branch.
+    expect(update).not.toContain("cancelled_at");
+  });
+
+  it("sets status='on_hold' + review flags when shipment is 'shipped' (Option B)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "1Z999",
+            carrier: "UPS",
+          }),
+        ],
+      },
+      { rows: [] },
+    ]);
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "requires_review", shipmentId: 501 });
+    expect(mock.getCallCount()).toBe(2);
+    expect(mock.calls[1].sqlText).toContain("customer_cancel_after_label");
+  });
+
+  it("returns { mode: 'noop' } when shipment is already cancelled", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "cancelled" })] },
+    ]);
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "noop", reason: "cancelled" });
+    expect(mock.getCallCount()).toBe(1);
+  });
+
+  it("returns { mode: 'noop' } when shipment is voided", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "voided" })] },
+    ]);
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "noop", reason: "voided" });
+  });
+
+  it("returns { mode: 'noop' } when shipment is on_hold (already flagged)", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "on_hold" })] },
+    ]);
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+    });
+    expect(result).toEqual({ mode: "noop", reason: "on_hold" });
+  });
+
+  it("throws SHIPMENT_NOT_FOUND when shipment is missing", async () => {
+    const mock = makeDb([{ rows: [] }]);
+    await expect(
+      handleCustomerCancelOnShipment(mock.db, 9999, { now: NOW }),
+    ).rejects.toMatchObject({ code: "SHIPMENT_NOT_FOUND" });
+  });
+
+  it("rejects non-positive shipmentId without DB access", async () => {
+    const mock = makeDb([]);
+    await expect(
+      handleCustomerCancelOnShipment(mock.db, 0, { now: NOW }),
+    ).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      field: "shipmentId",
+    });
+    expect(mock.getCallCount()).toBe(0);
   });
 });
 

@@ -88,6 +88,7 @@ interface CurrentShipmentRow {
   carrier: string | null;
   tracking_url: string | null;
   shopify_fulfillment_id: string | null;
+  shipstation_order_id: number | null;
 }
 
 /**
@@ -101,7 +102,7 @@ async function loadShipment(
 ): Promise<CurrentShipmentRow> {
   const result: any = await db.execute(sql`
     SELECT id, order_id, status, tracking_number, carrier, tracking_url,
-           shopify_fulfillment_id
+           shopify_fulfillment_id, shipstation_order_id
     FROM wms.outbound_shipments
     WHERE id = ${shipmentId}
     LIMIT 1
@@ -253,12 +254,33 @@ export async function markShipmentShipped(
  *
  * `cancelled` is terminal in the shipment state machine (§2.4); the
  * shipment cannot return to `planned` without a new row being created.
+ *
+ * Side effects beyond the shipment row (§6 Commit 19):
+ *   - When the shipment was previously pushed to ShipStation (status
+ *     `queued` or `labeled`) AND has a `shipstation_order_id`, we
+ *     invoke `opts.shipstation?.removeFromList?.(ssOrderId)` BEFORE
+ *     issuing the WMS UPDATE so that — even if the WMS write fails
+ *     mid-call — SS has already been told to drop the order from its
+ *     queue. Removal failure is logged but NOT thrown: reaching the
+ *     terminal cancelled state in WMS matters more than the SS-side
+ *     cleanup; reconcile (Group F) will spot any drift.
+ *   - Callers that don't wire `opts.shipstation` (tests, pre-Group-E
+ *     paths) skip the SS call cleanly.
+ *
+ * Reason defaults to `'operator_cancel'` when omitted, matching the
+ * primary caller (operator-driven cancel UI). Customer-cancel paths
+ * pass `'customer_cancel'` via `handleCustomerCancelOnShipment`.
  */
 export async function markShipmentCancelled(
   db: any,
   shipmentId: number,
-  reason?: string,
-  opts: { now?: Date } = {},
+  reason: string = "operator_cancel",
+  opts: {
+    now?: Date;
+    shipstation?: {
+      removeFromList?: (shipstationOrderId: number) => Promise<void>;
+    };
+  } = {},
 ): Promise<MarkShipmentResult> {
   assertPositiveInt(shipmentId, "shipmentId");
 
@@ -271,7 +293,30 @@ export async function markShipmentCancelled(
 
   const safeReason = typeof reason === "string" && reason.trim().length > 0
     ? reason.slice(0, 200)
-    : null;
+    : "operator_cancel";
+
+  // ShipStation-side removal (§6 Commit 19). Only when the shipment
+  // was already pushed (queued = pushed-but-not-labeled, labeled =
+  // pushed-and-labeled) AND we have the SS order id. Pre-push states
+  // (planned) never touched SS so there is nothing to remove. Post-
+  // ship/post-void states are not handled here — those have their own
+  // flows (markShipmentVoided, etc). Failure is non-blocking.
+  const ssOrderId = current.shipstation_order_id;
+  if (
+    (current.status === "queued" || current.status === "labeled") &&
+    typeof ssOrderId === "number" &&
+    Number.isInteger(ssOrderId) &&
+    ssOrderId > 0 &&
+    typeof opts.shipstation?.removeFromList === "function"
+  ) {
+    try {
+      await opts.shipstation.removeFromList(ssOrderId);
+    } catch (err: any) {
+      console.error(
+        `[markShipmentCancelled] ShipStation removeFromList failed for shipment ${shipmentId} (ss_order_id=${ssOrderId}): ${err?.message ?? err}`,
+      );
+    }
+  }
 
   await db.execute(sql`
     UPDATE wms.outbound_shipments SET
@@ -283,6 +328,166 @@ export async function markShipmentCancelled(
   `);
 
   return { wmsOrderId: current.order_id, changed: true };
+}
+
+// ─── handleAddressChangeOnShipment ──────────────────────────────────
+
+/**
+ * Handle an address change event on a shipment.
+ *
+ * Pre-label (status in 'planned' | 'queued'):
+ *   - Return `{ mode: 'can_repush', shipmentId }` so the caller can
+ *     invoke `pushShipment`. ShipStation upserts on `orderKey`, so a
+ *     re-push transparently updates the SS order's ship-to address.
+ *
+ * Post-label (status in 'labeled' | 'shipped'):
+ *   - SET `requires_review = true`, `review_reason =
+ *     'address_changed_after_label'`, `address_changed_after_label =
+ *     true` and return `{ mode: 'requires_review', shipmentId }`. We
+ *     deliberately do NOT auto-void: the operator inspects and
+ *     decides whether to void+re-label, ship as-is, or intercept.
+ *     (Plan §6 Commit 19, "Option B".)
+ *
+ * Terminal (status in 'cancelled' | 'voided' | 'returned' | 'lost' |
+ * 'on_hold'):
+ *   - Return `{ mode: 'noop', reason: <status> }`. Address changes on
+ *     a terminal shipment are meaningless; the caller decides whether
+ *     to log/alert or surface to the operator.
+ *
+ * This helper writes ONLY the shipment row (when post-label). Caller
+ * is responsible for the actual SS re-push and any event-row insert.
+ *
+ * Plan ref: shipstation-flow-refactor-plan.md §6 Commit 19.
+ */
+export async function handleAddressChangeOnShipment(
+  db: any,
+  shipmentId: number,
+  opts: { now?: Date } = {},
+): Promise<
+  | { mode: "can_repush"; shipmentId: number }
+  | { mode: "requires_review"; shipmentId: number }
+  | { mode: "noop"; reason: string }
+> {
+  assertPositiveInt(shipmentId, "shipmentId");
+
+  const current = await loadShipment(db, shipmentId);
+  const now = opts.now ?? new Date();
+
+  switch (current.status) {
+    case "planned":
+    case "queued":
+      return { mode: "can_repush", shipmentId };
+
+    case "labeled":
+    case "shipped": {
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments SET
+          requires_review = true,
+          review_reason = 'address_changed_after_label',
+          address_changed_after_label = true,
+          updated_at = ${now}
+        WHERE id = ${shipmentId}
+      `);
+      return { mode: "requires_review", shipmentId };
+    }
+
+    case "cancelled":
+    case "voided":
+    case "returned":
+    case "lost":
+    case "on_hold":
+      return { mode: "noop", reason: current.status };
+
+    default:
+      // Unknown / future status. Treat as noop rather than throwing —
+      // an address-change event for an unrecognized state should not
+      // crash the webhook handler. Caller can log if they care.
+      return { mode: "noop", reason: current.status };
+  }
+}
+
+// ─── handleCustomerCancelOnShipment ─────────────────────────────────
+
+/**
+ * Handle a customer-originated cancel on a shipment (e.g. Shopify
+ * `orders/cancelled` webhook fan-out).
+ *
+ * Pre-label (status in 'planned' | 'queued'):
+ *   - Delegates to `markShipmentCancelled` with
+ *     `reason = 'customer_cancel'`, threading through the
+ *     `opts.shipstation` hook so a queued shipment is also removed
+ *     from the SS list. Returns `{ mode: 'cancelled', wmsOrderId }`.
+ *
+ * Post-label (status in 'labeled' | 'shipped'):
+ *   - SET `status = 'on_hold'`, `requires_review = true`,
+ *     `review_reason = 'customer_cancel_after_label'`. Operator
+ *     decides void / ship-anyway / intercept. (Overlord's "Option B"
+ *     from the plan discussion: never auto-void post-label, always
+ *     surface to a human.) Returns
+ *     `{ mode: 'requires_review', shipmentId }`.
+ *
+ * Terminal (status in 'cancelled' | 'voided' | 'returned' | 'lost' |
+ * 'on_hold'):
+ *   - Returns `{ mode: 'noop', reason: <status> }`. A customer-cancel
+ *     event arriving on an already-terminal shipment is informational
+ *     only.
+ *
+ * Plan ref: shipstation-flow-refactor-plan.md §6 Commit 19.
+ */
+export async function handleCustomerCancelOnShipment(
+  db: any,
+  shipmentId: number,
+  opts: {
+    now?: Date;
+    shipstation?: {
+      removeFromList?: (shipstationOrderId: number) => Promise<void>;
+    };
+  } = {},
+): Promise<
+  | { mode: "cancelled"; wmsOrderId: number }
+  | { mode: "requires_review"; shipmentId: number }
+  | { mode: "noop"; reason: string }
+> {
+  assertPositiveInt(shipmentId, "shipmentId");
+
+  const current = await loadShipment(db, shipmentId);
+  const now = opts.now ?? new Date();
+
+  switch (current.status) {
+    case "planned":
+    case "queued": {
+      const result = await markShipmentCancelled(
+        db,
+        shipmentId,
+        "customer_cancel",
+        { now, shipstation: opts.shipstation },
+      );
+      return { mode: "cancelled", wmsOrderId: result.wmsOrderId };
+    }
+
+    case "labeled":
+    case "shipped": {
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments SET
+          status = 'on_hold',
+          requires_review = true,
+          review_reason = 'customer_cancel_after_label',
+          updated_at = ${now}
+        WHERE id = ${shipmentId}
+      `);
+      return { mode: "requires_review", shipmentId };
+    }
+
+    case "cancelled":
+    case "voided":
+    case "returned":
+    case "lost":
+    case "on_hold":
+      return { mode: "noop", reason: current.status };
+
+    default:
+      return { mode: "noop", reason: current.status };
+  }
 }
 
 // ─── markShipmentVoided ──────────────────────────────────────────────
