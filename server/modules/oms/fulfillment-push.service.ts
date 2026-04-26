@@ -133,10 +133,45 @@ export interface ShopifyFulfillmentTrackingUpdateResult {
  *   - non-Shopify channel,
  *   - no fulfillment orders left after location filtering (all FOs are
  *     assigned to a 3PL location and not ours).
+ *
+ * For combined-order groups (§6 Commit 25 + Overlord D8) the public
+ * `pushShopifyFulfillment` method fans out one Shopify fulfillment per
+ * order in the group, but the returned shape always reflects the
+ * TRIGGERING shipment only — the caller's retry/DLQ logic must keep
+ * thinking in terms of one shipment id at a time. Sibling outcomes are
+ * handled internally; failed siblings retry independently via DLQ.
  */
 export interface ShopifyFulfillmentPushResult {
   shopifyFulfillmentId: string | null;
   alreadyPushed: boolean;
+}
+
+/**
+ * Per-sibling outcome of a combined-group fan-out push (§6 Commit 25).
+ * Only used internally between `pushFulfillmentForCombinedGroup` and
+ * `pushShopifyFulfillment`; the public method narrows to the triggering
+ * shipment's row before returning to the caller.
+ */
+export interface CombinedGroupFulfillmentOutcome {
+  shipmentId: number;
+  orderId: number | null;
+  shopifyFulfillmentId: string | null;
+  alreadyPushed: boolean;
+  skipped: boolean;
+  skipReason?: string;
+  error?: { code: string; message: string };
+}
+
+/**
+ * Aggregate result returned by `pushFulfillmentForCombinedGroup`.
+ * `triggeringShipmentId` is the shipment id passed to the public
+ * `pushShopifyFulfillment` call that fanned out; `fulfillments` is one
+ * row per sibling shipment in the group (parent + children).
+ */
+export interface CombinedGroupFanOutResult {
+  triggeringShipmentId: number;
+  combinedGroupId: number;
+  fulfillments: CombinedGroupFulfillmentOutcome[];
 }
 
 /**
@@ -162,6 +197,8 @@ interface WmsOrderForShopify {
   source: string;
   external_order_id: string | null;
   oms_fulfillment_order_id: string | null;
+  combined_group_id: number | null;
+  combined_role: string | null;
 }
 
 /**
@@ -441,6 +478,25 @@ export function createFulfillmentPushService(
   // -----------------------------------------------------------------------
 
   /**
+   * Public push entrypoint. Internally dispatches to either single-
+   * shipment push (current C22c behaviour) or a combined-group fan-out
+   * (§6 Commit 25 + Overlord D8) once the order's `combined_group_id` is
+   * loaded.
+   *
+   * The returned `{shopifyFulfillmentId, alreadyPushed}` always reflects
+   * the TRIGGERING shipment's row only — the caller's retry/DLQ logic
+   * (C22d) keeps thinking in terms of one shipment id at a time. Sibling
+   * outcomes (success, idempotent skip, voided skip, error) are handled
+   * internally; failed siblings retry independently via DLQ on their own
+   * shipment id.
+   */
+  async function pushShopifyFulfillment(
+    shipmentId: number,
+  ): Promise<ShopifyFulfillmentPushResult> {
+    return await pushSingleShipmentFulfillment(shipmentId);
+  }
+
+  /**
    * Push a single WMS shipment to Shopify as a `fulfillmentCreateV2`.
    *
    * Returns `{ shopifyFulfillmentId, alreadyPushed }`:
@@ -455,9 +511,15 @@ export function createFulfillmentPushService(
    * Throws `ShopifyFulfillmentPushError` on any other failure; the
    * caller (C22d) is responsible for retry-vs-DLQ classification based
    * on `context.code`.
+   *
+   * `sharedTrackingInfo` (§6 Commit 25): when provided by the combined
+   * fan-out caller, overrides the per-shipment tracking columns. Solo
+   * callers omit it so each shipment uses its own row's tracking. The
+   * trim/non-empty validation is identical regardless of source.
    */
-  async function pushShopifyFulfillment(
+  async function pushSingleShipmentFulfillment(
     shipmentId: number,
+    sharedTrackingInfo?: { number: string; company: string; url?: string },
   ): Promise<ShopifyFulfillmentPushResult> {
     if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
       throw new ShopifyFulfillmentPushError(
@@ -522,7 +584,23 @@ export function createFulfillmentPushService(
     }
 
     // ---- 2. Validate header fields -------------------------------------
-    const trackingNumber = (shipment.tracking_number ?? "").trim();
+    // When `sharedTrackingInfo` is provided (combined-group fan-out per
+    // §6 Commit 25 + D8), the triggering shipment's tracking is reused
+    // for every sibling so all orders in the group share the same UPS/
+    // USPS link. Solo callers omit it; the per-shipment row supplies its
+    // own tracking. Validation is identical either way.
+    const useSharedTracking = sharedTrackingInfo !== undefined;
+    const trackingNumberSource = useSharedTracking
+      ? sharedTrackingInfo!.number
+      : shipment.tracking_number;
+    const carrierSource = useSharedTracking
+      ? sharedTrackingInfo!.company
+      : shipment.carrier;
+    const trackingUrlSource = useSharedTracking
+      ? sharedTrackingInfo!.url ?? null
+      : shipment.tracking_url;
+
+    const trackingNumber = (trackingNumberSource ?? "").trim();
     if (trackingNumber.length === 0) {
       throw new ShopifyFulfillmentPushError(
         `pushShopifyFulfillment: shipment ${shipmentId} has no tracking_number`,
@@ -530,11 +608,11 @@ export function createFulfillmentPushService(
           code: SHOPIFY_PUSH_INVALID_INPUT,
           shipmentId,
           field: "tracking_number",
-          value: shipment.tracking_number,
+          value: trackingNumberSource,
         },
       );
     }
-    const carrier = (shipment.carrier ?? "").trim();
+    const carrier = (carrierSource ?? "").trim();
     if (carrier.length === 0) {
       throw new ShopifyFulfillmentPushError(
         `pushShopifyFulfillment: shipment ${shipmentId} has no carrier`,
@@ -542,14 +620,22 @@ export function createFulfillmentPushService(
           code: SHOPIFY_PUSH_INVALID_INPUT,
           shipmentId,
           field: "carrier",
-          value: shipment.carrier,
+          value: carrierSource,
         },
       );
     }
+    // Trimmed url (or undefined if blank/null) — reused below for the
+    // mutation payload AND, for combined-group fan-outs, for the shared
+    // trackingInfo passed to siblings.
+    const trackingInfoUrl: string | undefined =
+      typeof trackingUrlSource === "string" && trackingUrlSource.trim().length > 0
+        ? trackingUrlSource.trim()
+        : undefined;
 
     // ---- 3. Load WMS order ---------------------------------------------
     const orderResult: any = await db.execute(sql`
-      SELECT id, channel_id, source, external_order_id, oms_fulfillment_order_id
+      SELECT id, channel_id, source, external_order_id, oms_fulfillment_order_id,
+             combined_group_id, combined_role
       FROM wms.orders
       WHERE id = ${shipment.order_id}
       LIMIT 1
@@ -560,6 +646,62 @@ export function createFulfillmentPushService(
         `pushShopifyFulfillment: order ${shipment.order_id} not found for shipment ${shipmentId}`,
         { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "order", value: shipment.order_id },
       );
+    }
+
+    // ---- 3b. Combined-group dispatch (§6 Commit 25 + Overlord D8) ------
+    // If this order is part of a combined-order group AND we are not
+    // already inside a fan-out (sharedTrackingInfo undefined), hand off
+    // to the fan-out helper. Each sibling shipment then re-enters this
+    // function with `sharedTrackingInfo` set, which both:
+    //   (a) supplies the shared tracking number/carrier/url, and
+    //   (b) acts as the recursion guard so we never re-fan-out.
+    //
+    // The fan-out's return is narrowed back to the triggering shipment's
+    // outcome before returning to the caller, so the public method's
+    // contract (one shipment id in, one result out) is preserved.
+    const combinedGroupId =
+      typeof order.combined_group_id === "number" ? order.combined_group_id : null;
+    if (combinedGroupId !== null && !useSharedTracking) {
+      const fanOutTrackingInfo: { number: string; company: string; url?: string } = {
+        number: trackingNumber,
+        company: shopifyTrackingCompany(carrier),
+      };
+      if (trackingInfoUrl !== undefined) fanOutTrackingInfo.url = trackingInfoUrl;
+
+      const fanOut = await pushFulfillmentForCombinedGroup({
+        triggeringShipmentId: shipmentId,
+        combinedGroupId,
+        sharedTrackingInfo: fanOutTrackingInfo,
+      });
+
+      const triggeringOutcome = fanOut.fulfillments.find(
+        (f) => f.shipmentId === shipmentId,
+      );
+      if (!triggeringOutcome) {
+        throw new ShopifyFulfillmentPushError(
+          `pushShopifyFulfillment: combined-group fan-out for shipment ${shipmentId} did not return an outcome for the triggering shipment`,
+          {
+            code: SHOPIFY_PUSH_INVALID_INPUT,
+            shipmentId,
+            field: "combined_group",
+            value: combinedGroupId,
+          },
+        );
+      }
+      if (triggeringOutcome.error) {
+        // Re-throw the triggering shipment's error so the caller's
+        // retry/DLQ classification (C22d) sees the same shape it would
+        // for a solo push. Sibling errors stay internal — each one is
+        // independently retryable on its own shipment id.
+        throw new ShopifyFulfillmentPushError(triggeringOutcome.error.message, {
+          code: triggeringOutcome.error.code,
+          shipmentId,
+        });
+      }
+      return {
+        shopifyFulfillmentId: triggeringOutcome.shopifyFulfillmentId,
+        alreadyPushed: triggeringOutcome.alreadyPushed,
+      };
     }
 
     // ---- 4. Channel guard — no-op for non-Shopify -----------------------
@@ -782,8 +924,8 @@ export function createFulfillmentPushService(
       number: trackingNumber,
       company: shopifyTrackingCompany(carrier),
     };
-    if (shipment.tracking_url && shipment.tracking_url.trim().length > 0) {
-      trackingInfo.url = shipment.tracking_url.trim();
+    if (trackingInfoUrl !== undefined) {
+      trackingInfo.url = trackingInfoUrl;
     }
     const variables = {
       fulfillment: {
@@ -833,6 +975,147 @@ export function createFulfillmentPushService(
     `);
 
     return { shopifyFulfillmentId: fulfillmentGid, alreadyPushed: false };
+  }
+
+  /**
+   * Fan out one Shopify fulfillment per sibling shipment in a combined
+   * group (§6 Commit 25 + Overlord D8).
+   *
+   * Real-world example: Alice places orders #1234 + #1235; we combine
+   * them into one box with UPS tracking 1Z999. Each order should show
+   * "Shipped" with the same UPS link on Alice's customer order page.
+   * Each order has its own `wms.outbound_shipments` row (parent linked
+   * to the original ShipStation order, child rows source=
+   * 'echelon_combined_child' from C14). This helper iterates every
+   * sibling and calls `pushSingleShipmentFulfillment(siblingId,
+   * sharedTrackingInfo)` so each Shopify order gets its own fulfillment
+   * record carrying the same tracking number.
+   *
+   * Failure semantics:
+   *   - Each sibling pushes independently. A sibling that errors does
+   *     NOT abort the fan-out — we capture the error and continue to the
+   *     next. The successful pushes are recorded; failed siblings retry
+   *     individually on their own shipment id via DLQ (C22d).
+   *   - Sibling shipments already carrying a `shopify_fulfillment_id`
+   *     skip idempotently (the single helper's D1 check fires first).
+   *   - Voided / cancelled sibling shipments are skipped without
+   *     contacting Shopify — their cancel flow (C17) handles them and
+   *     pushing tracking onto a voided shipment would be incorrect.
+   *
+   * The aggregate result is consumed by the public `pushShopifyFulfillment`
+   * which narrows it to the triggering shipment's outcome for caller
+   * compatibility. Sibling outcomes are intentionally not surfaced to
+   * the caller so its retry/DLQ logic stays per-shipment.
+   */
+  async function pushFulfillmentForCombinedGroup(args: {
+    triggeringShipmentId: number;
+    combinedGroupId: number;
+    sharedTrackingInfo: { number: string; company: string; url?: string };
+  }): Promise<CombinedGroupFanOutResult> {
+    const { triggeringShipmentId, combinedGroupId, sharedTrackingInfo } = args;
+
+    // ---- 1. Load all sibling shipments in the group ----------------
+    // Order parent first by convention (`combined_role='parent'` ranks
+    // ahead of children), with a stable secondary sort by shipment id.
+    // Includes the triggering shipment itself.
+    const siblingsResult: any = await db.execute(sql`
+      SELECT
+        os.id                    AS shipment_id,
+        os.order_id              AS order_id,
+        os.shopify_fulfillment_id AS shopify_fulfillment_id,
+        os.status                AS status,
+        o.combined_role          AS combined_role
+      FROM wms.outbound_shipments os
+      JOIN wms.orders o ON o.id = os.order_id
+      WHERE o.combined_group_id = ${combinedGroupId}
+      ORDER BY
+        CASE WHEN o.combined_role = 'parent' THEN 0 ELSE 1 END,
+        os.id ASC
+    `);
+    const siblings: Array<{
+      shipment_id: number;
+      order_id: number | null;
+      shopify_fulfillment_id: string | null;
+      status: string | null;
+      combined_role: string | null;
+    }> = siblingsResult?.rows ?? [];
+
+    if (siblings.length === 0) {
+      // No rows at all is unusual — the dispatch query already proved at
+      // least the triggering shipment exists in the group. Surface as a
+      // structured error rather than silently no-op-ing.
+      throw new ShopifyFulfillmentPushError(
+        `pushFulfillmentForCombinedGroup: combined group ${combinedGroupId} returned no shipments (triggering shipment ${triggeringShipmentId})`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId: triggeringShipmentId,
+          field: "combined_group",
+          value: combinedGroupId,
+        },
+      );
+    }
+
+    const fulfillments: CombinedGroupFulfillmentOutcome[] = [];
+
+    for (const sib of siblings) {
+      const sibShipmentId = Number(sib.shipment_id);
+      const sibOrderId = sib.order_id == null ? null : Number(sib.order_id);
+      const sibStatus = (sib.status ?? "").toLowerCase();
+
+      // Voided / cancelled siblings: skip. Pushing tracking to a voided
+      // shipment would be wrong; C17 handles their cancel-side cleanup.
+      if (sibStatus === "voided" || sibStatus === "cancelled") {
+        console.log(
+          `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: skipping sibling shipment ${sibShipmentId} (status=${sibStatus})`,
+        );
+        fulfillments.push({
+          shipmentId: sibShipmentId,
+          orderId: sibOrderId,
+          shopifyFulfillmentId: null,
+          alreadyPushed: false,
+          skipped: true,
+          skipReason: `status=${sibStatus}`,
+        });
+        continue;
+      }
+
+      // Per-sibling push: any error is captured and the loop continues
+      // so partial success is recorded. The single helper owns its own
+      // idempotency check (D1) so an already-pushed sibling returns
+      // `alreadyPushed: true` without contacting Shopify.
+      try {
+        const result = await pushSingleShipmentFulfillment(
+          sibShipmentId,
+          sharedTrackingInfo,
+        );
+        fulfillments.push({
+          shipmentId: sibShipmentId,
+          orderId: sibOrderId,
+          shopifyFulfillmentId: result.shopifyFulfillmentId,
+          alreadyPushed: result.alreadyPushed,
+          skipped: false,
+        });
+      } catch (err: any) {
+        const code: string =
+          err instanceof ShopifyFulfillmentPushError && err.context?.code
+            ? err.context.code
+            : "shopify_push_unknown_error";
+        const message: string = err?.message ?? String(err);
+        console.error(
+          `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: sibling shipment ${sibShipmentId} push failed (code=${code}): ${message} — continuing fan-out for remaining siblings`,
+        );
+        fulfillments.push({
+          shipmentId: sibShipmentId,
+          orderId: sibOrderId,
+          shopifyFulfillmentId: null,
+          alreadyPushed: false,
+          skipped: false,
+          error: { code, message },
+        });
+      }
+    }
+
+    return { triggeringShipmentId, combinedGroupId, fulfillments };
   }
 
   /**

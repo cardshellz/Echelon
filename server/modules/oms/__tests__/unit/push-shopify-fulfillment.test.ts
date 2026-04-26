@@ -1271,3 +1271,711 @@ describe("setShopifyClient", () => {
     expect(typeof svc.pushTracking).toBe("function");
   });
 });
+
+// ─── C25: Combined-orders fan-out (§6 Commit 25 + Overlord D8) ───────
+//
+// When a SHIP_NOTIFY fires for a shipment whose order is part of a
+// combined-order group (parent + N children, set up by C14), each
+// ORDER in the group needs its own Shopify fulfillment record so each
+// customer sees their own order as "Shipped" — but they all share the
+// SAME physical tracking number.
+//
+// Real-world example: Alice places orders #1234 and #1235, combined
+// into one box with UPS tracking 1Z999. Both orders should show
+// "Shipped" with the same UPS link.
+//
+// Test scaffolding notes:
+//   - The triggering shipment enters via the public method. Once its
+//     order row reveals `combined_group_id`, the helper fans out:
+//        (a) SELECT siblings ORDER BY parent-first then id
+//        (b) for each non-voided sibling, recurse via
+//            `pushSingleShipmentFulfillment(siblingId, sharedTracking)`
+//   - Each sibling that pushes consumes 8–11 db.execute calls of its
+//     own (idempotency, shipment, order, channel.provider, items,
+//     Path A read, [back-writes if Path B], warehouses, channels,
+//     UPDATE shipment) plus 2 GQL calls (location filter + create) on
+//     Path A or 3 GQL calls on Path B.
+//   - The fan-out's narrowing step requires the SIBLINGS query to
+//     return a row for the triggering shipment id.
+
+// Group fixtures.
+const PARENT_SHIPMENT_ID = SHIPMENT_ID;          // 9001
+const CHILD_SHIPMENT_ID_1 = 9101;
+const CHILD_SHIPMENT_ID_2 = 9102;
+const PARENT_ORDER_ID = ORDER_ID;                // 4242
+const CHILD_ORDER_ID_1 = 4243;
+const CHILD_ORDER_ID_2 = 4244;
+const COMBINED_GROUP_ID = 555;
+const CHILD_SHOPIFY_ORDER_GID_1 = "gid://shopify/Order/123456790";
+const CHILD_SHOPIFY_ORDER_GID_2 = "gid://shopify/Order/123456791";
+
+/**
+ * One sibling shipment row as returned by the fan-out's siblings SELECT.
+ */
+function siblingRow(
+  shipmentId: number,
+  orderId: number,
+  role: "parent" | "child",
+  overrides: Partial<{
+    shopify_fulfillment_id: string | null;
+    status: string;
+  }> = {},
+) {
+  return {
+    shipment_id: shipmentId,
+    order_id: orderId,
+    shopify_fulfillment_id:
+      overrides.shopify_fulfillment_id !== undefined
+        ? overrides.shopify_fulfillment_id
+        : null,
+    status: overrides.status ?? "labeled",
+    combined_role: role,
+  };
+}
+
+/**
+ * Build the db.execute script for ONE sibling's full Path A push, given
+ * its shipment id, order id, and Shopify order GID. Mirrors the solo
+ * Path A sequence.
+ */
+function siblingPathARows(
+  shipmentIdLocal: number,
+  orderIdLocal: number,
+  shopifyOrderGid: string,
+  combinedGroupId: number | null,
+  combinedRole: "parent" | "child",
+  fulfillmentIdAlready: string | null = null,
+) {
+  return [
+    { rows: [{ shopify_fulfillment_id: fulfillmentIdAlready }] }, // idempotency
+    ...(fulfillmentIdAlready
+      ? []
+      : [
+          {
+            rows: [
+              okShipmentRow({
+                id: shipmentIdLocal,
+                order_id: orderIdLocal,
+              }),
+            ],
+          }, // shipment
+          {
+            rows: [
+              okOrderRow({
+                id: orderIdLocal,
+                external_order_id: shopifyOrderGid,
+                combined_group_id: combinedGroupId,
+                combined_role: combinedRole,
+              }),
+            ],
+          }, // order
+          { rows: [{ provider: "shopify" }] }, // channel.provider
+          { rows: okItems() }, // items
+          { rows: pathAFullyPopulatedRows() }, // path A
+          ...locationConfigRows(), // warehouses, channels
+          { rows: [] }, // UPDATE shipment
+        ]),
+  ];
+}
+
+describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
+  it("fans out parent + 1 child: 2 fulfillments pushed, both saved", async () => {
+    const fulfillmentParent = "gid://shopify/Fulfillment/parent-1";
+    const fulfillmentChild = "gid://shopify/Fulfillment/child-1";
+
+    // Triggering shipment (parent) flow:
+    //   1) idempotency SELECT (parent)
+    //   2) shipment SELECT (parent)
+    //   3) order SELECT (parent) → sees combined_group_id → fan out
+    //   4) siblings SELECT (parent + child)
+    // Then per-sibling Path A push (parent first, child second).
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },                 // 1
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },        // 2
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },                                                            // 3
+      // 4. siblings
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child"),
+        ],
+      },
+      // — sibling 1 (parent) full Path A push
+      ...siblingPathARows(
+        PARENT_SHIPMENT_ID,
+        PARENT_ORDER_ID,
+        SHOPIFY_ORDER_GID,
+        COMBINED_GROUP_ID,
+        "parent",
+      ),
+      // — sibling 2 (child) full Path A push
+      ...siblingPathARows(
+        CHILD_SHIPMENT_ID_1,
+        CHILD_ORDER_ID_1,
+        CHILD_SHOPIFY_ORDER_GID_1,
+        COMBINED_GROUP_ID,
+        "child",
+      ),
+    ]);
+    const client = makeShopifyClient([
+      // sibling 1 (parent): location filter + create
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentParent),
+      // sibling 2 (child): location filter + create
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentChild),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+
+    // Public return reflects the triggering (parent) shipment only.
+    expect(result).toEqual({
+      shopifyFulfillmentId: fulfillmentParent,
+      alreadyPushed: false,
+    });
+
+    // 2 fulfillmentCreateV2 mutations issued (parent + child).
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(2);
+
+    // Both pushes carry the SAME tracking number (D8: shared tracking).
+    for (const call of createCalls) {
+      const fulfillment = (call.variables as any).fulfillment;
+      expect(fulfillment.trackingInfo.number).toBe("9400110000000000000001");
+      expect(fulfillment.trackingInfo.company).toBe("USPS");
+    }
+
+    // Two UPDATE wms.outbound_shipments persists, one per sibling.
+    const updates = db.capturedQueries.filter((q) =>
+      q.sqlText.includes("UPDATE wms.outbound_shipments"),
+    );
+    expect(updates).toHaveLength(2);
+  });
+
+  it("fans out when triggering shipment is the CHILD: parent + child both push", async () => {
+    const fulfillmentParent = "gid://shopify/Fulfillment/parent-2";
+    const fulfillmentChild = "gid://shopify/Fulfillment/child-2";
+
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },                 // 1 idempotency (child)
+      { rows: [okShipmentRow({ id: CHILD_SHIPMENT_ID_1 })] },       // 2 shipment
+      {
+        rows: [
+          okOrderRow({
+            id: CHILD_ORDER_ID_1,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "child",
+          }),
+        ],
+      },                                                            // 3 order
+      // 4 siblings (ORDER BY parent-first → parent comes first)
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child"),
+        ],
+      },
+      // sibling 1 (parent)
+      ...siblingPathARows(
+        PARENT_SHIPMENT_ID,
+        PARENT_ORDER_ID,
+        SHOPIFY_ORDER_GID,
+        COMBINED_GROUP_ID,
+        "parent",
+      ),
+      // sibling 2 (child)
+      ...siblingPathARows(
+        CHILD_SHIPMENT_ID_1,
+        CHILD_ORDER_ID_1,
+        CHILD_SHOPIFY_ORDER_GID_1,
+        COMBINED_GROUP_ID,
+        "child",
+      ),
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentParent),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentChild),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(CHILD_SHIPMENT_ID_1);
+
+    // Public return reflects the triggering (child) shipment only.
+    expect(result).toEqual({
+      shopifyFulfillmentId: fulfillmentChild,
+      alreadyPushed: false,
+    });
+
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(2);
+  });
+
+  it("fans out a group of 3 (parent + 2 children): 3 fulfillments pushed", async () => {
+    const fId = (n: number) => `gid://shopify/Fulfillment/3-grp-${n}`;
+
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child"),
+          siblingRow(CHILD_SHIPMENT_ID_2, CHILD_ORDER_ID_2, "child"),
+        ],
+      },
+      ...siblingPathARows(
+        PARENT_SHIPMENT_ID,
+        PARENT_ORDER_ID,
+        SHOPIFY_ORDER_GID,
+        COMBINED_GROUP_ID,
+        "parent",
+      ),
+      ...siblingPathARows(
+        CHILD_SHIPMENT_ID_1,
+        CHILD_ORDER_ID_1,
+        CHILD_SHOPIFY_ORDER_GID_1,
+        COMBINED_GROUP_ID,
+        "child",
+      ),
+      ...siblingPathARows(
+        CHILD_SHIPMENT_ID_2,
+        CHILD_ORDER_ID_2,
+        CHILD_SHOPIFY_ORDER_GID_2,
+        COMBINED_GROUP_ID,
+        "child",
+      ),
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fId(1)),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fId(2)),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fId(3)),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+
+    expect(result.shopifyFulfillmentId).toBe(fId(1));
+    expect(result.alreadyPushed).toBe(false);
+
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(3);
+  });
+
+  it("sibling already has shopify_fulfillment_id → idempotently skipped, others push normally", async () => {
+    const existingChildGid = "gid://shopify/Fulfillment/child-already-pushed";
+    const fulfillmentParent = "gid://shopify/Fulfillment/parent-3";
+
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },
+      // siblings: child already has shopify_fulfillment_id set
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child", {
+            shopify_fulfillment_id: existingChildGid,
+          }),
+        ],
+      },
+      // parent: full Path A push
+      ...siblingPathARows(
+        PARENT_SHIPMENT_ID,
+        PARENT_ORDER_ID,
+        SHOPIFY_ORDER_GID,
+        COMBINED_GROUP_ID,
+        "parent",
+      ),
+      // child: only the idempotency SELECT fires (returns existing GID)
+      ...siblingPathARows(
+        CHILD_SHIPMENT_ID_1,
+        CHILD_ORDER_ID_1,
+        CHILD_SHOPIFY_ORDER_GID_1,
+        COMBINED_GROUP_ID,
+        "child",
+        existingChildGid,
+      ),
+    ]);
+    const client = makeShopifyClient([
+      // Only the parent push touches Shopify.
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentParent),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+
+    expect(result.shopifyFulfillmentId).toBe(fulfillmentParent);
+    expect(result.alreadyPushed).toBe(false);
+
+    // Only ONE fulfillmentCreateV2 call (parent) — the already-pushed
+    // child sibling skipped Shopify entirely via D1 idempotency.
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(1);
+  });
+
+  it("voided sibling → skipped without contacting Shopify; non-voided still push", async () => {
+    const fulfillmentParent = "gid://shopify/Fulfillment/parent-voided-test";
+
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },
+      // siblings: child is voided
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child", {
+            status: "voided",
+          }),
+        ],
+      },
+      // parent push only — voided child consumes ZERO db calls
+      ...siblingPathARows(
+        PARENT_SHIPMENT_ID,
+        PARENT_ORDER_ID,
+        SHOPIFY_ORDER_GID,
+        COMBINED_GROUP_ID,
+        "parent",
+      ),
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentParent),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+
+    expect(result.shopifyFulfillmentId).toBe(fulfillmentParent);
+
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(1);
+  });
+
+  it("cancelled sibling → also skipped without contacting Shopify", async () => {
+    const fulfillmentParent = "gid://shopify/Fulfillment/parent-cancelled-test";
+
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child", {
+            status: "cancelled",
+          }),
+        ],
+      },
+      ...siblingPathARows(
+        PARENT_SHIPMENT_ID,
+        PARENT_ORDER_ID,
+        SHOPIFY_ORDER_GID,
+        COMBINED_GROUP_ID,
+        "parent",
+      ),
+    ]);
+    const client = makeShopifyClient([
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentParent),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+    expect(result.shopifyFulfillmentId).toBe(fulfillmentParent);
+
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(1);
+  });
+
+  it("all siblings already pushed → every sibling skips, no Shopify calls", async () => {
+    const triggeringExisting = "gid://shopify/Fulfillment/triggering-already";
+    const childExisting = "gid://shopify/Fulfillment/child-already";
+
+    // Triggering shipment's idempotency hits FIRST and short-circuits the
+    // public method before any fan-out can happen — that's the existing
+    // D1 contract for solo orders, and it carries through unchanged for
+    // combined orders. The public return is the triggering shipment's
+    // existing GID with alreadyPushed:true.
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: triggeringExisting }] }, // idempotency → short-circuit
+    ]);
+    void childExisting;
+    const client = makeShopifyClient([]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+    expect(result).toEqual({
+      shopifyFulfillmentId: triggeringExisting,
+      alreadyPushed: true,
+    });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("sibling errors mid-fan-out → others still attempt; triggering still returns success", async () => {
+    const fulfillmentParent = "gid://shopify/Fulfillment/parent-partial-success";
+
+    // Parent (triggering) succeeds; child errors at the create call.
+    // Per failure semantics: triggering's success is recorded and
+    // returned to the caller; the failed child sibling is captured
+    // internally and will be retried independently via DLQ on its own
+    // shipment id (C22d).
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child"),
+        ],
+      },
+      // parent: full success
+      ...siblingPathARows(
+        PARENT_SHIPMENT_ID,
+        PARENT_ORDER_ID,
+        SHOPIFY_ORDER_GID,
+        COMBINED_GROUP_ID,
+        "parent",
+      ),
+      // child: full sequence up to mutation, but mutation will throw via
+      // the GQL client. UPDATE shipment never fires for the child.
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: CHILD_SHIPMENT_ID_1, order_id: CHILD_ORDER_ID_1 })] },
+      {
+        rows: [
+          okOrderRow({
+            id: CHILD_ORDER_ID_1,
+            external_order_id: CHILD_SHOPIFY_ORDER_GID_1,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "child",
+          }),
+        ],
+      },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...locationConfigRows(),
+      // child UPDATE shipment never fires (mutation throws before it).
+    ]);
+    const client = makeShopifyClient([
+      // parent
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentParent),
+      // child: location filter ok, then create throws
+      okLocationFilterResponse(),
+      new Error("ECONNRESET"),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+
+    // Triggering (parent) succeeded → caller sees parent's outcome.
+    expect(result).toEqual({
+      shopifyFulfillmentId: fulfillmentParent,
+      alreadyPushed: false,
+    });
+
+    // Both fulfillmentCreateV2 attempts were made; child failed but
+    // parent still succeeded. UPDATE wms.outbound_shipments fired only
+    // for the parent.
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(2);
+    const updates = db.capturedQueries.filter((q) =>
+      q.sqlText.includes("UPDATE wms.outbound_shipments"),
+    );
+    expect(updates).toHaveLength(1);
+  });
+
+  it("triggering sibling itself errors → public method re-throws structured error", async () => {
+    // Parent (triggering) errors at the create call; child succeeds.
+    // Public method re-throws the parent's error so the caller's
+    // retry/DLQ logic sees the same shape it would for a solo push.
+    const fulfillmentChild = "gid://shopify/Fulfillment/child-only";
+
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },
+      {
+        rows: [
+          siblingRow(PARENT_SHIPMENT_ID, PARENT_ORDER_ID, "parent"),
+          siblingRow(CHILD_SHIPMENT_ID_1, CHILD_ORDER_ID_1, "child"),
+        ],
+      },
+      // parent: full sequence up to (failing) mutation
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow({ id: PARENT_SHIPMENT_ID })] },
+      {
+        rows: [
+          okOrderRow({
+            id: PARENT_ORDER_ID,
+            combined_group_id: COMBINED_GROUP_ID,
+            combined_role: "parent",
+          }),
+        ],
+      },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...locationConfigRows(),
+      // parent UPDATE never fires.
+      // child: full success Path A
+      ...siblingPathARows(
+        CHILD_SHIPMENT_ID_1,
+        CHILD_ORDER_ID_1,
+        CHILD_SHOPIFY_ORDER_GID_1,
+        COMBINED_GROUP_ID,
+        "child",
+      ),
+    ]);
+    const client = makeShopifyClient([
+      // parent: location filter ok, then create errors
+      okLocationFilterResponse(),
+      new Error("ECONNRESET"),
+      // child: success
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(fulfillmentChild),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    let err: ShopifyFulfillmentPushError | undefined;
+    try {
+      await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
+    } catch (e) {
+      err = e as ShopifyFulfillmentPushError;
+    }
+    expect(err).toBeInstanceOf(ShopifyFulfillmentPushError);
+    expect(err?.context.code).toBe(SHOPIFY_PUSH_NETWORK_ERROR);
+    expect(err?.context.shipmentId).toBe(PARENT_SHIPMENT_ID);
+
+    // Child still attempted + succeeded — partial fan-out semantics hold.
+    const createCalls = client.calls.filter((c) =>
+      c.query.includes("fulfillmentCreateV2"),
+    );
+    expect(createCalls).toHaveLength(2);
+  });
+
+  it("solo order (combined_group_id = null) behaves exactly like before", async () => {
+    // Regression: an order with combined_group_id null on its row must
+    // not trigger fan-out. This is the same fixture used by the C22c
+    // happy-path tests, just asserted in a C25-named block to make the
+    // intent obvious.
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      // combined_group_id NOT set on the order row → solo path
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      // Exactly 2 GQL calls: location filter + create. No siblings query
+      // and no fan-out.
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+    expect(client.calls).toHaveLength(2);
+
+    // No siblings SELECT was issued.
+    const siblingsQueries = db.capturedQueries.filter((q) =>
+      q.sqlText.includes("o.combined_group_id"),
+    );
+    expect(siblingsQueries).toHaveLength(0);
+  });
+});
