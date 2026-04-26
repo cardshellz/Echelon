@@ -379,6 +379,245 @@ describe("markShipmentShipped", () => {
       field: "shipDate",
     });
   });
+
+  // ─── §6 Commit 24: re-label Shopify fulfillment tracking-update hook ───
+
+  it("invokes fulfillmentPush.updateShopifyFulfillmentTracking on re-label when shipment has shopify_fulfillment_id AND hook provided", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "OLD-123",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] }, // history insert
+      { rows: [] }, // UPDATE
+    ]);
+    const update = vi.fn(async (_id: string, _info: any) => {});
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      {
+        trackingNumber: "NEW-456",
+        carrier: "FedEx",
+        shipDate: NOW,
+        trackingUrl: "https://track/NEW-456",
+      },
+      {
+        now: NOW,
+        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+      },
+    );
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    // Hook called once with the new tracking + carrier + url.
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith(
+      "gid://shopify/Fulfillment/999",
+      {
+        number: "NEW-456",
+        company: "FedEx",
+        url: "https://track/NEW-456",
+      },
+    );
+    // Still 3 DB calls: load + history + UPDATE. The hook call doesn't
+    // touch the DB.
+    expect(mock.getCallCount()).toBe(3);
+  });
+
+  it("passes url:undefined when no trackingUrl is provided", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "OLD-123",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ]);
+    const update = vi.fn(async (_id: string, _info: any) => {});
+    await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
+      {
+        now: NOW,
+        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+      },
+    );
+    expect(update).toHaveBeenCalledWith(
+      "gid://shopify/Fulfillment/999",
+      {
+        number: "NEW-456",
+        company: "UPS",
+        url: undefined,
+      },
+    );
+  });
+
+  it("does NOT call updateShopifyFulfillmentTracking when shipment has no shopify_fulfillment_id (nothing to update)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "OLD-123",
+            carrier: "UPS",
+            shopify_fulfillment_id: null,
+          }),
+        ],
+      },
+      { rows: [] }, // history insert
+      { rows: [] }, // UPDATE
+    ]);
+    const update = vi.fn(async () => {});
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
+      {
+        now: NOW,
+        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+      },
+    );
+    expect(result.changed).toBe(true);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call updateShopifyFulfillmentTracking when hook is not provided (graceful degrade)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "OLD-123",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ]);
+    // No fulfillmentPush in opts.
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
+      { now: NOW },
+    );
+    expect(result.changed).toBe(true);
+    // Just sanity: this should not throw.
+  });
+
+  it("does NOT call updateShopifyFulfillmentTracking on first ship (no prior tracking)", async () => {
+    // First-ship path: no prior tracking, so this is not a re-label
+    // even though the shipment may have a shopify_fulfillment_id
+    // (e.g. C21 pushed it but the SHIP_NOTIFY arrived later). No
+    // tracking-update fires — the original push already carried the
+    // correct tracking.
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "queued",
+            tracking_number: null,
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE
+    ]);
+    const update = vi.fn(async () => {});
+    await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
+      {
+        now: NOW,
+        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+      },
+    );
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call updateShopifyFulfillmentTracking on carrier-only swap (same tracking, mapping fix)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "1Z999",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE (no history insert because tracking unchanged)
+    ]);
+    const update = vi.fn(async () => {});
+    await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "1Z999", carrier: "FedEx", shipDate: NOW },
+      {
+        now: NOW,
+        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+      },
+    );
+    // Tracking didn't change — same gating as the history-row insert.
+    // A carrier mapping fix is not a re-label and Shopify already has
+    // the correct tracking number.
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("proceeds with shipment UPDATE even if updateShopifyFulfillmentTracking throws (non-blocking)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "OLD-123",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] }, // history insert
+      { rows: [] }, // UPDATE
+    ]);
+    const update = vi.fn(async () => {
+      throw new Error("shopify api 500");
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
+      {
+        now: NOW,
+        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+      },
+    );
+
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(update).toHaveBeenCalledTimes(1);
+    // The error was logged, not thrown.
+    const matched = errSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .some((line) => line.includes("Shopify tracking-update failed"));
+    expect(matched).toBe(true);
+    errSpy.mockRestore();
+  });
 });
 
 // ─── markShipmentCancelled ──────────────────────────────────────────

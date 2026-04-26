@@ -53,6 +53,8 @@ import {
   enqueueShipStationRetry,
   dispatchShipStationRetry,
   recordRetryFailure,
+  enqueueShopifyFulfillmentRetry,
+  dispatchShopifyFulfillmentRetry,
 } from "../../webhook-retry.worker";
 
 // ─── DB mock helpers ─────────────────────────────────────────────────
@@ -69,6 +71,13 @@ interface RecordedUpdate {
 
 function makeDb(opts: {
   shipStationService?: { processShipNotify: (url: string) => Promise<number> } | null;
+  fulfillmentPush?:
+    | {
+        pushShopifyFulfillment: (
+          shipmentId: number,
+        ) => Promise<{ shopifyFulfillmentId: string | null; alreadyPushed: boolean }>;
+      }
+    | null;
   insertThrows?: Error;
   updateThrows?: Error;
 } = {}) {
@@ -96,6 +105,9 @@ function makeDb(opts: {
 
   if (opts.shipStationService !== undefined) {
     db.__shipStationService = opts.shipStationService;
+  }
+  if (opts.fulfillmentPush !== undefined) {
+    db.__fulfillmentPush = opts.fulfillmentPush;
   }
 
   return { db, inserts, updates };
@@ -339,6 +351,13 @@ describe("dispatchShipStationRetry :: service not wired", () => {
 // ─── recordRetryFailure tests ────────────────────────────────────────
 
 describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("keeps row pending at attempts=4 with backoff=2^4 minutes", async () => {
     const { db, updates } = makeDb();
     const before = Date.now();
@@ -363,6 +382,338 @@ describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
     expect(result.status).toBe("dead");
     expect(result.attempts).toBe(5);
     expect(updates[0]!.set.status).toBe("dead");
+  });
+
+  it("emits CRITICAL: log on dead-letter for shopify_fulfillment_push topic", async () => {
+    const errSpy = vi.spyOn(console, "error");
+    const { db } = makeDb();
+    await recordRetryFailure(
+      db,
+      { id: 88, attempts: 4 },
+      "final boom",
+      { topic: "shopify_fulfillment_push", shipmentId: 501 },
+    );
+    const critical = errSpy.mock.calls.find((args) =>
+      String(args[0] ?? "").startsWith("CRITICAL:"),
+    );
+    expect(critical).toBeDefined();
+    expect(String(critical![0])).toContain(
+      "CRITICAL: Shopify Fulfillment Push Dead-Lettered",
+    );
+    expect(String(critical![0])).toContain("Shipment ID: 501");
+    expect(String(critical![0])).toContain("Queue Row ID: 88");
+    expect(String(critical![0])).toContain("Attempts: 5");
+    expect(String(critical![0])).toContain("final boom");
+  });
+
+  it("does NOT emit CRITICAL on transient failures (status=pending)", async () => {
+    const errSpy = vi.spyOn(console, "error");
+    const { db } = makeDb();
+    await recordRetryFailure(
+      db,
+      { id: 12, attempts: 1 },
+      "transient",
+      { topic: "shopify_fulfillment_push", shipmentId: 9 },
+    );
+    const critical = errSpy.mock.calls.find((args) =>
+      String(args[0] ?? "").startsWith("CRITICAL:"),
+    );
+    expect(critical).toBeUndefined();
+  });
+});
+
+// ─── enqueueShopifyFulfillmentRetry tests (C22d) ───────────────────
+
+describe("enqueueShopifyFulfillmentRetry :: happy path", () => {
+  it("inserts a single internal/shopify_fulfillment_push row with shipmentId payload", async () => {
+    const { db, inserts } = makeDb();
+    const before = Date.now();
+
+    await enqueueShopifyFulfillmentRetry(db, 501, new Error("shopify 500"));
+
+    const after = Date.now();
+    expect(inserts).toHaveLength(1);
+    const row = inserts[0]!.values;
+    expect(row.provider).toBe("internal");
+    expect(row.topic).toBe("shopify_fulfillment_push");
+    expect(row.payload).toEqual({ shipmentId: 501 });
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBe("shopify 500");
+    const nextMs = (row.nextRetryAt as Date).getTime();
+    expect(nextMs).toBeGreaterThanOrEqual(before + 5 * 60_000 - 50);
+    expect(nextMs).toBeLessThanOrEqual(after + 5 * 60_000 + 50);
+  });
+
+  it("records a string cause as-is", async () => {
+    const { db, inserts } = makeDb();
+    await enqueueShopifyFulfillmentRetry(db, 7, "transport down");
+    expect(inserts[0]!.values.lastError).toBe("transport down");
+  });
+
+  it("handles a non-Error/non-string cause via String() coercion", async () => {
+    const { db, inserts } = makeDb();
+    await enqueueShopifyFulfillmentRetry(db, 7, { code: 503 } as any);
+    // Object → String() → "[object Object]"; the helper just records it,
+    // it is not the helper's job to format unknown causes.
+    expect(typeof inserts[0]!.values.lastError).toBe("string");
+  });
+
+  it("coerces a null cause to null lastError", async () => {
+    const { db, inserts } = makeDb();
+    await enqueueShopifyFulfillmentRetry(db, 7, null);
+    expect(inserts[0]!.values.lastError).toBeNull();
+  });
+});
+
+describe("enqueueShopifyFulfillmentRetry :: validation", () => {
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["float", 1.5],
+    ["NaN", Number.NaN],
+    ["string", "5" as any],
+    ["undefined", undefined as any],
+  ])("throws on %s shipmentId", async (_label, shipmentId) => {
+    const { db, inserts } = makeDb();
+    await expect(
+      enqueueShopifyFulfillmentRetry(db, shipmentId as any, new Error("x")),
+    ).rejects.toThrow(/positive integer/);
+    expect(inserts).toHaveLength(0);
+  });
+});
+
+describe("enqueueShopifyFulfillmentRetry :: DB failure", () => {
+  it("propagates when the underlying insert throws", async () => {
+    const { db } = makeDb({ insertThrows: new Error("db down") });
+    await expect(
+      enqueueShopifyFulfillmentRetry(db, 1, new Error("x")),
+    ).rejects.toThrow(/db down/);
+  });
+});
+
+// ─── dispatchShopifyFulfillmentRetry tests (C22d) ─────────────────────
+
+describe("dispatchShopifyFulfillmentRetry :: happy path", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("calls pushShopifyFulfillment(shipmentId) and marks row success", async () => {
+    const push = vi.fn(async (_id: number) => ({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/9",
+      alreadyPushed: false,
+    }));
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push },
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 501,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 42 },
+      attempts: 0,
+    });
+
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenCalledWith(42);
+    expect(outcome).toBe("success");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("treats alreadyPushed=true as success (idempotent skip)", async () => {
+    const push = vi.fn(async (_id: number) => ({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/preexisting",
+      alreadyPushed: true,
+    }));
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push },
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 502,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 43 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(updates[0]!.set.status).toBe("success");
+  });
+});
+
+describe("dispatchShopifyFulfillmentRetry :: malformed payload", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["missing", undefined as any],
+    ["negative", -1],
+    ["zero", 0],
+    ["float", 1.5],
+    ["string", "42" as any],
+  ])("dead-letters immediately when shipmentId is %s", async (_label, badId) => {
+    const push = vi.fn();
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push as any },
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 600,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: badId === undefined ? {} : { shipmentId: badId },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("malformed");
+    expect(push).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("dead");
+    expect(String(updates[0]!.set.lastError)).toContain("malformed payload");
+  });
+
+  it("dead-letters when payload is null", async () => {
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: vi.fn() as any },
+    });
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 601,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: null as any,
+      attempts: 0,
+    });
+    expect(outcome).toBe("malformed");
+    expect(updates[0]!.set.status).toBe("dead");
+  });
+});
+
+describe("dispatchShopifyFulfillmentRetry :: failure path", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("increments attempts and pushes next_retry_at on transient failure", async () => {
+    const push = vi.fn(async () => {
+      throw new Error("shopify 503");
+    });
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push },
+    });
+
+    const before = Date.now();
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 700,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 11 },
+      attempts: 1,
+    });
+    const after = Date.now();
+
+    expect(outcome).toBe("pending");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("pending");
+    expect(updates[0]!.set.attempts).toBe(2);
+    expect(updates[0]!.set.lastError).toBe("shopify 503");
+
+    const nextMs = (updates[0]!.set.nextRetryAt as Date).getTime();
+    expect(nextMs).toBeGreaterThanOrEqual(before + 4 * 60_000 - 50);
+    expect(nextMs).toBeLessThanOrEqual(after + 4 * 60_000 + 50);
+  });
+
+  it("marks dead and emits CRITICAL: log when attempts hit MAX_ATTEMPTS", async () => {
+    const errSpy = vi.spyOn(console, "error");
+    const push = vi.fn(async () => {
+      throw new Error("still failing");
+    });
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push },
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 701,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 99 },
+      attempts: 4, // → 5 = MAX_ATTEMPTS
+    });
+
+    expect(outcome).toBe("dead");
+    expect(updates[0]!.set.status).toBe("dead");
+    expect(updates[0]!.set.attempts).toBe(5);
+
+    const critical = errSpy.mock.calls.find((args) =>
+      String(args[0] ?? "").startsWith("CRITICAL:"),
+    );
+    expect(critical).toBeDefined();
+    expect(String(critical![0])).toContain(
+      "CRITICAL: Shopify Fulfillment Push Dead-Lettered",
+    );
+    expect(String(critical![0])).toContain("Shipment ID: 99");
+  });
+});
+
+describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps row pending without incrementing attempts when fulfillmentPush stash missing", async () => {
+    // No fulfillmentPush key at all on db.
+    const { db, updates } = makeDb();
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 800,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 51 },
+      attempts: 2,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates).toHaveLength(1);
+    // attempts NOT incremented — graceful degrade.
+    expect(updates[0]!.set.attempts).toBeUndefined();
+    expect(updates[0]!.set.status).toBeUndefined();
+    expect(String(updates[0]!.set.lastError)).toMatch(
+      /fulfillment push service not available/,
+    );
+  });
+
+  it("keeps pending when stash exists but pushShopifyFulfillment fn is missing", async () => {
+    const { db, updates } = makeDb({
+      fulfillmentPush: {} as any,
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 801,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 52 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.attempts).toBeUndefined();
   });
 });
 

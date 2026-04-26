@@ -39,6 +39,15 @@ export const omsOrders = omsSchema.table("oms_orders", {
   customerEmail: varchar("customer_email", { length: 200 }),
   customerPhone: varchar("customer_phone", { length: 50 }),
 
+  // ===== FRAUD / RISK (migration 063 — §6 Group E D3) =====
+  // Captured at OMS ingest from Shopify webhook. No behavior gating in
+  // this commit; data is collected so future commits / reports can act
+  // on it. NULL for non-Shopify channels.
+  riskLevel: varchar("risk_level", { length: 20 }),
+  riskScore: numeric("risk_score", { precision: 5, scale: 4 }),
+  riskRecommendation: varchar("risk_recommendation", { length: 20 }),
+  riskFacts: jsonb("risk_facts"),
+
   // Shipping address
   shipToName: varchar("ship_to_name", { length: 200 }),
   shipToAddress1: varchar("ship_to_address1", { length: 300 }),
@@ -118,6 +127,13 @@ export const omsOrderLines = omsSchema.table("oms_order_lines", {
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   externalLineItemId: varchar("external_line_item_id", { length: 100 }),
   externalProductId: varchar("external_product_id", { length: 100 }),
+
+  // ===== SHOPIFY FULFILLMENT-ORDER LINKAGE (migration 063 — §6 Group E D2/D4) =====
+  // Populated at ingest by C22b. Used by pushShopifyFulfillment (C22c)
+  // as the primary path for resolving Shopify FO line item IDs.
+  // Fallback to live Shopify query (Path B) when null.
+  shopifyFulfillmentOrderId: varchar("shopify_fulfillment_order_id", { length: 100 }),
+  shopifyFulfillmentOrderLineItemId: varchar("shopify_fulfillment_order_line_item_id", { length: 100 }),
   sku: varchar("sku", { length: 100 }),
   title: varchar("title", { length: 300 }),
   variantTitle: varchar("variant_title", { length: 200 }),

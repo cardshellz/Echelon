@@ -1,8 +1,21 @@
-import { db as defaultDb } from "../../db";
 import { webhookRetryQueue } from "@shared/schema";
 import { eq, lte, and, sql } from "drizzle-orm";
 
 const MAX_ATTEMPTS = 5;
+
+/**
+ * Lazy default-db accessor. The worker is the only entry point that
+ * actually needs a real Postgres handle, and we only need it inside
+ * `processPendingWebhooks` (the polling loop). Importing `db` at the
+ * top of this file would force every consumer that calls
+ * `enqueueShipStationRetry` / `enqueueShopifyFulfillmentRetry` to
+ * also satisfy DATABASE_URL at module-load time — painful for unit
+ * tests that inject their own db mock and never start the worker.
+ */
+function getDefaultDb(): any {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require("../../db").db;
+}
 const LOG_PREFIX = "[Webhook DLQ Worker]";
 
 /**
@@ -62,6 +75,70 @@ export interface RetryShipStationService {
 }
 
 /**
+ * Shape of the small subset of FulfillmentPushService the retry worker
+ * needs to re-dispatch a `shopify_fulfillment_push` row. C22d wires this
+ * via the same `db.__fulfillmentPush` stash already used by the V2
+ * SHIP_NOTIFY hot path.
+ *
+ * The retry worker only cares about the boolean success of the push;
+ * the full `{shopifyFulfillmentId, alreadyPushed}` shape is consumed
+ * but not asserted on so callers can keep the contract minimal.
+ */
+export interface RetryFulfillmentPushService {
+  pushShopifyFulfillment(
+    shipmentId: number,
+  ): Promise<{ shopifyFulfillmentId: string | null; alreadyPushed: boolean }>;
+}
+
+/**
+ * Enqueue a failed Shopify fulfillment push for retry.
+ *
+ * provider='internal' because the retry worker re-dispatches by calling
+ * the in-process service rather than re-issuing an HTTP webhook.
+ * topic='shopify_fulfillment_push'
+ * payload={ shipmentId }
+ *
+ * Per Overlord D6/D7. Mirrors `enqueueShipStationRetry` shape so the
+ * existing worker poll loop just needs a new dispatch branch.
+ */
+export async function enqueueShopifyFulfillmentRetry(
+  dbArg: any,
+  shipmentId: number,
+  cause: unknown,
+): Promise<void> {
+  if (
+    typeof shipmentId !== "number" ||
+    !Number.isInteger(shipmentId) ||
+    shipmentId <= 0
+  ) {
+    throw new Error(
+      `enqueueShopifyFulfillmentRetry: shipmentId must be a positive integer (got ${shipmentId})`,
+    );
+  }
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  await dbArg.insert(webhookRetryQueue).values({
+    provider: "internal",
+    topic: "shopify_fulfillment_push",
+    payload: { shipmentId },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    // First retry ~5 minutes out (matches enqueueShipStationRetry).
+    // Worker's exponential backoff (2^attempts minutes) takes over
+    // on subsequent failures via recordRetryFailure.
+    nextRetryAt: new Date(Date.now() + 5 * 60_000),
+  });
+}
+
+/**
  * Resolve the ShipStation service the worker should invoke.
  *
  * Follows the same db-stash pattern already used by `__fulfillmentPush`
@@ -78,6 +155,101 @@ function resolveShipStationService(dbArg: any): RetryShipStationService | null {
 }
 
 /**
+ * Resolve the in-process Shopify fulfillment push service. Same pattern
+ * as `resolveShipStationService` but reads the `__fulfillmentPush`
+ * stash. See C22d for the wiring rationale.
+ */
+function resolveFulfillmentPushService(
+  dbArg: any,
+): RetryFulfillmentPushService | null {
+  const svc = dbArg?.__fulfillmentPush;
+  if (svc && typeof svc.pushShopifyFulfillment === "function") {
+    return svc as RetryFulfillmentPushService;
+  }
+  return null;
+}
+
+/**
+ * Dispatch a single pending row for the Shopify-fulfillment-push retry
+ * branch (`provider='internal' + topic='shopify_fulfillment_push'`).
+ * Exported for unit testing.
+ *
+ * Behavior matrix:
+ *   - malformed payload (missing/invalid shipmentId)  → dead immediately
+ *   - service handle not wired                       → keep pending
+ *   - push succeeds                                  → mark row success
+ *   - push throws → recordRetryFailure (transient or dead at MAX_ATTEMPTS)
+ */
+export async function dispatchShopifyFulfillmentRetry(
+  dbArg: any,
+  item: { id: number; provider: string; topic: string; payload: any; attempts: number },
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as { shipmentId?: number } | null;
+  const shipmentId = payload?.shipmentId;
+
+  if (
+    typeof shipmentId !== "number" ||
+    !Number.isInteger(shipmentId) ||
+    shipmentId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item.id,
+      "malformed payload: shipmentId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shopify_fulfillment_push payload)`,
+    );
+    return "malformed";
+  }
+
+  const fulfillmentPush = resolveFulfillmentPushService(dbArg);
+  if (!fulfillmentPush) {
+    // Service not wired — graceful degrade. Don't burn an attempt on a
+    // boot-order issue; the next worker tick will likely succeed once
+    // server/index.ts has stashed the service.
+    await keepPending(
+      dbArg,
+      item.id,
+      "fulfillment push service not available on db.__fulfillmentPush",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push) deferred — fulfillment push service unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    await fulfillmentPush.pushShopifyFulfillment(shipmentId);
+    await markRowSuccess(dbArg, item.id);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) succeeded`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "shopify_fulfillment_push", shipmentId },
+    );
+    if (status === "dead") {
+      // recordRetryFailure already emitted the CRITICAL: line; add a
+      // worker-level summary at the same severity for log drains that
+      // grep on the `[Webhook DLQ Worker]` prefix.
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) failed again. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+/**
  * One step of retry-failure bookkeeping. Exported for tests.
  *
  * Matches the exact pattern used by the legacy shopify branch in this file:
@@ -85,11 +257,17 @@ function resolveShipStationService(dbArg: any): RetryShipStationService | null {
  * - if attempts >= MAX_ATTEMPTS → status='dead'
  * - otherwise → status='pending' with 2^attempts minute backoff
  * - always record last_error
+ *
+ * On dead-letter (attempts == MAX_ATTEMPTS) emit a `CRITICAL:`-prefixed
+ * console.error in the format the log drain → Discord alerter expects.
+ * Optional `meta` lets callers shape the headline (e.g. include the
+ * shipment id / topic). Per Overlord D6.
  */
 export async function recordRetryFailure(
   dbArg: any,
-  item: { id: number; attempts: number },
-  errMessage: string
+  item: { id: number; attempts: number; topic?: string; payload?: any },
+  errMessage: string,
+  meta: { topic?: string; shipmentId?: number } = {},
 ): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date }> {
   const attempts = item.attempts + 1;
   const status: "dead" | "pending" = attempts >= MAX_ATTEMPTS ? "dead" : "pending";
@@ -109,7 +287,74 @@ export async function recordRetryFailure(
     })
     .where(eq(webhookRetryQueue.id, item.id));
 
+  if (status === "dead") {
+    const topic = meta.topic ?? item.topic;
+    const headline =
+      topic === "shopify_fulfillment_push"
+        ? "CRITICAL: Shopify Fulfillment Push Dead-Lettered"
+        : `CRITICAL: ${topic ?? item.topic ?? "Unknown"} Dead-Lettered`;
+    const idLine =
+      typeof meta.shipmentId === "number"
+        ? `Shipment ID: ${meta.shipmentId}`
+        : `Queue Row ID: ${item.id}`;
+    // Format chosen to be greppable by the existing log drain →
+    // Discord alerter. Keep newlines literal so multi-line context
+    // arrives intact (do not JSON.stringify).
+    console.error(
+      `${headline}\n${idLine}\nQueue Row ID: ${item.id}\nAttempts: ${attempts}\nLast Error: ${errMessage}`,
+    );
+  }
+
   return { attempts, status, nextRetryAt };
+}
+
+/**
+ * Mark a queue row dead immediately (used for non-retryable malformed
+ * payloads). No CRITICAL log here: a malformed row is an ingest bug,
+ * not a downstream outage worth paging on.
+ */
+async function markRowDead(
+  dbArg: any,
+  rowId: number,
+  reason: string,
+): Promise<void> {
+  await dbArg
+    .update(webhookRetryQueue)
+    .set({
+      status: "dead",
+      lastError: reason,
+      updatedAt: new Date(),
+    })
+    .where(eq(webhookRetryQueue.id, rowId));
+}
+
+/**
+ * Keep a row pending without incrementing attempts. Used when a
+ * required service handle is missing (graceful degrade — the row will
+ * be retried on the next worker tick once boot wires the stash).
+ */
+async function keepPending(
+  dbArg: any,
+  rowId: number,
+  reason: string,
+): Promise<void> {
+  await dbArg
+    .update(webhookRetryQueue)
+    .set({
+      lastError: reason,
+      updatedAt: new Date(),
+    })
+    .where(eq(webhookRetryQueue.id, rowId));
+}
+
+/**
+ * Mark a row succeeded.
+ */
+async function markRowSuccess(dbArg: any, rowId: number): Promise<void> {
+  await dbArg
+    .update(webhookRetryQueue)
+    .set({ status: "success", updatedAt: new Date() })
+    .where(eq(webhookRetryQueue.id, rowId));
 }
 
 /**
@@ -178,6 +423,7 @@ export async function dispatchShipStationRetry(
 }
 
 async function processPendingWebhooks() {
+  const defaultDb = getDefaultDb();
   const pending = await defaultDb
     .select()
     .from(webhookRetryQueue)
@@ -205,6 +451,22 @@ async function processPendingWebhooks() {
         // fires if the bookkeeping itself throws. Log + move on.
         console.error(
           `${LOG_PREFIX} Item ${item.id} shipstation dispatch threw: ${branchErr?.message || branchErr}`
+        );
+      }
+      continue;
+    }
+
+    // C22d Shopify fulfillment push retry branch — re-call the in-process
+    // service rather than issue an HTTP loopback (provider='internal').
+    if (
+      item.provider === "internal" &&
+      item.topic === "shopify_fulfillment_push"
+    ) {
+      try {
+        await dispatchShopifyFulfillmentRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} shopify_fulfillment_push dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
