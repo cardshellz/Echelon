@@ -210,7 +210,350 @@ function extractShopifyRisk(shopifyOrder: any): ExtractedRisk {
 // helper private to the module avoids leaking an internal contract;
 // `__test__` is the conventional escape hatch in this codebase
 // (mirrors fulfillment-push.service.ts).
-export const __test__ = { extractShopifyRisk };
+/**
+ * Cascade a Shopify orders/cancelled event through the per-shipment C19
+ * helpers. Pre-label shipments cancel cleanly (with SS removeFromList
+ * if pushed). Post-label shipments are flagged `requires_review` +
+ * `on_hold` per Overlord's "Option B" decision — operator decides
+ * void/ship/intercept. After the cascade, recomputes order-level
+ * warehouse_status from the shipment states.
+ *
+ * Plan ref: shipstation-flow-refactor-plan.md §6 Commit 28.
+ *
+ * Returns the per-shipment outcomes for logging + tests.
+ */
+export async function cascadeShopifyCancelToShipments(
+  db: any,
+  wmsOrderId: number,
+  helpers: {
+    handleCustomerCancelOnShipment: (
+      db: any,
+      shipmentId: number,
+      opts?: any,
+    ) => Promise<
+      | { mode: "cancelled"; wmsOrderId: number }
+      | { mode: "requires_review"; shipmentId: number }
+      | { mode: "noop"; reason: string }
+    >;
+    recomputeOrderStatusFromShipments: (
+      db: any,
+      wmsOrderId: number,
+    ) => Promise<{ warehouseStatus: string; changed: boolean }>;
+  },
+  opts: {
+    now?: Date;
+    shipstation?: { removeFromList?: (id: number) => Promise<void> };
+    logPrefix?: string;
+  } = {},
+): Promise<{
+  hadShipments: boolean;
+  cascadeResults: Array<{ shipmentId: number; mode: string; error?: string }>;
+  rollupChanged?: boolean;
+}> {
+  const logPrefix = opts.logPrefix ?? "[cascadeShopifyCancelToShipments]";
+  const now = opts.now ?? new Date();
+
+  // Find all non-terminal shipments for this WMS order
+  const shipmentsResult: any = await db.execute(sql`
+    SELECT id
+    FROM wms.outbound_shipments
+    WHERE order_id = ${wmsOrderId}
+      AND status NOT IN ('cancelled', 'voided', 'returned', 'lost')
+    ORDER BY id ASC
+  `);
+  const shipmentRows: Array<{ id: number }> = shipmentsResult?.rows ?? [];
+
+  if (shipmentRows.length === 0) {
+    return { hadShipments: false, cascadeResults: [] };
+  }
+
+  const cascadeResults: Array<{ shipmentId: number; mode: string; error?: string }> = [];
+  for (const { id: shipmentId } of shipmentRows) {
+    try {
+      const result = await helpers.handleCustomerCancelOnShipment(db, shipmentId, {
+        shipstation: opts.shipstation,
+        now,
+      });
+      cascadeResults.push({ shipmentId, mode: result.mode });
+    } catch (e: any) {
+      console.error(
+        `${logPrefix} handleCustomerCancelOnShipment failed for shipment ${shipmentId}: ${e.message}`,
+      );
+      cascadeResults.push({ shipmentId, mode: "error", error: e.message });
+    }
+  }
+
+  // Roll up order status from cascaded shipment states
+  let rollupChanged: boolean | undefined;
+  try {
+    const result = await helpers.recomputeOrderStatusFromShipments(db, wmsOrderId);
+    rollupChanged = result.changed;
+  } catch (e: any) {
+    console.error(
+      `${logPrefix} recomputeOrderStatusFromShipments failed for order ${wmsOrderId}: ${e.message}`,
+    );
+  }
+
+  return { hadShipments: true, cascadeResults, rollupChanged };
+}
+
+/**
+ * Apply a Shopify `refunds/create` payload as a return-record + optional
+ * restock against the WMS side. C29 (Group F).
+ *
+ * Behavior:
+ *  1. Validate payload has `id` (refund external id) and `order_id`.
+ *     Malformed → throws `BadPayloadError` (caller maps to 400).
+ *  2. Resolve OMS order. If not in OMS → outcome `order_not_tracked` (no DB writes).
+ *  3. Resolve WMS order via `wms.orders.oms_fulfillment_order_id` /
+ *     legacy `source_table_id`. If no WMS order → `wms_order_not_found`.
+ *  4. Resolve most recent shipment for the WMS order. Per migration 062
+ *     `wms.returns.shipment_id` is NOT NULL — if no shipment exists the
+ *     return cannot be persisted; we return `no_shipment_to_associate`
+ *     instead. (Capturing pre-shipment refunds is deferred to a later C
+ *     once the schema accepts NULL shipment_id.)
+ *  5. Idempotency: SELECT-then-INSERT keyed on `refund_external_id` for
+ *     the same order. Duplicate → outcome `idempotent_skip`.
+ *  6. Insert `wms.returns` row with `restocked` reflecting whether any
+ *     refund line item carried `restock=true` or `restock_type='return'`.
+ *  7. If `helpers.restock` is provided AND any line was flagged for
+ *     restock, invoke it once with the refund context. Failures are
+ *     logged but don't roll back the return record (C30 will add a
+ *     formal retry queue for the restock leg).
+ *
+ * Pure of HTTP concerns: HMAC verification + 200 response + error → 500
+ * mapping all live in the route handler. This helper just talks to db.
+ *
+ * Plan ref: shipstation-flow-refactor-plan.md §6 Commit 29.
+ */
+export class RefundsCreateBadPayloadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RefundsCreateBadPayloadError";
+  }
+}
+
+export type ApplyShopifyRefundCascadeOutcome =
+  | "return_recorded"
+  | "idempotent_skip"
+  | "order_not_tracked"
+  | "wms_order_not_found"
+  | "no_shipment_to_associate";
+
+export interface ApplyShopifyRefundCascadeResult {
+  outcome: ApplyShopifyRefundCascadeOutcome;
+  refundExternalId: string;
+  omsOrderId?: number;
+  wmsOrderId?: number;
+  shipmentId?: number | null;
+  restocked: boolean;
+  restockInvoked: boolean;
+  restockError?: string;
+}
+
+export async function applyShopifyRefundCascade(
+  db: any,
+  refundPayload: any,
+  helpers: {
+    /**
+     * Resolve OMS order id by shopify order id (numeric or GID) +
+     * channel id. Returning `null` means the order is not tracked in
+     * OMS — the cascade short-circuits with `order_not_tracked`.
+     */
+    resolveOmsOrder: (
+      db: any,
+      args: { shopifyOrderId: string | number; channelId: number },
+    ) => Promise<{ id: number } | null>;
+    /**
+     * Optional restock hook. Called once per refund if any line item is
+     * flagged for restock. Implementation owns the per-line fan-out.
+     * Failures are caught + logged; they do not abort the return-record
+     * insert.
+     */
+    restock?: (
+      db: any,
+      ctx: {
+        wmsOrderId: number;
+        omsOrderId: number;
+        refundLineItems: Array<any>;
+        refundPayload: any;
+      },
+    ) => Promise<void>;
+  },
+  opts: {
+    channelId: number;
+    now?: Date;
+    logPrefix?: string;
+  },
+): Promise<ApplyShopifyRefundCascadeResult> {
+  const logPrefix = opts.logPrefix ?? "[applyShopifyRefundCascade]";
+  const now = opts.now ?? new Date();
+
+  // ── 1. Validate payload ────────────────────────────────────────────
+  if (!refundPayload || typeof refundPayload !== "object") {
+    throw new RefundsCreateBadPayloadError("refund payload missing or not an object");
+  }
+  const refundExternalIdRaw = refundPayload.id;
+  const shopifyOrderIdRaw = refundPayload.order_id;
+  if (refundExternalIdRaw === undefined || refundExternalIdRaw === null) {
+    throw new RefundsCreateBadPayloadError("refund payload missing `id`");
+  }
+  if (shopifyOrderIdRaw === undefined || shopifyOrderIdRaw === null) {
+    throw new RefundsCreateBadPayloadError("refund payload missing `order_id`");
+  }
+  const refundExternalId = String(refundExternalIdRaw);
+
+  const refundLineItems: Array<any> = Array.isArray(refundPayload.refund_line_items)
+    ? refundPayload.refund_line_items
+    : [];
+  const restockLines = refundLineItems.filter(
+    (li: any) =>
+      li &&
+      (li.restock === true || li.restock_type === "return" || li.restock_type === "restock"),
+  );
+  const anyRestock = restockLines.length > 0;
+
+  // ── 2. Resolve OMS order ───────────────────────────────────────────
+  const oms = await helpers.resolveOmsOrder(db, {
+    shopifyOrderId: shopifyOrderIdRaw,
+    channelId: opts.channelId,
+  });
+  if (!oms) {
+    return {
+      outcome: "order_not_tracked",
+      refundExternalId,
+      restocked: false,
+      restockInvoked: false,
+    };
+  }
+  const omsOrderId = oms.id;
+
+  // ── 3. Resolve WMS order ───────────────────────────────────────────
+  const wmsOrderRes: any = await db.execute(sql`
+    SELECT id FROM wms.orders
+    WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrderId)})
+       OR (source = 'shopify' AND source_table_id = ${String(omsOrderId)})
+    LIMIT 1
+  `);
+  const wmsRows: Array<{ id: number }> = wmsOrderRes?.rows ?? [];
+  if (wmsRows.length === 0) {
+    return {
+      outcome: "wms_order_not_found",
+      refundExternalId,
+      omsOrderId,
+      restocked: false,
+      restockInvoked: false,
+    };
+  }
+  const wmsOrderId = wmsRows[0].id;
+
+  // ── 5. Idempotency check (do this before shipment resolution to
+  //    short-circuit cleanly on retries even if the order has since
+  //    been shipped) ─────────────────────────────────────────────────
+  const existingRes: any = await db.execute(sql`
+    SELECT id FROM wms.returns
+    WHERE refund_external_id = ${refundExternalId}
+      AND order_id = ${wmsOrderId}
+    LIMIT 1
+  `);
+  if ((existingRes?.rows?.length ?? 0) > 0) {
+    return {
+      outcome: "idempotent_skip",
+      refundExternalId,
+      omsOrderId,
+      wmsOrderId,
+      restocked: false,
+      restockInvoked: false,
+    };
+  }
+
+  // ── 4. Resolve most-recent shipment ────────────────────────────────
+  const shipmentRes: any = await db.execute(sql`
+    SELECT id FROM wms.outbound_shipments
+    WHERE order_id = ${wmsOrderId}
+    ORDER BY id DESC
+    LIMIT 1
+  `);
+  const shipmentRows: Array<{ id: number }> = shipmentRes?.rows ?? [];
+  if (shipmentRows.length === 0) {
+    // Schema requires a NOT NULL shipment_id, so we cannot persist a
+    // return row without one. Surface as a distinct outcome so the
+    // route handler can log + leave Shopify happy.
+    console.warn(
+      `${logPrefix} no shipment found for wmsOrder=${wmsOrderId}; cannot persist return ` +
+        `row (refund_external_id=${refundExternalId}). schema requires shipment_id NOT NULL.`,
+    );
+    return {
+      outcome: "no_shipment_to_associate",
+      refundExternalId,
+      omsOrderId,
+      wmsOrderId,
+      shipmentId: null,
+      restocked: false,
+      restockInvoked: false,
+    };
+  }
+  const shipmentId = shipmentRows[0].id;
+
+  // ── 6. Insert wms.returns row ──────────────────────────────────────
+  const reason = (refundPayload.note as string | undefined) ?? "shopify_refund";
+  const notes = (refundPayload.note as string | undefined) ?? null;
+  const refundedAt = refundPayload.processed_at
+    ? new Date(refundPayload.processed_at)
+    : now;
+  const source = "shopify_webhook";
+
+  await db.execute(sql`
+    INSERT INTO wms.returns (
+      shipment_id, order_id, source, reason,
+      refund_external_id, restocked,
+      received_at, refunded_at, notes
+    ) VALUES (
+      ${shipmentId}, ${wmsOrderId}, ${source}, ${reason},
+      ${refundExternalId}, ${anyRestock},
+      NULL, ${refundedAt}, ${notes}
+    )
+  `);
+
+  // ── 7. Conditional restock ────────────────────────────────────────
+  let restockInvoked = false;
+  let restockError: string | undefined;
+  if (anyRestock && helpers.restock) {
+    restockInvoked = true;
+    try {
+      await helpers.restock(db, {
+        wmsOrderId,
+        omsOrderId,
+        refundLineItems: restockLines,
+        refundPayload,
+      });
+    } catch (e: any) {
+      restockError = e?.message || String(e);
+      console.error(
+        `${logPrefix} restock helper failed for wmsOrder=${wmsOrderId} ` +
+          `(refund_external_id=${refundExternalId}): ${restockError}`,
+      );
+    }
+  }
+
+  return {
+    outcome: "return_recorded",
+    refundExternalId,
+    omsOrderId,
+    wmsOrderId,
+    shipmentId,
+    restocked: anyRestock,
+    restockInvoked,
+    restockError,
+  };
+}
+
+export const __test__ = {
+  extractShopifyRisk,
+  cascadeShopifyCancelToShipments,
+  applyShopifyRefundCascade,
+  RefundsCreateBadPayloadError,
+};
 
 function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
   const shipping = shopifyOrder.shipping_address || {};
@@ -710,23 +1053,54 @@ export function registerOmsWebhooks(
             console.error(`${LOG_PREFIX} Failed to release reservations for ${shopifyOrder.name}: ${e.message}`);
           }
 
-          // Update WMS order status
-          await db.execute(sql`
-            UPDATE wms.orders SET
-              warehouse_status = 'cancelled', 
-              cancelled_at = ${now}
-            WHERE id = ${wmsOrderId} AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
-          `);
-        }
-      }
+          // Per Plan §6 Commit 28: cascade through the C19 per-shipment
+          // helper so post-label shipments are flagged for operator review
+          // (Overlord's "Option B") rather than force-cancelled. Pre-label
+          // shipments cancel cleanly via markShipmentCancelled (which calls
+          // SS removeFromList if pushed).
+          const rollupModule = await import("../orders/shipment-rollup");
 
-      // Mirror to ShipStation: remove the order from the store so it leaves
-      // Awaiting Shipment. Non-blocking.
-      if (shipStationService?.isConfigured() && existing.shipstationOrderId) {
-        try {
-          await shipStationService.cancelOrder(existing.shipstationOrderId);
-        } catch (err: any) {
-          console.error(`${LOG_PREFIX} ShipStation cancelOrder failed for ${shopifyOrder.name}: ${err.message}`);
+          // Build SS adapter for the helper
+          const ssAdapter = shipStationService
+            ? {
+                removeFromList: async (ssOrderId: number) => {
+                  try {
+                    await shipStationService.cancelOrder(ssOrderId);
+                  } catch (e: any) {
+                    console.error(
+                      `${LOG_PREFIX} SS removeFromList failed for ssOrderId=${ssOrderId}: ${e.message}`,
+                    );
+                    throw e;
+                  }
+                },
+              }
+            : undefined;
+
+          const cascade = await cascadeShopifyCancelToShipments(
+            db,
+            wmsOrderId,
+            {
+              handleCustomerCancelOnShipment: rollupModule.handleCustomerCancelOnShipment,
+              recomputeOrderStatusFromShipments: rollupModule.recomputeOrderStatusFromShipments,
+            },
+            { now, shipstation: ssAdapter, logPrefix: LOG_PREFIX },
+          );
+
+          if (cascade.hadShipments) {
+            console.log(
+              `${LOG_PREFIX} cancel cascade for order ${shopifyOrder.name}: ${JSON.stringify(cascade.cascadeResults)}`,
+            );
+          } else {
+            // No shipments — order cancelled before any shipment was created.
+            // Direct-write the WMS order to cancelled per fallback per Plan §6 C28.
+            await db.execute(sql`
+              UPDATE wms.orders SET
+                warehouse_status = 'cancelled',
+                cancelled_at = ${now}
+              WHERE id = ${wmsOrderId}
+                AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
+            `);
+          }
         }
       }
 
@@ -944,33 +1318,45 @@ export function registerOmsWebhooks(
         })
         .where(eq(omsOrders.id, existing.id));
 
-      // Handle restock — release inventory for restocked items
-      if (wmsServices) {
-        const restockItems = refundLineItems.filter((li: any) => li.restock === true);
-
-        if (restockItems.length > 0) {
-          // Find WMS order
-          const wmsOrder = await db.execute<{ id: number }>(sql`
-            SELECT id FROM wms.orders
-            WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
-               OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-            LIMIT 1
-          `);
-
-          if (wmsOrder.rows.length > 0) {
-            const wmsOrderId = wmsOrder.rows[0].id;
-            try {
-              // For restocked items, release their reservations
-              await wmsServices.reservation.releaseOrderReservation(
-                wmsOrderId,
-                `Refund restock (${restockItems.length} items)`,
-              );
-              console.log(`${LOG_PREFIX} Released reservations for restocked items in order ${existing.externalOrderNumber}`);
-            } catch (e: any) {
-              console.error(`${LOG_PREFIX} Failed to release restock reservations: ${e.message}`);
-            }
-          }
-        }
+      // C29 — record the refund as a wms.returns row (audit trail) and
+      // optionally restock. The WMS-side cascade is owned by
+      // `applyShopifyRefundCascade`; the existing reservation-release is
+      // wired in as the restock hook so behaviour parity with prior
+      // commits is preserved.
+      let cascadeOutcome: ApplyShopifyRefundCascadeOutcome = "order_not_tracked";
+      try {
+        const cascade = await applyShopifyRefundCascade(
+          db,
+          refundPayload,
+          {
+            // OMS already resolved above — short-circuit the helper.
+            resolveOmsOrder: async () => ({ id: existing.id }),
+            restock: wmsServices
+              ? async (_db, ctx) => {
+                  await wmsServices.reservation.releaseOrderReservation(
+                    ctx.wmsOrderId,
+                    `Refund restock (${ctx.refundLineItems.length} items, refund=${ctx.refundPayload.id})`,
+                  );
+                  console.log(
+                    `${LOG_PREFIX} Released reservations for restocked items in order ${existing.externalOrderNumber}`,
+                  );
+                }
+              : undefined,
+          },
+          { channelId, now, logPrefix: LOG_PREFIX },
+        );
+        cascadeOutcome = cascade.outcome;
+        console.log(
+          `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
+            `outcome=${cascade.outcome} restocked=${cascade.restocked} ` +
+            `restockInvoked=${cascade.restockInvoked} shipmentId=${cascade.shipmentId ?? "null"}`,
+        );
+      } catch (cascadeErr: any) {
+        // Re-throw to fall into the outer catch which queues a retry. The
+        // OMS-side update has already been applied; the retry will
+        // idempotently no-op the OMS update and re-attempt the WMS
+        // return-record insert.
+        throw cascadeErr;
       }
 
       // Log event
@@ -986,6 +1372,7 @@ export function registerOmsWebhooks(
           totalRefundAmount: refundPayload.transactions?.reduce(
             (sum: number, t: any) => sum + parseFloat(t.amount || "0"), 0
           ),
+          wmsCascadeOutcome: cascadeOutcome,
         },
       });
 
