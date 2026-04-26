@@ -1,5 +1,6 @@
 import { webhookRetryQueue } from "@shared/schema";
 import { eq, lte, and, sql } from "drizzle-orm";
+import { incr } from "../../instrumentation/metrics";
 
 const MAX_ATTEMPTS = 5;
 
@@ -591,9 +592,21 @@ async function processPendingWebhooks() {
 
       if (status === "dead") {
         console.error(`${LOG_PREFIX} Item ${item.id} moved to DLQ (dead letter) after ${attempts} attempts`);
+        incr("shopify_webhook_dlq_dead_letter", 1, {
+          provider: item.provider,
+          topic: item.topic,
+          attempts,
+          rowId: item.id,
+        });
         // TODO: Fire an alert or slack notification here in the future
       } else {
         console.warn(`${LOG_PREFIX} Item ${item.id} failed again. Next retry at ${nextRetryAt.toISOString()}`);
+        incr("shopify_webhook_retry_processed", 1, {
+          provider: item.provider,
+          topic: item.topic,
+          attempts,
+          outcome: "transient_failure",
+        });
       }
     }
   }
