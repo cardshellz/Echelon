@@ -49,6 +49,12 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  clampSelectionToVisible,
+  DRAGGED_PRODUCTS_MIME,
+  filterContextKey,
+  parseDraggedProductIds,
+} from "./product-lines/selection";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -279,7 +285,11 @@ function LineSidebar({
   onSelect: (sel: Selection) => void;
   search: string;
   onSearchChange: (s: string) => void;
-  onDrop?: (targetLineId: number) => void;
+  // `ids` is the payload parsed out of the drag event's dataTransfer
+  // (produced by `ProductsTable.onRowDragStart`). The sidebar does not
+  // consult `selectedIds` directly — doing so in the drop handler was
+  // how stale, invisible IDs leaked into bulk moves before.
+  onDrop?: (targetLineId: number, ids: number[]) => void;
   totalProducts: number;
   unassignedCount: number;
 }) {
@@ -296,7 +306,7 @@ function LineSidebar({
   const [dragOverId, setDragOverId] = useState<number | "unassigned" | null>(null);
 
   const allowDropFromRows = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes("application/x-echelon-products")) {
+    if (e.dataTransfer.types.includes(DRAGGED_PRODUCTS_MIME)) {
       e.preventDefault();
     }
   };
@@ -346,7 +356,9 @@ function LineSidebar({
           onClick={() => onSelect({ kind: "unassigned" })}
           onDragOver={allowDropFromRows}
           onDragEnter={(e) => {
-            if (e.dataTransfer.types.includes("application/x-echelon-products")) {
+            // Unassigned drop handler does not accept product moves here,
+            // but the dragOver indicator still respects the MIME type.
+            if (e.dataTransfer.types.includes(DRAGGED_PRODUCTS_MIME)) {
               setDragOverId("unassigned");
             }
           }}
@@ -397,7 +409,7 @@ function LineSidebar({
               onDragOver={allowDropFromRows}
               onDragEnter={(e) => {
                 if (
-                  e.dataTransfer.types.includes("application/x-echelon-products")
+                  e.dataTransfer.types.includes(DRAGGED_PRODUCTS_MIME)
                 ) {
                   setDragOverId(line.id);
                 }
@@ -408,7 +420,9 @@ function LineSidebar({
               onDrop={(e) => {
                 e.preventDefault();
                 setDragOverId(null);
-                if (onDrop) onDrop(line.id);
+                if (onDrop) {
+                  onDrop(line.id, parseDraggedProductIds(e.dataTransfer));
+                }
               }}
               className={cn(
                 "w-full flex items-center justify-between px-3 py-2 mt-0.5 rounded-md text-left",
@@ -477,9 +491,13 @@ function ProductsTable({
   setSelectedIds: (updater: (prev: Set<number>) => Set<number>) => void;
   data: ProductsPage | undefined;
   isLoading: boolean;
-  onMoveToLine: (lineId: number) => void;
-  onDuplicateToLine: (lineId: number) => void;
-  onUnassign: () => void;
+  // Handlers take an explicit `ids` array (the clamped effective selection)
+  // so they can never be called with stale `selectedIds` that contain
+  // product IDs no longer visible to the user. See `product-lines/selection`
+  // for the clamping contract.
+  onMoveToLine: (lineId: number, ids: number[]) => void;
+  onDuplicateToLine: (lineId: number, ids: number[]) => void;
+  onUnassign: (ids: number[]) => void;
 }) {
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
@@ -515,16 +533,36 @@ function ProductsTable({
   const pageSomeSelected =
     rows.some((r) => selectedIds.has(r.id)) && !pageAllSelected;
 
-  const selectedCount = selectedIds.size;
+  // Visible IDs on the current page, used to clamp the raw selection to
+  // what the user can actually see right now. This is the ONLY selection
+  // value allowed to feed:
+  //   - the selection-count banner,
+  //   - bulk-action button enable/disable,
+  //   - bulk-action network payloads,
+  //   - the drag-to-sidebar payload.
+  // See `product-lines/selection.ts` for the contract & regression notes.
+  const visibleIds = useMemo(
+    () => new Set<number>(rows.map((r) => r.id)),
+    [rows],
+  );
+  const effectiveSelection = useMemo(
+    () => clampSelectionToVisible(selectedIds, visibleIds),
+    [selectedIds, visibleIds],
+  );
+  const effectiveCount = effectiveSelection.size;
+  const canBulkAct = effectiveCount > 0;
 
   // Drag handler for drag-to-sidebar
   const onRowDragStart = (e: React.DragEvent, productId: number) => {
-    // If the dragged row isn't selected, drag only that one; else drag the whole selection.
-    const dragIds = selectedIds.has(productId)
-      ? Array.from(selectedIds)
+    // If the dragged row isn't in the *effective* (clamped) selection,
+    // drag only that one row; otherwise drag the whole effective selection.
+    // Using `effectiveSelection` ensures we never emit a drag payload that
+    // contains IDs the user cannot see in the current filter context.
+    const dragIds = effectiveSelection.has(productId)
+      ? Array.from(effectiveSelection)
       : [productId];
     e.dataTransfer.setData(
-      "application/x-echelon-products",
+      DRAGGED_PRODUCTS_MIME,
       JSON.stringify(dragIds),
     );
     e.dataTransfer.effectAllowed = "move";
@@ -602,29 +640,45 @@ function ProductsTable({
         </Select>
       </div>
 
-      {/* Batch bar */}
-      {selectedCount > 0 && (
+      {/* Batch bar.
+          Shown only when at least one *visible* row is selected.
+          All counts, buttons, and mutation payloads derive from
+          `effectiveSelection` (the clamped intersection with visible rows),
+          never from the raw `selectedIds` state. This is the safety
+          guarantee: the backend never receives IDs the user cannot see. */}
+      {canBulkAct && (
         <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 text-sm font-medium">
           <span>
-            {selectedCount.toLocaleString()} selected
+            {effectiveCount.toLocaleString()} selected
           </span>
           <div className="flex-1" />
           <MoveToLinePopover
             lines={otherLines}
             label="Move to Line"
             icon={<ArrowRight className="h-3.5 w-3.5 mr-1" />}
-            onPick={onMoveToLine}
+            onPick={(lineId) =>
+              onMoveToLine(lineId, Array.from(effectiveSelection))
+            }
             variant="primary"
+            disabled={!canBulkAct}
           />
           <MoveToLinePopover
             lines={lines}
             label="Duplicate assignment"
             icon={<Copy className="h-3.5 w-3.5 mr-1" />}
-            onPick={onDuplicateToLine}
+            onPick={(lineId) =>
+              onDuplicateToLine(lineId, Array.from(effectiveSelection))
+            }
             variant="outline"
+            disabled={!canBulkAct}
           />
           {selection.kind !== "unassigned" && (
-            <Button size="sm" variant="outline" onClick={onUnassign}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canBulkAct}
+              onClick={() => onUnassign(Array.from(effectiveSelection))}
+            >
               Unassign all
             </Button>
           )}
@@ -788,12 +842,14 @@ function MoveToLinePopover({
   icon,
   onPick,
   variant,
+  disabled = false,
 }: {
   lines: ProductLine[];
   label: string;
   icon?: React.ReactNode;
   onPick: (lineId: number) => void;
   variant: "primary" | "outline";
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
@@ -819,6 +875,7 @@ function MoveToLinePopover({
         <Button
           size="sm"
           variant={variant === "primary" ? "default" : "outline"}
+          disabled={disabled}
         >
           {icon}
           {label}
@@ -1219,6 +1276,36 @@ export default function ProductLinesPage() {
     setPage(1);
   }, [selKey]);
 
+  // ---------- Selection hygiene ----------
+  //
+  // Regression: before this, `selectedIds` survived every filter change,
+  // so a user who hit "Select All" under scope=All (55 items) and then
+  // switched the scope dropdown to Active (36 visible) would see a batch
+  // bar reading "55 selected" — and invoking "Move to Line" would ship
+  // 19 invisible product IDs (draft/archived) to the backend.
+  //
+  // Fix: whenever the *filter context* changes (scope, category, search,
+  // vendor, status), wipe the raw selection state. Page changes are
+  // intentionally not part of the key, so paginating inside a stable
+  // filter context still preserves selection. This plus the
+  // `clampSelectionToVisible` guard inside `ProductsTable` means the
+  // mutation payload can never contain IDs the user cannot see.
+  const selectionContextKey = useMemo(
+    () =>
+      filterContextKey({
+        selectionKey: selKey,
+        search,
+        vendor,
+        status,
+      }),
+    [selKey, search, vendor, status],
+  );
+  useEffect(() => {
+    setSelectedIdsRaw(new Set());
+    // Intentionally depend ONLY on selectionContextKey so page changes
+    // (also tracked elsewhere) do not clear selection.
+  }, [selectionContextKey]);
+
   // ---------- Data: products page ----------
   const productsQueryKey = [
     "/api/product-lines/products",
@@ -1542,9 +1629,15 @@ export default function ProductLinesPage() {
   });
 
   // ---------- Handlers ----------
+  //
+  // Every bulk handler receives its `ids` array from the caller instead of
+  // reading `selectedIds` directly. `ProductsTable` passes
+  // `Array.from(effectiveSelection)` (the clamped intersection with the
+  // currently visible rows) so the mutation payload can never contain IDs
+  // the user cannot see. This is the core safety guarantee fixing the
+  // "55 selected under scope=Active but only 36 visible" bug.
 
-  const handleMoveToLine = (targetLineId: number) => {
-    const ids = Array.from(selectedIds);
+  const handleMoveToLine = (targetLineId: number, ids: number[]) => {
     if (ids.length === 0) return;
     const fromLineId: number | "unassigned" | "any" =
       selection.kind === "line"
@@ -1560,8 +1653,7 @@ export default function ProductLinesPage() {
     });
   };
 
-  const handleDuplicateToLine = (targetLineId: number) => {
-    const ids = Array.from(selectedIds);
+  const handleDuplicateToLine = (targetLineId: number, ids: number[]) => {
     if (ids.length === 0) return;
     bulkMoveMutation.mutate({
       productIds: ids,
@@ -1571,8 +1663,7 @@ export default function ProductLinesPage() {
     });
   };
 
-  const handleUnassign = () => {
-    const ids = Array.from(selectedIds);
+  const handleUnassign = (ids: number[]) => {
     if (ids.length === 0) return;
     bulkUnassignMutation.mutate(ids);
   };
@@ -1598,13 +1689,18 @@ export default function ProductLinesPage() {
     });
   };
 
-  // Drag onto sidebar handler
-  const handleSidebarDrop = (targetLineId: number) => {
-    // Read currently dragged ids from the selection (drag sets the selection
-    // to include the dragged row if it wasn't already selected).
-    const ids = Array.from(selectedIds);
+  // Drag onto sidebar handler.
+  //
+  // NOTE: the drag source already built its dataTransfer payload from the
+  // clamped effective selection (see `onRowDragStart` in ProductsTable),
+  // but the drop path here ignored that payload and re-read the raw
+  // `selectedIds` state, which could include stale IDs from a previous
+  // filter context. We now read the dragged IDs from the drag event's
+  // dataTransfer and fall through to the bulk-move handler with that
+  // explicit list — never touching raw `selectedIds` here.
+  const handleSidebarDrop = (targetLineId: number, ids: number[]) => {
     if (ids.length === 0) return;
-    handleMoveToLine(targetLineId);
+    handleMoveToLine(targetLineId, ids);
   };
 
   const onEditLine = () => {

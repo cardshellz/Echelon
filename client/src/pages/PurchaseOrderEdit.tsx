@@ -31,6 +31,7 @@ import {
   centsToMills,
   computeLineTotalCentsFromMills,
 } from "@shared/utils/money";
+import { PoLineType, PO_LINE_TYPES } from "@shared/schema/procurement.schema";
 import { useLocation, useParams } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 
@@ -67,6 +68,12 @@ import {
   AlertCircle,
 } from "lucide-react";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   AddToCatalogDialog,
   type AddToCatalogDecision,
   type CatalogCandidate,
@@ -100,8 +107,18 @@ type ProductLite = {
 };
 
 type LineDraft = {
-  // Client-local id for React key. NOT sent to the server.
+  // Client-local id for React key. Sent to server so parent_line_id can be
+  // resolved — backend route must be updated to pass it through (see note in
+  // saveMutation below).
   clientId: string;
+  // Line taxonomy (migration 0563). One of PO_LINE_TYPES. Default: "product".
+  lineType: PoLineType;
+  // Required for non-product lines; optional for product lines.
+  description: string;
+  // clientId of another line in this draft that this line "belongs to".
+  // Only valid on discount/rebate lines. null means "applies to all product
+  // lines" (no specific parent_line_id stored on the server).
+  parentClientId: string | null;
   productVariantId: number | null;
   productId: number | null;
   productName: string;
@@ -110,6 +127,7 @@ type LineDraft = {
   // Per-unit cost in mills (1/10000 of a dollar). Authoritative on this
   // draft. Cents is derived (rounded half-up) for display totals and for
   // the back-compat unit_cost_cents field on the wire.
+  // Signed: discount/rebate/adjustment lines may carry a negative value.
   unitCostMills: number;
   vendorProductId?: number | null;
   // Spec A follow-up: tracks whether the selected product was NOT in the
@@ -249,22 +267,36 @@ function UnitCostInput({
   mills,
   onChangeMills,
   ariaLabel,
+  allowNegative = false,
 }: {
   mills: number;
   onChangeMills: (mills: number) => void;
   ariaLabel: string;
+  // Discount / rebate / adjustment lines may carry negative cost. The default
+  // is false so the existing product-line behavior is unchanged (Rule #3 main
+  // money path is non-negative). When true the buffer accepts a leading
+  // minus and the parsed result preserves the sign.
+  allowNegative?: boolean;
 }) {
-  const [buffer, setBuffer] = useState<string>(() => millsToDollarString(mills));
+  const [buffer, setBuffer] = useState<string>(() =>
+    signedMillsToDollarString(mills),
+  );
   const [focused, setFocused] = useState(false);
 
   // When the parent's value changes from outside (preload, programmatic edit)
   // and we're not currently focused, pull the new value into the buffer.
   useEffect(() => {
     if (!focused) {
-      setBuffer(millsToDollarString(mills));
+      setBuffer(signedMillsToDollarString(mills));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mills, focused]);
+
+  // Typing-time regex: optional minus only when allowNegative; otherwise
+  // unchanged from the original strict-non-negative behavior.
+  const inputRegex = allowNegative
+    ? /^-?\d*\.?\d{0,4}$/
+    : /^\d*\.?\d{0,4}$/;
 
   return (
     <Input
@@ -273,9 +305,10 @@ function UnitCostInput({
       onFocus={() => setFocused(true)}
       onChange={(e) => {
         const raw = e.target.value;
-        // digits + optional single dot + up to 4 fractional digits.
-        // Intermediate states ("", ".", "5.", "5.1234") all match.
-        if (raw === "" || /^\d*\.?\d{0,4}$/.test(raw)) {
+        // digits + optional single dot + up to 4 fractional digits, with an
+        // optional leading minus when allowNegative=true. Intermediate
+        // states ("", ".", "5.", "-", "-.", "-5", "-5.1234") all match.
+        if (raw === "" || inputRegex.test(raw)) {
           setBuffer(raw);
         }
       }}
@@ -283,12 +316,15 @@ function UnitCostInput({
         setFocused(false);
         let nextMills = mills;
         try {
-          nextMills = dollarsToMills(buffer);
+          nextMills = signedDollarsToMills(buffer);
+          if (!allowNegative && nextMills < 0) {
+            nextMills = 0; // safety net; should not happen given regex.
+          }
         } catch {
           // Unparseable — revert to last known good.
           nextMills = mills;
         }
-        setBuffer(millsToDollarString(nextMills));
+        setBuffer(signedMillsToDollarString(nextMills));
         if (nextMills !== mills) onChangeMills(nextMills);
       }}
       onKeyDown={(e) => {
@@ -309,13 +345,58 @@ function formatCents(cents: number | null | undefined): string {
   })}`;
 }
 
+// ─── Signed money helpers ──────────────────────────────────────────────────
+// Discount / rebate / adjustment lines carry negative unitCostMills. The
+// shared money helpers reject negatives (they were designed for per-unit
+// cost which is always >= 0). These wrappers handle the sign and delegate
+// to the authoritative shared helpers for the magnitude.
+
+function signedMillsToDollarString(mills: number): string {
+  if (mills < 0) return `-${millsToDollarString(-mills)}`;
+  return millsToDollarString(mills);
+}
+
+function signedDollarsToMills(input: string): number {
+  const raw = String(input).trim();
+  if (!raw || raw === "-" || raw === "." || raw === "-.") return 0;
+  if (raw.startsWith("-")) {
+    return -(dollarsToMills(raw.slice(1)));
+  }
+  return dollarsToMills(raw);
+}
+
+function signedMillsToCents(mills: number): number {
+  if (mills < 0) return -(millsToCents(-mills));
+  return millsToCents(mills);
+}
+
+function signedComputeLineTotalCents(mills: number, qty: number): number {
+  if (mills === 0 || qty === 0) return 0;
+  if (mills < 0) return -(computeLineTotalCentsFromMills(-mills, qty));
+  return computeLineTotalCentsFromMills(mills, qty);
+}
+
+function signedFormatCents(cents: number | null | undefined): string {
+  const n = Number(cents) || 0;
+  if (n < 0) {
+    return `-$${((-n) / 100).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
+  return formatCents(n);
+}
+
 function newClientId(): string {
   return `ln-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function emptyLine(): LineDraft {
+function emptyLine(lineType: PoLineType = "product"): LineDraft {
   return {
     clientId: newClientId(),
+    lineType,
+    description: "",
+    parentClientId: null,
     productVariantId: null,
     productId: null,
     productName: "",
@@ -543,6 +624,11 @@ export default function PurchaseOrderEdit() {
       setLines(
         preload.lines.map((l) => ({
           clientId: newClientId(),
+          // Preloaded lines are always product lines (the preload endpoint
+          // returns catalog suggestions, not typed non-product lines).
+          lineType: "product" as PoLineType,
+          description: "",
+          parentClientId: null,
           productVariantId: l.productVariantId,
           productId: null, // filled if user re-selects; not strictly needed for submit
           productName: l.productName,
@@ -595,16 +681,30 @@ export default function PurchaseOrderEdit() {
     if (Array.isArray(existingPo.lines)) {
       setLines(
         existingPo.lines.map((l: any) => {
+          const lineType: PoLineType =
+            typeof l.lineType === "string" && PO_LINE_TYPES.includes(l.lineType as PoLineType)
+              ? (l.lineType as PoLineType)
+              : "product";
           const serverMills =
             typeof l.unitCostMills === "number" ? l.unitCostMills : null;
-          const unitCostMills =
-            serverMills !== null && serverMills >= 0
-              ? serverMills
-              : centsToMills(Number(l.unitCostCents) || 0);
+          // For non-product lines (discount/rebate/adjustment), cost may be
+          // negative. We preserve the sign from the server value.
+          let unitCostMills: number;
+          if (serverMills !== null) {
+            unitCostMills = serverMills;
+          } else {
+            // Fall back to cents→mills. Non-negative only (legacy rows).
+            unitCostMills = centsToMills(Number(l.unitCostCents) || 0);
+          }
           return {
             clientId: newClientId(),
-            productVariantId: l.productVariantId,
-            productId: l.productId,
+            lineType,
+            description: typeof l.description === "string" ? l.description : "",
+            parentClientId: null, // parent_line_id is a DB id; we don't
+            // resolve it back to a clientId on edit load. Rendered as
+            // "All product lines" for existing discount/rebate rows.
+            productVariantId: l.productVariantId ?? null,
+            productId: l.productId ?? null,
             productName: l.productName ?? "",
             sku: l.sku ?? null,
             orderQty: l.orderQty,
@@ -619,16 +719,138 @@ export default function PurchaseOrderEdit() {
   // ── Totals ────────────────────────────────────────────────────────────
   // Line total = round_half_up(unit_cost_mills * order_qty / 100) — integer
   // math only. Subtotal is the sum of line totals in cents.
-  const subtotalCents = useMemo(
-    () =>
-      lines.reduce((acc, l) => {
-        const qty = Number(l.orderQty) || 0;
-        const mills = Number(l.unitCostMills) || 0;
-        if (qty <= 0 || mills <= 0) return acc;
-        return acc + computeLineTotalCentsFromMills(mills, qty);
-      }, 0),
-    [lines],
-  );
+  // Sign-aware totals breakdown by line_type. Mirrors server-side
+  // computePoTotalsFromLines so the displayed totals match exactly what
+  // the backend will record on save.
+  const totals = useMemo(() => {
+    let productSubtotal = 0;
+    let discountTotal = 0;
+    let feeTotal = 0;
+    let taxTotal = 0;
+    let adjustmentTotal = 0;
+    for (const l of lines) {
+      const qty = Number(l.orderQty) || 0;
+      const mills = Number(l.unitCostMills) || 0;
+      if (qty === 0 || mills === 0) continue;
+      const lineTotal = signedComputeLineTotalCents(mills, qty);
+      switch (l.lineType) {
+        case "product":
+          productSubtotal += lineTotal;
+          break;
+        case "discount":
+        case "rebate":
+          discountTotal += lineTotal;
+          break;
+        case "fee":
+          feeTotal += lineTotal;
+          break;
+        case "tax":
+          taxTotal += lineTotal;
+          break;
+        case "adjustment":
+          adjustmentTotal += lineTotal;
+          break;
+      }
+    }
+    return {
+      productSubtotalCents: productSubtotal,
+      discountTotalCents: discountTotal,
+      feeTotalCents: feeTotal,
+      taxTotalCents: taxTotal,
+      adjustmentTotalCents: adjustmentTotal,
+      totalCents:
+        productSubtotal +
+        discountTotal +
+        feeTotal +
+        taxTotal +
+        adjustmentTotal,
+      hasNonProductLines: lines.some((l) => l.lineType !== "product"),
+    };
+  }, [lines]);
+
+  // Back-compat alias — simple subtotal display when there are no non-
+  // product lines uses just productSubtotalCents (matches old behavior).
+  const subtotalCents = totals.productSubtotalCents;
+
+  // ── Client-side line validation ──────────────────────────────
+  //
+  // Mirrors the server-side validateCreateWithLinesInput rules from
+  // purchasing.service.ts so the user sees inline errors before submit.
+  // The backend is still authoritative; this just gives faster feedback
+  // and disables the Save buttons when something obvious is wrong.
+  //
+  // Returns a map of clientId -> error message. Empty map = all valid.
+  const lineErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    for (const l of lines) {
+      const qty = Number(l.orderQty) || 0;
+      const mills = Number(l.unitCostMills) || 0;
+      const description = (l.description ?? "").trim();
+
+      if (l.lineType === "product") {
+        if (!l.productVariantId) {
+          errors[l.clientId] = "Pick a product";
+          continue;
+        }
+        if (qty <= 0) {
+          errors[l.clientId] = "Quantity must be greater than 0";
+          continue;
+        }
+        if (mills < 0) {
+          errors[l.clientId] = "Unit cost cannot be negative";
+          continue;
+        }
+        continue;
+      }
+
+      // Non-product lines: description required.
+      if (description.length === 0) {
+        errors[l.clientId] = "Description required";
+        continue;
+      }
+
+      // Per-type sign + qty rules.
+      if (l.lineType === "discount" || l.lineType === "rebate") {
+        if (mills > 0) {
+          errors[l.clientId] = `${l.lineType.charAt(0).toUpperCase()}${l.lineType.slice(1)} amount must be ≤ 0`;
+          continue;
+        }
+        if (qty !== 1) {
+          errors[l.clientId] = `${l.lineType.charAt(0).toUpperCase()}${l.lineType.slice(1)} quantity must be 1`;
+          continue;
+        }
+      } else if (l.lineType === "fee") {
+        if (mills < 0) {
+          errors[l.clientId] = "Fee amount must be ≥ 0";
+          continue;
+        }
+        if (qty < 1) {
+          errors[l.clientId] = "Fee quantity must be ≥ 1";
+          continue;
+        }
+      } else if (l.lineType === "tax") {
+        if (mills < 0) {
+          errors[l.clientId] = "Tax amount must be ≥ 0";
+          continue;
+        }
+        if (qty !== 1) {
+          errors[l.clientId] = "Tax quantity must be 1";
+          continue;
+        }
+      } else if (l.lineType === "adjustment") {
+        if (qty !== 1) {
+          errors[l.clientId] = "Adjustment quantity must be 1";
+          continue;
+        }
+      }
+    }
+    return errors;
+  }, [lines]);
+
+  const hasLineErrors = Object.keys(lineErrors).length > 0;
+  const hasNoLines = lines.length === 0;
+  const noVendor = !selectedVendor;
+  const canSave = !saving && !hasLineErrors && !hasNoLines && !noVendor;
 
   // ── Dirty nav prompt ──────────────────────────────────────────────────
   useEffect(() => {
@@ -805,13 +1027,26 @@ export default function PurchaseOrderEdit() {
         vendor_notes: vendorNotes || null,
         internal_notes: internalNotes || null,
         lines: lines.map((l) => ({
-          product_variant_id: l.productVariantId,
+          // NOTE: the procurement route handler (procurement.routes.ts) does
+          // not yet pass line_type, client_id, or parent_client_id through to
+          // the service layer. These fields are included here so the request
+          // is correct once that route gap is closed. Until then, all lines
+          // are treated as "product" by the backend. See completion report.
+          line_type: l.lineType,
+          client_id: l.clientId,
+          parent_client_id: l.parentClientId ?? null,
+          description: l.description || null,
+          // Only send product_variant_id for product lines — the server
+          // validator rejects a non-null variant on non-product lines.
+          ...(l.lineType === "product"
+            ? { product_variant_id: l.productVariantId }
+            : { product_variant_id: null }),
           quantity_ordered: l.orderQty,
-          // Mills is authoritative (4-decimal). Cents is sent for back-
-          // compat — derived via half-up rounding. Server validator rejects
-          // a disagreeing pair with 400.
+          // Mills is authoritative (4-decimal). Cents is sent for back-compat
+          // — derived via half-up rounding (sign-aware for discount/rebate/
+          // adjustment). Server validator rejects a disagreeing pair with 400.
           unit_cost_mills: l.unitCostMills,
-          unit_cost_cents: millsToCents(l.unitCostMills),
+          unit_cost_cents: signedMillsToCents(l.unitCostMills),
           vendor_product_id: l.vendorProductId ?? null,
         })),
         advance_to_sent: advanceToSent,
@@ -938,8 +1173,8 @@ export default function PurchaseOrderEdit() {
   function removeLine(clientId: string) {
     setLines((prev) => prev.filter((l) => l.clientId !== clientId));
   }
-  function addLine() {
-    setLines((prev) => [...prev, emptyLine()]);
+  function addLine(lineType: PoLineType = "product") {
+    setLines((prev) => [...prev, emptyLine(lineType)]);
   }
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -960,10 +1195,35 @@ export default function PurchaseOrderEdit() {
           <Button variant="ghost" onClick={handleCancel} disabled={saving}>
             Cancel
           </Button>
-          <Button variant="secondary" onClick={handleSaveDraft} disabled={saving}>
+          <Button
+            variant="secondary"
+            onClick={handleSaveDraft}
+            disabled={!canSave}
+            title={
+              hasLineErrors
+                ? "Fix line errors before saving"
+                : noVendor
+                ? "Pick a vendor before saving"
+                : hasNoLines
+                ? "Add at least one line before saving"
+                : undefined
+            }
+          >
             Save draft
           </Button>
-          <Button onClick={handleSaveAndSend} disabled={saving}>
+          <Button
+            onClick={handleSaveAndSend}
+            disabled={!canSave}
+            title={
+              hasLineErrors
+                ? "Fix line errors before sending"
+                : noVendor
+                ? "Pick a vendor before sending"
+                : hasNoLines
+                ? "Add at least one line before sending"
+                : undefined
+            }
+          >
             Save &amp; Send PDF
           </Button>
         </div>
@@ -1047,15 +1307,53 @@ export default function PurchaseOrderEdit() {
         <CardContent className="p-4 space-y-3">
           <div className="flex items-center justify-between">
             <Label className="text-base">Lines</Label>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={addLine}
-              disabled={!selectedVendor}
-            >
-              <Plus className="h-4 w-4 mr-1" />
-              Add line
-            </Button>
+            <div className="inline-flex items-stretch">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => addLine("product")}
+                disabled={!selectedVendor}
+                className="rounded-r-none border-r-0"
+                data-testid="button-add-product-line"
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Add product
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!selectedVendor}
+                    className="rounded-l-none px-2"
+                    aria-label="Add line of another type"
+                    data-testid="button-add-line-menu"
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => addLine("product")}>
+                    Product
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("discount")}>
+                    Discount
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("fee")}>
+                    Fee
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("tax")}>
+                    Tax
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("rebate")}>
+                    Rebate
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => addLine("adjustment")}>
+                    Adjustment
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
           {lines.length === 0 ? (
             <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
@@ -1065,34 +1363,145 @@ export default function PurchaseOrderEdit() {
             </div>
           ) : (
             <div className="space-y-2">
-              {lines.map((line, idx) => (
-                <LineRow
-                  key={line.clientId}
-                  line={line}
-                  idx={idx}
-                  onChange={(patch) => updateLine(line.clientId, patch)}
-                  onRemove={() => removeLine(line.clientId)}
-                  productSearch={productSearch[line.clientId] || ""}
-                  setProductSearch={(q) =>
-                    setProductSearch((prev) => ({ ...prev, [line.clientId]: q }))
-                  }
-                  popoverOpen={!!productPopoverOpen[line.clientId]}
-                  setPopoverOpen={(b) =>
-                    setProductPopoverOpen((prev) => ({ ...prev, [line.clientId]: b }))
-                  }
-                  useVendorCatalogSearch={useVendorCatalogSearch}
-                  vendorId={selectedVendor?.id ?? null}
-                  vendorName={selectedVendor?.name ?? null}
-                />
-              ))}
+              {(() => {
+                // Compute the set of product lines exactly once per render,
+                // so each non-product LineRow has a stable list to populate
+                // its "Applies to" dropdown.
+                const productLineOptions = lines
+                  .filter((l) => l.lineType === "product")
+                  .map((l, productIdx) => ({
+                    clientId: l.clientId,
+                    label:
+                      l.sku || l.productName
+                        ? `${l.sku ? `${l.sku} · ` : ""}${l.productName || "(unnamed)"}`
+                        : `Line ${productIdx + 1}`,
+                  }));
+                return lines.map((line, idx) => {
+                  const err = lineErrors[line.clientId];
+                  return (
+                    <div key={line.clientId} className="space-y-1">
+                      <LineRow
+                        line={line}
+                        idx={idx}
+                        onChange={(patch) => updateLine(line.clientId, patch)}
+                        onRemove={() => removeLine(line.clientId)}
+                        productSearch={productSearch[line.clientId] || ""}
+                        setProductSearch={(q) =>
+                          setProductSearch((prev) => ({
+                            ...prev,
+                            [line.clientId]: q,
+                          }))
+                        }
+                        popoverOpen={!!productPopoverOpen[line.clientId]}
+                        setPopoverOpen={(b) =>
+                          setProductPopoverOpen((prev) => ({
+                            ...prev,
+                            [line.clientId]: b,
+                          }))
+                        }
+                        useVendorCatalogSearch={useVendorCatalogSearch}
+                        vendorId={selectedVendor?.id ?? null}
+                        vendorName={selectedVendor?.name ?? null}
+                        productLineOptions={productLineOptions}
+                      />
+                      {err && (
+                        <div
+                          className="text-xs text-destructive pl-1"
+                          data-testid={`error-line-${idx}`}
+                          role="alert"
+                        >
+                          {err}
+                        </div>
+                      )}
+                    </div>
+                  );
+                });
+              })()}
             </div>
           )}
 
           <div className="pt-2 border-t text-right space-y-1">
-            <div className="text-sm">
-              <span className="text-muted-foreground mr-2">Subtotal</span>
-              <span className="font-semibold">{formatCents(subtotalCents)}</span>
-            </div>
+            {totals.hasNonProductLines ? (
+              // Mixed-type PO: render the full breakdown so the user can
+              // verify discount / fee / tax / adjustment math line by line.
+              // Only non-zero rows render (avoids visual clutter).
+              <div className="text-sm space-y-0.5 inline-block text-left">
+                <div className="grid grid-cols-[auto_auto] gap-x-4">
+                  <span className="text-muted-foreground">Products subtotal</span>
+                  <span
+                    className="font-medium tabular-nums text-right"
+                    data-testid="totals-products"
+                  >
+                    {signedFormatCents(totals.productSubtotalCents)}
+                  </span>
+                  {totals.discountTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Discounts</span>
+                      <span
+                        className="font-medium tabular-nums text-right text-destructive"
+                        data-testid="totals-discounts"
+                      >
+                        {signedFormatCents(totals.discountTotalCents)}
+                      </span>
+                    </>
+                  )}
+                  {totals.feeTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Fees</span>
+                      <span
+                        className="font-medium tabular-nums text-right"
+                        data-testid="totals-fees"
+                      >
+                        {signedFormatCents(totals.feeTotalCents)}
+                      </span>
+                    </>
+                  )}
+                  {totals.taxTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Tax</span>
+                      <span
+                        className="font-medium tabular-nums text-right"
+                        data-testid="totals-tax"
+                      >
+                        {signedFormatCents(totals.taxTotalCents)}
+                      </span>
+                    </>
+                  )}
+                  {totals.adjustmentTotalCents !== 0 && (
+                    <>
+                      <span className="text-muted-foreground">Adjustments</span>
+                      <span
+                        className={`font-medium tabular-nums text-right ${
+                          totals.adjustmentTotalCents < 0
+                            ? "text-destructive"
+                            : ""
+                        }`}
+                        data-testid="totals-adjustments"
+                      >
+                        {signedFormatCents(totals.adjustmentTotalCents)}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div className="grid grid-cols-[auto_auto] gap-x-4 pt-1 mt-1 border-t">
+                  <span className="font-semibold">Total</span>
+                  <span
+                    className="font-bold tabular-nums text-right"
+                    data-testid="totals-grand"
+                  >
+                    {signedFormatCents(totals.totalCents)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              // Product-only PO: keep the existing simple subtotal display.
+              <div className="text-sm">
+                <span className="text-muted-foreground mr-2">Subtotal</span>
+                <span className="font-semibold" data-testid="totals-subtotal">
+                  {formatCents(subtotalCents)}
+                </span>
+              </div>
+            )}
             <div className="text-xs text-muted-foreground">
               Shipping &amp; tax are added at receive time.
             </div>
@@ -1196,10 +1605,37 @@ export default function PurchaseOrderEdit() {
         <Button variant="ghost" onClick={handleCancel} disabled={saving} className="flex-1">
           Cancel
         </Button>
-        <Button variant="secondary" onClick={handleSaveDraft} disabled={saving} className="flex-1">
+        <Button
+          variant="secondary"
+          onClick={handleSaveDraft}
+          disabled={!canSave}
+          className="flex-1"
+          title={
+            hasLineErrors
+              ? "Fix line errors before saving"
+              : noVendor
+              ? "Pick a vendor before saving"
+              : hasNoLines
+              ? "Add at least one line before saving"
+              : undefined
+          }
+        >
           Save draft
         </Button>
-        <Button onClick={handleSaveAndSend} disabled={saving} className="flex-1">
+        <Button
+          onClick={handleSaveAndSend}
+          disabled={!canSave}
+          className="flex-1"
+          title={
+            hasLineErrors
+              ? "Fix line errors before sending"
+              : noVendor
+              ? "Pick a vendor before sending"
+              : hasNoLines
+              ? "Add at least one line before sending"
+              : undefined
+          }
+        >
           Send PDF
         </Button>
       </div>
@@ -1236,9 +1672,177 @@ type LineRowProps = {
   ) => ReturnType<typeof useQuery<CatalogSearchResponse>>;
   vendorId: number | null;
   vendorName: string | null;
+  // Product lines on this PO that a discount/rebate line can target via
+  // its parent_line_id. Sent from the parent because it depends on sibling
+  // lines, which the LineRow does not have access to on its own.
+  productLineOptions?: Array<{ clientId: string; label: string }>;
 };
 
+// Rendered above non-product line rows so the user can tell at a glance
+// what type of line they're editing. Reuses existing tailwind classes.
+function LineTypeChip({ lineType }: { lineType: PoLineType }) {
+  const label = lineType.charAt(0).toUpperCase() + lineType.slice(1);
+  return (
+    <span
+      className="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium text-muted-foreground bg-muted/40"
+      data-testid={`chip-line-type-${lineType}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+// Non-product line row (discount / fee / tax / rebate / adjustment).
+// Layout differs from product lines: free-text description instead of a
+// SKU typeahead, qty visible-but-fixed for most types, signed amount for
+// discount/rebate/adjustment. Discount/rebate also expose an "Applies to"
+// dropdown that targets a specific product line via parentClientId.
+function NonProductLineRow({
+  line,
+  idx,
+  onChange,
+  onRemove,
+  productLineOptions,
+}: {
+  line: LineDraft;
+  idx: number;
+  onChange: (patch: Partial<LineDraft>) => void;
+  onRemove: () => void;
+  productLineOptions: Array<{ clientId: string; label: string }>;
+}) {
+  const lineType = line.lineType;
+  const allowNegative =
+    lineType === "discount" ||
+    lineType === "rebate" ||
+    lineType === "adjustment";
+  const qtyEditable = lineType === "fee";
+  const showAppliesTo = lineType === "discount" || lineType === "rebate";
+
+  const lineTotalCents =
+    Number(line.orderQty) !== 0 && Number(line.unitCostMills) !== 0
+      ? signedComputeLineTotalCents(
+          Number(line.unitCostMills),
+          Number(line.orderQty),
+        )
+      : 0;
+
+  const totalIsNegative = lineTotalCents < 0;
+
+  return (
+    <div className="grid grid-cols-12 gap-2 items-start bg-muted/20 border border-dashed rounded-md p-2">
+      {/* Description + chip */}
+      <div className="col-span-12 md:col-span-6 space-y-1">
+        <div className="flex items-center gap-2">
+          <LineTypeChip lineType={lineType} />
+          {showAppliesTo && (
+            <Select
+              value={line.parentClientId ?? "__all__"}
+              onValueChange={(v) =>
+                onChange({ parentClientId: v === "__all__" ? null : v })
+              }
+            >
+              <SelectTrigger
+                className="h-7 w-auto px-2 text-xs"
+                data-testid={`select-parent-line-${idx}`}
+              >
+                <SelectValue placeholder="Applies to..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All product lines</SelectItem>
+                {productLineOptions.map((opt) => (
+                  <SelectItem key={opt.clientId} value={opt.clientId}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+        <Input
+          value={line.description}
+          onChange={(e) => onChange({ description: e.target.value })}
+          placeholder={
+            lineType === "discount"
+              ? "Vendor promo, volume discount, etc."
+              : lineType === "fee"
+              ? "Freight, tooling, small-order fee, etc."
+              : lineType === "tax"
+              ? "Sales tax, VAT, etc."
+              : lineType === "rebate"
+              ? "Loyalty / volume rebate"
+              : "Reason for adjustment"
+          }
+          aria-label={`Line ${idx + 1} description`}
+          data-testid={`input-line-description-${idx}`}
+        />
+      </div>
+
+      {/* Qty */}
+      <div className="col-span-4 md:col-span-2">
+        {qtyEditable ? (
+          <QuantityInput
+            qty={line.orderQty}
+            onChangeQty={(q) => onChange({ orderQty: q })}
+            ariaLabel={`Line ${idx + 1} quantity`}
+          />
+        ) : (
+          <Input
+            value={line.orderQty}
+            disabled
+            className="text-center text-muted-foreground"
+            aria-label={`Line ${idx + 1} quantity (fixed at 1)`}
+          />
+        )}
+      </div>
+
+      {/* Amount (signed for discount/rebate/adjustment) */}
+      <div className="col-span-4 md:col-span-2">
+        <UnitCostInput
+          mills={line.unitCostMills}
+          onChangeMills={(mills) => onChange({ unitCostMills: mills })}
+          ariaLabel={`Line ${idx + 1} amount`}
+          allowNegative={allowNegative}
+        />
+      </div>
+
+      {/* Line total */}
+      <div
+        className={`col-span-3 md:col-span-1 text-right text-sm pt-2 font-mono ${
+          totalIsNegative ? "text-destructive" : ""
+        }`}
+      >
+        {signedFormatCents(lineTotalCents)}
+      </div>
+
+      {/* Remove */}
+      <div className="col-span-1 text-right">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onRemove}
+          aria-label={`Remove line ${idx + 1}`}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function LineRow(props: LineRowProps) {
+  // Dispatch on line_type. Product lines keep the existing typeahead-driven
+  // layout; non-product types render the simpler description + amount form.
+  if (props.line.lineType !== "product") {
+    return (
+      <NonProductLineRow
+        line={props.line}
+        idx={props.idx}
+        onChange={props.onChange}
+        onRemove={props.onRemove}
+        productLineOptions={props.productLineOptions ?? []}
+      />
+    );
+  }
   const {
     line,
     idx,
