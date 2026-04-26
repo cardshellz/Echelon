@@ -157,6 +157,15 @@ function assertPositiveInt(value: unknown, field: string): number {
  *     matching the non-blocking contract used in markShipmentVoided.
  *     Reconcile (Group F) catches any gaps.
  *
+ * Side effects beyond the shipment row (§6 Commit 24, re-label):
+ *   - When the shipment had a non-null `shopify_fulfillment_id` AND
+ *     the tracking number is changing AND
+ *     `opts.fulfillmentPush.updateShopifyFulfillmentTracking` is
+ *     wired, that hook is invoked to update the EXISTING Shopify
+ *     fulfillment's tracking via `fulfillmentTrackingInfoUpdate`
+ *     (Overlord D9 — update, never create). Failure is logged but
+ *     does NOT block the WMS UPDATE; reconcile (Group F) catches drift.
+ *
  * Does NOT recompute the owning order's warehouse_status; the caller
  * orchestrates via `recomputeOrderStatusFromShipments`.
  */
@@ -169,7 +178,15 @@ export async function markShipmentShipped(
     shipDate: Date;
     trackingUrl?: string | null;
   },
-  opts: { now?: Date } = {},
+  opts: {
+    now?: Date;
+    fulfillmentPush?: {
+      updateShopifyFulfillmentTracking?: (
+        fulfillmentGid: string,
+        trackingInfo: { number: string; company: string; url?: string },
+      ) => Promise<unknown>;
+    };
+  } = {},
 ): Promise<MarkShipmentResult> {
   assertPositiveInt(shipmentId, "shipmentId");
 
@@ -241,6 +258,42 @@ export async function markShipmentShipped(
       updated_at = ${now}
     WHERE id = ${shipmentId}
   `);
+
+  // Shopify fulfillment tracking-update hook (§6 Commit 24, re-label).
+  // Fires only when:
+  //   - the shipment had a prior tracking number that DIFFERED from
+  //     the incoming one (true re-label, not a first ship and not a
+  //     carrier-only mapping fix — same conditions that gated the
+  //     history-row insert above);
+  //   - the shipment carries a `shopify_fulfillment_id` (i.e. C21 has
+  //     already pushed it to Shopify; nothing to update otherwise);
+  //   - the caller wired `opts.fulfillmentPush.updateShopifyFulfillmentTracking`.
+  // Failure is logged but does NOT roll back the shipment UPDATE,
+  // matching the non-blocking contract used by markShipmentVoided's
+  // cancel hook (§6 Commit 17). Reconcile (Group F) catches drift.
+  if (
+    typeof current.tracking_number === "string" &&
+    current.tracking_number.length > 0 &&
+    current.tracking_number !== meta.trackingNumber &&
+    typeof current.shopify_fulfillment_id === "string" &&
+    current.shopify_fulfillment_id.length > 0 &&
+    typeof opts.fulfillmentPush?.updateShopifyFulfillmentTracking === "function"
+  ) {
+    try {
+      await opts.fulfillmentPush.updateShopifyFulfillmentTracking(
+        current.shopify_fulfillment_id,
+        {
+          number: meta.trackingNumber,
+          company: meta.carrier,
+          url: meta.trackingUrl ?? undefined,
+        },
+      );
+    } catch (err: any) {
+      console.error(
+        `[markShipmentShipped] Shopify tracking-update failed for shipment ${shipmentId} (fulfillment ${current.shopify_fulfillment_id}): ${err?.message ?? err}`,
+      );
+    }
+  }
 
   return { wmsOrderId: current.order_id, changed: true };
 }
@@ -712,6 +765,10 @@ export async function dispatchShipmentEvent(
     now?: Date;
     fulfillmentPush?: {
       cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
+      updateShopifyFulfillmentTracking?: (
+        fulfillmentGid: string,
+        trackingInfo: { number: string; company: string; url?: string },
+      ) => Promise<unknown>;
     };
   } = {},
 ): Promise<MarkShipmentResult> {
@@ -726,7 +783,7 @@ export async function dispatchShipmentEvent(
           shipDate: event.shipDate,
           trackingUrl: event.trackingUrl ?? null,
         },
-        { now: opts.now },
+        { now: opts.now, fulfillmentPush: opts.fulfillmentPush },
       );
     case "cancelled":
       return markShipmentCancelled(db, shipmentId, event.reason, {

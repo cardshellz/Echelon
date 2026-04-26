@@ -88,6 +88,12 @@ export const SHOPIFY_PUSH_NO_OUR_LOCATIONS = "shopify_push_no_our_locations";
 export const SHOPIFY_CANCEL_INVALID_INPUT = "shopify_cancel_invalid_input";
 export const SHOPIFY_CANCEL_USER_ERRORS = "shopify_cancel_user_errors";
 export const SHOPIFY_CANCEL_NETWORK_ERROR = "shopify_cancel_network_error";
+export const SHOPIFY_TRACKING_UPDATE_INVALID_INPUT =
+  "shopify_tracking_update_invalid_input";
+export const SHOPIFY_TRACKING_UPDATE_USER_ERRORS =
+  "shopify_tracking_update_user_errors";
+export const SHOPIFY_TRACKING_UPDATE_NETWORK_ERROR =
+  "shopify_tracking_update_network_error";
 
 /**
  * Result returned by `cancelShopifyFulfillment`. The `alreadyCancelled`
@@ -99,6 +105,23 @@ export const SHOPIFY_CANCEL_NETWORK_ERROR = "shopify_cancel_network_error";
 export interface ShopifyFulfillmentCancelResult {
   fulfillmentGid: string;
   alreadyCancelled: boolean;
+}
+
+/**
+ * Result returned by `updateShopifyFulfillmentTracking`. The
+ * `trackingNumberChanged` discriminator lets callers (markShipmentShipped
+ * re-label flow, future retry/DLQ layers) distinguish a fresh tracking
+ * update from an idempotent skip without parsing log strings.
+ *
+ *   - `trackingNumberChanged: true`  — Shopify accepted the update; the
+ *     fulfillment now carries the new tracking number we sent.
+ *   - `trackingNumberChanged: false` — Shopify reported the fulfillment
+ *     already carried this tracking number (idempotent retry-safety);
+ *     no state change was needed on the Shopify side.
+ */
+export interface ShopifyFulfillmentTrackingUpdateResult {
+  fulfillmentGid: string;
+  trackingNumberChanged: boolean;
 }
 
 /**
@@ -953,12 +976,237 @@ export function createFulfillmentPushService(
     return { fulfillmentGid, alreadyCancelled: false };
   }
 
+  /**
+   * Update the tracking info on an existing Shopify fulfillment via the
+   * Admin GraphQL `fulfillmentTrackingInfoUpdate` mutation (§6 Commit 24).
+   * Called by `markShipmentShipped` (C18) when a re-label arrives on a
+   * shipment that has already been pushed to Shopify — we update the
+   * existing Fulfillment record rather than creating a new one (Overlord
+   * D9), so the customer's order page reflects the new tracking number
+   * without spawning a duplicate fulfillment row.
+   *
+   * Idempotent: if Shopify reports the fulfillment already carries the
+   * tracking number we sent, we return `trackingNumberChanged: false`
+   * instead of throwing. Two signals are accepted:
+   *   - the response's `fulfillment.trackingInfo.number` matches the
+   *     number we sent (Shopify accepted but it was a no-op), OR
+   *   - userErrors mentions "already has this tracking" or similar
+   *     (case-insensitive match).
+   *
+   * `opts.notifyCustomer` defaults to `true` per Overlord D11 (a
+   * re-label is a real change the customer should know about); callers
+   * (e.g. silent carrier-mapping fixes) can pass `false` to suppress.
+   *
+   * Failure modes (each throws a structured `ShopifyFulfillmentPushError`):
+   *   - SHOPIFY_TRACKING_UPDATE_INVALID_INPUT — fulfillmentGid is not a
+   *     non-empty string starting with `gid://shopify/Fulfillment/`, or
+   *     trackingInfo.number / trackingInfo.company is empty.
+   *   - SHOPIFY_PUSH_CLIENT_NOT_SET — `setShopifyClient` was never called.
+   *   - SHOPIFY_TRACKING_UPDATE_USER_ERRORS — Shopify returned
+   *     non-idempotent userErrors.
+   *   - SHOPIFY_TRACKING_UPDATE_NETWORK_ERROR — request threw (5xx,
+   *     fetch reject, timeout, etc.).
+   */
+  async function updateShopifyFulfillmentTracking(
+    fulfillmentGid: string,
+    trackingInfo: {
+      number: string;
+      company: string;
+      url?: string;
+    },
+    opts: { notifyCustomer?: boolean } = {},
+  ): Promise<ShopifyFulfillmentTrackingUpdateResult> {
+    // ---- 1. Validate input -----------------------------------------
+    if (
+      typeof fulfillmentGid !== "string" ||
+      fulfillmentGid.length === 0 ||
+      !fulfillmentGid.startsWith("gid://shopify/Fulfillment/")
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: fulfillmentGid must be a non-empty string starting with 'gid://shopify/Fulfillment/'",
+        {
+          code: SHOPIFY_TRACKING_UPDATE_INVALID_INPUT,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    if (
+      !trackingInfo ||
+      typeof trackingInfo.number !== "string" ||
+      trackingInfo.number.trim().length === 0
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: trackingInfo.number is required",
+        {
+          code: SHOPIFY_TRACKING_UPDATE_INVALID_INPUT,
+          shipmentId: -1,
+          field: "trackingInfo.number",
+          value: trackingInfo?.number,
+        },
+      );
+    }
+
+    if (
+      typeof trackingInfo.company !== "string" ||
+      trackingInfo.company.trim().length === 0
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: trackingInfo.company is required",
+        {
+          code: SHOPIFY_TRACKING_UPDATE_INVALID_INPUT,
+          shipmentId: -1,
+          field: "trackingInfo.company",
+          value: trackingInfo.company,
+        },
+      );
+    }
+
+    // ---- 2. Client must be wired -----------------------------------
+    if (!_shopifyClient) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: Shopify client not set",
+        {
+          code: SHOPIFY_PUSH_CLIENT_NOT_SET,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    // ---- 3. Build mutation -----------------------------------------
+    const mutation = `
+      mutation updateFulfillmentTracking($fulfillmentId: ID!, $trackingInfoInput: FulfillmentTrackingInput!, $notifyCustomer: Boolean) {
+        fulfillmentTrackingInfoUpdate(
+          fulfillmentId: $fulfillmentId,
+          trackingInfoInput: $trackingInfoInput,
+          notifyCustomer: $notifyCustomer
+        ) {
+          fulfillment {
+            id
+            trackingInfo {
+              number
+              company
+              url
+            }
+          }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const trimmedNumber = trackingInfo.number.trim();
+    const trimmedCompany = trackingInfo.company.trim();
+    const trimmedUrl =
+      typeof trackingInfo.url === "string" && trackingInfo.url.trim().length > 0
+        ? trackingInfo.url.trim()
+        : undefined;
+
+    const trackingInfoInput: { number: string; company: string; url?: string } = {
+      number: trimmedNumber,
+      company: trimmedCompany,
+    };
+    if (trimmedUrl !== undefined) {
+      trackingInfoInput.url = trimmedUrl;
+    }
+
+    const notifyCustomer =
+      typeof opts.notifyCustomer === "boolean" ? opts.notifyCustomer : true; // D11: default true
+
+    const variables = {
+      fulfillmentId: fulfillmentGid,
+      trackingInfoInput,
+      notifyCustomer,
+    };
+
+    // ---- 4. Issue mutation -----------------------------------------
+    let mutationResult: any;
+    try {
+      mutationResult = await _shopifyClient.request<any>(mutation, variables);
+    } catch (err: any) {
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentTrackingInfoUpdate transport error: ${err?.message ?? String(err)}`,
+        {
+          code: SHOPIFY_TRACKING_UPDATE_NETWORK_ERROR,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          cause: err?.message ?? String(err),
+        },
+      );
+    }
+
+    // ---- 5. Inspect response ---------------------------------------
+    const payload = mutationResult?.fulfillmentTrackingInfoUpdate;
+    const userErrors: ShopifyUserError[] = payload?.userErrors ?? [];
+    const returnedNumber: string | undefined =
+      payload?.fulfillment?.trackingInfo?.number;
+
+    if (userErrors.length > 0) {
+      // Idempotency: case-insensitive substring match on userError
+      // messages. Shopify wording varies, so cast a small net rather
+      // than brittle exact-match.
+      const isAlreadyHasTracking = userErrors.some((e) => {
+        const m = (e?.message ?? "").toLowerCase();
+        return (
+          m.includes("already has this tracking") ||
+          m.includes("already has the same tracking") ||
+          m.includes("already has this tracking number") ||
+          m.includes("tracking number is the same") ||
+          m.includes("tracking info is unchanged")
+        );
+      });
+
+      if (isAlreadyHasTracking) {
+        console.log(
+          `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} already has tracking ${trimmedNumber} — idempotent skip`,
+        );
+        return { fulfillmentGid, trackingNumberChanged: false };
+      }
+
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentTrackingInfoUpdate userErrors: ${userErrors.map((e) => e.message).join("; ")}`,
+        {
+          code: SHOPIFY_TRACKING_UPDATE_USER_ERRORS,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          userErrors,
+        },
+      );
+    }
+
+    // No userErrors — Shopify accepted the update. The returned
+    // tracking number should match what we sent (or echo our input);
+    // either way the caller wants `trackingNumberChanged: true`.
+    if (
+      typeof returnedNumber === "string" &&
+      returnedNumber === trimmedNumber
+    ) {
+      console.log(
+        `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking updated to ${trimmedNumber}`,
+      );
+      return { fulfillmentGid, trackingNumberChanged: true };
+    }
+
+    // Defensive fallthrough: no userErrors and no returned tracking
+    // info. Treat as success — Shopify accepted the call.
+    console.log(
+      `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking update accepted (no echoed trackingInfo)`,
+    );
+    return { fulfillmentGid, trackingNumberChanged: true };
+  }
+
   return {
     pushTracking,
     setEbayClient,
     setShopifyClient,
     pushShopifyFulfillment,
     cancelShopifyFulfillment,
+    updateShopifyFulfillmentTracking,
   };
 }
 
