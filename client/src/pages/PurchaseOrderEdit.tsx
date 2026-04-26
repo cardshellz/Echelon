@@ -1711,10 +1711,14 @@ function NonProductLineRow({
   productLineOptions: Array<{ clientId: string; label: string }>;
 }) {
   const lineType = line.lineType;
-  const allowNegative =
-    lineType === "discount" ||
-    lineType === "rebate" ||
-    lineType === "adjustment";
+  // Adjustment is the only type that's truly signed in the UI — the user
+  // explicitly chooses direction. Discount and rebate are conceptually
+  // negative-only: the user types a positive amount ("5%", "$50") and the
+  // sign is implied by the line type. We auto-negate on update so it's
+  // impossible to save a positive discount.
+  const allowNegative = lineType === "adjustment";
+  const isImplicitNegative =
+    lineType === "discount" || lineType === "rebate";
   const qtyEditable = lineType === "fee";
   const showAppliesTo = lineType === "discount" || lineType === "rebate";
 
@@ -1795,11 +1799,28 @@ function NonProductLineRow({
         )}
       </div>
 
-      {/* Amount (signed for discount/rebate/adjustment) */}
+      {/* Amount (signed for adjustment, auto-negated for discount/rebate) */}
       <div className="col-span-4 md:col-span-2">
         <UnitCostInput
-          mills={line.unitCostMills}
-          onChangeMills={(mills) => onChange({ unitCostMills: mills })}
+          // For discount/rebate, present the amount as a positive number to
+          // the user (the magnitude). The line_type already encodes the sign.
+          // Storage is still negative; we mirror via Math.abs on display and
+          // re-apply the negative on update.
+          mills={
+            isImplicitNegative
+              ? Math.abs(line.unitCostMills)
+              : line.unitCostMills
+          }
+          onChangeMills={(mills) => {
+            if (isImplicitNegative) {
+              // Force negative storage. Math.abs first so the user can't
+              // accidentally enter a negative; then negate.
+              const magnitude = Math.abs(mills);
+              onChange({ unitCostMills: magnitude === 0 ? 0 : -magnitude });
+            } else {
+              onChange({ unitCostMills: mills });
+            }
+          }}
           ariaLabel={`Line ${idx + 1} amount`}
           allowNegative={allowNegative}
         />
