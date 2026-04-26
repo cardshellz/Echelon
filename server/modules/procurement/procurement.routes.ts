@@ -1987,14 +1987,38 @@ export function registerPurchasingRoutes(app: Express) {
         // Inline-lines path. Map snake_case wire format to service's
         // camelCase. Per-unit cost supports both cents (legacy) and mills
         // (4-decimal); the service validator rejects disagreeing pairs.
+        //
+        // Typed lines (migration 0563): forward line_type, client_id,
+        // parent_client_id, and description so the service-layer validator
+        // can apply per-type rules and resolve parentClientId -> parent_line_id
+        // inside the insert transaction. Non-product lines must NOT carry a
+        // product_variant_id (service rejects), so we omit it on the wire
+        // for any non-product line.
         const lines = (req.body.lines as any[]).map((l) => {
           const rawCents = l.unit_cost_cents ?? l.unitCostCents;
           const rawMills = l.unit_cost_mills ?? l.unitCostMills;
+          const lineType = l.line_type ?? l.lineType ?? "product";
+          const variantIdRaw = l.product_variant_id ?? l.productVariantId;
           const out: any = {
-            productVariantId: Number(l.product_variant_id ?? l.productVariantId),
+            // line_type is the dispatch key; default to 'product' for
+            // back-compat callers that don't send it (matches column default).
+            lineType,
+            // Request-time identifier for parent linkage. Service uses this
+            // to resolve parent_line_id after insert. Optional.
+            clientId: l.client_id ?? l.clientId ?? undefined,
+            parentClientId:
+              l.parent_client_id ?? l.parentClientId ?? null,
+            // Description is required for non-product lines (service-enforced).
+            description: l.description ?? null,
+            // Variant only on product lines. Send null for non-product so
+            // the service validator's "variant on non-product" check sees a
+            // clean omission rather than a stale UI value.
+            productVariantId:
+              lineType === "product"
+                ? Number(variantIdRaw)
+                : null,
             orderQty: Number(l.quantity_ordered ?? l.orderQty),
             vendorProductId: l.vendor_product_id ?? l.vendorProductId ?? undefined,
-            description: l.description ?? undefined,
           };
           if (rawCents !== undefined && rawCents !== null) {
             out.unitCostCents = Number(rawCents);

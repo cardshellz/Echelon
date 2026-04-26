@@ -864,15 +864,53 @@ export default function PurchaseOrderEdit() {
   }, [dirty]);
 
   // ── Validation ────────────────────────────────────────────────────────
+  //
+  // Mirrors the server-side validateCreateWithLinesInput rules from
+  // purchasing.service.ts (migration 0563 + typed lines). Each line type
+  // has its own shape, so a single rule per line is wrong: e.g. a discount
+  // line has no productVariantId, has qty == 1, and cost <= 0.
   function validateForSubmit(): string | null {
     if (!selectedVendor) return "Select a vendor before saving.";
     if (lines.length === 0) return "Add at least one line.";
     for (const [idx, l] of lines.entries()) {
-      if (!l.productVariantId) return `Line ${idx + 1}: pick a product.`;
-      if (!Number.isInteger(l.orderQty) || l.orderQty <= 0)
-        return `Line ${idx + 1}: quantity must be a positive integer.`;
-      if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0)
-        return `Line ${idx + 1}: unit cost must be zero or more.`;
+      const label = `Line ${idx + 1}`;
+      const description = (l.description ?? "").trim();
+
+      if (l.lineType === "product") {
+        if (!l.productVariantId) return `${label}: pick a product.`;
+        if (!Number.isInteger(l.orderQty) || l.orderQty <= 0)
+          return `${label}: quantity must be a positive integer.`;
+        if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0)
+          return `${label}: unit cost must be zero or more.`;
+        continue;
+      }
+
+      // Non-product lines all require a description.
+      if (description.length === 0) {
+        return `${label} (${l.lineType}): description required.`;
+      }
+
+      const mills = Number(l.unitCostMills) || 0;
+      const qty = Number(l.orderQty) || 0;
+
+      if (l.lineType === "discount" || l.lineType === "rebate") {
+        if (mills > 0) {
+          return `${label} (${l.lineType}): amount must be zero or negative.`;
+        }
+        if (qty !== 1) {
+          return `${label} (${l.lineType}): quantity must be 1.`;
+        }
+      } else if (l.lineType === "fee") {
+        if (mills < 0) return `${label} (fee): amount must be zero or more.`;
+        if (qty < 1) return `${label} (fee): quantity must be 1 or more.`;
+      } else if (l.lineType === "tax") {
+        if (mills < 0) return `${label} (tax): amount must be zero or more.`;
+        if (qty !== 1) return `${label} (tax): quantity must be 1.`;
+      } else if (l.lineType === "adjustment") {
+        if (qty !== 1) {
+          return `${label} (adjustment): quantity must be 1.`;
+        }
+      }
     }
     return null;
   }
