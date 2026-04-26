@@ -9,6 +9,7 @@ const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...in
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../modules/integrations/shopify";
 import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
+import { webhookRetryQueue } from "@shared/schema";
 import crypto from "crypto";
 import { runReconciliationNow } from "../modules/orders/shopify-order-reconciliation";
 import { sql } from "drizzle-orm";
@@ -1186,6 +1187,11 @@ export function registerShopifyRoutes(app: Express) {
     channelId: number | null;
     shopDomain: string | null;
   }> {
+    // Allow internal worker bypass (mirrors oms-webhooks.ts verifyAndParse)
+    if (req.headers["x-internal-retry"] === process.env.SESSION_SECRET) {
+      return { verified: true, channelId: null, shopDomain: (req.headers["x-shopify-shop-domain"] as string) || null };
+    }
+
     const hmac = req.headers["x-shopify-hmac-sha256"] as string;
     const rawBody = (req as any).rawBody as Buffer | undefined;
     const shopDomain = (req.headers["x-shopify-shop-domain"] as string) || null;
@@ -1416,11 +1422,23 @@ export function registerShopifyRoutes(app: Express) {
       );
       return res.status(result.status).json(result.body);
     } catch (error: any) {
-      // Unhandled — log loud, return 500. Shopify retries automatically;
-      // C30 will add a formal retry queue.
       console.error(
         `[fulfillments/create] unhandled error: ${error?.message ?? error}`,
       );
+      // Enqueue to DLQ for worker retry (C30)
+      try {
+        const { db } = app.locals;
+        await db.insert(webhookRetryQueue).values({
+          provider: "shopify",
+          topic: "fulfillments/create",
+          payload: req.body,
+          lastError: error?.message ?? String(error),
+        });
+      } catch (enqueueErr: any) {
+        console.error(
+          `[fulfillments/create] failed to enqueue retry: ${enqueueErr?.message ?? enqueueErr}`,
+        );
+      }
       return res.status(500).json({ error: "Webhook processing failed" });
     }
   });
@@ -1473,6 +1491,20 @@ export function registerShopifyRoutes(app: Express) {
       console.error(
         `[fulfillments/update] unhandled error: ${error?.message ?? error}`,
       );
+      // Enqueue to DLQ for worker retry (C30)
+      try {
+        const { db } = app.locals;
+        await db.insert(webhookRetryQueue).values({
+          provider: "shopify",
+          topic: "fulfillments/update",
+          payload: req.body,
+          lastError: error?.message ?? String(error),
+        });
+      } catch (enqueueErr: any) {
+        console.error(
+          `[fulfillments/update] failed to enqueue retry: ${enqueueErr?.message ?? enqueueErr}`,
+        );
+      }
       return res.status(500).json({ error: "Webhook processing failed" });
     }
   });

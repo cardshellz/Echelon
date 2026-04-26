@@ -472,6 +472,81 @@ async function processPendingWebhooks() {
       continue;
     }
 
+    // Shopify inbound webhook retry branch (C30) — HTTP loopback with
+    // correct URL mapping per topic. Fulfillments/* live on
+    // /api/shopify/webhooks/*, everything else on /api/oms/webhooks/*.
+    if (item.provider === "shopify") {
+      if (!secret) {
+        console.error(`${LOG_PREFIX} Missing SESSION_SECRET, cannot run shopify loopbacks`);
+        continue;
+      }
+
+      const FULFILLMENT_TOPICS = new Set(["fulfillments/create", "fulfillments/update"]);
+      const KNOWN_TOPICS = new Set([
+        "orders/paid", "orders/updated", "orders/cancelled", "orders/fulfilled",
+        "refunds/create", "fulfillments/create", "fulfillments/update",
+      ]);
+
+      // Unknown topic → dead immediately (non-retryable bad data)
+      if (!KNOWN_TOPICS.has(item.topic)) {
+        console.error(`${LOG_PREFIX} Item ${item.id} unknown shopify topic '${item.topic}' — marking dead`);
+        await defaultDb
+          .update(webhookRetryQueue)
+          .set({ status: "dead", lastError: `Unknown topic: ${item.topic}`, updatedAt: new Date() })
+          .where(eq(webhookRetryQueue.id, item.id));
+        continue;
+      }
+
+      try {
+        console.log(`${LOG_PREFIX} Retrying shopify item ${item.id} (${item.topic}), attempt ${item.attempts + 1}`);
+
+        const basePath = FULFILLMENT_TOPICS.has(item.topic)
+          ? "/api/shopify/webhooks"
+          : "/api/oms/webhooks";
+        const url = `http://127.0.0.1:${process.env.PORT || 5000}${basePath}/${item.topic}`;
+        const payloadDomain = (item.payload as any)?.shop_domain || process.env.SHOPIFY_SHOP_DOMAIN || "echelon-wms.myshopify.com";
+
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-internal-retry": secret,
+            "x-shopify-shop-domain": payloadDomain,
+          },
+          body: JSON.stringify(item.payload),
+        });
+
+        if (res.ok) {
+          await defaultDb
+            .update(webhookRetryQueue)
+            .set({ status: "success", updatedAt: new Date() })
+            .where(eq(webhookRetryQueue.id, item.id));
+          console.log(`${LOG_PREFIX} Item ${item.id} (${item.topic}) succeeded`);
+        } else {
+          throw new Error(`Local API returned ${res.status}`);
+        }
+      } catch (itemErr: any) {
+        const { status, attempts, nextRetryAt } = await recordRetryFailure(
+          defaultDb,
+          item as any,
+          itemErr?.message || String(itemErr),
+        );
+
+        if (status === "dead") {
+          // Shopify-specific dead-letter format for Discord alerter
+          const orderId = (item.payload as any)?.order_id
+            ?? (item.payload as any)?.id
+            ?? "unknown";
+          console.error(
+            `CRITICAL: Shopify Webhook Dead-Lettered\nTopic: ${item.topic}\nOrder: ${orderId}\nLast Error: ${itemErr?.message || String(itemErr)}\nAttempts: ${attempts}\nQueue Row ID: ${item.id}`,
+          );
+        } else {
+          console.warn(`${LOG_PREFIX} Item ${item.id} (${item.topic}) failed again. Next retry at ${nextRetryAt.toISOString()}`);
+        }
+      }
+      continue;
+    }
+
     // Legacy shopify / other providers — HTTP loopback path.
     if (!secret) {
       console.error(`${LOG_PREFIX} Missing SESSION_SECRET, cannot run loopbacks`);
