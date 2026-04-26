@@ -391,9 +391,14 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
   lineNumber: integer("line_number").notNull(), // Sequential for display
 
-  // Product (required — catalog item must exist for full cost chain)
-  productId: integer("product_id").notNull().references(() => products.id),
-  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
+  // Product reference. Nullable since migration 0564 because non-product
+// line types (discount / fee / tax / rebate / adjustment) carry no product.
+// Service-level validation (purchasing.service.validateCreateWithLinesInput)
+// still requires both columns on product lines and forbids them on
+// non-product lines, so the integrity constraint moves from the schema to
+// the service — wider data shape, narrower runtime rule.
+  productId: integer("product_id").references(() => products.id),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id),
   vendorProductId: integer("vendor_product_id").references(() => vendorProducts.id, { onDelete: "set null" }),
   sku: varchar("sku", { length: 100 }), // Cached at creation
   productName: text("product_name"), // Cached
