@@ -24,7 +24,10 @@
  * EXTERNAL_DATABASE_URL, SHIPSTATION_API_KEY/SECRET, etc.)
  */
 
-import "dotenv/config";
+// Note: no `dotenv` import — production dynos load env vars via Heroku
+// runtime; local invocation can rely on the parent shell already having
+// the vars set (e.g. `heroku local` or a manual `export` / `$env:` block).
+// `dotenv` is a devDependency and isn't installed on the production dyno.
 
 // ---------------------------------------------------------------------------
 // CLI arg parsing (no external deps)
