@@ -1,6 +1,6 @@
 # Cutover Runbook — ShipStation/OMS/WMS Refactor
 
-**Last updated:** 2026-04-26
+**Last updated:** 2026-04-27
 **Plan reference:** `shipstation-flow-refactor-plan.md` §10 Rollout Strategy
 **Branch:** `refactor/ss-wms-oms`
 
@@ -10,76 +10,153 @@ This runbook covers the operational steps to safely flip feature flags for the S
 
 ---
 
+## Conventions used throughout this runbook
+
+- **All shell commands assume Windows PowerShell** (the Heroku CLI environment Overlord uses).
+- **`heroku run` requires the `-- "..."` quoted form** to pass flags through to the dyno's command. Without quotes, Heroku CLI eats the flags. Every `heroku run` example here uses the quoted form.
+- **`heroku pg:psql` is not used** because `psql` is not installed locally on the workstation. SQL inspection commands are run from a PostgreSQL GUI client (DBeaver, pgAdmin, TablePlus, etc.) connected directly to the Echelon database.
+- **`Select-String`** is used in place of `grep`.
+
+---
+
 ## 1. Pre-flight checklist
 
 Complete **all** items before starting the flag-flip sequence.
 
 ### 1.1 Deployment verification
 
-- [ ] All commits C1–C37 deployed to `main` on GitHub
+- [ ] All commits C1–C39 deployed to `main` on GitHub
 - [ ] Heroku auto-deploy is green (no failed deploys in Activity tab)
-- [ ] Production database accessible: `heroku run psql $DATABASE_URL -c "SELECT 1"`
+- [ ] Production database accessible: connect via your DB GUI client and run `SELECT 1;` — should return one row.
 
 ### 1.2 Migration verification
 
-Run from Heroku console:
+In your DB client, run:
 
-```bash
-heroku run psql $DATABASE_URL -c "
-  SELECT version, name FROM _migrations
-  WHERE version BETWEEN 058 AND 066
-  ORDER BY version;
-"
+```sql
+SELECT filename, applied_at
+FROM public._migrations
+WHERE filename LIKE '058_%'
+   OR filename LIKE '059_%'
+   OR filename LIKE '060_%'
+   OR filename LIKE '061_%'
+   OR filename LIKE '062_%'
+   OR filename LIKE '063_%'
+   OR filename LIKE '064_%'
+   OR filename LIKE '065_%'
+ORDER BY filename;
 ```
 
-Expected: rows for migrations 058 through 066, all applied.
+Expected: 7 rows (058–064 from the deploy, 065 added manually after dedup — see step 1.4 / 1.5).
 
-- [ ] Migrations 058–066 applied
-- [ ] Reverse migrations (if any) verified as not present
+- [ ] Migrations 058–064 present in `_migrations`
+- [ ] Migration 065 to be added during step 1.5
 
 ### 1.3 Feature flags — all OFF
 
-```bash
-heroku config | grep -E "WMS_FINANCIAL_SNAPSHOT|WMS_SHIPMENT_AT_SYNC|PUSH_FROM_WMS|SHIP_NOTIFY_V2|INBOUND_RECONCILE_V2|RECONCILE_V2|SHOPIFY_FULFILLMENT_PUSH_ENABLED"
+In PowerShell:
+
+```powershell
+heroku config -a cardshellz-echelon | Select-String -Pattern "WMS_FINANCIAL_SNAPSHOT|WMS_SHIPMENT_AT_SYNC|PUSH_FROM_WMS|SHIP_NOTIFY_V2|INBOUND_RECONCILE_V2|RECONCILE_V2|SHOPIFY_FULFILLMENT_PUSH_ENABLED"
 ```
 
-All 7 flags must be `false` or unset.
+**Expected:** no output (Heroku only shows env vars that are explicitly set; absence = unset = default OFF).
 
-- [ ] All flags OFF
+If the command returns rows, set each flag back to false (or unset) before proceeding.
+
+- [ ] All 7 flags OFF (command returned no output)
 
 ### 1.4 Backfills — run in order
 
-```bash
-# 1. Deduplicate OMS orders with duplicate external_order_number
-heroku run npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts --execute
+#### 1.4.1 Deduplicate OMS orders
 
-# 2. Backfill WMS↔OMS link (handles both GID + external_order_number paths)
-heroku run npx tsx scripts/backfill-wms-oms-link.ts --execute
+```powershell
+heroku run -a cardshellz-echelon -- "npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts --dry-run"
 ```
 
-- [ ] Dedup backfill completed with zero unresolvable duplicates
+Review the dry-run output. **The expected pattern:** ~470 duplicate groups exist (pre-fix data from before C39 normalized webhook ingest to numeric format). The dedup script may report errors due to a unique constraint on `oms_order_lines (order_id, external_line_id)` — that's expected.
+
+If the dry-run shows the duplicates pattern documented in `memory/2026-04-27.md`, run the manual SQL cleanup (from that memory note) instead of `--execute`. The dedup script's auto-reassign logic does not handle the case where doomed rows have lines that conflict with kept rows' lines.
+
+After cleanup, verify:
+
+```sql
+-- In your DB client
+SELECT COUNT(*) AS remaining_dupe_pairs
+FROM oms.oms_orders a
+JOIN oms.oms_orders b
+  ON a.channel_id = b.channel_id
+  AND a.external_order_number = b.external_order_number
+  AND a.id != b.id;
+-- Expect 0
+```
+
+- [ ] Dedup completed, remaining_dupe_pairs = 0
+
+#### 1.4.2 Backfill WMS↔OMS link
+
+```powershell
+# DRY-RUN first (defaults to dry-run if no flag)
+heroku run -a cardshellz-echelon -- "npx tsx scripts/backfill-wms-oms-link.ts --dry-run"
+```
+
+Review the summary. Expect roughly:
+- Path A (GID): scanned ~80, matched ~40, orphans ~40
+- Path B (external_order_number): scanned ~54k, matched ~20k, orphans ~34k
+
+Then execute:
+
+```powershell
+heroku run -a cardshellz-echelon -- "npx tsx scripts/backfill-wms-oms-link.ts --execute"
+```
+
 - [ ] WMS↔OMS link backfill completed
+- [ ] Total updated: ~20k (matches dry-run)
 
-### 1.5 Constraint verification
+### 1.5 Constraint verification + apply migration 065
 
-```bash
-# Migration 064 — NOT VALID constraint (exempts legacy orphans)
-heroku run psql $DATABASE_URL -c "
-  SELECT conname, convalidated FROM pg_constraint
-  WHERE conname LIKE '%wms_orders%oms_order_id%';
-"
-# Expect convalidated = false (NOT VALID; this is correct)
+#### 1.5.1 Apply migration 065 (only after 1.4.1 dedup is clean)
 
-# Migration 065 — unique index (only after dedup)
-heroku run psql $DATABASE_URL -c "
-  SELECT indexname FROM pg_indexes
-  WHERE indexname LIKE '%wms_orders%oms_order_id%unique%';
-"
-# Expect the index to exist
+In your DB client, run as a **separate query** (not inside a transaction — `CONCURRENTLY` cannot run inside a tx). If your client auto-wraps in transactions, either disable auto-commit OR drop the `CONCURRENTLY` keyword (the table is small enough that the brief lock is fine):
+
+```sql
+-- Preferred (no table lock):
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uniq_oms_orders_channel_external
+  ON oms.oms_orders (channel_id, external_order_number)
+  WHERE external_order_number IS NOT NULL;
+
+-- Fallback if your client wraps queries in transactions:
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_oms_orders_channel_external
+  ON oms.oms_orders (channel_id, external_order_number)
+  WHERE external_order_number IS NOT NULL;
 ```
 
-- [ ] Migration 064 (NOT VALID constraint) applied
-- [ ] Migration 065 (unique index) applied
+Then record the migration as applied:
+
+```sql
+INSERT INTO public._migrations (filename, content_hash)
+VALUES ('065_oms_orders_unique_channel_external_order_number.sql', 'manual')
+ON CONFLICT DO NOTHING;
+```
+
+#### 1.5.2 Verify both constraints
+
+```sql
+-- Migration 064 — NOT VALID constraint check
+SELECT conname, convalidated
+FROM pg_constraint
+WHERE conname = 'chk_oms_fulfillment_order_id_not_null';
+-- Expect 1 row, convalidated = false (NOT VALID; correct)
+
+-- Migration 065 — unique index check
+SELECT indexname
+FROM pg_indexes
+WHERE indexname = 'uniq_oms_orders_channel_external';
+-- Expect 1 row
+```
+
+- [ ] Migration 064 (NOT VALID constraint) verified
+- [ ] Migration 065 (unique index) applied and verified
 
 ---
 
@@ -89,8 +166,8 @@ The parity check compares Shopify-native ShipStation push payloads against Echel
 
 ### 2.1 Run the check
 
-```bash
-heroku run npx tsx scripts/parity-check-push.ts --limit 50
+```powershell
+heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limit 50"
 ```
 
 **Requirements:**
@@ -121,12 +198,12 @@ heroku run npx tsx scripts/parity-check-push.ts --limit 50
 
 **General pattern for each flip:**
 
-```bash
-heroku config:set FLAG_NAME=true
+```powershell
+heroku config:set FLAG_NAME=true -a cardshellz-echelon
 # Wait for dyno restart (~30s)
-heroku ps  # verify dynos are "up"
-# Monitor for the specified window
-# If issues: heroku config:set FLAG_NAME=false
+heroku ps -a cardshellz-echelon  # verify dynos are "up"
+# Monitor for the specified window (see each flag below)
+# If issues: heroku config:set FLAG_NAME=false -a cardshellz-echelon
 ```
 
 ---
@@ -135,19 +212,24 @@ heroku ps  # verify dynos are "up"
 
 **Why first:** Creates `wms.outbound_shipments` rows at sync time. Nothing reads from this table yet — purely additive. Zero risk to existing flows.
 
-```bash
-heroku config:set WMS_SHIPMENT_AT_SYNC=true
+```powershell
+heroku config:set WMS_SHIPMENT_AT_SYNC=true -a cardshellz-echelon
 ```
 
 **What to watch:**
-- `metric=wms_shipment_at_sync` — rows should be created for new orders
+- `metric=wms_shipment_created` — rows should be created for new orders
 - No `CRITICAL:` log lines
+
+**Live tail:**
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=wms_shipment_created|CRITICAL:"
+```
 
 **Monitoring window:** 1 hour (light monitoring is fine — this flag is very safe)
 
 **Rollback:**
-```bash
-heroku config:set WMS_SHIPMENT_AT_SYNC=false
+```powershell
+heroku config:set WMS_SHIPMENT_AT_SYNC=false -a cardshellz-echelon
 ```
 
 - [ ] Flag ON, dynos healthy, no errors for 1h
@@ -158,20 +240,35 @@ heroku config:set WMS_SHIPMENT_AT_SYNC=false
 
 **Why second:** Populates new financial columns (`total_cents`, `tax_cents`, etc.) on `wms.orders`. Still no read side consumes these — purely additive.
 
-```bash
-heroku config:set WMS_FINANCIAL_SNAPSHOT=true
+```powershell
+heroku config:set WMS_FINANCIAL_SNAPSHOT=true -a cardshellz-echelon
 ```
 
 **What to watch:**
-- New orders should have `wms.orders.total_cents > 0`
-- `metric=wms_financial_snapshot` — successful writes
+- New orders should have `wms.orders.total_cents > 0` (verify in DB client)
+- `metric=wms_financial_snapshot_*` events
 - No `CRITICAL:` log lines
+
+**Live tail:**
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=wms_financial_snapshot|wms_sync_validation_failed|CRITICAL:"
+```
+
+**Verify in DB client:**
+```sql
+-- Recent orders should have non-zero financials
+SELECT id, order_number, total_cents, currency, created_at
+FROM wms.orders
+WHERE created_at > NOW() - INTERVAL '1 hour'
+ORDER BY created_at DESC
+LIMIT 10;
+```
 
 **Monitoring window:** 1 hour
 
 **Rollback:**
-```bash
-heroku config:set WMS_FINANCIAL_SNAPSHOT=false
+```powershell
+heroku config:set WMS_FINANCIAL_SNAPSHOT=false -a cardshellz-echelon
 ```
 Existing rows with populated values are unaffected (they have `0` defaults otherwise).
 
@@ -183,21 +280,26 @@ Existing rows with populated values are unaffected (they have `0` defaults other
 
 **Why third:** Now ShipStation push reads from WMS instead of OMS. This is the first flag that changes **behavior** — push payloads now come from the WMS data model.
 
-```bash
-heroku config:set PUSH_FROM_WMS=true
+```powershell
+heroku config:set PUSH_FROM_WMS=true -a cardshellz-echelon
 ```
 
 **What to watch:**
-- `metric=ss_push_rejected_total` — should be zero
-- `SS_PUSH_INVALID_SHIPMENT` events in Heroku logs — should be zero
-- Push success rate should match pre-flag baseline
-- `metric=push_from_wms` entries in structured logs
+- `metric=ss_push_succeeded` rate steady or higher
+- `metric=ss_push_rejected` — should be near zero
+- `SS_PUSH_INVALID_SHIPMENT` log entries — should be zero
+- Push success rate matches pre-flag baseline
+
+**Live tail:**
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=ss_push_|SS_PUSH_INVALID_SHIPMENT|CRITICAL:"
+```
 
 **Monitoring window:** **24 hours minimum**
 
 **Rollback:**
-```bash
-heroku config:set PUSH_FROM_WMS=false
+```powershell
+heroku config:set PUSH_FROM_WMS=false -a cardshellz-echelon
 ```
 Legacy `pushOrder` path reactivates immediately on next request.
 
@@ -209,21 +311,36 @@ Legacy `pushOrder` path reactivates immediately on next request.
 
 **Why fourth:** SHIP_NOTIFY handler routes to the new shipment-centric v2 path. Supports multi-shipment, void, re-label, address-change, mid-flight cancel-after-label.
 
-```bash
-heroku config:set SHIP_NOTIFY_V2=true
+```powershell
+heroku config:set SHIP_NOTIFY_V2=true -a cardshellz-echelon
 ```
 
 **What to watch:**
-- `wms.outbound_shipments` status transitions should be correct
+- `wms.outbound_shipments` status transitions correct
 - No orphan SHIP_NOTIFY entries in the DLQ
-- `metric=ship_notify_v2` — processed count climbing
+- `metric=ss_ship_notify_processed` climbing
 - `CRITICAL: ship_notify` — should be zero
+
+**Live tail:**
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=ss_ship_notify|ss_ship_notify_dead_letter|CRITICAL:"
+```
+
+**Verify DLQ in DB client:**
+```sql
+SELECT provider, topic, status, COUNT(*) AS rows
+FROM oms.webhook_retry_queue
+WHERE provider = 'shipstation' AND topic = 'SHIP_NOTIFY'
+  AND created_at > NOW() - INTERVAL '24 hours'
+GROUP BY provider, topic, status;
+-- pending+dead should be zero or near-zero
+```
 
 **Monitoring window:** **24 hours minimum**
 
 **Rollback:**
-```bash
-heroku config:set SHIP_NOTIFY_V2=false
+```powershell
+heroku config:set SHIP_NOTIFY_V2=false -a cardshellz-echelon
 ```
 Legacy `processShipNotify` path still exists and reactivates.
 
@@ -235,8 +352,8 @@ Legacy `processShipNotify` path still exists and reactivates.
 
 **Why fifth:** Hourly reconcile now reads from `wms.outbound_shipments` instead of the legacy path.
 
-```bash
-heroku config:set RECONCILE_V2=true
+```powershell
+heroku config:set RECONCILE_V2=true -a cardshellz-echelon
 ```
 
 **What to watch:**
@@ -244,11 +361,16 @@ heroku config:set RECONCILE_V2=true
 - Reconcile job should complete within its cron window
 - `CRITICAL: reconcile` — should be zero
 
+**Live tail:**
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=ss_reconcile_v2|CRITICAL:"
+```
+
 **Monitoring window:** **24 hours minimum**
 
 **Rollback:**
-```bash
-heroku config:set RECONCILE_V2=false
+```powershell
+heroku config:set RECONCILE_V2=false -a cardshellz-echelon
 ```
 Legacy hourly reconcile reactivates.
 
@@ -260,20 +382,25 @@ Legacy hourly reconcile reactivates.
 
 **Why sixth:** Activates the Shopify → OMS → WMS → SS inbound reconciliation cascade (fulfillments, orders, refunds).
 
-```bash
-heroku config:set INBOUND_RECONCILE_V2=true
+```powershell
+heroku config:set INBOUND_RECONCILE_V2=true -a cardshellz-echelon
 ```
 
 **What to watch:**
-- `metric=inbound_reconcile_processed_total` — climbing
-- `metric=inbound_reconcile_error_total` — should be zero or near-zero
+- `metric=shopify_webhook_retry_processed` — climbing
+- `metric=shopify_webhook_dlq_dead_letter` — should be zero or near-zero
 - `CRITICAL: inbound_reconcile` — should be zero
+
+**Live tail:**
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=shopify_webhook|CRITICAL:"
+```
 
 **Monitoring window:** **24 hours minimum**
 
 **Rollback:**
-```bash
-heroku config:set INBOUND_RECONCILE_V2=false
+```powershell
+heroku config:set INBOUND_RECONCILE_V2=false -a cardshellz-echelon
 ```
 Shopify webhooks revert to legacy no-op paths.
 
@@ -285,22 +412,37 @@ Shopify webhooks revert to legacy no-op paths.
 
 **Why last:** This is the big one — Echelon starts pushing fulfillments to Shopify. Shopify-native ShipStation is still running in parallel as a safety net.
 
-```bash
-heroku config:set SHOPIFY_FULFILLMENT_PUSH_ENABLED=true
+```powershell
+heroku config:set SHOPIFY_FULFILLMENT_PUSH_ENABLED=true -a cardshellz-echelon
 ```
 
 **What to watch:**
-- `metric=shopify_fulfillment_push_total{status='success'}` — climbing
-- `metric=shopify_fulfillment_push_total{status='error'}` — trending to zero
+- `metric=shopify_push_succeeded` — climbing
+- `metric=shopify_push_failed` — trending to zero
 - `metric=shopify_push_dead_letter` — DLQ should be empty
-- `CRITICAL: shopify_push` — should be zero
+- `CRITICAL: Shopify Fulfillment Push Dead-Lettered` — should be zero
 - Customer-facing: tracking emails arriving as expected
+
+**Live tail:**
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=shopify_push|CRITICAL:"
+```
+
+**Verify DLQ in DB client:**
+```sql
+SELECT topic, status, COUNT(*) AS rows
+FROM oms.webhook_retry_queue
+WHERE provider = 'internal' AND topic = 'shopify_fulfillment_push'
+  AND created_at > NOW() - INTERVAL '48 hours'
+GROUP BY topic, status;
+-- pending+dead should be zero or near-zero
+```
 
 **Monitoring window:** **48 hours minimum** before proceeding to final cutover
 
 **Rollback:**
-```bash
-heroku config:set SHOPIFY_FULFILLMENT_PUSH_ENABLED=false
+```powershell
+heroku config:set SHOPIFY_FULFILLMENT_PUSH_ENABLED=false -a cardshellz-echelon
 ```
 Shopify-native SS feed is still running in parallel, catches any unfulfilled orders.
 
@@ -328,7 +470,7 @@ Shopify-native SS feed is still running in parallel, catches any unfulfilled ord
 
 **Prerequisites:**
 - [ ] `SHOPIFY_FULFILLMENT_PUSH_ENABLED` has been ON for at least 48 hours
-- [ ] Zero `CRITICAL: shopify_push` log entries in the monitoring window
+- [ ] Zero `CRITICAL: Shopify Fulfillment Push Dead-Lettered` log entries in the monitoring window
 - [ ] `metric=shopify_push_dead_letter` is empty
 - [ ] Final parity check passes (run `parity-check-push.ts` one more time)
 
@@ -363,15 +505,15 @@ Each flag can be rolled back independently. The system is designed so that flipp
 
 ### Per-flag rollback
 
-| Flag | Rollback command | State after rollback |
-|------|-----------------|---------------------|
-| `WMS_SHIPMENT_AT_SYNC` | `heroku config:set WMS_SHIPMENT_AT_SYNC=false` | New orders stop getting `outbound_shipments` rows. Existing rows harmless. |
-| `WMS_FINANCIAL_SNAPSHOT` | `heroku config:set WMS_FINANCIAL_SNAPSHOT=false` | New orders get `0` defaults on financial columns. Existing populated rows unaffected. |
-| `PUSH_FROM_WMS` | `heroku config:set PUSH_FROM_WMS=false` | Push reverts to legacy OMS-based `pushOrder`. Immediate effect on next push. |
-| `SHIP_NOTIFY_V2` | `heroku config:set SHIP_NOTIFY_V2=false` | SHIP_NOTIFY reverts to legacy `processShipNotify`. Shipment rows in WMS are harmless if unused. |
-| `RECONCILE_V2` | `heroku config:set RECONCILE_V2=false` | Hourly reconcile reverts to legacy path. |
-| `INBOUND_RECONCILE_V2` | `heroku config:set INBOUND_RECONCILE_V2=false` | Shopify webhooks revert to legacy no-op paths (known buggy but stable). |
-| `SHOPIFY_FULFILLMENT_PUSH_ENABLED` | `heroku config:set SHOPIFY_FULFILLMENT_PUSH_ENABLED=false` | Echelon stops pushing fulfillments. Shopify-native SS (if still installed) catches orders. |
+| Flag | Rollback command (PowerShell) | State after rollback |
+|------|-------------------------------|---------------------|
+| `WMS_SHIPMENT_AT_SYNC` | `heroku config:set WMS_SHIPMENT_AT_SYNC=false -a cardshellz-echelon` | New orders stop getting `outbound_shipments` rows. Existing rows harmless. |
+| `WMS_FINANCIAL_SNAPSHOT` | `heroku config:set WMS_FINANCIAL_SNAPSHOT=false -a cardshellz-echelon` | New orders get `0` defaults on financial columns. Existing populated rows unaffected. |
+| `PUSH_FROM_WMS` | `heroku config:set PUSH_FROM_WMS=false -a cardshellz-echelon` | Push reverts to legacy OMS-based `pushOrder`. Immediate effect on next push. |
+| `SHIP_NOTIFY_V2` | `heroku config:set SHIP_NOTIFY_V2=false -a cardshellz-echelon` | SHIP_NOTIFY reverts to legacy `processShipNotify`. Shipment rows in WMS are harmless if unused. |
+| `RECONCILE_V2` | `heroku config:set RECONCILE_V2=false -a cardshellz-echelon` | Hourly reconcile reverts to legacy path. |
+| `INBOUND_RECONCILE_V2` | `heroku config:set INBOUND_RECONCILE_V2=false -a cardshellz-echelon` | Shopify webhooks revert to legacy no-op paths (known buggy but stable). |
+| `SHOPIFY_FULFILLMENT_PUSH_ENABLED` | `heroku config:set SHOPIFY_FULFILLMENT_PUSH_ENABLED=false -a cardshellz-echelon` | Echelon stops pushing fulfillments. Shopify-native SS (if still installed) catches orders. |
 
 **Customer impact: minimal** for flags 1–6. The system reverts to the behavior that was working before the flag was on.
 
@@ -383,21 +525,24 @@ For flag 7 (Shopify fulfillment push), if you roll back AFTER disconnecting Shop
 
 If everything goes wrong:
 
-```bash
-# 1. Flip ALL flags off
-heroku config:set \
-  WMS_SHIPMENT_AT_SYNC=false \
-  WMS_FINANCIAL_SNAPSHOT=false \
-  PUSH_FROM_WMS=false \
-  SHIP_NOTIFY_V2=false \
-  RECONCILE_V2=false \
-  INBOUND_RECONCILE_V2=false \
-  SHOPIFY_FULFILLMENT_PUSH_ENABLED=false
+```powershell
+# 1. Flip ALL flags off (one command, multiple values)
+heroku config:set `
+  WMS_SHIPMENT_AT_SYNC=false `
+  WMS_FINANCIAL_SNAPSHOT=false `
+  PUSH_FROM_WMS=false `
+  SHIP_NOTIFY_V2=false `
+  RECONCILE_V2=false `
+  INBOUND_RECONCILE_V2=false `
+  SHOPIFY_FULFILLMENT_PUSH_ENABLED=false `
+  -a cardshellz-echelon
 
 # 2. Re-enable Shopify ShipStation app (if disconnected)
 
-# 3. Monitor DLQ — clear any stuck entries if needed
+# 3. Monitor DLQ — clear any stuck entries if needed (in DB client)
 ```
+
+(The backtick `` ` `` is PowerShell's line-continuation character.)
 
 ### Customer communication template
 
@@ -422,8 +567,8 @@ If customers are affected (e.g., tracking delays):
 **Symptom:** `metric=shopify_push_dead_letter` count increasing.
 
 **Investigation:**
-```bash
-heroku logs --tail | grep "metric=shopify_push_dead_letter"
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String "metric=shopify_push_dead_letter"
 ```
 
 **Common causes:**
@@ -441,8 +586,8 @@ heroku logs --tail | grep "metric=shopify_push_dead_letter"
 **Symptom:** `metric=wms_sync_validation_failed` increasing.
 
 **Investigation:**
-```bash
-heroku logs --tail | grep "metric=wms_sync_validation_failed"
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String "metric=wms_sync_validation_failed"
 ```
 
 **Common causes:**
@@ -451,7 +596,7 @@ heroku logs --tail | grep "metric=wms_sync_validation_failed"
 - Race condition between OMS creation and WMS sync → typically self-resolves on retry
 
 **Remediation:**
-- Check the specific order data in the OMS/wms tables
+- Check the specific order data in the OMS / WMS tables
 - If malformed: fix the upstream data, re-trigger sync
 - If race condition: the retry mechanism should handle it
 
@@ -460,8 +605,8 @@ heroku logs --tail | grep "metric=wms_sync_validation_failed"
 **Symptom:** `metric=ss_reconcile_v2_divergence` increasing.
 
 **Investigation:**
-```bash
-heroku logs --tail | grep "metric=ss_reconcile_v2_divergence"
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String "metric=ss_reconcile_v2_divergence"
 ```
 
 **Common causes:**
@@ -476,16 +621,16 @@ heroku logs --tail | grep "metric=ss_reconcile_v2_divergence"
 
 ### 6.4 Push rejection spike
 
-**Symptom:** `ss_push_rejected_total` increasing, `SS_PUSH_INVALID_SHIPMENT` events.
+**Symptom:** `ss_push_rejected` increasing, `SS_PUSH_INVALID_SHIPMENT` events.
 
 **Investigation:**
-```bash
-heroku logs --tail | grep "SS_PUSH_INVALID_SHIPMENT"
+```powershell
+heroku logs --tail -a cardshellz-echelon | Select-String "SS_PUSH_INVALID_SHIPMENT"
 ```
 
 **Common causes:**
 - WMS order missing shipping address (edge case for certain order types) → check the specific order
-- Combined-orders link missing → check `wms_combined_orders_link` table
+- Combined-orders link missing → check `wms.outbound_shipments` for `combined_role`
 - ShipStation API schema change → check ShipStation API docs
 
 **Remediation:**
@@ -495,22 +640,41 @@ heroku logs --tail | grep "SS_PUSH_INVALID_SHIPMENT"
 
 ---
 
-## Appendix: Log monitoring cheat sheet
+## Appendix A: Log monitoring cheat sheet (PowerShell)
 
-```bash
+```powershell
 # Live stream all relevant metrics
-heroku logs --tail | grep -E "metric=|CRITICAL:"
+heroku logs --tail -a cardshellz-echelon | Select-String -Pattern "metric=|CRITICAL:"
 
 # Specific metric streams
-heroku logs --tail | grep "metric=shopify_push_dead_letter"
-heroku logs --tail | grep "metric=wms_sync_validation_failed"
-heroku logs --tail | grep "metric=ss_reconcile_v2_divergence"
-heroku logs --tail | grep "SS_PUSH_INVALID_SHIPMENT"
-heroku logs --tail | grep "CRITICAL:"
+heroku logs --tail -a cardshellz-echelon | Select-String "metric=shopify_push_dead_letter"
+heroku logs --tail -a cardshellz-echelon | Select-String "metric=wms_sync_validation_failed"
+heroku logs --tail -a cardshellz-echelon | Select-String "metric=ss_reconcile_v2_divergence"
+heroku logs --tail -a cardshellz-echelon | Select-String "SS_PUSH_INVALID_SHIPMENT"
+heroku logs --tail -a cardshellz-echelon | Select-String "CRITICAL:"
 
 # Check dyno health
-heroku ps
+heroku ps -a cardshellz-echelon
 
-# Quick config check
-heroku config | grep -E "WMS_|PUSH_|SHIP_NOTIFY|RECONCILE|SHOPIFY_"
+# Quick config check (all 7 cutover flags at once)
+heroku config -a cardshellz-echelon | Select-String -Pattern "WMS_FINANCIAL_SNAPSHOT|WMS_SHIPMENT_AT_SYNC|PUSH_FROM_WMS|SHIP_NOTIFY_V2|INBOUND_RECONCILE_V2|RECONCILE_V2|SHOPIFY_FULFILLMENT_PUSH_ENABLED"
 ```
+
+---
+
+## Appendix B: Heroku CLI quirks worth knowing
+
+1. **`heroku run` with flags requires the quoted form:**
+   ```powershell
+   # WRONG — Heroku CLI eats the --execute flag:
+   heroku run npx tsx scripts/foo.ts --execute -a cardshellz-echelon
+
+   # RIGHT — quoted command, Heroku passes it through verbatim:
+   heroku run -a cardshellz-echelon -- "npx tsx scripts/foo.ts --execute"
+   ```
+
+2. **`heroku pg:psql` requires `psql` installed locally** — if you don't have psql, run SQL via your DB GUI client instead. All SQL examples in this runbook are written to copy-paste into a GUI.
+
+3. **PowerShell line continuation is backtick `` ` ``** (not `\`). The emergency rollback in §5 uses this for the multi-flag `config:set`.
+
+4. **`-a cardshellz-echelon`** must be on every Heroku command if you don't have it set as a default app. Some PowerShell users `cd` into the repo directory and Heroku auto-detects the app from `.git/config` — but the `-a` flag is always safe.
