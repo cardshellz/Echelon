@@ -82,7 +82,7 @@ interface OmsOrderRow {
   shipstation_order_id: number | null;
   external_order_number: string | null;
   external_order_id: string | null;
-  channel_name: string | null;
+  // (channel name not selected — column lives on channels.name; would require JOIN. Not needed for parity logic.)
 }
 
 interface WmsOrderRow {
@@ -546,7 +546,7 @@ export async function runParityCheck(
   let query;
   if (args.orderId) {
     query = sqlFn`
-      SELECT id, shipstation_order_id, external_order_number, external_order_id, channel_name
+      SELECT id, shipstation_order_id, external_order_number, external_order_id
       FROM oms.oms_orders
       WHERE id = ${args.orderId}
         AND shipstation_order_id IS NOT NULL
@@ -555,7 +555,7 @@ export async function runParityCheck(
     `;
   } else {
     query = sqlFn`
-      SELECT id, shipstation_order_id, external_order_number, external_order_id, channel_name
+      SELECT id, shipstation_order_id, external_order_number, external_order_id
       FROM oms.oms_orders
       WHERE shipstation_order_id IS NOT NULL
         AND created_at > NOW() - INTERVAL '14 days'
