@@ -647,6 +647,31 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * Return the numeric Shopify order ID from a webhook payload, stripping
+ * the GID prefix if present.
+ *
+ * Background: the shopify-bridge path uses numeric format
+ * (shopify_orders.id) and OMS's (channel_id, external_order_id) unique
+ * constraint depends on consistent format. If we store GID here and
+ * numeric there, we get duplicate OMS rows for the same Shopify order
+ * (~470 historical dupes pre-fix).
+ *
+ * Plan ref: post-refactor C39 fix.
+ */
+export function getExternalOrderId(shopifyOrder: any): string {
+  const raw = shopifyOrder?.admin_graphql_api_id || shopifyOrder?.id;
+  if (raw === undefined || raw === null) {
+    throw new Error("getExternalOrderId: missing admin_graphql_api_id and id on payload");
+  }
+  const s = String(raw).trim();
+  const PREFIX = "gid://shopify/Order/";
+  if (s.startsWith(PREFIX)) {
+    return s.substring(PREFIX.length);
+  }
+  return s;
+}
+
 // Register Webhook Routes
 // ---------------------------------------------------------------------------
 //
@@ -724,10 +749,7 @@ export function registerOmsWebhooks(
     }
   }
 
-  // Helper: get Shopify GID as string
-  function getExternalOrderId(shopifyOrder: any): string {
-    return String(shopifyOrder.admin_graphql_api_id || shopifyOrder.id);
-  }
+
 
   // Helper: Get dynamic Channel ID
   async function getChannelId(req: Request, shopifyOrder?: any): Promise<number | null> {
