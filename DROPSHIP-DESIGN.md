@@ -29,7 +29,7 @@
 
 ## 1. Executive Summary
 
-Card Shellz wants to enable resellers (vendors) to list and sell Card Shellz products on their own eBay and Shopify stores, with Card Shellz handling all fulfillment. The vendor never touches product. This is a **blind dropship** model — the end customer sees the vendor's brand, not Card Shellz.
+Card Shellz wants to enable resellers (vendors) to list and sell Card Shellz products on their own eBay and Shopify stores, with Card Shellz handling all fulfillment. The vendor never touches product. This is a **Card Shellz-powered reseller** model — vendors own customer acquisition and storefront merchandising, while Card Shellz fulfillment/packaging/return identity is allowed and expected.
 
 **Why this matters:**
 - Expands sales volume without Card Shellz managing more storefronts
@@ -65,9 +65,9 @@ Card Shellz wants to enable resellers (vendors) to list and sell Card Shellz pro
 │                     CARD SHELLZ WORLD                            │
 │                                                                 │
 │  ┌──────────────┐   ┌───────────┐   ┌───────────────────────┐   │
-│  │ Echelon OMS  │──▶│ WMS picks │──▶│ Ship blind (vendor's  │   │
-│  │ validates &  │   │ packs     │   │ branding or plain     │   │
-│  │ reserves inv │   │ orders    │   │ packing slip)         │   │
+│  │ Echelon OMS  │──▶│ WMS picks │──▶│ Ship Card Shellz      │   │
+│  │ validates &  │   │ packs     │   │ branded fulfillment    │   │
+│  │ reserves inv │   │ orders    │   │ as reseller program)   │   │
 │  └──────────────┘   └───────────┘   └──────────┬────────────┘   │
 │                                                 │               │
 │                                          Tracking number        │
@@ -108,17 +108,17 @@ Vendors log into the Card Shellz Vendor Portal (web app within Echelon) where th
 - See real-time ATP quantities
 - See their wholesale pricing (based on tier)
 - Select which products they want to list on their stores
-- Export selected products in Shopify CSV or eBay CSV format
-- Access the API for programmatic integration
+- Push approved listings directly to the connected vendor store/account
+- Access APIs for programmatic/agent integration
 
-**Feed formats (prioritized):**
+**Feed/listing methods (prioritized):**
 
-| Format | Use Case | Effort |
-|--------|----------|--------|
-| **Shopify CSV export** | Vendor imports into their Shopify store | Low — generate from existing product data |
-| **eBay CSV export** | Vendor imports via eBay File Exchange | Low — map to eBay bulk upload format |
-| **REST API** | Automated integrations, power vendors | Medium — new endpoints |
-| **Shopify app (future)** | Auto-sync products + inventory to vendor's Shopify | High — requires Shopify app approval |
+| Method | Use Case | MVP? |
+|--------|----------|------|
+| **Direct eBay connection/push** | Vendor connects eBay; Card Shellz pushes approved listings | ✅ |
+| **Direct Shopify connection/push** | Vendor connects Shopify; Card Shellz pushes approved listings | ✅ |
+| **REST/agent API** | Automated integrations, future agent commerce | Later |
+| **CSV export** | Admin/manual fallback only, not the primary vendor path | Fallback |
 
 ### 3.2 Product Data Included
 
@@ -138,20 +138,49 @@ For each product/variant in the feed:
 ### 3.3 Inventory Availability in the Feed
 
 - ATP is refreshed on every feed pull or API call
-- Vendors see a **dropship-allocated ATP** — not the full Card Shellz inventory (see Section 5)
-- When ATP hits 0, product shows as "out of stock" in the feed
+- Vendors see **Dropship channel allocated ATP** from Echelon's existing channel allocation engine, not raw inventory and not full Card Shellz ATP.
+- Dropship uses one shared Card Shellz Dropship channel allocation pool for all vendors. Vendor selections/listings sit on top of that pool; vendors are not separate inventory allocation channels.
+- When allocated ATP hits 0, product shows as "out of stock" in the feed
 - Vendors are responsible for delisting or marking OOS on their stores
+
+
+**Implementation requirement:** Dropship catalog, listing push, and vendor portal availability must read from the existing ATP + channel allocation path. Do not calculate dropship availability directly from `inventory.inventory_levels` inside dropship routes.
 
 **Real-time option (Phase 2):** Webhook push when ATP changes for products a vendor has selected. Vendor registers a webhook URL, Card Shellz pushes `{ sku, atp, timestamp }` on every meaningful change.
 
 ### 3.4 Vendor Product Selection
 
-Vendors don't have to list everything. In the portal:
-1. Browse catalog → toggle "List this product" per SKU
-2. Selected products appear in their "My Products" view
-3. Exports only include selected products
-4. ATP webhooks only fire for selected products
-5. Vendor can set their own retail price per SKU in the portal (for reference/tracking — not enforced on their store)
+Vendors don't have to list everything. Selection follows the same override structure as pricing: broad controls first, SKU-level exceptions when needed.
+
+In the portal:
+1. Browse catalog → approve/select at the product level by default
+2. Product-level approval selects all active dropship-eligible SKU variants under that product
+3. Vendors can opt out of specific SKU variants under an approved product
+4. Selected products/SKUs appear in their "My Products" view
+5. Listing push only includes selected SKU variants
+6. ATP webhooks only fire for selected SKU variants
+7. Vendor pricing auto-fills from MAP and follows the pricing override rules in Section 7.5
+
+
+**Data model requirement:** vendor selection is product-level by default, with SKU-level exceptions.
+
+Recommended tables/concepts:
+
+`vendor_product_selections`
+- `vendor_id`
+- `product_id`
+- `enabled`
+- represents: vendor wants this product family/listing group
+
+`vendor_variant_overrides`
+- `vendor_id`
+- `product_variant_id`
+- `enabled_override` nullable
+- `price_override_type` nullable (`percent`, `fixed`)
+- `price_override_value`
+- represents: this SKU differs from product/default rules
+
+Product approval stays simple. SKU exceptions stay precise.
 
 ### 3.5 Image Hosting
 
@@ -164,6 +193,82 @@ Hotlinking is fine for Shopify and eBay. Both platforms allow external image URL
 ---
 
 ## 4. Order Flow
+
+### 4.0 OMS Channel Model
+
+Dropship gets its own OMS channel: **Dropship**. This is distinct from Card Shellz-owned internal sales channels, including Card Shellz's own eBay store/channel.
+
+Vendor marketplace/storefront platforms are vendor-side surfaces under the Dropship program, not separate OMS channels. At launch, vendors may sell through eBay and Shopify; later surfaces may include TikTok, Instagram, BigCommerce, and others. Orders from those vendor surfaces still enter OMS through the Dropship channel.
+
+`vendor_id` identifies the reseller/commercial owner for wallet billing, reporting, permissions, and support. The vendor-side source platform/order reference should be stored as order metadata/source detail, but the OMS channel remains Dropship.
+
+Do not create one OMS channel per vendor and do not conflate vendor eBay activity with Card Shellz's internal eBay channel.
+
+**Idempotency:** dropship OMS order uniqueness must be enforced by a DB-level unique constraint on `(channel_id, external_order_id)`. `vendor_id` is ownership metadata, not part of the primary OMS idempotency boundary.
+
+Dropship-specific source detail should be stored separately from the OMS channel identity:
+- `vendor_id`
+- `source_platform` (`ebay`, `shopify`, etc.)
+- `source_account_id`
+- `source_order_id`
+
+The canonical order ingestion idempotency key remains `(Dropship channel_id, external_order_id)`.
+
+
+### 4.0.1 Vendor Store Connection Model
+
+For MVP, each dropship subscription includes **one connected vendor store/account**. That store may be eBay or Shopify at launch. Later, Card Shellz can offer additional connected stores/accounts as a paid add-on.
+
+The data model should still be store-connection aware rather than hardcoding a single eBay account directly on the vendor record. Store connection records should include:
+- `vendor_id`
+- `source_platform` (`ebay`, `shopify`, later `tiktok`, `instagram`, `bigcommerce`, etc.)
+- `source_account_id` (eBay username, Shopify domain, etc.)
+- OAuth/token/config fields as needed
+- status
+
+MVP policy: enforce one active store connection per subscription/vendor. Future policy: allow multiple active store connections when a paid add-on is enabled.
+
+Connection limits should be entitlement/config driven, not hardcoded:
+- `included_store_connections = 1` for MVP
+- `extra_store_connections_allowed = false` for MVP
+- future paid add-on can increase the allowed active connection count without schema surgery
+
+
+### 4.0.2 Store Token Security and Health
+
+Vendor store OAuth/access tokens are production secrets.
+
+Requirements:
+- Tokens must be encrypted at rest or stored through the existing secrets mechanism.
+- Access/refresh token values must never be returned to the frontend.
+- Store connections need refresh handling and explicit failure states.
+- Vendor and ops portals should show token/store health without exposing token values.
+- Audit events must be written when a store is connected, disconnected, re-authorized, token refresh succeeds, or token refresh fails.
+
+Store health states should include at minimum: `connected`, `needs_reauth`, `refresh_failed`, `disconnected`.
+
+OAuth state security requirements:
+- State must be server-side nonce-backed or HMAC-signed.
+- State must expire quickly.
+- Callback vendor/store connection must match the authenticated vendor/session that initiated OAuth.
+- State must be one-time use.
+- Failed or suspicious OAuth callbacks must be audited.
+
+Never trust a plain vendor ID parsed from OAuth `state` as authorization by itself.
+
+
+### 4.0.3 Store Setup Checklist
+
+Marketplace/store setup must be explicit and visible. Required policy/config setup cannot silently partially fail.
+
+Requirements:
+- Store setup checklist per connected store/platform
+- Required marketplace policies/config validated before listing push
+- Setup failures shown in vendor Action Center
+- Setup blockers visible in ops/admin portal
+- Listing push blocked while required setup is incomplete
+
+For eBay, this includes fulfillment/return/payment/location/category/policy prerequisites needed to create valid listings. If policy seeding or validation fails, record a setup blocker instead of only logging it.
 
 ### 4.1 Order Submission Path
 
@@ -211,10 +316,10 @@ Customer buys on vendor's store
          ┌───────────────────┐
          │ WMS Pick/Pack/Ship│
          │                   │
-         │ • Blind packing   │
-         │   slip (vendor    │
-         │   branding or     │
-         │   plain)          │
+         │ • Card Shellz     │
+         │   branded/standard│
+         │   fulfillment     │
+         │                   │
          │ • Ship via Card   │
          │   Shellz carriers │
          └────────┬──────────┘
@@ -296,27 +401,76 @@ Every dropship order runs through this validation chain (all must pass):
 2. **Vendor standing** — not suspended, not on credit hold
 3. **SKU validation** — all SKUs exist and are active in catalog
 4. **ATP check** — sufficient dropship-allocated inventory for all line items
-5. **Wallet balance** — vendor has funds ≥ wholesale cost + estimated shipping
+5. **Wallet balance** — vendor has funds ≥ full order charge before acceptance
 6. **Ship-to validation** — address is deliverable (basic format check; carrier validates at label time)
 7. **Rate limiting** — prevent bulk spam (100 orders/hour per vendor max)
 
 If any check fails, the order is rejected with a clear error. No partial orders — all items must pass or the whole order is rejected.
 
-### 4.4 Blind Shipment
 
-**Critical requirement:** The customer must NOT know Card Shellz fulfilled the order.
+### 4.3.1 Zero Credit Exposure Requirement
 
-- **Return address:** Configurable per vendor. Options:
-  - Vendor's return address (preferred — customer returns go to vendor)
-  - Card Shellz warehouse (if vendor opts in for return handling)
-  - Plain/generic address
-- **Packing slip options:**
-  - **Plain** — no branding, just items and quantities (default)
-  - **Vendor-branded** — vendor uploads their logo; Card Shellz prints their branded slip
-  - **None** — no packing slip included
-- **No Card Shellz marketing materials** in the box
-- **No Card Shellz pricing** visible anywhere in the package
-- **Shipping label** shows ship-from as vendor's address or Card Shellz warehouse (configurable)
+Card Shellz must have **zero credit exposure** on dropship orders. An accepted dropship order must mean the order is funded and inventory is reserved.
+
+Wallet debit happens at order acceptance/reservation time, not shipment time.
+
+In one transaction:
+1. Validate vendor/store/order/SKUs/allocated ATP
+2. Calculate full vendor charge
+3. Create OMS order under the Dropship channel
+4. Reserve inventory
+5. Debit vendor wallet
+6. Write immutable wallet ledger row
+
+If any step fails, the whole order is rejected/rolled back. No partial OMS order, no unpaid reserve, no shipment without funds.
+
+
+### 4.3.2 Vendor Intake Audit Trail
+
+Vendors need a detailed record of what succeeded, what failed, and why. Failed intake must not disappear silently.
+
+Use a dropship intake/audit record separate from OMS orders:
+- accepted intake → linked OMS order exists
+- rejected intake → no OMS order, but vendor portal shows the rejected attempt and reason
+
+Common rejection/success reasons to expose:
+- accepted/funded/reserved
+- insufficient available wallet balance
+- auto-reload pending or failed
+- insufficient Dropship channel allocated ATP
+- SKU not approved/listed for this vendor
+- invalid or incomplete address
+- duplicate order
+- disconnected store/token issue
+- marketplace/API payload validation error
+
+This preserves OMS cleanliness while giving vendors and Card Shellz a full audit trail.
+
+
+### 4.3.3 Order Intake Processing Jobs
+
+Marketplace order webhooks and polling should create intake events/jobs. The webhook/polling request should not perform long-running fulfillment work directly.
+
+Flow:
+1. Marketplace webhook or poll discovers an order
+2. System writes/updates an idempotent intake event
+3. Intake processor validates vendor/store/order/SKUs/allocated ATP/wallet
+4. Processor attempts the atomic acceptance transaction
+5. Intake record is marked accepted or rejected with detailed reason
+6. Retries are idempotent and never create duplicate OMS orders, reserves, or wallet debits
+
+The acceptance transaction itself must remain atomic: OMS order creation, inventory reservation, wallet debit, and ledger write succeed together or roll back together.
+
+### 4.4 Card Shellz-Powered Fulfillment
+
+**Critical requirement:** This is not blind dropship. It is a Card Shellz-powered reseller program.
+
+- **Return address:** Card Shellz warehouse by default.
+- **Packaging/packing slip:** Card Shellz branded or Card Shellz-standard fulfillment is allowed and expected.
+- **Vendor customer relationship:** Vendor owns customer service and storefront merchandising, but Card Shellz can be visible as fulfillment/return identity.
+- **No vendor-branded packing slips in MVP** unless explicitly added later as a paid/phase feature.
+- **No Card Shellz pricing** visible anywhere in the package.
+- **Shipping label:** Card Shellz warehouse/approved return address.
 
 ### 4.5 Tracking Flow
 
@@ -326,18 +480,20 @@ Card Shellz ships order
          ▼
 Carrier provides tracking number
          │
-         ├──▶ Stored in Echelon OMS (oms_orders, shipments)
+         ├──▶ Stored in Echelon OMS / shipment records
          │
-         ├──▶ Pushed to vendor via:
-         │    • Webhook callback (vendor provides URL)
-         │    • API polling (vendor calls GET /api/dropship/orders/{id})
-         │    • Portal display (vendor checks status in web UI)
+         ├──▶ System pushes tracking back to the vendor's connected store
+         │    (eBay/Shopify at launch; later TikTok/Instagram/BigCommerce/etc.)
          │
-         ▼
-Vendor updates their store
-(vendor's responsibility to push
- tracking to their customer)
+         ├──▶ Vendor portal displays shipment/tracking status
+         │
+         └──▶ If marketplace pushback fails:
+              • create vendor + ops action item
+              • record failure reason
+              • retry through tracking push job
 ```
+
+Vendor should not manually copy tracking unless automation is broken. Portal display is backup/visibility, not the primary tracking delivery path.
 
 **Tracking data provided:**
 - Carrier name (USPS, UPS, FedEx)
@@ -369,7 +525,7 @@ Vendor updates their store
 
 Card Shellz sells through multiple channels: their own Shopify, their own eBay, and now vendor dropship. Inventory must be allocated across these channels.
 
-**Echelon already has an allocation engine** (`allocation-engine.service.ts`, `channel_allocation_rules`). Dropship becomes a new "channel" in this system.
+**Echelon already has an allocation engine** (`allocation-engine.service.ts`, `channel_allocation_rules`). Dropship becomes a new "channel" in this system: one shared Card Shellz Dropship channel allocation pool feeds all vendors. Vendors are reseller/listing surfaces on top of that pool, not independent inventory allocation channels.
 
 ```
 Total On-Hand Inventory
@@ -399,12 +555,11 @@ Total On-Hand Inventory
 ### 5.2 ATP Calculation for Dropship
 
 ```
-Dropship ATP = Dropship Allocation Pool
-             - Active Dropship Reservations
-             - Safety Stock (if any held from dropship)
+Dropship vendor-visible ATP = allocated quantity from the shared Card Shellz Dropship channel
+                      - active reservations/orders already consuming that allocation
 ```
 
-This ties directly into Echelon's existing `atp.service.ts`. Add a `channel_type = 'dropship'` to the channels table, and the allocation engine handles the rest.
+This ties directly into Echelon's existing `atp.service.ts` and `allocation-engine.service.ts`. Add a Dropship channel/allocation rule, then dropship catalog, portal availability, and listing push must consume that channel allocation output. Dropship routes must not calculate availability directly from raw inventory tables.
 
 ### 5.3 Inventory Reservation
 
@@ -431,7 +586,7 @@ When a vendor submits a dropship order:
 | Method | Frequency | Use Case |
 |--------|-----------|----------|
 | API pull (`GET /api/dropship/products`) | On-demand | Vendor checks before listing |
-| CSV export from portal | On-demand | Bulk import to vendor store |
+| Direct listing push job | On approval / retry | Create/update vendor store listings |
 | Webhook push (Phase 2) | Real-time on ATP change | Auto-update vendor store listings |
 
 ---
@@ -617,19 +772,48 @@ Vendor deposits $500
 
 ---
 
+
+### 6.1.1 Available vs Pending Wallet Funds
+
+Zero credit exposure requires separating spendable funds from pending deposits.
+
+Wallet model should distinguish:
+- `available_balance_cents` — settled/spendable funds
+- `pending_balance_cents` — initiated but not yet settled funds
+- ledger entry status: `pending`, `settled`, `failed`
+
+Order acceptance may only use available/settled wallet balance. Pending funds must not reserve inventory, accept orders, or ship product.
+
+Auto-reload behavior:
+- Card auto-reload may continue order acceptance only after Stripe confirms successful payment and wallet credit is settled/available.
+- ACH reload/deposit typically takes 3–5 business days to settle and remains pending until settlement confirmation.
+- If wallet is short and auto-reload is pending or fails, the order is not accepted as funded.
+
+
+### 6.1.2 Wallet Ledger Idempotency
+
+Wallet ledger writes must be rock-solid idempotent. Retries, duplicate webhooks, polling loops, and worker restarts must not double-credit or double-debit.
+
+Required DB constraint:
+- Unique `(reference_type, reference_id)` when `reference_id IS NOT NULL`
+
+Reference conventions:
+- Order debit: `reference_type = dropship_order`, `reference_id = OMS order id` or canonical `(channel_id, external_order_id)` reference
+- Deposit credit: Stripe payment intent/session/charge id
+- Refund credit: original order/return id
+- Manual adjustment: explicit admin adjustment id/reference
+
+Application checks are not enough. Idempotency must be enforced at the database level and handled gracefully in application code.
+
 ## 7. Pricing & Fees
 
 ### 7.1 Wholesale Cost to Vendor
 
-Tied to Shellz Club tier:
+The Shellz Club app / configured member plan is the source of truth for vendor pricing and dropship entitlement. For this program, the relevant configured plan is the `.ops` plan (or whatever Shellz Club plan is configured for that vendor).
 
-| Tier | Membership | Wholesale Discount | Dropship Access |
-|------|-----------|-------------------|-----------------|
-| Shellz Club Standard | $49/yr | 15% off retail | ✅ Included |
-| Shellz Club Pro | $99/yr | 25% off retail | ✅ Included + branded packing slips |
-| Shellz Club Elite | $199/yr | 30% off retail + priority allocation | ✅ Included + all features |
+Echelon must not maintain independent hardcoded tier discount maps. Echelon should read/sync the vendor's current Shellz Club plan/entitlements and use that plan configuration to calculate wholesale cost.
 
-**Note:** These tiers are illustrative. Align with whatever Shellz Club tiers currently exist. The point: membership tier determines wholesale pricing, dropship access comes with membership.
+At order acceptance, Echelon must snapshot the plan/entitlement values used for auditability so later Shellz Club plan changes do not rewrite historical order economics.
 
 ### 7.2 Fee Structure
 
@@ -637,9 +821,8 @@ Tied to Shellz Club tier:
 |-----|--------|-------------|-------|
 | **Wholesale cost** | Tier-based | Per order (wallet debit) | The product cost |
 | **Fulfillment fee** | $1.50/order + $0.25/item | Per order (wallet debit) | Covers pick/pack labor |
-| **Shipping cost** | Pass-through at Card Shellz negotiated rate | Per order (wallet debit) | Card Shellz's USPS/UPS rates — vendor gets the benefit of Card Shellz's volume discounts |
+| **Shipping cost** | Fixed dropship shipping fee schedule | Per order at acceptance/reservation | Known upfront to preserve zero credit exposure; no label-cost reconciliation in MVP |
 | **Platform fee** | $0 (included in membership) | — | Shellz Club membership IS the platform fee |
-| **Branded packing slip** | $0.50/order | Per order (wallet debit) | Only if vendor opts for branded slips |
 | **Returns processing** | $3.00/return | Per return (wallet debit) | See Section 8 |
 
 ### 7.3 Example Economics
@@ -657,6 +840,110 @@ Tied to Shellz Club tier:
 | **Net per order** | **$5.00 profit** | **$11.99 revenue** (wholesale + fulfillment + shipping) |
 
 Card Shellz's COGS on the product might be $4-5 for a 25-pack of toploaders, so Card Shellz nets ~$7 gross margin on the fulfillment. The vendor nets $5. Everyone wins.
+
+
+
+### 7.4.1 MVP Shipping Charge Rule
+
+MVP uses a fixed dropship shipping fee schedule by service/package class. Shipping is charged at order acceptance/reservation time along with product wholesale and any fulfillment fees.
+
+Do not wait for final carrier label cost to bill the vendor in MVP. Avoid estimated-shipping reconciliation and micro debits/credits.
+
+This preserves zero credit exposure and keeps order acceptance deterministic.
+
+### 7.5 Vendor Listing Price Rules
+
+Vendor listing prices are auto-filled from MAP, then vendors can approve all, approve by category, or fine-tune by SKU before pushing listings.
+
+**MAP baseline:** Card Shellz retail price before discounts. Site sales/promos do not lower vendor MAP.
+
+**Pricing source of truth:** Shellz Club plan configuration, specifically the vendor's configured `.ops`/dropship-entitled plan, owns wholesale discount and entitlement. Echelon consumes that configuration and snapshots the values used at order acceptance.
+
+
+**Override precedence:**
+1. Catalog/global markup percentage
+2. Category/product-type markup percentage
+3. SKU-level override
+
+The most specific rule wins. All resolved prices must be `>= MAP`.
+
+**Allowed override types:**
+- Global/catalog: percentage only
+- Category/product-type: percentage only
+- SKU: percentage or fixed dollar price
+
+Fixed dollar prices are intentionally limited to SKU-level overrides because global/category fixed prices behave badly across products with different retail prices.
+
+Pricing rules should be separate from listing approval/selection. Recommended table/concept:
+
+`vendor_pricing_rules`
+- `vendor_id`
+- `scope` (`global`, `category`, `product`, `variant`)
+- `scope_id` nullable depending on scope
+- `rule_type` (`percent`, `fixed`)
+- `value`
+- specificity/priority metadata
+- timestamps
+
+Listing resolution flow:
+1. Check product selection
+2. Apply SKU opt-out/override if present
+3. Resolve price rule by most-specific scope
+4. Validate final advertised product price against MAP
+5. Generate listing preview for vendor approval
+
+The portal must show the resolved price source, for example: `Price: $24.99, from SKU fixed override` or `Price: $17.24, from Toploaders +20% rule`.
+
+The portal may show computed margin/profit based on the vendor's chosen listing price and known Card Shellz charges. This is informational only, not a suggested price.
+
+Show:
+- wholesale product cost
+- fixed shipping charge
+- fulfillment/return fees when applicable
+- MAP floor
+- vendor chosen listing price
+- computed gross margin/profit based on chosen price
+
+Do not recommend a margin or suggested listing price beyond auto-filling MAP.
+
+
+### 7.6 Listing Preview and Approval Flow
+
+Listing push must not be a direct "select products then push" action. The portal needs a first-class preview/approval step.
+
+Recommended flow:
+1. Vendor selects products
+2. Vendor configures pricing rules
+3. System generates fresh listing preview
+4. Preview validates each SKU:
+   - selected SKU and not opted out
+   - Dropship channel allocated ATP available
+   - MAP pass/fail
+   - title/images/category/policies present
+   - resolved price and price source
+5. Vendor approves all, approves by category, or approves by SKU
+6. Push creates/updates external listings
+
+Preview should be computed fresh from current catalog, MAP, pricing rules, selection rules, and channel allocation output. Persist actual `vendor_listings` state only after an external push succeeds.
+
+Reason: previews become stale quickly as ATP, MAP, catalog data, or rules change. Persisting preview rows as source of truth invites drift.
+
+
+### 7.6.1 Listing Push Jobs
+
+External marketplace listing push should not run directly inside a request/route flow. Use a job-based push model.
+
+Flow:
+1. Vendor approves listing preview
+2. System creates a listing push job
+3. Worker pushes listings to the connected marketplace/store
+4. Each SKU records success/failure details
+5. Vendor sees progress and results
+6. Failed SKUs can be retried safely
+
+Each listing target needs an idempotency key, for example `(vendor_store_connection_id, product_variant_id, target_platform)`, so retries update/continue the intended listing instead of creating duplicates.
+
+This prevents request timeouts, supports partial marketplace failures, and gives vendors/admins the audit trail needed for support.
 
 ### 7.4 Shipping Rate Tiers
 
@@ -818,12 +1105,12 @@ Vendor may request wallet credit (treated as a return — see Section 8)
 │  │  └──────────────┘  └──────────────┘  └────────────┘  │    │
 │  │                                                      │    │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  │    │
-│  │  │ Product Feed │  │ Packing Slip │  │ Tracking   │  │    │
-│  │  │ API          │  │ Generator    │  │ Callback   │  │    │
+│  │  │ Product Feed │  │ Store Setup  │  │ Tracking   │  │    │
+│  │  │ API          │  │ + Listings   │  │ Callback   │  │    │
 │  │  │              │  │              │  │            │  │    │
-│  │  │ • Catalog    │  │ • Plain      │  │ • Webhook  │  │    │
-│  │  │ • ATP        │  │ • Branded    │  │ • Polling  │  │    │
-│  │  │ • CSV export │  │ • PDF render │  │ • Email    │  │    │
+│  │  │ • Catalog    │  │ • Policies   │  │ • Webhook  │  │    │
+│  │  │ • ATP alloc  │  │ • Preview    │  │ • Polling  │  │    │
+│  │  │ • Push jobs  │  │ • Audit      │  │ • Email    │  │    │
 │  │  └──────────────┘  └──────────────┘  └────────────┘  │    │
 │  └──────────────────────────────────────────────────────┘    │
 │                                                             │
@@ -834,10 +1121,10 @@ Vendor may request wallet credit (treated as a return — see Section 8)
 │  │                                                      │    │
 │  │  Pages:                                              │    │
 │  │  • Dashboard (orders, balance, recent activity)      │    │
-│  │  • Product Catalog (browse, select, export)          │    │
+│  │  • Product Catalog (browse, select, preview/push)    │    │
 │  │  • My Orders (status, tracking)                      │    │
 │  │  • Wallet (balance, deposit, history)                │    │
-│  │  • Settings (API keys, webhook URLs, packing slip)   │    │
+│  │  • Settings (store connection, wallet, webhooks)      │    │
 │  │  • Returns (RMA requests)                            │    │
 │  └──────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
@@ -848,10 +1135,10 @@ Vendor may request wallet credit (treated as a return — see Section 8)
 | Table | Purpose |
 |-------|---------|
 | `dropship_vendors` | Vendor accounts (linked to `members` for Shellz Club) |
-| `dropship_vendor_settings` | Per-vendor config (webhook URL, packing slip preference, return address) |
+| `dropship_vendor_settings` | Per-vendor config (webhook URL, notification/settings) |
 | `dropship_api_keys` | API authentication keys per vendor |
 | `dropship_product_selections` | Which products each vendor has selected to list |
-| `dropship_orders` | Dropship-specific order metadata (vendor_id, vendor_order_ref, packing_slip_type). Links to `oms_orders`. |
+| `dropship_order_intake` | Intake/audit records for accepted and rejected marketplace orders. Accepted records link to `oms_orders`. |
 | `dropship_wallet_ledger` | Full wallet transaction history (deposits, debits, credits, adjustments) |
 | `dropship_wallet_balances` | Current balance per vendor (materialized from ledger) |
 | `dropship_returns` | RMA tracking |
@@ -872,8 +1159,6 @@ Vendor may request wallet credit (treated as a return — see Section 8)
 | `GET` | `/api/dropship/wallet/transactions` | Transaction history |
 | `POST` | `/api/dropship/wallet/deposit` | Initiate deposit (Stripe checkout or ACH) |
 | `POST` | `/api/dropship/returns` | Create RMA request |
-| `GET` | `/api/dropship/export/shopify` | Export selected products as Shopify CSV |
-| `GET` | `/api/dropship/export/ebay` | Export selected products as eBay CSV |
 
 All endpoints authenticated via API key (header: `X-Dropship-Key`) or JWT (Bearer token from portal login).
 
@@ -885,26 +1170,136 @@ All endpoints authenticated via API key (header: `X-Dropship-Key`) or JWT (Beare
 | **Allocation Engine** (`allocation-engine.service.ts`) | New channel type `dropship`. Allocation rules configured via existing UI. |
 | **ATP** (`atp.service.ts`) | Dropship ATP = allocation pool - reservations. Uses existing ATP logic. |
 | **OMS** (`oms_orders`, `oms_order_lines`) | Dropship orders create OMS orders with `channel = 'dropship'`, `source_vendor_id = vendor.id`. |
-| **WMS** (pick/pack/ship flow) | Dropship orders enter the same pick queue. WMS doesn't care about the channel — it just picks and packs. Packing slip generation is the only WMS-visible difference. |
+| **WMS** (pick/pack/ship flow) | Dropship orders enter the same pick queue. WMS picks/packs using Card Shellz-standard fulfillment. |
 | **Reservation** (`reservation.service.ts`) | Dropship orders create reservations same as any channel order. |
-| **Shipping** | Same label generation. Return address and packing slip differ per vendor config. |
+| **Shipping** | Same label generation. Card Shellz warehouse/approved return address for MVP. |
 | **Shellz Club** (`members`, `member_subscriptions`) | Vendor account linked to member record. Membership status gates dropship access. |
 
-### 10.5 Packing Slip Generation
+### 10.5 Fulfillment Presentation
 
-**New component:** A packing slip renderer that accepts:
-- Order details (items, quantities)
-- Vendor config (logo URL, company name, or "plain")
-- Output: PDF for printing during pack step
+No custom packing slip generator is required for MVP. Dropship orders use Card Shellz-standard/branded fulfillment.
 
-**WMS integration:** When packer scans an order that's tagged as dropship:
-- System fetches vendor's packing slip preference
-- Generates appropriate slip (plain or vendor-branded)
-- Prints on pack station printer
+Requirements:
+- No vendor-branded packing slips in MVP
+- No product pricing visible in the package
+- Card Shellz warehouse/approved return address
+- WMS should not need a separate pack flow beyond identifying the order as Dropship for any required handling notes
 
-This is the **only WMS workflow change** for dropship orders.
+### 10.6 Vendor Portal Home UX
 
----
+The vendor portal home should do both: surface urgent blockers and show business performance.
+
+**Top: Action Center**
+Revenue-blocking or attention-needed items appear first:
+- low available wallet balance / pending ACH funds
+- store disconnected or token/auth issue
+- listing preview validation failures
+- rejected order intake records with reason
+- products/SKUs out of Dropship channel allocated ATP
+- marketplace push failures
+
+**Below: Performance Dashboard**
+Business metrics and trend views:
+- sales/orders count
+- gross customer revenue reported by vendor marketplace when available
+- wallet spend
+- top products
+- accepted vs rejected orders
+- fulfillment status
+- trend over time
+
+Principle: actionability first, performance second. Blockers cost money immediately, but vendors still need stats to judge whether the program is working.
+
+
+### 10.7 Admin/Ops Portal UX
+
+The internal Card Shellz ops portal should mirror the vendor audit trail from an operator perspective. It should aggregate vendor health, revenue blockers, and program performance by severity.
+
+Ops views should include:
+- vendors with blocked revenue
+- rejected intake reasons by vendor and reason code
+- low available wallet / pending ACH
+- marketplace push failures
+- disconnected stores or expired tokens
+- top vendors by order volume
+- accepted vs rejected orders
+- products/SKUs causing repeated listing or ATP issues
+- zero-credit-exposure status: no accepted orders without settled funds and reserve
+
+Principle: ops should be able to answer, "Who needs attention, why, and how much revenue is blocked?" without digging through logs.
+
+
+### 10.8 No Hardcoded Business Rules
+
+Dropship implementation should avoid hardcoded business rules whenever possible. Business configuration must live in the owning system, database config, or explicit environment/config records.
+
+Examples that must not be hardcoded in production code:
+- wholesale discounts / tier behavior (owned by Shellz Club `.ops` or configured member plan)
+- channel IDs (lookup Dropship/internal eBay/etc. by stable key/slug/provider, not numeric ID)
+- vendor portal URLs except local-dev defaults
+- eBay policy names/location data
+- fixed shipping fee schedule
+- product selection limits
+- order rate limits
+- store connection limits
+
+Rules:
+- Code may have safe local-development defaults only.
+- Production behavior requires explicit config/source-of-truth data.
+- Hardcoded numeric channel IDs are prohibited.
+- Any fallback used in production must fail closed or surface an ops blocker, not silently guess.
+
+
+### 10.9 Application Use Cases / Clean Architecture
+
+Dropship implementation should be organized around application use cases. Routes/controllers should validate DTOs/auth and call use cases; they should not contain business logic, pricing logic, ATP calculations, wallet math, or external marketplace orchestration.
+
+Recommended use cases:
+- `GenerateVendorListingPreview`
+- `CreateListingPushJob`
+- `ProcessListingPushJob`
+- `RecordMarketplaceOrderIntake`
+- `AcceptDropshipOrder`
+- `CreditWalletDeposit`
+- `DebitWalletForOrder`
+- `RefreshStoreToken`
+- `PushTrackingToVendorStore`
+
+Each use case should have explicit inputs/outputs, deterministic validation, structured errors, and tests.
+
+Implementation warning: do not patch more business logic into large route files. Current route-level SQL/pricing/ATP/eBay/Stripe mixing should be refactored into domain/application/infrastructure layers before launch.
+
+
+### 10.10 Required Test Coverage
+
+Dropship launch requires tests for the financial/order/listing failure modes, not just happy paths.
+
+Required coverage:
+- pricing source of truth from Shellz Club `.ops` / configured dropship-entitled plan
+- integer money math, no floating point currency calculations
+- MAP enforcement
+- pricing override precedence
+- product selection + SKU opt-out
+- listing preview validation
+- listing push idempotency and retry behavior
+- order intake idempotency
+- wallet debit/credit idempotency
+- pending ACH not spendable
+- zero-credit transaction rollback
+- Dropship allocated ATP path; no raw inventory ATP calculation in dropship routes/use cases
+- tracking push retry/failure audit
+- OAuth state validation and token health states
+
+Tests should include unit tests for domain/use-case logic and integration tests for DB constraints/transactions. External marketplace and Stripe calls must be mocked.
+
+
+### 10.11 Implementation Direction: Clean Restart
+
+The current dropship backend should be treated as prototype/scaffold/reference only, not the production foundation. Starting over for the dropship module is cleaner than patching the prototype.
+
+Keep only useful reference snippets, such as eBay API call shapes, wallet locking concepts, and portal UI ideas. Rebuild production code around the updated design, clean use cases, shared Dropship channel allocation, Shellz Club `.ops` source-of-truth pricing, zero-credit wallet semantics, job-based marketplace operations, and DB-level idempotency.
+
+See `DROPSHIP-IMPLEMENTATION-DELTA.md` for the dev-ready implementation delta.
 
 ## 11. Legal Framework
 
@@ -914,8 +1309,10 @@ The **Card Shellz Authorized Reseller & Dropship Agreement** should cover:
 
 1. **Authorized Channels** — Vendor must declare where they sell (eBay store URL, Shopify domain). Sales on undeclared channels are a violation.
 
-2. **MAP Policy (Minimum Advertised Price)** — Optional but recommended. Sets a floor price vendors can advertise. Protects Card Shellz brand and prevents a race to the bottom.
-   - Recommendation: Set MAP at 10% below Card Shellz retail. Vendors can sell for more but not less.
+2. **MAP Policy (Minimum Advertised Price)** — Required. Sets a floor price vendors can advertise. Protects Card Shellz brand and prevents a race to the bottom.
+   - MAP equals Card Shellz retail price before discounts. Card Shellz sales/promos do not lower vendor MAP.
+   - Vendors may advertise above MAP, but never below MAP.
+   - Shipping is vendor-side merchandising: Card Shellz charges the vendor wholesale + fulfillment/shipping costs; vendors decide what they charge their own customers for shipping.
    - Enforcement: First violation = warning. Second = 30-day suspension. Third = termination.
 
 3. **Product Listing Standards** — Vendors must use Card Shellz product descriptions and images. No modifications to descriptions that misrepresent the product. Vendor can add their own branding to listings.
@@ -952,13 +1349,12 @@ The **Card Shellz Authorized Reseller & Dropship Agreement** should cover:
 - [ ] Wallet: manual deposits (Card Shellz admin adds balance), auto-debit on order
 - [ ] Dropship channel in allocation engine (10% pool)
 - [ ] OMS integration: dropship orders flow into existing pick/pack/ship
-- [ ] Plain packing slips (no vendor branding yet)
+- [ ] Card Shellz-standard/branded fulfillment handling notes
 - [ ] Tracking callback (webhook push to vendor)
 
 **Skip for now:**
 - Vendor portal UI (vendors use API + Card Shellz manually manages accounts)
-- CSV exports
-- Branded packing slips
+- Vendor-facing CSV exports (direct push is the primary flow)
 - Auto-deposit / Stripe funding
 - Returns portal
 
@@ -976,10 +1372,9 @@ The **Card Shellz Authorized Reseller & Dropship Agreement** should cover:
   - Dashboard, product catalog browser, order history, wallet management
 - [ ] Stripe-based wallet funding (credit card deposits)
 - [ ] ACH deposits via Stripe
-- [ ] Shopify CSV export
-- [ ] eBay CSV export
+- [ ] Direct Shopify connection/push
+- [ ] Direct eBay connection/push
 - [ ] Vendor self-registration (linked to Shellz Club membership)
-- [ ] Branded packing slip generation (vendor uploads logo)
 - [ ] Returns / RMA portal
 
 **Onboard:**
@@ -1090,9 +1485,9 @@ Overlord has expressed interest in USDC/crypto as a future payment rail. Here's 
 | 1 | Payment model | Prepaid Wallet (Option C) for MVP | Eliminates credit risk |
 | 2 | Access gate | Shellz Club membership required | Leverages existing member base |
 | 3 | Dropship allocation | 10% of inventory pool, shared across vendors | Protects direct sales |
-| 4 | MAP policy | Yes, 10% below retail floor | Prevents race to bottom |
+| 4 | MAP policy | Yes, equal to Card Shellz retail before discounts | Prevents race to bottom and protects direct storefront pricing |
 | 5 | Fulfillment fee | $1.50/order + $0.25/item | Covers labor cost |
-| 6 | Packing slips | Plain (MVP), Vendor-branded (Phase 1) | Maintains blind shipment |
+| 6 | Packing slips | Card Shellz-standard/branded fulfillment for MVP | Supports Card Shellz-powered reseller positioning |
 | 7 | First vendors | 3-5 existing Shellz Club members | Known quantities, low risk |
 | 8 | Shipping pricing | Pass-through at Card Shellz rate | Transparent, no margin games |
 | 9 | Return policy | Vendor handles customer; Card Shellz credits wallet if product returned | Clean separation |
@@ -1350,6 +1745,25 @@ The original doc (Section 8) describes three return paths. **Simplified and upda
 
 > Replaces Section 12. This phased plan reflects the corrected design decisions from Section 16 and the unified commerce vision from Section 15.
 
+
+### 17.1 Recommended Build Sequence After Design Review
+
+Do not continue patching the started backend route files as-is. The design now depends on clean use cases, shared allocation, idempotent jobs, and zero-credit wallet semantics.
+
+Recommended sequence:
+1. Data model + migrations
+2. Clean use-case layer
+3. Pricing/entitlement adapter from Shellz Club `.ops` / configured dropship-entitled plan
+4. Shared Dropship channel allocation integration
+5. Listing preview endpoint
+6. Listing push jobs
+7. Wallet available/pending balances + ledger idempotency
+8. Order intake jobs + atomic order acceptance
+9. Tracking push jobs
+10. Vendor/admin portal polish
+
+Reason: avoid building UI or marketplace flows on backend assumptions that were invalidated by this review.
+
 ### Phase 0: Foundation (4 weeks)
 
 **Goal:** Prove the core loop — vendor connects eBay → products push to their store → customer buys → Card Shellz fulfills → tracking flows back.
@@ -1437,7 +1851,7 @@ The original doc (Section 8) describes three return paths. **Simplified and upda
 - [ ] Shopify vendor support — OAuth for Shopify stores, push listings to vendor's Shopify, pull orders from vendor's Shopify
 - [ ] Vendor analytics dashboard — sales volume, top products, margin analysis, fulfillment speed metrics
 - [ ] Agent commerce API — `agents.json` at cardshellz.com, OpenAPI spec, `llms.txt` for agent discoverability
-- [ ] MAP enforcement tooling — automated listing price monitoring, violation alerts, escalation workflow
+- [ ] MAP enforcement tooling — pre-push validation in MVP; automated live listing monitoring, violation alerts, escalation workflow in Phase 2
 - [ ] Per-vendor allocation limits (if needed based on Phase 1 data)
 - [ ] Vendor tier system — automated tier progression based on order history
 
