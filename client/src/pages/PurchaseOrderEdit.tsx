@@ -1772,10 +1772,33 @@ function NonProductLineRow({
 
   return (
     <div className="grid grid-cols-12 gap-2 items-start bg-muted/20 border border-dashed rounded-md p-2">
-      {/* Description + chip */}
-      <div className="col-span-12 md:col-span-6 space-y-1">
+      {/* Chip + description on a single row so the qty/cost cells line
+          up across product and non-product rows. The chip is a small
+          flex-shrink-0 element on the left; the description input grows
+          to fill the remaining space. The 'Applies to' control (only on
+          discount/rebate) sits inline on the right of the description in
+          the same row. */}
+      <div className="col-span-12 md:col-span-6">
         <div className="flex items-center gap-2">
           <LineTypeChip lineType={lineType} />
+          <Input
+            value={line.description}
+            onChange={(e) => onChange({ description: e.target.value })}
+            placeholder={
+              lineType === "discount"
+                ? "Vendor promo, volume discount, etc."
+                : lineType === "fee"
+                ? "Freight, tooling, small-order fee, etc."
+                : lineType === "tax"
+                ? "Sales tax, VAT, etc."
+                : lineType === "rebate"
+                ? "Loyalty / volume rebate"
+                : "Reason for adjustment"
+            }
+            aria-label={`Line ${idx + 1} description`}
+            data-testid={`input-line-description-${idx}`}
+            className="flex-1 min-w-0"
+          />
           {showAppliesTo && (
             <Select
               value={line.parentClientId ?? "__all__"}
@@ -1784,7 +1807,7 @@ function NonProductLineRow({
               }
             >
               <SelectTrigger
-                className="h-7 w-auto px-2 text-xs"
+                className="h-9 w-auto px-2 text-xs flex-shrink-0"
                 data-testid={`select-parent-line-${idx}`}
               >
                 <SelectValue placeholder="Applies to..." />
@@ -1800,23 +1823,6 @@ function NonProductLineRow({
             </Select>
           )}
         </div>
-        <Input
-          value={line.description}
-          onChange={(e) => onChange({ description: e.target.value })}
-          placeholder={
-            lineType === "discount"
-              ? "Vendor promo, volume discount, etc."
-              : lineType === "fee"
-              ? "Freight, tooling, small-order fee, etc."
-              : lineType === "tax"
-              ? "Sales tax, VAT, etc."
-              : lineType === "rebate"
-              ? "Loyalty / volume rebate"
-              : "Reason for adjustment"
-          }
-          aria-label={`Line ${idx + 1} description`}
-          data-testid={`input-line-description-${idx}`}
-        />
       </div>
 
       {/* Qty */}
