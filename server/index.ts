@@ -20,6 +20,7 @@ import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
+import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
 import { pool as dbPool } from "./db";
@@ -660,48 +661,226 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     setInterval(runOmsWmsReconcile, 60 * 60 * 1000);
   }
 
-  // WMS<->ShipStation reconciliation — catches cases where an order got
-  // shipped/cancelled/refunded in Shopify (native connector shipped it, or
-  // customer cancelled) but Echelon's copy in ShipStation is still in
-  // Awaiting Shipment. Reads from WMS (source of truth) and syncs to
-  // ShipStation. Hourly sweep.
+  // WMS<->ShipStation reconciliation.
+  //
+  // V2 (RECONCILE_V2=true): reads from wms.outbound_shipments (source of
+  // truth after C8/C12/C15). Each shipment owns its own shipstation_order_id;
+  // we fetch SS state and dispatch via the shipment-rollup helpers
+  // (markShipmentShipped/Cancelled/Voided), then recompute order status.
+  // Tracks freshness via outbound_shipments.last_reconciled_at.
+  //
+  // V1 (default, RECONCILE_V2 unset/false): legacy path joins wms.orders →
+  // oms.oms_orders and calls ss.markAsShipped / ss.cancelOrder directly.
+  // Retained for rollback safety; remove after V2 soak.
   if (process.env.DISABLE_SCHEDULERS !== 'true') {
-    const runShipStationReconcile = async () => {
+
+    // ── V2: shipment-based reconcile ────────────────────────────────────
+    const runShipStationReconcileV2 = async () => {
       try {
         const ss = (services as any).shipStation;
         if (!ss?.isConfigured()) return;
 
-        // Find WMS orders that are shipped/cancelled but their linked OMS
-        // order still has a shipstation_order_id that hasn't been reconciled.
-        // Join wms.orders → oms.oms_orders via oms_fulfillment_order_id.
-        //
-        // The JOIN is disjunctive — `wms.orders.oms_fulfillment_order_id` is a
-        // varchar(128) that historically holds TWO distinct shapes:
-        //
-        //   Path A (numeric) — the canonical, current shape. Populated by
-        //     wms-sync.service.ts:syncOmsOrderToWms() as `omsOrder.id` cast to
-        //     text. JOIN on `o.id = w.oms_fulfillment_order_id::int`.
-        //
-        //   Path B (Shopify GID) — ~53k historical shopify-source rows +
-        //     ~9 ebay-source rows store `gid://shopify/Order/NNN`. These were
-        //     invisible to the reconcile prior to this change. JOIN on
-        //     `o.external_order_id = w.oms_fulfillment_order_id` (the OMS
-        //     column stores the same GID; see oms-webhooks.ts:280 via
-        //     mapShopifyOrderToOrderData using admin_graphql_api_id).
-        //
-        // Why a disjunctive JOIN and not two separate queries:
-        //   AND short-circuits in Postgres; the `::int` cast only runs for
-        //   rows matching the numeric regex, so the cast-crash P0 bug
-        //   (shipstation-sync-audit.md §4 H3) cannot recur. The regex is no
-        //   longer needed in WHERE — the JOIN itself gates both cast and
-        //   equality. NULLs are excluded (NULL ~ anything and NULL = anything
-        //   are both NULL → falsy). Non-numeric non-GID values (46 rows per
-        //   audit) match neither branch and are safely excluded.
-        //
-        // Index support for Path B: `idx_oms_orders_external` on
-        // `oms.oms_orders(external_order_id)` exists
-        // (migrations/0071_create_namespaces.sql:1524) — the planner will use
-        // it for the GID equality lookup.
+        // Select active shipments that have been pushed to ShipStation and
+        // haven't been checked recently. last_reconciled_at IS NULL rows
+        // come first so new shipments are verified promptly.
+        const rows: any = await db.execute(sql`
+          SELECT os.id AS shipment_id, os.order_id,
+                 os.shipstation_order_id, os.status AS wms_shipment_status,
+                 os.tracking_number, os.carrier
+          FROM wms.outbound_shipments os
+          WHERE os.shipstation_order_id IS NOT NULL
+            AND os.status IN ('queued', 'labeled', 'shipped')
+            AND (
+              os.last_reconciled_at IS NULL
+              OR os.last_reconciled_at < NOW() - INTERVAL '1 hour'
+            )
+          ORDER BY os.last_reconciled_at NULLS FIRST, os.id ASC
+          LIMIT 100
+        `);
+
+        if (!rows.rows?.length) return;
+
+        let markedShipped = 0;
+        let markedCancelled = 0;
+        let markedVoided = 0;
+
+        for (const row of rows.rows) {
+          const shipmentId: number = row.shipment_id;
+          const ssOrderId: number = Number(row.shipstation_order_id);
+          try {
+            // 1. Fetch SS order state
+            const ssOrder = await ss.getOrderById(ssOrderId);
+            if (!ssOrder) {
+              console.warn(
+                `[ShipStation Reconcile V2] SS order ${ssOrderId} not found (shipment=${shipmentId}) — skipping`,
+              );
+              continue;
+            }
+
+            let event: { kind: string; [key: string]: any } | null = null;
+
+            // 2. Detect voided labels first (voidDate beats orderStatus)
+            if (row.wms_shipment_status !== "voided") {
+              const ssShipments = await ss.getShipments(ssOrderId);
+              const hasVoidedLabel = ssShipments.some(
+                (s: any) => s.voidDate != null,
+              );
+              if (hasVoidedLabel) {
+                event = { kind: "voided", reason: "ss_label_void" };
+              }
+            }
+
+            // 3. Detect shipped / cancelled from order status
+            if (!event) {
+              if (
+                ssOrder.orderStatus === "shipped" &&
+                row.wms_shipment_status !== "shipped"
+              ) {
+                const ssShipments = await ss.getShipments(ssOrderId);
+                const latest = ssShipments[ssShipments.length - 1];
+                event = {
+                  kind: "shipped",
+                  trackingNumber: latest?.trackingNumber || row.tracking_number || "",
+                  carrier: latest?.carrierCode || row.carrier || "other",
+                  shipDate: latest?.shipDate
+                    ? new Date(latest.shipDate)
+                    : new Date(),
+                };
+              } else if (
+                ssOrder.orderStatus === "cancelled" &&
+                row.wms_shipment_status !== "cancelled"
+              ) {
+                event = { kind: "cancelled", reason: "ss_cancelled" };
+              }
+            }
+
+            if (!event) {
+              // No divergence — stamp to prove we checked
+              await db.execute(sql`
+                UPDATE wms.outbound_shipments
+                SET last_reconciled_at = NOW()
+                WHERE id = ${shipmentId}
+              `);
+              continue;
+            }
+
+            // 4. Dispatch via shipment-rollup helpers
+            const { wmsOrderId, changed } = await dispatchShipmentEvent(
+              db,
+              shipmentId,
+              event as any,
+            );
+
+            if (changed) {
+              // 5. Recompute order-level warehouse_status
+              const rollup = await recomputeOrderStatusFromShipments(
+                db,
+                row.order_id,
+              );
+              console.log(
+                `[ShipStation Reconcile V2] shipment=${shipmentId} → ${event.kind}, ` +
+                  `order ${row.order_id} warehouse_status=${rollup.warehouseStatus}`,
+              );
+
+              // 6. Update OMS derived fields (inline — mirrors
+              //    updateOmsDerivedFromEvent in shipstation.service.ts)
+              if (event.kind === "shipped") {
+                await db.execute(sql`
+                  UPDATE oms.oms_orders SET
+                    status = 'shipped',
+                    fulfillment_status = 'fulfilled',
+                    tracking_number = ${event.trackingNumber},
+                    tracking_carrier = ${event.carrier},
+                    shipped_at = ${event.shipDate},
+                    updated_at = NOW()
+                  WHERE id = ${row.order_id}
+                `);
+                await db.execute(sql`
+                  UPDATE oms.oms_order_lines SET
+                    fulfillment_status = 'fulfilled',
+                    updated_at = NOW()
+                  WHERE order_id = ${row.order_id}
+                `);
+                markedShipped++;
+              } else if (event.kind === "cancelled") {
+                await db.execute(sql`
+                  UPDATE oms.oms_orders SET
+                    status = 'cancelled',
+                    updated_at = NOW()
+                  WHERE id = ${row.order_id}
+                `);
+                markedCancelled++;
+              } else if (event.kind === "voided") {
+                // Voided: no OMS state change by design (shipment can be
+                // re-labeled; OMS stays in pre-ship state).
+                markedVoided++;
+              }
+
+              // Record audit event
+              try {
+                await db.execute(sql`
+                  INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+                  VALUES (
+                    ${row.order_id},
+                    ${event.kind === "shipped"
+                      ? "shipped_via_shipstation"
+                      : event.kind === "cancelled"
+                        ? "cancelled_via_shipstation"
+                        : "voided_via_shipstation"},
+                    ${JSON.stringify({
+                      wmsShipmentId: shipmentId,
+                      ssOrderId,
+                      ...(event.kind === "shipped"
+                        ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
+                        : { reason: event.reason }),
+                    })}::jsonb,
+                    NOW()
+                  )
+                `);
+              } catch (auditErr: any) {
+                console.warn(
+                  `[ShipStation Reconcile V2] audit insert failed for order ${row.order_id}:`,
+                  auditErr?.message,
+                );
+              }
+            }
+
+            // 7. Stamp last_reconciled_at
+            await db.execute(sql`
+              UPDATE wms.outbound_shipments
+              SET last_reconciled_at = NOW()
+              WHERE id = ${shipmentId}
+            `);
+
+            // Rate limit — ShipStation allows ~40 req/min
+            await new Promise(r => setTimeout(r, 1000));
+          } catch (err: any) {
+            // Per spec: log + skip + DON'T stamp last_reconciled_at so it
+            // gets retried next sweep.
+            console.warn(
+              `[ShipStation Reconcile V2] Failed for shipment ${shipmentId} (SS ${ssOrderId}):`,
+              err?.message,
+            );
+          }
+        }
+
+        if (markedShipped || markedCancelled || markedVoided) {
+          console.warn(
+            `[ShipStation Reconcile V2] Swept ${rows.rows.length} candidate(s): ` +
+              `${markedShipped} shipped, ${markedCancelled} cancelled, ${markedVoided} voided`,
+          );
+        }
+      } catch (err: any) {
+        console.warn("[ShipStation Reconcile V2] Sweep error:", err?.message);
+      }
+    };
+
+    // ── V1: legacy order-based reconcile (fallback) ─────────────────────
+    const runShipStationReconcileV1 = async () => {
+      try {
+        const ss = (services as any).shipStation;
+        if (!ss?.isConfigured()) return;
+
         const rows: any = await db.execute(sql`
           SELECT w.id AS wms_id, w.order_number AS wms_order_number,
                  w.warehouse_status, w.completed_at, w.tracking_number,
@@ -737,27 +916,31 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               });
               markedShipped++;
             } else {
-              // cancelled — remove from ShipStation store
               await ss.cancelOrder(Number(row.shipstation_order_id));
               cancelled++;
             }
-            // Stamp reconciliation marker so we don't re-hit this row next sweep
             await db.execute(sql`
               UPDATE oms.oms_orders SET shipstation_reconciled_at = NOW() WHERE id = ${row.oms_id}
             `);
-            // Rate limit — ShipStation allows ~40 req/min; keep under that.
             await new Promise(r => setTimeout(r, 1000));
           } catch (err: any) {
-            console.warn(`[ShipStation Reconcile] Failed for OMS ${row.oms_id}:`, err?.message);
+            console.warn(`[ShipStation Reconcile V1] Failed for OMS ${row.oms_id}:`, err?.message);
           }
         }
         if (markedShipped || cancelled) {
-          console.warn(`[ShipStation Reconcile] Swept ${rows.rows.length} divergent order(s): ${markedShipped} marked shipped, ${cancelled} cancelled`);
+          console.warn(`[ShipStation Reconcile V1] Swept ${rows.rows.length} divergent order(s): ${markedShipped} marked shipped, ${cancelled} cancelled`);
         }
       } catch (err: any) {
-        console.warn("[ShipStation Reconcile] Sweep error:", err?.message);
+        console.warn("[ShipStation Reconcile V1] Sweep error:", err?.message);
       }
     };
+
+    // Schedule: V2 when flag is ON, V1 otherwise.
+    const runShipStationReconcile =
+      process.env.RECONCILE_V2 === "true"
+        ? runShipStationReconcileV2
+        : runShipStationReconcileV1;
+
     setTimeout(runShipStationReconcile, 30_000);
     setInterval(runShipStationReconcile, 60 * 60 * 1000);
   }

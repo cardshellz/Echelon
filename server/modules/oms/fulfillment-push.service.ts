@@ -16,6 +16,7 @@
 
 import { eq, sql } from "drizzle-orm";
 import { omsOrders, omsOrderLines, omsOrderEvents, channels } from "@shared/schema";
+import { incr } from "../../instrumentation/metrics";
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { EbayShippingFulfillmentRequest } from "../channels/adapters/ebay/ebay-types";
 import type {
@@ -493,7 +494,16 @@ export function createFulfillmentPushService(
   async function pushShopifyFulfillment(
     shipmentId: number,
   ): Promise<ShopifyFulfillmentPushResult> {
-    return await pushSingleShipmentFulfillment(shipmentId);
+    try {
+      return await pushSingleShipmentFulfillment(shipmentId);
+    } catch (err: unknown) {
+      const code =
+        err instanceof ShopifyFulfillmentPushError
+          ? err.context?.code ?? "unknown"
+          : "unknown";
+      incr("shopify_push_failed", 1, { shipmentId, code });
+      throw err;
+    }
   }
 
   /**
@@ -547,11 +557,14 @@ export function createFulfillmentPushService(
       console.log(
         `[pushShopifyFulfillment] shipment ${shipmentId} already has Shopify fulfillment ${existingFulfillmentId} — idempotent skip`,
       );
+      incr("shopify_push_idempotent_skip", 1, { shipmentId });
       return {
         shopifyFulfillmentId: existingFulfillmentId,
         alreadyPushed: true,
       };
     }
+
+    incr("shopify_push_attempted", 1, { shipmentId });
 
     // ---- 1. Load WMS shipment ------------------------------------------
     const shipmentResult: any = await db.execute(sql`
@@ -974,6 +987,7 @@ export function createFulfillmentPushService(
        WHERE id = ${shipmentId}
     `);
 
+    incr("shopify_push_succeeded", 1, { shipmentId, fulfillmentId: fulfillmentGid });
     return { shopifyFulfillmentId: fulfillmentGid, alreadyPushed: false };
   }
 
@@ -1151,6 +1165,7 @@ export function createFulfillmentPushService(
     fulfillmentGid: string,
     opts: { notifyCustomer?: boolean } = {},
   ): Promise<ShopifyFulfillmentCancelResult> {
+    incr("shopify_cancel_attempted", 1, { fulfillmentGid });
     // ---- 1. Validate input -------------------------------------------
     if (
       typeof fulfillmentGid !== "string" ||
@@ -1238,6 +1253,7 @@ export function createFulfillmentPushService(
         console.log(
           `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} already cancelled — idempotent skip`,
         );
+        incr("shopify_cancel_idempotent_skip", 1, { fulfillmentGid });
         return { fulfillmentGid, alreadyCancelled: true };
       }
 
@@ -1256,6 +1272,7 @@ export function createFulfillmentPushService(
     console.log(
       `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} cancelled (status=${payload?.fulfillment?.status ?? "unknown"})`,
     );
+    incr("shopify_cancel_succeeded", 1, { fulfillmentGid });
     return { fulfillmentGid, alreadyCancelled: false };
   }
 
@@ -1299,6 +1316,7 @@ export function createFulfillmentPushService(
     },
     opts: { notifyCustomer?: boolean } = {},
   ): Promise<ShopifyFulfillmentTrackingUpdateResult> {
+    incr("shopify_tracking_update_attempted", 1, { fulfillmentGid });
     // ---- 1. Validate input -----------------------------------------
     if (
       typeof fulfillmentGid !== "string" ||
@@ -1447,6 +1465,7 @@ export function createFulfillmentPushService(
         console.log(
           `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} already has tracking ${trimmedNumber} — idempotent skip`,
         );
+        incr("shopify_tracking_update_idempotent_skip", 1, { fulfillmentGid });
         return { fulfillmentGid, trackingNumberChanged: false };
       }
 
@@ -1472,6 +1491,7 @@ export function createFulfillmentPushService(
       console.log(
         `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking updated to ${trimmedNumber}`,
       );
+      incr("shopify_tracking_update_succeeded", 1, { fulfillmentGid });
       return { fulfillmentGid, trackingNumberChanged: true };
     }
 
@@ -1480,6 +1500,7 @@ export function createFulfillmentPushService(
     console.log(
       `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking update accepted (no echoed trackingInfo)`,
     );
+    incr("shopify_tracking_update_succeeded", 1, { fulfillmentGid });
     return { fulfillmentGid, trackingNumberChanged: true };
   }
 
