@@ -14,6 +14,10 @@ export type ChannelListingRowInput = {
   shopDomain: string | null;
   productVariantId: number | null;
   variantSku: string | null;
+  // `variantIsActive` reflects productVariants.is_active. When false the
+  // variant has been archived; the listing is therefore stale even if
+  // sync_status still says 'synced'. See deriveListingStatus.
+  variantIsActive: boolean;
   externalProductId: string | null;
   externalVariantId: string | null;
   externalUrl: string | null;
@@ -35,7 +39,7 @@ export type ChannelListingDto = {
   externalListingId: string | null;
   externalListingIdNumeric: string | null;
   externalProductId: string | null;
-  status: "active" | "pending" | "error";
+  status: "active" | "archived" | "pending" | "error";
   syncStatus: string | null;
   syncError: string | null;
   listedSince: Date | string | null;
@@ -58,19 +62,28 @@ export function extractNumericId(value: string | null | undefined): string | nul
 }
 
 /**
- * Synthesize a user-facing listing status from the raw sync_status column
- * and presence of an external id. The schema does not store a true
- * "listing status" so we compose one here:
+ * Synthesize a user-facing listing status from the raw sync_status column,
+ * the variant's archive flag, and presence of an external id. The schema
+ * does not store a true "listing status" so we compose one here:
+ *   - "archived": the underlying product variant has been archived
+ *                 (productVariants.is_active = false). Takes precedence
+ *                 over every other state because the listing should not
+ *                 be sold even if sync_status still reads 'synced'.
  *   - "error"   : last sync explicitly failed
  *   - "active"  : we have an external variant id AND sync isn't pending
  *   - "pending" : queued, never pushed, or no external id yet
  */
-export function deriveListingStatus(
-  syncStatus: string | null | undefined,
-  externalVariantId: string | null | undefined,
-): "active" | "pending" | "error" {
-  if (syncStatus === "error") return "error";
-  if (externalVariantId && syncStatus !== "pending") return "active";
+export function deriveListingStatus(input: {
+  syncStatus: string | null | undefined;
+  externalVariantId: string | null | undefined;
+  variantIsActive: boolean;
+}): "active" | "archived" | "pending" | "error" {
+  // Archived takes precedence — once a variant is deactivated, the
+  // listing is effectively archived even if sync_status still says 'synced'.
+  if (input.variantIsActive === false) return "archived";
+
+  if (input.syncStatus === "error") return "error";
+  if (input.externalVariantId && input.syncStatus !== "pending") return "active";
   return "pending";
 }
 
@@ -115,7 +128,11 @@ export function rowToListingDto(row: ChannelListingRowInput): ChannelListingDto 
   const externalListingIdNumeric = extractNumericId(externalListingId);
   const externalProductId = row.externalProductId ?? null;
   const externalProductIdNumeric = extractNumericId(externalProductId);
-  const status = deriveListingStatus(row.syncStatus, externalListingId);
+  const status = deriveListingStatus({
+    syncStatus: row.syncStatus,
+    externalVariantId: externalListingId,
+    variantIsActive: row.variantIsActive,
+  });
   const adminUrl = buildAdminUrl({
     channelProvider: row.channelProvider,
     shopDomain: row.shopDomain,
