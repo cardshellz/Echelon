@@ -1163,6 +1163,10 @@ export function registerChannelRoutes(app: Express) {
             shopDomain: channelConnections.shopDomain,
             productVariantId: channelListings.productVariantId,
             variantSku: productVariants.sku,
+            // §17 Rule fix: include is_active so the transform can mark
+            // listings whose underlying variant has been archived as
+            // "archived" instead of misleadingly showing "active".
+            variantIsActive: productVariants.isActive,
             externalProductId: channelListings.externalProductId,
             externalVariantId: channelListings.externalVariantId,
             externalUrl: channelListings.externalUrl,

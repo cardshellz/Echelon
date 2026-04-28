@@ -369,7 +369,7 @@ interface ChannelListingDto {
   externalListingId: string | null;
   externalListingIdNumeric: string | null;
   externalProductId: string | null;
-  status: "active" | "pending" | "error";
+  status: "active" | "archived" | "pending" | "error";
   syncStatus: string | null;
   syncError: string | null;
   listedSince: string | null;
@@ -383,6 +383,16 @@ function ChannelListingStatusBadge({ status }: { status: ChannelListingDto["stat
       <Badge variant="default" className="text-[10px] bg-green-600 hover:bg-green-600">
         <CheckCircle2 className="h-3 w-3 mr-1" />
         Active
+      </Badge>
+    );
+  }
+  if (status === "archived") {
+    // Match the existing archived-variant badge style elsewhere in this
+    // file (outline, neutral) so the visual language stays consistent.
+    return (
+      <Badge variant="outline" className="text-[10px] text-muted-foreground">
+        <Archive className="h-3 w-3 mr-1" />
+        Archived
       </Badge>
     );
   }
