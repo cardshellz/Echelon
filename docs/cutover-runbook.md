@@ -16,6 +16,7 @@ This runbook covers the operational steps to safely flip feature flags for the S
 - **`heroku run` requires the `-- "..."` quoted form** to pass flags through to the dyno's command. Without quotes, Heroku CLI eats the flags. Every `heroku run` example here uses the quoted form.
 - **`heroku pg:psql` is not used** because `psql` is not installed locally on the workstation. SQL inspection commands are run from a PostgreSQL GUI client (DBeaver, pgAdmin, TablePlus, etc.) connected directly to the Echelon database.
 - **`Select-String`** is used in place of `grep`.
+- **Parity check (`scripts/parity-check-push.ts`) runs AFTER step 3.3** — not before. Pre-flag, the script has no Echelon-pushed shipments to compare against and reports all-skipped. See §2 and §3.3.A.
 
 ---
 
@@ -160,35 +161,18 @@ WHERE indexname = 'uniq_oms_orders_channel_external';
 
 ---
 
-## 2. Parity check — must pass twice
+## 2. Parity check — deferred until step 3.3 has been on for 1 hour
 
 The parity check compares Shopify-native ShipStation push payloads against Echelon-equivalent payloads for recent orders.
 
-### 2.1 Run the check
+**Why this can’t run pre-flag:** the script's first lookup expects a `wms.outbound_shipments` row keyed to `wms.orders.oms_fulfillment_order_id`. Pre-flag, those rows don’t exist for orders pushed by the parallel Shopify-native ShipStation feed (only inbound `processShopifyFulfillment` writes legacy rows, and those aren't in scope). The script will report `skipped: no_wms_shipment` for every order checked.
 
-```powershell
-heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limit 50"
-```
+**Real parity-able data only exists AFTER:**
 
-**Requirements:**
-- Exit code 0 (no divergences)
-- Zero `diverge` outcomes in the report
+1. `WMS_SHIPMENT_AT_SYNC=true` (step 3.1) — starts creating shipment rows for new orders, AND
+2. `PUSH_FROM_WMS=true` (step 3.3) — makes Echelon push fire and stamp `shipstation_order_id` on those shipments.
 
-### 2.2 Run it twice
-
-- First run: record timestamp + result
-- Wait at least **1 hour** (to capture new orders flowing through)
-- Second run: record timestamp + result
-- Both runs must be exit code 0
-
-### 2.3 Document results
-
-| Run | Timestamp (UTC) | Exit code | Divergences | Notes |
-|-----|-----------------|-----------|-------------|-------|
-| 1   |                 |           |             |       |
-| 2   |                 |           |             |       |
-
-- [ ] Parity check passed twice with zero divergences
+Once step 3.3 has been on for ~1 hour and a handful of orders have flowed through both Shopify-native ShipStation and Echelon-pushed ShipStation, run the parity check (see step 3.3.A below). **Do not block the flag-flip sequence on running it pre-flag — it will report all-skipped and tell you nothing.**
 
 ---
 
@@ -304,6 +288,30 @@ heroku config:set PUSH_FROM_WMS=false -a cardshellz-echelon
 Legacy `pushOrder` path reactivates immediately on next request.
 
 - [ ] Flag ON, zero rejected pushes, zero `SS_PUSH_INVALID_SHIPMENT` for 24h
+
+#### 3.3.A Parity check — the actual run point
+
+After `PUSH_FROM_WMS=true` has been on for ~1 hour AND at least 5–10 new orders have flowed through:
+
+```powershell
+heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limit 50"
+```
+
+**Requirements:**
+- Exit code 0 (no divergences)
+- Zero `diverge` outcomes in the report
+- A non-zero number of `ok` outcomes (otherwise the script ran against pre-flag data and produced no useful comparison; wait longer or restrict to recent orders only)
+
+**Run it twice with at least 1 hour between runs.** Both must be exit code 0 with `ok > 0`.
+
+| Run | Timestamp (UTC) | Exit code | OK count | Diverge count | Notes |
+|-----|-----------------|-----------|----------|---------------|-------|
+| 1   |                 |           |          |               |       |
+| 2   |                 |           |          |               |       |
+
+- [ ] Parity check passed twice with zero divergences and ok > 0
+
+**If divergences appear:** roll back `PUSH_FROM_WMS=false`, paste the per-order diff, fix the root cause before re-flipping.
 
 ---
 
