@@ -539,11 +539,11 @@ export const procurementMethods: IProcurementStorage = {
     }>(sql`
       SELECT
         p.id AS product_id,
-        pv.id AS product_variant_id,
-        COALESCE(pv.sku, p.sku) AS sku,
+        NULL AS product_variant_id,
+        p.sku AS sku,
         p.name AS product_name,
-        pv.name AS variant_name,
-        (
+        NULL AS variant_name,
+        MIN(
           CASE
             WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
             WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
@@ -562,7 +562,8 @@ export const procurementMethods: IProcurementStorage = {
           OR LOWER(p.name) LIKE ${like}
           OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
         )`}
-      ORDER BY rank ASC, p.name ASC, pv.sku ASC
+      GROUP BY p.id, p.sku, p.name
+      ORDER BY rank ASC, p.name ASC
       LIMIT ${remaining * 3}
     `);
 

@@ -578,17 +578,13 @@ export default function PurchaseOrderEdit() {
         const products: ProductLite[] = Array.isArray(data) ? data : (data as any).products ?? [];
         const outOfCatalog: CatalogSearchResponse["outOfCatalog"] = [];
         for (const p of products) {
-          const variants = p.variants ?? [];
-          if (variants.length === 0) continue;
-          for (const v of variants) {
-            outOfCatalog.push({
-              productId: p.id,
-              productVariantId: v.id,
-              sku: v.sku ?? p.sku ?? null,
-              productName: p.name,
-              variantName: v.name,
-            });
-          }
+          outOfCatalog.push({
+            productId: p.id,
+            productVariantId: null,
+            sku: p.sku ?? null,
+            productName: p.name,
+            variantName: null,
+          });
         }
         return { inCatalog: [], outOfCatalog };
       },
