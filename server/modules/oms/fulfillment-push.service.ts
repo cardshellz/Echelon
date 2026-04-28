@@ -358,7 +358,8 @@ export function createFulfillmentPushService(
       fulfillmentPayload,
     );
 
-    console.log(`[FulfillmentPush] eBay tracking pushed for order ${orderId} → fulfillment ${result.fulfillmentId}`);
+    const fulfillmentId = result?.fulfillmentId;
+    console.log(`[FulfillmentPush] eBay tracking pushed for order ${orderId} → fulfillment ${fulfillmentId ?? "(no id — accepted by eBay)"}`);
 
     // Record success event
     await db.insert(omsOrderEvents).values({
@@ -366,7 +367,7 @@ export function createFulfillmentPushService(
       eventType: "tracking_pushed",
       details: {
         provider: "ebay",
-        fulfillmentId: result.fulfillmentId,
+        fulfillmentId: fulfillmentId ?? null,
         trackingNumber: order.trackingNumber,
         carrier: order.trackingCarrier,
       },

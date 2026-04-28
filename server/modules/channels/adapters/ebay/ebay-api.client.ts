@@ -272,16 +272,79 @@ export class EbayApiClient {
   /**
    * Create a shipping fulfillment for an order.
    * POST /sell/fulfillment/v1/order/{orderId}/shipping_fulfillment
+   *
+   * eBay returns 201 Created with an empty body. The fulfillment ID is
+   * only available in the `Location` response header
+   * (e.g. …/shipping_fulfillment/{fulfillmentId}).  We extract it there
+   * so callers always get a usable `fulfillmentId`.
    */
   async createShippingFulfillment(
     orderId: string,
     fulfillment: EbayShippingFulfillmentRequest,
   ): Promise<EbayShippingFulfillmentResponse> {
-    return await this.request({
+    const path = `/sell/fulfillment/v1/order/${orderId}/shipping_fulfillment`;
+
+    // DRY_RUN: log but don't call
+    if (this.isDryRun) {
+      console.log(
+        `[EbayApi] DRY_RUN: POST ${path}`,
+        JSON.stringify(fulfillment).substring(0, 500),
+      );
+      return { fulfillmentId: "DRY_RUN_FULFILLMENT_ID" };
+    }
+
+    const accessToken = await this.authService.getAccessToken(this.channelId);
+    const url = `${this.baseUrl}${path}`;
+
+    const response = await fetch(url, {
       method: "POST",
-      path: `/sell/fulfillment/v1/order/${orderId}/shipping_fulfillment`,
-      body: fulfillment,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+      },
+      body: JSON.stringify(fulfillment),
     });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      let errorDetail = errorBody;
+      try {
+        const parsed: EbayErrorResponse = JSON.parse(errorBody);
+        errorDetail =
+          parsed.errors
+            ?.map((e) => `[${e.errorId}] ${e.message}`)
+            .join("; ") || errorBody;
+      } catch { /* use raw body */ }
+      throw new Error(
+        `eBay API POST ${path} failed (${response.status}): ${errorDetail}`,
+      );
+    }
+
+    // eBay returns 201 with empty body — fulfillmentId lives in Location header
+    // Location format: /sell/fulfillment/v1/order/{orderId}/shipping_fulfillment/{fulfillmentId}
+    const location = response.headers.get("Location") || response.headers.get("location");
+    if (location) {
+      const segments = location.split("/");
+      const fulfillmentId = segments[segments.length - 1];
+      if (fulfillmentId) {
+        return { fulfillmentId };
+      }
+    }
+
+    // Fallback: if body is non-empty (defensive), parse it
+    const text = await response.text();
+    if (text) {
+      try {
+        return JSON.parse(text);
+      } catch { /* fall through */ }
+    }
+
+    // No Location header and no body — return empty object so callers
+    // don't crash on undefined.  fulfillmentId will be undefined but
+    // the push itself succeeded (201).
+    return {} as EbayShippingFulfillmentResponse;
   }
 
   // -------------------------------------------------------------------------
