@@ -50,7 +50,10 @@ import {
   Trash2,
   Upload,
   Download,
+  ExternalLink,
+  Copy,
 } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
@@ -348,6 +351,247 @@ interface InventoryRow {
   zone: string | null;
   is_pickable: number | null;
   warehouse_name: string | null;
+}
+
+// --- Channel Listings panel ---------------------------------------------
+// Read-only view of every (variant × channel) listing for a product.
+// Shows the external listing id with a copy button, a deep link to the
+// channel admin (when available), listed-since (relative), and a status
+// badge. Backend: GET /api/products/:productId/channel-listings.
+interface ChannelListingDto {
+  listingId: number;
+  variantId: number | null;
+  variantSku: string | null;
+  channelId: number;
+  channelName: string | null;
+  channelProvider: string | null;
+  shopDomain: string | null;
+  externalListingId: string | null;
+  externalListingIdNumeric: string | null;
+  externalProductId: string | null;
+  status: "active" | "pending" | "error";
+  syncStatus: string | null;
+  syncError: string | null;
+  listedSince: string | null;
+  lastSynced: string | null;
+  adminUrl: string | null;
+}
+
+function ChannelListingStatusBadge({ status }: { status: ChannelListingDto["status"] }) {
+  if (status === "active") {
+    return (
+      <Badge variant="default" className="text-[10px] bg-green-600 hover:bg-green-600">
+        <CheckCircle2 className="h-3 w-3 mr-1" />
+        Active
+      </Badge>
+    );
+  }
+  if (status === "error") {
+    return (
+      <Badge variant="destructive" className="text-[10px]">
+        <AlertCircle className="h-3 w-3 mr-1" />
+        Error
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="secondary" className="text-[10px]">
+      <Clock className="h-3 w-3 mr-1" />
+      Pending
+    </Badge>
+  );
+}
+
+function CopyableExternalId({ value }: { value: string }) {
+  const { toast } = useToast();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      // navigator.clipboard requires a secure context. The product detail
+      // page is always served over HTTPS in the deployed app and over
+      // localhost in dev, both of which are secure contexts.
+      if (!navigator.clipboard) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      toast({
+        title: "Copy failed",
+        description: err instanceof Error ? err.message : "Could not copy to clipboard",
+        variant: "destructive",
+      });
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 min-w-0">
+      <span
+        className="font-mono text-xs truncate"
+        title={value}
+        data-testid="channel-listing-external-id"
+      >
+        {value}
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-6 w-6 p-0 shrink-0"
+        onClick={handleCopy}
+        aria-label={copied ? "Copied" : "Copy external id"}
+        title={copied ? "Copied" : "Copy"}
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5 text-green-600" />
+        ) : (
+          <Copy className="h-3.5 w-3.5" />
+        )}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Format an ISO date string as a relative time, e.g. "3 days ago".
+ * Returns an em dash if missing/invalid; never throws.
+ */
+function formatRelativeListedSince(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return formatDistanceToNow(d, { addSuffix: true });
+}
+
+function ChannelListingsPanel({ productId, enabled }: { productId: number; enabled: boolean }) {
+  const { data, isLoading, isError, error } = useQuery<{ listings: ChannelListingDto[] }>({
+    queryKey: [`/api/products/${productId}/channel-listings`],
+    enabled,
+  });
+
+  const listings = data?.listings ?? [];
+
+  return (
+    <Card data-testid="channel-listings-panel">
+      <CardHeader className="p-3 md:p-6">
+        <CardTitle className="text-base md:text-lg">Channel Listings</CardTitle>
+        <CardDescription className="text-xs md:text-sm">
+          External listing IDs and admin links per variant, per channel
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+        {isLoading ? (
+          <div className="text-center py-6 text-muted-foreground">
+            <Loader2 className="h-6 w-6 mx-auto mb-2 animate-spin opacity-50" />
+            <p className="text-sm">Loading channel listings…</p>
+          </div>
+        ) : isError ? (
+          <div className="text-center py-6 text-destructive">
+            <AlertCircle className="h-6 w-6 mx-auto mb-2 opacity-70" />
+            <p className="text-sm">
+              Failed to load channel listings
+              {error instanceof Error ? `: ${error.message}` : ""}
+            </p>
+          </div>
+        ) : listings.length === 0 ? (
+          <div className="text-center py-6 text-muted-foreground">
+            <Globe className="h-8 w-8 mx-auto mb-2 opacity-50" />
+            <p className="text-sm">Not listed on any channels yet</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="min-w-[120px]">SKU</TableHead>
+                  <TableHead className="min-w-[140px]">Channel</TableHead>
+                  <TableHead className="min-w-[220px]">External ID</TableHead>
+                  <TableHead className="min-w-[100px]">Status</TableHead>
+                  <TableHead className="min-w-[140px]">Listed since</TableHead>
+                  <TableHead className="min-w-[140px] text-right">Open</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {listings.map((l) => {
+                  const idForCopy = l.externalListingIdNumeric ?? l.externalListingId;
+                  const listedSinceLabel = formatRelativeListedSince(l.listedSince);
+                  const listedSinceTitle = l.listedSince
+                    ? new Date(l.listedSince).toLocaleString()
+                    : undefined;
+                  return (
+                    <TableRow
+                      key={l.listingId}
+                      data-testid={`channel-listing-row-${l.listingId}`}
+                    >
+                      <TableCell className="font-mono text-xs">
+                        {l.variantSku ?? "—"}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                          <span className="text-sm font-medium">
+                            {l.channelName ?? "Unknown"}
+                          </span>
+                          {l.channelProvider && (
+                            <Badge variant="outline" className="text-[10px]">
+                              {l.channelProvider}
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {idForCopy ? (
+                          <CopyableExternalId value={idForCopy} />
+                        ) : (
+                          <span className="text-xs text-muted-foreground italic">
+                            not pushed yet
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <ChannelListingStatusBadge status={l.status} />
+                        {l.status === "error" && l.syncError && (
+                          <p
+                            className="text-[10px] text-destructive mt-1 line-clamp-2"
+                            title={l.syncError}
+                          >
+                            {l.syncError}
+                          </p>
+                        )}
+                      </TableCell>
+                      <TableCell
+                        className="text-xs text-muted-foreground"
+                        title={listedSinceTitle}
+                      >
+                        {listedSinceLabel}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {l.adminUrl ? (
+                          <a
+                            href={l.adminUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                            data-testid={`channel-listing-open-${l.listingId}`}
+                          >
+                            Open in {l.channelName ?? l.channelProvider ?? "channel"}
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function ProductInventoryTab({ productId }: { productId: number }) {
@@ -2220,6 +2464,15 @@ export default function ProductDetail() {
                   )}
                 </>
               )}
+
+              {/* Channel listings panel — per (variant × channel) external IDs.
+                  Always rendered (independent of allocationData) so operators
+                  can see/copy listing IDs and jump to channel admin pages even
+                  when no channels are configured for allocation. */}
+              <ChannelListingsPanel
+                productId={product!.productId}
+                enabled={!!product?.productId && activeTab === "channels"}
+              />
             </TabsContent>
 
             {/* ===== VARIANTS TAB ===== */}
