@@ -73,6 +73,8 @@ export const TERMINAL_SHIPMENT_STATUSES: readonly ShipmentStatus[] = [
   "lost",
 ];
 
+export const OPEN_SHIPMENT_STATUSES = SHIPMENT_STATUS_VALUES.filter(isShipmentOpen);
+
 /**
  * True when the shipment has "already shipped" semantics for roll-up
  * purposes. `returned` and `lost` both presuppose `shipped`, so they

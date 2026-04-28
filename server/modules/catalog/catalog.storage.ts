@@ -26,6 +26,7 @@ import {
   asc,
   sql,
 } from "../../storage/base";
+import { OPEN_SHIPMENT_STATUSES } from "@shared/enums/order-status";
 import type {
   Product,
   InsertProduct,
@@ -284,7 +285,7 @@ export const productMethods: IProductStorage = {
       .innerJoin(outboundShipments, eq(outboundShipmentItems.shipmentId, outboundShipments.id))
       .where(and(
         inArray(outboundShipmentItems.productVariantId, variantIds),
-        inArray(outboundShipments.status, ["pending", "packed"]),
+        inArray(outboundShipments.status, [...OPEN_SHIPMENT_STATUSES]),
       ));
     return result;
   },

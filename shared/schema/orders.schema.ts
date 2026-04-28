@@ -6,6 +6,7 @@ import { warehouses, warehouseLocations } from "./warehouse.schema";
 import { channels } from "./channels.schema";
 import { users } from "./identity.schema";
 import { vendors } from "./procurement.schema";
+import { SHIPMENT_STATUS_VALUES, type ShipmentStatus } from "../enums/order-status";
 
 // ============================================
 // ENUMS
@@ -59,9 +60,7 @@ export type RoutingMatchType = typeof routingMatchTypeEnum[number];
 export const shipmentSourceEnum = ["shopify_webhook", "manual", "api"] as const;
 export type ShipmentSource = typeof shipmentSourceEnum[number];
 
-// Shipment status workflow
-export const shipmentStatusEnum = ["pending", "packed", "shipped", "delivered"] as const;
-export type ShipmentStatus = typeof shipmentStatusEnum[number];
+// Shipment status workflow (imported from shared/enums/order-status)
 
 // ============================================
 // ORDERS
