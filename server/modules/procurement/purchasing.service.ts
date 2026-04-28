@@ -88,6 +88,7 @@ interface Storage {
   createReceivingOrder(data: any): Promise<any>;
   generateReceiptNumber(): Promise<string>;
   bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
+  getReceivingLineById(id: number): Promise<any>;
 
   // Settings
   getSetting(key: string): Promise<string | null>;
@@ -1263,11 +1264,25 @@ export function createPurchasingService(db: any, storage: Storage) {
       // Rows without lineType (pre-migration-0563) default to product.
       if ((poLine.lineType ?? "product") !== "product") continue;
 
-      const unitsPerUom = poLine.unitsPerUom || 1;
-      const receivedPieces = rl.receivedQty * unitsPerUom;
-      const damagedPieces = (rl.damagedQty || 0) * unitsPerUom;
-      const newReceivedQty = (poLine.receivedQty || 0) + receivedPieces;
-      const newDamagedQty = (poLine.damagedQty || 0) + damagedPieces;
+      // Variant-Agnostic Reconciliation: Convert received variant quantity to base units, 
+      // then convert those base units into the PO line's ordered variant units.
+      const receivingLine = await storage.getReceivingLineById(rl.receivingLineId);
+      if (!receivingLine) continue;
+
+      const poVariant = await storage.getProductVariantById(poLine.productVariantId as number);
+      const rlVariant = await storage.getProductVariantById(receivingLine.productVariantId as number);
+
+      const poUnitsPerVariant = poVariant?.unitsPerVariant || poLine.unitsPerUom || 1;
+      const rlUnitsPerVariant = rlVariant?.unitsPerVariant || 1;
+
+      const baseUnitsReceived = rl.receivedQty * rlUnitsPerVariant;
+      const damagedBaseUnits = (rl.damagedQty || 0) * rlUnitsPerVariant;
+
+      const poLineUnitsReceived = Math.floor(baseUnitsReceived / poUnitsPerVariant);
+      const poLineDamagedReceived = Math.floor(damagedBaseUnits / poUnitsPerVariant);
+
+      const newReceivedQty = (poLine.receivedQty || 0) + poLineUnitsReceived;
+      const newDamagedQty = (poLine.damagedQty || 0) + poLineDamagedReceived;
       const remaining = poLine.orderQty - newReceivedQty - (poLine.cancelledQty || 0);
 
       const lineUpdates: any = {
@@ -1289,13 +1304,13 @@ export function createPurchasingService(db: any, storage: Storage) {
 
       await storage.updatePurchaseOrderLine(poLine.id, lineUpdates);
 
-      // Create PO receipt record (qtyReceived in pieces, matching PO orderQty units)
+      // Create PO receipt record
       await storage.createPoReceipt({
         purchaseOrderId: poId,
         purchaseOrderLineId: poLine.id,
         receivingOrderId: receivingOrderId,
         receivingLineId: rl.receivingLineId,
-        qtyReceived: receivedPieces,
+        qtyReceived: poLineUnitsReceived,
         poUnitCostCents: poLine.unitCostCents,
         actualUnitCostCents: rl.unitCost || poLine.unitCostCents,
         varianceCents: (rl.unitCost || poLine.unitCostCents) - poLine.unitCostCents,

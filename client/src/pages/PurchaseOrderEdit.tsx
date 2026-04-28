@@ -1888,6 +1888,62 @@ function NonProductLineRow({
   );
 }
 
+function UoMSelector({ line, onChange }: { line: LineDraft; onChange: (patch: Partial<LineDraft>) => void }) {
+  const { data: variants } = useQuery<any[]>({
+    queryKey: ["/api/products", line.productId, "variants"],
+    queryFn: async () => {
+      const res = await fetch(`/api/products/${line.productId}/variants`);
+      if (!res.ok) throw new Error("Failed to load variants");
+      return res.json();
+    },
+    enabled: !!line.productId,
+  });
+
+  if (!line.productId) {
+    return (
+      <div className="h-10 border rounded-md bg-muted/20 text-muted-foreground flex items-center px-3 text-xs italic">
+        Select product first
+      </div>
+    );
+  }
+
+  if (!variants || variants.length === 0) {
+    return (
+      <div className="h-10 border rounded-md bg-muted/20 text-muted-foreground flex items-center px-3 text-xs">
+        Loading...
+      </div>
+    );
+  }
+
+  return (
+    <Select
+      value={line.productVariantId ? String(line.productVariantId) : undefined}
+      onValueChange={(val) => {
+        const v = variants.find((v) => String(v.id) === val);
+        if (v) {
+          onChange({
+            productVariantId: v.id,
+            sku: v.sku || null,
+          });
+        }
+      }}
+    >
+      <SelectTrigger className="w-full h-10 px-3 text-sm" aria-label="Order Unit of Measure">
+        <span className="truncate max-w-[120px]">
+          <SelectValue placeholder="UoM" />
+        </span>
+      </SelectTrigger>
+      <SelectContent>
+        {variants.map((v) => (
+          <SelectItem key={v.id} value={String(v.id)}>
+            {v.name || (v.isBaseUnit ? "Piece" : `Pack of ${v.unitsPerVariant}`)}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function LineRow(props: LineRowProps) {
   // Dispatch on line_type. Product lines keep the existing typeahead-driven
   // layout; non-product types render the simpler description + amount form.
@@ -1933,7 +1989,7 @@ function LineRow(props: LineRowProps) {
   return (
     <div className="grid grid-cols-12 gap-2 items-start">
       {/* Product typeahead */}
-      <div className="col-span-12 md:col-span-6">
+      <div className="col-span-12 md:col-span-4">
         <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
           <PopoverTrigger asChild>
             <Button
@@ -2068,6 +2124,11 @@ function LineRow(props: LineRowProps) {
             </Command>
           </PopoverContent>
         </Popover>
+      </div>
+
+      {/* UoM */}
+      <div className="col-span-12 md:col-span-2">
+        <UoMSelector line={line} onChange={onChange} />
       </div>
 
       {/* Qty */}
