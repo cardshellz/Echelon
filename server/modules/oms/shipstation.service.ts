@@ -1802,6 +1802,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     pushOrder,
     pushShipment,
     getShipments,
+    getOrderById,
     getOrderByKey,
     processShipNotify,
     registerWebhook,
