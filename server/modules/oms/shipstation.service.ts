@@ -135,6 +135,7 @@ export interface WmsOrderRow {
   id: number;
   order_number: string;
   channel_id: number | null;
+  warehouse_id: number | null;
   oms_fulfillment_order_id: string | null;
   sort_rank: string | null;
   customer_name: string | null;
@@ -161,6 +162,109 @@ export interface WmsShipmentItemRow {
   name: string;
   qty: number;
   unit_price_cents: number;
+}
+
+// ---------------------------------------------------------------------------
+// resolveShipStationIds — data-driven store/warehouse routing.
+// ---------------------------------------------------------------------------
+//
+// Replaces the legacy hardcoded storeId=319989 / warehouseId=996884 with a
+// 4-tier lookup:
+//   1. channels.shipping_config → shipstation.storeId
+//   2. warehouse.warehouses.shipping_config → shipstation.warehouseId
+//   3. Env vars SHIPSTATION_DEFAULT_STORE_ID / SHIPSTATION_DEFAULT_WAREHOUSE_ID
+//   4. Hard fallback to 319989 / 996884 (backward-compatible)
+//
+// shipping_config is a jsonb column keyed by engine name ("shipstation",
+// "easypost", etc.) so future engine migrations don't require re-migration.
+
+function getDefaultStoreId(): number {
+  return parseInt(
+    process.env.SHIPSTATION_DEFAULT_STORE_ID ?? "319989",
+    10,
+  );
+}
+
+function getDefaultWarehouseId(): number {
+  return parseInt(
+    process.env.SHIPSTATION_DEFAULT_WAREHOUSE_ID ?? "996884",
+    10,
+  );
+}
+
+export interface ShipStationRouting {
+  storeId: number;
+  warehouseId: number;
+}
+
+/**
+ * Resolve ShipStation storeId + warehouseId for a push.
+ *
+ * Priority order per ID:
+ *   1. Per-row shipping_config jsonb (channel for storeId, warehouse for warehouseId)
+ *   2. Env var defaults (SHIPSTATION_DEFAULT_STORE_ID / SHIPSTATION_DEFAULT_WAREHOUSE_ID)
+ *   3. Hardcoded legacy fallback (319989 / 996884)
+ *
+ * Null/missing IDs gracefully degrade through the fallback chain.
+ */
+export async function resolveShipStationIds(
+  db: any,
+  args: { channelId: number | null; warehouseId: number | null },
+): Promise<ShipStationRouting> {
+  let storeId = getDefaultStoreId();
+  let warehouseId = getDefaultWarehouseId();
+
+  // --- Resolve storeId from channel's shipping_config ---
+  if (args.channelId != null) {
+    try {
+      const channelResult: any = await db.execute(sql`
+        SELECT shipping_config
+        FROM channels.channels
+        WHERE id = ${args.channelId}
+        LIMIT 1
+      `);
+      const rawConfig = channelResult?.rows?.[0]?.shipping_config;
+      if (rawConfig) {
+        const config = typeof rawConfig === "string" ? JSON.parse(rawConfig) : rawConfig;
+        const ssStoreId = config?.shipstation?.storeId;
+        if (typeof ssStoreId === "number" && Number.isInteger(ssStoreId) && ssStoreId > 0) {
+          storeId = ssStoreId;
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[ShipStation] shipping_config lookup failed for channel ${args.channelId}, using defaults:`,
+        err,
+      );
+    }
+  }
+
+  // --- Resolve warehouseId from warehouse's shipping_config ---
+  if (args.warehouseId != null) {
+    try {
+      const warehouseResult: any = await db.execute(sql`
+        SELECT shipping_config
+        FROM warehouse.warehouses
+        WHERE id = ${args.warehouseId}
+        LIMIT 1
+      `);
+      const rawConfig = warehouseResult?.rows?.[0]?.shipping_config;
+      if (rawConfig) {
+        const config = typeof rawConfig === "string" ? JSON.parse(rawConfig) : rawConfig;
+        const ssWarehouseId = config?.shipstation?.warehouseId;
+        if (typeof ssWarehouseId === "number" && Number.isInteger(ssWarehouseId) && ssWarehouseId > 0) {
+          warehouseId = ssWarehouseId;
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[ShipStation] shipping_config lookup failed for warehouse ${args.warehouseId}, using defaults:`,
+        err,
+      );
+    }
+  }
+
+  return { storeId, warehouseId };
 }
 
 // Shipment statuses that are eligible to be pushed to ShipStation. Any
@@ -475,6 +579,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       console.warn(`[ShipStation] sort_rank lookup failed for order ${omsOrder.id}:`, err);
     }
 
+    // Resolve ShipStation store/warehouse routing (data-driven, falls back to env/hardcoded)
+    const routing = await resolveShipStationIds(db, {
+      channelId: omsOrder.channelId ?? null,
+      warehouseId: omsOrder.warehouseId ?? null,
+    });
+
     // Determine order number prefix based on channel
     const channelName = omsOrder.channelName || "";
     const isEbay = channelName.toLowerCase().includes("ebay");
@@ -520,8 +630,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       shippingAmount: (omsOrder.shippingCents || 0) / 100,
       internalNotes: `Source: ${channelName || "unknown"} via Echelon OMS`,
       advancedOptions: {
-        warehouseId: 996884,
-        storeId: 319989,
+        warehouseId: routing.warehouseId,
+        storeId: routing.storeId,
         source: channelName || "echelon",
         // customField1 carries the Echelon pick queue sort rank. Packer
         // sorts ShipStation grid by Custom Field 1 DESC — yields the
@@ -1652,7 +1762,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // ─── 2. Load order (WMS only, with financial snapshot) ──────────
     const orderResult: any = await db.execute(sql`
       SELECT
-        id, order_number, channel_id, oms_fulfillment_order_id,
+        id, order_number, channel_id, warehouse_id, oms_fulfillment_order_id,
         sort_rank, external_order_id,
         customer_name, customer_email,
         shipping_name, shipping_address, shipping_city, shipping_state,
@@ -1714,6 +1824,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       ? new Date(orderRow.order_placed_at).toISOString()
       : new Date().toISOString();
 
+    // Resolve ShipStation store/warehouse routing (data-driven, falls back to env/hardcoded)
+    const routing = await resolveShipStationIds(db, {
+      channelId: orderRow.channel_id,
+      warehouseId: orderRow.warehouse_id,
+    });
+
     const payload = {
       orderNumber,
       orderKey,
@@ -1752,8 +1868,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       shippingAmount: orderRow.shipping_cents / 100,
       internalNotes: `Source: wms shipment ${shipmentId} (channel ${orderRow.channel_id ?? "unknown"}) via Echelon WMS`,
       advancedOptions: {
-        warehouseId: 996884,
-        storeId: 319989,
+        warehouseId: routing.warehouseId,
+        storeId: routing.storeId,
         source: "echelon-wms",
         // customField1 — sort_rank for packer pick-order sort. Padded
         // string so ShipStation's text sort matches our numeric sort.

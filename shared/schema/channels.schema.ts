@@ -35,6 +35,7 @@ export const channels = channelsSchema.table("channels", {
   syncEnabled: boolean("sync_enabled").default(false),
   syncMode: varchar("sync_mode", { length: 10 }).default("dry_run"), // 'live' or 'dry_run'
   sweepIntervalMinutes: integer("sweep_interval_minutes").default(15),
+  shippingConfig: jsonb("shipping_config"), // Engine-specific routing: {"shipstation": {"storeId": 319989}}, {"easypost": {...}}, etc.
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

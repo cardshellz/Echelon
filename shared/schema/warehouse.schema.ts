@@ -109,6 +109,7 @@ export const warehouses = warehouseSchema.table("warehouses", {
   lastInventorySyncAt: timestamp("last_inventory_sync_at"), // Last time external inventory was pulled
   inventorySyncStatus: varchar("inventory_sync_status", { length: 20 }).default("never"), // never, syncing, ok, error
   feedEnabled: boolean("feed_enabled").default(true), // Whether this warehouse feeds inventory to channel sync
+  shippingConfig: jsonb("shipping_config"), // Engine-specific routing: {"shipstation": {"warehouseId": 996884}}, {"easypost": {...}}, etc.
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
