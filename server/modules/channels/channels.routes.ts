@@ -13,14 +13,16 @@ import {
   channelWarehouseAssignments,
   channelAllocationRules,
   channels as channelsTable,
+  channelListings,
   warehouses,
   products,
   productVariants,
-  eq, and, inArray, isNull, sql,
+  eq, and, inArray, isNull, sql, asc,
 } from "../../storage/base";
 import { pool } from "../../db";
 import { channelConnections } from "@shared/schema";
 import { ShopifyAdapter } from "./adapters/shopify.adapter";
+import { rowToListingDto } from "./channel-listings.transform";
 import { createOmsService } from "../oms/oms.service";
 import { WmsOrderInvariantError } from "../wms/insert-order";
 import { randomBytes } from "crypto";
@@ -1134,6 +1136,61 @@ export function registerChannelRoutes(app: Express) {
       res.status(500).json({ error: "Failed to fetch channel status" });
     }
   });
+
+  // ============================================
+  // CHANNEL LISTINGS (external IDs per variant)
+  // ============================================
+  // Read-only feed for the Product Detail page so operators can see which
+  // external channels each variant is listed on, copy the external ID, and
+  // jump to the channel admin without querying the DB.
+  app.get(
+    "/api/products/:productId/channel-listings",
+    requirePermission("channels", "view"),
+    async (req, res) => {
+      try {
+        const productId = parseInt(req.params.productId, 10);
+        if (!Number.isFinite(productId) || productId <= 0) {
+          return res.status(400).json({ error: "Invalid productId" });
+        }
+
+        // Single join query; ordered by sku then channel name for stable UI rendering.
+        const rows = await db
+          .select({
+            listingId: channelListings.id,
+            channelId: channelListings.channelId,
+            channelName: channelsTable.name,
+            channelProvider: channelsTable.provider,
+            shopDomain: channelConnections.shopDomain,
+            productVariantId: channelListings.productVariantId,
+            variantSku: productVariants.sku,
+            externalProductId: channelListings.externalProductId,
+            externalVariantId: channelListings.externalVariantId,
+            externalUrl: channelListings.externalUrl,
+            syncStatus: channelListings.syncStatus,
+            syncError: channelListings.syncError,
+            createdAt: channelListings.createdAt,
+            updatedAt: channelListings.updatedAt,
+            lastSyncedAt: channelListings.lastSyncedAt,
+          })
+          .from(channelListings)
+          .innerJoin(productVariants, eq(productVariants.id, channelListings.productVariantId))
+          .innerJoin(channelsTable, eq(channelsTable.id, channelListings.channelId))
+          .leftJoin(channelConnections, eq(channelConnections.channelId, channelsTable.id))
+          .where(eq(productVariants.productId, productId))
+          .orderBy(
+            asc(productVariants.sku),
+            asc(channelsTable.name),
+          );
+
+        const listings = rows.map(rowToListingDto);
+
+        res.json({ listings });
+      } catch (error) {
+        console.error("Error fetching channel listings:", error);
+        res.status(500).json({ error: "Failed to fetch channel listings" });
+      }
+    },
+  );
 
   // ============================================
   // CHANNEL PRODUCT OVERRIDES API
