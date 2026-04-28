@@ -50,6 +50,25 @@ interface Purchasing {
     damagedQty?: number;
     unitCost?: number;
   }>): Promise<void>;
+  // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
+  // landed unit cost after spreading non-product line totals
+  // (discount / fee / tax / rebate / adjustment) across the product lines.
+  // Used at receive time so inventory lots are stamped with the true
+  // cost-per-unit, not the raw line cost. Returns null if the PO has no
+  // typed-line allocation to apply (no non-product lines, or no products).
+  getAllocatedLineCostsForPo?(poId: number): Promise<{
+    perLine: Array<{
+      purchaseOrderLineId: number;
+      lineTotalCents: number;
+      allocatedCents: number;
+      landedLineTotalCents: number;
+      landedUnitCostMills: number;
+      landedUnitCostCents: number;
+    }>;
+    pooledCents: number;
+    productSubtotalCents: number;
+    unallocatedCents: number;
+  }>;
 }
 
 interface ShipmentTracking {
@@ -355,6 +374,60 @@ export class ReceivingService {
           // Receiving order linked to shipment but no tracking service — mark provisional
           costProvisional = 1;
           inboundShipmentId = order.inboundShipmentId;
+        }
+
+        // Typed-lines allocator (Option C, 2026-04-28).
+        //
+        // If shipment-tracking didn't supply a landed cost AND the linked
+        // PO has typed non-product lines (discount / fee / tax / rebate /
+        // adjustment), spread those across the product lines and use the
+        // resulting landed unit cost. This makes COGS, margin, and
+        // inventory valuation correct for domestic POs that don't run
+        // through a formal inbound shipment.
+        //
+        // Skip if shipment-tracking already wrote a landed cost (its
+        // freight/duty allocation is more authoritative for international
+        // POs that run through a real shipment). Skip if there's no
+        // purchasing service, no PO line link, or no PO id known.
+        if (
+          line.purchaseOrderLineId &&
+          costProvisional === 0 &&
+          this.purchasing?.getAllocatedLineCostsForPo &&
+          (!this.shipmentTracking ||
+            // No shipment landed cost was applied above. We re-resolve here
+            // by checking whether the cost we have right now matches the
+            // shipment-tracking output — simpler: just always run if no
+            // shipment is linked.
+            !order.inboundShipmentId)
+        ) {
+          try {
+            const poLine =
+              typeof (this.storage as any).getPurchaseOrderLineById === "function"
+                ? await (this.storage as any).getPurchaseOrderLineById(
+                    line.purchaseOrderLineId,
+                  )
+                : null;
+            const poId = poLine?.purchaseOrderId;
+            if (poId) {
+              const allocation = await this.purchasing.getAllocatedLineCostsForPo(poId);
+              const match = allocation.perLine.find(
+                (p) => p.purchaseOrderLineId === line.purchaseOrderLineId,
+              );
+              // Only override when the allocation actually changed the cost
+              // (i.e. the PO has non-zero pooledCents). Avoids unnecessary
+              // writes on simple product-only POs.
+              if (
+                match &&
+                allocation.pooledCents !== 0 &&
+                allocation.unallocatedCents === 0
+              ) {
+                unitCostCents = match.landedUnitCostCents;
+                unitCostMills = match.landedUnitCostMills;
+              }
+            }
+          } catch {
+            // Non-critical — leave existing PO/line cost in place.
+          }
         }
 
         await this.inventoryCore.receiveInventory({
