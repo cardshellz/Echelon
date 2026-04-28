@@ -263,6 +263,205 @@ export function createPurchasingService(db: any, storage: Storage) {
     };
   }
 
+  // ── Typed-line cost allocator (Option C, 2026-04-28) ──────────────────
+  //
+  // Distributes non-product line totals (discount / fee / tax / adjustment)
+  // across product lines proportionally so each product line's effective
+  // landed unit cost reflects the true cost-per-unit after the PO is
+  // settled. This is what makes downstream COGS, margin, and inventory
+  // valuation correct on PO-header-discount or PO-header-fee scenarios.
+  //
+  // Allocation rules:
+  //   * Basis: product line total in cents (qty × unit_cost). Lines with
+  //     zero or negative basis are skipped (they receive nothing).
+  //   * Non-product line totals (the "to-allocate" pool) are summed from
+  //     all non-product lines on the PO regardless of parent_line_id.
+  //     Today the parent_line_id is stored but does NOT pin the allocation
+  //     — PO-level discounts/fees spread across all products. Future work:
+  //     when parent_line_id is set, target only that product line.
+  //   * Each product line gets share = lineTotal / sum(productTotals).
+  //   * Allocated cents = round_half_up(allocateCents × share).
+  //   * Rounding remainder is added to the largest-basis line so the sum
+  //     stays exact (mirrors shipment-tracking.runAllocation pattern).
+  //   * Effective landed line total = lineTotal + allocatedCents.
+  //   * Effective landed unit cost (mills) = round_half_up(
+  //       effectiveLandedTotal × 100 / qty).
+  //
+  // Pure function. No DB access. Caller is responsible for fetching lines
+  // and writing results back wherever they're consumed (currently:
+  // receiving, when stamping inventory lots).
+
+  type AllocatedLineCost = {
+    purchaseOrderLineId: number;
+    lineTotalCents: number;          // raw, before allocation
+    allocatedCents: number;           // signed; can be negative for net-discount
+    landedLineTotalCents: number;     // lineTotalCents + allocatedCents
+    landedUnitCostMills: number;      // for stamping inventory lots
+    landedUnitCostCents: number;      // back-compat, derived from mills
+  };
+
+  type AllocationResult = {
+    perLine: AllocatedLineCost[];
+    pooledCents: number;              // total non-product cents allocated
+    productSubtotalCents: number;     // sum of product line basis
+    // Non-zero only when productSubtotalCents == 0 and pooledCents != 0,
+    // i.e. fees/discounts exist with no product line to absorb them.
+    unallocatedCents: number;
+  };
+
+  function computeAllocatedLineCosts(lines: any[]): AllocationResult {
+    // Partition lines by type. Cancelled lines never participate.
+    const productLines: any[] = [];
+    let pooledCents = 0;
+    for (const line of lines) {
+      if (line.status === "cancelled") continue;
+      const type: PoLineType = (line.lineType as PoLineType) ?? "product";
+      const lineTotal = Number(line.lineTotalCents) || 0;
+      if (type === "product") {
+        productLines.push(line);
+      } else {
+        // discount / fee / tax / rebate / adjustment all flow into the pool.
+        // Sign-aware: discount/rebate are negative, fee/tax are positive,
+        // adjustment is signed. Sum is also signed.
+        pooledCents += lineTotal;
+      }
+    }
+
+    // Compute basis (= raw line totals in cents) for each product line.
+    // Lines with zero or negative basis are skipped from share computation
+    // but still surface in `perLine` with allocatedCents=0 (so the caller
+    // can stamp them with a clean record).
+    const productSubtotalCents = productLines.reduce(
+      (sum, l) => sum + (Number(l.lineTotalCents) || 0),
+      0,
+    );
+
+    // Edge: no product lines or zero/negative product subtotal. Nothing to
+    // allocate against — surface the pool as "unallocated" so the caller can
+    // decide what to do (most likely: error or warn the user).
+    if (productLines.length === 0 || productSubtotalCents <= 0) {
+      return {
+        perLine: productLines.map((l) => ({
+          purchaseOrderLineId: Number(l.id),
+          lineTotalCents: Number(l.lineTotalCents) || 0,
+          allocatedCents: 0,
+          landedLineTotalCents: Number(l.lineTotalCents) || 0,
+          landedUnitCostMills:
+            typeof l.unitCostMills === "number"
+              ? l.unitCostMills
+              : centsToMills(Number(l.unitCostCents) || 0),
+          landedUnitCostCents: Number(l.unitCostCents) || 0,
+        })),
+        pooledCents,
+        productSubtotalCents,
+        unallocatedCents: pooledCents,
+      };
+    }
+
+    // Allocate. Track running total to detect the rounding remainder.
+    const perLine: AllocatedLineCost[] = [];
+    let allocatedSoFar = 0;
+    let maxBasis = 0;
+    let maxBasisIdx = 0;
+
+    for (let i = 0; i < productLines.length; i++) {
+      const line = productLines[i];
+      const lineTotalCents = Number(line.lineTotalCents) || 0;
+      const qty = Number(line.orderQty) || 0;
+      const basis = lineTotalCents > 0 ? lineTotalCents : 0;
+
+      // share = basis / productSubtotalCents.
+      // allocatedCents = round_half_up_away_from_zero(pool * basis / productSubtotal).
+      // BigInt + signed half-up helper for deterministic rounding (Rule #2)
+      // and overflow safety.
+      let allocatedCents = 0;
+      if (basis > 0) {
+        allocatedCents = Number(
+          signedRoundHalfUpDiv(
+            BigInt(pooledCents) * BigInt(basis),
+            BigInt(productSubtotalCents),
+          ),
+        );
+      }
+      allocatedSoFar += allocatedCents;
+
+      if (basis > maxBasis) {
+        maxBasis = basis;
+        maxBasisIdx = i;
+      }
+
+      const landedLineTotalCents = lineTotalCents + allocatedCents;
+      // landed unit cost in mills = round_half_up(landed_line_total_cents * 100 / qty).
+      // BigInt to stay safe on large pooled totals.
+      const landedUnitCostMills =
+        qty > 0
+          ? Number(
+              signedRoundHalfUpDiv(
+                BigInt(landedLineTotalCents) * BigInt(100),
+                BigInt(qty),
+              ),
+            )
+          : 0;
+      const landedUnitCostCents =
+        qty > 0
+          ? Number(
+              signedRoundHalfUpDiv(BigInt(landedLineTotalCents), BigInt(qty)),
+            )
+          : 0;
+
+      perLine.push({
+        purchaseOrderLineId: Number(line.id),
+        lineTotalCents,
+        allocatedCents,
+        landedLineTotalCents,
+        landedUnitCostMills,
+        landedUnitCostCents,
+      });
+    }
+
+    // Distribute rounding remainder to the largest-basis line so the
+    // total reconciles exactly. Mirrors shipment-tracking.runAllocation.
+    const remainder = pooledCents - allocatedSoFar;
+    if (remainder !== 0 && perLine.length > 0) {
+      const target = perLine[maxBasisIdx];
+      target.allocatedCents += remainder;
+      target.landedLineTotalCents += remainder;
+      const qty = Number(productLines[maxBasisIdx].orderQty) || 0;
+      if (qty > 0) {
+        target.landedUnitCostMills = Number(
+          signedRoundHalfUpDiv(
+            BigInt(target.landedLineTotalCents) * BigInt(100),
+            BigInt(qty),
+          ),
+        );
+        target.landedUnitCostCents = Number(
+          signedRoundHalfUpDiv(BigInt(target.landedLineTotalCents), BigInt(qty)),
+        );
+      }
+    }
+
+    return {
+      perLine,
+      pooledCents,
+      productSubtotalCents,
+      unallocatedCents: 0,
+    };
+  }
+
+  // Helper: signed BigInt half-up division (toward +infinity for positives,
+  // toward -infinity for negatives — i.e. away from zero on the half-cent).
+  // Returns a JS number; safe for any value that fits Number.MAX_SAFE_INTEGER
+  // post-division (which is fine for any real-world cent total).
+  function signedRoundHalfUpDiv(numerator: bigint, denominator: bigint): bigint {
+    if (denominator === BigInt(0)) return BigInt(0);
+    const sign = (numerator < BigInt(0)) !== (denominator < BigInt(0)) ? -1 : 1;
+    const absNum = numerator < BigInt(0) ? -numerator : numerator;
+    const absDen = denominator < BigInt(0) ? -denominator : denominator;
+    const halfDen = absDen / BigInt(2);
+    const rounded = (absNum + halfDen) / absDen;
+    return sign === -1 ? -rounded : rounded;
+  }
+
   async function recalculateTotals(purchaseOrderId: number, userId?: string): Promise<any> {
     const lines = await storage.getPurchaseOrderLines(purchaseOrderId);
     let subtotalCents = BigInt(0);
@@ -2600,6 +2799,11 @@ export function createPurchasingService(db: any, storage: Storage) {
     // Recalculate
     recalculateTotals,
     computePoTotalsFromLines,
+    computeAllocatedLineCosts,
+    getAllocatedLineCostsForPo: async (poId: number) => {
+      const lines = await storage.getPurchaseOrderLines(poId);
+      return computeAllocatedLineCosts(lines);
+    },
 
     // Receiving integration
     createReceiptFromPO,
