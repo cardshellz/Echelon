@@ -88,26 +88,18 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
       }
 
       for (const o of toClear) {
-        console.log(`[ShipStation Sweeper] Clearing mismatch/duplicate SS Order ${o.orderId} (${o.orderNumber})`);
-        const payload = {
-          orderId: o.orderId,
-          carrierCode: "other",
-          shipDate: new Date().toISOString().split('T')[0],
-          trackingNumber: "", 
-          notifyCustomer: false,
-          notifySalesChannel: false
-        };
-        const mRes = await fetch(`${baseUrl}/orders/markasshipped`, {
-          method: "POST",
+        console.log(`[ShipStation Sweeper] DELETING mismatch/duplicate SS Order ${o.orderId} (${o.orderNumber})`);
+        const mRes = await fetch(`${baseUrl}/orders/${o.orderId}`, {
+          method: "DELETE",
           headers: {
-            "Authorization": `Basic ${encodedAuth}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(payload)
+            "Authorization": `Basic ${encodedAuth}`
+          }
         });
 
         if (mRes.ok) {
           totalCleared++;
+        } else {
+          console.warn(`[ShipStation Sweeper] Failed to delete SS Order ${o.orderId}:`, await mRes.text());
         }
       }
     }
