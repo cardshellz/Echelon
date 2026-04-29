@@ -237,7 +237,7 @@ export function createServices(db: any) {
 
   // SyncRecovery — unified order-pipeline gap recovery (Shopify → shopify_orders
   // → OMS → WMS). Runs on a schedule and is exposed via /api/sync/recover-orders.
-  const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync });
+  const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync, shipStation });
 
   return {
     inventoryCore,

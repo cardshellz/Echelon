@@ -15,6 +15,7 @@
 
 import { runReconciliationNow as shopifyReconcile } from "../orders/shopify-order-reconciliation";
 import { backfillShopifyOrders } from "./shopify-bridge-wrapper";
+import { sql } from "drizzle-orm";
 
 export interface StageResult {
   name: string;
@@ -37,7 +38,7 @@ export class SyncRecoveryService {
 
   constructor(
     private db: any,
-    private services: { oms?: any; wmsSync?: any },
+    private services: { oms?: any; wmsSync?: any; shipStation?: any },
   ) {}
 
   /**
@@ -74,6 +75,9 @@ export class SyncRecoveryService {
 
       // 3) Bridge oms_orders that haven't reached WMS yet
       stages.push(await this.runOmsToWmsBackfill());
+
+      // 4) Push WMS outbound shipments stuck in 'planned' to ShipStation
+      stages.push(await this.runWmsToShipStationBackfill());
     } finally {
       this.isRunning = false;
     }
@@ -151,6 +155,56 @@ export class SyncRecoveryService {
       console.error("[SyncRecovery] oms_to_wms failed:", err);
       return {
         name: "oms_to_wms",
+        ok: false,
+        error: err?.message || String(err),
+      };
+    }
+  }
+
+  async runWmsToShipStationBackfill(): Promise<StageResult> {
+    try {
+      if (!this.services.shipStation) {
+        return {
+          name: "wms_to_shipstation",
+          ok: false,
+          error: "shipStation service unavailable",
+        };
+      }
+
+      // Find all planned outbound shipments that do NOT have a shipstation order ID
+      const result: any = await this.db.execute(sql`
+        SELECT id
+        FROM wms.outbound_shipments
+        WHERE status = 'planned'
+          AND shipstation_order_id IS NULL
+        ORDER BY created_at ASC
+      `);
+      
+      const shipmentIds = result.rows.map((r: any) => r.id);
+      if (shipmentIds.length === 0) {
+        return { name: "wms_to_shipstation", ok: true, data: { checked: 0, pushed: 0, failed: 0 } };
+      }
+      
+      let pushed = 0;
+      let failed = 0;
+      
+      for (const id of shipmentIds) {
+        try {
+          await this.services.shipStation.pushShipment(id);
+          pushed++;
+        } catch (err: any) {
+          console.warn(`[SyncRecovery] wms_to_shipstation failed to push shipment ${id}: ${err.message}`);
+          failed++;
+        }
+        // Rate limit: ~1 request per second
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      return { name: "wms_to_shipstation", ok: true, data: { checked: shipmentIds.length, pushed, failed } };
+    } catch (err: any) {
+      console.error("[SyncRecovery] wms_to_shipstation sweep failed:", err);
+      return {
+        name: "wms_to_shipstation",
         ok: false,
         error: err?.message || String(err),
       };
