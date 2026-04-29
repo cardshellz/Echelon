@@ -872,6 +872,33 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     });
 
     if (event.kind === "shipped") {
+      if (inventoryCore) {
+        try {
+          const itemsResult = await db.execute(sql`
+            SELECT id, order_item_id, product_variant_id, qty, from_location_id
+            FROM wms.outbound_shipment_items
+            WHERE shipment_id = ${wmsShipmentRow.id}
+          `);
+          
+          for (const item of itemsResult.rows as any[]) {
+            if (!item.product_variant_id || !item.from_location_id || !item.qty) continue;
+            
+            await inventoryCore.recordShipment({
+              productVariantId: item.product_variant_id,
+              warehouseLocationId: item.from_location_id,
+              qty: item.qty,
+              orderId: wmsOrderId,
+              orderItemId: item.order_item_id,
+              shipmentId: String(wmsShipmentRow.id),
+              userId: "system:shipstation:v2",
+            });
+            console.log(`[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})`);
+          }
+        } catch (invErr: any) {
+          console.error(`[ShipStation Webhook V2] Inventory deduction failed for shipment ${wmsShipmentRow.id}: ${invErr.message}`);
+        }
+      }
+
       try {
         const fulfillmentPush = (db as any).__fulfillmentPush;
         if (fulfillmentPush) {

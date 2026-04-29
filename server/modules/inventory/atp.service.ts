@@ -164,9 +164,7 @@ class InventoryAtpService {
     const row = (result.rows as any[])[0] || {};
     const onHand = Number(row.on_hand ?? 0);
     const reserved = Number(row.reserved ?? 0);
-    const picked = Number(row.picked ?? 0);
-    const packed = Number(row.packed ?? 0);
-    return onHand - reserved - picked - packed;
+    return onHand - reserved;
   }
 
   // --------------------------------------------------------------------------
@@ -181,7 +179,7 @@ class InventoryAtpService {
    * rows at the warehouse for each variant independently.
    *
    * Formula per variant:
-   *   ATP = SUM(GREATEST(variant_qty - reserved_qty - picked_qty - packed_qty, 0))
+   *   ATP = SUM(GREATEST(variant_qty - reserved_qty, 0))
    *   across all inventory_levels WHERE warehouse_location_id belongs to this warehouse.
    *
    * GREATEST(..., 0) is applied per-row so a negative bin doesn't drag down
