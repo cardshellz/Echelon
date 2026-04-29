@@ -736,6 +736,41 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 row.wms_shipment_status !== "cancelled"
               ) {
                 event = { kind: "cancelled", reason: "ss_cancelled" };
+              } else if (
+                ssOrder.orderStatus !== "shipped" &&
+                row.wms_shipment_status === "shipped"
+              ) {
+                // Outbound Sync: Push shipped status to ShipStation if it drifted
+                await ss.markAsShipped(ssOrderId, {
+                  shipDate: new Date(),
+                  trackingNumber: row.tracking_number || "",
+                  carrierCode: row.carrier || "other",
+                  notifyCustomer: false,
+                });
+                console.log(`[ShipStation Reconcile V2] Outbound sync: marked SS order ${ssOrderId} shipped`);
+                markedShipped++;
+
+                await db.execute(sql`
+                  UPDATE wms.outbound_shipments
+                  SET last_reconciled_at = NOW()
+                  WHERE id = ${shipmentId}
+                `);
+                continue;
+              } else if (
+                ssOrder.orderStatus !== "cancelled" &&
+                row.wms_shipment_status === "cancelled"
+              ) {
+                // Outbound Sync: Push cancelled status to ShipStation if it drifted
+                await ss.cancelOrder(ssOrderId);
+                console.log(`[ShipStation Reconcile V2] Outbound sync: cancelled SS order ${ssOrderId}`);
+                markedCancelled++;
+
+                await db.execute(sql`
+                  UPDATE wms.outbound_shipments
+                  SET last_reconciled_at = NOW()
+                  WHERE id = ${shipmentId}
+                `);
+                continue;
               }
             }
 
