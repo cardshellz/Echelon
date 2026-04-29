@@ -1914,6 +1914,9 @@ function UoMSelector({ line, onChange, vendorId }: { line: LineDraft; onChange: 
     );
   }
 
+  // Restrict ordering to base pieces only to decouple PO unit of measure from receiving config
+  const baseVariants = variants.filter((v) => v.isBaseUnit || v.unitsPerVariant === 1);
+
   return (
     <Select
       value={line.productVariantId ? String(line.productVariantId) : undefined}
@@ -1938,7 +1941,7 @@ function UoMSelector({ line, onChange, vendorId }: { line: LineDraft; onChange: 
         </span>
       </SelectTrigger>
       <SelectContent>
-        {variants.map((v) => {
+        {baseVariants.map((v) => {
           const uomName = v.name || (v.isBaseUnit ? "Piece" : `Pack of ${v.unitsPerVariant}`);
           return (
             <SelectItem key={v.id} value={String(v.id)}>
@@ -1991,7 +1994,8 @@ function LineRow(props: LineRowProps) {
   } = props;
 
   const catalogQuery = useVendorCatalogSearch(vendorId, productSearch);
-  const inCatalog = catalogQuery.data?.inCatalog ?? [];
+  // Restrict PO creation to base pieces only: hide case variants
+  const inCatalog = (catalogQuery.data?.inCatalog ?? []).filter(v => v.packSize == null || v.packSize === 1);
   const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
 
   // Line total in cents is derived from mills (authoritative), half-up at
