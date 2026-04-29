@@ -1884,11 +1884,14 @@ function NonProductLineRow({
   );
 }
 
-function UoMSelector({ line, onChange }: { line: LineDraft; onChange: (patch: Partial<LineDraft>) => void }) {
+function UoMSelector({ line, onChange, vendorId }: { line: LineDraft; onChange: (patch: Partial<LineDraft>) => void; vendorId: number | null }) {
   const { data: variants } = useQuery<any[]>({
-    queryKey: ["/api/products", line.productId, "variants"],
+    queryKey: ["/api/products", line.productId, "variants", vendorId],
     queryFn: async () => {
-      const res = await fetch(`/api/products/${line.productId}/variants`);
+      const url = vendorId 
+        ? `/api/products/${line.productId}/variants?vendorId=${vendorId}` 
+        : `/api/products/${line.productId}/variants`;
+      const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to load variants");
       return res.json();
     },
@@ -1917,10 +1920,15 @@ function UoMSelector({ line, onChange }: { line: LineDraft; onChange: (patch: Pa
       onValueChange={(val) => {
         const v = variants.find((v) => String(v.id) === val);
         if (v) {
-          onChange({
+          const patch: Partial<LineDraft> = {
             productVariantId: v.id,
             sku: v.sku || null,
-          });
+          };
+          if (v.isVendorCatalog && typeof v.vendorCostMills === "number") {
+            patch.unitCostMills = v.vendorCostMills;
+            if (v.vendorProductId) patch.vendorProductId = v.vendorProductId;
+          }
+          onChange(patch);
         }
       }}
     >
@@ -1930,11 +1938,25 @@ function UoMSelector({ line, onChange }: { line: LineDraft; onChange: (patch: Pa
         </span>
       </SelectTrigger>
       <SelectContent>
-        {variants.map((v) => (
-          <SelectItem key={v.id} value={String(v.id)}>
-            {v.name || (v.isBaseUnit ? "Piece" : `Pack of ${v.unitsPerVariant}`)}
-          </SelectItem>
-        ))}
+        {variants.map((v) => {
+          const uomName = v.name || (v.isBaseUnit ? "Piece" : `Pack of ${v.unitsPerVariant}`);
+          return (
+            <SelectItem key={v.id} value={String(v.id)}>
+              <div className="flex items-center justify-between w-full gap-4">
+                <span>{uomName}</span>
+                {v.isVendorCatalog && typeof v.vendorCostMills === "number" ? (
+                  <span className="text-muted-foreground text-xs tabular-nums text-right flex-1">
+                    ${(v.vendorCostMills / 1000).toFixed(4)}
+                  </span>
+                ) : vendorId ? (
+                  <span className="text-muted-foreground/50 text-xs italic text-right flex-1">
+                    (not in catalog)
+                  </span>
+                ) : null}
+              </div>
+            </SelectItem>
+          );
+        })}
       </SelectContent>
     </Select>
   );
@@ -2124,7 +2146,7 @@ function LineRow(props: LineRowProps) {
 
       {/* UoM */}
       <div className="col-span-12 md:col-span-2">
-        <UoMSelector line={line} onChange={onChange} />
+        <UoMSelector line={line} onChange={onChange} vendorId={vendorId} />
       </div>
 
       {/* Qty */}

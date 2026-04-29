@@ -575,7 +575,27 @@ export async function registerProductRoutes(app: Express) {
   app.get("/api/products/:productId/variants", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const productId = parseInt(req.params.productId);
+      const vendorId = req.query.vendorId ? parseInt(req.query.vendorId as string) : undefined;
       const variants = await storage.getProductVariantsByProductId(productId);
+      
+      if (vendorId && !isNaN(vendorId)) {
+        // Look up vendor products to get vendor-specific pricing
+        const vendorProducts = await req.app.locals.services.purchasing.getVendorProducts({ vendorId, productId });
+        const enrichedVariants = variants.map(v => {
+          const vp = vendorProducts.find((vp: any) => vp.productVariantId === v.id) || 
+                     vendorProducts.find((vp: any) => vp.productVariantId === null);
+          return {
+            ...v,
+            vendorCostMills: vp ? vp.unitCostMills : undefined,
+            vendorCostCents: vp ? vp.unitCostCents : undefined,
+            vendorSku: vp ? vp.vendorSku : undefined,
+            vendorProductId: vp ? vp.id : undefined,
+            isVendorCatalog: !!vp,
+          };
+        });
+        return res.json(enrichedVariants);
+      }
+
       res.json(variants);
     } catch (error) {
       console.error("Error fetching variants:", error);
