@@ -959,14 +959,6 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     const runShipStationReconcile = async () => {
       if (process.env.RECONCILE_V2 === "true") {
         await runShipStationReconcileV2();
-        
-        // Also run the aggressive sweeper to catch stray SS-generated duplicates
-        const apiKey = process.env.SHIPSTATION_API_KEY;
-        const apiSecret = process.env.SHIPSTATION_API_SECRET;
-        if (apiKey && apiSecret) {
-          const { sweepShipStationQueue } = await import("./modules/oms/shipstation-sweeper");
-          await sweepShipStationQueue(apiKey, apiSecret).catch(e => console.warn("[ShipStation Sweeper] error:", e.message));
-        }
       } else {
         await runShipStationReconcileV1();
       }
