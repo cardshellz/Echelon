@@ -13,7 +13,6 @@ import { initReconciliation, startShopifyReconciliation } from "./modules/orders
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
-import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationService, setDropshipWmsServices } from "./modules/dropship/vendor-order-polling";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { startWebhookRetryWorker, enqueueShipStationRetry } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
@@ -378,21 +377,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     log(`eBay order polling not started (config missing): ${err.message}`, "oms");
   }
 
-  // Start Vendor (Dropship) Order Polling — polls each vendor's eBay for orders
-  try {
-    setDropshipOmsService(services.oms);
-    setDropshipShipStationService(services.shipStation);
-    setDropshipWmsServices({
-      reservation: services.reservation,
-      fulfillmentRouter: services.fulfillmentRouter,
-      slaMonitor: services.slaMonitor,
-    });
-    startVendorOrderPolling();
-    log("Vendor dropship order polling started", "dropship");
-  } catch (err: any) {
-    log(`Vendor order polling not started: ${err.message}`, "dropship");
-  }
-
+  // Dropship V2 vendor polling remains disabled until the replacement use-case layer lands.
   // ---- eBay Listing Reconciliation (every 30 minutes) ----
   // Checks synced listings against eBay to detect ended/deleted items
   const RECONCILE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes

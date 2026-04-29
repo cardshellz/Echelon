@@ -228,7 +228,12 @@ export const dropshipStoreSetupChecks = dropshipSchema.table("dropship_store_set
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("dropship_setup_check_store_key_idx").on(table.storeConnectionId, table.checkKey),
+  uniqueIndex("dropship_setup_check_store_key_idx")
+    .on(table.storeConnectionId, table.checkKey)
+    .where(sql`${table.storeConnectionId} IS NOT NULL`),
+  uniqueIndex("dropship_setup_check_vendor_key_idx")
+    .on(table.vendorId, table.checkKey)
+    .where(sql`${table.storeConnectionId} IS NULL`),
   index("dropship_setup_check_status_idx").on(table.status),
 ]);
 
@@ -247,8 +252,11 @@ export const dropshipSetupBlockers = dropshipSchema.table("dropship_setup_blocke
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("dropship_setup_blocker_entity_key_idx").on(table.vendorId, table.entityType, table.entityId, table.blockerKey),
+  uniqueIndex("dropship_setup_blocker_entity_key_idx")
+    .on(table.vendorId, table.entityType, table.entityId, table.blockerKey)
+    .where(sql`${table.status} <> 'resolved'`),
   index("dropship_setup_blocker_status_idx").on(table.status),
+  check("dropship_setup_blocker_status_chk", sql`${table.status} IN ('open','acknowledged','resolved')`),
 ]);
 
 export const dropshipCatalogRules = dropshipSchema.table("dropship_catalog_rules", {
@@ -271,6 +279,43 @@ export const dropshipCatalogRules = dropshipSchema.table("dropship_catalog_rules
   index("dropship_catalog_rules_scope_idx").on(table.scopeType, table.isActive),
   check("dropship_catalog_rules_scope_chk", sql`${table.scopeType} IN ('catalog','product_line','category','product','variant')`),
   check("dropship_catalog_rules_action_chk", sql`${table.action} IN ('include','exclude')`),
+  check("dropship_catalog_rules_target_chk", sql`
+    (
+      ${table.scopeType} = 'catalog'
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'product_line'
+      AND ${table.productLineId} IS NOT NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'category'
+      AND ${table.category} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'product'
+      AND ${table.productId} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'variant'
+      AND ${table.productVariantId} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.category} IS NULL
+    )
+  `),
 ]);
 
 export const dropshipVendorSelectionRules = dropshipSchema.table("dropship_vendor_selection_rules", {
@@ -293,6 +338,43 @@ export const dropshipVendorSelectionRules = dropshipSchema.table("dropship_vendo
   index("dropship_selection_rules_vendor_idx").on(table.vendorId, table.isActive),
   check("dropship_selection_rules_scope_chk", sql`${table.scopeType} IN ('catalog','product_line','category','product','variant')`),
   check("dropship_selection_rules_action_chk", sql`${table.action} IN ('include','exclude')`),
+  check("dropship_selection_rules_target_chk", sql`
+    (
+      ${table.scopeType} = 'catalog'
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'product_line'
+      AND ${table.productLineId} IS NOT NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'category'
+      AND ${table.category} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'product'
+      AND ${table.productId} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'variant'
+      AND ${table.productVariantId} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.category} IS NULL
+    )
+  `),
 ]);
 
 export const dropshipVendorVariantOverrides = dropshipSchema.table("dropship_vendor_variant_overrides", {
@@ -325,9 +407,47 @@ export const dropshipPricingPolicies = dropshipSchema.table("dropship_pricing_po
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_pricing_policies_scope_idx").on(table.scopeType, table.isActive),
+  check("dropship_pricing_policies_scope_chk", sql`${table.scopeType} IN ('catalog','product_line','category','product','variant')`),
   check("dropship_pricing_policies_mode_chk", sql`${table.mode} IN ('off','warn_only','block_listing_push','block_order_acceptance')`),
   check("dropship_pricing_policies_floor_chk", sql`${table.floorPriceCents} IS NULL OR ${table.floorPriceCents} >= 0`),
   check("dropship_pricing_policies_ceiling_chk", sql`${table.ceilingPriceCents} IS NULL OR ${table.ceilingPriceCents} >= 0`),
+  check("dropship_pricing_policies_target_chk", sql`
+    (
+      ${table.scopeType} = 'catalog'
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'product_line'
+      AND ${table.productLineId} IS NOT NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'category'
+      AND ${table.category} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.productVariantId} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'product'
+      AND ${table.productId} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productVariantId} IS NULL
+      AND ${table.category} IS NULL
+    )
+    OR (
+      ${table.scopeType} = 'variant'
+      AND ${table.productVariantId} IS NOT NULL
+      AND ${table.productLineId} IS NULL
+      AND ${table.productId} IS NULL
+      AND ${table.category} IS NULL
+    )
+  `),
 ]);
 
 export const dropshipVendorListings = dropshipSchema.table("dropship_vendor_listings", {
@@ -354,6 +474,7 @@ export const dropshipVendorListings = dropshipSchema.table("dropship_vendor_list
 }, (table) => [
   uniqueIndex("dropship_listing_store_variant_idx").on(table.storeConnectionId, table.productVariantId),
   index("dropship_listing_vendor_status_idx").on(table.vendorId, table.status),
+  check("dropship_listing_platform_chk", sql`${table.platform} IN ('ebay','shopify','tiktok','instagram','bigcommerce')`),
   check("dropship_listing_status_chk", sql`${table.status} IN ('not_listed','preview_ready','queued','pushing','active','paused','ended','failed','blocked','drift_detected')`),
   check("dropship_listing_price_chk", sql`${table.vendorRetailPriceCents} IS NULL OR ${table.vendorRetailPriceCents} >= 0`),
   check("dropship_listing_qty_chk", sql`${table.pushedQuantity} >= 0 AND (${table.quantityCap} IS NULL OR ${table.quantityCap} >= 0)`),
@@ -375,6 +496,7 @@ export const dropshipListingPushJobs = dropshipSchema.table("dropship_listing_pu
 }, (table) => [
   uniqueIndex("dropship_listing_job_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_listing_job_status_idx").on(table.status),
+  check("dropship_listing_job_status_chk", sql`${table.status} IN ('queued','processing','completed','failed','cancelled')`),
 ]);
 
 export const dropshipListingPushJobItems = dropshipSchema.table("dropship_listing_push_job_items", {
@@ -396,6 +518,7 @@ export const dropshipListingPushJobItems = dropshipSchema.table("dropship_listin
   uniqueIndex("dropship_listing_job_item_job_variant_idx").on(table.jobId, table.productVariantId),
   uniqueIndex("dropship_listing_job_item_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_listing_job_item_status_idx").on(table.status),
+  check("dropship_listing_job_item_status_chk", sql`${table.status} IN ('queued','processing','completed','failed','blocked','cancelled')`),
 ]);
 
 export const dropshipListingSyncEvents = dropshipSchema.table("dropship_listing_sync_events", {
@@ -479,11 +602,22 @@ export const dropshipWalletLedger = dropshipSchema.table("dropship_wallet_ledger
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   settledAt: timestamp("settled_at", { withTimezone: true }),
 }, (table) => [
-  uniqueIndex("dropship_wallet_ref_idx").on(table.referenceType, table.referenceId).where(sql`reference_id IS NOT NULL`),
+  uniqueIndex("dropship_wallet_ref_idx")
+    .on(table.referenceType, table.referenceId)
+    .where(sql`${table.referenceType} IS NOT NULL AND ${table.referenceId} IS NOT NULL`),
   uniqueIndex("dropship_wallet_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_wallet_ledger_vendor_idx").on(table.vendorId),
+  check("dropship_wallet_ledger_type_chk", sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment')`),
   check("dropship_wallet_ledger_status_chk", sql`${table.status} IN ('pending','settled','failed','voided')`),
   check("dropship_wallet_ledger_amount_chk", sql`${table.amountCents} <> 0`),
+  check("dropship_wallet_ledger_reference_chk", sql`
+    (${table.referenceType} IS NULL AND ${table.referenceId} IS NULL)
+    OR (${table.referenceType} IS NOT NULL AND ${table.referenceId} IS NOT NULL)
+  `),
+  check("dropship_wallet_ledger_balance_chk", sql`
+    (${table.availableBalanceAfterCents} IS NULL OR ${table.availableBalanceAfterCents} >= 0)
+    AND (${table.pendingBalanceAfterCents} IS NULL OR ${table.pendingBalanceAfterCents} >= 0)
+  `),
 ]);
 
 export const dropshipBoxCatalog = dropshipSchema.table("dropship_box_catalog", {
@@ -579,7 +713,12 @@ export const dropshipInsurancePoolConfig = dropshipSchema.table("dropship_insura
   effectiveTo: timestamp("effective_to", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  check("dropship_insurance_bps_chk", sql`${table.feeBps} >= 0`),
+  check("dropship_insurance_bps_chk", sql`${table.feeBps} >= 0 AND ${table.feeBps} <= 10000`),
+  check("dropship_insurance_fee_bounds_chk", sql`
+    (${table.minFeeCents} IS NULL OR ${table.minFeeCents} >= 0)
+    AND (${table.maxFeeCents} IS NULL OR ${table.maxFeeCents} >= 0)
+    AND (${table.minFeeCents} IS NULL OR ${table.maxFeeCents} IS NULL OR ${table.maxFeeCents} >= ${table.minFeeCents})
+  `),
 ]);
 
 export const dropshipShippingQuoteSnapshots = dropshipSchema.table("dropship_shipping_quote_snapshots", {
@@ -600,7 +739,14 @@ export const dropshipShippingQuoteSnapshots = dropshipSchema.table("dropship_shi
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_shipping_quote_vendor_idx").on(table.vendorId, table.createdAt),
-  check("dropship_shipping_quote_total_chk", sql`${table.packageCount} > 0 AND ${table.baseRateCents} >= 0 AND ${table.totalShippingCents} >= 0`),
+  check("dropship_shipping_quote_total_chk", sql`
+    ${table.packageCount} > 0
+    AND ${table.baseRateCents} >= 0
+    AND ${table.markupCents} >= 0
+    AND ${table.insurancePoolCents} >= 0
+    AND ${table.dunnageCents} >= 0
+    AND ${table.totalShippingCents} >= 0
+  `),
 ]);
 
 export const dropshipOrderIntake = dropshipSchema.table("dropship_order_intake", {
@@ -627,6 +773,7 @@ export const dropshipOrderIntake = dropshipSchema.table("dropship_order_intake",
   uniqueIndex("dropship_order_intake_store_external_idx").on(table.storeConnectionId, table.externalOrderId),
   index("dropship_order_intake_status_idx").on(table.status),
   index("dropship_order_intake_vendor_idx").on(table.vendorId, table.receivedAt),
+  check("dropship_order_intake_platform_chk", sql`${table.platform} IN ('ebay','shopify','tiktok','instagram','bigcommerce')`),
   check("dropship_order_intake_status_chk", sql`${table.status} IN ('received','processing','accepted','rejected','retrying','failed','payment_hold','cancelled','exception')`),
 ]);
 
@@ -693,6 +840,11 @@ export const dropshipRmaItems = dropshipSchema.table("dropship_rma_items", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   check("dropship_rma_item_qty_chk", sql`${table.quantity} > 0`),
+  check("dropship_rma_item_money_chk", sql`
+    (${table.requestedCreditCents} IS NULL OR ${table.requestedCreditCents} >= 0)
+    AND (${table.finalCreditCents} IS NULL OR ${table.finalCreditCents} >= 0)
+    AND (${table.feeCents} IS NULL OR ${table.feeCents} >= 0)
+  `),
 ]);
 
 export const dropshipRmaInspections = dropshipSchema.table("dropship_rma_inspections", {
@@ -729,6 +881,10 @@ export const dropshipCarrierClaims = dropshipSchema.table("dropship_carrier_clai
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_carrier_claim_status_idx").on(table.status),
+  check("dropship_carrier_claim_money_chk", sql`
+    (${table.claimAmountCents} IS NULL OR ${table.claimAmountCents} >= 0)
+    AND (${table.insurancePoolCreditCents} IS NULL OR ${table.insurancePoolCreditCents} >= 0)
+  `),
 ]);
 
 export const dropshipNotificationEvents = dropshipSchema.table("dropship_notification_events", {
@@ -797,6 +953,7 @@ export const dropshipUsdcLedgerEntries = dropshipSchema.table("dropship_usdc_led
   settledAt: timestamp("settled_at", { withTimezone: true }),
 }, (table) => [
   uniqueIndex("dropship_usdc_tx_idx").on(table.chainId, table.transactionHash),
+  check("dropship_usdc_amount_chk", sql`${table.amountAtomicUnits} > 0`),
   check("dropship_usdc_confirmations_chk", sql`${table.confirmations} >= 0`),
 ]);
 

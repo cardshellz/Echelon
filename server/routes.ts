@@ -23,11 +23,6 @@ import { router as ebayPricingRouter } from "./routes/ebay/ebay-pricing.routes";
 import { router as ebayPoliciesRouter } from "./routes/ebay/ebay-policies.routes";
 import { registerSyncControlRoutes } from "./modules/channels/sync-control.routes";
 import { registerOmsRoutes } from "./routes/oms.routes";
-import { registerDropshipAdminRoutes } from "./modules/dropship/admin.routes";
-import { registerVendorAuthRoutes } from "./modules/dropship/vendor-auth.routes";
-import { registerVendorPortalRoutes } from "./modules/dropship/vendor-portal.routes";
-import { registerStripeWebhookRoute } from "./modules/dropship/vendor-webhooks";
-import { registerVendorEbayRoutes } from "./modules/dropship/vendor-ebay.routes";
 import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subscription.webhooks";
 import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";
 import { registerDiagnosticsRoutes } from "./routes/diagnostics";
@@ -66,12 +61,7 @@ export async function registerRoutes(
   registerSyncControlRoutes(app);
   registerOmsRoutes(app);
 
-  // Dropship platform routes
-  registerDropshipAdminRoutes(app);    // behind Echelon admin auth
-  registerVendorAuthRoutes(app);       // public (login/register)
-  registerVendorPortalRoutes(app);     // behind vendor JWT auth
-  registerVendorEbayRoutes(app);       // vendor eBay OAuth + listing push
-  registerStripeWebhookRoute(app);     // Stripe webhook (public, signature-verified)
+  // Dropship V2 routes register after the new use-case layer replaces the Phase 0 prototype.
   registerSubscriptionRoutes(app);     // Subscription admin routes (behind auth)
   registerPickPriorityRoutes(app);     // Pick priority settings (admin-only)
   registerDiagnosticsRoutes(app);      // System diagnostics (admin-only)

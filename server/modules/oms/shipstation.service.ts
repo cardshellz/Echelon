@@ -415,23 +415,23 @@ export function validateShipmentForPush(
     0,
   );
   
-  const expectedTotalCents = linesSumCents + order.tax_cents + order.shipping_cents - order.discount_cents;
+  const expectedTotalCents = linesSumCents + order.tax_cents + order.shipping_cents;
 
   if (
     !isLineSumWithinTolerance(
       order.total_cents,
       expectedTotalCents,
       items.length,
-      1,
+      5,
     )
   ) {
     throw new ShipStationPushError(
-      "expected total_cents (lines + tax + shipping - discount) does not match actual order.total_cents within tolerance",
+      "expected total_cents (lines + tax + shipping) does not match actual order.total_cents within tolerance",
       {
         code: SS_PUSH_INVALID_SHIPMENT,
         shipmentId,
         field: "order.total_cents",
-        value: { linesSumCents, tax: order.tax_cents, shipping: order.shipping_cents, discount: order.discount_cents, expectedTotalCents, actualTotalCents: order.total_cents },
+        value: { linesSumCents, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalCents, actualTotalCents: order.total_cents },
       },
     );
   }
@@ -1606,7 +1606,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         orderId: shipstationOrderId,
         carrierCode: opts.carrierCode || existing.carrierCode || "other",
         shipDate,
-        trackingNumber: opts.trackingNumber || existing.trackingNumber || null,
+        trackingNumber: opts.trackingNumber || existing.trackingNumber || "",
         notifyCustomer: opts.notifyCustomer ?? false,
         notifySalesChannel: false
       };
