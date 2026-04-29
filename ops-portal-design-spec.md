@@ -4,7 +4,7 @@
 > **Date:** 2026-04-26
 > **Status:** Ready for development
 > **Domain:** cardshellz.io
-> **Companion doc:** `dropship.md` Section 18 (business/UX decisions)
+> **Companion doc:** `DROPSHIP-V2-CONSOLIDATED-DESIGN.md` (authoritative business/UX decisions)
 
 This document specifies the visual design system, component library, page structures, and behavioral patterns for the .ops vendor portal. It is the source of truth for engineering implementation. Where this document conflicts with the working prototype (`ops-portal.jsx`), this document governs.
 
@@ -829,12 +829,12 @@ The companion JSX file is a working React prototype demonstrating layout, intera
 - Stripe Customer Balance integration with auto-reload
 - USDC smart contract on Base + Coinbase Business integration
 - eBay OAuth flow + multi-tenant token management + token refresh
-- Cartonization engine and rate table (per dropship.md Section 18.6)
+- Cartonization engine and rate table (per `DROPSHIP-V2-CONSOLIDATED-DESIGN.md`)
 - Real-time push (WebSocket/SSE) for order status, wallet, eBay sync
 - Notification delivery (email, SMS, webhook) per channel preferences
 - PDF generation for receipts and statements
 
-### 10.3 Pre-Launch Dependencies (per dropship.md Section 18.16)
+### 10.3 Pre-Launch Dependencies
 
 Must exist in Echelon before .ops Phase 0 ships:
 
@@ -860,4 +860,4 @@ These are not specified by design and need engineering input:
 
 ---
 
-*End of design specification. Companion files: `ops-portal.jsx` (reference prototype), `dropship.md` Section 18 (business and UX decisions).*
+*End of design specification. Companion files: `ops-portal.jsx` (reference prototype), `DROPSHIP-V2-CONSOLIDATED-DESIGN.md` (authoritative business and UX decisions).*

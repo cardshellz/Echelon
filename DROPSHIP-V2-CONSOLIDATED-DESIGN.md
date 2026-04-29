@@ -11,11 +11,10 @@ This document supersedes the prior working docs for implementation decisions:
 - `DROPSHIP-PHASE1-ENGINEER-BRIEF.md`
 - `DROPSHIP-PHASE1-MIMO-BRIEF.md`
 - `DROPSHIP-PHASE0-SPEC.md`
-- `dropship.md`
 - `ops-portal-design-spec.md`
 - `ops-portal.jsx`
 
-The older docs remain useful for historical context and detailed UX inspiration, but this file is the source of truth for new work.
+The older docs remain useful only for historical context and detailed UX inspiration. The removed legacy `dropship.md` file must not be used as an implementation source. This file is the source of truth for new dropship work.
 
 ---
 

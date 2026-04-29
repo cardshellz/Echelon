@@ -1221,6 +1221,37 @@ export function registerOmsWebhooks(
             END
           WHERE id = ${wmsOrder.rows[0].id}
         `);
+
+        // FIX: Transition any stranded WMS shipments to 'shipped'
+        const strandedShipments = await db.execute(sql`
+          UPDATE wms.outbound_shipments SET
+            status = 'shipped',
+            tracking_number = COALESCE(tracking_number, ${trackingNumber}),
+            carrier = COALESCE(carrier, ${carrier}),
+            shipped_at = NOW()
+          WHERE order_id = ${wmsOrder.rows[0].id}
+            AND status NOT IN ('shipped', 'cancelled', 'voided')
+          RETURNING shipstation_order_id
+        `);
+
+        // Immediately clear these stranded shipments from ShipStation
+        if (shipStationService?.isConfigured()) {
+          for (const s of strandedShipments.rows) {
+            if (s.shipstation_order_id && s.shipstation_order_id !== existing.shipstationOrderId) {
+              try {
+                await shipStationService.markAsShipped(Number(s.shipstation_order_id), {
+                  shipDate: now,
+                  trackingNumber,
+                  carrierCode: carrier?.toLowerCase() || "other",
+                  notifyCustomer: false,
+                });
+                console.log(`[OMS] Cleared stranded WMS shipment from ShipStation: ${s.shipstation_order_id}`);
+              } catch (e: any) {
+                console.error(`[OMS] Failed to mark WMS SS order shipped: ${e.message}`);
+              }
+            }
+          }
+        }
       }
 
       // Mirror to ShipStation: mark the Echelon-pushed order shipped so it
