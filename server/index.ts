@@ -956,12 +956,23 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     };
 
     // Schedule: V2 when flag is ON, V1 otherwise.
-    const runShipStationReconcile =
-      process.env.RECONCILE_V2 === "true"
-        ? runShipStationReconcileV2
-        : runShipStationReconcileV1;
+    const runShipStationReconcile = async () => {
+      if (process.env.RECONCILE_V2 === "true") {
+        await runShipStationReconcileV2();
+        
+        // Also run the aggressive sweeper to catch stray SS-generated duplicates
+        const apiKey = process.env.SHIPSTATION_API_KEY;
+        const apiSecret = process.env.SHIPSTATION_API_SECRET;
+        if (apiKey && apiSecret) {
+          const { sweepShipStationQueue } = await import("./modules/oms/shipstation-sweeper");
+          await sweepShipStationQueue(apiKey, apiSecret).catch(e => console.warn("[ShipStation Sweeper] error:", e.message));
+        }
+      } else {
+        await runShipStationReconcileV1();
+      }
+    };
 
     setTimeout(runShipStationReconcile, 30_000);
-    setInterval(runShipStationReconcile, 60 * 60 * 1000);
+    setInterval(runShipStationReconcile, 10 * 60 * 1000); // Every 10 minutes
   }
 })();
