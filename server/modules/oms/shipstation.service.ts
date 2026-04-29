@@ -11,7 +11,7 @@
  */
 
 import { eq, and, sql } from "drizzle-orm";
-import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels } from "@shared/schema";
+import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels, outboundShipments, wmsOrders, outboundShipmentItems, wmsOrderItems } from "@shared/schema";
 import type { OmsOrderWithLines } from "./oms.service";
 import { buildTrackingUrl } from "./tracking-url.util";
 import { isLineSumWithinTolerance } from "@shared/validation/currency";
@@ -149,6 +149,7 @@ export interface WmsOrderRow {
   amount_paid_cents: number;
   tax_cents: number;
   shipping_cents: number;
+  discount_cents: number;
   total_cents: number;
   currency: string;
   order_placed_at: Date | string | null;
@@ -307,6 +308,9 @@ export function validateShipmentForPush(
   order: Pick<
     WmsOrderRow,
     | "amount_paid_cents"
+    | "tax_cents"
+    | "shipping_cents"
+    | "discount_cents"
     | "total_cents"
     | "shipping_address"
     | "customer_email"
@@ -334,8 +338,7 @@ export function validateShipmentForPush(
   //    Negative values are the exact bug class that motivated this refactor.
   for (let i = 0; i < items.length; i++) {
     const line = items[i];
-    const unit = typeof line.unit_price_cents === 'string' ? Number(line.unit_price_cents) : line.unit_price_cents;
-    line.unit_price_cents = unit as any; // mutate for downstream
+    const unit = line.unit_price_cents;
 
     if (
       typeof unit !== "number" ||
@@ -354,8 +357,7 @@ export function validateShipmentForPush(
       );
     }
 
-    const qty = typeof line.qty === 'string' ? Number(line.qty) : line.qty;
-    line.qty = qty as any; // mutate for downstream
+    const qty = line.qty;
 
     if (
       typeof qty !== "number" ||
@@ -375,8 +377,7 @@ export function validateShipmentForPush(
   }
 
   // 3. amount_paid_cents must be >= 0.
-  const amountPaidCents = typeof order.amount_paid_cents === 'string' ? Number(order.amount_paid_cents) : order.amount_paid_cents;
-  order.amount_paid_cents = amountPaidCents as any;
+  const amountPaidCents = order.amount_paid_cents;
 
   if (
     typeof amountPaidCents !== "number" ||
@@ -391,11 +392,10 @@ export function validateShipmentForPush(
     });
   }
 
-  // 4. Sum of line extensions must reconcile with order-level total_cents
-  //    within 1¢ per line. Tolerance accounts for channel-side rounding
-  //    (e.g. tax distributed per-line at half-even rounding).
-  const totalCents = typeof order.total_cents === 'string' ? Number(order.total_cents) : order.total_cents;
-  order.total_cents = totalCents as any;
+  // 4. Sum of line extensions + shipping + tax - discount must reconcile
+  //    with order-level total_cents within 1¢ per line. Tolerance accounts
+  //    for channel-side rounding (e.g. tax distributed per-line).
+  const totalCents = order.total_cents;
 
   if (
     typeof totalCents !== "number" ||
@@ -414,10 +414,27 @@ export function validateShipmentForPush(
     (sum, line) => sum + line.unit_price_cents * line.qty,
     0,
   );
-  // NOTE: We cannot strictly validate linesSumCents === order.total_cents
-  // here because wms.orders.total_cents includes shipping, tax, and discounts,
-  // which are not passed into this validator. Strict enforcement here
-  // crashes all ShipStation pushes with shipping charges.
+  
+  const expectedTotalCents = linesSumCents + order.tax_cents + order.shipping_cents - order.discount_cents;
+
+  if (
+    !isLineSumWithinTolerance(
+      order.total_cents,
+      expectedTotalCents,
+      items.length,
+      1,
+    )
+  ) {
+    throw new ShipStationPushError(
+      "expected total_cents (lines + tax + shipping - discount) does not match actual order.total_cents within tolerance",
+      {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "order.total_cents",
+        value: { linesSumCents, tax: order.tax_cents, shipping: order.shipping_cents, discount: order.discount_cents, expectedTotalCents, actualTotalCents: order.total_cents },
+      },
+    );
+  }
 
   // 5. Shipping address — at least the single-line shipping_address must
   //    be present. We don't validate per-field granularity here because
@@ -1732,13 +1749,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     // ─── 1. Load shipment header (WMS only) ─────────────────────────
-    const shipmentResult: any = await db.execute(sql`
-      SELECT id, order_id, channel_id, status
-      FROM wms.outbound_shipments
-      WHERE id = ${shipmentId}
-      LIMIT 1
-    `);
-    const shipmentRow: WmsShipmentRow | undefined = shipmentResult?.rows?.[0];
+    const shipmentRows = await db.select({
+      id: outboundShipments.id,
+      order_id: outboundShipments.orderId,
+      channel_id: outboundShipments.channelId,
+      status: outboundShipments.status,
+    })
+      .from(outboundShipments)
+      .where(eq(outboundShipments.id, shipmentId))
+      .limit(1);
+
+    const shipmentRow = shipmentRows[0] as WmsShipmentRow | undefined;
     if (!shipmentRow) {
       throw new ShipStationPushError("shipment not found", {
         code: SS_PUSH_INVALID_SHIPMENT,
@@ -1762,20 +1783,35 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     // ─── 2. Load order (WMS only, with financial snapshot) ──────────
-    const orderResult: any = await db.execute(sql`
-      SELECT
-        id, order_number, channel_id, warehouse_id, oms_fulfillment_order_id,
-        sort_rank, external_order_id,
-        customer_name, customer_email,
-        shipping_name, shipping_address, shipping_city, shipping_state,
-        shipping_postal_code, shipping_country,
-        amount_paid_cents, tax_cents, shipping_cents, total_cents, currency,
-        order_placed_at
-      FROM wms.orders
-      WHERE id = ${shipmentRow.order_id}
-      LIMIT 1
-    `);
-    const orderRow: WmsOrderRow | undefined = orderResult?.rows?.[0];
+    const orderRows = await db.select({
+      id: wmsOrders.id,
+      order_number: wmsOrders.orderNumber,
+      channel_id: wmsOrders.channelId,
+      warehouse_id: wmsOrders.warehouseId,
+      oms_fulfillment_order_id: wmsOrders.omsFulfillmentOrderId,
+      sort_rank: wmsOrders.sortRank,
+      external_order_id: wmsOrders.externalOrderId,
+      customer_name: wmsOrders.customerName,
+      customer_email: wmsOrders.customerEmail,
+      shipping_name: wmsOrders.shippingName,
+      shipping_address: wmsOrders.shippingAddress,
+      shipping_city: wmsOrders.shippingCity,
+      shipping_state: wmsOrders.shippingState,
+      shipping_postal_code: wmsOrders.shippingPostalCode,
+      shipping_country: wmsOrders.shippingCountry,
+      amount_paid_cents: wmsOrders.amountPaidCents,
+      tax_cents: wmsOrders.taxCents,
+      shipping_cents: wmsOrders.shippingCents,
+      discount_cents: wmsOrders.discountCents,
+      total_cents: wmsOrders.totalCents,
+      currency: wmsOrders.currency,
+      order_placed_at: wmsOrders.orderPlacedAt,
+    })
+      .from(wmsOrders)
+      .where(eq(wmsOrders.id, shipmentRow.order_id))
+      .limit(1);
+
+    const orderRow = orderRows[0] as WmsOrderRow | undefined;
     if (!orderRow) {
       throw new ShipStationPushError("wms order not found for shipment", {
         code: SS_PUSH_INVALID_SHIPMENT,
@@ -1786,20 +1822,19 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     // ─── 3. Load items (WMS only, joined to order_items for pricing) ─
-    const itemsResult: any = await db.execute(sql`
-      SELECT
-        osi.id                    AS id,
-        osi.order_item_id         AS order_item_id,
-        oi.sku                    AS sku,
-        oi.name                   AS name,
-        osi.qty                   AS qty,
-        oi.unit_price_cents       AS unit_price_cents
-      FROM wms.outbound_shipment_items osi
-      JOIN wms.order_items oi ON oi.id = osi.order_item_id
-      WHERE osi.shipment_id = ${shipmentId}
-      ORDER BY osi.id ASC
-    `);
-    const itemRows: WmsShipmentItemRow[] = itemsResult?.rows ?? [];
+    const itemRows = await db.select({
+      id: outboundShipmentItems.id,
+      order_item_id: outboundShipmentItems.orderItemId,
+      sku: wmsOrderItems.sku,
+      name: wmsOrderItems.name,
+      qty: outboundShipmentItems.qty,
+      unit_price_cents: wmsOrderItems.paidPriceCents,
+    })
+      .from(outboundShipmentItems)
+      .innerJoin(wmsOrderItems, eq(wmsOrderItems.id, outboundShipmentItems.orderItemId))
+      .where(eq(outboundShipmentItems.shipmentId, shipmentId))
+      .orderBy(outboundShipmentItems.id) as WmsShipmentItemRow[];
+
     if (itemRows.length === 0) {
       throw new ShipStationPushError("shipment has no items", {
         code: SS_PUSH_INVALID_SHIPMENT,

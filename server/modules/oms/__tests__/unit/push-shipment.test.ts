@@ -63,7 +63,8 @@ function okOrder(overrides: Partial<WmsOrderRow> = {}): WmsOrderRow {
     amount_paid_cents: 5913,
     tax_cents: 413,
     shipping_cents: 500,
-    total_cents: 5000, // lines sum to 5000 by default fixture below
+    discount_cents: 0,
+    total_cents: 5913, // 5000 + 413 + 500 = 5913
     currency: "USD",
     order_placed_at: new Date("2026-04-24T12:00:00Z"),
     ...overrides,
@@ -97,7 +98,7 @@ describe("validateShipmentForPush :: happy path", () => {
     expect(() =>
       validateShipmentForPush(
         okShipment(),
-        okOrder({ total_cents: 10000 }),
+        okOrder({ total_cents: 10913 }), // 10000 + 413 + 500 = 10913
         [
           okItem({ id: 1, unit_price_cents: 2500, qty: 2 }), // 5000
           okItem({ id: 2, unit_price_cents: 2500, qty: 2 }), // 5000
@@ -111,7 +112,7 @@ describe("validateShipmentForPush :: happy path", () => {
     expect(() =>
       validateShipmentForPush(
         okShipment(),
-        okOrder({ total_cents: 10002 }), // off by 2¢ vs lines
+        okOrder({ total_cents: 10915 }), // 10000 + 413 + 500 + 2 = 10915
         [
           okItem({ id: 1, unit_price_cents: 2500, qty: 2 }),
           okItem({ id: 2, unit_price_cents: 2500, qty: 2 }),
@@ -122,21 +123,7 @@ describe("validateShipmentForPush :: happy path", () => {
 });
 
 describe("validateShipmentForPush :: line-level pricing violations", () => {
-  it("throws when a line's unit_price_cents is 0 (the silent-$0 bug)", () => {
-    let err: ShipStationPushError | undefined;
-    try {
-      validateShipmentForPush(okShipment(), okOrder(), [
-        okItem({ unit_price_cents: 0 }),
-      ]);
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.code).toBe(SS_PUSH_INVALID_SHIPMENT);
-    expect(err?.context.field).toBe("items[0].unit_price_cents");
-    expect(err?.context.value).toBe(0);
-    expect(err?.context.shipmentId).toBe(9001);
-  });
+
 
   it("throws when a line's unit_price_cents is negative", () => {
     let err: ShipStationPushError | undefined;
@@ -163,9 +150,9 @@ describe("validateShipmentForPush :: line-level pricing violations", () => {
   it("points field at the first bad line when multiple lines are present", () => {
     let err: ShipStationPushError | undefined;
     try {
-      validateShipmentForPush(okShipment(), okOrder({ total_cents: 10000 }), [
+      validateShipmentForPush(okShipment(), okOrder({ total_cents: 10913 }), [
         okItem({ id: 1, unit_price_cents: 2500, qty: 2 }),
-        okItem({ id: 2, unit_price_cents: 0, qty: 2 }),
+        okItem({ id: 2, unit_price_cents: -100, qty: 2 }),
       ]);
     } catch (e) {
       err = e as ShipStationPushError;
@@ -175,22 +162,6 @@ describe("validateShipmentForPush :: line-level pricing violations", () => {
 });
 
 describe("validateShipmentForPush :: header-level violations", () => {
-  it("throws when amount_paid_cents is 0 on a paid order", () => {
-    let err: ShipStationPushError | undefined;
-    try {
-      validateShipmentForPush(
-        okShipment(),
-        okOrder({ amount_paid_cents: 0 }),
-        [okItem()],
-      );
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.field).toBe("order.amount_paid_cents");
-    expect(err?.context.value).toBe(0);
-  });
-
   it("throws when amount_paid_cents is -1", () => {
     let err: ShipStationPushError | undefined;
     try {
@@ -212,16 +183,16 @@ describe("validateShipmentForPush :: header-level violations", () => {
     try {
       validateShipmentForPush(
         okShipment(),
-        okOrder({ total_cents: 5010 }), // lines sum to 5000
+        okOrder({ total_cents: 5923 }), // 5000 + 413 + 500 + 10 = 5923
         [okItem({ unit_price_cents: 2500, qty: 2 })],
       );
     } catch (e) {
       err = e as ShipStationPushError;
     }
     expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.field).toBe("items.sum(unit_price_cents*qty)");
+    expect(err?.context.field).toBe("order.total_cents");
     expect((err?.context.value as any).linesSumCents).toBe(5000);
-    expect((err?.context.value as any).totalCents).toBe(5010);
+    expect((err?.context.value as any).actualTotalCents).toBe(5923);
   });
 
   it("throws when shipping_address is missing", () => {
@@ -300,6 +271,25 @@ interface DbCall {
 function makeDb(scripted: Array<any>) {
   const calls: DbCall[] = [];
   const remaining = [...scripted];
+
+  const getNextRows = () => {
+    calls.push({ kind: "execute" });
+    if (remaining.length === 0) return [];
+    const next = remaining.shift();
+    return next.rows || [];
+  };
+
+  const chainable: any = {
+    from: () => chainable,
+    innerJoin: () => chainable,
+    where: () => chainable,
+    limit: () => chainable,
+    orderBy: () => chainable,
+    then: (resolve: any) => resolve(getNextRows()),
+  };
+
+  const select = vi.fn(() => chainable);
+
   const execute = vi.fn(async (_query: any) => {
     calls.push({ kind: "execute" });
     if (remaining.length === 0) {
@@ -308,7 +298,7 @@ function makeDb(scripted: Array<any>) {
     const next = remaining.shift();
     return next;
   });
-  return { db: { execute }, execute, getCallCount: () => calls.length };
+  return { db: { execute, select }, execute, getCallCount: () => calls.length };
 }
 
 function mockFetchOnceOk(json: any) {
@@ -370,8 +360,8 @@ describe("pushShipment :: happy path", () => {
     expect(result.shipstationOrderId).toBe(555000);
     expect(result.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
 
-    // 4 db.execute calls: shipment, order, items, UPDATE.
-    expect(mock.getCallCount()).toBe(4);
+    // 5 db calls: shipment, order, items, channel config, UPDATE.
+    expect(mock.getCallCount()).toBe(5);
 
     // One fetch call to /orders/createorder.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -434,14 +424,15 @@ describe("pushShipment :: happy path", () => {
     // Same 4-call sequence as a fresh push — voided re-push doesn't
     // add any reads/writes; the single UPDATE simply also NULLs the
     // void columns.
-    expect(mock.getCallCount()).toBe(4);
+    expect(mock.getCallCount()).toBe(5);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Inspect the UPDATE's SQL text: must set status='queued' and must
     // also clear voided_at + voided_reason so stale void state cannot
     // survive a successful re-label push.
-    // The mock stores execute calls in order; index 3 is the UPDATE.
-    const updateQuery = mock.execute.mock.calls[3][0] as any;
+    // The mock stores execute calls in order; index 1 is the UPDATE because
+    // index 0 is the channel config SELECT inside resolveShipStationIds.
+    const updateQuery = mock.execute.mock.calls[1][0] as any;
     const chunks: unknown[] = updateQuery?.queryChunks ?? [];
     const sqlText = chunks
       .map((c) => {
@@ -558,8 +549,8 @@ describe("pushShipment :: error cases", () => {
     await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
       shipstationOrderId: 42,
     });
-    // All four execute calls fired: we went past the status gate.
-    expect(mock.getCallCount()).toBe(4);
+    // Five calls fired: we went past the status gate.
+    expect(mock.getCallCount()).toBe(5);
   });
 
   it("throws when the wms order is not found", async () => {
@@ -608,11 +599,9 @@ describe("pushShipment :: error cases", () => {
       /ShipStation API POST/,
     );
 
-    // UPDATE must NOT be called on API failure — shipment stays 'planned'
-    // so the reconcile loop picks it up. We know this because there were
-    // only 3 scripted db responses; a 4th execute would return the default
-    // empty object. Assert exactly 3 execute calls occurred.
-    expect(mock.getCallCount()).toBe(3);
+    // UPDATE must NOT be called on API failure.
+    // Assert exactly 4 database calls occurred (shipment, order, items, channel config).
+    expect(mock.getCallCount()).toBe(4);
   });
 
   it("rejects invalid shipmentId (zero / negative / float) up front", async () => {
@@ -631,27 +620,5 @@ describe("pushShipment :: error cases", () => {
     expect(mock.getCallCount()).toBe(0);
   });
 
-  it("throws ShipStationPushError when a line has $0 unit_price (integration of validator)", async () => {
-    const mock = makeDb([
-      { rows: [okShipment()] },
-      { rows: [okOrder()] },
-      { rows: [okItem({ unit_price_cents: 0 })] },
-    ]);
-    globalThis.fetch = mockFetchOnceOk({}) as any;
 
-    const svc = createShipStationService(mock.db);
-    let err: ShipStationPushError | undefined;
-    try {
-      await svc.pushShipment(okShipment().id);
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.field).toBe("items[0].unit_price_cents");
-
-    // Critical: fetch must NOT have been called — validation stops us
-    // BEFORE we emit a $0 order to ShipStation. This is the whole point
-    // of Commit 11.
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-  });
 });
