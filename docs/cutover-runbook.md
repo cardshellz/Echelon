@@ -307,18 +307,20 @@ heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limi
 ```
 
 **Requirements:**
-- Exit code 0 (no divergences)
+- Exit code 0 (no real divergences)
 - Zero `diverge` outcomes in the report
-- A non-zero number of `ok` outcomes (otherwise the script ran against pre-flag data and produced no useful comparison; wait longer or pass `--since <flip-timestamp>`)
+- `ok + address_only > 0` (otherwise the script ran against pre-flag data and produced no useful comparison; wait longer or pass `--since <flip-timestamp>`)
+- `address_only` outcomes are acceptable — they represent USPS CASS address standardization differences (case, street suffix abbreviation, ZIP+4, city truncation) between ShipStation's CASS-validated addresses and Echelon's literal customer-entry addresses. Both are correct; the difference is cosmetic, not a data integrity issue.
+- Use `--strict` if you want to treat `address_only` as `diverge` (legacy behavior). Not recommended for normal parity runs.
 
-**Run it twice with at least 1 hour between runs.** Both must be exit code 0 with `ok > 0`.
+**Run it twice with at least 1 hour between runs.** Both must be exit code 0 with `ok + address_only > 0`.
 
-| Run | Timestamp (UTC) | Exit code | OK count | Diverge count | Notes |
-|-----|-----------------|-----------|----------|---------------|-------|
-| 1   |                 |           |          |               |       |
-| 2   |                 |           |          |               |       |
+| Run | Timestamp (UTC) | Exit code | OK count | Address-only | Diverge count | Notes |
+|-----|-----------------|-----------|----------|-------------|---------------|-------|
+| 1   |                 |           |          |             |               |       |
+| 2   |                 |           |          |             |               |       |
 
-- [ ] Parity check passed twice with zero divergences and ok > 0
+- [ ] Parity check passed twice with zero divergences and ok + address_only > 0
 
 **If divergences appear:** roll back `PUSH_FROM_WMS=false`, paste the per-order diff, fix the root cause before re-flipping.
 
