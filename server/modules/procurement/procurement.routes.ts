@@ -1881,8 +1881,21 @@ export function registerPurchasingRoutes(app: Express) {
         const raw = Array.isArray(req.query.status) ? req.query.status as string[] : (req.query.status as string).split(",");
         statusFilter = raw.length === 1 ? raw[0] : raw;
       }
+      // Phase 2: dual-track physical/financial status filters
+      let physicalStatusFilter: string | string[] | undefined;
+      if (req.query.physical_status) {
+        const raw = Array.isArray(req.query.physical_status) ? req.query.physical_status as string[] : (req.query.physical_status as string).split(",");
+        physicalStatusFilter = raw.length === 1 ? raw[0] : raw;
+      }
+      let financialStatusFilter: string | string[] | undefined;
+      if (req.query.financial_status) {
+        const raw = Array.isArray(req.query.financial_status) ? req.query.financial_status as string[] : (req.query.financial_status as string).split(",");
+        financialStatusFilter = raw.length === 1 ? raw[0] : raw;
+      }
       const filters = {
         status: statusFilter,
+        physicalStatus: physicalStatusFilter,
+        financialStatus: financialStatusFilter,
         vendorId: req.query.vendorId ? Number(req.query.vendorId) : undefined,
         search: req.query.search as string | undefined,
         limit: req.query.limit ? Number(req.query.limit) : 50,
@@ -2398,6 +2411,17 @@ export function registerPurchasingRoutes(app: Express) {
     try {
       const history = await purchasing.getPoStatusHistory(Number(req.params.id));
       res.json({ history });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Phase 2: payments linked to this PO via:
+  //   vendor_invoice_po_links → vendor_invoices → ap_payment_allocations → ap_payments
+  app.get("/api/purchase-orders/:id/payments", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const payments = await apLedger.getPaymentsForPo(Number(req.params.id));
+      res.json({ payments });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

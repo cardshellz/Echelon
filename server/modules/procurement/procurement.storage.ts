@@ -131,8 +131,8 @@ export interface IProcurementStorage {
   createPoApprovalTier(data: InsertPoApprovalTier): Promise<PoApprovalTier>;
   updatePoApprovalTier(id: number, updates: Partial<InsertPoApprovalTier>): Promise<PoApprovalTier | null>;
   deletePoApprovalTier(id: number): Promise<boolean>;
-  getPurchaseOrders(filters?: { status?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]>;
-  getPurchaseOrdersCount(filters?: { status?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
+  getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]>;
+  getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number): Promise<PurchaseOrder | undefined>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
   createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
@@ -634,7 +634,7 @@ export const procurementMethods: IProcurementStorage = {
     return result.length > 0;
   },
 
-  async getPurchaseOrders(filters?: { status?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]> {
+  async getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]> {
     const conditions: any[] = [];
     if (filters?.status) {
       if (Array.isArray(filters.status)) {
@@ -642,6 +642,15 @@ export const procurementMethods: IProcurementStorage = {
       } else {
         conditions.push(eq(purchaseOrders.status, filters.status));
       }
+    }
+    // Phase 2: dual-track physical/financial status filters
+    if (filters?.physicalStatus) {
+      const vals = Array.isArray(filters.physicalStatus) ? filters.physicalStatus : [filters.physicalStatus];
+      conditions.push(vals.length === 1 ? eq(purchaseOrders.physicalStatus, vals[0]) : inArray(purchaseOrders.physicalStatus, vals));
+    }
+    if (filters?.financialStatus) {
+      const vals = Array.isArray(filters.financialStatus) ? filters.financialStatus : [filters.financialStatus];
+      conditions.push(vals.length === 1 ? eq(purchaseOrders.financialStatus, vals[0]) : inArray(purchaseOrders.financialStatus, vals));
     }
     if (filters?.vendorId) conditions.push(eq(purchaseOrders.vendorId, filters.vendorId));
     if (filters?.search) {
@@ -660,7 +669,7 @@ export const procurementMethods: IProcurementStorage = {
     return await query;
   },
 
-  async getPurchaseOrdersCount(filters?: { status?: string | string[]; vendorId?: number; search?: string }): Promise<number> {
+  async getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number> {
     const conditions: any[] = [];
     if (filters?.status) {
       if (Array.isArray(filters.status)) {
@@ -668,6 +677,15 @@ export const procurementMethods: IProcurementStorage = {
       } else {
         conditions.push(eq(purchaseOrders.status, filters.status));
       }
+    }
+    // Phase 2: dual-track physical/financial status filters
+    if (filters?.physicalStatus) {
+      const vals = Array.isArray(filters.physicalStatus) ? filters.physicalStatus : [filters.physicalStatus];
+      conditions.push(vals.length === 1 ? eq(purchaseOrders.physicalStatus, vals[0]) : inArray(purchaseOrders.physicalStatus, vals));
+    }
+    if (filters?.financialStatus) {
+      const vals = Array.isArray(filters.financialStatus) ? filters.financialStatus : [filters.financialStatus];
+      conditions.push(vals.length === 1 ? eq(purchaseOrders.financialStatus, vals[0]) : inArray(purchaseOrders.financialStatus, vals));
     }
     if (filters?.vendorId) conditions.push(eq(purchaseOrders.vendorId, filters.vendorId));
     if (filters?.search) {
