@@ -20,6 +20,117 @@ import {
 import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
 import { format } from "date-fns";
 
+// ─── PO Financial Aggregate Recompute ───────────────────────────────────────
+//
+// Called after any invoice or payment write that can affect a PO's financial
+// state. Reads from non-voided vendor_invoices linked via vendor_invoice_po_links
+// and writes back to purchase_orders.invoiced_total_cents / paid_total_cents /
+// outstanding_cents / financial_status.
+//
+// Rule #3: integer arithmetic only — BigInt cents, no floats.
+// Rule #6: idempotent — safe to call multiple times for the same PO.
+
+/**
+ * Return all PO IDs linked to a given invoice via vendor_invoice_po_links.
+ */
+async function getPoIdsForInvoice(invoiceId: number): Promise<number[]> {
+  const rows = await db
+    .select({ purchaseOrderId: vendorInvoicePoLinks.purchaseOrderId })
+    .from(vendorInvoicePoLinks)
+    .where(eq(vendorInvoicePoLinks.vendorInvoiceId, invoiceId));
+  return rows.map((r) => r.purchaseOrderId);
+}
+
+/**
+ * Recompute financial aggregate columns on a purchase_order row.
+ *
+ * Sums invoicedAmountCents and paidAmountCents from all non-voided
+ * vendor_invoices linked to the PO, derives outstanding_cents and
+ * financial_status, then writes back atomically.
+ *
+ * Timestamps (firstInvoicedAt, firstPaidAt, fullyPaidAt) are only stamped
+ * on first occurrence — never overwritten once set.
+ */
+export async function recomputePoFinancialAggregates(poId: number): Promise<void> {
+  // Sum from non-voided invoices linked to this PO.
+  const invoiceRows = await db
+    .select({
+      invoicedAmountCents: vendorInvoices.invoicedAmountCents,
+      paidAmountCents: vendorInvoices.paidAmountCents,
+    })
+    .from(vendorInvoicePoLinks)
+    .innerJoin(vendorInvoices, eq(vendorInvoicePoLinks.vendorInvoiceId, vendorInvoices.id))
+    .where(
+      and(
+        eq(vendorInvoicePoLinks.purchaseOrderId, poId),
+        ne(vendorInvoices.status, "voided"),
+      ),
+    );
+
+  // Integer arithmetic only (Rule #3).
+  let invoicedTotal = BigInt(0);
+  let paidTotal = BigInt(0);
+  for (const row of invoiceRows) {
+    invoicedTotal += BigInt(Number(row.invoicedAmountCents) || 0);
+    paidTotal += BigInt(Number(row.paidAmountCents) || 0);
+  }
+  const outstanding = invoicedTotal > paidTotal ? invoicedTotal - paidTotal : BigInt(0);
+
+  // Fetch current PO state for timestamp preservation and status tracking.
+  const [po] = await db
+    .select({
+      financialStatus: purchaseOrders.financialStatus,
+      firstInvoicedAt: purchaseOrders.firstInvoicedAt,
+      firstPaidAt: purchaseOrders.firstPaidAt,
+      fullyPaidAt: purchaseOrders.fullyPaidAt,
+    })
+    .from(purchaseOrders)
+    .where(eq(purchaseOrders.id, poId));
+
+  if (!po) return; // PO doesn't exist — nothing to update.
+
+  // Derive new financial_status. Disputed stays disputed until explicitly resolved.
+  const currentFinancial = (po.financialStatus ?? "unbilled") as string;
+  let newFinancial: string;
+  if (currentFinancial === "disputed") {
+    newFinancial = "disputed";
+  } else if (invoicedTotal === BigInt(0)) {
+    newFinancial = "unbilled";
+  } else if (paidTotal >= invoicedTotal) {
+    newFinancial = "paid";
+  } else if (paidTotal > BigInt(0)) {
+    newFinancial = "partially_paid";
+  } else {
+    newFinancial = "invoiced";
+  }
+
+  const now = new Date();
+  const patch: Record<string, any> = {
+    invoicedTotalCents: Number(invoicedTotal),
+    paidTotalCents: Number(paidTotal),
+    outstandingCents: Number(outstanding),
+    financialStatus: newFinancial,
+    updatedAt: now,
+  };
+
+  // Stamp lifecycle timestamps on first occurrence only.
+  if (currentFinancial === "unbilled" && newFinancial !== "unbilled" && !po.firstInvoicedAt) {
+    patch.firstInvoicedAt = now;
+  }
+  if (
+    (currentFinancial === "unbilled" || currentFinancial === "invoiced") &&
+    (newFinancial === "partially_paid" || newFinancial === "paid") &&
+    !po.firstPaidAt
+  ) {
+    patch.firstPaidAt = now;
+  }
+  if (newFinancial === "paid" && !po.fullyPaidAt) {
+    patch.fullyPaidAt = now;
+  }
+
+  await db.update(purchaseOrders).set(patch).where(eq(purchaseOrders.id, poId));
+}
+
 // ─── Status Transition Validation ────────────────────────────────────────────
 
 const INVOICE_VALID_TRANSITIONS: Record<string, string[]> = {
@@ -193,6 +304,11 @@ export async function createInvoice(data: {
 
     // Recalculate header total from lines
     await recalculateInvoiceFromLines(invoice.id);
+
+    // Recompute PO financial aggregates for all linked POs.
+    for (const poId of data.poIds) {
+      await recomputePoFinancialAggregates(poId);
+    }
   }
 
   // Re-fetch to get updated totals
@@ -353,6 +469,12 @@ export async function approveInvoice(id: number, userId?: string) {
     .set({ status: "approved", approvedAt: new Date(), approvedBy: userId, updatedBy: userId, updatedAt: new Date() })
     .where(eq(vendorInvoices.id, id))
     .returning();
+
+  // Recompute PO financial aggregates (approval can change effective financial status).
+  for (const poId of await getPoIdsForInvoice(id)) {
+    await recomputePoFinancialAggregates(poId);
+  }
+
   return updated;
 }
 
@@ -367,6 +489,12 @@ export async function disputeInvoice(id: number, reason: string, userId?: string
     .set({ status: "disputed", disputeReason: reason, updatedBy: userId, updatedAt: new Date() })
     .where(eq(vendorInvoices.id, id))
     .returning();
+
+  // Recompute PO financials — disputed status affects financial_status derivation.
+  for (const poId of await getPoIdsForInvoice(id)) {
+    await recomputePoFinancialAggregates(poId);
+  }
+
   return updated;
 }
 
@@ -375,11 +503,20 @@ export async function voidInvoice(id: number, reason: string, userId?: string) {
   if (!inv || inv.status === "voided") throw new Error("Invoice is already voided");
   if (inv.paidAmountCents > 0) throw new Error("Cannot void an invoice with payments applied — void the payments first");
 
+  // Capture PO links before the void so we can recompute after.
+  const linkedPoIds = await getPoIdsForInvoice(id);
+
   const [updated] = await db
     .update(vendorInvoices)
     .set({ status: "voided", internalNotes: `${inv.internalNotes ? inv.internalNotes + "\n" : ""}VOIDED: ${reason}`, updatedBy: userId, updatedAt: new Date() })
     .where(eq(vendorInvoices.id, id))
     .returning();
+
+  // Voiding removes this invoice from the aggregate pool — recompute.
+  for (const poId of linkedPoIds) {
+    await recomputePoFinancialAggregates(poId);
+  }
+
   return updated;
 }
 
@@ -403,6 +540,9 @@ export async function linkPoToInvoice(
   // Auto-import PO lines and recalculate invoice total
   await importLinesFromPO(invoiceId, purchaseOrderId);
   await recalculateInvoiceFromLines(invoiceId);
+
+  // Linking a PO to an invoice changes the PO's invoiced totals.
+  await recomputePoFinancialAggregates(purchaseOrderId);
 
   return link;
 }
@@ -435,6 +575,9 @@ export async function unlinkPoFromInvoice(invoiceId: number, purchaseOrderId: nu
       );
     await recalculateInvoiceFromLines(invoiceId);
   }
+
+  // Unlinking removes this PO's invoiced contribution — recompute.
+  await recomputePoFinancialAggregates(purchaseOrderId);
 }
 
 export async function getInvoicesForPo(purchaseOrderId: number) {
@@ -528,9 +671,17 @@ export async function recordPayment(data: {
       }))
     );
 
-    // Recalculate balance on each affected invoice
+    // Recalculate balance on each affected invoice and recompute PO aggregates.
+    // Collect all affected PO IDs (deduplicated) across all allocations so we
+    // don't recompute the same PO multiple times (Rule #6).
+    const affectedPoIds = new Set<number>();
     for (const alloc of data.allocations) {
       await recalculateInvoiceBalance(alloc.vendorInvoiceId);
+      const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId);
+      for (const poId of poIds) affectedPoIds.add(poId);
+    }
+    for (const poId of affectedPoIds) {
+      await recomputePoFinancialAggregates(poId);
     }
   }
 
@@ -611,14 +762,22 @@ export async function voidPayment(id: number, reason: string, userId?: string) {
     .set({ status: "voided", voidedAt: new Date(), voidedBy: userId, voidReason: reason, updatedBy: userId, updatedAt: new Date() })
     .where(eq(apPayments.id, id));
 
-  // Get affected invoices and recalculate their balances
+  // Get affected invoices and recalculate their balances.
   const affectedAllocs = await db
     .select({ vendorInvoiceId: apPaymentAllocations.vendorInvoiceId })
     .from(apPaymentAllocations)
     .where(eq(apPaymentAllocations.apPaymentId, id));
 
+  const affectedPoIds = new Set<number>();
   for (const alloc of affectedAllocs) {
     await recalculateInvoiceBalance(alloc.vendorInvoiceId);
+    const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId);
+    for (const poId of poIds) affectedPoIds.add(poId);
+  }
+
+  // Recompute PO financial aggregates — voiding a payment reverses paid amounts.
+  for (const poId of affectedPoIds) {
+    await recomputePoFinancialAggregates(poId);
   }
 }
 

@@ -25,12 +25,25 @@ export type ReceivingSource = typeof receivingSourceEnum[number];
 export const receivingLineStatusEnum = ["pending", "partial", "complete", "overage", "short"] as const;
 export type ReceivingLineStatus = typeof receivingLineStatusEnum[number];
 
-// PO status
+// PO status (legacy single-track — kept for back-compat)
 export const poStatusEnum = [
   "draft", "pending_approval", "approved", "sent", "acknowledged",
   "partially_received", "received", "closed", "cancelled",
 ] as const;
 export type PoStatus = typeof poStatusEnum[number];
+
+// PO dual-track: physical (goods-movement) status values (migration 0565)
+export const PO_PHYSICAL_STATUSES = [
+  "draft", "sent", "acknowledged", "shipped", "in_transit",
+  "arrived", "receiving", "received", "cancelled", "short_closed",
+] as const;
+export type PoPhysicalStatus = typeof PO_PHYSICAL_STATUSES[number];
+
+// PO dual-track: financial (AP/payment) status values (migration 0565)
+export const PO_FINANCIAL_STATUSES = [
+  "unbilled", "invoiced", "partially_paid", "paid", "disputed",
+] as const;
+export type PoFinancialStatus = typeof PO_FINANCIAL_STATUSES[number];
 
 // PO type
 export const poTypeEnum = ["standard", "blanket", "dropship"] as const;
@@ -369,6 +382,32 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   // Auto-draft tracking
   source: varchar("source", { length: 30 }).default("manual"), // 'manual' | 'auto_draft' | 'reorder'
   autoDraftDate: date("auto_draft_date"),
+
+  // ── Dual-track lifecycle (migration 0565) ────────────────────────────────
+  // physicalStatus tracks goods movement; financialStatus tracks AP/payment.
+  // The legacy `status` column stays as a single-track aggregate for
+  // back-compat with callers not yet updated to the dual-track model.
+  //
+  // Physical values: draft | sent | acknowledged | shipped | in_transit |
+  //   arrived | receiving | received | cancelled | short_closed
+  // Financial values: unbilled | invoiced | partially_paid | paid | disputed
+  physicalStatus: varchar("physical_status", { length: 30 }).notNull().default("draft"),
+  financialStatus: varchar("financial_status", { length: 30 }).notNull().default("unbilled"),
+
+  // Physical lifecycle timestamps (complement the existing sentToVendorAt etc.)
+  firstShippedAt: timestamp("first_shipped_at"),
+  firstArrivedAt: timestamp("first_arrived_at"),
+
+  // Financial lifecycle timestamps
+  firstInvoicedAt: timestamp("first_invoiced_at"),
+  firstPaidAt: timestamp("first_paid_at"),
+  fullyPaidAt: timestamp("fully_paid_at"),
+
+  // Rolled-up financial aggregates — kept current by recomputeFinancialAggregates.
+  // Integer cents only (Rule #3 — no floats).
+  invoicedTotalCents: bigint("invoiced_total_cents", { mode: "number" }).notNull().default(0),
+  paidTotalCents: bigint("paid_total_cents", { mode: "number" }).notNull().default(0),
+  outstandingCents: bigint("outstanding_cents", { mode: "number" }).notNull().default(0),
 });
 
 export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders).omit({
