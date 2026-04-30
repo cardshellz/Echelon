@@ -11,6 +11,8 @@ import {
   dropshipOrderIntake,
   dropshipSourcePlatformEnum,
   dropshipStoreConnections,
+  dropshipVendorSelectionRuleSetRevisions,
+  dropshipVendorSelectionRules,
   dropshipVendorListings,
   dropshipWalletAccounts,
   dropshipWalletLedger,
@@ -22,6 +24,10 @@ const migrationSql = readFileSync(
 );
 const catalogExposureMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0090_dropship_catalog_exposure_revisions.sql"),
+  "utf8",
+);
+const vendorSelectionMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0091_dropship_vendor_selection_revisions.sql"),
   "utf8",
 );
 
@@ -91,6 +97,16 @@ describe("Dropship V2 schema contract", () => {
     expect(catalogExposureMigrationSql).toContain("dropship_catalog_rule_set_revisions");
     expect(catalogExposureMigrationSql).toContain("dropship_catalog_rule_rev_idem_idx");
     expect(catalogExposureMigrationSql).toContain("ADD COLUMN IF NOT EXISTS revision_id");
+  });
+
+  it("tracks vendor selection rule revisions idempotently per vendor", () => {
+    expect((dropshipVendorSelectionRuleSetRevisions as any).vendorId.name).toBe("vendor_id");
+    expect((dropshipVendorSelectionRuleSetRevisions as any).idempotencyKey.name).toBe("idempotency_key");
+    expect((dropshipVendorSelectionRuleSetRevisions as any).requestHash.name).toBe("request_hash");
+    expect((dropshipVendorSelectionRules as any).revisionId.name).toBe("revision_id");
+    expect(vendorSelectionMigrationSql).toContain("dropship_vendor_selection_rule_set_revisions");
+    expect(vendorSelectionMigrationSql).toContain("dropship_selection_rule_rev_vendor_idem_idx");
+    expect(vendorSelectionMigrationSql).toContain("ADD COLUMN IF NOT EXISTS revision_id");
   });
 });
 
