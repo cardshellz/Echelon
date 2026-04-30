@@ -569,23 +569,54 @@ export async function runParityCheck(
       LIMIT 1
     `;
   } else {
+    // Post-refactor (Commit 12): the SS pointer lives on
+    // wms.outbound_shipments.shipstation_order_id, not on
+    // oms.oms_orders.shipstation_order_id (which is now legacy and
+    // stays NULL on new orders). We must JOIN through WMS to find the
+    // SS ID for any order pushed by the new pushShipment() path.
+    //
+    // Inner DISTINCT ON keeps one shipment per OMS order (latest by
+    // shipment id). Outer ORDER BY then sorts by created_at DESC so
+    // — limit— still means "most recent N orders".
     if (args.since) {
       query = sqlFn`
         SELECT id, shipstation_order_id, external_order_number, external_order_id
-        FROM oms.oms_orders
-        WHERE shipstation_order_id IS NOT NULL
-          AND created_at >= ${args.since.toISOString()}
-          AND cancelled_at IS NULL
+        FROM (
+          SELECT DISTINCT ON (oo.id)
+                 oo.id,
+                 oo.created_at,
+                 os.shipstation_order_id,
+                 oo.external_order_number,
+                 oo.external_order_id
+          FROM oms.oms_orders oo
+          JOIN wms.orders wo ON wo.oms_fulfillment_order_id = oo.id::text
+          JOIN wms.outbound_shipments os ON os.order_id = wo.id
+          WHERE os.shipstation_order_id IS NOT NULL
+            AND oo.created_at >= ${args.since.toISOString()}
+            AND oo.cancelled_at IS NULL
+          ORDER BY oo.id, os.id DESC
+        ) latest
         ORDER BY created_at DESC
         LIMIT ${args.limit}
       `;
     } else {
       query = sqlFn`
         SELECT id, shipstation_order_id, external_order_number, external_order_id
-        FROM oms.oms_orders
-        WHERE shipstation_order_id IS NOT NULL
-          AND created_at > NOW() - INTERVAL '14 days'
-          AND cancelled_at IS NULL
+        FROM (
+          SELECT DISTINCT ON (oo.id)
+                 oo.id,
+                 oo.created_at,
+                 os.shipstation_order_id,
+                 oo.external_order_number,
+                 oo.external_order_id
+          FROM oms.oms_orders oo
+          JOIN wms.orders wo ON wo.oms_fulfillment_order_id = oo.id::text
+          JOIN wms.outbound_shipments os ON os.order_id = wo.id
+          WHERE os.shipstation_order_id IS NOT NULL
+            AND oo.created_at > NOW() - INTERVAL '14 days'
+            AND oo.cancelled_at IS NULL
+          ORDER BY oo.id, os.id DESC
+        ) latest
         ORDER BY created_at DESC
         LIMIT ${args.limit}
       `;
