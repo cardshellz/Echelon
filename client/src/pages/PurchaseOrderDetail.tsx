@@ -1230,6 +1230,9 @@ export default function PurchaseOrderDetail() {
         </div>
       )}
 
+      {/* Phase 2: Tabs + Quick Actions side rail */}
+      <div className="flex flex-col md:flex-row gap-4 items-start">
+      <div className="flex-1 min-w-0">
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
@@ -1824,6 +1827,168 @@ export default function PurchaseOrderDetail() {
           )}
         </TabsContent>
       </Tabs>
+      </div>{/* end main column */}
+
+      {/* ── Quick Actions Side Rail (Phase 2) ── */}
+      <div className="w-full md:w-64 shrink-0 space-y-3">
+        <Card>
+          <CardHeader className="pb-2 pt-3 px-4">
+            <CardTitle className="text-sm">Quick actions</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4 space-y-2">
+            {/* Physical actions */}
+
+            {/* Send to vendor (draft only) */}
+            {po.physicalStatus === "draft" && isSoloMode && (
+              <Button
+                className="w-full justify-start"
+                size="sm"
+                onClick={() => sendToVendorMutation.mutate()}
+                disabled={sendToVendorMutation.isPending}
+              >
+                <Send className="h-3.5 w-3.5 mr-2" />
+                Send to vendor
+              </Button>
+            )}
+
+            {/* Mark acknowledged (sent) */}
+            {po.physicalStatus === "sent" && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAckDialog(true)}
+              >
+                <CheckCircle className="h-3.5 w-3.5 mr-2" />
+                Mark acknowledged
+              </Button>
+            )}
+
+            {/* Mark shipped — Phase 3 transition, gray out */}
+            {po.physicalStatus === "acknowledged" && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                disabled
+                title="Coming soon — Phase 3"
+              >
+                <Truck className="h-3.5 w-3.5 mr-2" />
+                Mark shipped
+              </Button>
+            )}
+
+            {/* Mark in transit — Phase 3 */}
+            {po.physicalStatus === "shipped" && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                disabled
+                title="Coming soon — Phase 3"
+              >
+                <Ship className="h-3.5 w-3.5 mr-2" />
+                Mark in transit
+              </Button>
+            )}
+
+            {/* Mark arrived — Phase 3 */}
+            {(po.physicalStatus === "in_transit" || po.physicalStatus === "shipped") && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                disabled
+                title="Coming soon — Phase 3"
+              >
+                <Package className="h-3.5 w-3.5 mr-2" />
+                Mark arrived
+              </Button>
+            )}
+
+            {/* Create receipt */}
+            {(["arrived", "receiving", "acknowledged", "shipped", "in_transit", "sent", "partially_received"].includes(po.physicalStatus ?? "") ||
+              ["sent", "acknowledged", "partially_received"].includes(po.status)) && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={() => createReceiptMutation.mutate()}
+                disabled={createReceiptMutation.isPending}
+              >
+                <Truck className="h-3.5 w-3.5 mr-2" />
+                {createReceiptMutation.isPending ? "Creating..." : "Create receipt"}
+              </Button>
+            )}
+
+            {/* Cancel PO */}
+            {["draft", "sent", "acknowledged"].includes(po.physicalStatus ?? "") &&
+              po.financialStatus === "unbilled" &&
+              !["closed", "cancelled"].includes(po.status) && (
+              <Button
+                className="w-full justify-start text-red-600 hover:text-red-700"
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowCancelDialog(true)}
+              >
+                <Ban className="h-3.5 w-3.5 mr-2" />
+                Cancel PO
+              </Button>
+            )}
+
+            {/* Financial: Add invoice */}
+            {["unbilled", "invoiced"].includes(po.financialStatus ?? "") &&
+              ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  let invoiceNumber = "";
+                  try {
+                    const r = await fetch("/api/vendor-invoices/next-number");
+                    if (r.ok) invoiceNumber = (await r.json()).invoiceNumber;
+                  } catch {}
+                  setInvoiceForm({
+                    invoiceNumber,
+                    amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
+                    invoiceDate: new Date().toISOString().slice(0, 10),
+                    dueDate: "",
+                    notes: "",
+                  });
+                  setShowCreateInvoiceDialog(true);
+                }}
+              >
+                <FileText className="h-3.5 w-3.5 mr-2" />
+                Add invoice
+              </Button>
+            )}
+
+            {/* Financial: Record payment */}
+            {["invoiced", "partially_paid"].includes(po.financialStatus ?? "") && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={() => navigate("/ap-payments")}
+                title="Record payment in AP ledger"
+              >
+                <DollarSign className="h-3.5 w-3.5 mr-2" />
+                Record payment
+              </Button>
+            )}
+
+            {/* Fallback: no actions available */}
+            {po.physicalStatus === "received" &&
+              po.financialStatus === "paid" && (
+              <p className="text-xs text-muted-foreground text-center py-2">
+                All done — PO fully received and paid.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </div>{/* end side rail */}
+      </div>{/* end grid wrapper */}
 
       {/* ── Add Line Dialog ── */}
       <Dialog open={showAddLineDialog} onOpenChange={(open) => {
