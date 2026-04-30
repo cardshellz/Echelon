@@ -659,7 +659,7 @@ export function createPurchasingService(db: any, storage: Storage) {
 
   async function addLine(purchaseOrderId: number, data: {
     productId: number;
-    productVariantId: number;
+    productVariantId?: number | null;
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
@@ -679,8 +679,8 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     // Cache product info
-    const variant = await storage.getProductVariantById(data.productVariantId);
-    if (!variant) throw new PurchasingError("Product variant not found", 404);
+    const variant = data.productVariantId ? await storage.getProductVariantById(data.productVariantId) : null;
+    if (data.productVariantId && !variant) throw new PurchasingError("Product variant not found", 404);
     const product = await storage.getProductById(data.productId);
     if (!product) throw new PurchasingError("Product not found", 404);
 
@@ -701,14 +701,14 @@ export function createPurchasingService(db: any, storage: Storage) {
       purchaseOrderId,
       lineNumber: nextLineNumber,
       productId: data.productId,
-      productVariantId: data.productVariantId,
+      productVariantId: data.productVariantId || null,
       vendorProductId: data.vendorProductId,
-      sku: variant.sku,
+      sku: variant?.sku || product.sku,
       productName: product.name,
       vendorSku: data.vendorSku,
       description: data.description,
-      unitOfMeasure: data.unitOfMeasure || variant.name?.split(" ")[0]?.toLowerCase(),
-      unitsPerUom: data.unitsPerUom || variant.unitsPerVariant || 1,
+      unitOfMeasure: data.unitOfMeasure || variant?.name?.split(" ")[0]?.toLowerCase() || product.baseUnit,
+      unitsPerUom: data.unitsPerUom || variant?.unitsPerVariant || 1,
       orderQty: data.orderQty,
       unitCostCents: data.unitCostCents,
       discountPercent: String(data.discountPercent || 0),
@@ -727,7 +727,7 @@ export function createPurchasingService(db: any, storage: Storage) {
 
   async function addBulkLines(purchaseOrderId: number, lines: Array<{
     productId: number;
-    productVariantId: number;
+    productVariantId?: number | null;
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
@@ -748,9 +748,9 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     const lineData: any[] = [];
     for (const line of lines) {
-      const variant = await storage.getProductVariantById(line.productVariantId);
+      const variant = line.productVariantId ? await storage.getProductVariantById(line.productVariantId) : null;
       const product = await storage.getProductById(line.productId);
-      if (!variant || !product) continue;
+      if (!product) continue;
 
       const costs = calculateLineCosts({
         orderQty: line.orderQty,
@@ -761,14 +761,14 @@ export function createPurchasingService(db: any, storage: Storage) {
         purchaseOrderId,
         lineNumber: nextLineNumber++,
         productId: line.productId,
-        productVariantId: line.productVariantId,
+        productVariantId: line.productVariantId || null,
         vendorProductId: line.vendorProductId,
-        sku: variant.sku,
+        sku: variant?.sku || product.sku,
         productName: product.name,
         vendorSku: line.vendorSku,
         description: line.description,
         unitOfMeasure: line.unitOfMeasure || "each",
-        unitsPerUom: variant.unitsPerVariant || 1,
+        unitsPerUom: variant?.unitsPerVariant || 1,
         orderQty: line.orderQty,
         unitCostCents: line.unitCostCents,
         lineTotalCents: costs.lineTotalCents,

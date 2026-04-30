@@ -437,40 +437,37 @@ export const procurementMethods: IProcurementStorage = {
         SELECT DISTINCT ON (p.id)
           vp.id              AS vendor_product_id,
           vp.product_id      AS product_id,
-          vp.product_variant_id AS product_variant_id,
-          COALESCE(pv.sku, p.sku) AS sku,
+          NULL               AS product_variant_id,
+          p.sku              AS sku,
           p.name             AS product_name,
           NULL               AS variant_name,
           vp.vendor_sku      AS vendor_sku,
           vp.vendor_product_name AS vendor_product_name,
           vp.unit_cost_cents AS unit_cost_cents,
           vp.unit_cost_mills AS unit_cost_mills,
-          vp.pack_size       AS pack_size,
+          NULL               AS pack_size,
           vp.moq             AS moq,
           vp.lead_time_days  AS lead_time_days,
           vp.is_preferred    AS is_preferred,
           (
             CASE
-              WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
-              WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
+              WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(p.sku, '')) LIKE ${prefix}`} THEN 0
+              WHEN LOWER(COALESCE(p.sku, '')) LIKE ${like} THEN 1
               WHEN LOWER(COALESCE(vp.vendor_sku, '')) LIKE ${like} THEN 1
               WHEN LOWER(p.name) LIKE ${like} THEN 2
-              WHEN LOWER(COALESCE(pv.name, '')) LIKE ${like} THEN 2
               WHEN LOWER(COALESCE(vp.vendor_product_name, '')) LIKE ${like} THEN 2
               ELSE 3
             END
           ) AS rank
         FROM procurement.vendor_products vp
         JOIN catalog.products p ON p.id = vp.product_id
-        LEFT JOIN catalog.product_variants pv ON pv.id = vp.product_variant_id
         WHERE vp.vendor_id = ${vendorId}
           AND vp.is_active = 1
           ${qTrim.length === 0 ? sql`` : sql`AND (
             LOWER(COALESCE(p.sku, '')) LIKE ${like}
-            OR LOWER(COALESCE(pv.sku, '')) LIKE ${like}
+            OR LOWER(COALESCE(p.sku, '')) LIKE ${like}
             OR LOWER(COALESCE(vp.vendor_sku, '')) LIKE ${like}
             OR LOWER(p.name) LIKE ${like}
-            OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
             OR LOWER(COALESCE(vp.vendor_product_name, '')) LIKE ${like}
           )`}
         ORDER BY p.id, vp.is_preferred DESC NULLS LAST, vp.id ASC
@@ -547,22 +544,17 @@ export const procurementMethods: IProcurementStorage = {
         NULL AS variant_name,
         MIN(
           CASE
-            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
-            WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
+            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(p.sku, '')) LIKE ${prefix}`} THEN 0
+            WHEN LOWER(COALESCE(p.sku, '')) LIKE ${like} THEN 1
             WHEN LOWER(p.name) LIKE ${like} THEN 2
-            WHEN LOWER(COALESCE(pv.name, '')) LIKE ${like} THEN 2
             ELSE 3
           END
         ) AS rank
       FROM catalog.products p
-      LEFT JOIN catalog.product_variants pv
-        ON pv.product_id = p.id AND pv.is_active = true
       WHERE p.is_active = true
         ${qTrim.length === 0 ? sql`` : sql`AND (
           LOWER(COALESCE(p.sku, '')) LIKE ${like}
-          OR LOWER(COALESCE(pv.sku, '')) LIKE ${like}
           OR LOWER(p.name) LIKE ${like}
-          OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
         )`}
       GROUP BY p.id, p.sku, p.name
       ORDER BY rank ASC, p.name ASC

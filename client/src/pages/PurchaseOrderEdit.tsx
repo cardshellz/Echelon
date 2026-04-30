@@ -784,7 +784,7 @@ export default function PurchaseOrderEdit() {
       const description = (l.description ?? "").trim();
 
       if (l.lineType === "product") {
-        if (!l.productVariantId) {
+        if (!l.productId) {
           errors[l.clientId] = "Pick a product";
           continue;
         }
@@ -1994,8 +1994,9 @@ function LineRow(props: LineRowProps) {
   } = props;
 
   const catalogQuery = useVendorCatalogSearch(vendorId, productSearch);
-  // Restrict PO creation to base pieces only: hide case variants
-  const inCatalog = (catalogQuery.data?.inCatalog ?? []).filter(v => v.packSize == null || v.packSize === 1);
+  // We previously restricted PO creation to base pieces only. However, some vendors
+  // have their catalog explicitly mapped to case variants.
+  const inCatalog = catalogQuery.data?.inCatalog ?? [];
   const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
 
   // Line total in cents is derived from mills (authoritative), half-up at
