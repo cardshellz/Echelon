@@ -98,6 +98,7 @@ interface Storage {
   generateReceiptNumber(): Promise<string>;
   bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
   getReceivingLineById(id: number): Promise<any>;
+  getReceivingOrderById(id: number): Promise<any>;
 
   // Settings
   getSetting(key: string): Promise<string | null>;
@@ -1528,6 +1529,33 @@ export function createPurchasingService(db: any, storage: Storage) {
    * Called by ReceivingService when a receiving order linked to a PO is closed.
    * Updates PO line received quantities and auto-transitions PO status.
    */
+  /**
+   * Find an open product PO line on the given PO that matches a product ID.
+   * Returns the single matching line, or null if there are zero or multiple
+   * matches (ambiguous — caller should leave unlinked and warn).
+   *
+   * "Open" means the line is not cancelled/received/closed and has remaining
+   * quantity (orderQty > receivedQty + cancelledQty).
+   */
+  async function findOpenPoLineByProduct(
+    poId: number,
+    productId: number,
+  ): Promise<any | null> {
+    const lines = await storage.getPurchaseOrderLines(poId);
+    const candidates = lines.filter((l: any) => {
+      if ((l.lineType ?? "product") !== "product") return false;
+      if (l.productId !== productId) return false;
+      if (l.status === "cancelled" || l.status === "received" || l.status === "closed") return false;
+      const remaining = (Number(l.orderQty) || 0)
+        - (Number(l.receivedQty) || 0)
+        - (Number(l.cancelledQty) || 0);
+      return remaining > 0;
+    });
+    if (candidates.length === 1) return candidates[0];
+    // Zero or ambiguous (multiple open lines for the same product) — cannot auto-link.
+    return null;
+  }
+
   async function onReceivingOrderClosed(receivingOrderId: number, receivingLines: Array<{
     receivingLineId: number;
     purchaseOrderLineId?: number;
@@ -1535,20 +1563,72 @@ export function createPurchasingService(db: any, storage: Storage) {
     damagedQty?: number;
     unitCost?: number;
   }>) {
-    // Find the PO
-    // We'll look it up through the first line's PO linkage
+    // Resolve the PO ID. Prefer explicit PO line linkage; fall back to the
+    // receiving order's own purchaseOrderId for unlinked-line receipts.
     const poLineIds = receivingLines
       .map(l => l.purchaseOrderLineId)
-      .filter(Boolean);
+      .filter(Boolean) as number[];
 
-    if (poLineIds.length === 0) return; // Not a PO-linked receipt
+    let poId: number | null = null;
 
-    const firstPoLine = await storage.getPurchaseOrderLineById(poLineIds[0]!);
-    if (!firstPoLine) return;
+    if (poLineIds.length > 0) {
+      const firstPoLine = await storage.getPurchaseOrderLineById(poLineIds[0]);
+      if (firstPoLine) poId = firstPoLine.purchaseOrderId;
+    }
 
-    const poId = firstPoLine.purchaseOrderId;
+    // If no linked lines, check the receiving order itself
+    if (!poId) {
+      const receivingOrder = await storage.getReceivingOrderById(receivingOrderId);
+      if (receivingOrder?.purchaseOrderId) {
+        poId = receivingOrder.purchaseOrderId;
+      }
+    }
+
+    if (!poId) return; // Not a PO-linked receipt
+
     const po = await storage.getPurchaseOrderById(poId);
     if (!po) return;
+
+    // ── Auto-match unlinked receiving lines to PO lines by product_id ────────
+    //
+    // Phase 1: when a receiving line has no purchaseOrderLineId, attempt to
+    // match it by looking for a single open product PO line with the same
+    // product_id. If exactly one match exists, auto-link. If zero or multiple,
+    // leave unlinked and log a warning (Phase 2 UI will surface these).
+    for (const rl of receivingLines) {
+      if (rl.purchaseOrderLineId) continue; // Already linked
+      const rlRecord = await storage.getReceivingLineById(rl.receivingLineId);
+      if (!rlRecord) continue;
+
+      // Resolve product_id: first from the receiving line record, then via
+      // product variant lookup if only productVariantId is present.
+      let productId: number | null = rlRecord.productId ?? null;
+      if (!productId && rlRecord.productVariantId) {
+        const variant = await storage.getProductVariantById(rlRecord.productVariantId);
+        productId = variant?.productId ?? null;
+      }
+
+      if (!productId) {
+        console.warn(
+          `[Receiving] Auto-match skipped for receiving line ${rl.receivingLineId}: no product_id resolvable`,
+        );
+        continue;
+      }
+
+      const matchedLine = await findOpenPoLineByProduct(poId, productId);
+      if (matchedLine) {
+        // Mutate the in-memory rl so the reconciliation loop below picks it up.
+        rl.purchaseOrderLineId = matchedLine.id;
+        console.info(
+          `[Receiving] Auto-matched receiving line ${rl.receivingLineId} → PO line ${matchedLine.id} (product_id=${productId})`,
+        );
+      } else {
+        console.warn(
+          `[Receiving] Auto-match failed for receiving line ${rl.receivingLineId}: ` +
+          `zero or multiple open PO lines for product_id=${productId} on PO ${poId}. Leaving unlinked.`,
+        );
+      }
+    }
 
     // Update each PO line's received/damaged quantities
     for (const rl of receivingLines) {
@@ -3132,6 +3212,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     transitionPhysical,
     transitionFinancial,
     recomputeFinancialAggregates,
+    findOpenPoLineByProduct,
 
     // Reorder → PO
     createPOFromReorder,
