@@ -63,6 +63,8 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "settings", action: "edit", description: "Edit system settings", category: "settings" },
   { resource: "shopify", action: "view", description: "View Shopify sync status", category: "shopify" },
   { resource: "shopify", action: "sync", description: "Trigger Shopify sync", category: "shopify" },
+  { resource: "dropship", action: "view", description: "View dropship operations", category: "dropship" },
+  { resource: "dropship", action: "manage_catalog", description: "Manage dropship catalog exposure", category: "dropship" },
   { resource: "locations", action: "view", description: "View warehouse locations", category: "inventory" },
   { resource: "locations", action: "create", description: "Create locations", category: "inventory" },
   { resource: "locations", action: "edit", description: "Edit locations", category: "inventory" },
@@ -82,7 +84,7 @@ export const SYSTEM_ROLES = {
     permissions: [
       "dashboard:view", "inventory:view", "orders:view", "orders:claim", "orders:hold", "orders:priority", "orders:resolve_exception",
       "picking:view", "picking:perform", "picking:complete", "purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:cancel",
-      "reports:view", "users:view", "shopify:view", "locations:view",
+      "reports:view", "users:view", "shopify:view", "dropship:view", "locations:view",
     ],
   },
   picker: {

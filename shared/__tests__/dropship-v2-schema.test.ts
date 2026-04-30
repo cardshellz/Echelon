@@ -5,6 +5,8 @@ import {
   DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS,
   DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES,
   DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS,
+  dropshipCatalogRuleSetRevisions,
+  dropshipCatalogRules,
   dropshipFaultCategoryEnum,
   dropshipOrderIntake,
   dropshipSourcePlatformEnum,
@@ -16,6 +18,10 @@ import {
 
 const migrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0086_dropship_v2_foundation.sql"),
+  "utf8",
+);
+const catalogExposureMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0090_dropship_catalog_exposure_revisions.sql"),
   "utf8",
 );
 
@@ -76,6 +82,15 @@ describe("Dropship V2 schema contract", () => {
     expect(migrationSql).toContain("dropship_rma_fault_chk");
     expect(migrationSql).toContain("dropship_notification_pref_critical_chk");
     expect(migrationSql).toContain("dropship_insurance_bps_chk");
+  });
+
+  it("tracks admin dropship catalog exposure revisions idempotently", () => {
+    expect((dropshipCatalogRuleSetRevisions as any).idempotencyKey.name).toBe("idempotency_key");
+    expect((dropshipCatalogRuleSetRevisions as any).requestHash.name).toBe("request_hash");
+    expect((dropshipCatalogRules as any).revisionId.name).toBe("revision_id");
+    expect(catalogExposureMigrationSql).toContain("dropship_catalog_rule_set_revisions");
+    expect(catalogExposureMigrationSql).toContain("dropship_catalog_rule_rev_idem_idx");
+    expect(catalogExposureMigrationSql).toContain("ADD COLUMN IF NOT EXISTS revision_id");
   });
 });
 

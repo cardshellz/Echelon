@@ -343,8 +343,24 @@ export const dropshipSetupBlockers = dropshipSchema.table("dropship_setup_blocke
   check("dropship_setup_blocker_status_chk", sql`${table.status} IN ('open','acknowledged','resolved')`),
 ]);
 
+export const dropshipCatalogRuleSetRevisions = dropshipSchema.table("dropship_catalog_rule_set_revisions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 128 }).notNull(),
+  actorType: varchar("actor_type", { length: 40 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }),
+  ruleCount: integer("rule_count").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_catalog_rule_rev_idem_idx").on(table.idempotencyKey),
+  index("dropship_catalog_rule_rev_created_idx").on(table.createdAt),
+  check("dropship_catalog_rule_rev_actor_chk", sql`${table.actorType} IN ('admin','system')`),
+  check("dropship_catalog_rule_rev_count_chk", sql`${table.ruleCount} >= 0`),
+]);
+
 export const dropshipCatalogRules = dropshipSchema.table("dropship_catalog_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  revisionId: integer("revision_id").references(() => dropshipCatalogRuleSetRevisions.id, { onDelete: "set null" }),
   scopeType: varchar("scope_type", { length: 30 }).notNull(),
   action: varchar("action", { length: 20 }).notNull().default("include"),
   productLineId: integer("product_line_id").references(() => productLines.id),
@@ -360,6 +376,7 @@ export const dropshipCatalogRules = dropshipSchema.table("dropship_catalog_rules
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
+  index("dropship_catalog_rules_revision_idx").on(table.revisionId),
   index("dropship_catalog_rules_scope_idx").on(table.scopeType, table.isActive),
   check("dropship_catalog_rules_scope_chk", sql`${table.scopeType} IN ('catalog','product_line','category','product','variant')`),
   check("dropship_catalog_rules_action_chk", sql`${table.action} IN ('include','exclude')`),
@@ -1079,6 +1096,10 @@ export type DropshipStoreSetupCheck = typeof dropshipStoreSetupChecks.$inferSele
 export const insertDropshipSetupBlockerSchema = createInsertSchema(dropshipSetupBlockers).omit(omitGenerated);
 export type InsertDropshipSetupBlocker = z.infer<typeof insertDropshipSetupBlockerSchema>;
 export type DropshipSetupBlocker = typeof dropshipSetupBlockers.$inferSelect;
+
+export const insertDropshipCatalogRuleSetRevisionSchema = createInsertSchema(dropshipCatalogRuleSetRevisions).omit(omitIdCreated);
+export type InsertDropshipCatalogRuleSetRevision = z.infer<typeof insertDropshipCatalogRuleSetRevisionSchema>;
+export type DropshipCatalogRuleSetRevision = typeof dropshipCatalogRuleSetRevisions.$inferSelect;
 
 export const insertDropshipCatalogRuleSchema = createInsertSchema(dropshipCatalogRules).omit(omitGenerated);
 export type InsertDropshipCatalogRule = z.infer<typeof insertDropshipCatalogRuleSchema>;

@@ -28,6 +28,7 @@ import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription
 import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { registerPickPriorityRoutes } from "./routes/pick-priority.routes";
 import { registerDropshipAuthRoutes } from "./modules/dropship/interfaces/http/dropship-auth.routes";
+import { registerDropshipAdminCatalogRoutes } from "./modules/dropship/interfaces/http/dropship-admin-catalog.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -42,6 +43,7 @@ export async function registerRoutes(
 
   registerAuthRoutes(app);
   registerDropshipAuthRoutes(app);
+  registerDropshipAdminCatalogRoutes(app);
   registerLocationRoutes(app);
   registerPickingRoutes(app);
   registerShopifyRoutes(app);
