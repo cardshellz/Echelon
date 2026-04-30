@@ -1630,6 +1630,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       description?: string | null;
 
       // Required on product lines only. Must be null/absent on other types.
+      productId?: number | null;
       productVariantId?: number | null;
 
       // Product lines: qty > 0. Fee: qty >= 1. All other types: qty == 1.
@@ -1701,15 +1702,24 @@ export function createPurchasingService(db: any, storage: Storage) {
         }
       }
 
-      // Variant rule.
+      // Product rule.
       if (lineType === "product") {
         if (
-          !Number.isInteger(line.productVariantId) ||
-          (line.productVariantId as number) <= 0
+          !Number.isInteger(line.productId) ||
+          (line.productId as number) <= 0
         ) {
-          throw new PurchasingError(`${label}.product_variant_id is required`, 400);
+          throw new PurchasingError(`${label}.product_id is required`, 400);
         }
       } else {
+        if (
+          line.productId !== undefined &&
+          line.productId !== null
+        ) {
+          throw new PurchasingError(
+            `${label}.product_id is only valid on product lines`,
+            400,
+          );
+        }
         if (
           line.productVariantId !== undefined &&
           line.productVariantId !== null
@@ -1896,16 +1906,12 @@ export function createPurchasingService(db: any, storage: Storage) {
         let variant: any = null;
         let product: any = null;
         if (lineType === "product") {
-          variant = await storage.getProductVariantById(line.productVariantId as number);
-          if (!variant) {
-            throw new PurchasingError(
-              `Product variant ${line.productVariantId} not found`,
-              404,
-            );
-          }
-          product = await storage.getProductById(variant.productId);
+          product = await storage.getProductById(line.productId as number);
           if (!product) {
-            throw new PurchasingError(`Product ${variant.productId} not found`, 404);
+            throw new PurchasingError(`Product ${line.productId} not found`, 404);
+          }
+          if (line.productVariantId) {
+            variant = await storage.getProductVariantById(line.productVariantId);
           }
         }
 
@@ -1979,16 +1985,16 @@ export function createPurchasingService(db: any, storage: Storage) {
         return {
           purchaseOrderId: header.id,
           lineNumber: idx + 1,
-          productId: isProduct ? r.variant.productId : null,
-          productVariantId: isProduct ? r.variant.id : null,
+          productId: isProduct ? r.product.id : null,
+          productVariantId: isProduct ? (r.variant?.id ?? null) : null,
           vendorProductId: isProduct ? (r.line.vendorProductId ?? null) : null,
-          sku: isProduct ? r.variant.sku : null,
+          sku: isProduct ? (r.variant?.sku ?? null) : null,
           productName: isProduct ? r.product.name : null,
           description: r.line.description ?? null,
           unitOfMeasure: isProduct
-            ? (r.variant.name?.split(" ")[0]?.toLowerCase() ?? "each")
+            ? (r.variant?.name?.split(" ")[0]?.toLowerCase() ?? "each")
             : null,
-          unitsPerUom: isProduct ? (r.variant.unitsPerVariant || 1) : 1,
+          unitsPerUom: isProduct ? (r.variant?.unitsPerVariant || 1) : 1,
           orderQty: r.line.orderQty,
           // Write BOTH mills and cents on INSERT (spec): mills is authoritative,
           // cents is the rounded back-compat mirror. Signed for non-product.

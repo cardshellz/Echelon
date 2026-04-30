@@ -576,7 +576,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     return mock;
   }
 
-  it("flag OFF → pushShopifyFulfillment is NOT called even when pushed", async () => {
+  it("flag default (undefined) → pushShopifyFulfillment IS called", async () => {
     delete process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED;
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: "x",
@@ -590,8 +590,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     const svc = createShipStationService(mock.db);
     await svc.processShipNotify("/foo");
 
-    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
-    // No retry insert either.
+    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
     expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1); // only the audit event
   });
 

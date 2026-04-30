@@ -28,7 +28,9 @@ const EBAY_CHANNEL_ID = 67;
 // customer-facing Shopify fulfillment email + order page tracking link
 // once C22d has been validated in staging. Per Overlord D7.
 function isShopifyFulfillmentPushEnabled(): boolean {
-  return process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED === "true";
+  // Enabled by default since ShipStation channel disconnection requires
+  // Echelon to natively push fulfillment data. Can be explicitly disabled.
+  return process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED !== "false";
 }
 
 // ---------------------------------------------------------------------------

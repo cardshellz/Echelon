@@ -125,14 +125,14 @@ function makeSvc() {
 
 describe("Typed PO lines — per-type validation", () => {
   // PRODUCT ---------------------------------------------------------------
-  it("product line requires productVariantId", async () => {
+  it("product line requires productId", async () => {
     const { svc } = makeSvc();
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
         lines: [{ lineType: "product", orderQty: 1, unitCostMills: 1000 }],
       } as any),
-    ).rejects.toThrow(/product_variant_id is required/);
+    ).rejects.toThrow(/product_id is required/);
   });
 
   it("product line rejects negative cost", async () => {
@@ -140,7 +140,7 @@ describe("Typed PO lines — per-type validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productVariantId: 101, orderQty: 1, unitCostMills: -1000 }],
+        lines: [{ productId: 101, orderQty: 1, unitCostMills: -1000 }],
       } as any),
     ).rejects.toThrow(/non-negative cost/);
   });
@@ -150,7 +150,7 @@ describe("Typed PO lines — per-type validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productVariantId: 101, orderQty: 0, unitCostMills: 1000 }],
+        lines: [{ productId: 101, orderQty: 0, unitCostMills: 1000 }],
       } as any),
     ).rejects.toThrow(/must be > 0/);
   });
@@ -183,7 +183,7 @@ describe("Typed PO lines — per-type validation", () => {
     ).rejects.toThrow(/description is required/);
   });
 
-  it("discount line forbids productVariantId", async () => {
+  it("discount line forbids productId", async () => {
     const { svc } = makeSvc();
     await expect(
       svc.createPurchaseOrderWithLines({
@@ -192,7 +192,7 @@ describe("Typed PO lines — per-type validation", () => {
           {
             lineType: "discount",
             description: "X",
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: -1000,
           },
@@ -246,7 +246,7 @@ describe("Typed PO lines — per-type validation", () => {
         vendorId: 1,
         lines: [
           {
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -287,7 +287,7 @@ describe("Typed PO lines — per-type validation", () => {
         vendorId: 1,
         lines: [
           {
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -309,7 +309,7 @@ describe("Typed PO lines — per-type validation", () => {
         vendorId: 1,
         lines: [
           {
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -354,7 +354,7 @@ describe("Typed PO lines — parentClientId", () => {
         lines: [
           {
             clientId: "a",
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -423,14 +423,14 @@ describe("Typed PO lines — parentClientId", () => {
         lines: [
           {
             clientId: "p1",
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
           {
             clientId: "p2",
             parentClientId: "p1",
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -447,13 +447,13 @@ describe("Typed PO lines — parentClientId", () => {
         lines: [
           {
             clientId: "same",
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
           {
             clientId: "same",
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -470,7 +470,7 @@ describe("Typed PO lines — parentClientId", () => {
         lines: [
           {
             clientId: "prod1",
-            productVariantId: 101,
+            productId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },

@@ -1073,8 +1073,8 @@ export default function PurchaseOrderEdit() {
           // Only send product_variant_id for product lines — the server
           // validator rejects a non-null variant on non-product lines.
           ...(l.lineType === "product"
-            ? { product_variant_id: l.productVariantId }
-            : { product_variant_id: null }),
+            ? { product_id: l.productId, product_variant_id: l.productVariantId }
+            : { product_id: null, product_variant_id: null }),
           quantity_ordered: l.orderQty,
           // Mills is authoritative (4-decimal). Cents is sent for back-compat
           // — derived via half-up rounding (sign-aware for discount/rebate/

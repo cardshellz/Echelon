@@ -1999,6 +1999,7 @@ export function registerPurchasingRoutes(app: Express) {
           const rawMills = l.unit_cost_mills ?? l.unitCostMills;
           const lineType = l.line_type ?? l.lineType ?? "product";
           const variantIdRaw = l.product_variant_id ?? l.productVariantId;
+          const productIdRaw = l.product_id ?? l.productId;
           const out: any = {
             // line_type is the dispatch key; default to 'product' for
             // back-compat callers that don't send it (matches column default).
@@ -2010,11 +2011,10 @@ export function registerPurchasingRoutes(app: Express) {
               l.parent_client_id ?? l.parentClientId ?? null,
             // Description is required for non-product lines (service-enforced).
             description: l.description ?? null,
-            // Variant only on product lines. Send null for non-product so
-            // the service validator's "variant on non-product" check sees a
-            // clean omission rather than a stale UI value.
+            // Product only on product lines. Send null for non-product.
+            productId: lineType === "product" ? Number(productIdRaw) : null,
             productVariantId:
-              lineType === "product"
+              lineType === "product" && variantIdRaw != null
                 ? Number(variantIdRaw)
                 : null,
             orderQty: Number(l.quantity_ordered ?? l.orderQty),
