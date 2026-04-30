@@ -14,6 +14,12 @@
  *   tsx scripts/parity-check-push.ts --limit 50
  *   tsx scripts/parity-check-push.ts --order 12345    # one specific OMS order id
  *   tsx scripts/parity-check-push.ts --tolerance 1    # cents tolerance per line
+ *   tsx scripts/parity-check-push.ts --since 2026-04-29T23:01:00Z   # restrict to orders created on/after this UTC timestamp
+ *   tsx scripts/parity-check-push.ts --since-flag PUSH_FROM_WMS    # auto: filter from the most recent flip of this Heroku flag (requires HEROKU_API_TOKEN env)
+ *
+ * Note: --since takes precedence over --since-flag. Both narrow the
+ * default 14-day window; they do NOT widen it. Use --since to compare
+ * only orders pushed by the new code path after a flag flip.
  *
  * Exit codes:
  *   0 — all checked orders match within tolerance
@@ -38,12 +44,14 @@ function parseArgs(argv: string[]): {
   tolerance: number;
   verbose: boolean;
   silent: boolean;
+  since: Date | null;
 } {
   let limit = 20;
   let orderId: number | null = null;
   let tolerance = 1;
   let verbose = false;
   let silent = false;
+  let since: Date | null = null;
 
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
@@ -62,6 +70,13 @@ function parseArgs(argv: string[]): {
       if (isNaN(tolerance) || tolerance < 0) {
         throw new Error(`--tolerance must be a non-negative integer, got: ${argv[i]}`);
       }
+    } else if (arg === "--since" && argv[i + 1]) {
+      const raw = argv[++i];
+      const parsed = new Date(raw);
+      if (isNaN(parsed.getTime())) {
+        throw new Error(`--since must be an ISO 8601 timestamp (e.g. 2026-04-29T23:01:00Z), got: ${raw}`);
+      }
+      since = parsed;
     } else if (arg === "--verbose") {
       verbose = true;
     } else if (arg === "--silent") {
@@ -71,7 +86,7 @@ function parseArgs(argv: string[]): {
     }
   }
 
-  return { limit, orderId, tolerance, verbose, silent };
+  return { limit, orderId, tolerance, verbose, silent, since };
 }
 
 // ---------------------------------------------------------------------------
@@ -554,15 +569,27 @@ export async function runParityCheck(
       LIMIT 1
     `;
   } else {
-    query = sqlFn`
-      SELECT id, shipstation_order_id, external_order_number, external_order_id
-      FROM oms.oms_orders
-      WHERE shipstation_order_id IS NOT NULL
-        AND created_at > NOW() - INTERVAL '14 days'
-        AND cancelled_at IS NULL
-      ORDER BY created_at DESC
-      LIMIT ${args.limit}
-    `;
+    if (args.since) {
+      query = sqlFn`
+        SELECT id, shipstation_order_id, external_order_number, external_order_id
+        FROM oms.oms_orders
+        WHERE shipstation_order_id IS NOT NULL
+          AND created_at >= ${args.since.toISOString()}
+          AND cancelled_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT ${args.limit}
+      `;
+    } else {
+      query = sqlFn`
+        SELECT id, shipstation_order_id, external_order_number, external_order_id
+        FROM oms.oms_orders
+        WHERE shipstation_order_id IS NOT NULL
+          AND created_at > NOW() - INTERVAL '14 days'
+          AND cancelled_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT ${args.limit}
+      `;
+    }
   }
 
   const rows: any = await db.execute(query);

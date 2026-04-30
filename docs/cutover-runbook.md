@@ -294,13 +294,22 @@ Legacy `pushOrder` path reactivates immediately on next request.
 After `PUSH_FROM_WMS=true` has been on for ~1 hour AND at least 5–10 new orders have flowed through:
 
 ```powershell
-heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limit 50"
+# Replace <FLIP_TS_UTC> with the exact UTC timestamp PUSH_FROM_WMS=true was set.
+# Without --since the script falls back to a 14-day window that will sweep in pre-flag
+# orders pushed by Shopify-native ShipStation; those will all diverge by design and
+# tell you nothing about whether the new code is correct.
+heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limit 50 --since <FLIP_TS_UTC>"
+```
+
+Example for a flip at 2026-04-29 19:01 EST (= 2026-04-29 23:01 UTC):
+```powershell
+heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limit 50 --since 2026-04-29T23:01:00Z"
 ```
 
 **Requirements:**
 - Exit code 0 (no divergences)
 - Zero `diverge` outcomes in the report
-- A non-zero number of `ok` outcomes (otherwise the script ran against pre-flag data and produced no useful comparison; wait longer or restrict to recent orders only)
+- A non-zero number of `ok` outcomes (otherwise the script ran against pre-flag data and produced no useful comparison; wait longer or pass `--since <flip-timestamp>`)
 
 **Run it twice with at least 1 hour between runs.** Both must be exit code 0 with `ok > 0`.
 
