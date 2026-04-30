@@ -19,7 +19,7 @@ import { formatMills, centsToMills } from "@shared/utils/money";
 export type CatalogCandidate = {
   clientId: string;
   productId: number;
-  productVariantId: number;
+  productVariantId: number | null;
   productName: string;
   sku: string | null;
   // Per-unit cost. Mills (4-decimal) is authoritative when present; cents

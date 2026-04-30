@@ -873,7 +873,7 @@ export default function PurchaseOrderEdit() {
       const description = (l.description ?? "").trim();
 
       if (l.lineType === "product") {
-        if (!l.productVariantId) return `${label}: pick a product.`;
+        if (!l.productId) return `${label}: pick a product.`;
         if (!Number.isInteger(l.orderQty) || l.orderQty <= 0)
           return `${label}: quantity must be a positive integer.`;
         if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0)
@@ -925,12 +925,12 @@ export default function PurchaseOrderEdit() {
     const out: CatalogCandidate[] = [];
     for (const l of lines) {
       if (l.catalogOriginallyAbsent !== true) continue;
-      if (!l.productVariantId || !l.productId) continue;
+      if (!l.productId) continue;
       if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0) continue;
       out.push({
         clientId: l.clientId,
         productId: l.productId,
-        productVariantId: l.productVariantId,
+        productVariantId: l.productVariantId ?? null,
         productName: l.productName || "(unnamed)",
         sku: l.sku,
         // Dialog displays 4-decimal mills; cents derived for back-compat.
