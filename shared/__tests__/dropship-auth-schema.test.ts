@@ -17,6 +17,10 @@ const authRoutesMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0088_dropship_auth_routes.sql"),
   "utf8",
 );
+const passkeyActionMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0089_dropship_register_passkey_action.sql"),
+  "utf8",
+);
 
 describe("Dropship V2 auth schema contract", () => {
   it("stores Card Shellz member identity separately from vendor operations", () => {
@@ -37,6 +41,7 @@ describe("Dropship V2 auth schema contract", () => {
   it("supports email MFA only as a sensitive-action challenge method", () => {
     expect(dropshipStepUpMethodEnum).toEqual(["passkey", "email_mfa"]);
     expect(dropshipSensitiveActionEnum).toContain("account_bootstrap");
+    expect(dropshipSensitiveActionEnum).toContain("register_passkey");
     expect(dropshipSensitiveActionEnum).toContain("connect_store");
     expect(dropshipSensitiveActionEnum).toContain("add_funding_method");
     expect((dropshipSensitiveActionChallenges as any).challengeHash.name).toBe("challenge_hash");
@@ -44,5 +49,6 @@ describe("Dropship V2 auth schema contract", () => {
     expect(migrationSql).toContain("dropship_sensitive_challenge_idem_idx");
     expect(authRoutesMigrationSql).toContain("'account_bootstrap'");
     expect(authRoutesMigrationSql).toContain("'password_reset'");
+    expect(passkeyActionMigrationSql).toContain("'register_passkey'");
   });
 });
