@@ -27,6 +27,7 @@ import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subsc
 import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";
 import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { registerPickPriorityRoutes } from "./routes/pick-priority.routes";
+import { registerDropshipAuthRoutes } from "./modules/dropship/interfaces/http/dropship-auth.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -40,6 +41,7 @@ export async function registerRoutes(
   registerSubscriptionWebhookRoutes(app);
 
   registerAuthRoutes(app);
+  registerDropshipAuthRoutes(app);
   registerLocationRoutes(app);
   registerPickingRoutes(app);
   registerShopifyRoutes(app);
