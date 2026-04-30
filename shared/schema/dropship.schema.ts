@@ -159,6 +159,25 @@ export const dropshipNotificationChannelEnum = [
 ] as const;
 export type DropshipNotificationChannel = typeof dropshipNotificationChannelEnum[number];
 
+export const dropshipAuthIdentityStatusEnum = ["active", "locked", "disabled"] as const;
+export type DropshipAuthIdentityStatus = typeof dropshipAuthIdentityStatusEnum[number];
+
+export const dropshipSensitiveActionEnum = [
+  "connect_store",
+  "disconnect_store",
+  "change_password",
+  "change_contact_email",
+  "add_funding_method",
+  "remove_funding_method",
+  "wallet_funding_high_value",
+  "bulk_listing_push",
+  "high_risk_order_acceptance",
+] as const;
+export type DropshipSensitiveAction = typeof dropshipSensitiveActionEnum[number];
+
+export const dropshipStepUpMethodEnum = ["passkey", "email_mfa"] as const;
+export type DropshipStepUpMethod = typeof dropshipStepUpMethodEnum[number];
+
 export const dropshipVendors = dropshipSchema.table("dropship_vendors", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   memberId: varchar("member_id", { length: 255 }).notNull().references(() => members.id),
@@ -181,6 +200,68 @@ export const dropshipVendors = dropshipSchema.table("dropship_vendors", {
   index("dropship_vendors_status_idx").on(table.status),
   check("dropship_vendors_status_chk", sql`${table.status} IN ('onboarding','active','paused','lapsed','suspended','closed')`),
   check("dropship_vendors_store_count_chk", sql`${table.includedStoreConnections} >= 1`),
+]);
+
+export const dropshipAuthIdentities = dropshipSchema.table("dropship_auth_identities", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  memberId: varchar("member_id", { length: 255 }).notNull().references(() => members.id, { onDelete: "cascade" }),
+  primaryEmail: varchar("primary_email", { length: 255 }).notNull(),
+  passwordHash: text("password_hash"),
+  passwordHashAlgorithm: varchar("password_hash_algorithm", { length: 40 }),
+  passwordUpdatedAt: timestamp("password_updated_at", { withTimezone: true }),
+  lastCardShellzProofAt: timestamp("last_card_shellz_proof_at", { withTimezone: true }),
+  passkeyEnrolledAt: timestamp("passkey_enrolled_at", { withTimezone: true }),
+  status: varchar("status", { length: 30 }).notNull().default("active"),
+  lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_auth_identity_member_idx").on(table.memberId),
+  uniqueIndex("dropship_auth_identity_email_idx").on(table.primaryEmail),
+  check("dropship_auth_identity_status_chk", sql`${table.status} IN ('active','locked','disabled')`),
+  check("dropship_auth_identity_password_chk", sql`
+    (${table.passwordHash} IS NULL AND ${table.passwordHashAlgorithm} IS NULL AND ${table.passwordUpdatedAt} IS NULL)
+    OR (${table.passwordHash} IS NOT NULL AND ${table.passwordHashAlgorithm} IS NOT NULL AND ${table.passwordUpdatedAt} IS NOT NULL)
+  `),
+]);
+
+export const dropshipPasskeyCredentials = dropshipSchema.table("dropship_passkey_credentials", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  authIdentityId: integer("auth_identity_id").notNull().references(() => dropshipAuthIdentities.id, { onDelete: "cascade" }),
+  memberId: varchar("member_id", { length: 255 }).notNull().references(() => members.id, { onDelete: "cascade" }),
+  credentialId: varchar("credential_id", { length: 512 }).notNull(),
+  publicKey: text("public_key").notNull(),
+  signCount: integer("sign_count").notNull().default(0),
+  transports: jsonb("transports"),
+  aaguid: varchar("aaguid", { length: 80 }),
+  backupEligible: boolean("backup_eligible"),
+  backupState: boolean("backup_state"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("dropship_passkey_credential_idx").on(table.credentialId),
+  index("dropship_passkey_member_idx").on(table.memberId),
+  check("dropship_passkey_sign_count_chk", sql`${table.signCount} >= 0`),
+]);
+
+export const dropshipSensitiveActionChallenges = dropshipSchema.table("dropship_sensitive_action_challenges", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  memberId: varchar("member_id", { length: 255 }).notNull().references(() => members.id, { onDelete: "cascade" }),
+  action: varchar("action", { length: 80 }).notNull(),
+  method: varchar("method", { length: 30 }).notNull(),
+  challengeHash: varchar("challenge_hash", { length: 255 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  attempts: integer("attempts").notNull().default(0),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_sensitive_challenge_idem_idx").on(table.idempotencyKey),
+  index("dropship_sensitive_challenge_member_idx").on(table.memberId, table.createdAt),
+  check("dropship_sensitive_challenge_action_chk", sql`${table.action} IN ('connect_store','disconnect_store','change_password','change_contact_email','add_funding_method','remove_funding_method','wallet_funding_high_value','bulk_listing_push','high_risk_order_acceptance')`),
+  check("dropship_sensitive_challenge_method_chk", sql`${table.method} IN ('passkey','email_mfa')`),
+  check("dropship_sensitive_challenge_attempts_chk", sql`${table.attempts} >= 0`),
 ]);
 
 export const dropshipStoreConnections = dropshipSchema.table("dropship_store_connections", {
@@ -971,6 +1052,18 @@ const omitIdCreated = {
 export const insertDropshipVendorSchema = createInsertSchema(dropshipVendors).omit(omitGenerated);
 export type InsertDropshipVendor = z.infer<typeof insertDropshipVendorSchema>;
 export type DropshipVendor = typeof dropshipVendors.$inferSelect;
+
+export const insertDropshipAuthIdentitySchema = createInsertSchema(dropshipAuthIdentities).omit(omitGenerated);
+export type InsertDropshipAuthIdentity = z.infer<typeof insertDropshipAuthIdentitySchema>;
+export type DropshipAuthIdentity = typeof dropshipAuthIdentities.$inferSelect;
+
+export const insertDropshipPasskeyCredentialSchema = createInsertSchema(dropshipPasskeyCredentials).omit(omitIdCreated);
+export type InsertDropshipPasskeyCredential = z.infer<typeof insertDropshipPasskeyCredentialSchema>;
+export type DropshipPasskeyCredential = typeof dropshipPasskeyCredentials.$inferSelect;
+
+export const insertDropshipSensitiveActionChallengeSchema = createInsertSchema(dropshipSensitiveActionChallenges).omit(omitIdCreated);
+export type InsertDropshipSensitiveActionChallenge = z.infer<typeof insertDropshipSensitiveActionChallengeSchema>;
+export type DropshipSensitiveActionChallenge = typeof dropshipSensitiveActionChallenges.$inferSelect;
 
 export const insertDropshipStoreConnectionSchema = createInsertSchema(dropshipStoreConnections).omit(omitGenerated);
 export type InsertDropshipStoreConnection = z.infer<typeof insertDropshipStoreConnectionSchema>;
