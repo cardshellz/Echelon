@@ -1884,86 +1884,6 @@ function NonProductLineRow({
   );
 }
 
-function UoMSelector({ line, onChange, vendorId }: { line: LineDraft; onChange: (patch: Partial<LineDraft>) => void; vendorId: number | null }) {
-  const { data: variants } = useQuery<any[]>({
-    queryKey: ["/api/products", line.productId, "variants", vendorId],
-    queryFn: async () => {
-      const url = vendorId 
-        ? `/api/products/${line.productId}/variants?vendorId=${vendorId}` 
-        : `/api/products/${line.productId}/variants`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error("Failed to load variants");
-      return res.json();
-    },
-    enabled: !!line.productId,
-  });
-
-  if (!line.productId) {
-    return (
-      <div className="h-10 border rounded-md bg-muted/20 text-muted-foreground flex items-center px-3 text-xs italic">
-        Select product first
-      </div>
-    );
-  }
-
-  if (!variants || variants.length === 0) {
-    return (
-      <div className="h-10 border rounded-md bg-muted/20 text-muted-foreground flex items-center px-3 text-xs">
-        Loading...
-      </div>
-    );
-  }
-
-  // Restrict ordering to base pieces only to decouple PO unit of measure from receiving config
-  const baseVariants = variants.filter((v) => v.isBaseUnit || v.unitsPerVariant === 1);
-
-  return (
-    <Select
-      value={line.productVariantId ? String(line.productVariantId) : undefined}
-      onValueChange={(val) => {
-        const v = variants.find((v) => String(v.id) === val);
-        if (v) {
-          const patch: Partial<LineDraft> = {
-            productVariantId: v.id,
-            sku: v.sku || null,
-          };
-          if (v.isVendorCatalog && typeof v.vendorCostMills === "number") {
-            patch.unitCostMills = v.vendorCostMills;
-            if (v.vendorProductId) patch.vendorProductId = v.vendorProductId;
-          }
-          onChange(patch);
-        }
-      }}
-    >
-      <SelectTrigger className="w-full h-10 px-3 text-sm" aria-label="Order Unit of Measure">
-        <span className="truncate max-w-[120px]">
-          <SelectValue placeholder="UoM" />
-        </span>
-      </SelectTrigger>
-      <SelectContent>
-        {baseVariants.map((v) => {
-          const uomName = v.name || (v.isBaseUnit ? "Piece" : `Pack of ${v.unitsPerVariant}`);
-          return (
-            <SelectItem key={v.id} value={String(v.id)}>
-              <div className="flex items-center justify-between w-full gap-4">
-                <span>{uomName}</span>
-                {v.isVendorCatalog && typeof v.vendorCostMills === "number" ? (
-                  <span className="text-muted-foreground text-xs tabular-nums text-right flex-1">
-                    ${(v.vendorCostMills / 1000).toFixed(4)}
-                  </span>
-                ) : vendorId ? (
-                  <span className="text-muted-foreground/50 text-xs italic text-right flex-1">
-                    (not in catalog)
-                  </span>
-                ) : null}
-              </div>
-            </SelectItem>
-          );
-        })}
-      </SelectContent>
-    </Select>
-  );
-}
 
 function LineRow(props: LineRowProps) {
   // Dispatch on line_type. Product lines keep the existing typeahead-driven
@@ -2012,7 +1932,7 @@ function LineRow(props: LineRowProps) {
   return (
     <div className="grid grid-cols-12 gap-2 items-start">
       {/* Product typeahead */}
-      <div className="col-span-12 md:col-span-4">
+      <div className="col-span-12 md:col-span-6">
         <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
           <PopoverTrigger asChild>
             <Button
@@ -2020,7 +1940,7 @@ function LineRow(props: LineRowProps) {
               className="w-full justify-between h-10 font-normal"
             >
               <span className="truncate text-left">
-                {line.productVariantId
+                {line.productId
                   ? `${line.sku ? `${line.sku} · ` : ""}${line.productName || "(unnamed)"}`
                   : "Search product..."}
               </span>
@@ -2147,11 +2067,6 @@ function LineRow(props: LineRowProps) {
             </Command>
           </PopoverContent>
         </Popover>
-      </div>
-
-      {/* UoM */}
-      <div className="col-span-12 md:col-span-2">
-        <UoMSelector line={line} onChange={onChange} vendorId={vendorId} />
       </div>
 
       {/* Qty */}
