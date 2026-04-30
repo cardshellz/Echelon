@@ -1,8 +1,13 @@
+import React from "react";
 import {
   dollarsToCents,
   formatMills,
   centsToMills,
 } from "@shared/utils/money";
+import {
+  PO_PHYSICAL_STATUSES,
+  PO_FINANCIAL_STATUSES,
+} from "@shared/schema/procurement.schema";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
@@ -44,7 +49,219 @@ import {
   ExternalLink,
   Printer,
   Mail,
+  DollarSign,
 } from "lucide-react";
+
+// ── Dual-track display helpers ─────────────────────────────────────────────────────
+
+// Physical stages displayed in the timeline (cancelled / short_closed are shown differently)
+const PHYSICAL_TRACK_STAGES = PO_PHYSICAL_STATUSES.filter(
+  (s) => s !== "cancelled" && s !== "short_closed",
+) as readonly string[];
+
+// Stage label abbreviations for the track dots
+const PHYSICAL_LABELS: Record<string, string> = {
+  draft: "Draft",
+  sent: "Sent",
+  acknowledged: "Ack'd",
+  shipped: "Shipped",
+  in_transit: "Transit",
+  arrived: "Arrived",
+  receiving: "Receiving",
+  received: "Received",
+};
+
+const FINANCIAL_LABELS: Record<string, string> = {
+  unbilled: "Unbilled",
+  invoiced: "Invoiced",
+  partially_paid: "Partial",
+  paid: "Paid",
+  disputed: "Disputed",
+};
+
+// The 4 linear financial stages; 'disputed' shown as warn on partially_paid
+const FINANCIAL_TRACK_STAGES = [
+  "unbilled",
+  "invoiced",
+  "partially_paid",
+  "paid",
+] as const;
+
+type StageState = "done" | "current" | "warn" | "future";
+
+function stageState(
+  stageIndex: number,
+  currentIndex: number,
+  isWarn: boolean,
+): StageState {
+  if (stageIndex < currentIndex) return "done";
+  if (stageIndex === currentIndex) return isWarn ? "warn" : "current";
+  return "future";
+}
+
+/** A dot-and-connector timeline for one track */
+function TrackTimeline({
+  stages,
+  currentStatus,
+  isWarn,
+  timestamps,
+}: {
+  stages: readonly string[];
+  currentStatus: string;
+  isWarn?: boolean;
+  timestamps?: Record<string, string | null | undefined>;
+}) {
+  const effectiveStatus =
+    currentStatus === "disputed" ? "partially_paid" : currentStatus;
+  const currentIdx = stages.indexOf(effectiveStatus);
+
+  return (
+    <div className="flex items-center gap-0">
+      {stages.map((stage, i) => {
+        const state = stageState(i, currentIdx, !!(isWarn && i === currentIdx));
+        const dotClass =
+          state === "done"
+            ? "bg-green-600 border-green-600"
+            : state === "current"
+            ? "bg-blue-600 border-blue-600"
+            : state === "warn"
+            ? "bg-amber-500 border-amber-500"
+            : "bg-background border-border";
+        const connectorClass =
+          i < currentIdx ? "bg-green-600" : "bg-border";
+        const ts = timestamps?.[stage];
+        return (
+          <div key={stage} className="flex items-center">
+            <div className="relative flex flex-col items-center">
+              <div
+                title={ts ? new Date(ts).toLocaleString() : stage}
+                className={`w-3 h-3 rounded-full border-2 ${dotClass} cursor-default`}
+              />
+              <span className="text-[9px] text-muted-foreground mt-0.5 whitespace-nowrap">
+                {PHYSICAL_LABELS[stage] ?? FINANCIAL_LABELS[stage] ?? stage}
+              </span>
+            </div>
+            {i < stages.length - 1 && (
+              <div className={`w-6 h-0.5 ${connectorClass} -mt-3`} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The two-row dual-track header card */
+function DualTrackHeader({ po }: { po: any }) {
+  const isCancelled = po.physicalStatus === "cancelled" || po.physicalStatus === "short_closed";
+
+  // physical summary text
+  const totalOrderQty: number = (po.lines ?? []).reduce(
+    (s: number, l: any) => s + (Number(l.orderQty) || 0),
+    0,
+  );
+  const totalReceivedQty: number = (po.lines ?? []).reduce(
+    (s: number, l: any) => s + (Number(l.receivedQty) || 0),
+    0,
+  );
+  let physicalSummary: React.ReactNode;
+  if (isCancelled) {
+    physicalSummary = <span className="text-red-600 font-medium">Cancelled</span>;
+  } else if (po.physicalStatus === "received") {
+    physicalSummary = <span className="text-green-600 font-medium">All received</span>;
+  } else {
+    physicalSummary = (
+      <>
+        <strong>{totalReceivedQty.toLocaleString()}</strong> of{" "}
+        <strong>{totalOrderQty.toLocaleString()}</strong> pcs received
+      </>
+    );
+  }
+
+  // financial summary text (integer math only — Rule #3)
+  const paidCents = Number(po.paidTotalCents ?? 0);
+  const invoicedCents = Number(po.invoicedTotalCents ?? 0);
+  const outstandingCents = Number(po.outstandingCents ?? 0);
+  let financialSummary: React.ReactNode;
+  if (po.financialStatus === "unbilled") {
+    financialSummary = <span className="text-muted-foreground">Unbilled</span>;
+  } else if (po.financialStatus === "paid") {
+    financialSummary = <span className="text-green-600 font-medium">Paid in full</span>;
+  } else if (outstandingCents > 0 && po.firstInvoicedAt) {
+    const daysSinceInvoice = Math.floor(
+      (Date.now() - new Date(po.firstInvoicedAt).getTime()) / (1000 * 60 * 60 * 24),
+    );
+    const isPastDue = daysSinceInvoice > 30;
+    financialSummary = (
+      <>
+        <strong>{formatCents(paidCents)}</strong> paid of{" "}
+        <strong>{formatCents(invoicedCents)}</strong>
+        {isPastDue && (
+          <span className="ml-1 text-red-600 font-medium">· {formatCents(outstandingCents)} past due</span>
+        )}
+      </>
+    );
+  } else {
+    financialSummary = (
+      <>
+        <strong>{formatCents(paidCents)}</strong> paid of{" "}
+        <strong>{formatCents(invoicedCents)}</strong>
+      </>
+    );
+  }
+
+  const physTimestamps: Record<string, string | null | undefined> = {
+    shipped: po.firstShippedAt,
+    arrived: po.firstArrivedAt,
+  };
+  const finTimestamps: Record<string, string | null | undefined> = {
+    invoiced: po.firstInvoicedAt,
+    partially_paid: po.firstPaidAt,
+    paid: po.fullyPaidAt,
+  };
+
+  const finWarn = po.financialStatus === "disputed" ||
+    (outstandingCents > 0 &&
+      po.firstInvoicedAt != null &&
+      Date.now() - new Date(po.firstInvoicedAt).getTime() > 30 * 24 * 60 * 60 * 1000);
+
+  return (
+    <div className="rounded-lg border bg-card p-4 space-y-3">
+      {/* Physical track */}
+      <div className="flex items-start gap-4">
+        <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
+          Physical
+        </span>
+        <div className="flex-1 overflow-x-auto">
+          <TrackTimeline
+            stages={PHYSICAL_TRACK_STAGES}
+            currentStatus={po.physicalStatus ?? "draft"}
+            timestamps={physTimestamps}
+          />
+        </div>
+        <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{physicalSummary}</div>
+      </div>
+
+      {/* Financial track */}
+      <div className="flex items-start gap-4">
+        <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
+          Financial
+        </span>
+        <div className="flex-1 overflow-x-auto">
+          <TrackTimeline
+            stages={FINANCIAL_TRACK_STAGES}
+            currentStatus={po.financialStatus ?? "unbilled"}
+            isWarn={finWarn}
+            timestamps={finTimestamps}
+          />
+        </div>
+        <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{financialSummary}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Incoterms ─────────────────────────────────────────────────────
 
 // Incoterms → which vendor-side charges are applicable
 const INCOTERMS_LIST = ["EXW", "FCA", "FOB", "CFR", "CIF", "CPT", "CIP", "DAP", "DPU", "DDP"] as const;
@@ -228,6 +445,12 @@ export default function PurchaseOrderDetail() {
   const { data: invoicesData } = useQuery<{ invoices: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/invoices`],
     enabled: !!poId && activeTab === "invoices",
+  });
+
+  // Phase 2: payments tab
+  const { data: paymentsData } = useQuery<{ payments: any[] }>({
+    queryKey: [`/api/purchase-orders/${poId}/payments`],
+    enabled: !!poId && activeTab === "payments",
   });
 
   const lines = po?.lines ?? [];
@@ -817,6 +1040,9 @@ export default function PurchaseOrderDetail() {
         </div>
       </div>
 
+      {/* Phase 2: Dual-track header */}
+      <DualTrackHeader po={po} />
+
       {/* Charge summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-2 md:gap-4">
 
@@ -1010,6 +1236,7 @@ export default function PurchaseOrderDetail() {
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="receipts">Receipts</TabsTrigger>
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
+          <TabsTrigger value="payments">Payments</TabsTrigger>
           <TabsTrigger value="shipments">Shipments {linkedShipments.length > 0 ? `(${linkedShipments.length})` : ""}</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
@@ -1490,6 +1717,63 @@ export default function PurchaseOrderDetail() {
                         </TableCell>
                         <TableCell>
                           <a href={`/ap-invoices/${inv.id}`} className="text-xs text-blue-600 hover:underline">View →</a>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* ── Payments Tab (Phase 2) ── */}
+        <TabsContent value="payments" className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            AP payments applied to invoices linked to this purchase order.
+          </p>
+          {!paymentsData?.payments?.length ? (
+            <Card>
+              <CardContent className="p-8 text-center text-muted-foreground">
+                <DollarSign className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                <p className="text-sm">No payments recorded against this PO yet.</p>
+                <p className="text-xs mt-1">
+                  Payments appear here once invoices are linked and payment is applied in the AP ledger.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Payment Date</TableHead>
+                      <TableHead>Method</TableHead>
+                      <TableHead className="text-right">Amount Applied</TableHead>
+                      <TableHead>Invoice #</TableHead>
+                      <TableHead>Reference</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {paymentsData.payments.map((p: any) => (
+                      <TableRow key={p.allocationId}>
+                        <TableCell className="text-sm">
+                          {p.paymentDate
+                            ? format(new Date(p.paymentDate), "MMM d, yyyy")
+                            : "—"}
+                        </TableCell>
+                        <TableCell className="capitalize">
+                          {(p.paymentMethod ?? "").replace(/_/g, " ") || "—"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono font-medium">
+                          {formatCents(p.appliedAmountCents)}
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">
+                          {p.invoiceNumber ?? "—"}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {p.referenceNumber || p.paymentNumber || "—"}
                         </TableCell>
                       </TableRow>
                     ))}
