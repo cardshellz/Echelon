@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import {
+  PO_PHYSICAL_STATUSES,
+  PO_FINANCIAL_STATUSES,
+} from "@shared/schema/procurement.schema";
 
 // Spec A feature flag shape. Only `useNewPoEditor` matters on this page;
 // the rest of the keys are queried together and ignored here.
@@ -59,6 +63,13 @@ type PurchaseOrder = {
   poNumber: string;
   vendorId: number;
   status: string;
+  // Phase 2: dual-track fields
+  physicalStatus: string;
+  financialStatus: string;
+  invoicedTotalCents: number;
+  paidTotalCents: number;
+  outstandingCents: number;
+  firstInvoicedAt: string | null;
   poType: string;
   priority: string;
   lineCount: number;
@@ -67,6 +78,87 @@ type PurchaseOrder = {
   createdAt: string;
   vendor?: Vendor;
 };
+
+// ── Dual-track segment display helpers ──────────────────────────────────────
+
+// Physical stages shown as linear segments (cancelled/short_closed shown separately)
+const PHYSICAL_TRACK_STAGES = PO_PHYSICAL_STATUSES.filter(
+  (s) => s !== "cancelled" && s !== "short_closed",
+) as readonly string[];
+
+// Financial stages shown as segments (disputed overlaid on partially_paid)
+const FINANCIAL_TRACK_STAGES = ["unbilled", "invoiced", "partially_paid", "paid"] as const;
+
+type SegmentState = "done" | "current" | "warn" | "future";
+
+function physicalSegments(physicalStatus: string): SegmentState[] {
+  const idx = PHYSICAL_TRACK_STAGES.indexOf(physicalStatus);
+  return PHYSICAL_TRACK_STAGES.map((_, i) => {
+    if (i < idx) return "done";
+    if (i === idx) return "current";
+    return "future";
+  });
+}
+
+function financialSegments(financialStatus: string, outstandingCents: number, firstInvoicedAt: string | null): SegmentState[] {
+  // "disputed" maps to warn on the partially_paid segment
+  const effectiveStatus = financialStatus === "disputed" ? "partially_paid" : financialStatus;
+  const isPastDue =
+    outstandingCents > 0 &&
+    firstInvoicedAt != null &&
+    Date.now() - new Date(firstInvoicedAt).getTime() > 30 * 24 * 60 * 60 * 1000; // rough 30d heuristic
+  const idx = FINANCIAL_TRACK_STAGES.indexOf(effectiveStatus as typeof FINANCIAL_TRACK_STAGES[number]);
+  return FINANCIAL_TRACK_STAGES.map((stage, i) => {
+    if (i < idx) return "done";
+    if (i === idx) {
+      if ((financialStatus === "disputed" || isPastDue) && stage === "partially_paid") return "warn";
+      return "current";
+    }
+    return "future";
+  });
+}
+
+const SEG_CLASSES: Record<SegmentState, string> = {
+  done: "bg-green-600",
+  current: "bg-blue-600",
+  warn: "bg-amber-500",
+  future: "bg-border",
+};
+
+function MiniTrack({ segments }: { segments: SegmentState[] }) {
+  return (
+    <div className="flex gap-[2px] items-center">
+      {segments.map((state, i) => (
+        <span
+          key={i}
+          className={`inline-block w-3.5 h-1 rounded-sm ${SEG_CLASSES[state]}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DualTrackCell({ po }: { po: PurchaseOrder }) {
+  if (po.physicalStatus === "cancelled") {
+    return (
+      <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-700">
+        Cancelled
+      </span>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <div className="grid grid-cols-[50px_1fr] items-center gap-1.5">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Phys</span>
+        <MiniTrack segments={physicalSegments(po.physicalStatus)} />
+      </div>
+      <div className="grid grid-cols-[50px_1fr] items-center gap-1.5">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Fin</span>
+        <MiniTrack segments={financialSegments(po.financialStatus, po.outstandingCents, po.firstInvoicedAt)} />
+      </div>
+    </div>
+  );
+}
 
 type InlineLineItem = {
   id: string; // temp client-side id
@@ -107,6 +199,9 @@ export default function PurchaseOrders() {
   const [statusFilter, setStatusFilter] = useState("active");
   const [searchQuery, setSearchQuery] = useState("");
   const [vendorFilter, setVendorFilter] = useState<number | null>(null);
+  // Phase 2: dual-track filter chips
+  const [physicalFilter, setPhysicalFilter] = useState<string | null>(null);
+  const [financialFilter, setFinancialFilter] = useState<string | null>(null);
 
   // Spec A feature flag. When true, '+ New Purchase Order' navigates to the
   // new full-page editor instead of opening the legacy dialog. Flag lives on
@@ -178,12 +273,15 @@ export default function PurchaseOrders() {
 
   // Queries
   const { data: poData } = useQuery<{ purchaseOrders: PurchaseOrder[]; total: number }>({
-    queryKey: ["/api/purchase-orders", statusFilter, searchQuery, vendorFilter],
+    queryKey: ["/api/purchase-orders", statusFilter, searchQuery, vendorFilter, physicalFilter, financialFilter],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (statusFilter !== "all" && statusFilter !== "active") params.set("status", statusFilter);
       if (searchQuery) params.set("search", searchQuery);
       if (vendorFilter) params.set("vendorId", String(vendorFilter));
+      // Phase 2: dual-track filter chips
+      if (physicalFilter) params.set("physical_status", physicalFilter);
+      if (financialFilter) params.set("financial_status", financialFilter);
       params.set("limit", "100");
       const res = await fetch(`/api/purchase-orders?${params}`);
       if (!res.ok) throw new Error("Failed to fetch POs");
@@ -492,7 +590,7 @@ export default function PurchaseOrders() {
         </Card>
       </div>
 
-      {/* Filters */}
+      {/* Search + legacy status filter */}
       <div className="flex flex-col sm:flex-row gap-2">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -521,6 +619,39 @@ export default function PurchaseOrders() {
             <SelectItem value="cancelled">Cancelled</SelectItem>
           </SelectContent>
         </Select>
+      </div>
+
+      {/* Phase 2: Dual-track filter chips */}
+      <div className="flex flex-wrap gap-2 items-center">
+        <span className="text-xs text-muted-foreground">Physical:</span>
+        {([null, "draft", "sent", "in_transit", "receiving", "received"] as (string | null)[]).map((val) => (
+          <button
+            key={val ?? "all-phys"}
+            onClick={() => setPhysicalFilter(val)}
+            className={`px-2.5 py-0.5 rounded-full border text-xs transition-colors ${
+              physicalFilter === val
+                ? "bg-blue-600 border-blue-600 text-white"
+                : "border-border bg-background hover:bg-muted"
+            }`}
+          >
+            {val === null ? "All" : val.charAt(0).toUpperCase() + val.slice(1).replace(/_/g, " ")}
+          </button>
+        ))}
+        <span className="w-px h-4 bg-border mx-1" />
+        <span className="text-xs text-muted-foreground">Financial:</span>
+        {([null, "unbilled", "invoiced", "partially_paid", "paid"] as (string | null)[]).map((val) => (
+          <button
+            key={val ?? "all-fin"}
+            onClick={() => setFinancialFilter(val)}
+            className={`px-2.5 py-0.5 rounded-full border text-xs transition-colors ${
+              financialFilter === val
+                ? "bg-blue-600 border-blue-600 text-white"
+                : "border-border bg-background hover:bg-muted"
+            }`}
+          >
+            {val === null ? "All" : val.charAt(0).toUpperCase() + val.slice(1).replace(/_/g, " ")}
+          </button>
+        ))}
       </div>
 
       {/* Mobile Card View */}
@@ -593,6 +724,7 @@ export default function PurchaseOrders() {
               <TableHead>Vendor</TableHead>
               <TableHead>Type</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead className="w-44">Tracks</TableHead>
               <TableHead className="text-right">Lines</TableHead>
               <TableHead className="text-right">Total</TableHead>
               <TableHead>Expected</TableHead>
@@ -603,7 +735,7 @@ export default function PurchaseOrders() {
           <TableBody>
             {purchaseOrders.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
+                <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
                   No purchase orders found. Click "New Purchase Order" to create one.
                 </TableCell>
               </TableRow>
@@ -630,6 +762,9 @@ export default function PurchaseOrders() {
                     >
                       {STATUS_BADGES[po.status]?.label || po.status}
                     </Badge>
+                  </TableCell>
+                  <TableCell className="w-44">
+                    <DualTrackCell po={po} />
                   </TableCell>
                   <TableCell className="text-right">{po.lineCount || 0}</TableCell>
                   <TableCell className="text-right font-mono">{formatCents(po.totalCents)}</TableCell>

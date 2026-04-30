@@ -1,8 +1,13 @@
+import React from "react";
 import {
   dollarsToCents,
   formatMills,
   centsToMills,
 } from "@shared/utils/money";
+import {
+  PO_PHYSICAL_STATUSES,
+  PO_FINANCIAL_STATUSES,
+} from "@shared/schema/procurement.schema";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
@@ -44,7 +49,219 @@ import {
   ExternalLink,
   Printer,
   Mail,
+  DollarSign,
 } from "lucide-react";
+
+// ── Dual-track display helpers ─────────────────────────────────────────────────────
+
+// Physical stages displayed in the timeline (cancelled / short_closed are shown differently)
+const PHYSICAL_TRACK_STAGES = PO_PHYSICAL_STATUSES.filter(
+  (s) => s !== "cancelled" && s !== "short_closed",
+) as readonly string[];
+
+// Stage label abbreviations for the track dots
+const PHYSICAL_LABELS: Record<string, string> = {
+  draft: "Draft",
+  sent: "Sent",
+  acknowledged: "Ack'd",
+  shipped: "Shipped",
+  in_transit: "Transit",
+  arrived: "Arrived",
+  receiving: "Receiving",
+  received: "Received",
+};
+
+const FINANCIAL_LABELS: Record<string, string> = {
+  unbilled: "Unbilled",
+  invoiced: "Invoiced",
+  partially_paid: "Partial",
+  paid: "Paid",
+  disputed: "Disputed",
+};
+
+// The 4 linear financial stages; 'disputed' shown as warn on partially_paid
+const FINANCIAL_TRACK_STAGES = [
+  "unbilled",
+  "invoiced",
+  "partially_paid",
+  "paid",
+] as const;
+
+type StageState = "done" | "current" | "warn" | "future";
+
+function stageState(
+  stageIndex: number,
+  currentIndex: number,
+  isWarn: boolean,
+): StageState {
+  if (stageIndex < currentIndex) return "done";
+  if (stageIndex === currentIndex) return isWarn ? "warn" : "current";
+  return "future";
+}
+
+/** A dot-and-connector timeline for one track */
+function TrackTimeline({
+  stages,
+  currentStatus,
+  isWarn,
+  timestamps,
+}: {
+  stages: readonly string[];
+  currentStatus: string;
+  isWarn?: boolean;
+  timestamps?: Record<string, string | null | undefined>;
+}) {
+  const effectiveStatus =
+    currentStatus === "disputed" ? "partially_paid" : currentStatus;
+  const currentIdx = stages.indexOf(effectiveStatus);
+
+  return (
+    <div className="flex items-center gap-0">
+      {stages.map((stage, i) => {
+        const state = stageState(i, currentIdx, !!(isWarn && i === currentIdx));
+        const dotClass =
+          state === "done"
+            ? "bg-green-600 border-green-600"
+            : state === "current"
+            ? "bg-blue-600 border-blue-600"
+            : state === "warn"
+            ? "bg-amber-500 border-amber-500"
+            : "bg-background border-border";
+        const connectorClass =
+          i < currentIdx ? "bg-green-600" : "bg-border";
+        const ts = timestamps?.[stage];
+        return (
+          <div key={stage} className="flex items-center">
+            <div className="relative flex flex-col items-center">
+              <div
+                title={ts ? new Date(ts).toLocaleString() : stage}
+                className={`w-3 h-3 rounded-full border-2 ${dotClass} cursor-default`}
+              />
+              <span className="text-[9px] text-muted-foreground mt-0.5 whitespace-nowrap">
+                {PHYSICAL_LABELS[stage] ?? FINANCIAL_LABELS[stage] ?? stage}
+              </span>
+            </div>
+            {i < stages.length - 1 && (
+              <div className={`w-6 h-0.5 ${connectorClass} -mt-3`} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The two-row dual-track header card */
+function DualTrackHeader({ po }: { po: any }) {
+  const isCancelled = po.physicalStatus === "cancelled" || po.physicalStatus === "short_closed";
+
+  // physical summary text
+  const totalOrderQty: number = (po.lines ?? []).reduce(
+    (s: number, l: any) => s + (Number(l.orderQty) || 0),
+    0,
+  );
+  const totalReceivedQty: number = (po.lines ?? []).reduce(
+    (s: number, l: any) => s + (Number(l.receivedQty) || 0),
+    0,
+  );
+  let physicalSummary: React.ReactNode;
+  if (isCancelled) {
+    physicalSummary = <span className="text-red-600 font-medium">Cancelled</span>;
+  } else if (po.physicalStatus === "received") {
+    physicalSummary = <span className="text-green-600 font-medium">All received</span>;
+  } else {
+    physicalSummary = (
+      <>
+        <strong>{totalReceivedQty.toLocaleString()}</strong> of{" "}
+        <strong>{totalOrderQty.toLocaleString()}</strong> pcs received
+      </>
+    );
+  }
+
+  // financial summary text (integer math only — Rule #3)
+  const paidCents = Number(po.paidTotalCents ?? 0);
+  const invoicedCents = Number(po.invoicedTotalCents ?? 0);
+  const outstandingCents = Number(po.outstandingCents ?? 0);
+  let financialSummary: React.ReactNode;
+  if (po.financialStatus === "unbilled") {
+    financialSummary = <span className="text-muted-foreground">Unbilled</span>;
+  } else if (po.financialStatus === "paid") {
+    financialSummary = <span className="text-green-600 font-medium">Paid in full</span>;
+  } else if (outstandingCents > 0 && po.firstInvoicedAt) {
+    const daysSinceInvoice = Math.floor(
+      (Date.now() - new Date(po.firstInvoicedAt).getTime()) / (1000 * 60 * 60 * 24),
+    );
+    const isPastDue = daysSinceInvoice > 30;
+    financialSummary = (
+      <>
+        <strong>{formatCents(paidCents)}</strong> paid of{" "}
+        <strong>{formatCents(invoicedCents)}</strong>
+        {isPastDue && (
+          <span className="ml-1 text-red-600 font-medium">· {formatCents(outstandingCents)} past due</span>
+        )}
+      </>
+    );
+  } else {
+    financialSummary = (
+      <>
+        <strong>{formatCents(paidCents)}</strong> paid of{" "}
+        <strong>{formatCents(invoicedCents)}</strong>
+      </>
+    );
+  }
+
+  const physTimestamps: Record<string, string | null | undefined> = {
+    shipped: po.firstShippedAt,
+    arrived: po.firstArrivedAt,
+  };
+  const finTimestamps: Record<string, string | null | undefined> = {
+    invoiced: po.firstInvoicedAt,
+    partially_paid: po.firstPaidAt,
+    paid: po.fullyPaidAt,
+  };
+
+  const finWarn = po.financialStatus === "disputed" ||
+    (outstandingCents > 0 &&
+      po.firstInvoicedAt != null &&
+      Date.now() - new Date(po.firstInvoicedAt).getTime() > 30 * 24 * 60 * 60 * 1000);
+
+  return (
+    <div className="rounded-lg border bg-card p-4 space-y-3">
+      {/* Physical track */}
+      <div className="flex items-start gap-4">
+        <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
+          Physical
+        </span>
+        <div className="flex-1 overflow-x-auto">
+          <TrackTimeline
+            stages={PHYSICAL_TRACK_STAGES}
+            currentStatus={po.physicalStatus ?? "draft"}
+            timestamps={physTimestamps}
+          />
+        </div>
+        <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{physicalSummary}</div>
+      </div>
+
+      {/* Financial track */}
+      <div className="flex items-start gap-4">
+        <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
+          Financial
+        </span>
+        <div className="flex-1 overflow-x-auto">
+          <TrackTimeline
+            stages={FINANCIAL_TRACK_STAGES}
+            currentStatus={po.financialStatus ?? "unbilled"}
+            isWarn={finWarn}
+            timestamps={finTimestamps}
+          />
+        </div>
+        <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{financialSummary}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Incoterms ─────────────────────────────────────────────────────
 
 // Incoterms → which vendor-side charges are applicable
 const INCOTERMS_LIST = ["EXW", "FCA", "FOB", "CFR", "CIF", "CPT", "CIP", "DAP", "DPU", "DDP"] as const;
@@ -228,6 +445,12 @@ export default function PurchaseOrderDetail() {
   const { data: invoicesData } = useQuery<{ invoices: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/invoices`],
     enabled: !!poId && activeTab === "invoices",
+  });
+
+  // Phase 2: payments tab
+  const { data: paymentsData } = useQuery<{ payments: any[] }>({
+    queryKey: [`/api/purchase-orders/${poId}/payments`],
+    enabled: !!poId && activeTab === "payments",
   });
 
   const lines = po?.lines ?? [];
@@ -817,6 +1040,9 @@ export default function PurchaseOrderDetail() {
         </div>
       </div>
 
+      {/* Phase 2: Dual-track header */}
+      <DualTrackHeader po={po} />
+
       {/* Charge summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-2 md:gap-4">
 
@@ -1004,12 +1230,16 @@ export default function PurchaseOrderDetail() {
         </div>
       )}
 
+      {/* Phase 2: Tabs + Quick Actions side rail */}
+      <div className="flex flex-col md:flex-row gap-4 items-start">
+      <div className="flex-1 min-w-0">
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="receipts">Receipts</TabsTrigger>
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
+          <TabsTrigger value="payments">Payments</TabsTrigger>
           <TabsTrigger value="shipments">Shipments {linkedShipments.length > 0 ? `(${linkedShipments.length})` : ""}</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
@@ -1500,6 +1730,63 @@ export default function PurchaseOrderDetail() {
           )}
         </TabsContent>
 
+        {/* ── Payments Tab (Phase 2) ── */}
+        <TabsContent value="payments" className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            AP payments applied to invoices linked to this purchase order.
+          </p>
+          {!paymentsData?.payments?.length ? (
+            <Card>
+              <CardContent className="p-8 text-center text-muted-foreground">
+                <DollarSign className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                <p className="text-sm">No payments recorded against this PO yet.</p>
+                <p className="text-xs mt-1">
+                  Payments appear here once invoices are linked and payment is applied in the AP ledger.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Payment Date</TableHead>
+                      <TableHead>Method</TableHead>
+                      <TableHead className="text-right">Amount Applied</TableHead>
+                      <TableHead>Invoice #</TableHead>
+                      <TableHead>Reference</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {paymentsData.payments.map((p: any) => (
+                      <TableRow key={p.allocationId}>
+                        <TableCell className="text-sm">
+                          {p.paymentDate
+                            ? format(new Date(p.paymentDate), "MMM d, yyyy")
+                            : "—"}
+                        </TableCell>
+                        <TableCell className="capitalize">
+                          {(p.paymentMethod ?? "").replace(/_/g, " ") || "—"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono font-medium">
+                          {formatCents(p.appliedAmountCents)}
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">
+                          {p.invoiceNumber ?? "—"}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {p.referenceNumber || p.paymentNumber || "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
         <TabsContent value="history" className="space-y-4">
           {history.length === 0 ? (
             <Card>
@@ -1540,6 +1827,168 @@ export default function PurchaseOrderDetail() {
           )}
         </TabsContent>
       </Tabs>
+      </div>{/* end main column */}
+
+      {/* ── Quick Actions Side Rail (Phase 2) ── */}
+      <div className="w-full md:w-64 shrink-0 space-y-3">
+        <Card>
+          <CardHeader className="pb-2 pt-3 px-4">
+            <CardTitle className="text-sm">Quick actions</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4 space-y-2">
+            {/* Physical actions */}
+
+            {/* Send to vendor (draft only) */}
+            {po.physicalStatus === "draft" && isSoloMode && (
+              <Button
+                className="w-full justify-start"
+                size="sm"
+                onClick={() => sendToVendorMutation.mutate()}
+                disabled={sendToVendorMutation.isPending}
+              >
+                <Send className="h-3.5 w-3.5 mr-2" />
+                Send to vendor
+              </Button>
+            )}
+
+            {/* Mark acknowledged (sent) */}
+            {po.physicalStatus === "sent" && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAckDialog(true)}
+              >
+                <CheckCircle className="h-3.5 w-3.5 mr-2" />
+                Mark acknowledged
+              </Button>
+            )}
+
+            {/* Mark shipped — Phase 3 transition, gray out */}
+            {po.physicalStatus === "acknowledged" && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                disabled
+                title="Coming soon — Phase 3"
+              >
+                <Truck className="h-3.5 w-3.5 mr-2" />
+                Mark shipped
+              </Button>
+            )}
+
+            {/* Mark in transit — Phase 3 */}
+            {po.physicalStatus === "shipped" && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                disabled
+                title="Coming soon — Phase 3"
+              >
+                <Ship className="h-3.5 w-3.5 mr-2" />
+                Mark in transit
+              </Button>
+            )}
+
+            {/* Mark arrived — Phase 3 */}
+            {(po.physicalStatus === "in_transit" || po.physicalStatus === "shipped") && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                disabled
+                title="Coming soon — Phase 3"
+              >
+                <Package className="h-3.5 w-3.5 mr-2" />
+                Mark arrived
+              </Button>
+            )}
+
+            {/* Create receipt */}
+            {(["arrived", "receiving", "acknowledged", "shipped", "in_transit", "sent", "partially_received"].includes(po.physicalStatus ?? "") ||
+              ["sent", "acknowledged", "partially_received"].includes(po.status)) && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={() => createReceiptMutation.mutate()}
+                disabled={createReceiptMutation.isPending}
+              >
+                <Truck className="h-3.5 w-3.5 mr-2" />
+                {createReceiptMutation.isPending ? "Creating..." : "Create receipt"}
+              </Button>
+            )}
+
+            {/* Cancel PO */}
+            {["draft", "sent", "acknowledged"].includes(po.physicalStatus ?? "") &&
+              po.financialStatus === "unbilled" &&
+              !["closed", "cancelled"].includes(po.status) && (
+              <Button
+                className="w-full justify-start text-red-600 hover:text-red-700"
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowCancelDialog(true)}
+              >
+                <Ban className="h-3.5 w-3.5 mr-2" />
+                Cancel PO
+              </Button>
+            )}
+
+            {/* Financial: Add invoice */}
+            {["unbilled", "invoiced"].includes(po.financialStatus ?? "") &&
+              ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  let invoiceNumber = "";
+                  try {
+                    const r = await fetch("/api/vendor-invoices/next-number");
+                    if (r.ok) invoiceNumber = (await r.json()).invoiceNumber;
+                  } catch {}
+                  setInvoiceForm({
+                    invoiceNumber,
+                    amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
+                    invoiceDate: new Date().toISOString().slice(0, 10),
+                    dueDate: "",
+                    notes: "",
+                  });
+                  setShowCreateInvoiceDialog(true);
+                }}
+              >
+                <FileText className="h-3.5 w-3.5 mr-2" />
+                Add invoice
+              </Button>
+            )}
+
+            {/* Financial: Record payment */}
+            {["invoiced", "partially_paid"].includes(po.financialStatus ?? "") && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={() => navigate("/ap-payments")}
+                title="Record payment in AP ledger"
+              >
+                <DollarSign className="h-3.5 w-3.5 mr-2" />
+                Record payment
+              </Button>
+            )}
+
+            {/* Fallback: no actions available */}
+            {po.physicalStatus === "received" &&
+              po.financialStatus === "paid" && (
+              <p className="text-xs text-muted-foreground text-center py-2">
+                All done — PO fully received and paid.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </div>{/* end side rail */}
+      </div>{/* end grid wrapper */}
 
       {/* ── Add Line Dialog ── */}
       <Dialog open={showAddLineDialog} onOpenChange={(open) => {

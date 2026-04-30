@@ -594,6 +594,52 @@ export async function getInvoicesForPo(purchaseOrderId: number) {
   return links.map((r) => ({ ...r.invoice, allocatedAmountCents: r.link.allocatedAmountCents }));
 }
 
+/**
+ * Phase 2: Return all ap_payments linked to a PO via the chain:
+ *   vendor_invoice_po_links → vendor_invoices → ap_payment_allocations → ap_payments
+ *
+ * Columns: paymentDate, paymentMethod, appliedAmountCents, invoiceNumber, referenceNumber
+ * Only non-voided payments are returned.
+ */
+export async function getPaymentsForPo(purchaseOrderId: number) {
+  // Step 1: find all vendor invoice IDs linked to this PO
+  const invoiceLinks = await db
+    .select({ vendorInvoiceId: vendorInvoicePoLinks.vendorInvoiceId })
+    .from(vendorInvoicePoLinks)
+    .where(eq(vendorInvoicePoLinks.purchaseOrderId, purchaseOrderId));
+
+  if (invoiceLinks.length === 0) return [];
+
+  const invoiceIds = invoiceLinks.map((l) => l.vendorInvoiceId);
+
+  // Step 2: fetch all non-voided payment allocations for those invoices
+  const rows = await db
+    .select({
+      allocationId: apPaymentAllocations.id,
+      apPaymentId: apPaymentAllocations.apPaymentId,
+      appliedAmountCents: apPaymentAllocations.appliedAmountCents,
+      vendorInvoiceId: apPaymentAllocations.vendorInvoiceId,
+      invoiceNumber: vendorInvoices.invoiceNumber,
+      paymentDate: apPayments.paymentDate,
+      paymentMethod: apPayments.paymentMethod,
+      paymentStatus: apPayments.status,
+      referenceNumber: apPayments.referenceNumber,
+      paymentNumber: apPayments.paymentNumber,
+    })
+    .from(apPaymentAllocations)
+    .innerJoin(apPayments, eq(apPaymentAllocations.apPaymentId, apPayments.id))
+    .innerJoin(vendorInvoices, eq(apPaymentAllocations.vendorInvoiceId, vendorInvoices.id))
+    .where(
+      and(
+        inArray(apPaymentAllocations.vendorInvoiceId, invoiceIds),
+        ne(apPayments.status, "voided"),
+      ),
+    )
+    .orderBy(desc(apPayments.paymentDate));
+
+  return rows;
+}
+
 // ─── Payments ─────────────────────────────────────────────────────────────────
 
 export async function recordPayment(data: {

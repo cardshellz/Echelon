@@ -45,8 +45,8 @@ import {
 
 interface Storage {
   // Purchase Orders
-  getPurchaseOrders(filters?: { status?: string; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<any[]>;
-  getPurchaseOrdersCount(filters?: { status?: string; vendorId?: number; search?: string }): Promise<number>;
+  getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<any[]>;
+  getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number): Promise<any>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<any>;
   createPurchaseOrder(data: any, historyData?: any): Promise<any>;
