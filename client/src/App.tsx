@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { VendorAuthProvider, useVendorAuth } from "@/lib/vendor-auth";
+import { DropshipAuthProvider, dropshipPortalPath, isDropshipPortalHost, useDropshipAuth } from "@/lib/dropship-auth";
 import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
 import Layout from "@/components/layout/AppShell";
 import VendorLayout from "@/components/vendor/VendorLayout";
@@ -17,6 +18,8 @@ import VendorProducts from "@/pages/vendor/VendorProducts";
 import VendorOrders from "@/pages/vendor/VendorOrders";
 import VendorWallet from "@/pages/vendor/VendorWallet";
 import VendorSettings from "@/pages/vendor/VendorSettings";
+import DropshipPortalAuth from "@/pages/dropship/DropshipPortalAuth";
+import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Orders from "@/pages/Orders";
@@ -147,9 +150,51 @@ function VendorRouter() {
   );
 }
 
+function DropshipPortalProtectedRoute({ component: Component }: { component: React.ComponentType }) {
+  const { isAuthenticated, isLoading } = useDropshipAuth();
+
+  if (isLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-50">
+        <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-emerald-600"></div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Redirect to={dropshipPortalPath("/login")} />;
+  }
+
+  return <Component />;
+}
+
+function DropshipPortalRouter() {
+  const portalRoot = isDropshipPortalHost() ? "" : "/dropship-portal";
+
+  return (
+    <DropshipAuthProvider>
+      <Switch>
+        <Route path={`${portalRoot}/login`} component={DropshipPortalAuth} />
+        <Route path={`${portalRoot}/setup`} component={DropshipPortalAuth} />
+        <Route path={`${portalRoot}/dashboard`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalDashboard} />
+        </Route>
+        <Route path={portalRoot || "/"}>
+          <Redirect to={dropshipPortalPath("/dashboard")} />
+        </Route>
+        <Route component={DropshipPortalAuth} />
+      </Switch>
+    </DropshipAuthProvider>
+  );
+}
+
 function Router() {
   const [location] = useLocation();
   const { user, isLoading } = useAuth();
+
+  if (isDropshipPortalHost() || location.startsWith("/dropship-portal")) {
+    return <DropshipPortalRouter />;
+  }
 
   // Vendor portal routes — completely separate auth
   if (location.startsWith("/vendor")) {
