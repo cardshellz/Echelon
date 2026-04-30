@@ -163,10 +163,12 @@ export const dropshipAuthIdentityStatusEnum = ["active", "locked", "disabled"] a
 export type DropshipAuthIdentityStatus = typeof dropshipAuthIdentityStatusEnum[number];
 
 export const dropshipSensitiveActionEnum = [
+  "account_bootstrap",
   "connect_store",
   "disconnect_store",
   "change_password",
   "change_contact_email",
+  "password_reset",
   "add_funding_method",
   "remove_funding_method",
   "wallet_funding_high_value",
@@ -259,7 +261,7 @@ export const dropshipSensitiveActionChallenges = dropshipSchema.table("dropship_
 }, (table) => [
   uniqueIndex("dropship_sensitive_challenge_idem_idx").on(table.idempotencyKey),
   index("dropship_sensitive_challenge_member_idx").on(table.memberId, table.createdAt),
-  check("dropship_sensitive_challenge_action_chk", sql`${table.action} IN ('connect_store','disconnect_store','change_password','change_contact_email','add_funding_method','remove_funding_method','wallet_funding_high_value','bulk_listing_push','high_risk_order_acceptance')`),
+  check("dropship_sensitive_challenge_action_chk", sql`${table.action} IN ('account_bootstrap','connect_store','disconnect_store','change_password','change_contact_email','password_reset','add_funding_method','remove_funding_method','wallet_funding_high_value','bulk_listing_push','high_risk_order_acceptance')`),
   check("dropship_sensitive_challenge_method_chk", sql`${table.method} IN ('passkey','email_mfa')`),
   check("dropship_sensitive_challenge_attempts_chk", sql`${table.attempts} >= 0`),
 ]);

@@ -4,10 +4,12 @@ export const DROPSHIP_ENTITLEMENT_GRACE_HOURS = 72;
 export const DROPSHIP_EMAIL_MFA_TTL_MINUTES = 10;
 
 export const dropshipSensitiveActionEnum = [
+  "account_bootstrap",
   "connect_store",
   "disconnect_store",
   "change_password",
   "change_contact_email",
+  "password_reset",
   "add_funding_method",
   "remove_funding_method",
   "wallet_funding_high_value",
@@ -17,6 +19,7 @@ export const dropshipSensitiveActionEnum = [
 
 export type DropshipSensitiveAction = typeof dropshipSensitiveActionEnum[number];
 export type DropshipStepUpMethod = "passkey" | "email_mfa";
+export type DropshipAuthMethod = "passkey" | "password";
 export type DropshipEntitlementStatus =
   | "active"
   | "grace"
@@ -28,8 +31,19 @@ export interface DropshipAuthenticatedPrincipal {
   memberId: string;
   cardShellzEmail: string;
   hasPasskey: boolean;
-  authMethod: "passkey" | "password";
+  authMethod: DropshipAuthMethod;
 }
+
+export interface DropshipSessionPrincipal extends DropshipAuthenticatedPrincipal {
+  authIdentityId: number;
+  entitlementStatus: Extract<DropshipEntitlementStatus, "active" | "grace">;
+  authenticatedAt: string;
+}
+
+export const DROPSHIP_PASSWORD_MIN_LENGTH = 12;
+export const DROPSHIP_PASSWORD_MAX_LENGTH = 256;
+export const DROPSHIP_EMAIL_CHALLENGE_MAX_ATTEMPTS = 5;
+export const DROPSHIP_SENSITIVE_ACTION_PROOF_TTL_MINUTES = 10;
 
 export interface DropshipMembershipEntitlementInput {
   memberId: string;
@@ -64,6 +78,25 @@ export function normalizeCardShellzEmail(email: string): string {
   }
 
   return normalized;
+}
+
+export function assertDropshipPasswordPolicy(password: string): void {
+  if (
+    password.length < DROPSHIP_PASSWORD_MIN_LENGTH ||
+    password.length > DROPSHIP_PASSWORD_MAX_LENGTH
+  ) {
+    throw new DropshipError("DROPSHIP_PASSWORD_POLICY_FAILED", "Password does not meet length requirements.", {
+      minLength: DROPSHIP_PASSWORD_MIN_LENGTH,
+      maxLength: DROPSHIP_PASSWORD_MAX_LENGTH,
+    });
+  }
+
+  if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
+    throw new DropshipError(
+      "DROPSHIP_PASSWORD_POLICY_FAILED",
+      "Password must include uppercase, lowercase, and numeric characters.",
+    );
+  }
 }
 
 export function resolveSensitiveActionStepUp(
