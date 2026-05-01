@@ -324,6 +324,17 @@ heroku run -a cardshellz-echelon -- "npx tsx scripts/parity-check-push.ts --limi
 
 **If divergences appear:** roll back `PUSH_FROM_WMS=false`, paste the per-order diff, fix the root cause before re-flipping.
 
+**Known false-positive class — split orders (2026-04-30):**
+When ShipStation splits an order into multiple shipments (manually via the SS UI's split button OR via SS automation rules), the script may report `lineItems.count: SS=N vs Echelon=M` divergences even though both systems hold the correct data. Root cause is an SS API quirk: split children get reassigned internal SS order ids that no longer match the parent. The script attempts to compensate by falling back to `?orderNumber=` filtering, but in some account configurations even that returns empty.
+
+When this happens:
+1. Spot-check the suspect order in the SS UI — verify all line items + qty are present across the multiple shipments.
+2. Confirm the OMS/WMS data is correct via the diagnostic SQL in `wms-oms-crossover.md` (sums across `wms.outbound_shipment_items` should match `oms.oms_order_lines`).
+3. If both systems hold the correct data, certify the run as **PASS — manual spot-check** and document which orders diverged in the run log.
+4. The financials (`amountPaid`, `taxAmount`, `shippingAmount`) on a split order's parent are summed across all children by SS; if those match in the parity check, that's strong evidence SS received the full order correctly even when per-shipment item filtering fails.
+
+This class of divergence does NOT block runbook progression.
+
 ---
 
 ### 3.4 `SHIP_NOTIFY_V2=true` (Commit 15)
