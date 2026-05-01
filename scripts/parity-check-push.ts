@@ -649,7 +649,10 @@ export async function checkSingleOrder(
     db: any;
     sql: any;
     getOrderById: (id: number) => Promise<any>;
-    getShipments?: (orderId: number) => Promise<SsShipment[]>;
+    getShipments?: (
+      orderId: number,
+      opts?: { orderNumber?: string },
+    ) => Promise<SsShipment[]>;
   },
 ): Promise<OrderResult> {
   const { db, sql, getOrderById, tolerance } = opts;
@@ -690,7 +693,9 @@ export async function checkSingleOrder(
   let ssShipments: SsShipment[] = [];
   if (opts.getShipments) {
     try {
-      ssShipments = await opts.getShipments(ssOrderId);
+      ssShipments = await opts.getShipments(ssOrderId, {
+          orderNumber: ssOrder.orderNumber,
+        });
       if (opts.verbose) {
         console.log(`    [debug] getShipments(${ssOrderId}) returned ${ssShipments.length} shipments`);
         for (const s of ssShipments) {
@@ -928,13 +933,21 @@ export async function runParityCheck(
     db?: any;
     sql?: any;
     getOrderById?: (id: number) => Promise<any>;
-    getShipments?: (orderId: number) => Promise<SsShipment[]>;
+    getShipments?: (
+      orderId: number,
+      opts?: { orderNumber?: string },
+    ) => Promise<SsShipment[]>;
   },
 ): Promise<ParityReport> {
   let db: any;
   let sqlFn: any;
   let getOrderById: (id: number) => Promise<any>;
-  let getShipmentsFn: ((orderId: number) => Promise<SsShipment[]>) | undefined;
+  let getShipmentsFn:
+    | ((
+        orderId: number,
+        opts?: { orderNumber?: string },
+      ) => Promise<SsShipment[]>)
+    | undefined;
 
   if (deps) {
     db = deps.db;
@@ -952,8 +965,8 @@ export async function runParityCheck(
     getOrderById = (id: number) => ssService.getOrderById(id);
     // getShipments is available on the service; cast to our local type
     // (the service's ShipStationShipment doesn't declare items, but the API returns them)
-    getShipmentsFn = (id: number) =>
-      ssService.getShipments(id) as unknown as Promise<SsShipment[]>;
+    getShipmentsFn = (id: number, optsArg?: { orderNumber?: string }) =>
+      ssService.getShipments(id, optsArg) as unknown as Promise<SsShipment[]>;
   }
 
   const report: ParityReport = {

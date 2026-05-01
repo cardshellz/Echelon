@@ -724,18 +724,38 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   // Get shipments for a ShipStation order
   // -------------------------------------------------------------------------
 
-  async function getShipments(orderId: number): Promise<ShipStationShipment[]> {
+  async function getShipments(
+    orderId: number,
+    opts?: { orderNumber?: string },
+  ): Promise<ShipStationShipment[]> {
     // includeShipmentItems=true is required to populate `shipmentItems` on
     // each shipment; without it SS returns empty/undefined item arrays.
-    // The parity check (and any future split-shipment reconciler) needs
-    // per-shipment items, so request them here. Pagination is not handled
-    // because a single SS order rarely has more than the default page of
-    // shipments; revisit if real customers regularly exceed it.
-    const result = await apiRequest<{ shipments: ShipStationShipment[] }>(
+    //
+    // SS API gotcha: when an order is split inside ShipStation (manually
+    // via the UI's split button OR via automation rules), each child
+    // shipment gets its own internal SS order id. The /shipments?orderId
+    // filter then misses the children because they no longer match the
+    // parent's id. The orderNumber field (e.g. "#56826") is what stays
+    // stable across all the splits.
+    //
+    // Strategy: try orderId first (works for un-split orders, fastest),
+    // and if it returns nothing AND we have an orderNumber, fall back
+    // to filtering by orderNumber to catch all the children of split
+    // parents.
+    const byOrderId = await apiRequest<{ shipments: ShipStationShipment[] }>(
       "GET",
       `/shipments?orderId=${orderId}&includeShipmentItems=true`,
     );
-    return result.shipments || [];
+    const idResults = byOrderId.shipments || [];
+    if (idResults.length > 0 || !opts?.orderNumber) {
+      return idResults;
+    }
+
+    const byOrderNumber = await apiRequest<{ shipments: ShipStationShipment[] }>(
+      "GET",
+      `/shipments?orderNumber=${encodeURIComponent(opts.orderNumber)}&includeShipmentItems=true`,
+    );
+    return byOrderNumber.shipments || [];
   }
 
   // -------------------------------------------------------------------------
