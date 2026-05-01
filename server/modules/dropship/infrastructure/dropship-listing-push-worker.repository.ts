@@ -175,7 +175,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
       });
       await client.query(
         `UPDATE dropship.dropship_vendor_listings
-         SET status = 'active',
+         SET status = $8,
              external_listing_id = $2,
              external_offer_id = $3,
              pushed_quantity = $4,
@@ -199,6 +199,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
               workerId: input.workerId,
             },
           }),
+          input.intent.listingMode === "live" ? "active" : "paused",
         ],
       );
       await recordListingSyncEvent(client, {

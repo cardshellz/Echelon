@@ -81,6 +81,7 @@ interface CandidateRow {
   mpn: string | null;
   condition: string | null;
   item_specifics: Record<string, unknown> | null;
+  image_urls: string[] | null;
   product_is_active: boolean;
   variant_is_active: boolean;
   units_per_variant: number;
@@ -257,6 +258,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            pv.mpn,
            p.condition AS condition,
            p.item_specifics,
+           assets.image_urls,
            p.is_active AS product_is_active,
            pv.is_active AS variant_is_active,
            pv.units_per_variant,
@@ -264,8 +266,16 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
          LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
+         LEFT JOIN LATERAL (
+           SELECT ARRAY_AGG(pa.url ORDER BY pa.is_primary DESC, pa.position ASC, pa.id ASC) AS image_urls
+           FROM catalog.product_assets pa
+           WHERE pa.product_id = p.id
+             AND (pa.product_variant_id IS NULL OR pa.product_variant_id = pv.id)
+             AND pa.asset_type = 'image'
+             AND NULLIF(BTRIM(pa.url), '') IS NOT NULL
+         ) assets ON true
          WHERE pv.id = ANY($1::int[])
-         GROUP BY p.id, pv.id`,
+         GROUP BY p.id, pv.id, assets.image_urls`,
         [productVariantIds],
       );
       return result.rows.map(mapCandidateRow);
@@ -670,6 +680,7 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     mpn: row.mpn,
     condition: row.condition,
     itemSpecifics: row.item_specifics,
+    imageUrls: row.image_urls ?? [],
   };
 }
 

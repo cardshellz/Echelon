@@ -275,6 +275,7 @@ function makeCandidate(): DropshipListingCatalogCandidate {
     mpn: "TL35",
     condition: "new",
     itemSpecifics: { size: "35pt" },
+    imageUrls: ["https://cdn.example.test/toploader.jpg"],
   };
 }
 
