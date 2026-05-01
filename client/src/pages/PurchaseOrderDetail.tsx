@@ -94,8 +94,14 @@ function stageState(
   currentIndex: number,
   isWarn: boolean,
 ): StageState {
+  // Convention (set 2026-05-01): the stage the PO is currently IN
+  // is rendered as 'done' (the action that put us there is complete).
+  // The NEXT stage is rendered as 'current' (the action we're waiting
+  // on). Terminal stages (received, paid) leave nothing as current.
+  if (currentIndex < 0) return "future"; // unknown status
+  if (stageIndex === currentIndex) return isWarn ? "warn" : "done";
   if (stageIndex < currentIndex) return "done";
-  if (stageIndex === currentIndex) return isWarn ? "warn" : "current";
+  if (stageIndex === currentIndex + 1) return "current";
   return "future";
 }
 
@@ -127,8 +133,11 @@ function TrackTimeline({
             : state === "warn"
             ? "bg-amber-500 border-amber-500"
             : "bg-background border-border";
+        // Connector lights up green up to AND INCLUDING the in-stage
+        // (since that stage is now considered done under the new
+        // convention). Connectors past the in-stage stay gray.
         const connectorClass =
-          i < currentIdx ? "bg-green-600" : "bg-border";
+          i <= currentIdx ? "bg-green-600" : "bg-border";
         const ts = timestamps?.[stage];
         return (
           <div key={stage} className="flex items-center">
