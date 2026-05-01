@@ -8,6 +8,7 @@ import type {
   DropshipStoreConnectionSummary,
   DropshipVendorProvisioningRepository,
 } from "../application/dropship-vendor-provisioning-service";
+import { ensureDropshipWalletScaffoldingForVendor } from "./dropship-wallet.repository";
 
 interface VendorProfileRow {
   id: number;
@@ -56,6 +57,10 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
       const status = input.resolveStatus(existing?.status ?? null);
       if (!existing) {
         const vendor = await insertVendorProfile(client, input, status);
+        await ensureDropshipWalletScaffoldingForVendor(client, {
+          vendorId: vendor.vendorId,
+          now: input.checkedAt,
+        });
         await recordVendorProvisioningAuditEvent(client, {
           vendor,
           eventType: "vendor_profile_provisioned",
@@ -88,6 +93,10 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
 
       const changedFields = changedVendorProfileFields(existing, input, status);
       const vendor = await updateVendorProfile(client, existing.vendorId, input, status);
+      await ensureDropshipWalletScaffoldingForVendor(client, {
+        vendorId: vendor.vendorId,
+        now: input.checkedAt,
+      });
       if (changedFields.length > 0) {
         await recordVendorProvisioningAuditEvent(client, {
           vendor,
