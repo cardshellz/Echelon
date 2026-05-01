@@ -197,9 +197,19 @@ function TrackTimeline({
                   />
                 </TooltipTrigger>
                 <TooltipContent side="top" sideOffset={6} className="text-xs max-w-xs">
+                  {/*
+                    Tooltip surface is dark (primary bg + primary-foreground).
+                    The default `text-muted-foreground` was rendering as dim
+                    grey-on-blue and effectively unreadable. Use a translucent
+                    primary-foreground for the secondary lines so they stay
+                    distinguishable from the headline without losing contrast.
+                  */}
                   <div className="font-medium">{lines[0]}</div>
                   {lines.slice(1).map((line, idx) => (
-                    <div key={idx} className="text-muted-foreground">
+                    <div
+                      key={idx}
+                      className="text-primary-foreground/85"
+                    >
                       {line}
                     </div>
                   ))}
@@ -333,30 +343,66 @@ function DualTrackHeader({
   const receivingAt = firstHistoryAt(history, ["receiving", "partially_received"]);
   const receivedAt = firstHistoryAt(history, ["received"]);
 
+  // ── Cancellation audit ───────────────────────────────────────────────
+  //
+  // When a PO is cancelled mid-lifecycle, every track dot needs to make
+  // clear that the lifecycle stopped — otherwise the user can't tell
+  // whether stages past the cancellation point were ever reached.
+  // We compute, per stage, whether it was reached BEFORE the cancellation
+  // by checking the corresponding stage timestamp.
+  // The History tab is the canonical audit trail; this is the at-a-glance
+  // augment.
+  const cancelledAt: string | null = po.cancelledAt ?? null;
+  const cancelReason: string | null = po.cancelReason ?? null;
+  const cancelledBy: string | null = po.cancelledBy ?? null;
+  const cancelExtras = (stageReachedAt: string | null | undefined): string[] => {
+    if (!isCancelled || !cancelledAt) return [];
+    const reached = !!stageReachedAt && new Date(stageReachedAt) <= new Date(cancelledAt);
+    if (reached) {
+      return [
+        `✅ Reached before cancellation (cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledBy ? ` by ${cancelledBy}` : ""})`,
+        cancelReason ? `Reason: ${cancelReason}` : "",
+      ];
+    }
+    return [
+      `⛔ Not reached — PO cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledBy ? ` by ${cancelledBy}` : ""}`,
+      cancelReason ? `Reason: ${cancelReason}` : "",
+    ];
+  };
+
   const physTimestamps: Record<string, StageTooltipInfo | undefined> = {
     draft: {
       ts: po.createdAt,
-      extra: [po.createdBy ? `Created by ${po.createdBy}` : null],
+      extra: [
+        po.createdBy ? `Created by ${po.createdBy}` : null,
+        ...cancelExtras(po.createdAt),
+      ],
     },
     sent: {
       ts: po.sentToVendorAt,
-      extra: [po.vendor?.name ? `Sent to ${po.vendor.name}` : null],
+      extra: [
+        po.vendor?.name ? `Sent to ${po.vendor.name}` : null,
+        ...cancelExtras(po.sentToVendorAt),
+      ],
     },
     acknowledged: {
       ts: po.vendorAckDate,
-      extra: ["Vendor confirmed receipt of PO"],
+      extra: [
+        "Vendor confirmed receipt of PO",
+        ...cancelExtras(po.vendorAckDate),
+      ],
     },
     shipped: {
       ts: po.firstShippedAt,
-      extra: ["Goods left vendor"],
+      extra: ["Goods left vendor", ...cancelExtras(po.firstShippedAt)],
     },
     in_transit: {
       ts: inTransitAt,
-      extra: ["Goods en route"],
+      extra: ["Goods en route", ...cancelExtras(inTransitAt)],
     },
     arrived: {
       ts: po.firstArrivedAt,
-      extra: ["Goods at our dock"],
+      extra: ["Goods at our dock", ...cancelExtras(po.firstArrivedAt)],
     },
     receiving: {
       ts: receivingAt,
@@ -364,6 +410,7 @@ function DualTrackHeader({
         totalOrderQty > 0
           ? `${totalReceivedQty.toLocaleString()} of ${totalOrderQty.toLocaleString()} pcs received so far`
           : null,
+        ...cancelExtras(receivingAt),
       ],
     },
     received: {
@@ -372,6 +419,7 @@ function DualTrackHeader({
         totalOrderQty > 0
           ? `${totalReceivedQty.toLocaleString()} of ${totalOrderQty.toLocaleString()} pcs received`
           : null,
+        ...cancelExtras(receivedAt),
       ],
     },
   };
@@ -385,6 +433,7 @@ function DualTrackHeader({
       ts: po.firstInvoicedAt,
       extra: [
         invoicedCents > 0 ? `Invoiced: ${formatCents(invoicedCents)}` : null,
+        ...cancelExtras(po.firstInvoicedAt),
       ],
     },
     partially_paid: {
@@ -396,6 +445,7 @@ function DualTrackHeader({
         outstandingCents > 0
           ? `${formatCents(outstandingCents)} outstanding`
           : null,
+        ...cancelExtras(po.firstPaidAt),
       ],
     },
     paid: {
@@ -404,6 +454,7 @@ function DualTrackHeader({
         invoicedCents > 0
           ? `${formatCents(paidCents)} paid in full`
           : null,
+        ...cancelExtras(po.fullyPaidAt),
       ],
     },
   };
@@ -1470,6 +1521,79 @@ export default function PurchaseOrderDetail() {
           <span aria-hidden>⚠</span>
           {openExceptionCount} exception{openExceptionCount > 1 ? "s" : ""}
         </button>
+      )}
+
+      {/*
+        Cancellation audit banner.
+        When physical_status='cancelled', surface the reason + when + who
+        and warn about pre-cancel artifacts (invoices/receipts/payments
+        that exist on this PO and may need follow-up).
+        The History tab is the canonical chronological audit trail; this
+        banner is the at-a-glance summary so the user doesn't have to
+        hunt for it.
+      */}
+      {po.physicalStatus === "cancelled" && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 space-y-1.5">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-sm font-semibold text-destructive">
+              <span aria-hidden>⛔</span>
+              <span>
+                Cancelled
+                {po.cancelledAt
+                  ? ` ${new Date(po.cancelledAt).toLocaleString()}`
+                  : ""}
+                {po.cancelledBy ? ` by ${po.cancelledBy}` : ""}
+              </span>
+            </div>
+            {po.cancelReason && (
+              <span className="text-xs text-muted-foreground">
+                Reason: <span className="text-foreground">{po.cancelReason}</span>
+              </span>
+            )}
+          </div>
+          {(() => {
+            // Pre-cancel artifacts that might need follow-up. We surface
+            // counts (and click-to-tab) but don't try to make value
+            // judgments about whether they're 'OK' — user knows context.
+            const issuedInvoices = invoicesData?.invoices?.length ?? 0;
+            const recordedPayments = paymentsData?.payments?.length ?? 0;
+            const physReceipts = receipts.length;
+            const items: Array<{ label: string; tab: string }> = [];
+            if (issuedInvoices > 0) items.push({ label: `${issuedInvoices} invoice${issuedInvoices > 1 ? "s" : ""} issued before cancellation`, tab: "invoices" });
+            if (recordedPayments > 0) items.push({ label: `${recordedPayments} payment${recordedPayments > 1 ? "s" : ""} recorded`, tab: "payments" });
+            if (physReceipts > 0) items.push({ label: `${physReceipts} receipt${physReceipts > 1 ? "s" : ""} on file`, tab: "receipts" });
+            if (items.length === 0) return null;
+            return (
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Pre-cancel artifacts:</span>{" "}
+                {items.map((it, i) => (
+                  <span key={it.tab}>
+                    {i > 0 && " · "}
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab(it.tab)}
+                      className="underline hover:text-foreground"
+                    >
+                      {it.label}
+                    </button>
+                  </span>
+                ))}
+                {". Review for follow-up."}
+              </div>
+            );
+          })()}
+          <div className="text-[11px] text-muted-foreground">
+            Full audit trail in the{" "}
+            <button
+              type="button"
+              onClick={() => setActiveTab("history")}
+              className="underline hover:text-foreground"
+            >
+              History tab
+            </button>
+            .
+          </div>
+        </div>
       )}
 
       {/* Phase 2: Dual-track header. We pass the history rows so the
