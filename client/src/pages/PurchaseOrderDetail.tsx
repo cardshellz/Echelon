@@ -14,6 +14,12 @@ import { useRoute, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -139,15 +145,40 @@ function TrackTimeline({
         const connectorClass =
           i <= currentIdx ? "bg-green-600" : "bg-border";
         const ts = timestamps?.[stage];
+        const stageLabel =
+          PHYSICAL_LABELS[stage] ?? FINANCIAL_LABELS[stage] ?? stage;
+        // Build the tooltip body. Done stages show their timestamp when
+        // available; future/current stages show the stage name + state.
+        // Native title= attribute was unreliable across browsers (slow,
+        // dismissed by mouseout, no styling). Use the Radix Tooltip
+        // primitive that lives in the existing design system.
+        const tooltipBody =
+          state === "done" && ts
+            ? `${stageLabel} — ${new Date(ts).toLocaleString()}`
+            : state === "done"
+            ? `${stageLabel} — completed`
+            : state === "current"
+            ? `${stageLabel} — in progress (next action)`
+            : state === "warn"
+            ? `${stageLabel} — needs attention`
+            : `${stageLabel} — not yet reached`;
         return (
           <div key={stage} className="flex items-center">
             <div className="relative flex flex-col items-center">
-              <div
-                title={ts ? new Date(ts).toLocaleString() : stage}
-                className={`w-3 h-3 rounded-full border-2 ${dotClass} cursor-default`}
-              />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={tooltipBody}
+                    className={`w-3 h-3 rounded-full border-2 ${dotClass} cursor-help block`}
+                  />
+                </TooltipTrigger>
+                <TooltipContent side="top" sideOffset={6} className="text-xs">
+                  {tooltipBody}
+                </TooltipContent>
+              </Tooltip>
               <span className="text-[9px] text-muted-foreground mt-0.5 whitespace-nowrap">
-                {PHYSICAL_LABELS[stage] ?? FINANCIAL_LABELS[stage] ?? stage}
+                {stageLabel}
               </span>
             </div>
             {i < stages.length - 1 && (
@@ -235,38 +266,42 @@ function DualTrackHeader({ po }: { po: any }) {
       Date.now() - new Date(po.firstInvoicedAt).getTime() > 30 * 24 * 60 * 60 * 1000);
 
   return (
-    <div className="rounded-lg border bg-card p-4 space-y-3">
-      {/* Physical track */}
-      <div className="flex items-start gap-4">
-        <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
-          Physical
-        </span>
-        <div className="flex-1 overflow-x-auto">
-          <TrackTimeline
-            stages={PHYSICAL_TRACK_STAGES}
-            currentStatus={po.physicalStatus ?? "draft"}
-            timestamps={physTimestamps}
-          />
+    // TooltipProvider needs to wrap the tooltip triggers below. delayDuration
+    // tightened from default 700ms so hover feedback is responsive.
+    <TooltipProvider delayDuration={150} skipDelayDuration={50}>
+      <div className="rounded-lg border bg-card p-4 space-y-3">
+        {/* Physical track */}
+        <div className="flex items-start gap-4">
+          <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
+            Physical
+          </span>
+          <div className="flex-1 overflow-x-auto">
+            <TrackTimeline
+              stages={PHYSICAL_TRACK_STAGES}
+              currentStatus={po.physicalStatus ?? "draft"}
+              timestamps={physTimestamps}
+            />
+          </div>
+          <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{physicalSummary}</div>
         </div>
-        <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{physicalSummary}</div>
-      </div>
 
-      {/* Financial track */}
-      <div className="flex items-start gap-4">
-        <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
-          Financial
-        </span>
-        <div className="flex-1 overflow-x-auto">
-          <TrackTimeline
-            stages={FINANCIAL_TRACK_STAGES}
-            currentStatus={po.financialStatus ?? "unbilled"}
-            isWarn={finWarn}
-            timestamps={finTimestamps}
-          />
+        {/* Financial track */}
+        <div className="flex items-start gap-4">
+          <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
+            Financial
+          </span>
+          <div className="flex-1 overflow-x-auto">
+            <TrackTimeline
+              stages={FINANCIAL_TRACK_STAGES}
+              currentStatus={po.financialStatus ?? "unbilled"}
+              isWarn={finWarn}
+              timestamps={finTimestamps}
+            />
+          </div>
+          <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{financialSummary}</div>
         </div>
-        <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{financialSummary}</div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
 
