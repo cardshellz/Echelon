@@ -298,6 +298,25 @@ export const dropshipStoreConnections = dropshipSchema.table("dropship_store_con
   check("dropship_store_conn_status_chk", sql`${table.status} IN ('connected','needs_reauth','refresh_failed','grace_period','paused','disconnected')`),
 ]);
 
+export const dropshipStoreConnectionTokens = dropshipSchema.table("dropship_store_connection_tokens", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  storeConnectionId: integer("store_connection_id").notNull().references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+  tokenKind: varchar("token_kind", { length: 30 }).notNull(),
+  tokenRef: varchar("token_ref", { length: 160 }).notNull(),
+  keyId: varchar("key_id", { length: 120 }).notNull(),
+  ciphertext: text("ciphertext").notNull(),
+  iv: text("iv").notNull(),
+  authTag: text("auth_tag").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_store_token_ref_idx").on(table.tokenRef),
+  uniqueIndex("dropship_store_token_connection_kind_idx").on(table.storeConnectionId, table.tokenKind),
+  check("dropship_store_token_kind_chk", sql`${table.tokenKind} IN ('access','refresh')`),
+  check("dropship_store_token_ref_chk", sql`length(${table.tokenRef}) >= 24`),
+]);
+
 export const dropshipStoreSetupChecks = dropshipSchema.table("dropship_store_setup_checks", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
@@ -1106,6 +1125,10 @@ export type DropshipSensitiveActionChallenge = typeof dropshipSensitiveActionCha
 export const insertDropshipStoreConnectionSchema = createInsertSchema(dropshipStoreConnections).omit(omitGenerated);
 export type InsertDropshipStoreConnection = z.infer<typeof insertDropshipStoreConnectionSchema>;
 export type DropshipStoreConnection = typeof dropshipStoreConnections.$inferSelect;
+
+export const insertDropshipStoreConnectionTokenSchema = createInsertSchema(dropshipStoreConnectionTokens).omit(omitGenerated);
+export type InsertDropshipStoreConnectionToken = z.infer<typeof insertDropshipStoreConnectionTokenSchema>;
+export type DropshipStoreConnectionToken = typeof dropshipStoreConnectionTokens.$inferSelect;
 
 export const insertDropshipStoreSetupCheckSchema = createInsertSchema(dropshipStoreSetupChecks).omit(omitGenerated);
 export type InsertDropshipStoreSetupCheck = z.infer<typeof insertDropshipStoreSetupCheckSchema>;

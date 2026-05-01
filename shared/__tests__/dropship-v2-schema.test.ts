@@ -9,6 +9,7 @@ import {
   dropshipCatalogRules,
   dropshipFaultCategoryEnum,
   dropshipOrderIntake,
+  dropshipStoreConnectionTokens,
   dropshipSourcePlatformEnum,
   dropshipStoreConnections,
   dropshipVendorSelectionRuleSetRevisions,
@@ -28,6 +29,10 @@ const catalogExposureMigrationSql = readFileSync(
 );
 const vendorSelectionMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0091_dropship_vendor_selection_revisions.sql"),
+  "utf8",
+);
+const storeConnectionTokenVaultMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0092_dropship_store_connection_token_vault.sql"),
   "utf8",
 );
 const releaseScript = readFileSync(
@@ -63,6 +68,16 @@ describe("Dropship V2 schema contract", () => {
     expect(migrationSql).toContain("dropship_wallet_ledger_phase0_legacy");
     expect(migrationSql).toContain("dropship_vendor_products_phase0_legacy");
     expect(migrationSql).not.toContain("dropship_vendor_channels");
+  });
+
+  it("stores OAuth token material behind encrypted store connection token refs", () => {
+    expect((dropshipStoreConnections as any).accessTokenRef.name).toBe("access_token_ref");
+    expect((dropshipStoreConnections as any).refreshTokenRef.name).toBe("refresh_token_ref");
+    expect((dropshipStoreConnectionTokens as any).tokenRef.name).toBe("token_ref");
+    expect((dropshipStoreConnectionTokens as any).ciphertext.name).toBe("ciphertext");
+    expect(storeConnectionTokenVaultMigrationSql).toContain("dropship_store_connection_tokens");
+    expect(storeConnectionTokenVaultMigrationSql).toContain("dropship_store_token_ref_idx");
+    expect(storeConnectionTokenVaultMigrationSql).toContain("dropship_store_token_connection_kind_idx");
   });
 
   it("keeps order intake idempotent by store connection and external order", () => {
