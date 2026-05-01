@@ -92,16 +92,23 @@ const FINANCIAL_TRACK_STAGES = ["unbilled", "invoiced", "partially_paid", "paid"
 type SegmentState = "done" | "current" | "warn" | "future";
 
 function physicalSegments(physicalStatus: string): SegmentState[] {
+  // Convention (set 2026-05-01): the stage the PO currently is IN is
+  // rendered as 'done' (the action that put it there is complete). The
+  // NEXT-pending stage is rendered as 'current' (the action we're waiting
+  // on). Terminal stages (received) leave nothing as current.
   const idx = PHYSICAL_TRACK_STAGES.indexOf(physicalStatus);
   return PHYSICAL_TRACK_STAGES.map((_, i) => {
-    if (i < idx) return "done";
-    if (i === idx) return "current";
+    if (idx < 0) return "future"; // unknown status
+    if (i <= idx) return "done";
+    if (i === idx + 1) return "current";
     return "future";
   });
 }
 
 function financialSegments(financialStatus: string, outstandingCents: number, firstInvoicedAt: string | null): SegmentState[] {
-  // "disputed" maps to warn on the partially_paid segment
+  // Same convention as physicalSegments: completed stages green, next stage
+  // blue. 'disputed' paints the IN-stage as warn so the row flags at a glance.
+  // Past-due also surfaces as warn on the IN-stage.
   const effectiveStatus = financialStatus === "disputed" ? "partially_paid" : financialStatus;
   const isPastDue =
     outstandingCents > 0 &&
@@ -109,11 +116,14 @@ function financialSegments(financialStatus: string, outstandingCents: number, fi
     Date.now() - new Date(firstInvoicedAt).getTime() > 30 * 24 * 60 * 60 * 1000; // rough 30d heuristic
   const idx = FINANCIAL_TRACK_STAGES.indexOf(effectiveStatus as typeof FINANCIAL_TRACK_STAGES[number]);
   return FINANCIAL_TRACK_STAGES.map((stage, i) => {
-    if (i < idx) return "done";
-    if (i === idx) {
-      if ((financialStatus === "disputed" || isPastDue) && stage === "partially_paid") return "warn";
-      return "current";
+    if (idx < 0) return "future";
+    if (i <= idx) {
+      if ((financialStatus === "disputed" || isPastDue) && stage === "partially_paid" && i === idx) {
+        return "warn";
+      }
+      return "done";
     }
+    if (i === idx + 1) return "current";
     return "future";
   });
 }
