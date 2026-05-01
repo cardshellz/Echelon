@@ -264,6 +264,85 @@ export class ReceivingService {
     private shipmentTracking: ShipmentTracking | null = null,
   ) {}
 
+  // ─── Discard Draft ──────────────────────────────────────────
+
+  /**
+   * Permanently discard a draft receiving order before any receive activity.
+   *
+   * Business rules (Rule #7 — single transaction):
+   *   1. Order must be in 'draft' status — 409 otherwise.
+   *   2. No receiving line may have receivedQty > 0 — 409 otherwise.
+   *   3. Delete lines + order atomically.
+   *   4. If linked to a PO, append an audit row to po_status_history
+   *      (Rule #8 — who/what/when, fromStatus = toStatus = current physical
+   *      status so the track does not change, only the notes document the
+   *      discard event).
+   */
+  async discardDraftReceivingOrder(
+    receivingOrderId: number,
+    userId?: string,
+  ): Promise<void> {
+    // 1. Verify order exists and is still a draft
+    const order = await this.storage.getReceivingOrderById(receivingOrderId);
+    if (!order) throw new ReceivingError("Receiving order not found", 404);
+    if (order.status !== "draft") {
+      throw new ReceivingError("Cannot discard a started receipt", 409);
+    }
+
+    // 2. Verify no lines carry actual received quantity
+    const lines = await this.storage.getReceivingLines(receivingOrderId);
+    if (lines.some((l: any) => (l.receivedQty ?? 0) > 0)) {
+      throw new ReceivingError(
+        "Receipt has received quantities; cannot discard",
+        409,
+      );
+    }
+
+    // 3 + 4. Atomic: delete lines, delete order, write audit row
+    await this.db.transaction(async (tx) => {
+      // Explicit line deletion before order (defense-in-depth; the DB
+      // schema also has ON DELETE CASCADE but we make the intent clear).
+      await tx.execute(sql`
+        DELETE FROM procurement.receiving_lines
+        WHERE receiving_order_id = ${receivingOrderId}
+      `);
+
+      await tx.execute(sql`
+        DELETE FROM procurement.receiving_orders
+        WHERE id = ${receivingOrderId}
+      `);
+
+      // Audit: write a po_status_history row so PO history shows the
+      // receipt was created and discarded (Rule #8).
+      if ((order as any).purchaseOrderId) {
+        const poId: number = (order as any).purchaseOrderId;
+        const poRows = await tx.execute(sql`
+          SELECT physical_status, status
+          FROM procurement.purchase_orders
+          WHERE id = ${poId}
+        `);
+        const po = poRows.rows[0];
+        if (po) {
+          const physicalStatus: string =
+            (po as any).physical_status ?? (po as any).status ?? "draft";
+          const receiptNumber: string =
+            (order as any).receiptNumber ?? `RCV-${receivingOrderId}`;
+          await tx.execute(sql`
+            INSERT INTO procurement.po_status_history
+              (purchase_order_id, from_status, to_status, changed_by, notes)
+            VALUES (
+              ${poId},
+              ${physicalStatus},
+              ${physicalStatus},
+              ${userId ?? null},
+              ${`Receipt ${receiptNumber} discarded before save`}
+            )
+          `);
+        }
+      }
+    });
+  }
+
   // ─── Open ─────────────────────────────────────────────────────
 
   async open(orderId: number, userId: string | null) {

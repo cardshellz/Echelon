@@ -2469,6 +2469,27 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // ── Discard a draft receiving order (no inventory side-effects) ────────
+  //
+  // Validates status=draft and no received qty before atomically deleting the
+  // order + its lines and writing an audit row on the linked PO (Rule #8).
+  // Idempotent: calling twice on a non-existent id returns 404 on the second
+  // call (the order is already gone).
+  app.delete("/api/receiving-orders/:id/discard", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { receiving: rcvService } = req.app.locals.services;
+      await rcvService.discardDraftReceivingOrder(
+        Number(req.params.id),
+        req.session.user?.id,
+      );
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("[Receiving] Error discarding draft receiving order:", error);
+      res.status(500).json({ error: "Failed to discard receiving order" });
+    }
+  });
+
   app.get("/api/purchase-orders/:id/history", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const history = await purchasing.getPoStatusHistory(Number(req.params.id));

@@ -23,6 +23,17 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -398,6 +409,33 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const discardReceiptMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/receiving-orders/${id}/discard`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Discard failed (${res.status})`);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      setShowReceiptDetail(false);
+      toast({ title: "Receipt discarded" });
+      // Navigate back to the source PO if this receipt was PO-linked
+      if (selectedReceipt?.purchaseOrderId) {
+        navigate(`/purchase-orders/${selectedReceipt.purchaseOrderId}`);
+      } else {
+        navigate("/purchase-orders");
+      }
+    },
+    onError: (error: Error) => {
+      // Surface 409 reason verbatim — do not hide it (spec: "don't pretend it succeeded")
+      toast({ title: "Cannot discard receipt", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1569,6 +1607,40 @@ DEF-456,25,,,5.00,,Location TBD`;
                         <Play className="h-4 w-4 mr-1 md:mr-2" />
                         Start
                       </Button>
+                      {/* Discard draft — only when no lines have been received */}
+                      {(!selectedReceipt.lines || selectedReceipt.lines.every(l => (l.receivedQty ?? 0) <= 0)) && (
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              className="min-h-[44px] text-xs md:text-sm text-destructive hover:text-destructive hover:bg-destructive/10"
+                              disabled={discardReceiptMutation.isPending}
+                              data-testid="btn-discard-receipt"
+                            >
+                              <X className="h-4 w-4 mr-1 md:mr-2" />
+                              Discard
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Discard this receipt?</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                Receipt <strong>{selectedReceipt.receiptNumber}</strong> will be permanently
+                                deleted. No inventory changes have been made yet. This cannot be undone.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Keep receipt</AlertDialogCancel>
+                              <AlertDialogAction
+                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                onClick={() => discardReceiptMutation.mutate(selectedReceipt.id)}
+                              >
+                                {discardReceiptMutation.isPending ? "Discarding..." : "Yes, discard"}
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      )}
                     </>
                   )}
                   {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (
