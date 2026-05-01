@@ -926,12 +926,23 @@ export async function runParityCheck(
   // Query orders
   let query;
   if (args.orderId) {
+    // Post-refactor: pull SS ID from wms.outbound_shipments rather than
+    // the legacy oms.oms_orders.shipstation_order_id column, which is
+    // NULL on all post-cutover orders. Picks the latest shipment per
+    // OMS order so we always parity-check against the most recent push.
     query = sqlFn`
-      SELECT id, shipstation_order_id, external_order_number, external_order_id
-      FROM oms.oms_orders
-      WHERE id = ${args.orderId}
-        AND shipstation_order_id IS NOT NULL
-        AND cancelled_at IS NULL
+      SELECT DISTINCT ON (oo.id)
+             oo.id,
+             os.shipstation_order_id,
+             oo.external_order_number,
+             oo.external_order_id
+      FROM oms.oms_orders oo
+      JOIN wms.orders wo ON wo.oms_fulfillment_order_id = oo.id::text
+      JOIN wms.outbound_shipments os ON os.order_id = wo.id
+      WHERE oo.id = ${args.orderId}
+        AND os.shipstation_order_id IS NOT NULL
+        AND oo.cancelled_at IS NULL
+      ORDER BY oo.id, os.id DESC
       LIMIT 1
     `;
   } else {
