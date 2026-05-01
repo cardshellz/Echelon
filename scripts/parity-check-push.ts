@@ -691,11 +691,29 @@ export async function checkSingleOrder(
   if (opts.getShipments) {
     try {
       ssShipments = await opts.getShipments(ssOrderId);
-    } catch {
+      if (opts.verbose) {
+        console.log(`    [debug] getShipments(${ssOrderId}) returned ${ssShipments.length} shipments`);
+        for (const s of ssShipments) {
+          const itemsArr = (s as any).shipmentItems ?? (s as any).items;
+          const itemCount = Array.isArray(itemsArr) ? itemsArr.length : "undefined";
+          const skuList = Array.isArray(itemsArr)
+            ? itemsArr.map((it: any) => `${it?.sku ?? "?"}×${it?.quantity ?? "?"}`).join(", ")
+            : "<no items array>";
+          console.log(
+              `      shipment ${s.shipmentId} (tracking ${s.trackingNumber || "-"}): items=${itemCount} → [${skuList}]`,
+          );
+        }
+      }
+    } catch (err: any) {
+      if (opts.verbose) {
+        console.log(`    [debug] getShipments(${ssOrderId}) THREW: ${err?.message ?? String(err)}`);
+      }
       // If getShipments fails (e.g., not implemented), fall back to
       // single-shipment mode using the order-level items.
       ssShipments = [];
     }
+  } else if (opts.verbose) {
+    console.log(`    [debug] getShipments not provided — multi-shipment disabled`);
   }
 
   // 4. Fetch ALL WMS shipments for this OMS order (not just LIMIT 1)
