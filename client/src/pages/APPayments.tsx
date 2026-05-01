@@ -67,6 +67,10 @@ export default function APPayments() {
     bankAccountLabel: "",
     totalAmountDollars: "",
     notes: "",
+    // Bypass the server's 3-way match check (PO line <-> receipt <->
+    // invoice line). Default false; user opts in when the match is
+    // intentionally pending (legacy / imported invoices).
+    forceOverride: false,
   });
 
   const { data, isLoading } = useQuery<{ payments: any[] }>({
@@ -95,6 +99,9 @@ export default function APPayments() {
         bankAccountLabel: newPayment.bankAccountLabel || undefined,
         totalAmountCents: dollarsToCents(newPayment.totalAmountDollars || "0"),
         notes: newPayment.notes || undefined,
+        // 3-way match override. Only sent when explicitly enabled via the
+        // dialog checkbox; default off keeps the safety net active.
+        forceOverride: newPayment.forceOverride || undefined,
         allocations: Object.entries(allocations)
           .filter(([, val]) => parseFloat(val) > 0)
           .map(([invId, val]) => ({
@@ -127,7 +134,7 @@ export default function APPayments() {
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
       setShowPaymentDialog(false);
-      setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "" });
+      setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "", forceOverride: false });
       setAllocations({});
       toast({ title: "Payment recorded" });
     },
@@ -349,6 +356,30 @@ export default function APPayments() {
             <div className="space-y-2">
               <Label>Notes</Label>
               <Input placeholder="Optional" value={newPayment.notes} onChange={(e) => setNewPayment(p => ({ ...p, notes: e.target.value }))} />
+            </div>
+
+            {/* 3-way match override — see APInvoiceDetail.tsx for the long
+                version of this comment. */}
+            <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={newPayment.forceOverride}
+                  onChange={(e) => setNewPayment(p => ({ ...p, forceOverride: e.target.checked }))}
+                />
+                <div className="text-sm">
+                  <div className="font-medium">
+                    Override 3-way match check
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    Skip the PO↔receipt↔invoice reconciliation check. Use only
+                    when the match is intentionally pending (legacy invoice,
+                    pre-system PO, or you've already verified the goods
+                    manually).
+                  </div>
+                </div>
+              </label>
             </div>
 
             <div className="flex gap-2 justify-end">
