@@ -111,6 +111,22 @@ function stageState(
   return "future";
 }
 
+/**
+ * Per-stage info shown in the tooltip when a user hovers a dot.
+ *
+ *   ts:    ISO datetime string for when the stage was reached (rendered as
+ *          the headline of the tooltip).
+ *   extra: optional list of additional context lines (e.g. money amounts,
+ *          received-vs-ordered counts). Rendered after the timestamp.
+ *
+ * Both fields are optional; the tooltip falls back to a state-derived label
+ * when nothing is supplied (matches the prior behavior).
+ */
+export interface StageTooltipInfo {
+  ts?: string | null;
+  extra?: Array<string | null | undefined>;
+}
+
 /** A dot-and-connector timeline for one track */
 function TrackTimeline({
   stages,
@@ -121,7 +137,9 @@ function TrackTimeline({
   stages: readonly string[];
   currentStatus: string;
   isWarn?: boolean;
-  timestamps?: Record<string, string | null | undefined>;
+  // Map of stage name -> rich tooltip info. Stages absent from the map use
+  // the default state-derived label.
+  timestamps?: Record<string, StageTooltipInfo | undefined>;
 }) {
   const effectiveStatus =
     currentStatus === "disputed" ? "partially_paid" : currentStatus;
@@ -144,24 +162,29 @@ function TrackTimeline({
         // convention). Connectors past the in-stage stay gray.
         const connectorClass =
           i <= currentIdx ? "bg-green-600" : "bg-border";
-        const ts = timestamps?.[stage];
+        const info = timestamps?.[stage];
+        const ts = info?.ts ?? null;
+        const extras = (info?.extra ?? []).filter(
+          (s): s is string => typeof s === "string" && s.length > 0,
+        );
         const stageLabel =
           PHYSICAL_LABELS[stage] ?? FINANCIAL_LABELS[stage] ?? stage;
-        // Build the tooltip body. Done stages show their timestamp when
-        // available; future/current stages show the stage name + state.
-        // Native title= attribute was unreliable across browsers (slow,
-        // dismissed by mouseout, no styling). Use the Radix Tooltip
-        // primitive that lives in the existing design system.
-        const tooltipBody =
-          state === "done" && ts
-            ? `${stageLabel} — ${new Date(ts).toLocaleString()}`
-            : state === "done"
+
+        // Tooltip headline: state-aware. Body lines append timestamp + extras.
+        const headline =
+          state === "done"
             ? `${stageLabel} — completed`
             : state === "current"
             ? `${stageLabel} — in progress (next action)`
             : state === "warn"
             ? `${stageLabel} — needs attention`
             : `${stageLabel} — not yet reached`;
+        const lines: string[] = [headline];
+        if (ts) lines.push(new Date(ts).toLocaleString());
+        for (const e of extras) lines.push(e);
+
+        // aria-label collapses to a single string; tooltip renders multi-line.
+        const ariaLabel = lines.join(". ");
         return (
           <div key={stage} className="flex items-center">
             <div className="relative flex flex-col items-center">
@@ -169,12 +192,17 @@ function TrackTimeline({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    aria-label={tooltipBody}
+                    aria-label={ariaLabel}
                     className={`w-3 h-3 rounded-full border-2 ${dotClass} cursor-help block`}
                   />
                 </TooltipTrigger>
-                <TooltipContent side="top" sideOffset={6} className="text-xs">
-                  {tooltipBody}
+                <TooltipContent side="top" sideOffset={6} className="text-xs max-w-xs">
+                  <div className="font-medium">{lines[0]}</div>
+                  {lines.slice(1).map((line, idx) => (
+                    <div key={idx} className="text-muted-foreground">
+                      {line}
+                    </div>
+                  ))}
                 </TooltipContent>
               </Tooltip>
               <span className="text-[9px] text-muted-foreground mt-0.5 whitespace-nowrap">
@@ -191,8 +219,37 @@ function TrackTimeline({
   );
 }
 
+/**
+ * Pick the earliest po_status_history row whose toStatus matches one of
+ * the candidate names. Returns the changedAt timestamp or null. Used to
+ * fill in stage timestamps that don't have dedicated columns on
+ * purchase_orders (e.g. in_transit, receiving, received).
+ */
+function firstHistoryAt(
+  history: Array<{ toStatus?: string; changedAt?: string | null }>,
+  candidates: string[],
+): string | null {
+  // history is conventionally newest-first from the API; iterate to find
+  // the earliest matching entry by changedAt.
+  let earliest: string | null = null;
+  for (const h of history) {
+    if (!h?.toStatus || !h.changedAt) continue;
+    if (!candidates.includes(h.toStatus)) continue;
+    if (earliest === null || new Date(h.changedAt) < new Date(earliest)) {
+      earliest = h.changedAt;
+    }
+  }
+  return earliest;
+}
+
 /** The two-row dual-track header card */
-function DualTrackHeader({ po }: { po: any }) {
+function DualTrackHeader({
+  po,
+  history = [],
+}: {
+  po: any;
+  history?: Array<{ toStatus?: string; changedAt?: string | null }>;
+}) {
   const isCancelled = po.physicalStatus === "cancelled" || po.physicalStatus === "short_closed";
 
   // physical summary text
@@ -250,14 +307,105 @@ function DualTrackHeader({ po }: { po: any }) {
     );
   }
 
-  const physTimestamps: Record<string, string | null | undefined> = {
-    shipped: po.firstShippedAt,
-    arrived: po.firstArrivedAt,
+  // ── Per-stage tooltip data ─────────────────────────────────────────────
+  //
+  // Each stage gets a timestamp (when applicable) plus context lines that
+  // make the tooltip actually useful. Stages without dedicated timestamp
+  // columns derive theirs from po_status_history.
+  //
+  // Physical track stage → source mapping:
+  //   draft         createdAt
+  //   sent          sentToVendorAt
+  //   acknowledged  vendorAckDate
+  //   shipped       firstShippedAt
+  //   in_transit    history fallback (toStatus = 'in_transit')
+  //   arrived       firstArrivedAt
+  //   receiving     history fallback (toStatus IN ('receiving', 'partially_received'))
+  //   received      history fallback (toStatus = 'received')
+  //
+  // Financial track stage → source mapping:
+  //   unbilled      createdAt + 'no invoice yet' note when current
+  //   invoiced      firstInvoicedAt + 'invoiced \$X' line
+  //   partially_paid firstPaidAt + 'paid \$Y of \$Z' line
+  //   paid          fullyPaidAt + 'paid in full' line
+
+  const inTransitAt = firstHistoryAt(history, ["in_transit"]);
+  const receivingAt = firstHistoryAt(history, ["receiving", "partially_received"]);
+  const receivedAt = firstHistoryAt(history, ["received"]);
+
+  const physTimestamps: Record<string, StageTooltipInfo | undefined> = {
+    draft: {
+      ts: po.createdAt,
+      extra: [po.createdBy ? `Created by ${po.createdBy}` : null],
+    },
+    sent: {
+      ts: po.sentToVendorAt,
+      extra: [po.vendor?.name ? `Sent to ${po.vendor.name}` : null],
+    },
+    acknowledged: {
+      ts: po.vendorAckDate,
+      extra: ["Vendor confirmed receipt of PO"],
+    },
+    shipped: {
+      ts: po.firstShippedAt,
+      extra: ["Goods left vendor"],
+    },
+    in_transit: {
+      ts: inTransitAt,
+      extra: ["Goods en route"],
+    },
+    arrived: {
+      ts: po.firstArrivedAt,
+      extra: ["Goods at our dock"],
+    },
+    receiving: {
+      ts: receivingAt,
+      extra: [
+        totalOrderQty > 0
+          ? `${totalReceivedQty.toLocaleString()} of ${totalOrderQty.toLocaleString()} pcs received so far`
+          : null,
+      ],
+    },
+    received: {
+      ts: receivedAt,
+      extra: [
+        totalOrderQty > 0
+          ? `${totalReceivedQty.toLocaleString()} of ${totalOrderQty.toLocaleString()} pcs received`
+          : null,
+      ],
+    },
   };
-  const finTimestamps: Record<string, string | null | undefined> = {
-    invoiced: po.firstInvoicedAt,
-    partially_paid: po.firstPaidAt,
-    paid: po.fullyPaidAt,
+
+  const finTimestamps: Record<string, StageTooltipInfo | undefined> = {
+    unbilled: {
+      // No timestamp — 'unbilled' is the starting state, not an event.
+      extra: ["No invoice received yet"],
+    },
+    invoiced: {
+      ts: po.firstInvoicedAt,
+      extra: [
+        invoicedCents > 0 ? `Invoiced: ${formatCents(invoicedCents)}` : null,
+      ],
+    },
+    partially_paid: {
+      ts: po.firstPaidAt,
+      extra: [
+        invoicedCents > 0
+          ? `${formatCents(paidCents)} paid of ${formatCents(invoicedCents)}`
+          : null,
+        outstandingCents > 0
+          ? `${formatCents(outstandingCents)} outstanding`
+          : null,
+      ],
+    },
+    paid: {
+      ts: po.fullyPaidAt,
+      extra: [
+        invoicedCents > 0
+          ? `${formatCents(paidCents)} paid in full`
+          : null,
+      ],
+    },
   };
 
   const finWarn = po.financialStatus === "disputed" ||
@@ -1324,8 +1472,10 @@ export default function PurchaseOrderDetail() {
         </button>
       )}
 
-      {/* Phase 2: Dual-track header */}
-      <DualTrackHeader po={po} />
+      {/* Phase 2: Dual-track header. We pass the history rows so the
+          tooltip can derive timestamps for stages that don't have
+          dedicated columns (in_transit, receiving, received). */}
+      <DualTrackHeader po={po} history={history} />
 
       {/* Charge summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-2 md:gap-4">
