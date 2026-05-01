@@ -28,7 +28,7 @@ export async function runFulfillmentSweep(dbArg: any = db) {
     const sweepOrders = await dbArg.execute(sql`
       SELECT o.*, c.provider 
       FROM oms.oms_orders o
-      JOIN oms.channels c ON o.channel_id = c.id
+      JOIN channels.channels c ON o.channel_id = c.id
       WHERE o.status = 'shipped'
         AND o.shipped_at < NOW() - INTERVAL '1 hour'
         AND o.shipped_at > NOW() - INTERVAL '7 days'
