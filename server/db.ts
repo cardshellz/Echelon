@@ -145,7 +145,7 @@ export async function runStartupMigrations(): Promise<void> {
     console.log("Checked channel_product_allocation and channel_sync_log tables");
 
     // Add aisle_filter column to cycle_counts if missing
-    await client.query(`ALTER TABLE cycle_counts ADD COLUMN IF NOT EXISTS aisle_filter VARCHAR(20)`);
+    await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS aisle_filter VARCHAR(20)`);
 
     // Migration 037: Product lines
     await client.query(`
@@ -206,7 +206,7 @@ export async function runStartupMigrations(): Promise<void> {
     console.log("Checked product_lines tables and seeded defaults");
 
     // Add location_codes column to cycle_counts for quick single-bin counts
-    await client.query(`ALTER TABLE cycle_counts ADD COLUMN IF NOT EXISTS location_codes TEXT`);
+    await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS location_codes TEXT`);
 
     // Migration 038: Make location code unique per warehouse instead of globally
     await client.query(`

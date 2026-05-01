@@ -1477,8 +1477,8 @@ export function registerShopifyRoutes(app: Express) {
         `[fulfillments/update] received: fulfillment=${fulfillmentId} order=${shopifyOrderId} status=${status}`,
       );
 
-      const { db } = app.locals;
-      const { oms: omsSvc } = app.locals.services ?? {};
+      const { db } = require("../db");
+      const { oms: omsSvc } = req.app.locals.services ?? {};
       const result = await handleShopifyFulfillmentUpdate(
         { db, omsSvc },
         payload,
@@ -1493,7 +1493,7 @@ export function registerShopifyRoutes(app: Express) {
       );
       // Enqueue to DLQ for worker retry (C30)
       try {
-        const { db } = app.locals;
+        const { db } = require("../db");
         await db.insert(webhookRetryQueue).values({
           provider: "shopify",
           topic: "fulfillments/update",

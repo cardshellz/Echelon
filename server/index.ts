@@ -514,12 +514,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
   try {
-    const res = await db.execute(sql`SELECT id, variant_id, location_id, variant_qty FROM inventory_levels WHERE variant_qty < 0`);
+    const res = await db.execute(sql`SELECT id, product_variant_id, warehouse_location_id, variant_qty FROM inventory.inventory_levels WHERE variant_qty < 0`);
     if ((res as any).rows.length > 0) {
-      console.warn(`[Startup Warning] Found ${(res as any).rows.length} negative inventory levels. They have NOT been cleared. Writing to audit log.`);
-      for (const row of (res as any).rows) {
-        await db.execute(sql`INSERT INTO startup_inventory_anomalies (variant_id, location_id, qty_on_hand) VALUES (${row.variant_id}, ${row.location_id}, ${row.variant_qty})`);
-      }
+      console.warn(`[Startup Warning] Found ${(res as any).rows.length} negative inventory levels. They have NOT been cleared.`);
     }
 
     // P1-18 extracted: Startup fix for dangling completed items has been moved to scripts/backfill/fix-dangling-order-items.ts
