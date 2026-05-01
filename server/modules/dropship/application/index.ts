@@ -4,6 +4,8 @@ export * from "./dropship-auth-service";
 export * from "./dropship-catalog-dtos";
 export * from "./dropship-catalog-exposure-service";
 export * from "./dropship-passkey-service";
+export * from "./dropship-store-connection-dtos";
+export * from "./dropship-store-connection-service";
 export * from "./dropship-vendor-provisioning-service";
 export * from "./dropship-use-case-dtos";
 export * from "./dropship-use-cases";
