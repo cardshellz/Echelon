@@ -14,6 +14,7 @@ import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
+import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startWebhookRetryWorker, enqueueShipStationRetry } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
@@ -550,6 +551,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Start webhook DLQ recovery worker
       if (process.env.DISABLE_SCHEDULERS !== 'true') {
         startWebhookRetryWorker();
+        startFulfillmentSweeper(db);
       }
     }
   );
@@ -671,8 +673,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         const rows: any = await db.execute(sql`
           SELECT os.id AS shipment_id, os.order_id,
                  os.shipstation_order_id, os.status AS wms_shipment_status,
-                 os.tracking_number, os.carrier
+                 os.tracking_number, os.carrier,
+                 w.oms_fulfillment_order_id AS oms_id
           FROM wms.outbound_shipments os
+          JOIN wms.orders w ON w.id = os.order_id
           WHERE os.shipstation_order_id IS NOT NULL
             AND os.status IN ('queued', 'labeled', 'shipped')
             AND (
@@ -804,64 +808,78 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
               // 6. Update OMS derived fields (inline — mirrors
               //    updateOmsDerivedFromEvent in shipstation.service.ts)
-              if (event.kind === "shipped") {
-                await db.execute(sql`
-                  UPDATE oms.oms_orders SET
-                    status = 'shipped',
-                    fulfillment_status = 'fulfilled',
-                    tracking_number = ${event.trackingNumber},
-                    tracking_carrier = ${event.carrier},
-                    shipped_at = ${event.shipDate},
-                    updated_at = NOW()
-                  WHERE id = ${row.order_id}
-                `);
-                await db.execute(sql`
-                  UPDATE oms.oms_order_lines SET
-                    fulfillment_status = 'fulfilled',
-                    updated_at = NOW()
-                  WHERE order_id = ${row.order_id}
-                `);
-                markedShipped++;
-              } else if (event.kind === "cancelled") {
-                await db.execute(sql`
-                  UPDATE oms.oms_orders SET
-                    status = 'cancelled',
-                    updated_at = NOW()
-                  WHERE id = ${row.order_id}
-                `);
-                markedCancelled++;
-              } else if (event.kind === "voided") {
-                // Voided: no OMS state change by design (shipment can be
-                // re-labeled; OMS stays in pre-ship state).
-                markedVoided++;
+              if (row.oms_id && row.oms_id.match(/^[0-9]+$/)) {
+                const omsId = Number(row.oms_id);
+                if (event.kind === "shipped") {
+                  await db.execute(sql`
+                    UPDATE oms.oms_orders SET
+                      status = 'shipped',
+                      fulfillment_status = 'fulfilled',
+                      tracking_number = ${event.trackingNumber},
+                      tracking_carrier = ${event.carrier},
+                      shipped_at = ${event.shipDate},
+                      updated_at = NOW()
+                    WHERE id = ${omsId}
+                  `);
+                  await db.execute(sql`
+                    UPDATE oms.oms_order_lines SET
+                      fulfillment_status = 'fulfilled',
+                      updated_at = NOW()
+                    WHERE order_id = ${omsId}
+                  `);
+                  markedShipped++;
+
+                  // Push tracking to channels (Shopify / eBay)
+                  try {
+                    const fulfillmentPush = (db as any).__fulfillmentPush || (services as any).fulfillmentPush;
+                    if (fulfillmentPush) {
+                      await fulfillmentPush.pushTracking(omsId);
+                    }
+                  } catch (pushErr: any) {
+                    console.error(`[ShipStation Reconcile V2] Failed to push tracking for order ${omsId}:`, pushErr.message);
+                  }
+                } else if (event.kind === "cancelled") {
+                  await db.execute(sql`
+                    UPDATE oms.oms_orders SET
+                      status = 'cancelled',
+                      updated_at = NOW()
+                    WHERE id = ${omsId}
+                  `);
+                  markedCancelled++;
+                } else if (event.kind === "voided") {
+                  markedVoided++;
+                }
               }
 
               // Record audit event
-              try {
-                await db.execute(sql`
-                  INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                  VALUES (
-                    ${row.order_id},
-                    ${event.kind === "shipped"
-                      ? "shipped_via_shipstation"
-                      : event.kind === "cancelled"
-                        ? "cancelled_via_shipstation"
-                        : "voided_via_shipstation"},
-                    ${JSON.stringify({
-                      wmsShipmentId: shipmentId,
-                      ssOrderId,
-                      ...(event.kind === "shipped"
-                        ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
-                        : { reason: event.reason }),
-                    })}::jsonb,
-                    NOW()
-                  )
-                `);
-              } catch (auditErr: any) {
-                console.warn(
-                  `[ShipStation Reconcile V2] audit insert failed for order ${row.order_id}:`,
-                  auditErr?.message,
-                );
+              if (row.oms_id && row.oms_id.match(/^[0-9]+$/)) {
+                const omsId = Number(row.oms_id);
+                try {
+                  await db.execute(sql`
+                    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+                    VALUES (
+                      ${omsId},
+                      ${event.kind === "shipped"
+                        ? "shipped_via_shipstation"
+                        : event.kind === "cancelled"
+                          ? "cancelled_via_shipstation"
+                          : "voided_via_shipstation"},
+                      ${JSON.stringify({
+                        wmsShipmentId: shipmentId,
+                        ssOrderId,
+                        ...(event.kind === "shipped"
+                          ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
+                          : { reason: event.reason }),
+                      })}::jsonb,
+                      NOW()
+                    )
+                  `);
+                } catch (auditErr: any) {
+                  console.warn(
+                    `[ShipStation Reconcile V2] audit insert failed for order ${omsId}:`,
+                    auditErr?.message,
+                  );
+                }
               }
             }
 

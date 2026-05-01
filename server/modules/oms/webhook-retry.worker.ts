@@ -140,6 +140,36 @@ export async function enqueueShopifyFulfillmentRetry(
 }
 
 /**
+ * Enqueue a delayed tracking push for non-Shopify channels (like eBay).
+ * Intentionally delayed by 5 minutes to allow carriers (e.g. USPS) to fully
+ * index the tracking number before eBay's asynchronous REST validation hits it.
+ */
+export async function enqueueDelayedTrackingPush(
+  dbArg: any,
+  orderId: number,
+): Promise<void> {
+  if (
+    typeof orderId !== "number" ||
+    !Number.isInteger(orderId) ||
+    orderId <= 0
+  ) {
+    throw new Error(
+      `enqueueDelayedTrackingPush: orderId must be a positive integer (got ${orderId})`,
+    );
+  }
+
+  await dbArg.insert(webhookRetryQueue).values({
+    provider: "internal",
+    topic: "delayed_tracking_push",
+    payload: { orderId },
+    attempts: 0,
+    status: "pending",
+    // 5-minute initial delay
+    nextRetryAt: new Date(Date.now() + 5 * 60_000),
+  });
+}
+
+/**
  * Resolve the ShipStation service the worker should invoke.
  *
  * Follows the same db-stash pattern already used by `__fulfillmentPush`
@@ -162,10 +192,10 @@ function resolveShipStationService(dbArg: any): RetryShipStationService | null {
  */
 function resolveFulfillmentPushService(
   dbArg: any,
-): RetryFulfillmentPushService | null {
+): any | null {
   const svc = dbArg?.__fulfillmentPush;
-  if (svc && typeof svc.pushShopifyFulfillment === "function") {
-    return svc as RetryFulfillmentPushService;
+  if (svc) {
+    return svc;
   }
   return null;
 }
@@ -244,6 +274,69 @@ export async function dispatchShopifyFulfillmentRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) failed again. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+/**
+ * Dispatch a single pending row for the delayed tracking push branch.
+ */
+export async function dispatchDelayedTrackingPush(
+  dbArg: any,
+  item: { id: number; provider: string; topic: string; payload: any; attempts: number },
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as { orderId?: number } | null;
+  const orderId = payload?.orderId;
+
+  if (
+    typeof orderId !== "number" ||
+    !Number.isInteger(orderId) ||
+    orderId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item.id,
+      "malformed payload: orderId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed delayed_tracking_push payload)`,
+    );
+    return "malformed";
+  }
+
+  const fulfillmentPush = resolveFulfillmentPushService(dbArg);
+  if (!fulfillmentPush || typeof fulfillmentPush.pushTracking !== "function") {
+    await keepPending(
+      dbArg,
+      item.id,
+      "fulfillment push service not available",
+    );
+    return "pending";
+  }
+
+  try {
+    const pushed = await fulfillmentPush.pushTracking(orderId);
+    await markRowSuccess(dbArg, item.id);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) succeeded (pushed=${pushed})`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "delayed_tracking_push" },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -468,6 +561,20 @@ async function processPendingWebhooks() {
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} shopify_fulfillment_push dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === "delayed_tracking_push"
+    ) {
+      try {
+        await dispatchDelayedTrackingPush(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} delayed_tracking_push dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
