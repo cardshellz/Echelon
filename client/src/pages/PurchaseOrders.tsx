@@ -77,6 +77,9 @@ type PurchaseOrder = {
   expectedDeliveryDate: string | null;
   createdAt: string;
   vendor?: Vendor;
+  // Exception counts (migration 0566)
+  openExceptionCount?: number;
+  maxOpenSeverity?: 'info' | 'warn' | 'error' | null;
 };
 
 // ── Dual-track segment display helpers ──────────────────────────────────────
@@ -166,6 +169,18 @@ function DualTrackCell({ po }: { po: PurchaseOrder }) {
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Fin</span>
         <MiniTrack segments={financialSegments(po.financialStatus, po.outstandingCents, po.firstInvoicedAt)} />
       </div>
+      {/* Exception pill — shown below the tracks when open exceptions exist (migration 0566) */}
+      {(po.openExceptionCount ?? 0) > 0 && (
+        <span
+          className={`mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-medium ${
+            po.maxOpenSeverity === 'error'
+              ? 'bg-red-50 border-red-300 text-red-700'
+              : 'bg-amber-50 border-amber-300 text-amber-700'
+          }`}
+        >
+          ⚠ {po.openExceptionCount} exception{(po.openExceptionCount ?? 0) > 1 ? 's' : ''}
+        </span>
+      )}
     </div>
   );
 }

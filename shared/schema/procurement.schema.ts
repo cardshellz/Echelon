@@ -1135,3 +1135,79 @@ export const insertPoEventSchema = createInsertSchema(poEvents).omit({
 
 export type InsertPoEvent = z.infer<typeof insertPoEventSchema>;
 export type PoEvent = typeof poEvents.$inferSelect;
+
+// ============================================================================
+// 25. PO EXCEPTIONS — layered exception/issue tracking (migration 0566)
+// ============================================================================
+//
+// Each row represents a single exception event on a PO (physical or financial).
+// Rows are NEVER deleted; resolved exceptions stay forever for audit.
+// Exception detection is event-driven (no cron in Phase 1).
+//
+// Idempotency: payload_hash (SHA-256 of po_id + kind + canonical payload JSON)
+// prevents duplicate rows when detection hooks fire multiple times for the
+// same underlying issue.
+
+// ── Constants (Rule #11 — no magic strings) ──────────────────────────────────
+
+export const EXCEPTION_KINDS = [
+  // Physical exceptions
+  'qty_short',
+  'qty_over',
+  'damaged_on_arrival',
+  'wrong_product_received',
+  'slow_ack',
+  'slow_ship',
+  'customs_hold',
+  'lost_shipment',
+  // Financial exceptions
+  'match_mismatch',
+  'invoice_disputed',
+  'credit_memo_pending',
+  'payment_failed',
+  'overpaid',
+  'past_due',
+  'vendor_reissued_invoice',
+] as const;
+export type ExceptionKind = typeof EXCEPTION_KINDS[number];
+
+export const EXCEPTION_SEVERITIES = ['info', 'warn', 'error'] as const;
+export type ExceptionSeverity = typeof EXCEPTION_SEVERITIES[number];
+
+export const EXCEPTION_STATUSES = ['open', 'acknowledged', 'resolved', 'dismissed'] as const;
+export type ExceptionStatus = typeof EXCEPTION_STATUSES[number];
+
+// ── Table definition ─────────────────────────────────────────────────────────
+
+export const poExceptions = procurementSchema.table('po_exceptions', {
+  id: bigint('id', { mode: 'number' }).primaryKey().generatedByDefaultAsIdentity(),
+  poId: integer('po_id').notNull().references(() => purchaseOrders.id, { onDelete: 'cascade' }),
+  kind: varchar('kind', { length: 40 }).notNull(),
+  severity: varchar('severity', { length: 10 }).notNull(),
+  status: varchar('status', { length: 20 }).notNull().default('open'),
+  payload: jsonb('payload').notNull().default({}),
+  payloadHash: varchar('payload_hash', { length: 64 }).notNull(),
+  title: varchar('title', { length: 120 }).notNull(),
+  message: text('message'),
+  // audit
+  detectedAt: timestamp('detected_at', { withTimezone: true }).defaultNow().notNull(),
+  detectedBy: varchar('detected_by', { length: 50 }),
+  acknowledgedAt: timestamp('acknowledged_at', { withTimezone: true }),
+  acknowledgedBy: varchar('acknowledged_by', { length: 50 }),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  resolvedBy: varchar('resolved_by', { length: 50 }),
+  resolutionNote: text('resolution_note'),
+  dismissedAt: timestamp('dismissed_at', { withTimezone: true }),
+  dismissedBy: varchar('dismissed_by', { length: 50 }),
+  dismissNote: text('dismiss_note'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const insertPoExceptionSchema = createInsertSchema(poExceptions).omit({
+  id: true,
+  detectedAt: true,
+  updatedAt: true,
+});
+
+export type InsertPoException = z.infer<typeof insertPoExceptionSchema>;
+export type PoException = typeof poExceptions.$inferSelect;

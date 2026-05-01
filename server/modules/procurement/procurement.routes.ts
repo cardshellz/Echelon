@@ -10,6 +10,8 @@ import { requireIdempotency } from "../../middleware/idempotency";
 import { PurchasingError } from "./purchasing.service";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
+import * as poExceptionsService from "./po-exceptions.service";
+import { PoExceptionError } from "./po-exceptions.service";
 import { renderPoHtml } from "./po-document";
 import * as emailService from "../notifications/email.service";
 import * as notificationService from "../notifications/notifications.service";
@@ -1907,9 +1909,17 @@ export function registerPurchasingRoutes(app: Express) {
         storage.getAllVendors(),
       ]);
       const vendorMap = new Map(allVendors.map((v: any) => [v.id, v]));
-      const enriched = pos.map((po: any) => ({
+
+      // Attach open exception counts to each PO (parallel, no N+1).
+      const exceptionCounts = await Promise.all(
+        pos.map((po: any) => poExceptionsService.countOpenExceptions(po.id)),
+      );
+
+      const enriched = pos.map((po: any, i: number) => ({
         ...po,
         vendor: vendorMap.get(po.vendorId) || null,
+        openExceptionCount: exceptionCounts[i].count,
+        maxOpenSeverity: exceptionCounts[i].maxSeverity,
       }));
       res.json({ purchaseOrders: enriched, total: count });
     } catch (error: any) {
@@ -1944,11 +1954,18 @@ export function registerPurchasingRoutes(app: Express) {
       const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
       if (!po) return res.status(404).json({ error: "Purchase order not found" });
 
-      const [lines, vendor] = await Promise.all([
+      const [lines, vendor, exceptionCount] = await Promise.all([
         purchasing.getPurchaseOrderLines(po.id),
         storage.getVendorById(po.vendorId),
+        poExceptionsService.countOpenExceptions(po.id),
       ]);
-      res.json({ ...po, lines, vendor });
+      res.json({
+        ...po,
+        lines,
+        vendor,
+        openExceptionCount: exceptionCount.count,
+        maxOpenSeverity: exceptionCount.maxSeverity,
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -2412,6 +2429,111 @@ export function registerPurchasingRoutes(app: Express) {
       const history = await purchasing.getPoStatusHistory(Number(req.params.id));
       res.json({ history });
     } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // PO EXCEPTIONS — Phase 1 (migration 0566)
+  // ──────────────────────────────────────────────────────────────
+
+  // GET /api/purchase-orders/:id/exceptions
+  // List exceptions for a PO. Returns open + acknowledged by default.
+  // ?include_resolved=true to include resolved + dismissed rows.
+  app.get("/api/purchase-orders/:id/exceptions", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const poId = Number(req.params.id);
+      const includeResolved = req.query.include_resolved === "true";
+      const exceptions = await poExceptionsService.listExceptions(poId, { includeResolved });
+      res.json({ exceptions });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/purchase-orders/:id/exceptions
+  // Manually create an exception (e.g. damaged_on_arrival, wrong_product_received).
+  // Requires purchasing:edit permission.
+  app.post("/api/purchase-orders/:id/exceptions", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const poId = Number(req.params.id);
+      const { kind, severity, title, message, payload } = req.body;
+
+      if (!kind || !severity || !title) {
+        return res.status(400).json({ error: "kind, severity, and title are required" });
+      }
+
+      const exception = await poExceptionsService.upsertException({
+        poId,
+        kind,
+        severity,
+        title,
+        message,
+        payload: payload ?? {},
+        detectedBy: (req as any).user?.id ? `user:${(req as any).user.id}` : "user",
+      });
+      res.status(201).json({ exception });
+    } catch (error: any) {
+      if (error instanceof PoExceptionError) {
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/po-exceptions/:id/acknowledge
+  // Mark an exception as acknowledged. Requires purchasing:view permission.
+  app.post("/api/po-exceptions/:id/acknowledge", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const userId = (req as any).user?.id ?? "unknown";
+      const exception = await poExceptionsService.acknowledgeException(id, userId);
+      res.json({ exception });
+    } catch (error: any) {
+      if (error instanceof PoExceptionError) {
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/po-exceptions/:id/resolve
+  // Mark an exception as resolved. Requires resolutionNote in body.
+  // Requires purchasing:edit permission.
+  app.post("/api/po-exceptions/:id/resolve", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const userId = (req as any).user?.id ?? "unknown";
+      const { resolutionNote } = req.body;
+
+      if (!resolutionNote || String(resolutionNote).trim().length === 0) {
+        return res.status(400).json({ error: "resolutionNote is required" });
+      }
+
+      const exception = await poExceptionsService.resolveException(id, userId, resolutionNote);
+      res.json({ exception });
+    } catch (error: any) {
+      if (error instanceof PoExceptionError) {
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/po-exceptions/:id/dismiss
+  // Dismiss an exception (false alarm / not actionable).
+  // Requires purchasing:edit permission.
+  app.post("/api/po-exceptions/:id/dismiss", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const userId = (req as any).user?.id ?? "unknown";
+      const { reason } = req.body;
+      const exception = await poExceptionsService.dismissException(id, userId, reason);
+      res.json({ exception });
+    } catch (error: any) {
+      if (error instanceof PoExceptionError) {
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
       res.status(500).json({ error: error.message });
     }
   });
