@@ -1169,7 +1169,76 @@ export default function PurchaseOrderEdit() {
     }
   }
 
+  // Cancel PO (the formal lifecycle action, not the discard-edits action).
+  // Transitions the PO to physical_status='cancelled' with an audit row.
+  // Only valid when the PO has not yet entered the financial track and
+  // physical state is in {draft, sent, acknowledged}. Server enforces all
+  // gating; this UI just gives the user a path to it from the editor.
+  const cancelPoMutation = useMutation({
+    mutationFn: async (reason: string) => {
+      if (!editId) throw new Error("Cannot cancel a PO that hasn't been saved yet");
+      const res = await fetch(`/api/purchase-orders/${editId}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Cancel failed (${res.status})`);
+      }
+      return res.json();
+    },
+    onSuccess: (po: any) => {
+      toast({ title: "PO cancelled", description: po?.poNumber ?? "" });
+      // Bypass the dirty-prompt: cancelling the PO supersedes any pending edits.
+      setDirty(false);
+      navigate("/purchase-orders");
+    },
+    onError: (e: Error) => {
+      toast({ title: "Cancel failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  function handleCancelPo() {
+    if (!editId) return;
+    const reason = window.prompt(
+      "Cancel this purchase order?\n\n" +
+      "This is a permanent state change — the PO will be marked cancelled " +
+      "and an audit row will be written. Use Discard if you only want to " +
+      "undo your in-flight edits.\n\n" +
+      "Reason for cancellation:",
+      "",
+    );
+    if (reason === null) return; // user dismissed
+    if (!reason.trim()) {
+      toast({
+        title: "Reason required",
+        description: "Please provide a reason for cancelling.",
+        variant: "destructive",
+      });
+      return;
+    }
+    cancelPoMutation.mutate(reason.trim());
+  }
+
+  // Whether the formal Cancel-PO action is allowed for this PO.
+  // Drafts: yes. Anything past financial track start (invoiced+): no.
+  // Server enforces too; this just decides whether to render the button.
+  const canCancelPo =
+    isEditMode &&
+    !!editId &&
+    !cancelPoMutation.isPending &&
+    !saving &&
+    ["draft", "sent", "acknowledged"].includes(
+      (existingPo?.physicalStatus as string) ?? "draft",
+    ) &&
+    ((existingPo?.financialStatus as string) ?? "unbilled") === "unbilled";
+
   function handleCancel() {
+    // "Discard" button on the editor: discards in-flight edits, doesn't
+    // touch the PO's actual status. NOT the same as cancelling the PO
+    // (use the Cancel-PO action for that). Naming was "Cancel" before but
+    // collided with the formal Cancel-PO action; renamed to Discard 2026-05-01.
     if (dirty) {
       const ok = window.confirm("Discard this PO? Unsaved changes will be lost.");
       if (!ok) return;
@@ -1227,8 +1296,19 @@ export default function PurchaseOrderEdit() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="ghost" onClick={handleCancel} disabled={saving}>
-            Cancel
+            Discard
           </Button>
+          {canCancelPo && (
+            <Button
+              variant="ghost"
+              onClick={handleCancelPo}
+              disabled={cancelPoMutation.isPending || saving}
+              className="text-red-600 hover:text-red-700"
+              title="Cancel the PO permanently (writes an audit row). Use Discard to throw away unsaved edits without changing PO state."
+            >
+              {cancelPoMutation.isPending ? "Cancelling..." : "Cancel PO"}
+            </Button>
+          )}
           <Button
             variant="secondary"
             onClick={handleSaveDraft}
@@ -1637,7 +1717,7 @@ export default function PurchaseOrderEdit() {
       {/* Sticky action bar on mobile */}
       <div className="md:hidden sticky bottom-0 bg-background border-t pt-2 flex gap-2">
         <Button variant="ghost" onClick={handleCancel} disabled={saving} className="flex-1">
-          Cancel
+          Discard
         </Button>
         <Button
           variant="secondary"
