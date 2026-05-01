@@ -471,6 +471,17 @@ export function validateShipmentForPush(
 // Types
 // ---------------------------------------------------------------------------
 
+export interface ShipStationShipmentItem {
+  orderItemId?: number;
+  lineItemKey?: string | null;
+  sku: string;
+  name?: string;
+  quantity: number;
+  unitPrice?: number;
+  warehouseLocation?: string | null;
+  options?: unknown;
+}
+
 export interface ShipStationShipment {
   shipmentId: number;
   orderId: number;
@@ -482,6 +493,24 @@ export interface ShipStationShipment {
   shipDate: string;
   voidDate: string | null;
   shipmentCost: number;
+  // Populated only when caller passes includeShipmentItems=true on the
+  // GET /shipments query string. Used by the parity check to compare
+  // per-shipment line items for split orders.
+  shipmentItems?: ShipStationShipmentItem[];
+  // SS also returns shipTo on each shipment, useful for parity address
+  // comparison since a split order may ship to different addresses
+  // (rare, but allowed by SS).
+  shipTo?: {
+    name?: string;
+    company?: string | null;
+    street1?: string;
+    street2?: string | null;
+    street3?: string | null;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    country?: string;
+  };
 }
 
 interface ShipStationCreateOrderResponse {
@@ -696,9 +725,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   // -------------------------------------------------------------------------
 
   async function getShipments(orderId: number): Promise<ShipStationShipment[]> {
+    // includeShipmentItems=true is required to populate `shipmentItems` on
+    // each shipment; without it SS returns empty/undefined item arrays.
+    // The parity check (and any future split-shipment reconciler) needs
+    // per-shipment items, so request them here. Pagination is not handled
+    // because a single SS order rarely has more than the default page of
+    // shipments; revisit if real customers regularly exceed it.
     const result = await apiRequest<{ shipments: ShipStationShipment[] }>(
       "GET",
-      `/shipments?orderId=${orderId}`,
+      `/shipments?orderId=${orderId}&includeShipmentItems=true`,
     );
     return result.shipments || [];
   }

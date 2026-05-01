@@ -179,7 +179,19 @@ interface SsOrder {
   };
 }
 
-/** SS shipment from /shipments?orderId=<id> — includes per-shipment items. */
+/**
+ * SS shipment from /shipments?orderId=<id>&includeShipmentItems=true.
+ *
+ * NOTE: the SS API returns per-shipment line items under the field
+ * `shipmentItems`, NOT `items`. Earlier versions of this script had a
+ * stale `items` field which was always undefined at runtime, so the
+ * multi-shipment summation silently fell back to the parent order's
+ * single-line item list.
+ *
+ * `items` is retained as an alias-only legacy alternative for any
+ * future code that mirrors the parent order shape; current logic
+ * reads `shipmentItems`.
+ */
 interface SsShipment {
   shipmentId: number;
   orderId: number;
@@ -191,6 +203,15 @@ interface SsShipment {
   shipDate: string;
   voidDate: string | null;
   shipmentCost: number;
+  shipmentItems?: Array<{
+    orderItemId?: number;
+    lineItemKey?: string | null;
+    sku?: string;
+    name?: string;
+    quantity?: number;
+    unitPrice?: number;
+  }>;
+  /** @deprecated SS API does not return this field; use shipmentItems. */
   items?: Array<{
     lineItemKey?: string;
     sku?: string;
@@ -771,13 +792,17 @@ export async function checkSingleOrder(
     ...compareFinancials(ssOrder, echelonFinancials, tolerance, allWmsItems.length),
   );
 
-  // Line items: aggregate across all SS shipments and all WMS shipments
+  // Line items: aggregate across all SS shipments and all WMS shipments.
+  // SS returns per-shipment line items in `shipmentItems` (only when
+  // ?includeShipmentItems=true is passed on the GET /shipments call).
+  // We tolerate the legacy `items` alias to stay forward/back compatible
+  // with any caller that mirrors the parent-order shape.
   if (ssShipments.length > 0) {
-    // Sum SS shipment items into a SKU→qty map
     const ssItems: Array<{ sku: string; qty: number }> = [];
     for (const shipment of ssShipments) {
-      if (shipment.items && Array.isArray(shipment.items)) {
-        for (const item of shipment.items) {
+      const itemsArr = shipment.shipmentItems ?? shipment.items;
+      if (itemsArr && Array.isArray(itemsArr)) {
+        for (const item of itemsArr) {
           ssItems.push({ sku: item.sku || "", qty: item.quantity || 0 });
         }
       }
