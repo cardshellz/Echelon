@@ -972,34 +972,59 @@ export default function APInvoiceDetail() {
             </div>
             {/*
               3-way match override.
-              Server requires invoice lines to be matched against PO lines and
-              receipts before payment is allowed (Rule #6 + financial integrity).
-              When the match is pending — typical for legacy invoices, imported
-              data, or invoices that predate the matching system — the user can
-              opt to override the check. Default off so the safety net stays on
-              for normal flows.
+              Server runs the match only when this payment SETTLES the invoice
+              (balance hits zero). Partial payments / deposits flow through
+              without match — goods may not have arrived yet. The override
+              checkbox is only relevant when this payment is the final one;
+              hidden otherwise to avoid noise.
+              (Server logic is the source of truth; this UI just mirrors it.)
             */}
-            <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={payment.forceOverride}
-                  onChange={(e) => setPayment(p => ({ ...p, forceOverride: e.target.checked }))}
-                />
-                <div className="text-sm">
-                  <div className="font-medium">
-                    Override 3-way match check
+            {(() => {
+              const amountCents = dollarsToCents(payment.amountDollars || "0");
+              const balance = invoice.balanceCents ?? 0;
+              const isFinalPayment = amountCents > 0 && amountCents >= balance;
+              const isPartial = amountCents > 0 && amountCents < balance;
+
+              if (isPartial) {
+                return (
+                  <div className="rounded-md border border-blue-200 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm">
+                    <div className="font-medium">Partial payment</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      Remaining balance after this payment: {formatCents(balance - amountCents)}.
+                      The 3-way match runs when the final payment settles the invoice.
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    Skip the PO↔receipt↔invoice reconciliation check. Use only
-                    when the match is intentionally pending (legacy invoice,
-                    pre-system PO, or you've already verified the goods
-                    manually).
+                );
+              }
+
+              if (isFinalPayment) {
+                return (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={payment.forceOverride}
+                        onChange={(e) => setPayment(p => ({ ...p, forceOverride: e.target.checked }))}
+                      />
+                      <div className="text-sm">
+                        <div className="font-medium">
+                          Override 3-way match check
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          This payment will fully settle the invoice. Server
+                          will require the invoice lines to be matched against
+                          PO lines and receipts. Check this only if the match
+                          is intentionally pending (legacy invoice, pre-system
+                          PO, or goods verified manually).
+                        </div>
+                      </div>
+                    </label>
                   </div>
-                </div>
-              </label>
-            </div>
+                );
+              }
+              return null;
+            })()}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
               <Button onClick={() => paymentMutation.mutate()} disabled={!payment.amountDollars || paymentMutation.isPending}>

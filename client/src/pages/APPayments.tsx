@@ -358,29 +358,75 @@ export default function APPayments() {
               <Input placeholder="Optional" value={newPayment.notes} onChange={(e) => setNewPayment(p => ({ ...p, notes: e.target.value }))} />
             </div>
 
-            {/* 3-way match override — see APInvoiceDetail.tsx for the long
-                version of this comment. */}
-            <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={newPayment.forceOverride}
-                  onChange={(e) => setNewPayment(p => ({ ...p, forceOverride: e.target.checked }))}
-                />
-                <div className="text-sm">
-                  <div className="font-medium">
-                    Override 3-way match check
+            {/*
+              3-way match override.
+              Server runs the match only when an allocation SETTLES its invoice
+              (balance hits zero). Across multiple invoices in this payment,
+              we only need the override option when at least one allocation
+              would fully settle its target.
+            */}
+            {(() => {
+              // For each allocation, compare the entered amount to its
+              // invoice's balance. If any one of them would zero-out the
+              // balance, the server's match check will run — surface the
+              // override. Otherwise hide it (everything's a partial).
+              const anyAllocationSettles = Object.entries(allocations).some(([invIdStr, val]) => {
+                const applied = dollarsToCents(val || "0");
+                if (applied <= 0) return false;
+                const inv = openInvoices.find((i: any) => i.id === Number(invIdStr));
+                if (!inv) return false;
+                return applied >= (inv.balanceCents ?? 0);
+              });
+              const anyAllocationPartial = Object.entries(allocations).some(([invIdStr, val]) => {
+                const applied = dollarsToCents(val || "0");
+                if (applied <= 0) return false;
+                const inv = openInvoices.find((i: any) => i.id === Number(invIdStr));
+                if (!inv) return false;
+                return applied < (inv.balanceCents ?? 0);
+              });
+
+              if (!anyAllocationSettles && anyAllocationPartial) {
+                return (
+                  <div className="rounded-md border border-blue-200 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm">
+                    <div className="font-medium">Partial payment</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      None of these allocations fully settle an invoice. The
+                      3-way match runs when the final payment closes each
+                      invoice.
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    Skip the PO↔receipt↔invoice reconciliation check. Use only
-                    when the match is intentionally pending (legacy invoice,
-                    pre-system PO, or you've already verified the goods
-                    manually).
+                );
+              }
+
+              if (anyAllocationSettles) {
+                return (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={newPayment.forceOverride}
+                        onChange={(e) => setNewPayment(p => ({ ...p, forceOverride: e.target.checked }))}
+                      />
+                      <div className="text-sm">
+                        <div className="font-medium">
+                          Override 3-way match check
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          At least one allocation here will fully settle its
+                          invoice. The server will require those invoices to
+                          have lines matched to PO lines and receipts. Check
+                          this only if the match is intentionally pending
+                          (legacy invoice, pre-system PO, or goods verified
+                          manually).
+                        </div>
+                      </div>
+                    </label>
                   </div>
-                </div>
-              </label>
-            </div>
+                );
+              }
+              return null;
+            })()}
 
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
