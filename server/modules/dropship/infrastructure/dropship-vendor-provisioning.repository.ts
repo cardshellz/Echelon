@@ -1,0 +1,352 @@
+import type { Pool, PoolClient } from "pg";
+import { pool as defaultPool } from "../../../db";
+import type {
+  DropshipCatalogSetupSummary,
+  DropshipProvisionVendorRepositoryInput,
+  DropshipProvisionVendorRepositoryResult,
+  DropshipProvisionedVendorProfile,
+  DropshipStoreConnectionSummary,
+  DropshipVendorProvisioningRepository,
+} from "../application/dropship-vendor-provisioning-service";
+
+interface VendorProfileRow {
+  id: number;
+  member_id: string;
+  current_subscription_id: string | null;
+  current_plan_id: string | null;
+  business_name: string | null;
+  contact_name: string | null;
+  email: string | null;
+  phone: string | null;
+  status: string;
+  entitlement_status: string;
+  entitlement_checked_at: Date | null;
+  membership_grace_ends_at: Date | null;
+  included_store_connections: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface StoreConnectionSummaryRow {
+  active_count: string | number;
+  connected_count: string | number;
+  needs_attention_count: string | number;
+  total_count: string | number;
+}
+
+interface CatalogSetupSummaryRow {
+  admin_exposure_rule_count: string | number;
+  vendor_selection_rule_count: string | number;
+}
+
+export class PgDropshipVendorProvisioningRepository implements DropshipVendorProvisioningRepository {
+  constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  async provisionVendor(
+    input: DropshipProvisionVendorRepositoryInput,
+  ): Promise<DropshipProvisionVendorRepositoryResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('dropship_vendor_profile'), hashtext($1))", [
+        input.entitlement.memberId,
+      ]);
+
+      const existing = await findVendorByMemberIdWithClient(client, input.entitlement.memberId, true);
+      const status = input.resolveStatus(existing?.status ?? null);
+      if (!existing) {
+        const vendor = await insertVendorProfile(client, input, status);
+        await recordVendorProvisioningAuditEvent(client, {
+          vendor,
+          eventType: "vendor_profile_provisioned",
+          changedFields: [
+            "memberId",
+            "currentSubscriptionId",
+            "currentPlanId",
+            "email",
+            "status",
+            "entitlementStatus",
+          ],
+          before: null,
+          after: serializeVendorProfileForAudit(vendor),
+          occurredAt: input.checkedAt,
+        });
+        await client.query("COMMIT");
+        return {
+          vendor,
+          created: true,
+          changedFields: [
+            "memberId",
+            "currentSubscriptionId",
+            "currentPlanId",
+            "email",
+            "status",
+            "entitlementStatus",
+          ],
+        };
+      }
+
+      const changedFields = changedVendorProfileFields(existing, input, status);
+      const vendor = await updateVendorProfile(client, existing.vendorId, input, status);
+      if (changedFields.length > 0) {
+        await recordVendorProvisioningAuditEvent(client, {
+          vendor,
+          eventType: "vendor_profile_synced",
+          changedFields,
+          before: serializeVendorProfileForAudit(existing),
+          after: serializeVendorProfileForAudit(vendor),
+          occurredAt: input.checkedAt,
+        });
+      }
+
+      await client.query("COMMIT");
+      return {
+        vendor,
+        created: false,
+        changedFields,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getStoreConnectionSummary(vendorId: number): Promise<DropshipStoreConnectionSummary> {
+    const client = await this.dbPool.connect();
+    try {
+      const result = await client.query<StoreConnectionSummaryRow>(
+        `SELECT
+           COUNT(*) FILTER (
+             WHERE status IN ('connected','needs_reauth','refresh_failed','grace_period','paused')
+           ) AS active_count,
+           COUNT(*) FILTER (WHERE status = 'connected') AS connected_count,
+           COUNT(*) FILTER (
+             WHERE status IN ('needs_reauth','refresh_failed','grace_period','paused')
+           ) AS needs_attention_count,
+           COUNT(*) AS total_count
+         FROM dropship.dropship_store_connections
+         WHERE vendor_id = $1`,
+        [vendorId],
+      );
+      const row = result.rows[0];
+      return {
+        activeCount: Number(row?.active_count ?? 0),
+        connectedCount: Number(row?.connected_count ?? 0),
+        needsAttentionCount: Number(row?.needs_attention_count ?? 0),
+        totalCount: Number(row?.total_count ?? 0),
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  async getCatalogSetupSummary(vendorId: number): Promise<DropshipCatalogSetupSummary> {
+    const client = await this.dbPool.connect();
+    try {
+      const result = await client.query<CatalogSetupSummaryRow>(
+        `SELECT
+           (SELECT COUNT(*) FROM dropship.dropship_catalog_rules WHERE is_active = true) AS admin_exposure_rule_count,
+           (
+             SELECT COUNT(*)
+             FROM dropship.dropship_vendor_selection_rules
+             WHERE vendor_id = $1
+               AND is_active = true
+           ) AS vendor_selection_rule_count`,
+        [vendorId],
+      );
+      const row = result.rows[0];
+      return {
+        adminExposureRuleCount: Number(row?.admin_exposure_rule_count ?? 0),
+        vendorSelectionRuleCount: Number(row?.vendor_selection_rule_count ?? 0),
+      };
+    } finally {
+      client.release();
+    }
+  }
+}
+
+async function findVendorByMemberIdWithClient(
+  client: PoolClient,
+  memberId: string,
+  forUpdate: boolean,
+): Promise<DropshipProvisionedVendorProfile | null> {
+  const result = await client.query<VendorProfileRow>(
+    `SELECT id, member_id, current_subscription_id, current_plan_id, business_name,
+            contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
+            membership_grace_ends_at, included_store_connections, created_at, updated_at
+     FROM dropship.dropship_vendors
+     WHERE member_id::text = $1
+     LIMIT 1
+     ${forUpdate ? "FOR UPDATE" : ""}`,
+    [memberId],
+  );
+  return mapVendorProfileRow(result.rows[0]);
+}
+
+async function insertVendorProfile(
+  client: PoolClient,
+  input: DropshipProvisionVendorRepositoryInput,
+  status: string,
+): Promise<DropshipProvisionedVendorProfile> {
+  const result = await client.query<VendorProfileRow>(
+    `INSERT INTO dropship.dropship_vendors
+      (member_id, current_subscription_id, current_plan_id, email, status,
+       entitlement_status, entitlement_checked_at, membership_grace_ends_at,
+       included_store_connections, metadata, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, 1, '{}'::jsonb, $7, $7)
+     RETURNING id, member_id, current_subscription_id, current_plan_id, business_name,
+               contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
+               membership_grace_ends_at, included_store_connections, created_at, updated_at`,
+    [
+      input.entitlement.memberId,
+      input.entitlement.subscriptionId,
+      input.entitlement.planId,
+      input.entitlement.cardShellzEmail,
+      status,
+      input.entitlement.status,
+      input.checkedAt,
+    ],
+  );
+  const vendor = mapVendorProfileRow(result.rows[0]);
+  if (!vendor) {
+    throw new Error("Dropship vendor provisioning insert did not return a vendor row.");
+  }
+  return vendor;
+}
+
+async function updateVendorProfile(
+  client: PoolClient,
+  vendorId: number,
+  input: DropshipProvisionVendorRepositoryInput,
+  status: string,
+): Promise<DropshipProvisionedVendorProfile> {
+  const result = await client.query<VendorProfileRow>(
+    `UPDATE dropship.dropship_vendors
+     SET current_subscription_id = $2,
+         current_plan_id = $3,
+         email = $4,
+         status = $5,
+         entitlement_status = $6,
+         entitlement_checked_at = $7,
+         membership_grace_ends_at = NULL,
+         updated_at = $7
+     WHERE id = $1
+     RETURNING id, member_id, current_subscription_id, current_plan_id, business_name,
+               contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
+               membership_grace_ends_at, included_store_connections, created_at, updated_at`,
+    [
+      vendorId,
+      input.entitlement.subscriptionId,
+      input.entitlement.planId,
+      input.entitlement.cardShellzEmail,
+      status,
+      input.entitlement.status,
+      input.checkedAt,
+    ],
+  );
+  const vendor = mapVendorProfileRow(result.rows[0]);
+  if (!vendor) {
+    throw new Error("Dropship vendor provisioning update did not return a vendor row.");
+  }
+  return vendor;
+}
+
+function changedVendorProfileFields(
+  existing: DropshipProvisionedVendorProfile,
+  input: DropshipProvisionVendorRepositoryInput,
+  status: string,
+): string[] {
+  const comparisons: Array<[string, unknown, unknown]> = [
+    ["currentSubscriptionId", existing.currentSubscriptionId, input.entitlement.subscriptionId],
+    ["currentPlanId", existing.currentPlanId, input.entitlement.planId],
+    ["email", existing.email, input.entitlement.cardShellzEmail],
+    ["status", existing.status, status],
+    ["entitlementStatus", existing.entitlementStatus, input.entitlement.status],
+  ];
+
+  return comparisons
+    .filter(([, before, after]) => normalizeNullableValue(before) !== normalizeNullableValue(after))
+    .map(([field]) => field);
+}
+
+async function recordVendorProvisioningAuditEvent(
+  client: PoolClient,
+  input: {
+    vendor: DropshipProvisionedVendorProfile;
+    eventType: "vendor_profile_provisioned" | "vendor_profile_synced";
+    changedFields: string[];
+    before: Record<string, unknown> | null;
+    after: Record<string, unknown>;
+    occurredAt: Date;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (vendor_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, 'dropship_vendor', $2, $3, 'system', NULL, 'info', $4::jsonb, $5)`,
+    [
+      input.vendor.vendorId,
+      String(input.vendor.vendorId),
+      input.eventType,
+      JSON.stringify({
+        changedFields: input.changedFields,
+        before: input.before,
+        after: input.after,
+      }),
+      input.occurredAt,
+    ],
+  );
+}
+
+function mapVendorProfileRow(row: VendorProfileRow | undefined): DropshipProvisionedVendorProfile | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    vendorId: row.id,
+    memberId: row.member_id,
+    currentSubscriptionId: row.current_subscription_id,
+    currentPlanId: row.current_plan_id,
+    businessName: row.business_name,
+    contactName: row.contact_name,
+    email: row.email,
+    phone: row.phone,
+    status: row.status,
+    entitlementStatus: row.entitlement_status,
+    entitlementCheckedAt: row.entitlement_checked_at,
+    membershipGraceEndsAt: row.membership_grace_ends_at,
+    includedStoreConnections: row.included_store_connections,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function serializeVendorProfileForAudit(
+  vendor: DropshipProvisionedVendorProfile,
+): Record<string, unknown> {
+  return {
+    vendorId: vendor.vendorId,
+    memberId: vendor.memberId,
+    currentSubscriptionId: vendor.currentSubscriptionId,
+    currentPlanId: vendor.currentPlanId,
+    email: vendor.email,
+    status: vendor.status,
+    entitlementStatus: vendor.entitlementStatus,
+    includedStoreConnections: vendor.includedStoreConnections,
+  };
+}
+
+function normalizeNullableValue(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+async function rollbackQuietly(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    // Preserve the original failure.
+  }
+}
