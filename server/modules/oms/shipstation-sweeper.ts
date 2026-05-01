@@ -73,17 +73,15 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
       
       let toClear = [];
       if (isShippedOrCancelled) {
-        toClear = orders; // Clear everything
+        // If it's already shipped in Echelon, we only clear echelon-oms-* orders.
+        // We shouldn't blindly clear everything in case the user manually created a SS order.
+        toClear = orders.filter(o => o.orderKey?.startsWith("echelon-oms-") || o.orderKey?.startsWith("echelon-wms-shp-"));
       } else if (orders.length > 1) {
-        // Sort to find the 'best' one to keep. The 'echelon-wms-shp-' key is preferred.
-        // If neither have it, just keep the first one.
+        // Find the wms order
         const wmsOrder = orders.find(o => o.orderKey?.startsWith("echelon-wms-shp-"));
         if (wmsOrder) {
-          toClear = orders.filter(o => o.orderId !== wmsOrder.orderId);
-        } else {
-          // If no wms order, just keep the latest order ID
-          orders.sort((a, b) => b.orderId - a.orderId);
-          toClear = orders.slice(1);
+          // Only clear the old OMS duplicates! Do NOT clear manual splits or user-created orders.
+          toClear = orders.filter(o => o.orderKey?.startsWith("echelon-oms-"));
         }
       }
 

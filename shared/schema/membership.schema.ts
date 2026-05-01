@@ -11,18 +11,30 @@ export const membershipSchema = pgSchema("membership");
 
 export const members = membershipSchema.table("members", {
   id: varchar("id").primaryKey(),
+  shopifyCustomerId: text("shopify_customer_id"),
   email: text("email"),
   firstName: text("first_name"),
   lastName: text("last_name"),
+  planId: varchar("plan_id"),
   status: text("status"),
-  shopifyCustomerId: varchar("shopify_customer_id"),
+  startDate: timestamp("start_date"),
+  nextBillingDate: timestamp("next_billing_date"),
+  walletAddress: text("wallet_address"),
+  walletProvider: text("wallet_provider"),
+  tokenBalance: numeric("token_balance"),
+  lastTokenSync: timestamp("last_token_sync"),
+  birthday: timestamp("birthday"),
+  birthdayLastAwarded: integer("birthday_last_awarded"),
+  phone: text("phone"),
+  emailIsSynthetic: boolean("email_is_synthetic"),
   tier: varchar("tier"),
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const insertMemberSchema = createInsertSchema(members);
 export type Member = typeof members.$inferSelect;
-export type InsertMember = z.infer<typeof insertMemberSchema>;
 
 // ============================================
 // PLANS
@@ -32,10 +44,8 @@ export const plans = membershipSchema.table("plans", {
   id: varchar("id").primaryKey(),
   name: text("name"),
   tierLevel: integer("tier_level"),
-  
-  // DYNAMIC CONFIG: The priority modifier subtracted/added to the base shipping score
+  tier: varchar("tier"),
   priorityModifier: integer("priority_modifier").notNull().default(5),
-  
   priceCents: bigint("price_cents", { mode: "number" }),
   billingInterval: text("billing_interval"),
   billingIntervalCount: integer("billing_interval_count"),
@@ -60,7 +70,30 @@ export const memberSubscriptions = membershipSchema.table("member_subscriptions"
   status: text("status"),
   billingInterval: text("billing_interval"),
   cycleStartedAt: timestamp("cycle_started_at"),
-  shopifySubscriptionContractId: varchar("shopify_subscription_contract_id"),
+  cycleEndsAt: timestamp("cycle_ends_at"),
+  amountPaidCents: integer("amount_paid_cents"),
+  isInTrial: boolean("is_in_trial"),
+  trialEndsAt: timestamp("trial_ends_at"),
+  isInIntro: boolean("is_in_intro"),
+  introEndsAt: timestamp("intro_ends_at"),
+  cancelledAt: timestamp("cancelled_at"),
+  cancellationReason: text("cancellation_reason"),
+  shopifySubscriptionId: text("shopify_subscription_id"),
+  scheduledPlanId: varchar("scheduled_plan_id"),
+  shopifyContractId: varchar("shopify_contract_id"),
+  nextBillingDate: timestamp("next_billing_date"),
+  sellingPlanId: varchar("selling_plan_id"),
+  failedBillingCount: integer("failed_billing_count"),
+  billingStatus: varchar("billing_status"),
+  shopifySubscriptionContractId: bigint("shopify_subscription_contract_id", { mode: 'number' }),
+  shopifySubscriptionContractGid: varchar("shopify_subscription_contract_gid"),
+  shopifyCustomerId: bigint("shopify_customer_id", { mode: 'number' }),
+  currentPeriodStart: timestamp("current_period_start"),
+  currentPeriodEnd: timestamp("current_period_end"),
+  failedBillingAttempts: integer("failed_billing_attempts"),
+  billingInProgress: boolean("billing_in_progress"),
+  paymentMethodId: varchar("payment_method_id"),
+  revisionId: varchar("revision_id"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -685,3 +718,30 @@ export const marketplaceExclusions = membershipSchema.table("marketplace_exclusi
   createdAt: timestamp("created_at"),
 });
 
+
+
+export const sellingPlanMap = membershipSchema.table("selling_plan_map", {
+  shopifySellingPlanGid: text("shopify_selling_plan_gid").primaryKey(),
+  shopifySellingPlanGroupGid: text("shopify_selling_plan_group_gid"),
+  planId: varchar("plan_id"),
+  planName: text("plan_name"),
+  billingInterval: text("billing_interval"),
+  priceCents: integer("price_cents"),
+  isActive: boolean("is_active").default(true),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const subscriptionBillingLog = membershipSchema.table("subscription_billing_log", {
+  id: varchar("id").primaryKey(),
+  memberSubscriptionId: varchar("member_subscription_id").references(() => memberSubscriptions.id),
+  shopifyBillingAttemptId: varchar("shopify_billing_attempt_id"),
+  shopifyOrderId: varchar("shopify_order_id"),
+  amountCents: integer("amount_cents").notNull(),
+  status: varchar("status").notNull(),
+  errorCode: varchar("error_code"),
+  errorMessage: text("error_message"),
+  idempotencyKey: varchar("idempotency_key").unique(),
+  billingPeriodStart: timestamp("billing_period_start"),
+  billingPeriodEnd: timestamp("billing_period_end"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});

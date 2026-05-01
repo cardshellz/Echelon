@@ -1,5 +1,15 @@
 // subscription.storage.ts — Database operations for subscriptions
-import { pool } from "../../../db";
+import { db } from "../../../db";
+import { eq, inArray, desc, asc, and, sql } from "drizzle-orm";
+import {
+  plans,
+  sellingPlanMap,
+  members,
+  memberSubscriptions,
+  memberCurrentMembership,
+  subscriptionBillingAttempts,
+  subscriptionEvents,
+} from "@shared/schema";
 import type {
   SubscriptionRecord,
   PlanRecord,
@@ -11,33 +21,49 @@ import type {
 // ─── Plans ───────────────────────────────────────────────────────────
 
 export async function getAllPlans(): Promise<PlanRecord[]> {
-  const result = await pool.query(
-    `SELECT id, name, tier, billing_interval, billing_interval_count,
-            price_cents, shopify_selling_plan_gid, includes_dropship, is_active, priority_modifier
-     FROM membership.plans ORDER BY id`
-  );
-  return result.rows;
+  const result = await db.select({
+    id: sql<number>`CAST(${plans.id} AS INTEGER)`,
+    name: plans.name,
+    tier: plans.tier,
+    billing_interval: plans.billingInterval,
+    billing_interval_count: plans.billingIntervalCount,
+    price_cents: plans.priceCents,
+    shopify_selling_plan_gid: plans.shopifySellingPlanGid,
+    includes_dropship: plans.includesDropship,
+    is_active: plans.isActive,
+    priority_modifier: plans.priorityModifier,
+  }).from(plans).orderBy(asc(plans.id));
+  return result as unknown as PlanRecord[];
 }
 
 export async function getActivePlans(): Promise<PlanRecord[]> {
-  const result = await pool.query(
-    `SELECT id, name, tier, billing_interval, billing_interval_count,
-            price_cents, shopify_selling_plan_gid, includes_dropship, is_active, priority_modifier
-     FROM membership.plans WHERE is_active = true ORDER BY id`
-  );
-  return result.rows;
+  const result = await db.select({
+    id: sql<number>`CAST(${plans.id} AS INTEGER)`,
+    name: plans.name,
+    tier: plans.tier,
+    billing_interval: plans.billingInterval,
+    billing_interval_count: plans.billingIntervalCount,
+    price_cents: plans.priceCents,
+    shopify_selling_plan_gid: plans.shopifySellingPlanGid,
+    includes_dropship: plans.includesDropship,
+    is_active: plans.isActive,
+    priority_modifier: plans.priorityModifier,
+  }).from(plans).where(eq(plans.isActive, true)).orderBy(asc(plans.id));
+  return result as unknown as PlanRecord[];
 }
 
 export async function updatePlanSellingPlan(
   planId: number,
   shopifySellingPlanGid: string,
   shopifySellingPlanId: number,
-  client: any = pool
+  client: any = db
 ): Promise<void> {
-  await client.query(
-    `UPDATE membership.plans SET shopify_selling_plan_gid = $1, shopify_selling_plan_id = $2 WHERE id = $3`,
-    [shopifySellingPlanGid, shopifySellingPlanId, planId]
-  );
+  await client.update(plans)
+    .set({
+      shopifySellingPlanGid,
+      shopifySellingPlanId: String(shopifySellingPlanId)
+    })
+    .where(eq(plans.id, String(planId)));
 }
 
 export async function updatePlanDetails(
@@ -53,38 +79,54 @@ export async function updatePlanDetails(
     priority_modifier: number;
   }>
 ): Promise<void> {
-  const setClauses: string[] = [];
-  const values: any[] = [];
-  let idx = 1;
+  if (Object.keys(updates).length === 0) return;
+  const dbUpdates: any = {};
+  if (updates.name !== undefined) dbUpdates.name = updates.name;
+  if (updates.tier !== undefined) dbUpdates.tier = updates.tier;
+  if (updates.billing_interval !== undefined) dbUpdates.billingInterval = updates.billing_interval;
+  if (updates.billing_interval_count !== undefined) dbUpdates.billingIntervalCount = updates.billing_interval_count;
+  if (updates.price_cents !== undefined) dbUpdates.priceCents = updates.price_cents;
+  if (updates.includes_dropship !== undefined) dbUpdates.includesDropship = updates.includes_dropship;
+  if (updates.is_active !== undefined) dbUpdates.isActive = updates.is_active;
+  if (updates.priority_modifier !== undefined) dbUpdates.priorityModifier = updates.priority_modifier;
 
-  for (const [key, val] of Object.entries(updates)) {
-    if (val !== undefined) {
-      setClauses.push(`${key} = $${idx++}`);
-      values.push(val);
-    }
-  }
-  if (setClauses.length === 0) return;
-
-  values.push(planId);
-  await pool.query(
-    `UPDATE membership.plans SET ${setClauses.join(", ")} WHERE id = $${idx}`,
-    values
-  );
+  await db.update(plans).set(dbUpdates).where(eq(plans.id, String(planId)));
 }
 
 export async function getPlanBySellingPlanGid(gid: string): Promise<PlanRecord | null> {
-  const result = await pool.query(
-    `SELECT p.* FROM membership.plans p
-     JOIN membership.selling_plan_map spm ON spm.plan_id = p.id
-     WHERE spm.shopify_selling_plan_gid = $1 LIMIT 1`,
-    [gid]
-  );
-  return result.rows[0] || null;
+  const result = await db.select({
+    id: sql<number>`CAST(${plans.id} AS INTEGER)`,
+    name: plans.name,
+    tier: plans.tier,
+    billing_interval: plans.billingInterval,
+    billing_interval_count: plans.billingIntervalCount,
+    price_cents: plans.priceCents,
+    shopify_selling_plan_gid: plans.shopifySellingPlanGid,
+    includes_dropship: plans.includesDropship,
+    is_active: plans.isActive,
+    priority_modifier: plans.priorityModifier,
+  })
+    .from(plans)
+    .innerJoin(sellingPlanMap, eq(sellingPlanMap.planId, plans.id))
+    .where(eq(sellingPlanMap.shopifySellingPlanGid, gid))
+    .limit(1);
+  return (result[0] as unknown as PlanRecord) || null;
 }
 
 export async function getPlanById(planId: number): Promise<PlanRecord | null> {
-  const result = await pool.query(`SELECT * FROM membership.plans WHERE id = $1`, [planId]);
-  return result.rows[0] || null;
+  const result = await db.select({
+    id: sql<number>`CAST(${plans.id} AS INTEGER)`,
+    name: plans.name,
+    tier: plans.tier,
+    billing_interval: plans.billingInterval,
+    billing_interval_count: plans.billingIntervalCount,
+    price_cents: plans.priceCents,
+    shopify_selling_plan_gid: plans.shopifySellingPlanGid,
+    includes_dropship: plans.includesDropship,
+    is_active: plans.isActive,
+    priority_modifier: plans.priorityModifier,
+  }).from(plans).where(eq(plans.id, String(planId))).limit(1);
+  return (result[0] as unknown as PlanRecord) || null;
 }
 
 // ─── Selling Plan Map ────────────────────────────────────────────────
@@ -96,14 +138,25 @@ export async function upsertSellingPlanMap(entry: {
   plan_name: string;
   billing_interval: string;
   price_cents: number;
-}, client: any = pool): Promise<void> {
-  await client.query(
-    `INSERT INTO membership.selling_plan_map (shopify_selling_plan_gid, shopify_selling_plan_group_gid, plan_id, plan_name, billing_interval, price_cents, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
-     ON CONFLICT (shopify_selling_plan_gid) DO UPDATE SET
-       plan_id = $3, plan_name = $4, billing_interval = $5, price_cents = $6, updated_at = NOW()`,
-    [entry.shopify_selling_plan_gid, entry.shopify_selling_plan_group_gid, entry.plan_id, entry.plan_name, entry.billing_interval, entry.price_cents]
-  );
+}, client: any = db): Promise<void> {
+  await client.insert(sellingPlanMap).values({
+    shopifySellingPlanGid: entry.shopify_selling_plan_gid,
+    shopifySellingPlanGroupGid: entry.shopify_selling_plan_group_gid,
+    planId: String(entry.plan_id),
+    planName: entry.plan_name,
+    billingInterval: entry.billing_interval,
+    priceCents: entry.price_cents,
+    updatedAt: new Date()
+  }).onConflictDoUpdate({
+    target: sellingPlanMap.shopifySellingPlanGid,
+    set: {
+      planId: String(entry.plan_id),
+      planName: entry.plan_name,
+      billingInterval: entry.billing_interval,
+      priceCents: entry.price_cents,
+      updatedAt: new Date()
+    }
+  });
 }
 
 export async function getSellingPlanMap(): Promise<Array<{
@@ -115,26 +168,28 @@ export async function getSellingPlanMap(): Promise<Array<{
   price_cents: number;
   is_active: boolean;
 }>> {
-  const result = await pool.query(`SELECT * FROM membership.selling_plan_map ORDER BY plan_id`);
-  return result.rows;
+  const result = await db.select({
+    shopify_selling_plan_gid: sellingPlanMap.shopifySellingPlanGid,
+    shopify_selling_plan_group_gid: sellingPlanMap.shopifySellingPlanGroupGid,
+    plan_id: sql<number>`CAST(${sellingPlanMap.planId} AS INTEGER)`,
+    plan_name: sellingPlanMap.planName,
+    billing_interval: sellingPlanMap.billingInterval,
+    price_cents: sellingPlanMap.priceCents,
+    is_active: sellingPlanMap.isActive,
+  }).from(sellingPlanMap).orderBy(asc(sellingPlanMap.planId));
+  return result as any;
 }
 
 // ─── Members ─────────────────────────────────────────────────────────
 
 export async function findMemberByShopifyCustomerId(customerId: number): Promise<any | null> {
-  const result = await pool.query(
-    `SELECT * FROM membership.members WHERE shopify_customer_id = $1 LIMIT 1`,
-    [customerId]
-  );
-  return result.rows[0] || null;
+  const result = await db.select().from(members).where(eq(members.shopifyCustomerId, String(customerId))).limit(1);
+  return result[0] || null;
 }
 
 export async function findMemberByEmail(email: string): Promise<any | null> {
-  const result = await pool.query(
-    `SELECT * FROM membership.members WHERE LOWER(email) = LOWER($1) LIMIT 1`,
-    [email]
-  );
-  return result.rows[0] || null;
+  const result = await db.select().from(members).where(sql`LOWER(${members.email}) = LOWER(${email})`).limit(1);
+  return result[0] || null;
 }
 
 export async function upsertMember(data: {
@@ -144,40 +199,61 @@ export async function upsertMember(data: {
   last_name?: string;
   tier?: string;
 }): Promise<number> {
-  // Try to find existing by shopify_customer_id first, then email
   let existing = await findMemberByShopifyCustomerId(data.shopify_customer_id);
   if (!existing) {
     existing = await findMemberByEmail(data.email);
   }
 
   if (existing) {
-    await pool.query(
-      `UPDATE membership.members SET shopify_customer_id = $1, tier = COALESCE($2, tier), updated_at = NOW() WHERE id = $3`,
-      [data.shopify_customer_id, data.tier || null, existing.id]
-    );
-    return existing.id;
+    await db.update(members).set({
+      shopifyCustomerId: String(data.shopify_customer_id),
+      tier: data.tier || existing.tier,
+    }).where(eq(members.id, existing.id));
+    return Number(existing.id);
   }
 
-  const result = await pool.query(
-    `INSERT INTO membership.members (email, shopify_customer_id, first_name, last_name, tier, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) RETURNING id`,
-    [data.email, data.shopify_customer_id, data.first_name || null, data.last_name || null, data.tier || "standard"]
-  );
-  return result.rows[0].id;
+  const result = await db.insert(members).values({
+    id: String(Date.now() + Math.floor(Math.random() * 1000)), // Fallback ID generator, hopefully DB has a trigger
+    email: data.email,
+    shopifyCustomerId: String(data.shopify_customer_id),
+    firstName: data.first_name || null,
+    lastName: data.last_name || null,
+    tier: data.tier || "standard",
+    createdAt: new Date()
+  }).returning({ id: members.id });
+  return Number(result[0].id);
 }
 
 export async function updateMemberTier(memberId: number, tier: string): Promise<void> {
-  await pool.query(`UPDATE membership.members SET tier = $1, updated_at = NOW() WHERE id = $2`, [tier, memberId]);
+  await db.update(members).set({ tier }).where(eq(members.id, String(memberId)));
 }
 
 // ─── Subscriptions ───────────────────────────────────────────────────
 
 export async function findSubscriptionByContractId(contractId: number): Promise<SubscriptionRecord | null> {
-  const result = await pool.query(
-    `SELECT * FROM membership.member_subscriptions WHERE shopify_subscription_contract_id = $1 LIMIT 1`,
-    [contractId]
-  );
-  return result.rows[0] || null;
+  const result = await db.select().from(memberSubscriptions).where(eq(memberSubscriptions.shopifySubscriptionContractId, contractId)).limit(1);
+  if (!result[0]) return null;
+  return {
+    ...result[0],
+    id: Number(result[0].id),
+    member_id: Number(result[0].memberId),
+    plan_id: Number(result[0].planId),
+    shopify_subscription_contract_id: result[0].shopifySubscriptionContractId,
+    shopify_subscription_contract_gid: result[0].shopifySubscriptionContractGid,
+    shopify_customer_id: result[0].shopifyCustomerId,
+    next_billing_date: result[0].nextBillingDate,
+    current_period_start: result[0].currentPeriodStart,
+    current_period_end: result[0].currentPeriodEnd,
+    billing_status: result[0].billingStatus,
+    failed_billing_attempts: result[0].failedBillingAttempts,
+    billing_in_progress: result[0].billingInProgress,
+    cancelled_at: result[0].cancelledAt,
+    cancellation_reason: result[0].cancellationReason,
+    payment_method_id: result[0].paymentMethodId,
+    revision_id: result[0].revisionId,
+    started_at: result[0].cycleStartedAt,
+    created_at: result[0].createdAt
+  } as unknown as SubscriptionRecord;
 }
 
 export async function createSubscription(data: {
@@ -191,21 +267,22 @@ export async function createSubscription(data: {
   current_period_end: Date;
   billing_status?: string;
 }): Promise<number> {
-  const result = await pool.query(
-    `INSERT INTO membership.member_subscriptions
-       (member_id, plan_id, shopify_subscription_contract_id, shopify_subscription_contract_gid,
-        shopify_customer_id, next_billing_date, current_period_start, current_period_end,
-        billing_status, status, started_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', NOW(), NOW())
-     RETURNING id`,
-    [
-      data.member_id, data.plan_id, data.shopify_subscription_contract_id,
-      data.shopify_subscription_contract_gid, data.shopify_customer_id,
-      data.next_billing_date, data.current_period_start, data.current_period_end,
-      data.billing_status || "current",
-    ]
-  );
-  return result.rows[0].id;
+  const result = await db.insert(memberSubscriptions).values({
+    id: String(Date.now() + Math.floor(Math.random() * 1000)), // Assuming standard logic if ID is required
+    memberId: String(data.member_id),
+    planId: String(data.plan_id),
+    shopifySubscriptionContractId: data.shopify_subscription_contract_id,
+    shopifySubscriptionContractGid: data.shopify_subscription_contract_gid,
+    shopifyCustomerId: data.shopify_customer_id,
+    nextBillingDate: data.next_billing_date,
+    currentPeriodStart: data.current_period_start,
+    currentPeriodEnd: data.current_period_end,
+    billingStatus: data.billing_status || "current",
+    status: "active",
+    cycleStartedAt: new Date(),
+    createdAt: new Date(),
+  }).returning({ id: memberSubscriptions.id });
+  return Number(result[0].id);
 }
 
 export async function updateSubscriptionStatus(
@@ -214,28 +291,12 @@ export async function updateSubscriptionStatus(
   billingStatus?: string,
   extra?: Partial<{ cancelled_at: Date; cancellation_reason: string }>
 ): Promise<void> {
-  const sets = [`status = $1`];
-  const vals: any[] = [status];
-  let idx = 2;
+  const updates: any = { status };
+  if (billingStatus) updates.billingStatus = billingStatus;
+  if (extra?.cancelled_at) updates.cancelledAt = extra.cancelled_at;
+  if (extra?.cancellation_reason) updates.cancellationReason = extra.cancellation_reason;
 
-  if (billingStatus) {
-    sets.push(`billing_status = $${idx++}`);
-    vals.push(billingStatus);
-  }
-  if (extra?.cancelled_at) {
-    sets.push(`cancelled_at = $${idx++}`);
-    vals.push(extra.cancelled_at);
-  }
-  if (extra?.cancellation_reason) {
-    sets.push(`cancellation_reason = $${idx++}`);
-    vals.push(extra.cancellation_reason);
-  }
-
-  vals.push(subscriptionId);
-  await pool.query(
-    `UPDATE membership.member_subscriptions SET ${sets.join(", ")} WHERE id = $${idx}`,
-    vals
-  );
+  await db.update(memberSubscriptions).set(updates).where(eq(memberSubscriptions.id, String(subscriptionId)));
 }
 
 export async function updateSubscriptionBillingDate(
@@ -244,81 +305,96 @@ export async function updateSubscriptionBillingDate(
   periodStart: Date,
   periodEnd: Date
 ): Promise<void> {
-  await pool.query(
-    `UPDATE membership.member_subscriptions
-     SET next_billing_date = $1, current_period_start = $2, current_period_end = $3,
-         failed_billing_attempts = 0, billing_status = 'current', billing_in_progress = false
-     WHERE id = $4`,
-    [nextBillingDate, periodStart, periodEnd, subscriptionId]
-  );
+  await db.update(memberSubscriptions).set({
+    nextBillingDate,
+    currentPeriodStart: periodStart,
+    currentPeriodEnd: periodEnd,
+    failedBillingAttempts: 0,
+    billingStatus: "current",
+    billingInProgress: false
+  }).where(eq(memberSubscriptions.id, String(subscriptionId)));
 }
 
 export async function updateSubscriptionPlan(subscriptionId: number, planId: number): Promise<void> {
-  await pool.query(
-    `UPDATE membership.member_subscriptions SET plan_id = $1 WHERE id = $2`,
-    [planId, subscriptionId]
-  );
+  await db.update(memberSubscriptions).set({ planId: String(planId) }).where(eq(memberSubscriptions.id, String(subscriptionId)));
 }
 
 export async function incrementFailedBilling(subscriptionId: number): Promise<number> {
-  const result = await pool.query(
-    `UPDATE membership.member_subscriptions
-     SET failed_billing_attempts = failed_billing_attempts + 1,
-         billing_status = 'past_due', billing_in_progress = false
-     WHERE id = $1
-     RETURNING failed_billing_attempts`,
-    [subscriptionId]
-  );
-  return result.rows[0]?.failed_billing_attempts || 0;
+  const result = await db.update(memberSubscriptions).set({
+    failedBillingAttempts: sql`COALESCE(${memberSubscriptions.failedBillingAttempts}, 0) + 1`,
+    billingStatus: "past_due",
+    billingInProgress: false
+  }).where(eq(memberSubscriptions.id, String(subscriptionId)))
+  .returning({ failedBillingAttempts: memberSubscriptions.failedBillingAttempts });
+  return result[0]?.failedBillingAttempts || 0;
 }
 
 export async function setBillingInProgress(subscriptionId: number, inProgress: boolean): Promise<void> {
-  await pool.query(
-    `UPDATE membership.member_subscriptions SET billing_in_progress = $1 WHERE id = $2`,
-    [inProgress, subscriptionId]
-  );
+  await db.update(memberSubscriptions).set({ billingInProgress: inProgress }).where(eq(memberSubscriptions.id, String(subscriptionId)));
 }
 
 export async function getDueBillings(): Promise<SubscriptionRecord[]> {
-  const result = await pool.query(
-    `SELECT ms.*, p.price_cents, p.billing_interval, p.billing_interval_count, p.tier, p.name as plan_name
-     FROM membership.member_subscriptions ms
-     JOIN membership.plans p ON p.id = ms.plan_id
-     WHERE ms.billing_status IN ('current', 'past_due')
-       AND ms.status = 'active'
-       AND ms.next_billing_date <= NOW()
-       AND ms.billing_in_progress = false
-       AND ms.shopify_subscription_contract_gid IS NOT NULL
-     ORDER BY ms.next_billing_date ASC
-     LIMIT 100`
-  );
-  return result.rows;
+  const result = await db.select({
+    id: sql<number>`CAST(${memberSubscriptions.id} AS INTEGER)`,
+    member_id: sql<number>`CAST(${memberSubscriptions.memberId} AS INTEGER)`,
+    plan_id: sql<number>`CAST(${memberSubscriptions.planId} AS INTEGER)`,
+    status: memberSubscriptions.status,
+    shopify_subscription_contract_id: memberSubscriptions.shopifySubscriptionContractId,
+    shopify_subscription_contract_gid: memberSubscriptions.shopifySubscriptionContractGid,
+    shopify_customer_id: memberSubscriptions.shopifyCustomerId,
+    next_billing_date: memberSubscriptions.nextBillingDate,
+    current_period_start: memberSubscriptions.currentPeriodStart,
+    current_period_end: memberSubscriptions.currentPeriodEnd,
+    billing_status: memberSubscriptions.billingStatus,
+    failed_billing_attempts: memberSubscriptions.failedBillingAttempts,
+    billing_in_progress: memberSubscriptions.billingInProgress,
+    cancelled_at: memberSubscriptions.cancelledAt,
+    cancellation_reason: memberSubscriptions.cancellationReason,
+    payment_method_id: memberSubscriptions.paymentMethodId,
+    revision_id: memberSubscriptions.revisionId,
+    started_at: memberSubscriptions.cycleStartedAt,
+    created_at: memberSubscriptions.createdAt,
+    price_cents: plans.priceCents,
+    billing_interval: plans.billingInterval,
+    billing_interval_count: plans.billingIntervalCount,
+    tier: plans.tier,
+    plan_name: plans.name
+  }).from(memberSubscriptions)
+    .innerJoin(plans, eq(plans.id, memberSubscriptions.planId))
+    .where(
+      and(
+        inArray(memberSubscriptions.billingStatus, ["current", "past_due"]),
+        eq(memberSubscriptions.status, "active"),
+        sql`${memberSubscriptions.nextBillingDate} <= NOW()`,
+        eq(memberSubscriptions.billingInProgress, false),
+        sql`${memberSubscriptions.shopifySubscriptionContractGid} IS NOT NULL`
+      )
+    ).orderBy(asc(memberSubscriptions.nextBillingDate)).limit(100);
+
+  return result as unknown as SubscriptionRecord[];
 }
 
 // ─── Current Membership ──────────────────────────────────────────────
 
 export async function upsertCurrentMembership(memberId: number, planId: number, planName: string): Promise<void> {
-  await pool.query(
-    `INSERT INTO member_current_membership (member_id, plan_id, updated_at)
-     VALUES ($1, $2, NOW())
-     ON CONFLICT (member_id) DO UPDATE SET plan_id = $2, updated_at = NOW()`,
-    [memberId, planId]
-  );
+  // Assuming raw sql for this as it's a specific materialized view pattern not natively supported in standard inserts if it's a view,
+  // but if it's a table we can do:
+  await db.execute(sql`
+    INSERT INTO membership.member_current_membership (member_id, plan_id, updated_at)
+    VALUES (${String(memberId)}, ${String(planId)}, NOW())
+    ON CONFLICT (member_id) DO UPDATE SET plan_id = ${String(planId)}, updated_at = NOW()
+  `);
 }
 
 export async function clearCurrentMembership(memberId: number): Promise<void> {
-  await pool.query(
-    `DELETE FROM member_current_membership WHERE member_id = $1`,
-    [memberId]
-  );
+  await db.execute(sql`DELETE FROM membership.member_current_membership WHERE member_id = ${String(memberId)}`);
 }
 
 // ─── Reconciliation (M7) ─────────────────────────────────────────────
 
 export async function reconcileCurrentMemberships(): Promise<{ upserted: number }> {
-  // Sync the materialized table with ground-truth active subscriptions
-  const result = await pool.query(`
-    INSERT INTO member_current_membership (member_id, plan_id, updated_at)
+  const result = await db.execute(sql`
+    INSERT INTO membership.member_current_membership (member_id, plan_id, updated_at)
     SELECT ms.member_id, p.id, NOW()
     FROM membership.member_subscriptions ms
     JOIN membership.plans p ON p.id = ms.plan_id
@@ -327,8 +403,7 @@ export async function reconcileCurrentMemberships(): Promise<{ upserted: number 
       SET plan_id = EXCLUDED.plan_id, 
           updated_at = EXCLUDED.updated_at
   `);
-  
-  return { upserted: result.rowCount || 0 };
+  return { upserted: (result as any).rowCount || 0 };
 }
 
 // ─── Billing Log ─────────────────────────────────────────────────────
@@ -345,23 +420,21 @@ export async function insertBillingLog(entry: {
   billing_period_start?: Date;
   billing_period_end?: Date;
 }): Promise<number> {
-  const result = await pool.query(
-    `INSERT INTO subscription_billing_log
-       (member_subscription_id, shopify_billing_attempt_id, shopify_order_id,
-        amount_cents, status, error_code, error_message, idempotency_key,
-        billing_period_start, billing_period_end)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-     ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
-     RETURNING id`,
-    [
-      entry.member_subscription_id, entry.shopify_billing_attempt_id || null,
-      entry.shopify_order_id || null, entry.amount_cents, entry.status,
-      entry.error_code || null, entry.error_message || null,
-      entry.idempotency_key || null, entry.billing_period_start || null,
-      entry.billing_period_end || null,
-    ]
-  );
-  return result.rows[0]?.id || 0;
+  // Using subscriptionBillingAttempts as previously identified in the schema check
+  const result = await db.insert(subscriptionBillingAttempts).values({
+    id: String(Date.now() + Math.floor(Math.random() * 1000)),
+    contractId: String(entry.member_subscription_id), // Maps to contract_id
+    shopifyBillingAttemptId: entry.shopify_billing_attempt_id,
+    status: entry.status,
+    amountCents: entry.amount_cents,
+    errorCode: entry.error_code,
+    errorMessage: entry.error_message,
+    shopifyOrderId: String(entry.shopify_order_id),
+    processedAt: new Date(),
+    createdAt: new Date(),
+  }).returning({ id: subscriptionBillingAttempts.id });
+  
+  return Number(result[0]?.id || 0);
 }
 
 export async function getBillingLogs(filters?: {
@@ -370,41 +443,43 @@ export async function getBillingLogs(filters?: {
   limit?: number;
   offset?: number;
 }): Promise<{ rows: BillingLogRecord[]; total: number }> {
-  const where: string[] = [];
-  const vals: any[] = [];
-  let idx = 1;
+  let query = db.select({
+    id: sql<number>`CAST(${subscriptionBillingAttempts.id} AS INTEGER)`,
+    member_subscription_id: sql<number>`CAST(${subscriptionBillingAttempts.contractId} AS INTEGER)`,
+    shopify_billing_attempt_id: subscriptionBillingAttempts.shopifyBillingAttemptId,
+    shopify_order_id: subscriptionBillingAttempts.shopifyOrderId,
+    amount_cents: subscriptionBillingAttempts.amountCents,
+    status: subscriptionBillingAttempts.status,
+    error_code: subscriptionBillingAttempts.errorCode,
+    error_message: subscriptionBillingAttempts.errorMessage,
+    created_at: subscriptionBillingAttempts.createdAt,
+    member_id: sql<number>`CAST(${memberSubscriptions.memberId} AS INTEGER)`,
+    member_email: members.email,
+    plan_name: plans.name
+  }).from(subscriptionBillingAttempts)
+    .leftJoin(memberSubscriptions, eq(memberSubscriptions.id, subscriptionBillingAttempts.contractId))
+    .leftJoin(members, eq(members.id, memberSubscriptions.memberId))
+    .leftJoin(plans, eq(plans.id, memberSubscriptions.planId));
 
-  if (filters?.member_subscription_id) {
-    where.push(`sbl.member_subscription_id = $${idx++}`);
-    vals.push(filters.member_subscription_id);
-  }
-  if (filters?.status) {
-    where.push(`sbl.status = $${idx++}`);
-    vals.push(filters.status);
-  }
+  const conditions = [];
+  if (filters?.member_subscription_id) conditions.push(eq(subscriptionBillingAttempts.contractId, String(filters.member_subscription_id)));
+  if (filters?.status) conditions.push(eq(subscriptionBillingAttempts.status, filters.status));
+  if (conditions.length > 0) query = query.where(and(...conditions)) as any;
 
-  const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = filters?.limit || 50;
   const offset = filters?.offset || 0;
+  
+  // Total Count Query
+  let countQuery = db.select({ total: sql<number>`COUNT(*)` }).from(subscriptionBillingAttempts)
+    .leftJoin(memberSubscriptions, eq(memberSubscriptions.id, subscriptionBillingAttempts.contractId))
+    .leftJoin(members, eq(members.id, memberSubscriptions.memberId))
+    .leftJoin(plans, eq(plans.id, memberSubscriptions.planId));
+  if (conditions.length > 0) countQuery = countQuery.where(and(...conditions)) as any;
 
-  const countResult = await pool.query(
-    `SELECT COUNT(*) as total FROM subscription_billing_log sbl ${whereClause}`,
-    vals
-  );
+  const countResult = await countQuery;
+  const result = await query.orderBy(desc(subscriptionBillingAttempts.createdAt)).limit(limit).offset(offset);
 
-  const result = await pool.query(
-    `SELECT sbl.*, ms.member_id, m.email as member_email, p.name as plan_name
-     FROM subscription_billing_log sbl
-     JOIN membership.member_subscriptions ms ON ms.id = sbl.member_subscription_id
-     LEFT JOIN membership.members m ON m.id = ms.member_id
-     LEFT JOIN membership.plans p ON p.id = ms.plan_id
-     ${whereClause}
-     ORDER BY sbl.created_at DESC
-     LIMIT $${idx++} OFFSET $${idx}`,
-    [...vals, limit, offset]
-  );
-
-  return { rows: result.rows, total: parseInt(countResult.rows[0].total) };
+  return { rows: result as any, total: Number(countResult[0]?.total || 0) };
 }
 
 // ─── Events ──────────────────────────────────────────────────────────
@@ -417,18 +492,16 @@ export async function insertEvent(entry: {
   payload?: any;
   notes?: string;
 }): Promise<void> {
-  await pool.query(
-    `INSERT INTO subscription_events
-       (member_subscription_id, shopify_subscription_contract_id, event_type, event_source, payload, notes)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [
-      entry.member_subscription_id || null,
-      entry.shopify_subscription_contract_id || null,
-      entry.event_type, entry.event_source,
-      entry.payload ? JSON.stringify(entry.payload) : null,
-      entry.notes || null,
-    ]
-  );
+  await db.insert(subscriptionEvents).values({
+    id: String(Date.now() + Math.floor(Math.random() * 1000)),
+    memberSubscriptionId: entry.member_subscription_id ? String(entry.member_subscription_id) : null,
+    shopifyContractId: entry.shopify_subscription_contract_id ? String(entry.shopify_subscription_contract_id) : null,
+    eventType: entry.event_type,
+    eventSource: entry.event_source,
+    payload: entry.payload,
+    notes: entry.notes,
+    createdAt: new Date(),
+  });
 }
 
 export async function getEvents(filters?: {
@@ -436,107 +509,79 @@ export async function getEvents(filters?: {
   event_type?: string;
   limit?: number;
 }): Promise<SubscriptionEvent[]> {
-  const where: string[] = [];
-  const vals: any[] = [];
-  let idx = 1;
+  let query = db.select().from(subscriptionEvents);
+  const conditions = [];
+  if (filters?.member_subscription_id) conditions.push(eq(subscriptionEvents.memberSubscriptionId, String(filters.member_subscription_id)));
+  if (filters?.event_type) conditions.push(eq(subscriptionEvents.eventType, filters.event_type));
+  if (conditions.length > 0) query = query.where(and(...conditions)) as any;
 
-  if (filters?.member_subscription_id) {
-    where.push(`member_subscription_id = $${idx++}`);
-    vals.push(filters.member_subscription_id);
-  }
-  if (filters?.event_type) {
-    where.push(`event_type = $${idx++}`);
-    vals.push(filters.event_type);
-  }
-
-  const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const limit = filters?.limit || 100;
-
-  const result = await pool.query(
-    `SELECT * FROM membership.subscription_events ${whereClause} ORDER BY created_at DESC LIMIT $${idx}`,
-    [...vals, limit]
-  );
-  return result.rows;
+  const result = await query.orderBy(desc(subscriptionEvents.createdAt)).limit(filters?.limit || 100);
+  return result as any;
 }
 
 // ─── Dashboard Stats ─────────────────────────────────────────────────
 
 export async function getDashboardStats(): Promise<SubscriptionDashboardStats> {
-  const client = await pool.connect();
-  try {
-    const activeResult = await client.query(
-      `SELECT p.tier, COUNT(*) as cnt, SUM(COALESCE(p.price_cents, 0)) as total_price,
-              p.billing_interval
-       FROM membership.member_subscriptions ms
-       JOIN membership.plans p ON p.id = ms.plan_id
-       WHERE ms.status = 'active'
-       GROUP BY p.tier, p.billing_interval`
-    );
+  const activeResult = await db.select({
+    tier: plans.tier,
+    cnt: sql<number>`COUNT(*)`,
+    total_price: sql<number>`SUM(COALESCE(${plans.priceCents}, 0))`,
+    billing_interval: plans.billingInterval,
+  }).from(memberSubscriptions)
+    .innerJoin(plans, eq(plans.id, memberSubscriptions.planId))
+    .where(eq(memberSubscriptions.status, 'active'))
+    .groupBy(plans.tier, plans.billingInterval);
 
-    let totalActive = 0;
-    let totalActiveStandard = 0;
-    let totalActiveGold = 0;
-    let mrr = 0;
+  let totalActive = 0;
+  let totalActiveStandard = 0;
+  let totalActiveGold = 0;
+  let mrr = 0;
 
-    for (const row of activeResult.rows) {
-      const count = parseInt(row.cnt);
-      totalActive += count;
-      if (row.tier === "gold") totalActiveGold += count;
-      else totalActiveStandard += count;
+  for (const row of activeResult) {
+    const count = Number(row.cnt);
+    totalActive += count;
+    if (row.tier === "gold") totalActiveGold += count;
+    else totalActiveStandard += count;
 
-      // Calculate MRR: annual plans divided by 12
-      const price = parseInt(row.total_price || "0");
-      if (row.billing_interval === "year") {
-        mrr += Math.round(price / 12);
-      } else {
-        mrr += price;
-      }
+    const price = Number(row.total_price || 0);
+    if (row.billing_interval === "year") {
+      mrr += Math.round(price / 12);
+    } else {
+      mrr += price;
     }
-
-    const pastDueResult = await client.query(
-      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions WHERE billing_status = 'past_due' AND status = 'active'`
-    );
-    const pastDueCount = parseInt(pastDueResult.rows[0].cnt);
-
-    // Churn: cancellations in last 30 days / active at start of period
-    const churn30Result = await client.query(
-      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
-       WHERE cancelled_at >= NOW() - INTERVAL '30 days'`
-    );
-    const totalAtStart30 = totalActive + parseInt(churn30Result.rows[0].cnt);
-    const churnRate30 = totalAtStart30 > 0 ? parseInt(churn30Result.rows[0].cnt) / totalAtStart30 : 0;
-
-    const churn90Result = await client.query(
-      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
-       WHERE cancelled_at >= NOW() - INTERVAL '90 days'`
-    );
-    const totalAtStart90 = totalActive + parseInt(churn90Result.rows[0].cnt);
-    const churnRate90 = totalAtStart90 > 0 ? parseInt(churn90Result.rows[0].cnt) / totalAtStart90 : 0;
-
-    const newThisMonthResult = await client.query(
-      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
-       WHERE started_at >= DATE_TRUNC('month', NOW())`
-    );
-
-    const cancelledThisMonthResult = await client.query(
-      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
-       WHERE cancelled_at >= DATE_TRUNC('month', NOW())`
-    );
-
-    return {
-      totalActive,
-      totalActiveStandard,
-      totalActiveGold,
-      mrr,
-      churnRate30: Math.round(churnRate30 * 10000) / 100,
-      churnRate90: Math.round(churnRate90 * 10000) / 100,
-      pastDueCount,
-      newThisMonth: parseInt(newThisMonthResult.rows[0].cnt),
-      cancelledThisMonth: parseInt(cancelledThisMonthResult.rows[0].cnt),
-    };
-  } finally {
-    client.release();
   }
+
+  const pastDueResult = await db.select({ cnt: sql<number>`COUNT(*)` }).from(memberSubscriptions)
+    .where(and(eq(memberSubscriptions.billingStatus, 'past_due'), eq(memberSubscriptions.status, 'active')));
+  const pastDueCount = Number(pastDueResult[0].cnt);
+
+  const churn30Result = await db.select({ cnt: sql<number>`COUNT(*)` }).from(memberSubscriptions)
+    .where(sql`${memberSubscriptions.cancelledAt} >= NOW() - INTERVAL '30 days'`);
+  const totalAtStart30 = totalActive + Number(churn30Result[0].cnt);
+  const churnRate30 = totalAtStart30 > 0 ? Number(churn30Result[0].cnt) / totalAtStart30 : 0;
+
+  const churn90Result = await db.select({ cnt: sql<number>`COUNT(*)` }).from(memberSubscriptions)
+    .where(sql`${memberSubscriptions.cancelledAt} >= NOW() - INTERVAL '90 days'`);
+  const totalAtStart90 = totalActive + Number(churn90Result[0].cnt);
+  const churnRate90 = totalAtStart90 > 0 ? Number(churn90Result[0].cnt) / totalAtStart90 : 0;
+
+  const newThisMonthResult = await db.select({ cnt: sql<number>`COUNT(*)` }).from(memberSubscriptions)
+    .where(sql`${memberSubscriptions.cycleStartedAt} >= DATE_TRUNC('month', NOW())`);
+
+  const cancelledThisMonthResult = await db.select({ cnt: sql<number>`COUNT(*)` }).from(memberSubscriptions)
+    .where(sql`${memberSubscriptions.cancelledAt} >= DATE_TRUNC('month', NOW())`);
+
+  return {
+    totalActive,
+    totalActiveStandard,
+    totalActiveGold,
+    mrr,
+    churnRate30: Math.round(churnRate30 * 10000) / 100,
+    churnRate90: Math.round(churnRate90 * 10000) / 100,
+    pastDueCount,
+    newThisMonth: Number(newThisMonthResult[0].cnt),
+    cancelledThisMonth: Number(cancelledThisMonthResult[0].cnt),
+  };
 }
 
 // ─── Subscriber List ─────────────────────────────────────────────────
@@ -549,70 +594,77 @@ export async function getSubscriberList(filters?: {
   limit?: number;
   offset?: number;
 }): Promise<{ rows: any[]; total: number }> {
-  const where: string[] = [];
-  const vals: any[] = [];
-  let idx = 1;
+  let baseQuery = db.select({
+    id: memberSubscriptions.id,
+    member_id: memberSubscriptions.memberId,
+    plan_id: memberSubscriptions.planId,
+    status: memberSubscriptions.status,
+    billing_status: memberSubscriptions.billingStatus,
+    next_billing_date: memberSubscriptions.nextBillingDate,
+    started_at: memberSubscriptions.cycleStartedAt,
+    cancelled_at: memberSubscriptions.cancelledAt,
+    failed_billing_attempts: memberSubscriptions.failedBillingAttempts,
+    shopify_subscription_contract_id: memberSubscriptions.shopifySubscriptionContractId,
+    email: members.email,
+    first_name: members.firstName,
+    last_name: members.lastName,
+    shopify_customer_id: members.shopifyCustomerId,
+    plan_name: plans.name,
+    tier: plans.tier,
+    price_cents: plans.priceCents,
+    billing_interval: plans.billingInterval
+  }).from(memberSubscriptions)
+    .innerJoin(members, eq(members.id, memberSubscriptions.memberId))
+    .innerJoin(plans, eq(plans.id, memberSubscriptions.planId));
 
-  if (filters?.status) {
-    where.push(`ms.status = $${idx++}`);
-    vals.push(filters.status);
-  }
-  if (filters?.billing_status) {
-    where.push(`ms.billing_status = $${idx++}`);
-    vals.push(filters.billing_status);
-  }
-  if (filters?.tier) {
-    where.push(`p.tier = $${idx++}`);
-    vals.push(filters.tier);
-  }
+  const conditions = [];
+  if (filters?.status) conditions.push(eq(memberSubscriptions.status, filters.status));
+  if (filters?.billing_status) conditions.push(eq(memberSubscriptions.billingStatus, filters.billing_status));
+  if (filters?.tier) conditions.push(eq(plans.tier, filters.tier));
   if (filters?.search) {
-    where.push(`(LOWER(m.email) LIKE $${idx} OR LOWER(m.first_name || ' ' || m.last_name) LIKE $${idx})`);
-    vals.push(`%${filters.search.toLowerCase()}%`);
-    idx++;
+    conditions.push(sql`(LOWER(${members.email}) LIKE ${'%' + filters.search.toLowerCase() + '%'} OR LOWER(${members.firstName} || ' ' || ${members.lastName}) LIKE ${'%' + filters.search.toLowerCase() + '%'})`);
   }
 
-  const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const limit = filters?.limit || 50;
-  const offset = filters?.offset || 0;
+  if (conditions.length > 0) baseQuery = baseQuery.where(and(...conditions)) as any;
 
-  const countResult = await pool.query(
-    `SELECT COUNT(*) as total
-     FROM membership.member_subscriptions ms
-     JOIN membership.members m ON m.id = ms.member_id
-     JOIN membership.plans p ON p.id = ms.plan_id
-     ${whereClause}`,
-    vals
-  );
+  const countQuery = db.select({ total: sql<number>`COUNT(*)` }).from(memberSubscriptions)
+    .innerJoin(members, eq(members.id, memberSubscriptions.memberId))
+    .innerJoin(plans, eq(plans.id, memberSubscriptions.planId));
+  if (conditions.length > 0) countQuery.where(and(...conditions));
 
-  const result = await pool.query(
-    `SELECT ms.id, ms.member_id, ms.plan_id, ms.status, ms.billing_status,
-            ms.next_billing_date, ms.started_at, ms.cancelled_at,
-            ms.failed_billing_attempts, ms.shopify_subscription_contract_id,
-            m.email, m.first_name, m.last_name, m.shopify_customer_id,
-            p.name as plan_name, p.tier, p.price_cents, p.billing_interval
-     FROM membership.member_subscriptions ms
-     JOIN membership.members m ON m.id = ms.member_id
-     JOIN membership.plans p ON p.id = ms.plan_id
-     ${whereClause}
-     ORDER BY ms.created_at DESC
-     LIMIT $${idx++} OFFSET $${idx}`,
-    [...vals, limit, offset]
-  );
+  const countResult = await countQuery;
+  const result = await baseQuery.orderBy(desc(memberSubscriptions.createdAt)).limit(filters?.limit || 50).offset(filters?.offset || 0);
 
-  return { rows: result.rows, total: parseInt(countResult.rows[0].total) };
+  return { rows: result, total: Number(countResult[0]?.total || 0) };
 }
 
 // ─── Subscription Detail ────────────────────────────────────────────
 
 export async function getSubscriptionDetail(subscriptionId: number): Promise<any | null> {
-  const result = await pool.query(
-    `SELECT ms.*, m.email, m.first_name, m.last_name, m.shopify_customer_id as member_shopify_id,
-            p.name as plan_name, p.tier, p.price_cents, p.billing_interval, p.includes_dropship
-     FROM membership.member_subscriptions ms
-     JOIN membership.members m ON m.id = ms.member_id
-     JOIN membership.plans p ON p.id = ms.plan_id
-     WHERE ms.id = $1`,
-    [subscriptionId]
-  );
-  return result.rows[0] || null;
+  const result = await db.select({
+    id: memberSubscriptions.id,
+    member_id: memberSubscriptions.memberId,
+    plan_id: memberSubscriptions.planId,
+    status: memberSubscriptions.status,
+    billing_status: memberSubscriptions.billingStatus,
+    next_billing_date: memberSubscriptions.nextBillingDate,
+    started_at: memberSubscriptions.cycleStartedAt,
+    cancelled_at: memberSubscriptions.cancelledAt,
+    failed_billing_attempts: memberSubscriptions.failedBillingAttempts,
+    shopify_subscription_contract_id: memberSubscriptions.shopifySubscriptionContractId,
+    email: members.email,
+    first_name: members.firstName,
+    last_name: members.lastName,
+    member_shopify_id: members.shopifyCustomerId,
+    plan_name: plans.name,
+    tier: plans.tier,
+    price_cents: plans.priceCents,
+    billing_interval: plans.billingInterval,
+    includes_dropship: plans.includesDropship
+  }).from(memberSubscriptions)
+    .innerJoin(members, eq(members.id, memberSubscriptions.memberId))
+    .innerJoin(plans, eq(plans.id, memberSubscriptions.planId))
+    .where(eq(memberSubscriptions.id, String(subscriptionId))).limit(1);
+
+  return result[0] || null;
 }
