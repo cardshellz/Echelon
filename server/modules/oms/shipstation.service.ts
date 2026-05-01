@@ -957,13 +957,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       }
 
       try {
-        const fulfillmentPush = (db as any).__fulfillmentPush;
-        if (fulfillmentPush) {
-          await fulfillmentPush.pushTracking(omsOrderId);
-        }
+        const { enqueueDelayedTrackingPush } = await import("./webhook-retry.worker");
+        await enqueueDelayedTrackingPush(db, omsOrderId);
+        console.log(`[ShipStation Webhook V2] Enqueued delayed tracking push for order ${omsOrderId}`);
       } catch (pushErr: any) {
         console.error(
-          `[ShipStation Webhook V2] Failed to push tracking for order ${omsOrderId}: ${pushErr.message}`,
+          `[ShipStation Webhook V2] Failed to enqueue tracking push for order ${omsOrderId}: ${pushErr.message}`,
         );
       }
     }
