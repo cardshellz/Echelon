@@ -354,18 +354,20 @@ function DualTrackHeader({
   // augment.
   const cancelledAt: string | null = po.cancelledAt ?? null;
   const cancelReason: string | null = po.cancelReason ?? null;
-  const cancelledBy: string | null = po.cancelledBy ?? null;
+  const relatedUsers: Record<string, { username: string; displayName: string | null }> | undefined = (po as any).relatedUsers;
+  const cancelledByFormatted = formatActor((po as any).cancelledBy, relatedUsers);
   const cancelExtras = (stageReachedAt: string | null | undefined): string[] => {
     if (!isCancelled || !cancelledAt) return [];
     const reached = !!stageReachedAt && new Date(stageReachedAt) <= new Date(cancelledAt);
+    const cancelledByPart = (po as any).cancelledBy ? ` by ${cancelledByFormatted}` : "";
     if (reached) {
       return [
-        `✅ Reached before cancellation (cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledBy ? ` by ${cancelledBy}` : ""})`,
+        `✅ Reached before cancellation (cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledByPart})`,
         cancelReason ? `Reason: ${cancelReason}` : "",
       ];
     }
     return [
-      `⛔ Not reached — PO cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledBy ? ` by ${cancelledBy}` : ""}`,
+      `⛔ Not reached — PO cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledByPart}`,
       cancelReason ? `Reason: ${cancelReason}` : "",
     ];
   };
@@ -374,7 +376,7 @@ function DualTrackHeader({
     draft: {
       ts: po.createdAt,
       extra: [
-        po.createdBy ? `Created by ${po.createdBy}` : null,
+        po.createdBy ? `Created by ${formatActor(po.createdBy, relatedUsers)}` : null,
         ...cancelExtras(po.createdAt),
       ],
     },
@@ -544,12 +546,14 @@ function ExceptionCard({
   onResolve,
   onDismiss,
   busy,
+  relatedUsers,
 }: {
   ex: any;
   onAcknowledge: () => void;
   onResolve: (note: string) => void;
   onDismiss: (note: string) => void;
   busy: boolean;
+  relatedUsers?: Record<string, { username: string; displayName: string | null }>;
 }) {
   const severity = (ex.severity ?? "warn") as "info" | "warn" | "error";
   const borderClass =
@@ -609,7 +613,7 @@ function ExceptionCard({
             {detectedLabel && (
               <div className="text-xs text-muted-foreground mt-0.5">
                 Detected {detectedLabel}
-                {ex.detectedBy ? ` by ${ex.detectedBy}` : ""}
+                {ex.detectedBy ? ` by ${formatActor(ex.detectedBy, relatedUsers)}` : ""}
               </div>
             )}
             {ex.message && (
@@ -653,6 +657,32 @@ function ExceptionCard({
 
 /** Convert a dollar string to cents without floating-point artifacts */
 
+/**
+ * Resolve an actor ID (user UUID, 'system', 'cron:*', 'agent:*') to a
+ * human-readable name using the relatedUsers map returned by the PO detail
+ * endpoint.
+ *
+ * Resolution order:
+ *   1. displayName when present
+ *   2. username
+ *   3. 'user:<first-7-chars-of-UUID>' as fallback for unknown IDs
+ *   4. Prefixed strings ('system', 'cron:*', 'agent:*') pass through unchanged
+ *   5. empty / undefined → '—'
+ */
+function formatActor(
+  actorId: string | null | undefined,
+  relatedUsers: Record<string, { username: string; displayName: string | null }> | undefined,
+): string {
+  if (!actorId) return "—";
+  // Prefixed non-UUID actor strings pass through unchanged
+  if (/^(system|cron:|agent:)/.test(actorId)) return actorId;
+  const user = relatedUsers?.[actorId];
+  if (user) {
+    return user.displayName || user.username;
+  }
+  // Unknown UUID: show short form for readability
+  return `user:${actorId.slice(0, 7)}`;
+}
 
 function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
   if (!cents && cents !== 0) return "$0.00";
@@ -752,6 +782,15 @@ export default function PurchaseOrderDetail() {
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
+
+  // PO detail endpoint resolves all referenced actor UUIDs (createdBy,
+  // cancelledBy, history.changedBy, exception.detectedBy/...) into a single
+  // map with displayName + username. Used by formatActor() everywhere actor
+  // strings appear in this component (cancellation banner, history rows,
+  // exception cards, etc.) so users see human names instead of raw UUIDs.
+  const relatedUsers: Record<string, { username: string; displayName: string | null }> | undefined =
+    (po as any)?.relatedUsers;
+  const cancelledByFormatted = formatActor((po as any)?.cancelledBy, relatedUsers);
 
   // Feature-flag redirect: when the new PO editor is enabled, land-on-draft
   // via direct URL should hop over to the new inline editor. Keeps this
@@ -1542,7 +1581,7 @@ export default function PurchaseOrderDetail() {
                 {po.cancelledAt
                   ? ` ${new Date(po.cancelledAt).toLocaleString()}`
                   : ""}
-                {po.cancelledBy ? ` by ${po.cancelledBy}` : ""}
+                {po.cancelledBy ? ` by ${cancelledByFormatted}` : ""}
               </span>
             </div>
             {po.cancelReason && (
@@ -2377,6 +2416,7 @@ export default function PurchaseOrderDetail() {
                     resolveExceptionMutation.isPending ||
                     dismissExceptionMutation.isPending
                   }
+                  relatedUsers={relatedUsers}
                 />
               ))}
             </div>
@@ -2422,7 +2462,7 @@ export default function PurchaseOrderDetail() {
                           <span className="text-muted-foreground">
                             {ex.status === "resolved" ? "resolved" : "dismissed"}{" "}
                             {ex.resolvedAt ? new Date(ex.resolvedAt).toLocaleDateString() : ""}
-                            {ex.resolvedBy ? ` by ${ex.resolvedBy}` : ""}
+                            {ex.resolvedBy ? ` by ${formatActor(ex.resolvedBy, relatedUsers)}` : ""}
                           </span>
                         </div>
                         {ex.resolutionNote && (
@@ -2469,7 +2509,7 @@ export default function PurchaseOrderDetail() {
                       {h.notes && <p className="text-sm mt-1">{h.notes}</p>}
                       <p className="text-xs text-muted-foreground mt-1">
                         {h.changedAt ? format(new Date(h.changedAt), "MMM d, yyyy h:mm a") : ""}
-                        {h.changedBy && ` • ${h.changedBy}`}
+                        {h.changedBy && ` • ${formatActor(h.changedBy, relatedUsers)}`}
                       </p>
                     </div>
                   </CardContent>

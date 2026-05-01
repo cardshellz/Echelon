@@ -15,8 +15,9 @@ import { PoExceptionError } from "./po-exceptions.service";
 import { renderPoHtml } from "./po-document";
 import * as emailService from "../notifications/email.service";
 import * as notificationService from "../notifications/notifications.service";
-import { sql } from "drizzle-orm";
+import { sql, inArray } from "drizzle-orm";
 import { db } from "../../db";
+import { users as identityUsers } from "../../storage/base";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 
 /**
@@ -1954,17 +1955,61 @@ export function registerPurchasingRoutes(app: Express) {
       const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
       if (!po) return res.status(404).json({ error: "Purchase order not found" });
 
-      const [lines, vendor, exceptionCount] = await Promise.all([
+      const [lines, vendor, exceptionCount, history, exceptions] = await Promise.all([
         purchasing.getPurchaseOrderLines(po.id),
         storage.getVendorById(po.vendorId),
         poExceptionsService.countOpenExceptions(po.id),
+        purchasing.getPoStatusHistory(po.id),
+        poExceptionsService.listExceptions(po.id, { includeResolved: true }),
       ]);
+
+      // Collect all distinct user IDs referenced on this PO for client-side
+      // display. Prefixed actor strings (system, cron:*, agent:*) are passed
+      // through unchanged by formatActor on the client — exclude them here.
+      const NON_UUID_PREFIX = /^(system|cron:|agent:)/;
+      const actorIds = new Set<string>();
+      const addActor = (id: string | null | undefined) => {
+        if (id && !NON_UUID_PREFIX.test(id)) actorIds.add(id);
+      };
+
+      // PO-level actor fields
+      addActor((po as any).createdBy);
+      addActor((po as any).cancelledBy);
+      addActor((po as any).approvedBy);
+      addActor((po as any).closedBy);
+      addActor((po as any).updatedBy);
+
+      // Status history actors
+      for (const h of history) {
+        addActor((h as any).changedBy);
+      }
+
+      // Exception actors
+      for (const ex of exceptions) {
+        addActor((ex as any).detectedBy);
+        addActor((ex as any).acknowledgedBy);
+        addActor((ex as any).resolvedBy);
+      }
+
+      // Single batch query — no N+1
+      let relatedUsers: Record<string, { username: string; displayName: string | null }> = {};
+      if (actorIds.size > 0) {
+        const rows = await db
+          .select({ id: identityUsers.id, username: identityUsers.username, displayName: identityUsers.displayName })
+          .from(identityUsers)
+          .where(inArray(identityUsers.id, [...actorIds]));
+        for (const row of rows) {
+          relatedUsers[row.id] = { username: row.username, displayName: row.displayName };
+        }
+      }
+
       res.json({
         ...po,
         lines,
         vendor,
         openExceptionCount: exceptionCount.count,
         maxOpenSeverity: exceptionCount.maxSeverity,
+        relatedUsers,
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
