@@ -11,6 +11,9 @@ import {
   productVariants,
   productTypes,
   inventoryLevels,
+  ebayCategoryAspects,
+  ebayTypeAspectDefaults,
+  ebayProductAspectOverrides,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
@@ -238,18 +241,15 @@ export const router = express.Router();
         return;
       }
 
-      const client = await pool.connect();
-      try {
         // Check cache freshness (24 hours)
-        const cacheCheck = await client.query(
-          `SELECT fetched_at FROM ebay_category_aspects
-           WHERE category_id = $1 LIMIT 1`,
-          [categoryId],
-        );
+        const cacheCheck = await db.select({ fetchedAt: ebayCategoryAspects.fetchedAt })
+          .from(ebayCategoryAspects)
+          .where(eq(ebayCategoryAspects.categoryId, categoryId))
+          .limit(1);
 
         const isFresh =
-          cacheCheck.rows.length > 0 &&
-          Date.now() - new Date(cacheCheck.rows[0].fetched_at).getTime() <
+          cacheCheck.length > 0 &&
+          Date.now() - new Date(cacheCheck[0].fetchedAt).getTime() <
             24 * 60 * 60 * 1000;
 
         if (!isFresh) {
@@ -307,58 +307,47 @@ export const router = express.Router();
           }
 
           // Delete old + insert fresh (transactional)
-          await client.query("BEGIN");
-          await client.query(
-            "DELETE FROM ebay_category_aspects WHERE category_id = $1",
-            [categoryId],
-          );
-          for (const a of aspects) {
-            await client.query(
-              `INSERT INTO ebay_category_aspects
-                 (category_id, aspect_name, aspect_required, aspect_mode, aspect_usage, aspect_values, aspect_order, fetched_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-              [
-                categoryId,
-                a.name,
-                a.required,
-                a.mode,
-                a.usage,
-                a.values ? JSON.stringify(a.values) : null,
-                a.order,
-              ],
-            );
-          }
-          await client.query("COMMIT");
+          await db.transaction(async (tx) => {
+            await tx.delete(ebayCategoryAspects).where(eq(ebayCategoryAspects.categoryId, categoryId));
+            if (aspects.length > 0) {
+              const insertData = aspects.map(a => ({
+                  categoryId,
+                  aspectName: a.name,
+                  aspectRequired: a.required,
+                  aspectMode: a.mode,
+                  aspectUsage: a.usage,
+                  aspectValues: a.values,
+                  aspectOrder: a.order,
+                  fetchedAt: new Date()
+              }));
+              await tx.insert(ebayCategoryAspects).values(insertData);
+            }
+          });
         }
 
         // Return cached aspects
-        const result = await client.query(
-          `SELECT aspect_name, aspect_required, aspect_mode, aspect_usage, aspect_values, aspect_order
-           FROM ebay_category_aspects
-           WHERE category_id = $1
-           ORDER BY aspect_required DESC, aspect_order ASC`,
-          [categoryId],
-        );
+        const result = await db.select({
+            aspectName: ebayCategoryAspects.aspectName,
+            aspectRequired: ebayCategoryAspects.aspectRequired,
+            aspectMode: ebayCategoryAspects.aspectMode,
+            aspectUsage: ebayCategoryAspects.aspectUsage,
+            aspectValues: ebayCategoryAspects.aspectValues,
+            aspectOrder: ebayCategoryAspects.aspectOrder,
+          })
+          .from(ebayCategoryAspects)
+          .where(eq(ebayCategoryAspects.categoryId, categoryId))
+          .orderBy(desc(ebayCategoryAspects.aspectRequired), asc(ebayCategoryAspects.aspectOrder));
 
-        const aspects = result.rows.map((r: any) => ({
-          name: r.aspect_name,
-          required: r.aspect_required,
-          mode: r.aspect_mode,
-          usage: r.aspect_usage,
-          values: r.aspect_values || null,
-          order: r.aspect_order,
+        const aspectsList = result.map((r: any) => ({
+          name: r.aspectName,
+          required: r.aspectRequired,
+          mode: r.aspectMode,
+          usage: r.aspectUsage,
+          values: r.aspectValues || null,
+          order: r.aspectOrder,
         }));
 
-        res.json({ aspects, categoryId });
-      } catch (err: any) {
-        // Rollback if we were in a transaction
-        try {
-          await client.query("ROLLBACK");
-        } catch {}
-        throw err;
-      } finally {
-        client.release();
-      }
+        res.json({ aspects: aspectsList, categoryId });
     } catch (err: any) {
       console.error("[eBay Category Aspects] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -372,21 +361,15 @@ export const router = express.Router();
   router.get("/api/ebay/type-aspect-defaults/:productTypeSlug", requireAuth, async (req: Request, res: Response) => {
     try {
       const { productTypeSlug } = req.params;
-      const client = await pool.connect();
-      try {
-        const result = await client.query(
-          `SELECT aspect_name, aspect_value FROM ebay_type_aspect_defaults
-           WHERE product_type_slug = $1`,
-          [productTypeSlug],
-        );
-        const defaults: Record<string, string> = {};
-        for (const r of result.rows) {
-          defaults[r.aspect_name] = r.aspect_value;
-        }
-        res.json({ defaults });
-      } finally {
-        client.release();
+      const result = await db.select()
+        .from(ebayTypeAspectDefaults)
+        .where(eq(ebayTypeAspectDefaults.productTypeSlug, productTypeSlug));
+      
+      const defaults: Record<string, string> = {};
+      for (const r of result) {
+        defaults[r.aspectName] = r.aspectValue;
       }
+      res.json({ defaults });
     } catch (err: any) {
       console.error("[eBay Type Aspect Defaults] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -406,42 +389,34 @@ export const router = express.Router();
         return;
       }
 
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-
-        // Delete all existing for this slug
-        await client.query(
-          "DELETE FROM ebay_type_aspect_defaults WHERE product_type_slug = $1",
-          [productTypeSlug],
-        );
-
-        // Insert new
+      await db.transaction(async (tx) => {
+        await tx.delete(ebayTypeAspectDefaults).where(eq(ebayTypeAspectDefaults.productTypeSlug, productTypeSlug));
+        
         const entries = Object.entries(defaults).filter(
           ([, v]) => v !== undefined && v !== null && v !== "",
         );
-        for (const [name, value] of entries) {
-          await client.query(
-            `INSERT INTO ebay_type_aspect_defaults (product_type_slug, aspect_name, aspect_value, created_at, updated_at)
-             VALUES ($1, $2, $3, NOW(), NOW())`,
-            [productTypeSlug, name, value],
-          );
+        
+        if (entries.length > 0) {
+          const insertData = entries.map(([name, value]) => ({
+            productTypeSlug,
+            aspectName: name,
+            aspectValue: value,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          }));
+          await tx.insert(ebayTypeAspectDefaults).values(insertData);
         }
+      });
 
-        await client.query("COMMIT");
-
-        // Return updated defaults
-        const result: Record<string, string> = {};
-        for (const [name, value] of entries) {
-          result[name] = value;
-        }
-        res.json({ defaults: result });
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      } finally {
-        client.release();
+      // Return updated defaults
+      const result: Record<string, string> = {};
+      const entries = Object.entries(defaults).filter(
+        ([, v]) => v !== undefined && v !== null && v !== "",
+      );
+      for (const [name, value] of entries) {
+        result[name] = value;
       }
+      res.json({ defaults: result });
     } catch (err: any) {
       console.error("[eBay Type Aspect Defaults Save] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -459,21 +434,15 @@ export const router = express.Router();
         res.status(400).json({ error: "Invalid product ID" });
         return;
       }
-      const client = await pool.connect();
-      try {
-        const result = await client.query(
-          `SELECT aspect_name, aspect_value FROM ebay_product_aspect_overrides
-           WHERE product_id = $1`,
-          [productId],
-        );
-        const overrides: Record<string, string> = {};
-        for (const r of result.rows) {
-          overrides[r.aspect_name] = r.aspect_value;
-        }
-        res.json({ overrides });
-      } finally {
-        client.release();
+      const result = await db.select()
+        .from(ebayProductAspectOverrides)
+        .where(eq(ebayProductAspectOverrides.productId, productId));
+      
+      const overrides: Record<string, string> = {};
+      for (const r of result) {
+        overrides[r.aspectName] = r.aspectValue;
       }
+      res.json({ overrides });
     } catch (err: any) {
       console.error("[eBay Product Aspects] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -497,41 +466,33 @@ export const router = express.Router();
         return;
       }
 
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
+      await db.transaction(async (tx) => {
+        await tx.delete(ebayProductAspectOverrides).where(eq(ebayProductAspectOverrides.productId, productId));
 
-        // Delete all existing for this product
-        await client.query(
-          "DELETE FROM ebay_product_aspect_overrides WHERE product_id = $1",
-          [productId],
-        );
-
-        // Insert new
         const entries = Object.entries(overrides).filter(
           ([, v]) => v !== undefined && v !== null && v !== "",
         );
-        for (const [name, value] of entries) {
-          await client.query(
-            `INSERT INTO ebay_product_aspect_overrides (product_id, aspect_name, aspect_value, created_at, updated_at)
-             VALUES ($1, $2, $3, NOW(), NOW())`,
-            [productId, name, value],
-          );
+        
+        if (entries.length > 0) {
+          const insertData = entries.map(([name, value]) => ({
+            productId,
+            aspectName: name,
+            aspectValue: value,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          }));
+          await tx.insert(ebayProductAspectOverrides).values(insertData);
         }
+      });
 
-        await client.query("COMMIT");
-
-        const result: Record<string, string> = {};
-        for (const [name, value] of entries) {
-          result[name] = value;
-        }
-        res.json({ overrides: result });
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      } finally {
-        client.release();
+      const result: Record<string, string> = {};
+      const entries = Object.entries(overrides).filter(
+        ([, v]) => v !== undefined && v !== null && v !== "",
+      );
+      for (const [name, value] of entries) {
+        result[name] = value;
       }
+      res.json({ overrides: result });
     } catch (err: any) {
       console.error("[eBay Product Aspects Save] Error:", err.message);
       res.status(500).json({ error: err.message });

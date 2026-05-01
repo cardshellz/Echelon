@@ -55,6 +55,10 @@ export const products = catalogSchema.table("products", {
   productType: varchar("product_type", { length: 50 }), // References product_types.slug
   ebayBrowseCategoryId: varchar("ebay_browse_category_id", { length: 20 }), // Per-product eBay browse category override
   ebayBrowseCategoryName: varchar("ebay_browse_category_name", { length: 200 }), // Per-product eBay browse category name override
+  ebayFulfillmentPolicyOverride: varchar("ebay_fulfillment_policy_override", { length: 100 }),
+  ebayReturnPolicyOverride: varchar("ebay_return_policy_override", { length: 100 }),
+  ebayPaymentPolicyOverride: varchar("ebay_payment_policy_override", { length: 100 }),
+  ebayListingExcluded: boolean("ebay_listing_excluded").notNull().default(false), // Per-product eBay exclusion
   reorderExcluded: boolean("reorder_excluded").notNull().default(false), // Per-product exclusion from reorder analysis
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -108,6 +112,9 @@ export const productVariants = catalogSchema.table("product_variants", {
   mpn: varchar("mpn", { length: 100 }), // Manufacturer Part Number
   conditionNote: text("condition_note"), // Per-variant condition details
   ebayListingExcluded: boolean("ebay_listing_excluded").notNull().default(false), // Per-variant eBay exclusion
+  ebayFulfillmentPolicyOverride: varchar("ebay_fulfillment_policy_override", { length: 100 }),
+  ebayReturnPolicyOverride: varchar("ebay_return_policy_override", { length: 100 }),
+  ebayPaymentPolicyOverride: varchar("ebay_payment_policy_override", { length: 100 }),
   dropshipEligible: boolean("dropship_eligible").default(false), // Whether variant is eligible for dropship vendors
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

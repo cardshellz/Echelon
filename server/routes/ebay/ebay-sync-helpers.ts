@@ -1,10 +1,21 @@
 import { pool, db } from "../../db";
 import { EBAY_CHANNEL_ID, getAuthService, getChannelConnection, ebayApiRequest, atpService } from "./ebay-utils";
+import {
+  channelListings,
+  productVariants,
+  products,
+  productAssets,
+  ebayCategoryMappings,
+  ebayTypeAspectDefaults,
+  ebayProductAspectOverrides,
+  channelPricingRules
+} from "@shared/schema";
+import { eq, and, sql, inArray, asc } from "drizzle-orm";
 
 export interface SyncFilter { productIds?: number[]; productTypeSlugs?: string[]; variantIds?: number[]; }
 
 export async function upsertChannelListing(
-  client: any,
+  dbArg: any,
   channelId: number,
   productVariantId: number,
   data: {
@@ -18,36 +29,35 @@ export async function upsertChannelListing(
     lastSyncedQty?: number | null;
   }
 ): Promise<void> {
-  await client.query(`
-    INSERT INTO channel_listings (
-      channel_id, product_variant_id, external_product_id, external_variant_id,
-      external_sku, external_url, sync_status, sync_error,
-      last_synced_price, last_synced_qty, last_synced_at, created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), NOW())
-    ON CONFLICT (channel_id, product_variant_id)
-    DO UPDATE SET
-      external_product_id = COALESCE(EXCLUDED.external_product_id, channel_listings.external_product_id),
-      external_variant_id = COALESCE(EXCLUDED.external_variant_id, channel_listings.external_variant_id),
-      external_sku = COALESCE(EXCLUDED.external_sku, channel_listings.external_sku),
-      external_url = COALESCE(EXCLUDED.external_url, channel_listings.external_url),
-      sync_status = EXCLUDED.sync_status,
-      sync_error = EXCLUDED.sync_error,
-      last_synced_price = EXCLUDED.last_synced_price,
-      last_synced_qty = EXCLUDED.last_synced_qty,
-      last_synced_at = NOW(),
-      updated_at = NOW()
-  `, [
+  await dbArg.insert(channelListings).values({
     channelId,
     productVariantId,
-    data.externalProductId || null,
-    data.externalVariantId || null,
-    data.externalSku || null,
-    data.externalUrl || null,
-    data.syncStatus || "pending",
-    data.syncError || null,
-    data.lastSyncedPrice || null,
-    data.lastSyncedQty || null,
-  ]);
+    externalProductId: data.externalProductId || null,
+    externalVariantId: data.externalVariantId || null,
+    externalSku: data.externalSku || null,
+    externalUrl: data.externalUrl || null,
+    syncStatus: data.syncStatus || "pending",
+    syncError: data.syncError || null,
+    lastSyncedPrice: data.lastSyncedPrice || null,
+    lastSyncedQty: data.lastSyncedQty || null,
+    lastSyncedAt: new Date(),
+    createdAt: new Date(),
+    updatedAt: new Date()
+  }).onConflictDoUpdate({
+    target: [channelListings.channelId, channelListings.productVariantId],
+    set: {
+      externalProductId: sql`COALESCE(EXCLUDED.external_product_id, channel_listings.external_product_id)`,
+      externalVariantId: sql`COALESCE(EXCLUDED.external_variant_id, channel_listings.external_variant_id)`,
+      externalSku: sql`COALESCE(EXCLUDED.external_sku, channel_listings.external_sku)`,
+      externalUrl: sql`COALESCE(EXCLUDED.external_url, channel_listings.external_url)`,
+      syncStatus: data.syncStatus || "pending",
+      syncError: data.syncError || null,
+      lastSyncedPrice: data.lastSyncedPrice || null,
+      lastSyncedQty: data.lastSyncedQty || null,
+      lastSyncedAt: new Date(),
+      updatedAt: new Date()
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -58,15 +68,22 @@ export async function upsertChannelListing(
  * Store the last push error for a product (across all its variants).
  * Uses the first variant's channel_listing row to store the error.
  */
-export async function upsertPushError(client: any, channelId: number, productId: number, error: string): Promise<void> {
+export async function upsertPushError(dbArg: any, channelId: number, productId: number, error: string): Promise<void> {
   // Find all variant IDs for this product
-  const varResult = await client.query(
-    `SELECT id FROM catalog.product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true LIMIT 1`,
-    [productId],
-  );
-  if (varResult.rows.length > 0) {
-    const variantId = varResult.rows[0].id;
-    await upsertChannelListing(client, channelId, variantId, {
+  const variants = await dbArg.select({ id: productVariants.id })
+    .from(productVariants)
+    .where(
+      and(
+        eq(productVariants.productId, productId),
+        sql`${productVariants.sku} IS NOT NULL`,
+        eq(productVariants.isActive, true)
+      )
+    )
+    .limit(1);
+
+  if (variants.length > 0) {
+    const variantId = variants[0].id;
+    await upsertChannelListing(dbArg, channelId, variantId, {
       syncStatus: "error",
       syncError: error.substring(0, 1000),
     });
@@ -76,14 +93,24 @@ export async function upsertPushError(client: any, channelId: number, productId:
 /**
  * Clear push error for a product (across all its variants).
  */
-export async function clearPushError(client: any, channelId: number, productId: number): Promise<void> {
-  await client.query(
-    `UPDATE channel_listings SET sync_error = NULL
-     WHERE channel_id = $1 AND product_variant_id IN (
-       SELECT id FROM product_variants WHERE product_id = $2
-     )`,
-    [channelId, productId],
-  );
+export async function clearPushError(dbArg: any, channelId: number, productId: number): Promise<void> {
+  // Subquery: get all variant IDs for the product
+  const variants = await dbArg.select({ id: productVariants.id })
+    .from(productVariants)
+    .where(eq(productVariants.productId, productId));
+  
+  if (variants.length === 0) return;
+
+  const variantIds = variants.map((v: any) => v.id);
+
+  await dbArg.update(channelListings)
+    .set({ syncError: null })
+    .where(
+      and(
+        eq(channelListings.channelId, channelId),
+        inArray(channelListings.productVariantId, variantIds)
+      )
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -95,56 +122,72 @@ export async function clearPushError(client: any, channelId: number, productId: 
  * Priority: variant > product > category > channel > base price
  */
 export async function resolveChannelPrice(
-  client: any,
+  dbArg: any,
   channelId: number,
   productId: number,
   variantId: number,
   basePriceCents: number,
 ): Promise<number> {
   // 1. Check variant-level rule
-  const variantRule = await client.query(
-    `SELECT rule_type, value FROM channel_pricing_rules
-     WHERE channel_id = $1 AND scope = 'variant' AND scope_id = $2::text`,
-    [channelId, variantId],
-  );
-  if (variantRule.rows.length > 0) {
-    return applyPricingRule(basePriceCents, variantRule.rows[0].rule_type, parseFloat(variantRule.rows[0].value));
+  const variantRule = await dbArg.select()
+    .from(channelPricingRules)
+    .where(
+      and(
+        eq(channelPricingRules.channelId, channelId),
+        eq(channelPricingRules.scope, "variant"),
+        eq(channelPricingRules.scopeId, String(variantId))
+      )
+    );
+  if (variantRule.length > 0) {
+    return applyPricingRule(basePriceCents, variantRule[0].ruleType, parseFloat(variantRule[0].value as string));
   }
 
   // 2. Check product-level rule
-  const productRule = await client.query(
-    `SELECT rule_type, value FROM channel_pricing_rules
-     WHERE channel_id = $1 AND scope = 'product' AND scope_id = $2::text`,
-    [channelId, productId],
-  );
-  if (productRule.rows.length > 0) {
-    return applyPricingRule(basePriceCents, productRule.rows[0].rule_type, parseFloat(productRule.rows[0].value));
+  const productRule = await dbArg.select()
+    .from(channelPricingRules)
+    .where(
+      and(
+        eq(channelPricingRules.channelId, channelId),
+        eq(channelPricingRules.scope, "product"),
+        eq(channelPricingRules.scopeId, String(productId))
+      )
+    );
+  if (productRule.length > 0) {
+    return applyPricingRule(basePriceCents, productRule[0].ruleType, parseFloat(productRule[0].value as string));
   }
 
   // 3. Check category-level rule (lookup product's product_type)
-  const productTypeResult = await client.query(
-    `SELECT product_type FROM catalog.products WHERE id = $1`,
-    [productId],
-  );
-  if (productTypeResult.rows.length > 0 && productTypeResult.rows[0].product_type) {
-    const categoryRule = await client.query(
-      `SELECT rule_type, value FROM channel_pricing_rules
-       WHERE channel_id = $1 AND scope = 'category' AND scope_id = $2`,
-      [channelId, productTypeResult.rows[0].product_type],
-    );
-    if (categoryRule.rows.length > 0) {
-      return applyPricingRule(basePriceCents, categoryRule.rows[0].rule_type, parseFloat(categoryRule.rows[0].value));
+  const productInfo = await dbArg.select({ productType: products.productType })
+    .from(products)
+    .where(eq(products.id, productId));
+
+  if (productInfo.length > 0 && productInfo[0].productType) {
+    const categoryRule = await dbArg.select()
+      .from(channelPricingRules)
+      .where(
+        and(
+          eq(channelPricingRules.channelId, channelId),
+          eq(channelPricingRules.scope, "category"),
+          eq(channelPricingRules.scopeId, productInfo[0].productType)
+        )
+      );
+    if (categoryRule.length > 0) {
+      return applyPricingRule(basePriceCents, categoryRule[0].ruleType, parseFloat(categoryRule[0].value as string));
     }
   }
 
   // 4. Check channel-level rule
-  const channelRule = await client.query(
-    `SELECT rule_type, value FROM channel_pricing_rules
-     WHERE channel_id = $1 AND scope = 'channel' AND scope_id IS NULL`,
-    [channelId],
-  );
-  if (channelRule.rows.length > 0) {
-    return applyPricingRule(basePriceCents, channelRule.rows[0].rule_type, parseFloat(channelRule.rows[0].value));
+  const channelRule = await dbArg.select()
+    .from(channelPricingRules)
+    .where(
+      and(
+        eq(channelPricingRules.channelId, channelId),
+        eq(channelPricingRules.scope, "channel"),
+        sql`${channelPricingRules.scopeId} IS NULL`
+      )
+    );
+  if (channelRule.length > 0) {
+    return applyPricingRule(basePriceCents, channelRule[0].ruleType, parseFloat(channelRule[0].value as string));
   }
 
   // 5. No rule — return base price
@@ -257,71 +300,63 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
   const client = await pool.connect();
   try {
     // Build the filter clause for active listings
-    let filterClause = "";
-    const params: any[] = [EBAY_CHANNEL_ID];
-    let paramIdx = 2;
+    const conditions = [
+      eq(channelListings.channelId, EBAY_CHANNEL_ID),
+      eq(channelListings.syncStatus, 'synced')
+    ];
 
     if (filter?.productIds && filter.productIds.length > 0) {
-      filterClause += ` AND p.id = ANY($${paramIdx})`;
-      params.push(filter.productIds);
-      paramIdx++;
+      conditions.push(inArray(products.id, filter.productIds));
     }
     if (filter?.productTypeSlugs && filter.productTypeSlugs.length > 0) {
-      filterClause += ` AND p.product_type = ANY($${paramIdx})`;
-      params.push(filter.productTypeSlugs);
-      paramIdx++;
+      conditions.push(inArray(products.productType, filter.productTypeSlugs));
     }
     if (filter?.variantIds && filter.variantIds.length > 0) {
-      filterClause += ` AND pv.id = ANY($${paramIdx})`;
-      params.push(filter.variantIds);
-      paramIdx++;
+      conditions.push(inArray(productVariants.id, filter.variantIds));
     }
 
     // Get all synced listings with their product/variant data
-    const listingsResult = await client.query(`
-      SELECT
-        cl.id AS listing_id,
-        cl.product_variant_id,
-        cl.external_product_id,
-        cl.external_variant_id,
-        cl.external_sku,
-        cl.last_synced_price,
-        cl.last_synced_qty,
-        pv.id AS variant_id,
-        pv.sku AS variant_sku,
-        pv.name AS variant_name,
-        pv.price_cents,
-        pv.option1_name,
-        pv.option1_value,
-        pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
-        pv.ebay_return_policy_override AS variant_return_override,
-        pv.ebay_payment_policy_override AS variant_payment_override,
-        p.id AS product_id,
-        p.name AS product_name,
-        p.sku AS product_sku,
-        p.description AS product_description,
-        p.brand AS product_brand,
-        p.product_type,
-        p.ebay_browse_category_id,
-        p.ebay_fulfillment_policy_override AS product_fulfillment_override,
-        p.ebay_return_policy_override AS product_return_override,
-        p.ebay_payment_policy_override AS product_payment_override
-      FROM channels.channel_listings cl
-      JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
-      JOIN catalog.products p ON p.id = pv.product_id
-      WHERE cl.channel_id = $1
-        AND cl.sync_status = 'synced'
-        ${filterClause}
-      ORDER BY p.id ASC, pv.position ASC, pv.id ASC
-    `, params);
+    const listingsResult = await db.select({
+      listing_id: channelListings.id,
+      product_variant_id: channelListings.productVariantId,
+      external_product_id: channelListings.externalProductId,
+      external_variant_id: channelListings.externalVariantId,
+      external_sku: channelListings.externalSku,
+      last_synced_price: channelListings.lastSyncedPrice,
+      last_synced_qty: channelListings.lastSyncedQty,
+      variant_id: productVariants.id,
+      variant_sku: productVariants.sku,
+      variant_name: productVariants.name,
+      price_cents: productVariants.priceCents,
+      option1_name: productVariants.option1Name,
+      option1_value: productVariants.option1Value,
+      variant_fulfillment_override: productVariants.ebayFulfillmentPolicyOverride,
+      variant_return_override: productVariants.ebayReturnPolicyOverride,
+      variant_payment_override: productVariants.ebayPaymentPolicyOverride,
+      product_id: products.id,
+      product_name: products.name,
+      product_sku: products.sku,
+      product_description: products.description,
+      product_brand: products.brand,
+      product_type: products.productType,
+      ebay_browse_category_id: products.ebayBrowseCategoryId,
+      product_fulfillment_override: products.ebayFulfillmentPolicyOverride,
+      product_return_override: products.ebayReturnPolicyOverride,
+      product_payment_override: products.ebayPaymentPolicyOverride,
+    })
+    .from(channelListings)
+    .innerJoin(productVariants, eq(productVariants.id, channelListings.productVariantId))
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .where(and(...conditions))
+    .orderBy(asc(products.id), asc(productVariants.position), asc(productVariants.id));
 
-    if (listingsResult.rows.length === 0) {
+    if (listingsResult.length === 0) {
       return { synced: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, errors: 0, details: [] };
     }
 
     // Group listings by product
     const productGroups: Map<number, any[]> = new Map();
-    for (const row of listingsResult.rows) {
+    for (const row of listingsResult) {
       const pid = row.product_id;
       if (!productGroups.has(pid)) productGroups.set(pid, []);
       productGroups.get(pid)!.push(row);
@@ -346,19 +381,26 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
 
       // Category-level overrides
       if (product.product_type) {
-        const catResult = await client.query(
-          `SELECT ebay_browse_category_id, ebay_store_category_name,
-                  fulfillment_policy_override, return_policy_override, payment_policy_override
-           FROM ebay_category_mappings
-           WHERE channel_id = $1 AND product_type_slug = $2`,
-          [EBAY_CHANNEL_ID, product.product_type],
-        );
-        if (catResult.rows.length > 0) {
-          const catRow = catResult.rows[0];
-          if (!ebayBrowseCategoryId) ebayBrowseCategoryId = catRow.ebay_browse_category_id;
-          if (catRow.fulfillment_policy_override) effectivePolicies.fulfillmentPolicyId = catRow.fulfillment_policy_override;
-          if (catRow.return_policy_override) effectivePolicies.returnPolicyId = catRow.return_policy_override;
-          if (catRow.payment_policy_override) effectivePolicies.paymentPolicyId = catRow.payment_policy_override;
+        const catResult = await db.select({
+            ebayBrowseCategoryId: ebayCategoryMappings.ebayBrowseCategoryId,
+            ebayStoreCategoryName: ebayCategoryMappings.ebayStoreCategoryName,
+            fulfillmentPolicyOverride: ebayCategoryMappings.fulfillmentPolicyOverride,
+            returnPolicyOverride: ebayCategoryMappings.returnPolicyOverride,
+            paymentPolicyOverride: ebayCategoryMappings.paymentPolicyOverride,
+          })
+          .from(ebayCategoryMappings)
+          .where(
+            and(
+              eq(ebayCategoryMappings.channelId, EBAY_CHANNEL_ID),
+              eq(ebayCategoryMappings.productTypeSlug, product.product_type)
+            )
+          );
+        if (catResult.length > 0) {
+          const catRow = catResult[0];
+          if (!ebayBrowseCategoryId) ebayBrowseCategoryId = catRow.ebayBrowseCategoryId;
+          if (catRow.fulfillmentPolicyOverride) effectivePolicies.fulfillmentPolicyId = catRow.fulfillmentPolicyOverride;
+          if (catRow.returnPolicyOverride) effectivePolicies.returnPolicyId = catRow.returnPolicyOverride;
+          if (catRow.paymentPolicyOverride) effectivePolicies.paymentPolicyId = catRow.paymentPolicyOverride;
         }
       }
 
@@ -372,24 +414,29 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
       if (product.product_brand) aspects["Brand"] = [product.product_brand];
 
       if (product.product_type) {
-        const typeDefaults = await client.query(
-          `SELECT aspect_name, aspect_value FROM ebay_type_aspect_defaults WHERE product_type_slug = $1`,
-          [product.product_type],
-        );
-        for (const td of typeDefaults.rows) aspects[td.aspect_name] = [td.aspect_value];
+        const typeDefaults = await db.select({
+            aspectName: ebayTypeAspectDefaults.aspectName,
+            aspectValue: ebayTypeAspectDefaults.aspectValue
+          })
+          .from(ebayTypeAspectDefaults)
+          .where(eq(ebayTypeAspectDefaults.productTypeSlug, product.product_type));
+        for (const td of typeDefaults) aspects[td.aspectName] = [td.aspectValue];
       }
-      const prodOverrides = await client.query(
-        `SELECT aspect_name, aspect_value FROM ebay_product_aspect_overrides WHERE product_id = $1`,
-        [productId],
-      );
-      for (const po of prodOverrides.rows) aspects[po.aspect_name] = [po.aspect_value];
+      
+      const prodOverrides = await db.select({
+          aspectName: ebayProductAspectOverrides.aspectName,
+          aspectValue: ebayProductAspectOverrides.aspectValue
+        })
+        .from(ebayProductAspectOverrides)
+        .where(eq(ebayProductAspectOverrides.productId, productId));
+      for (const po of prodOverrides) aspects[po.aspectName] = [po.aspectValue];
 
       // Get images
-      const imgResult = await client.query(
-        `SELECT url FROM catalog.product_assets WHERE product_id = $1 ORDER BY position ASC`,
-        [productId],
-      );
-      const imageUrls = imgResult.rows
+      const imgResult = await db.select({ url: productAssets.url })
+        .from(productAssets)
+        .where(eq(productAssets.productId, productId))
+        .orderBy(asc(productAssets.position));
+      const imageUrls = imgResult
         .map((r: any) => r.url)
         .filter((url: string) => url && url.startsWith("https://"))
         .slice(0, 12);
@@ -431,7 +478,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         try {
           // Recalculate price
           const newPriceCents = await resolveChannelPrice(
-            client, EBAY_CHANNEL_ID, productId, variant.variant_id, variant.price_cents,
+            db, EBAY_CHANNEL_ID, productId, variant.variant_id, variant.price_cents,
           );
           const priceInDollars = (newPriceCents / 100).toFixed(2);
 
@@ -540,7 +587,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
           }
 
           // Update channel_listings with new synced values
-          await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.variant_id, {
+          await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
             lastSyncedPrice: newPriceCents,
             lastSyncedQty: newQty,
             syncStatus: "synced",
@@ -624,7 +671,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     console.log(`[eBay Sync] Complete: synced=${summary.synced} priceChanges=${summary.priceChanges} qtyChanges=${summary.qtyChanges} policyChanges=${summary.policyChanges} errors=${summary.errors}`);
     return summary;
   } finally {
-    client.release();
+    // client.release() is removed since we use db directly
   }
 }
 

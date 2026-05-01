@@ -11,6 +11,8 @@ import {
   productVariants,
   productTypes,
   inventoryLevels,
+  channelListings,
+  productAssets,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
@@ -27,16 +29,12 @@ export const router = express.Router();
         return;
       }
       const { excluded } = req.body as { excluded: boolean };
-      const client = await pool.connect();
-      try {
-        await client.query(
-          "UPDATE catalog.products SET ebay_listing_excluded = $1 WHERE id = $2",
-          [excluded, productId]
-        );
-        res.json({ success: true, productId, excluded });
-      } finally {
-        client.release();
-      }
+      
+      await db.update(products)
+        .set({ ebayListingExcluded: excluded })
+        .where(eq(products.id, productId));
+        
+      res.json({ success: true, productId, excluded });
     } catch (err: any) {
       console.error("[eBay Product Exclusion] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -59,20 +57,16 @@ export const router = express.Router();
         returnPolicyId?: string | null;
         paymentPolicyId?: string | null;
       };
-      const client = await pool.connect();
-      try {
-        await client.query(
-          `UPDATE catalog.products SET
-             ebay_fulfillment_policy_override = $1,
-             ebay_return_policy_override = $2,
-             ebay_payment_policy_override = $3
-           WHERE id = $4`,
-          [fulfillmentPolicyId || null, returnPolicyId || null, paymentPolicyId || null, productId]
-        );
-        res.json({ success: true, productId });
-      } finally {
-        client.release();
-      }
+      
+      await db.update(products)
+        .set({
+          ebayFulfillmentPolicyOverride: fulfillmentPolicyId || null,
+          ebayReturnPolicyOverride: returnPolicyId || null,
+          ebayPaymentPolicyOverride: paymentPolicyId || null,
+        })
+        .where(eq(products.id, productId));
+        
+      res.json({ success: true, productId });
     } catch (err: any) {
       console.error("[eBay Product Policies] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -95,20 +89,16 @@ export const router = express.Router();
         returnPolicyId?: string | null;
         paymentPolicyId?: string | null;
       };
-      const client = await pool.connect();
-      try {
-        await client.query(
-          `UPDATE catalog.product_variants SET
-             ebay_fulfillment_policy_override = $1,
-             ebay_return_policy_override = $2,
-             ebay_payment_policy_override = $3
-           WHERE id = $4`,
-          [fulfillmentPolicyId || null, returnPolicyId || null, paymentPolicyId || null, variantId]
-        );
-        res.json({ success: true, variantId });
-      } finally {
-        client.release();
-      }
+      
+      await db.update(productVariants)
+        .set({
+          ebayFulfillmentPolicyOverride: fulfillmentPolicyId || null,
+          ebayReturnPolicyOverride: returnPolicyId || null,
+          ebayPaymentPolicyOverride: paymentPolicyId || null,
+        })
+        .where(eq(productVariants.id, variantId));
+        
+      res.json({ success: true, variantId });
     } catch (err: any) {
       console.error("[eBay Variant Policies] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -126,26 +116,25 @@ export const router = express.Router();
         res.status(400).json({ error: "Invalid product ID" });
         return;
       }
-      const client = await pool.connect();
-      try {
-        const result = await client.query(
-          `SELECT ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-           FROM catalog.products WHERE id = $1`,
-          [productId]
-        );
-        if (result.rows.length === 0) {
-          res.status(404).json({ error: "Product not found" });
-          return;
-        }
-        const row = result.rows[0];
-        res.json({
-          fulfillmentPolicyId: row.ebay_fulfillment_policy_override || null,
-          returnPolicyId: row.ebay_return_policy_override || null,
-          paymentPolicyId: row.ebay_payment_policy_override || null,
-        });
-      } finally {
-        client.release();
+      
+      const result = await db.select({
+        fulfillmentPolicyId: products.ebayFulfillmentPolicyOverride,
+        returnPolicyId: products.ebayReturnPolicyOverride,
+        paymentPolicyId: products.ebayPaymentPolicyOverride,
+      })
+      .from(products)
+      .where(eq(products.id, productId));
+
+      if (result.length === 0) {
+        res.status(404).json({ error: "Product not found" });
+        return;
       }
+      const row = result[0];
+      res.json({
+        fulfillmentPolicyId: row.fulfillmentPolicyId || null,
+        returnPolicyId: row.returnPolicyId || null,
+        paymentPolicyId: row.paymentPolicyId || null,
+      });
     } catch (err: any) {
       console.error("[eBay Product Policies GET] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -163,26 +152,25 @@ export const router = express.Router();
         res.status(400).json({ error: "Invalid variant ID" });
         return;
       }
-      const client = await pool.connect();
-      try {
-        const result = await client.query(
-          `SELECT ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-           FROM catalog.product_variants WHERE id = $1`,
-          [variantId]
-        );
-        if (result.rows.length === 0) {
-          res.status(404).json({ error: "Variant not found" });
-          return;
-        }
-        const row = result.rows[0];
-        res.json({
-          fulfillmentPolicyId: row.ebay_fulfillment_policy_override || null,
-          returnPolicyId: row.ebay_return_policy_override || null,
-          paymentPolicyId: row.ebay_payment_policy_override || null,
-        });
-      } finally {
-        client.release();
+      
+      const result = await db.select({
+        fulfillmentPolicyId: productVariants.ebayFulfillmentPolicyOverride,
+        returnPolicyId: productVariants.ebayReturnPolicyOverride,
+        paymentPolicyId: productVariants.ebayPaymentPolicyOverride,
+      })
+      .from(productVariants)
+      .where(eq(productVariants.id, variantId));
+
+      if (result.length === 0) {
+        res.status(404).json({ error: "Variant not found" });
+        return;
       }
+      const row = result[0];
+      res.json({
+        fulfillmentPolicyId: row.fulfillmentPolicyId || null,
+        returnPolicyId: row.returnPolicyId || null,
+        paymentPolicyId: row.paymentPolicyId || null,
+      });
     } catch (err: any) {
       console.error("[eBay Variant Policies GET] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -202,11 +190,10 @@ export const router = express.Router();
       }
 
       const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
-      const client = await pool.connect();
 
       try {
         // Get one SKU per product from synced eBay listings
-        const listingsResult = await client.query(`
+        const listingsResult = await db.execute(sql`
           SELECT DISTINCT ON (p.id)
             p.id AS product_id,
             p.name AS product_name,
@@ -214,13 +201,13 @@ export const router = express.Router();
           FROM channels.channel_listings cl
           JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           JOIN catalog.products p ON p.id = pv.product_id
-          WHERE cl.channel_id = $1
+          WHERE cl.channel_id = ${EBAY_CHANNEL_ID}
             AND cl.sync_status = 'synced'
             AND cl.external_sku IS NOT NULL
           ORDER BY p.id ASC, cl.id ASC
-        `, [EBAY_CHANNEL_ID]);
+        `);
 
-        const prods = listingsResult.rows;
+        const prods = listingsResult.rows as any[];
         let imported = 0;
         let skipped = 0;
         let errors = 0;
@@ -241,31 +228,35 @@ export const router = express.Router();
               continue;
             }
 
-            const existingResult = await client.query(
-              `SELECT url FROM catalog.product_assets WHERE product_id = $1`,
-              [prod.product_id],
-            );
-            const existingUrls = new Set(existingResult.rows.map((r: any) => r.url));
+            const existingResult = await db.select({ url: productAssets.url })
+              .from(productAssets)
+              .where(eq(productAssets.productId, prod.product_id));
+            const existingUrls = new Set(existingResult.map(r => r.url));
 
-            const posResult = await client.query(
-              `SELECT COALESCE(MAX(position), -1) AS max_pos FROM catalog.product_assets WHERE product_id = $1`,
-              [prod.product_id],
-            );
-            let position = (posResult.rows[0]?.max_pos ?? -1) + 1;
+            const posResult = await db.select({ max_pos: sql<number>`COALESCE(MAX(${productAssets.position}), -1)` })
+              .from(productAssets)
+              .where(eq(productAssets.productId, prod.product_id));
+            let position = Number(posResult[0].max_pos) + 1;
 
             let addedCount = 0;
+            const toInsert = [];
             for (const url of ebayImageUrls) {
               if (!url || existingUrls.has(url)) continue;
-              await client.query(
-                `INSERT INTO catalog.product_assets (product_id, asset_type, url, position, is_primary, storage_type, created_at)
-                 VALUES ($1, 'image', $2, $3, $4, 'url', NOW())`,
-                [prod.product_id, url, position, position === 0 ? 1 : 0],
-              );
+              toInsert.push({
+                productId: prod.product_id,
+                assetType: 'image',
+                url,
+                position,
+                isPrimary: position === 0,
+                storageType: 'url',
+                createdAt: new Date()
+              });
               position++;
               addedCount++;
             }
 
-            if (addedCount > 0) {
+            if (toInsert.length > 0) {
+              await db.insert(productAssets).values(toInsert as any);
               imported++;
               details.push({ productId: prod.product_id, productName: prod.product_name, status: "imported", imageCount: addedCount });
             } else {
@@ -282,8 +273,8 @@ export const router = express.Router();
         }
 
         res.json({ total: prods.length, imported, skipped, errors, details });
-      } finally {
-        client.release();
+      } catch (err: any) {
+        throw err;
       }
     } catch (err: any) {
       console.error("[eBay Import Images] Error:", err.message);
@@ -352,23 +343,21 @@ export const router = express.Router();
       }
 
       // Clean up channel_listings rows
-      const client = await pool.connect();
-      try {
-        const result = await client.query(
-          `DELETE FROM channel_listings
-           WHERE channel_id = $1
-             AND product_variant_id IN (
-               SELECT id FROM product_variants WHERE product_id = $2
-             )
-           RETURNING id, product_variant_id, external_sku`,
-          [EBAY_CHANNEL_ID, 60],
-        );
-        log.push(`Deleted ${result.rowCount} channel_listings rows`);
-        for (const row of result.rows) {
-          log.push(`  - listing ${row.id}: variant ${row.product_variant_id} (${row.external_sku})`);
+      const variantsList = await db.select({ id: productVariants.id }).from(productVariants).where(eq(productVariants.productId, 60));
+      if (variantsList.length > 0) {
+        const variantIds = variantsList.map(v => v.id);
+        const deletedRows = await db.delete(channelListings)
+          .where(
+            and(
+              eq(channelListings.channelId, EBAY_CHANNEL_ID),
+              inArray(channelListings.productVariantId, variantIds)
+            )
+          )
+          .returning({ id: channelListings.id, productVariantId: channelListings.productVariantId, externalSku: channelListings.externalSku });
+        log.push(`Deleted ${deletedRows.length} channel_listings rows`);
+        for (const row of deletedRows) {
+          log.push(`  - listing ${row.id}: variant ${row.productVariantId} (${row.externalSku})`);
         }
-      } finally {
-        client.release();
       }
 
       res.json({ success: true, log });
