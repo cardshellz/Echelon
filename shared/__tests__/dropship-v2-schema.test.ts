@@ -30,6 +30,10 @@ const vendorSelectionMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0091_dropship_vendor_selection_revisions.sql"),
   "utf8",
 );
+const releaseScript = readFileSync(
+  resolve(process.cwd(), "scripts/release.sh"),
+  "utf8",
+);
 
 describe("Dropship V2 schema contract", () => {
   it("uses the agreed launch defaults without floating point money", () => {
@@ -55,6 +59,9 @@ describe("Dropship V2 schema contract", () => {
     expect((dropshipStoreConnections as any).platform.name).toBe("platform");
     expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS dropship.dropship_store_connections");
     expect(migrationSql).toContain("dropship_store_conn_active_vendor_idx");
+    expect(migrationSql).toContain("dropship_vendors_phase0_legacy");
+    expect(migrationSql).toContain("dropship_wallet_ledger_phase0_legacy");
+    expect(migrationSql).toContain("dropship_vendor_products_phase0_legacy");
     expect(migrationSql).not.toContain("dropship_vendor_channels");
   });
 
@@ -107,6 +114,11 @@ describe("Dropship V2 schema contract", () => {
     expect(vendorSelectionMigrationSql).toContain("dropship_vendor_selection_rule_set_revisions");
     expect(vendorSelectionMigrationSql).toContain("dropship_selection_rule_rev_vendor_idem_idx");
     expect(vendorSelectionMigrationSql).toContain("ADD COLUMN IF NOT EXISTS revision_id");
+  });
+
+  it("does not swallow SQL migration failures during release", () => {
+    expect(releaseScript).toContain("npx tsx migrations/run-migrations.ts");
+    expect(releaseScript).not.toContain("SQL migration step completed with warnings");
   });
 });
 

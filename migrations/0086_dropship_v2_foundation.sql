@@ -4,6 +4,50 @@
 
 CREATE SCHEMA IF NOT EXISTS dropship;
 
+DO $$
+BEGIN
+  IF to_regclass('dropship.dropship_vendors') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema = 'dropship'
+         AND table_name = 'dropship_vendors'
+         AND column_name = 'member_id'
+     ) THEN
+    IF to_regclass('dropship.dropship_vendors_phase0_legacy') IS NOT NULL THEN
+      RAISE EXCEPTION 'Cannot create Dropship V2 vendors table because dropship.dropship_vendors_phase0_legacy already exists.';
+    END IF;
+
+    ALTER TABLE dropship.dropship_vendors
+      RENAME TO dropship_vendors_phase0_legacy;
+  END IF;
+
+  IF to_regclass('dropship.dropship_wallet_ledger') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema = 'dropship'
+         AND table_name = 'dropship_wallet_ledger'
+         AND column_name = 'wallet_account_id'
+     ) THEN
+    IF to_regclass('dropship.dropship_wallet_ledger_phase0_legacy') IS NOT NULL THEN
+      RAISE EXCEPTION 'Cannot create Dropship V2 wallet ledger table because dropship.dropship_wallet_ledger_phase0_legacy already exists.';
+    END IF;
+
+    ALTER TABLE dropship.dropship_wallet_ledger
+      RENAME TO dropship_wallet_ledger_phase0_legacy;
+  END IF;
+
+  IF to_regclass('dropship.dropship_vendor_products') IS NOT NULL THEN
+    IF to_regclass('dropship.dropship_vendor_products_phase0_legacy') IS NOT NULL THEN
+      RAISE EXCEPTION 'Cannot archive Phase 0 vendor products because dropship.dropship_vendor_products_phase0_legacy already exists.';
+    END IF;
+
+    ALTER TABLE dropship.dropship_vendor_products
+      RENAME TO dropship_vendor_products_phase0_legacy;
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS dropship.dropship_vendors (
   id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
   member_id varchar(255) NOT NULL REFERENCES membership.members(id),
