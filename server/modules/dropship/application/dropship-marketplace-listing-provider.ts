@@ -31,6 +31,7 @@ export interface DropshipCanonicalListingContent {
   mpn: string | null;
   condition: string | null;
   itemSpecifics: Record<string, unknown> | null;
+  imageUrls: string[];
 }
 
 export interface DropshipMarketplaceListingIntent {
@@ -43,7 +44,12 @@ export interface DropshipMarketplaceListingIntent {
   title: string;
   description: string | null;
   category: string | null;
+  brand: string | null;
+  gtin: string | null;
+  mpn: string | null;
   condition: string | null;
+  itemSpecifics: Record<string, unknown> | null;
+  imageUrls: string[];
   priceCents: number;
   quantity: number;
   marketplaceConfig: Record<string, unknown>;

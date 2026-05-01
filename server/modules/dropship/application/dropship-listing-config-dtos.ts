@@ -16,6 +16,7 @@ export const dropshipListingRequiredProductFieldSchema = z.enum([
   "mpn",
   "condition",
   "itemSpecifics",
+  "imageUrls",
 ]);
 
 const requiredConfigKeySchema = z.string()

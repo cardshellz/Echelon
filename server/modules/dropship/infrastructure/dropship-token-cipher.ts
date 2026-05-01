@@ -1,4 +1,4 @@
-import { createCipheriv, randomBytes, randomUUID } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "crypto";
 import { DropshipError } from "../domain/errors";
 import type {
   DropshipStoreConnectionTokenRecord,
@@ -55,6 +55,30 @@ export class AesGcmDropshipStoreTokenCipher implements DropshipStoreTokenCipher 
       authTag: authTag.toString("base64url"),
       expiresAt: input.expiresAt,
     };
+  }
+
+  open(input: {
+    tokenRecord: DropshipStoreConnectionTokenRecord;
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+  }): string {
+    if (input.tokenRecord.keyId !== this.keyId) {
+      throw new DropshipError("DROPSHIP_TOKEN_KEY_MISMATCH", "Dropship token key id does not match the active key.");
+    }
+
+    const decipher = createDecipheriv(
+      "aes-256-gcm",
+      this.key,
+      Buffer.from(input.tokenRecord.iv, "base64url"),
+    );
+    decipher.setAAD(Buffer.from(`${input.vendorId}:${input.platform}:${input.tokenRecord.tokenKind}`, "utf8"));
+    decipher.setAuthTag(Buffer.from(input.tokenRecord.authTag, "base64url"));
+
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(input.tokenRecord.ciphertext, "base64url")),
+      decipher.final(),
+    ]);
+    return plaintext.toString("utf8");
   }
 }
 

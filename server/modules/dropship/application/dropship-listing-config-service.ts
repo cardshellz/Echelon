@@ -165,6 +165,26 @@ export class DropshipListingConfigService {
 export function buildDefaultDropshipStoreListingConfig(
   platform: DropshipSourcePlatform,
 ): NormalizedDropshipStoreListingConfigInput & { platform: DropshipSourcePlatform } {
+  if (platform === "ebay") {
+    return {
+      platform,
+      listingMode: DROPSHIP_DEFAULT_LISTING_MODE,
+      inventoryMode: DROPSHIP_DEFAULT_LISTING_INVENTORY_MODE,
+      priceMode: DROPSHIP_DEFAULT_LISTING_PRICE_MODE,
+      marketplaceConfig: {},
+      requiredConfigKeys: [
+        "marketplaceId",
+        "categoryId",
+        "merchantLocationKey",
+        "businessPolicies.paymentPolicyId",
+        "businessPolicies.returnPolicyId",
+        "businessPolicies.fulfillmentPolicyId",
+      ],
+      requiredProductFields: ["sku", "title", "description", "imageUrls"],
+      isActive: true,
+    };
+  }
+
   return {
     platform,
     listingMode: DROPSHIP_DEFAULT_LISTING_MODE,
