@@ -26,6 +26,7 @@ export const dropshipSchema = pgSchema("dropship");
 export const DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES = 48 * 60;
 export const DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS = 30;
 export const DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS = 200;
+export const DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS = 0;
 
 export const dropshipVendorStatusEnum = [
   "onboarding",
@@ -859,6 +860,27 @@ export const dropshipInsurancePoolConfig = dropshipSchema.table("dropship_insura
   `),
 ]);
 
+export const dropshipShippingMarkupConfig = dropshipSchema.table("dropship_shipping_markup_config", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  name: varchar("name", { length: 120 }).notNull(),
+  markupBps: integer("markup_bps").notNull().default(DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS),
+  fixedMarkupCents: bigint("fixed_markup_cents", { mode: "number" }).notNull().default(0),
+  minMarkupCents: bigint("min_markup_cents", { mode: "number" }),
+  maxMarkupCents: bigint("max_markup_cents", { mode: "number" }),
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: timestamp("effective_from", { withTimezone: true }).defaultNow().notNull(),
+  effectiveTo: timestamp("effective_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  check("dropship_shipping_markup_bps_chk", sql`${table.markupBps} >= 0 AND ${table.markupBps} <= 10000`),
+  check("dropship_shipping_markup_bounds_chk", sql`
+    ${table.fixedMarkupCents} >= 0
+    AND (${table.minMarkupCents} IS NULL OR ${table.minMarkupCents} >= 0)
+    AND (${table.maxMarkupCents} IS NULL OR ${table.maxMarkupCents} >= 0)
+    AND (${table.minMarkupCents} IS NULL OR ${table.maxMarkupCents} IS NULL OR ${table.maxMarkupCents} >= ${table.minMarkupCents})
+  `),
+]);
+
 export const dropshipShippingQuoteSnapshots = dropshipSchema.table("dropship_shipping_quote_snapshots", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
@@ -867,6 +889,9 @@ export const dropshipShippingQuoteSnapshots = dropshipSchema.table("dropship_shi
   rateTableId: integer("rate_table_id").references(() => dropshipRateTables.id),
   destinationCountry: varchar("destination_country", { length: 2 }).notNull().default("US"),
   destinationPostalCode: varchar("destination_postal_code", { length: 20 }),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
+  requestHash: varchar("request_hash", { length: 128 }),
   packageCount: integer("package_count").notNull(),
   baseRateCents: bigint("base_rate_cents", { mode: "number" }).notNull(),
   markupCents: bigint("markup_cents", { mode: "number" }).notNull().default(0),
@@ -877,6 +902,9 @@ export const dropshipShippingQuoteSnapshots = dropshipSchema.table("dropship_shi
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_shipping_quote_vendor_idx").on(table.vendorId, table.createdAt),
+  uniqueIndex("dropship_shipping_quote_vendor_idem_idx")
+    .on(table.vendorId, table.idempotencyKey)
+    .where(sql`idempotency_key IS NOT NULL`),
   check("dropship_shipping_quote_total_chk", sql`
     ${table.packageCount} > 0
     AND ${table.baseRateCents} >= 0
@@ -1217,6 +1245,10 @@ export type DropshipZoneRule = typeof dropshipZoneRules.$inferSelect;
 export const insertDropshipInsurancePoolConfigSchema = createInsertSchema(dropshipInsurancePoolConfig).omit(omitIdCreated);
 export type InsertDropshipInsurancePoolConfig = z.infer<typeof insertDropshipInsurancePoolConfigSchema>;
 export type DropshipInsurancePoolConfig = typeof dropshipInsurancePoolConfig.$inferSelect;
+
+export const insertDropshipShippingMarkupConfigSchema = createInsertSchema(dropshipShippingMarkupConfig).omit(omitIdCreated);
+export type InsertDropshipShippingMarkupConfig = z.infer<typeof insertDropshipShippingMarkupConfigSchema>;
+export type DropshipShippingMarkupConfig = typeof dropshipShippingMarkupConfig.$inferSelect;
 
 export const insertDropshipShippingQuoteSnapshotSchema = createInsertSchema(dropshipShippingQuoteSnapshots).omit(omitIdCreated);
 export type InsertDropshipShippingQuoteSnapshot = z.infer<typeof insertDropshipShippingQuoteSnapshotSchema>;
