@@ -85,7 +85,14 @@ export function startFulfillmentSweeper(dbArg: any = db) {
 
   const SWEEPER_LOCK_ID = 8484; // unique lock ID
 
-  // Run every 1 hour
+  // Run immediately on boot
+  setTimeout(() => {
+    withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
+      await runFulfillmentSweep(dbArg);
+    }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
+  }, 5000); // 5 second delay to let server stabilize
+
+  // Run every 1 hour thereafter
   setInterval(() => {
     withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
       await runFulfillmentSweep(dbArg);
