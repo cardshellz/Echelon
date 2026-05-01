@@ -11,6 +11,7 @@ import type {
   DropshipSupportedStorePlatform,
 } from "../domain/store-connection";
 import { DropshipError } from "../domain/errors";
+import { ensureDefaultListingConfigWithClient } from "./dropship-listing-config.repository";
 
 interface StoreConnectionRow {
   id: number;
@@ -112,6 +113,13 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
         : await insertConnection(client, input);
 
       await replaceTokenRecords(client, connection.storeConnectionId, input.tokenRecords);
+      await ensureDefaultListingConfigWithClient(client, {
+        vendorId: input.vendorId,
+        storeConnectionId: connection.storeConnectionId,
+        platform: input.platform,
+        actor: { actorType: "vendor", actorId: String(input.vendorId) },
+        now: input.connectedAt,
+      });
       await recordAuditEvent(client, {
         vendorId: input.vendorId,
         storeConnectionId: connection.storeConnectionId,

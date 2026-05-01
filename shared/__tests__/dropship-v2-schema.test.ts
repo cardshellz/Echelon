@@ -48,6 +48,10 @@ const listingConnectionConfigMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0094_dropship_listing_connection_config.sql"),
   "utf8",
 );
+const listingConfigBackfillMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0095_dropship_listing_config_backfill.sql"),
+  "utf8",
+);
 const releaseScript = readFileSync(
   resolve(process.cwd(), "scripts/release.sh"),
   "utf8",
@@ -149,6 +153,8 @@ describe("Dropship V2 schema contract", () => {
     expect(listingConnectionConfigMigrationSql).toContain("inventory_mode IN ('managed_quantity_sync','manual_quantity','disabled')");
     expect(listingConnectionConfigMigrationSql).toContain("ADD COLUMN IF NOT EXISTS request_hash");
     expect(listingConnectionConfigMigrationSql).toContain("ON dropship.dropship_listing_push_jobs(vendor_id, idempotency_key)");
+    expect(listingConfigBackfillMigrationSql).toContain("INSERT INTO dropship.dropship_store_listing_configs");
+    expect(listingConfigBackfillMigrationSql).toContain("ON CONFLICT (store_connection_id) DO NOTHING");
   });
 
   it("tracks admin dropship catalog exposure revisions idempotently", () => {
