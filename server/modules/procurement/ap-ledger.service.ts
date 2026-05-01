@@ -19,6 +19,11 @@ import {
 } from "@shared/schema";
 import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
 import { format } from "date-fns";
+import {
+  detectMatchMismatch,
+  detectOverpaid,
+  detectPastDue,
+} from "./po-exceptions.service";
 
 // ─── PO Financial Aggregate Recompute ───────────────────────────────────────
 //
@@ -129,6 +134,20 @@ export async function recomputePoFinancialAggregates(poId: number): Promise<void
   }
 
   await db.update(purchaseOrders).set(patch).where(eq(purchaseOrders.id, poId));
+
+  // ── Exception detection hooks (event-driven, Phase 1) ──────────────────
+  // Run after the DB write so detection reads fresh aggregates.
+  // Non-blocking: detection failures should not roll back the recompute.
+  try {
+    // Overpaid: triggers when paid > invoiced.
+    if (Number(patch.paidTotalCents ?? 0) > Number(patch.invoicedTotalCents ?? 0)) {
+      await detectOverpaid(poId);
+    }
+    // Past-due: lazy check on every financial recompute.
+    await detectPastDue(poId);
+  } catch (detectionErr) {
+    console.error("[po-exceptions] detection hook failed in recomputePoFinancialAggregates:", detectionErr);
+  }
 }
 
 // ─── Status Transition Validation ────────────────────────────────────────────
@@ -1202,11 +1221,27 @@ export async function runInvoiceMatch(invoiceId: number) {
   }
 
   // Return updated lines
-  return db
+  const updatedLines = await db
     .select()
     .from(vendorInvoiceLines)
     .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId))
     .orderBy(asc(vendorInvoiceLines.lineNumber));
+
+  // ── Exception detection hook: match_mismatch ──────────────────────
+  // Detect after all line match statuses have been written.
+  // Non-blocking: detection failures should not roll back the match run.
+  try {
+    const hasMismatch = updatedLines.some(
+      (l) => l.matchStatus !== "matched" && l.matchStatus !== "pending",
+    );
+    if (hasMismatch) {
+      await detectMatchMismatch(invoiceId);
+    }
+  } catch (detectionErr) {
+    console.error("[po-exceptions] detection hook failed in runInvoiceMatch:", detectionErr);
+  }
+
+  return updatedLines;
 }
 
 // ─── Attachments ──────────────────────────────────────────────────────────────

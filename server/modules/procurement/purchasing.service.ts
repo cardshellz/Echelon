@@ -40,6 +40,10 @@ import {
   millsToCents,
   computeLineTotalCentsFromMills,
 } from "@shared/utils/money";
+import {
+  detectQtyVariance,
+  detectPastDue,
+} from "./po-exceptions.service";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -641,12 +645,29 @@ export function createPurchasingService(db: any, storage: Storage) {
       patch.closedBy = userId ?? null;
     }
 
-    return await storage.updatePurchaseOrderStatusWithHistory(poId, patch, {
+    const result = await storage.updatePurchaseOrderStatusWithHistory(poId, patch, {
       fromStatus: po.status ?? current,
       toStatus: legacyStatus ?? po.status,
       changedBy: userId,
       notes: notes ?? `Physical status: ${current} → ${target}`,
     });
+
+    // ── Exception detection hooks (event-driven, Phase 1) ──────────────────
+    // Run after the DB write so detection reads fresh data.
+    // Non-blocking: detection failures should not roll back the status transition.
+    try {
+      // Qty variance: detect after goods are received.
+      if (target === "received") {
+        await detectQtyVariance(poId);
+      }
+      // Past-due: lazy detection on any physical transition.
+      await detectPastDue(poId);
+    } catch (detectionErr) {
+      // Log but don't throw — detection is best-effort, not transactional.
+      console.error("[po-exceptions] detection hook failed in transitionPhysical:", detectionErr);
+    }
+
+    return result;
   }
 
   /**
