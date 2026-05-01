@@ -32,6 +32,7 @@ import { registerDropshipAdminCatalogRoutes } from "./modules/dropship/interface
 import { registerDropshipVendorCatalogRoutes } from "./modules/dropship/interfaces/http/dropship-vendor-catalog.routes";
 import { registerDropshipOnboardingRoutes } from "./modules/dropship/interfaces/http/dropship-onboarding.routes";
 import { registerDropshipStoreConnectionRoutes } from "./modules/dropship/interfaces/http/dropship-store-connection.routes";
+import { registerDropshipShippingRoutes } from "./modules/dropship/interfaces/http/dropship-shipping.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -50,6 +51,7 @@ export async function registerRoutes(
   registerDropshipVendorCatalogRoutes(app);
   registerDropshipOnboardingRoutes(app);
   registerDropshipStoreConnectionRoutes(app);
+  registerDropshipShippingRoutes(app);
   registerLocationRoutes(app);
   registerPickingRoutes(app);
   registerShopifyRoutes(app);

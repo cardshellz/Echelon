@@ -5,10 +5,13 @@ import {
   DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS,
   DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES,
   DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS,
+  DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS,
   dropshipCatalogRuleSetRevisions,
   dropshipCatalogRules,
   dropshipFaultCategoryEnum,
   dropshipOrderIntake,
+  dropshipShippingMarkupConfig,
+  dropshipShippingQuoteSnapshots,
   dropshipStoreConnectionTokens,
   dropshipSourcePlatformEnum,
   dropshipStoreConnections,
@@ -35,6 +38,10 @@ const storeConnectionTokenVaultMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0092_dropship_store_connection_token_vault.sql"),
   "utf8",
 );
+const shippingQuoteFoundationMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0093_dropship_shipping_quote_foundation.sql"),
+  "utf8",
+);
 const releaseScript = readFileSync(
   resolve(process.cwd(), "scripts/release.sh"),
   "utf8",
@@ -45,6 +52,7 @@ describe("Dropship V2 schema contract", () => {
     expect(DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES).toBe(2880);
     expect(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS).toBe(30);
     expect(DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS).toBe(200);
+    expect(DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS).toBe(0);
     expect(migrationSql).toContain("payment_hold_timeout_minutes integer NOT NULL DEFAULT 2880");
     expect(migrationSql).toContain("return_window_days integer NOT NULL DEFAULT 30");
     expect(migrationSql).toContain("fee_bps integer NOT NULL DEFAULT 200");
@@ -110,6 +118,17 @@ describe("Dropship V2 schema contract", () => {
     expect(migrationSql).toContain("dropship_rma_fault_chk");
     expect(migrationSql).toContain("dropship_notification_pref_critical_chk");
     expect(migrationSql).toContain("dropship_insurance_bps_chk");
+  });
+
+  it("keeps shipping quotes idempotent and shipping markup configurable", () => {
+    expect((dropshipShippingMarkupConfig as any).markupBps.name).toBe("markup_bps");
+    expect((dropshipShippingMarkupConfig as any).fixedMarkupCents.name).toBe("fixed_markup_cents");
+    expect((dropshipShippingQuoteSnapshots as any).idempotencyKey.name).toBe("idempotency_key");
+    expect((dropshipShippingQuoteSnapshots as any).requestHash.name).toBe("request_hash");
+    expect((dropshipShippingQuoteSnapshots as any).currency.name).toBe("currency");
+    expect(shippingQuoteFoundationMigrationSql).toContain("dropship_shipping_markup_config");
+    expect(shippingQuoteFoundationMigrationSql).toContain("dropship_shipping_quote_vendor_idem_idx");
+    expect(shippingQuoteFoundationMigrationSql).toContain("ADD COLUMN IF NOT EXISTS request_hash");
   });
 
   it("tracks admin dropship catalog exposure revisions idempotently", () => {
