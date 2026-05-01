@@ -354,18 +354,20 @@ function DualTrackHeader({
   // augment.
   const cancelledAt: string | null = po.cancelledAt ?? null;
   const cancelReason: string | null = po.cancelReason ?? null;
-  const cancelledBy: string | null = po.cancelledBy ?? null;
+  const relatedUsers: Record<string, { username: string; displayName: string | null }> | undefined = (po as any).relatedUsers;
+  const cancelledByFormatted = formatActor((po as any).cancelledBy, relatedUsers);
   const cancelExtras = (stageReachedAt: string | null | undefined): string[] => {
     if (!isCancelled || !cancelledAt) return [];
     const reached = !!stageReachedAt && new Date(stageReachedAt) <= new Date(cancelledAt);
+    const cancelledByPart = (po as any).cancelledBy ? ` by ${cancelledByFormatted}` : "";
     if (reached) {
       return [
-        `✅ Reached before cancellation (cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledBy ? ` by ${cancelledBy}` : ""})`,
+        `✅ Reached before cancellation (cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledByPart})`,
         cancelReason ? `Reason: ${cancelReason}` : "",
       ];
     }
     return [
-      `⛔ Not reached — PO cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledBy ? ` by ${cancelledBy}` : ""}`,
+      `⛔ Not reached — PO cancelled ${new Date(cancelledAt).toLocaleString()}${cancelledByPart}`,
       cancelReason ? `Reason: ${cancelReason}` : "",
     ];
   };
@@ -374,7 +376,7 @@ function DualTrackHeader({
     draft: {
       ts: po.createdAt,
       extra: [
-        po.createdBy ? `Created by ${po.createdBy}` : null,
+        po.createdBy ? `Created by ${formatActor(po.createdBy, relatedUsers)}` : null,
         ...cancelExtras(po.createdAt),
       ],
     },
@@ -544,12 +546,14 @@ function ExceptionCard({
   onResolve,
   onDismiss,
   busy,
+  relatedUsers,
 }: {
   ex: any;
   onAcknowledge: () => void;
   onResolve: (note: string) => void;
   onDismiss: (note: string) => void;
   busy: boolean;
+  relatedUsers?: Record<string, { username: string; displayName: string | null }>;
 }) {
   const severity = (ex.severity ?? "warn") as "info" | "warn" | "error";
   const borderClass =
@@ -609,7 +613,7 @@ function ExceptionCard({
             {detectedLabel && (
               <div className="text-xs text-muted-foreground mt-0.5">
                 Detected {detectedLabel}
-                {ex.detectedBy ? ` by ${ex.detectedBy}` : ""}
+                {ex.detectedBy ? ` by ${formatActor(ex.detectedBy, relatedUsers)}` : ""}
               </div>
             )}
             {ex.message && (
@@ -653,6 +657,32 @@ function ExceptionCard({
 
 /** Convert a dollar string to cents without floating-point artifacts */
 
+/**
+ * Resolve an actor ID (user UUID, 'system', 'cron:*', 'agent:*') to a
+ * human-readable name using the relatedUsers map returned by the PO detail
+ * endpoint.
+ *
+ * Resolution order:
+ *   1. displayName when present
+ *   2. username
+ *   3. 'user:<first-7-chars-of-UUID>' as fallback for unknown IDs
+ *   4. Prefixed strings ('system', 'cron:*', 'agent:*') pass through unchanged
+ *   5. empty / undefined → '—'
+ */
+function formatActor(
+  actorId: string | null | undefined,
+  relatedUsers: Record<string, { username: string; displayName: string | null }> | undefined,
+): string {
+  if (!actorId) return "—";
+  // Prefixed non-UUID actor strings pass through unchanged
+  if (/^(system|cron:|agent:)/.test(actorId)) return actorId;
+  const user = relatedUsers?.[actorId];
+  if (user) {
+    return user.displayName || user.username;
+  }
+  // Unknown UUID: show short form for readability
+  return `user:${actorId.slice(0, 7)}`;
+}
 
 function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
   if (!cents && cents !== 0) return "$0.00";
@@ -737,6 +767,21 @@ export default function PurchaseOrderDetail() {
   const [addLineMode, setAddLineMode] = useState<"catalog" | "search">("catalog");
   const [catalogSearch, setCatalogSearch] = useState("");
   const [selectedCatalogEntry, setSelectedCatalogEntry] = useState<any>(null);
+
+  // Inline Record Payment dialog (replaces navigate-to-/ap-payments flow)
+  const [showPaymentDialog, setShowPaymentDialog] = useState(false);
+  const [payment, setPayment] = useState({
+    paymentDate: format(new Date(), "yyyy-MM-dd"),
+    paymentMethod: "ach",
+    referenceNumber: "",
+    checkNumber: "",
+    bankAccountLabel: "",
+    amountDollars: "",   // pre-filled when dialog opens from first unpaid invoice
+    notes: "",
+    invoiceId: null as number | null,  // which invoice this payment allocates to
+    forceOverride: false,
+  });
+
   const [newLine, setNewLine] = useState({
     productId: 0,
     productVariantId: 0,
@@ -752,6 +797,15 @@ export default function PurchaseOrderDetail() {
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
+
+  // PO detail endpoint resolves all referenced actor UUIDs (createdBy,
+  // cancelledBy, history.changedBy, exception.detectedBy/...) into a single
+  // map with displayName + username. Used by formatActor() everywhere actor
+  // strings appear in this component (cancellation banner, history rows,
+  // exception cards, etc.) so users see human names instead of raw UUIDs.
+  const relatedUsers: Record<string, { username: string; displayName: string | null }> | undefined =
+    (po as any)?.relatedUsers;
+  const cancelledByFormatted = formatActor((po as any)?.cancelledBy, relatedUsers);
 
   // Feature-flag redirect: when the new PO editor is enabled, land-on-draft
   // via direct URL should hop over to the new inline editor. Keeps this
@@ -803,9 +857,12 @@ export default function PurchaseOrderDetail() {
   });
   const linkedShipments = linkedShipmentsRaw.filter((s: any) => s.status !== "cancelled");
 
+  // Eagerly fetched (not tab-gated) so the side-rail Record Payment button
+  // can pre-populate the invoice dropdown without requiring the invoices tab
+  // to have been visited first.
   const { data: invoicesData } = useQuery<{ invoices: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/invoices`],
-    enabled: !!poId && activeTab === "invoices",
+    enabled: !!poId,
   });
 
   // Phase 2: payments tab
@@ -1088,6 +1145,120 @@ export default function PurchaseOrderDetail() {
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
+  });
+
+  // Phase 3 physical-status transition mutations — mirror
+  // acknowledgeMutation's pattern exactly.
+  const markShippedMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/purchase-orders/${poId}/mark-shipped`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      toast({ title: "Marked as shipped" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  const markInTransitMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/purchase-orders/${poId}/mark-in-transit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      toast({ title: "Marked as in transit" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  const markArrivedMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/purchase-orders/${poId}/mark-arrived`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      toast({ title: "Marked as arrived" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  // Inline payment mutation — posts directly to /api/ap-payments so
+  // the user never has to navigate away from PO detail (Rule #6: fresh
+  // Idempotency-Key per attempt prevents double-posts on retry).
+  const paymentMutation = useMutation({
+    mutationFn: async () => {
+      if (!payment.invoiceId) throw new Error("No invoice selected");
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `po-pay-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
+      const res = await fetch("/api/ap-payments", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({
+          vendorId: po?.vendorId,
+          paymentDate: payment.paymentDate,
+          paymentMethod: payment.paymentMethod,
+          referenceNumber: payment.referenceNumber || undefined,
+          checkNumber: payment.checkNumber || undefined,
+          bankAccountLabel: payment.bankAccountLabel || undefined,
+          totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
+          notes: payment.notes || undefined,
+          forceOverride: payment.forceOverride || undefined,
+          allocations: [{
+            vendorInvoiceId: payment.invoiceId,
+            appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
+          }],
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Payment failed (${res.status})`);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/payments`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/invoices`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
+      setShowPaymentDialog(false);
+      setPayment(p => ({
+        ...p,
+        amountDollars: "",
+        invoiceId: null,
+        referenceNumber: "",
+        checkNumber: "",
+        bankAccountLabel: "",
+        notes: "",
+        forceOverride: false,
+      }));
+      toast({ title: "Payment recorded" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });
 
   const cancelMutation = useMutation({
@@ -1542,7 +1713,7 @@ export default function PurchaseOrderDetail() {
                 {po.cancelledAt
                   ? ` ${new Date(po.cancelledAt).toLocaleString()}`
                   : ""}
-                {po.cancelledBy ? ` by ${po.cancelledBy}` : ""}
+                {po.cancelledBy ? ` by ${cancelledByFormatted}` : ""}
               </span>
             </div>
             {po.cancelReason && (
@@ -2377,6 +2548,7 @@ export default function PurchaseOrderDetail() {
                     resolveExceptionMutation.isPending ||
                     dismissExceptionMutation.isPending
                   }
+                  relatedUsers={relatedUsers}
                 />
               ))}
             </div>
@@ -2422,7 +2594,7 @@ export default function PurchaseOrderDetail() {
                           <span className="text-muted-foreground">
                             {ex.status === "resolved" ? "resolved" : "dismissed"}{" "}
                             {ex.resolvedAt ? new Date(ex.resolvedAt).toLocaleDateString() : ""}
-                            {ex.resolvedBy ? ` by ${ex.resolvedBy}` : ""}
+                            {ex.resolvedBy ? ` by ${formatActor(ex.resolvedBy, relatedUsers)}` : ""}
                           </span>
                         </div>
                         {ex.resolutionNote && (
@@ -2469,7 +2641,7 @@ export default function PurchaseOrderDetail() {
                       {h.notes && <p className="text-sm mt-1">{h.notes}</p>}
                       <p className="text-xs text-muted-foreground mt-1">
                         {h.changedAt ? format(new Date(h.changedAt), "MMM d, yyyy h:mm a") : ""}
-                        {h.changedBy && ` • ${h.changedBy}`}
+                        {h.changedBy && ` • ${formatActor(h.changedBy, relatedUsers)}`}
                       </p>
                     </div>
                   </CardContent>
@@ -2516,45 +2688,45 @@ export default function PurchaseOrderDetail() {
               </Button>
             )}
 
-            {/* Mark shipped — Phase 3 transition, gray out */}
+            {/* Mark shipped */}
             {po.physicalStatus === "acknowledged" && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
                 size="sm"
-                disabled
-                title="Coming soon — Phase 3"
+                onClick={() => markShippedMutation.mutate()}
+                disabled={markShippedMutation.isPending}
               >
                 <Truck className="h-3.5 w-3.5 mr-2" />
-                Mark shipped
+                {markShippedMutation.isPending ? "Marking..." : "Mark shipped"}
               </Button>
             )}
 
-            {/* Mark in transit — Phase 3 */}
+            {/* Mark in transit */}
             {po.physicalStatus === "shipped" && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
                 size="sm"
-                disabled
-                title="Coming soon — Phase 3"
+                onClick={() => markInTransitMutation.mutate()}
+                disabled={markInTransitMutation.isPending}
               >
                 <Ship className="h-3.5 w-3.5 mr-2" />
-                Mark in transit
+                {markInTransitMutation.isPending ? "Marking..." : "Mark in transit"}
               </Button>
             )}
 
-            {/* Mark arrived — Phase 3 */}
+            {/* Mark arrived */}
             {(po.physicalStatus === "in_transit" || po.physicalStatus === "shipped") && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
                 size="sm"
-                disabled
-                title="Coming soon — Phase 3"
+                onClick={() => markArrivedMutation.mutate()}
+                disabled={markArrivedMutation.isPending}
               >
                 <Package className="h-3.5 w-3.5 mr-2" />
-                Mark arrived
+                {markArrivedMutation.isPending ? "Marking..." : "Mark arrived"}
               </Button>
             )}
 
@@ -2618,16 +2790,40 @@ export default function PurchaseOrderDetail() {
 
             {/* Financial: Record payment */}
             {["invoiced", "partially_paid"].includes(po.financialStatus ?? "") && (
-              <Button
-                className="w-full justify-start"
-                variant="outline"
-                size="sm"
-                onClick={() => navigate("/ap-payments")}
-                title="Record payment in AP ledger"
-              >
-                <DollarSign className="h-3.5 w-3.5 mr-2" />
-                Record payment
-              </Button>
+              <>
+                <Button
+                  className="w-full justify-start"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    // Pre-fill from the first unpaid invoice; guard if none exist
+                    const unpaidInvoices = invoicesData?.invoices?.filter((i: any) => i.balanceCents > 0) ?? [];
+                    if (unpaidInvoices.length === 0) {
+                      // invoicesData might not be loaded yet (tab not visited) — open the
+                      // dialog anyway and let the user select; it will validate on submit.
+                      setShowPaymentDialog(true);
+                      return;
+                    }
+                    const first = unpaidInvoices[0];
+                    setPayment(p => ({
+                      ...p,
+                      invoiceId: first.id,
+                      amountDollars: (first.balanceCents / 100).toFixed(2),
+                    }));
+                    setShowPaymentDialog(true);
+                  }}
+                >
+                  <DollarSign className="h-3.5 w-3.5 mr-2" />
+                  Record payment
+                </Button>
+                {/* Fallback link for users who want the full AP payments list */}
+                <button
+                  className="w-full text-left text-xs text-muted-foreground underline-offset-2 hover:underline px-1"
+                  onClick={() => navigate("/ap-payments")}
+                >
+                  View all payments →
+                </button>
+              </>
             )}
 
             {/* Fallback: no actions available */}
@@ -3383,6 +3579,149 @@ export default function PurchaseOrderDetail() {
                 disabled={createShipmentMutation.isPending}
               >
                 {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ═══════ Inline Record Payment Dialog ═══════ */}
+      {/* Mirrors APInvoiceDetail.tsx paymentMutation/dialog structure. Adds an
+          invoice dropdown at the top because the user is acting from PO context
+          rather than a specific invoice. */}
+      <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Record Payment</DialogTitle>
+            <DialogDescription>
+              {po?.poNumber} — choose an invoice and enter payment details
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {/* Invoice selector — PO context-specific, not present in invoice-level dialog */}
+            <div className="space-y-2">
+              <Label>Invoice *</Label>
+              {(() => {
+                const unpaidInvoices = invoicesData?.invoices?.filter((i: any) => i.balanceCents > 0) ?? [];
+                if (unpaidInvoices.length === 0) {
+                  return (
+                    <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3 text-sm">
+                      No unpaid invoices on this PO. Add an invoice first.
+                    </div>
+                  );
+                }
+                return (
+                  <select
+                    className="w-full border rounded-md h-10 px-3 text-sm bg-background"
+                    value={payment.invoiceId ?? ""}
+                    onChange={(e) => {
+                      const inv = unpaidInvoices.find((i: any) => i.id === Number(e.target.value));
+                      setPayment(p => ({
+                        ...p,
+                        invoiceId: inv ? inv.id : null,
+                        amountDollars: inv ? (inv.balanceCents / 100).toFixed(2) : p.amountDollars,
+                      }));
+                    }}
+                  >
+                    <option value="" disabled>Select invoice…</option>
+                    {unpaidInvoices.map((inv: any) => (
+                      <option key={inv.id} value={inv.id}>
+                        {inv.invoiceNumber} — {formatCents(inv.balanceCents)} due
+                      </option>
+                    ))}
+                  </select>
+                );
+              })()}
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Payment Date *</Label>
+                <Input type="date" value={payment.paymentDate} onChange={(e) => setPayment(p => ({ ...p, paymentDate: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Method *</Label>
+                <select className="w-full border rounded-md h-10 px-3 text-sm bg-background" value={payment.paymentMethod} onChange={(e) => setPayment(p => ({ ...p, paymentMethod: e.target.value }))}>
+                  <option value="ach">ACH</option>
+                  <option value="check">Check</option>
+                  <option value="wire">Wire</option>
+                  <option value="credit_card">Credit Card</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Amount ($) *</Label>
+              <Input type="number" step="0.01" min="0" value={payment.amountDollars} onChange={(e) => setPayment(p => ({ ...p, amountDollars: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Reference # <span className="text-muted-foreground text-xs">(ACH/wire)</span></Label>
+                <Input placeholder="Trace / wire ref" value={payment.referenceNumber} onChange={(e) => setPayment(p => ({ ...p, referenceNumber: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Check #</Label>
+                <Input placeholder="If paying by check" value={payment.checkNumber} onChange={(e) => setPayment(p => ({ ...p, checkNumber: e.target.value }))} />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Bank Account</Label>
+              <Input placeholder="e.g. Chase Operating" value={payment.bankAccountLabel} onChange={(e) => setPayment(p => ({ ...p, bankAccountLabel: e.target.value }))} />
+            </div>
+            <div className="space-y-2">
+              <Label>Notes</Label>
+              <Input placeholder="Optional" value={payment.notes} onChange={(e) => setPayment(p => ({ ...p, notes: e.target.value }))} />
+            </div>
+            {/* 3-way match banner (mirrors APInvoiceDetail.tsx logic) */}
+            {(() => {
+              const amountCents = dollarsToCents(payment.amountDollars || "0");
+              const selectedInvoice = invoicesData?.invoices?.find((i: any) => i.id === payment.invoiceId);
+              const balance = selectedInvoice?.balanceCents ?? 0;
+              const isFinalPayment = amountCents > 0 && amountCents >= balance;
+              const isPartial = amountCents > 0 && amountCents < balance;
+
+              if (isPartial) {
+                return (
+                  <div className="rounded-md border border-blue-200 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm">
+                    <div className="font-medium">Partial payment</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      Remaining balance after this payment: {formatCents(balance - amountCents)}.
+                      The 3-way match runs when the final payment settles the invoice.
+                    </div>
+                  </div>
+                );
+              }
+
+              if (isFinalPayment) {
+                return (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={payment.forceOverride}
+                        onChange={(e) => setPayment(p => ({ ...p, forceOverride: e.target.checked }))}
+                      />
+                      <div className="text-sm">
+                        <div className="font-medium">Override 3-way match check</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          This payment will fully settle the invoice. Server will require the
+                          invoice lines to be matched against PO lines and receipts. Check this
+                          only if the match is intentionally pending.
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
+              <Button
+                onClick={() => paymentMutation.mutate()}
+                disabled={!payment.amountDollars || !payment.invoiceId || paymentMutation.isPending}
+              >
+                {paymentMutation.isPending ? "Recording..." : "Record Payment"}
               </Button>
             </div>
           </div>

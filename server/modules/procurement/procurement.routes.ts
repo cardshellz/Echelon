@@ -15,8 +15,9 @@ import { PoExceptionError } from "./po-exceptions.service";
 import { renderPoHtml } from "./po-document";
 import * as emailService from "../notifications/email.service";
 import * as notificationService from "../notifications/notifications.service";
-import { sql } from "drizzle-orm";
+import { sql, inArray } from "drizzle-orm";
 import { db } from "../../db";
+import { users as identityUsers } from "../../storage/base";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 
 /**
@@ -1954,17 +1955,61 @@ export function registerPurchasingRoutes(app: Express) {
       const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
       if (!po) return res.status(404).json({ error: "Purchase order not found" });
 
-      const [lines, vendor, exceptionCount] = await Promise.all([
+      const [lines, vendor, exceptionCount, history, exceptions] = await Promise.all([
         purchasing.getPurchaseOrderLines(po.id),
         storage.getVendorById(po.vendorId),
         poExceptionsService.countOpenExceptions(po.id),
+        purchasing.getPoStatusHistory(po.id),
+        poExceptionsService.listExceptions(po.id, { includeResolved: true }),
       ]);
+
+      // Collect all distinct user IDs referenced on this PO for client-side
+      // display. Prefixed actor strings (system, cron:*, agent:*) are passed
+      // through unchanged by formatActor on the client — exclude them here.
+      const NON_UUID_PREFIX = /^(system|cron:|agent:)/;
+      const actorIds = new Set<string>();
+      const addActor = (id: string | null | undefined) => {
+        if (id && !NON_UUID_PREFIX.test(id)) actorIds.add(id);
+      };
+
+      // PO-level actor fields
+      addActor((po as any).createdBy);
+      addActor((po as any).cancelledBy);
+      addActor((po as any).approvedBy);
+      addActor((po as any).closedBy);
+      addActor((po as any).updatedBy);
+
+      // Status history actors
+      for (const h of history) {
+        addActor((h as any).changedBy);
+      }
+
+      // Exception actors
+      for (const ex of exceptions) {
+        addActor((ex as any).detectedBy);
+        addActor((ex as any).acknowledgedBy);
+        addActor((ex as any).resolvedBy);
+      }
+
+      // Single batch query — no N+1
+      let relatedUsers: Record<string, { username: string; displayName: string | null }> = {};
+      if (actorIds.size > 0) {
+        const rows = await db
+          .select({ id: identityUsers.id, username: identityUsers.username, displayName: identityUsers.displayName })
+          .from(identityUsers)
+          .where(inArray(identityUsers.id, [...actorIds]));
+        for (const row of rows) {
+          relatedUsers[row.id] = { username: row.username, displayName: row.displayName };
+        }
+      }
+
       res.json({
         ...po,
         lines,
         vendor,
         openExceptionCount: exceptionCount.count,
         maxOpenSeverity: exceptionCount.maxSeverity,
+        relatedUsers,
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -2349,6 +2394,56 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // ── Phase 3 physical-status transitions ─────────────────────────────
+  // All three delegate directly to purchasing.transitionPhysical which
+  // validates the VALID_PHYSICAL_TRANSITIONS table and returns 400/409 on
+  // invalid moves. PurchasingError.statusCode is forwarded verbatim.
+
+  app.post("/api/purchase-orders/:id/mark-shipped", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.transitionPhysical(
+        Number(req.params.id),
+        "shipped",
+        req.session.user?.id,
+        req.body.notes,
+      );
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/mark-in-transit", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.transitionPhysical(
+        Number(req.params.id),
+        "in_transit",
+        req.session.user?.id,
+        req.body.notes,
+      );
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/mark-arrived", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.transitionPhysical(
+        Number(req.params.id),
+        "arrived",
+        req.session.user?.id,
+        req.body.notes,
+      );
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/purchase-orders/:id/acknowledge", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const data = {
@@ -2421,6 +2516,27 @@ export function registerPurchasingRoutes(app: Express) {
       res.json({ receipts });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Discard a draft receiving order (no inventory side-effects) ────────
+  //
+  // Validates status=draft and no received qty before atomically deleting the
+  // order + its lines and writing an audit row on the linked PO (Rule #8).
+  // Idempotent: calling twice on a non-existent id returns 404 on the second
+  // call (the order is already gone).
+  app.delete("/api/receiving-orders/:id/discard", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { receiving: rcvService } = req.app.locals.services;
+      await rcvService.discardDraftReceivingOrder(
+        Number(req.params.id),
+        req.session.user?.id,
+      );
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("[Receiving] Error discarding draft receiving order:", error);
+      res.status(500).json({ error: "Failed to discard receiving order" });
     }
   });
 
