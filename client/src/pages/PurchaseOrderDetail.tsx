@@ -334,6 +334,124 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
   cancelled: { variant: "destructive", label: "Cancelled" },
 };
 
+// ── ExceptionCard ────────────────────────────────────────────────────
+// One open or acknowledged exception. Severity drives the left border
+// color; status drives which actions render. Resolve and dismiss prompt
+// for a free-text note via window.prompt for now (small enough surface
+// that a full dialog isn't worth the weight).
+function ExceptionCard({
+  ex,
+  onAcknowledge,
+  onResolve,
+  onDismiss,
+  busy,
+}: {
+  ex: any;
+  onAcknowledge: () => void;
+  onResolve: (note: string) => void;
+  onDismiss: (note: string) => void;
+  busy: boolean;
+}) {
+  const severity = (ex.severity ?? "warn") as "info" | "warn" | "error";
+  const borderClass =
+    severity === "error"
+      ? "border-l-4 border-l-red-600"
+      : severity === "info"
+      ? "border-l-4 border-l-blue-600"
+      : "border-l-4 border-l-amber-500";
+  const iconColor =
+    severity === "error"
+      ? "text-red-600"
+      : severity === "info"
+      ? "text-blue-600"
+      : "text-amber-600";
+  const detectedLabel = (() => {
+    if (!ex.detectedAt) return null;
+    const dt = new Date(ex.detectedAt);
+    return `${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  })();
+  const handleResolve = () => {
+    const note = window.prompt(
+      "Resolution note (required) — what fixed this exception?",
+      "",
+    );
+    if (note === null) return; // user cancelled
+    if (!note.trim()) {
+      window.alert("A resolution note is required.");
+      return;
+    }
+    onResolve(note.trim());
+  };
+  const handleDismiss = () => {
+    const note = window.prompt(
+      "Optional reason for dismissing (e.g. 'false alarm', 'duplicate'):",
+      "",
+    );
+    if (note === null) return; // user cancelled
+    onDismiss(note.trim());
+  };
+  return (
+    <Card className={borderClass}>
+      <CardContent className="p-4">
+        <div className="flex items-start gap-3">
+          <span className={`text-xl leading-none ${iconColor}`} aria-hidden>
+            ⚠
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline justify-between gap-2 flex-wrap">
+              <h3 className="text-sm font-semibold">{ex.title}</h3>
+              <Badge
+                variant="outline"
+                className="text-[10px] uppercase"
+              >
+                {ex.status === "acknowledged" ? "acknowledged" : "open"}
+              </Badge>
+            </div>
+            {detectedLabel && (
+              <div className="text-xs text-muted-foreground mt-0.5">
+                Detected {detectedLabel}
+                {ex.detectedBy ? ` by ${ex.detectedBy}` : ""}
+              </div>
+            )}
+            {ex.message && (
+              <p className="text-sm mt-2">{ex.message}</p>
+            )}
+            <div className="flex flex-wrap gap-2 mt-3">
+              {ex.status === "open" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onAcknowledge}
+                  disabled={busy}
+                >
+                  Acknowledge
+                </Button>
+              )}
+              <Button
+                size="sm"
+                onClick={handleResolve}
+                disabled={busy}
+                data-testid={`resolve-exception-${ex.id}`}
+              >
+                Mark resolved
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={handleDismiss}
+                disabled={busy}
+                className="text-muted-foreground"
+              >
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 /** Convert a dollar string to cents without floating-point artifacts */
 
 
@@ -497,6 +615,39 @@ export default function PurchaseOrderDetail() {
     enabled: !!poId && activeTab === "payments",
   });
 
+  // Exceptions — fetched on detail-page load (lightweight; the count drives
+  // the header pill + tab counter regardless of which tab is active).
+  // includeResolved param flips when user expands the resolved section so
+  // we don't pull every closed exception on initial load.
+  const [showResolvedExceptions, setShowResolvedExceptions] = useState(false);
+  const { data: exceptionsData, refetch: refetchExceptions } = useQuery<{ exceptions: any[] }>({
+    queryKey: [`/api/purchase-orders/${poId}/exceptions`, showResolvedExceptions],
+    queryFn: async () => {
+      const url = showResolvedExceptions
+        ? `/api/purchase-orders/${poId}/exceptions?includeResolved=true`
+        : `/api/purchase-orders/${poId}/exceptions`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to load exceptions");
+      return res.json();
+    },
+    enabled: !!poId,
+  });
+  const allExceptions = exceptionsData?.exceptions ?? [];
+  const openExceptions = allExceptions.filter((e: any) =>
+    ["open", "acknowledged"].includes(e.status),
+  );
+  const closedExceptions = allExceptions.filter((e: any) =>
+    ["resolved", "dismissed"].includes(e.status),
+  );
+  const openExceptionCount = openExceptions.length;
+  const maxOpenSeverity = openExceptions.reduce<
+    "info" | "warn" | "error" | null
+  >((acc, e) => {
+    const order: Record<string, number> = { info: 1, warn: 2, error: 3 };
+    if (!acc) return e.severity;
+    return order[e.severity] > order[acc] ? e.severity : acc;
+  }, null);
+
   const lines = po?.lines ?? [];
   const history = historyData?.history ?? [];
   const receipts = receiptsData?.receipts ?? [];
@@ -570,6 +721,77 @@ export default function PurchaseOrderDetail() {
     select: (data: any) => data,
   });
   const requireAcknowledgment = settingsData?.requireVendorAcknowledgment === "true";
+
+  // ── Exception lifecycle mutations ──────────────────────────────
+  const ackExceptionMutation = useMutation({
+    mutationFn: async (exceptionId: number) => {
+      const res = await fetch(`/api/po-exceptions/${exceptionId}/acknowledge`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Acknowledge failed (${res.status})`);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchExceptions();
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/history`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      toast({ title: "Exception acknowledged" });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const resolveExceptionMutation = useMutation({
+    mutationFn: async ({ id, resolutionNote }: { id: number; resolutionNote: string }) => {
+      const res = await fetch(`/api/po-exceptions/${id}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolutionNote }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Resolve failed (${res.status})`);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchExceptions();
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/history`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      toast({ title: "Exception resolved" });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const dismissExceptionMutation = useMutation({
+    mutationFn: async ({ id, note }: { id: number; note?: string }) => {
+      const res = await fetch(`/api/po-exceptions/${id}/dismiss`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: note || "" }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Dismiss failed (${res.status})`);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchExceptions();
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/history`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      toast({ title: "Exception dismissed" });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
 
   const sendToVendorMutation = useMutation({
     mutationFn: async () => {
@@ -1084,6 +1306,24 @@ export default function PurchaseOrderDetail() {
         </div>
       </div>
 
+      {/* Exception pill (Phase 1) — only when there are open exceptions.
+          Click jumps to the Exceptions tab below. Severity drives color. */}
+      {openExceptionCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setActiveTab("exceptions")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border text-sm font-medium transition-colors ${
+            maxOpenSeverity === "error"
+              ? "bg-red-50 text-red-700 border-red-300 hover:bg-red-100"
+              : "bg-amber-50 text-amber-700 border-amber-300 hover:bg-amber-100"
+          }`}
+          data-testid="po-exception-pill"
+        >
+          <span aria-hidden>⚠</span>
+          {openExceptionCount} exception{openExceptionCount > 1 ? "s" : ""}
+        </button>
+      )}
+
       {/* Phase 2: Dual-track header */}
       <DualTrackHeader po={po} />
 
@@ -1285,6 +1525,9 @@ export default function PurchaseOrderDetail() {
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
           <TabsTrigger value="payments">Payments</TabsTrigger>
           <TabsTrigger value="shipments">Shipments {linkedShipments.length > 0 ? `(${linkedShipments.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="exceptions" data-testid="tab-exceptions">
+            Exceptions{openExceptionCount > 0 ? ` (${openExceptionCount})` : ""}
+          </TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
 
@@ -1828,6 +2071,97 @@ export default function PurchaseOrderDetail() {
                 </Table>
               </CardContent>
             </Card>
+          )}
+        </TabsContent>
+
+        {/* Exceptions tab (Phase 1) — surfaces open + acknowledged events,
+            with a collapsible 'resolved/dismissed' section at the bottom. */}
+        <TabsContent value="exceptions" className="space-y-3">
+          {openExceptions.length === 0 && closedExceptions.length === 0 && (
+            <Card>
+              <CardContent className="p-6 text-center text-muted-foreground">
+                No exceptions on this PO.
+              </CardContent>
+            </Card>
+          )}
+
+          {openExceptions.length > 0 && (
+            <div className="space-y-2">
+              {openExceptions.map((ex: any) => (
+                <ExceptionCard
+                  key={ex.id}
+                  ex={ex}
+                  onAcknowledge={() => ackExceptionMutation.mutate(ex.id)}
+                  onResolve={(note) =>
+                    resolveExceptionMutation.mutate({ id: ex.id, resolutionNote: note })
+                  }
+                  onDismiss={(note) =>
+                    dismissExceptionMutation.mutate({ id: ex.id, note })
+                  }
+                  busy={
+                    ackExceptionMutation.isPending ||
+                    resolveExceptionMutation.isPending ||
+                    dismissExceptionMutation.isPending
+                  }
+                />
+              ))}
+            </div>
+          )}
+
+          {(closedExceptions.length > 0 || showResolvedExceptions) && (
+            <div className="pt-2">
+              {!showResolvedExceptions ? (
+                <button
+                  type="button"
+                  onClick={() => setShowResolvedExceptions(true)}
+                  className="w-full text-center text-xs text-muted-foreground py-2 rounded-md hover:bg-muted"
+                  data-testid="show-resolved-exceptions"
+                >
+                  ▸ Show resolved / dismissed exceptions
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
+                    <span>Resolved / dismissed</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowResolvedExceptions(false)}
+                      className="underline hover:text-foreground"
+                    >
+                      Hide
+                    </button>
+                  </div>
+                  {closedExceptions.length === 0 ? (
+                    <div className="text-xs text-muted-foreground text-center py-3">
+                      None.
+                    </div>
+                  ) : (
+                    closedExceptions.map((ex: any) => (
+                      <div
+                        key={ex.id}
+                        className="text-xs border rounded-md p-2 bg-muted/30"
+                      >
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="font-medium">
+                            {ex.status === "resolved" ? "✓" : "✕"} {ex.title}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {ex.status === "resolved" ? "resolved" : "dismissed"}{" "}
+                            {ex.resolvedAt ? new Date(ex.resolvedAt).toLocaleDateString() : ""}
+                            {ex.resolvedBy ? ` by ${ex.resolvedBy}` : ""}
+                          </span>
+                        </div>
+                        {ex.resolutionNote && (
+                          <div className="mt-1 text-muted-foreground italic">
+                            “{ex.resolutionNote}”
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </TabsContent>
 
