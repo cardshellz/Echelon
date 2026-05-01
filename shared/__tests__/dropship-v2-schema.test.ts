@@ -12,7 +12,9 @@ import {
   dropshipOrderIntake,
   dropshipShippingMarkupConfig,
   dropshipShippingQuoteSnapshots,
+  dropshipListingPushJobs,
   dropshipStoreConnectionTokens,
+  dropshipStoreListingConfigs,
   dropshipSourcePlatformEnum,
   dropshipStoreConnections,
   dropshipVendorSelectionRuleSetRevisions,
@@ -40,6 +42,10 @@ const storeConnectionTokenVaultMigrationSql = readFileSync(
 );
 const shippingQuoteFoundationMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0093_dropship_shipping_quote_foundation.sql"),
+  "utf8",
+);
+const listingConnectionConfigMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0094_dropship_listing_connection_config.sql"),
   "utf8",
 );
 const releaseScript = readFileSync(
@@ -129,6 +135,20 @@ describe("Dropship V2 schema contract", () => {
     expect(shippingQuoteFoundationMigrationSql).toContain("dropship_shipping_markup_config");
     expect(shippingQuoteFoundationMigrationSql).toContain("dropship_shipping_quote_vendor_idem_idx");
     expect(shippingQuoteFoundationMigrationSql).toContain("ADD COLUMN IF NOT EXISTS request_hash");
+  });
+
+  it("drives marketplace listing behavior from store connection config", () => {
+    expect((dropshipStoreListingConfigs as any).storeConnectionId.name).toBe("store_connection_id");
+    expect((dropshipStoreListingConfigs as any).listingMode.name).toBe("listing_mode");
+    expect((dropshipStoreListingConfigs as any).inventoryMode.name).toBe("inventory_mode");
+    expect((dropshipStoreListingConfigs as any).priceMode.name).toBe("price_mode");
+    expect((dropshipStoreListingConfigs as any).marketplaceConfig.name).toBe("marketplace_config");
+    expect((dropshipListingPushJobs as any).requestHash.name).toBe("request_hash");
+    expect(listingConnectionConfigMigrationSql).toContain("dropship_store_listing_configs");
+    expect(listingConnectionConfigMigrationSql).toContain("listing_mode IN ('draft_first','live','manual_only')");
+    expect(listingConnectionConfigMigrationSql).toContain("inventory_mode IN ('managed_quantity_sync','manual_quantity','disabled')");
+    expect(listingConnectionConfigMigrationSql).toContain("ADD COLUMN IF NOT EXISTS request_hash");
+    expect(listingConnectionConfigMigrationSql).toContain("ON dropship.dropship_listing_push_jobs(vendor_id, idempotency_key)");
   });
 
   it("tracks admin dropship catalog exposure revisions idempotently", () => {
