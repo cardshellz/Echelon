@@ -195,7 +195,7 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
       updatedAt: input.checkedAt,
     });
     const changedFields = existing
-      ? changedFields(existing, nextVendor)
+      ? changedVendorFields(existing, nextVendor)
       : ["memberId", "currentSubscriptionId", "currentPlanId", "email", "status", "entitlementStatus"];
     this.vendor = nextVendor;
     return {
@@ -237,7 +237,7 @@ function makeVendorProfile(
   };
 }
 
-function changedFields(
+function changedVendorFields(
   before: DropshipProvisionedVendorProfile,
   after: DropshipProvisionedVendorProfile,
 ): string[] {

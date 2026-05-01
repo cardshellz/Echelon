@@ -17,6 +17,7 @@ export * from "./dropship-shipping-quote-service";
 export * from "./dropship-shipping-rate-provider";
 export * from "./dropship-store-connection-dtos";
 export * from "./dropship-store-connection-service";
+export * from "./dropship-wallet-service";
 export * from "./dropship-vendor-provisioning-service";
 export * from "./dropship-use-case-dtos";
 export * from "./dropship-use-cases";
