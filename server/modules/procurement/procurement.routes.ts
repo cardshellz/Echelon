@@ -2394,6 +2394,56 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // ── Phase 3 physical-status transitions ─────────────────────────────
+  // All three delegate directly to purchasing.transitionPhysical which
+  // validates the VALID_PHYSICAL_TRANSITIONS table and returns 400/409 on
+  // invalid moves. PurchasingError.statusCode is forwarded verbatim.
+
+  app.post("/api/purchase-orders/:id/mark-shipped", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.transitionPhysical(
+        Number(req.params.id),
+        "shipped",
+        req.session.user?.id,
+        req.body.notes,
+      );
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/mark-in-transit", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.transitionPhysical(
+        Number(req.params.id),
+        "in_transit",
+        req.session.user?.id,
+        req.body.notes,
+      );
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/mark-arrived", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.transitionPhysical(
+        Number(req.params.id),
+        "arrived",
+        req.session.user?.id,
+        req.body.notes,
+      );
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/purchase-orders/:id/acknowledge", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const data = {

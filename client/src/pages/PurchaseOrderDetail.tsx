@@ -1147,6 +1147,59 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  // Phase 3 physical-status transition mutations — mirror
+  // acknowledgeMutation's pattern exactly.
+  const markShippedMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/purchase-orders/${poId}/mark-shipped`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      toast({ title: "Marked as shipped" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  const markInTransitMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/purchase-orders/${poId}/mark-in-transit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      toast({ title: "Marked as in transit" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  const markArrivedMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/purchase-orders/${poId}/mark-arrived`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      toast({ title: "Marked as arrived" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
   // Inline payment mutation — posts directly to /api/ap-payments so
   // the user never has to navigate away from PO detail (Rule #6: fresh
   // Idempotency-Key per attempt prevents double-posts on retry).
@@ -2635,45 +2688,45 @@ export default function PurchaseOrderDetail() {
               </Button>
             )}
 
-            {/* Mark shipped — Phase 3 transition, gray out */}
+            {/* Mark shipped */}
             {po.physicalStatus === "acknowledged" && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
                 size="sm"
-                disabled
-                title="Coming soon — Phase 3"
+                onClick={() => markShippedMutation.mutate()}
+                disabled={markShippedMutation.isPending}
               >
                 <Truck className="h-3.5 w-3.5 mr-2" />
-                Mark shipped
+                {markShippedMutation.isPending ? "Marking..." : "Mark shipped"}
               </Button>
             )}
 
-            {/* Mark in transit — Phase 3 */}
+            {/* Mark in transit */}
             {po.physicalStatus === "shipped" && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
                 size="sm"
-                disabled
-                title="Coming soon — Phase 3"
+                onClick={() => markInTransitMutation.mutate()}
+                disabled={markInTransitMutation.isPending}
               >
                 <Ship className="h-3.5 w-3.5 mr-2" />
-                Mark in transit
+                {markInTransitMutation.isPending ? "Marking..." : "Mark in transit"}
               </Button>
             )}
 
-            {/* Mark arrived — Phase 3 */}
+            {/* Mark arrived */}
             {(po.physicalStatus === "in_transit" || po.physicalStatus === "shipped") && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
                 size="sm"
-                disabled
-                title="Coming soon — Phase 3"
+                onClick={() => markArrivedMutation.mutate()}
+                disabled={markArrivedMutation.isPending}
               >
                 <Package className="h-3.5 w-3.5 mr-2" />
-                Mark arrived
+                {markArrivedMutation.isPending ? "Marking..." : "Mark arrived"}
               </Button>
             )}
 
