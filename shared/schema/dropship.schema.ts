@@ -318,6 +318,28 @@ export const dropshipStoreConnectionTokens = dropshipSchema.table("dropship_stor
   check("dropship_store_token_ref_chk", sql`length(${table.tokenRef}) >= 24`),
 ]);
 
+export const dropshipStoreListingConfigs = dropshipSchema.table("dropship_store_listing_configs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  storeConnectionId: integer("store_connection_id").notNull().references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
+  platform: varchar("platform", { length: 30 }).notNull(),
+  listingMode: varchar("listing_mode", { length: 40 }).notNull(),
+  inventoryMode: varchar("inventory_mode", { length: 40 }).notNull().default("managed_quantity_sync"),
+  priceMode: varchar("price_mode", { length: 40 }).notNull().default("vendor_defined"),
+  marketplaceConfig: jsonb("marketplace_config").notNull().default({}),
+  requiredConfigKeys: jsonb("required_config_keys").notNull().default([]),
+  requiredProductFields: jsonb("required_product_fields").notNull().default([]),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_store_listing_config_store_idx").on(table.storeConnectionId),
+  index("dropship_store_listing_config_platform_idx").on(table.platform, table.isActive),
+  check("dropship_store_listing_config_platform_chk", sql`${table.platform} IN ('ebay','shopify','tiktok','instagram','bigcommerce')`),
+  check("dropship_store_listing_config_mode_chk", sql`${table.listingMode} IN ('draft_first','live','manual_only')`),
+  check("dropship_store_listing_config_inventory_chk", sql`${table.inventoryMode} IN ('managed_quantity_sync','manual_quantity','disabled')`),
+  check("dropship_store_listing_config_price_chk", sql`${table.priceMode} IN ('vendor_defined','connection_default','disabled')`),
+]);
+
 export const dropshipStoreSetupChecks = dropshipSchema.table("dropship_store_setup_checks", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
@@ -628,12 +650,13 @@ export const dropshipListingPushJobs = dropshipSchema.table("dropship_listing_pu
   requestedScope: jsonb("requested_scope"),
   requestedBy: varchar("requested_by", { length: 255 }),
   idempotencyKey: varchar("idempotency_key", { length: 200 }),
+  requestHash: varchar("request_hash", { length: 128 }),
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
 }, (table) => [
-  uniqueIndex("dropship_listing_job_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
+  uniqueIndex("dropship_listing_job_idem_idx").on(table.vendorId, table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_listing_job_status_idx").on(table.status),
   check("dropship_listing_job_status_chk", sql`${table.status} IN ('queued','processing','completed','failed','cancelled')`),
 ]);
@@ -1157,6 +1180,10 @@ export type DropshipStoreConnection = typeof dropshipStoreConnections.$inferSele
 export const insertDropshipStoreConnectionTokenSchema = createInsertSchema(dropshipStoreConnectionTokens).omit(omitGenerated);
 export type InsertDropshipStoreConnectionToken = z.infer<typeof insertDropshipStoreConnectionTokenSchema>;
 export type DropshipStoreConnectionToken = typeof dropshipStoreConnectionTokens.$inferSelect;
+
+export const insertDropshipStoreListingConfigSchema = createInsertSchema(dropshipStoreListingConfigs).omit(omitGenerated);
+export type InsertDropshipStoreListingConfig = z.infer<typeof insertDropshipStoreListingConfigSchema>;
+export type DropshipStoreListingConfig = typeof dropshipStoreListingConfigs.$inferSelect;
 
 export const insertDropshipStoreSetupCheckSchema = createInsertSchema(dropshipStoreSetupChecks).omit(omitGenerated);
 export type InsertDropshipStoreSetupCheck = z.infer<typeof insertDropshipStoreSetupCheckSchema>;
