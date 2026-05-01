@@ -286,7 +286,16 @@ export default function PurchaseOrders() {
     queryKey: ["/api/purchase-orders", statusFilter, searchQuery, vendorFilter, physicalFilter, financialFilter],
     queryFn: async () => {
       const params = new URLSearchParams();
-      if (statusFilter !== "all" && statusFilter !== "active") params.set("status", statusFilter);
+      // Scope filter -> server-side `status` param.
+      // active   — no server filter, client filters out cancelled/closed below.
+      // all      — no server filter, show everything.
+      // archived — server filters status to {cancelled, closed} via comma list
+      //            (storage layer accepts comma-split lists already).
+      if (statusFilter === "archived") {
+        params.set("status", "cancelled,closed");
+      }
+      // 'active' and 'all' don't need a server param. Client-side scope
+      // narrowing happens below (see purchaseOrders memo).
       if (searchQuery) params.set("search", searchQuery);
       if (vendorFilter) params.set("vendorId", String(vendorFilter));
       // Phase 2: dual-track filter chips
@@ -327,9 +336,25 @@ export default function PurchaseOrders() {
   });
   const isSoloMode = (approvalTiersData?.tiers?.length ?? 0) === 0;
 
-  const purchaseOrders = statusFilter === "active"
-    ? (poData?.purchaseOrders ?? []).filter(po => !["cancelled", "void"].includes(po.status))
-    : (poData?.purchaseOrders ?? []);
+  // Scope toggle applied client-side as a final pass:
+  //   active   — hide cancelled + closed (live POs only).
+  //   all      — no narrowing.
+  //   archived — server-side status=cancelled,closed already narrowed it,
+  //              this is a defensive guard.
+  const purchaseOrders = (() => {
+    const rows = poData?.purchaseOrders ?? [];
+    if (statusFilter === "active") {
+      return rows.filter(
+        (po) => !["cancelled", "closed", "void"].includes(po.status),
+      );
+    }
+    if (statusFilter === "archived") {
+      return rows.filter((po) =>
+        ["cancelled", "closed"].includes(po.status),
+      );
+    }
+    return rows; // "all"
+  })();
 
   // Stats
   const stats = {
@@ -611,30 +636,63 @@ export default function PurchaseOrders() {
             className="pl-9 h-10"
           />
         </div>
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-full sm:w-44 h-10">
-            <SelectValue placeholder="Status" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="active">Active</SelectItem>
-            <SelectItem value="all">All Status</SelectItem>
-            <SelectItem value="draft">Draft</SelectItem>
-            <SelectItem value="pending_approval">Pending Approval</SelectItem>
-            <SelectItem value="approved">Approved</SelectItem>
-            <SelectItem value="sent">Sent</SelectItem>
-            <SelectItem value="acknowledged">Acknowledged</SelectItem>
-            <SelectItem value="partially_received">Partial Receipt</SelectItem>
-            <SelectItem value="received">Received</SelectItem>
-            <SelectItem value="closed">Closed</SelectItem>
-            <SelectItem value="cancelled">Cancelled</SelectItem>
-          </SelectContent>
-        </Select>
+        {/*
+          Scope toggle (Active / All / Archived) replaces the legacy 11-option
+          status dropdown. Per-status filtering moves to the dual-track chips
+          below; this control only sets the broad scope:
+
+            active   — default. Hides cancelled and closed.
+            all      — show every PO regardless of state.
+            archived — only cancelled and closed POs (lookup / audit).
+
+          The chip filters AND with this scope so a user can ask "show me
+          received POs that are also archived (closed)" if they need to.
+          The legacy `statusFilter` state name is kept for diff continuity
+          even though its semantics are now scope-shaped.
+        */}
+        <div className="inline-flex h-10 rounded-md border border-input overflow-hidden">
+          {([
+            { value: "active", label: "Active" },
+            { value: "all", label: "All" },
+            { value: "archived", label: "Archived" },
+          ] as const).map((opt, i) => (
+            <button
+              key={opt.value}
+              onClick={() => setStatusFilter(opt.value)}
+              className={`px-4 text-sm font-medium transition-colors ${
+                statusFilter === opt.value
+                  ? "bg-blue-600 text-white"
+                  : "bg-background hover:bg-muted text-foreground"
+              } ${i > 0 ? "border-l border-input" : ""}`}
+              data-testid={`scope-${opt.value}`}
+              type="button"
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Phase 2: Dual-track filter chips */}
+      {/* Dual-track filter chips. Physical chips are the canonical filter
+          for goods-movement state; financial chips for AP state. The chip
+          set covers every stage in the lifecycle so the user never has to
+          fall back to a hidden dropdown. Approval-tier states (pending
+          approval, approved) are gated behind isSoloMode. */}
       <div className="flex flex-wrap gap-2 items-center">
         <span className="text-xs text-muted-foreground">Physical:</span>
-        {([null, "draft", "sent", "in_transit", "receiving", "received"] as (string | null)[]).map((val) => (
+        {(
+          [
+            null,
+            "draft",
+            "sent",
+            "acknowledged",
+            "shipped",
+            "in_transit",
+            "arrived",
+            "receiving",
+            "received",
+          ] as (string | null)[]
+        ).map((val) => (
           <button
             key={val ?? "all-phys"}
             onClick={() => setPhysicalFilter(val)}
@@ -745,7 +803,7 @@ export default function PurchaseOrders() {
           <TableBody>
             {purchaseOrders.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
+                <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                   No purchase orders found. Click "New Purchase Order" to create one.
                 </TableCell>
               </TableRow>
@@ -765,16 +823,19 @@ export default function PurchaseOrders() {
                   </TableCell>
                   <TableCell>{po.vendor?.name || `Vendor #${po.vendorId}`}</TableCell>
                   <TableCell className="capitalize">{po.poType}</TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={STATUS_BADGES[po.status]?.variant || "secondary"}
-                      className={STATUS_BADGES[po.status]?.color || ""}
-                    >
-                      {STATUS_BADGES[po.status]?.label || po.status}
-                    </Badge>
-                  </TableCell>
                   <TableCell className="w-44">
                     <DualTrackCell po={po} />
+                    {/* Caption row: exact stage names underneath the visual
+                        segments so the column stands on its own without a
+                        separate Status column. Cancelled / closed POs are
+                        labeled explicitly. */}
+                    <div className="text-[10px] text-muted-foreground mt-1 leading-tight">
+                      {po.status === "cancelled"
+                        ? "cancelled"
+                        : po.status === "closed"
+                        ? "closed"
+                        : `${po.physicalStatus ?? "draft"} · ${po.financialStatus ?? "unbilled"}`}
+                    </div>
                   </TableCell>
                   <TableCell className="text-right">{po.lineCount || 0}</TableCell>
                   <TableCell className="text-right font-mono">{formatCents(po.totalCents)}</TableCell>
