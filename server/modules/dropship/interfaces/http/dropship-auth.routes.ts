@@ -7,7 +7,12 @@ import { PgDropshipAuthIdentityRepository } from "../../infrastructure/dropship-
 import { BcryptDropshipPasswordHasher } from "../../infrastructure/dropship-password-hasher";
 import { SmtpDropshipAuthEmailSender } from "../../infrastructure/dropship-auth-email.sender";
 import { SimpleWebAuthnPasskeyProvider } from "../../infrastructure/simple-webauthn-passkey.provider";
+import { createDropshipVendorProvisioningServiceFromEnv } from "../../infrastructure/dropship-vendor-provisioning.factory";
 import { DropshipAuthService, type DropshipAuthCodeGenerator } from "../../application/dropship-auth-service";
+import type {
+  DropshipProvisionedVendorProfile,
+  DropshipVendorProvisioningService,
+} from "../../application/dropship-vendor-provisioning-service";
 import {
   DropshipPasskeyService,
   type DropshipStoredPasskeyAuthentication,
@@ -78,6 +83,7 @@ export function registerDropshipAuthRoutes(
   app: Express,
   service: DropshipAuthService = createDropshipAuthServiceFromEnv(),
   passkeyService: DropshipPasskeyService = createDropshipPasskeyServiceFromEnv(),
+  vendorProvisioningService: DropshipVendorProvisioningService = createDropshipVendorProvisioningServiceFromEnv(),
 ): void {
   app.post("/api/dropship/auth/bootstrap/start", authRateLimiter, async (req, res) => {
     try {
@@ -93,10 +99,11 @@ export function registerDropshipAuthRoutes(
     try {
       const input = parseBody(completeDropshipAccountBootstrapInputSchema, req.body);
       const principal = await service.completeAccountBootstrap(input);
+      const vendor = await provisionDropshipVendorProfile(vendorProvisioningService, principal);
       req.session.dropship = principal;
       req.session.dropshipSensitiveProofs = {};
       await saveSession(req);
-      return res.status(201).json({ principal });
+      return res.status(201).json({ principal, vendor });
     } catch (error) {
       return sendDropshipAuthError(res, error);
     }
@@ -106,11 +113,13 @@ export function registerDropshipAuthRoutes(
     try {
       const input = parseBody(dropshipPasswordLoginInputSchema, req.body);
       const principal = await service.loginWithPassword(input);
+      const vendor = await provisionDropshipVendorProfile(vendorProvisioningService, principal);
       req.session.dropship = principal;
       req.session.dropshipSensitiveProofs = {};
       await saveSession(req);
       return res.json({
         principal,
+        vendor,
         sensitiveActionStepUp: principal.hasPasskey ? "passkey" : "email_mfa",
       });
     } catch (error) {
@@ -138,12 +147,14 @@ export function registerDropshipAuthRoutes(
         throw new DropshipError("DROPSHIP_PASSKEY_CHALLENGE_REQUIRED", "Passkey login challenge is required.");
       }
       const principal = await passkeyService.completeLogin(challenge, input);
+      const vendor = await provisionDropshipVendorProfile(vendorProvisioningService, principal);
       req.session.dropship = principal;
       req.session.dropshipSensitiveProofs = {};
       delete req.session.dropshipPasskeyLogin;
       await saveSession(req);
       return res.json({
         principal,
+        vendor,
         sensitiveActionStepUp: "passkey",
       });
     } catch (error) {
@@ -206,10 +217,11 @@ export function registerDropshipAuthRoutes(
           throw new DropshipError("DROPSHIP_PASSKEY_CHALLENGE_REQUIRED", "Passkey registration challenge is required.");
         }
         const principal = await passkeyService.completeRegistration(req.session.dropship!, challenge, input);
+        const vendor = await provisionDropshipVendorProfile(vendorProvisioningService, principal);
         req.session.dropship = principal;
         delete req.session.dropshipPasskeyRegistration;
         await saveSession(req);
-        return res.status(201).json({ principal });
+        return res.status(201).json({ principal, vendor });
       } catch (error) {
         return sendDropshipAuthError(res, error);
       }
@@ -320,6 +332,14 @@ export function registerDropshipAuthRoutes(
       }
     },
   );
+}
+
+async function provisionDropshipVendorProfile(
+  service: DropshipVendorProvisioningService,
+  principal: DropshipSessionPrincipal,
+): Promise<DropshipProvisionedVendorProfile> {
+  const result = await service.provisionForMember(principal.memberId);
+  return result.vendor;
 }
 
 export function requireDropshipAuth(req: Request, res: Response, next: NextFunction): void {
