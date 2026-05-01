@@ -6,9 +6,10 @@ set -e
 
 # Run pending SQL migrations
 echo "Running SQL migrations from migrations/ folder..."
-npx tsx migrations/run-migrations.ts || echo "SQL migration step completed with warnings"
+npx tsx migrations/run-migrations.ts
 
 echo "Running drizzle-kit push (non-interactive)..."
+export NODE_OPTIONS="${NODE_OPTIONS:-} --use-system-ca"
 yes '' | PGSSLMODE=require npx drizzle-kit@0.31.8 push \
   --dialect=postgresql \
   --schema=./shared/schema.ts \
