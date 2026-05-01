@@ -275,9 +275,19 @@ export default function APInvoiceDetail() {
   });
 
   const paymentMutation = useMutation({
-    mutationFn: () => fetch("/api/ap-payments", {
+    mutationFn: () => {
+      // Server requires Idempotency-Key on payment writes (Rule #6).
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `ap-pay-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
+      return fetch("/api/ap-payments", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
       body: JSON.stringify({
         vendorId: invoice?.vendorId,
         paymentDate: payment.paymentDate,
@@ -292,7 +302,8 @@ export default function APInvoiceDetail() {
           appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
         }],
       }),
-    }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
+    },
     onSuccess: () => {
       invalidate();
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });

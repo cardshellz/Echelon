@@ -102,9 +102,21 @@ export default function APPayments() {
             appliedAmountCents: dollarsToCents(val),
           })),
       };
+      // Server requires Idempotency-Key on payment writes (Rule #6 — payments
+      // must never double-apply on retry). Generate a fresh UUID per attempt;
+      // a real retry of THIS attempt re-uses this same key client-side via
+      // react-query's automatic retry semantics.
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `ap-pay-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
       const res = await fetch("/api/ap-payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error((await res.json()).error);
@@ -123,11 +135,24 @@ export default function APPayments() {
   });
 
   const voidMutation = useMutation({
-    mutationFn: (id: number) => fetch(`/api/ap-payments/${id}/void`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: voidReason }),
-    }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    mutationFn: (id: number) => {
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `ap-pay-void-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
+      return fetch(`/api/ap-payments/${id}/void`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({ reason: voidReason }),
+      }).then(async (r) => {
+        if (!r.ok) throw new Error((await r.json()).error);
+        return r.json();
+      });
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
