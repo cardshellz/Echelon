@@ -18,11 +18,11 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
 
       const ebayClient = createEbayApiClient(
         authService,
-        order.channelId,
+        (order as any).channel_id || order.channelId,
         process.env.EBAY_ENVIRONMENT === "sandbox" ? "sandbox" : "production"
       );
 
-      const ebayOrder = await ebayClient.getOrder(order.externalOrderId);
+      const ebayOrder = await ebayClient.getOrder((order as any).external_order_id || order.externalOrderId);
       
       if (!ebayOrder || !ebayOrder.orderFulfillmentStatus) {
         return "unknown";
