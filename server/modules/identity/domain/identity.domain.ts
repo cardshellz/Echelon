@@ -65,6 +65,7 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "shopify", action: "sync", description: "Trigger Shopify sync", category: "shopify" },
   { resource: "dropship", action: "view", description: "View dropship operations", category: "dropship" },
   { resource: "dropship", action: "manage_catalog", description: "Manage dropship catalog exposure", category: "dropship" },
+  { resource: "dropship", action: "manage_operations", description: "Manage dropship operational settings", category: "dropship" },
   { resource: "locations", action: "view", description: "View warehouse locations", category: "inventory" },
   { resource: "locations", action: "create", description: "Create locations", category: "inventory" },
   { resource: "locations", action: "edit", description: "Edit locations", category: "inventory" },

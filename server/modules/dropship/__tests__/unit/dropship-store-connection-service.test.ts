@@ -134,6 +134,29 @@ describe("DropshipStoreConnectionService", () => {
     expect(result.graceEndsAt?.toISOString()).toBe("2026-05-04T15:00:00.000Z");
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_STORE_DISCONNECT_STARTED" });
   });
+
+  it("updates admin order processing warehouse config", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21 })];
+
+    const result = await service.updateOrderProcessingConfig({
+      storeConnectionId: 21,
+      defaultWarehouseId: 3,
+      idempotencyKey: "warehouse-config-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.orderProcessingConfig.defaultWarehouseId).toBe(3);
+    expect(repository.lastOrderProcessingConfigInput).toMatchObject({
+      storeConnectionId: 21,
+      defaultWarehouseId: 3,
+      idempotencyKey: "warehouse-config-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+      updatedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_STORE_ORDER_PROCESSING_CONFIG_UPDATED",
+    });
+  });
 });
 
 class FakeVendorProvisioningService {
@@ -218,6 +241,7 @@ class FakeTokenCipher implements DropshipStoreTokenCipher {
 class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository {
   connections: DropshipStoreConnectionProfile[] = [];
   lastConnectInput: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0] | null = null;
+  lastOrderProcessingConfigInput: Parameters<DropshipStoreConnectionRepository["updateOrderProcessingConfig"]>[0] | null = null;
 
   async listByVendorId(): Promise<DropshipStoreConnectionProfile[]> {
     return this.connections;
@@ -257,6 +281,23 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
       disconnectReason: input.reason,
       disconnectedAt: input.disconnectedAt,
       graceEndsAt: input.graceEndsAt,
+    };
+    this.connections = [updated];
+    return updated;
+  }
+
+  async updateOrderProcessingConfig(
+    input: Parameters<DropshipStoreConnectionRepository["updateOrderProcessingConfig"]>[0],
+  ): Promise<DropshipStoreConnectionProfile> {
+    this.lastOrderProcessingConfigInput = input;
+    const connection = this.connections.find((item) => item.storeConnectionId === input.storeConnectionId);
+    if (!connection) throw new Error("missing fake connection");
+    const updated = {
+      ...connection,
+      orderProcessingConfig: {
+        defaultWarehouseId: input.defaultWarehouseId,
+      },
+      updatedAt: input.updatedAt,
     };
     this.connections = [updated];
     return updated;
@@ -307,6 +348,9 @@ function makeConnection(overrides: Partial<DropshipStoreConnectionProfile> = {})
     lastSyncAt: null,
     lastOrderSyncAt: null,
     lastInventorySyncAt: null,
+    orderProcessingConfig: {
+      defaultWarehouseId: null,
+    },
     createdAt: now,
     updatedAt: now,
     ...overrides,

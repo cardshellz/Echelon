@@ -33,3 +33,12 @@ export const disconnectDropshipStoreConnectionInputSchema = z.object({
 export type DisconnectDropshipStoreConnectionInput = z.infer<
   typeof disconnectDropshipStoreConnectionInputSchema
 >;
+
+export const updateDropshipStoreOrderProcessingConfigInputSchema = z.object({
+  defaultWarehouseId: z.number().int().positive().nullable(),
+  idempotencyKey: z.string().trim().min(8).max(200),
+}).strict();
+
+export type UpdateDropshipStoreOrderProcessingConfigInput = z.infer<
+  typeof updateDropshipStoreOrderProcessingConfigInputSchema
+>;

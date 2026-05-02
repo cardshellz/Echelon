@@ -34,8 +34,13 @@ export interface DropshipStoreConnectionProfile {
   lastSyncAt: Date | null;
   lastOrderSyncAt: Date | null;
   lastInventorySyncAt: Date | null;
+  orderProcessingConfig: DropshipStoreConnectionOrderProcessingConfig;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface DropshipStoreConnectionOrderProcessingConfig {
+  defaultWarehouseId: number | null;
 }
 
 export interface DropshipStoreConnectionSetupCheck {
@@ -147,6 +152,16 @@ export interface DropshipStoreConnectionRepository {
     disconnectedAt: Date;
     graceEndsAt: Date;
     idempotencyKey: string;
+  }): Promise<DropshipStoreConnectionProfile>;
+  updateOrderProcessingConfig(input: {
+    storeConnectionId: number;
+    defaultWarehouseId: number | null;
+    actor: {
+      actorType: "admin" | "system";
+      actorId?: string;
+    };
+    idempotencyKey: string;
+    updatedAt: Date;
   }): Promise<DropshipStoreConnectionProfile>;
   listSetupChecks(vendorId: number): Promise<Record<number, DropshipStoreConnectionSetupCheck[]>>;
 }
@@ -339,6 +354,37 @@ export class DropshipStoreConnectionService {
 
     return connection;
   }
+
+  async updateOrderProcessingConfig(input: {
+    storeConnectionId: number;
+    defaultWarehouseId: number | null;
+    idempotencyKey: string;
+    actor: {
+      actorType: "admin" | "system";
+      actorId?: string;
+    };
+  }): Promise<DropshipStoreConnectionProfile> {
+    const connection = await this.deps.repository.updateOrderProcessingConfig({
+      storeConnectionId: input.storeConnectionId,
+      defaultWarehouseId: normalizeDefaultWarehouseId(input.defaultWarehouseId),
+      idempotencyKey: input.idempotencyKey,
+      actor: input.actor,
+      updatedAt: this.deps.clock.now(),
+    });
+
+    this.deps.logger.info({
+      code: "DROPSHIP_STORE_ORDER_PROCESSING_CONFIG_UPDATED",
+      message: "Dropship store order processing config was updated.",
+      context: {
+        storeConnectionId: connection.storeConnectionId,
+        vendorId: connection.vendorId,
+        defaultWarehouseId: connection.orderProcessingConfig.defaultWarehouseId,
+        idempotencyKey: input.idempotencyKey,
+      },
+    });
+
+    return connection;
+  }
 }
 
 export function makeDropshipStoreConnectionLogger(): DropshipLogger {
@@ -352,6 +398,20 @@ export function makeDropshipStoreConnectionLogger(): DropshipLogger {
 export const systemDropshipStoreConnectionClock: DropshipClock = {
   now: () => new Date(),
 };
+
+function normalizeDefaultWarehouseId(value: number | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_ORDER_PROCESSING_WAREHOUSE_INVALID",
+      "Order processing default warehouse id must be a positive integer or null.",
+      { defaultWarehouseId: value },
+    );
+  }
+  return value;
+}
 
 function logDropshipStoreConnectionEvent(
   level: "info" | "warn" | "error",

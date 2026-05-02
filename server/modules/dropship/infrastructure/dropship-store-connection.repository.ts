@@ -31,6 +31,7 @@ interface StoreConnectionRow {
   last_sync_at: Date | null;
   last_order_sync_at: Date | null;
   last_inventory_sync_at: Date | null;
+  config: Record<string, unknown> | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -59,7 +60,7 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
         `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
                 access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                 disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
-                last_inventory_sync_at, created_at, updated_at
+                last_inventory_sync_at, config, created_at, updated_at
          FROM dropship.dropship_store_connections
          WHERE vendor_id = $1
          ORDER BY created_at DESC, id DESC`,
@@ -184,7 +185,7 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
          RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
                    access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                    disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
-                   last_inventory_sync_at, created_at, updated_at`,
+                   last_inventory_sync_at, config, created_at, updated_at`,
         [
           input.storeConnectionId,
           input.vendorId,
@@ -211,6 +212,73 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
 
       await client.query("COMMIT");
       return mapStoreConnectionRow(requiredRow(result.rows[0], "Dropship store disconnect did not return a row."));
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateOrderProcessingConfig(input: {
+    storeConnectionId: number;
+    defaultWarehouseId: number | null;
+    actor: {
+      actorType: "admin" | "system";
+      actorId?: string;
+    };
+    idempotencyKey: string;
+    updatedAt: Date;
+  }): Promise<DropshipStoreConnectionProfile> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await findConnectionByIdAnyVendorForUpdate(client, input.storeConnectionId);
+      if (!existing) {
+        throw new DropshipError(
+          "DROPSHIP_STORE_CONNECTION_NOT_FOUND",
+          "Dropship store connection was not found.",
+          { storeConnectionId: input.storeConnectionId },
+        );
+      }
+
+      const nextConfig = mergeOrderProcessingConfig(existing.config ?? {}, {
+        defaultWarehouseId: input.defaultWarehouseId,
+      });
+      const result = await client.query<StoreConnectionRow>(
+        `UPDATE dropship.dropship_store_connections
+         SET config = $2::jsonb,
+             updated_at = $3
+         WHERE id = $1
+         RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+                   access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
+                   disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
+                   last_inventory_sync_at, config, created_at, updated_at`,
+        [
+          input.storeConnectionId,
+          JSON.stringify(nextConfig),
+          input.updatedAt,
+        ],
+      );
+      const updated = requiredRow(
+        result.rows[0],
+        "Dropship store order processing config update did not return a row.",
+      );
+      await recordAuditEvent(client, {
+        vendorId: updated.vendor_id,
+        storeConnectionId: updated.id,
+        eventType: "store_order_processing_config_updated",
+        actor: input.actor,
+        payload: {
+          idempotencyKey: input.idempotencyKey,
+          previousDefaultWarehouseId: readOrderProcessingDefaultWarehouseId(existing.config ?? {}),
+          defaultWarehouseId: input.defaultWarehouseId,
+        },
+        occurredAt: input.updatedAt,
+      });
+
+      await client.query("COMMIT");
+      return mapStoreConnectionRow(updated);
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
@@ -274,7 +342,7 @@ async function findReusableConnection(
     `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
             access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
             disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
-            last_inventory_sync_at, created_at, updated_at
+            last_inventory_sync_at, config, created_at, updated_at
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
@@ -297,11 +365,28 @@ async function findConnectionByIdForUpdate(
     `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
             access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
             disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
-            last_inventory_sync_at, created_at, updated_at
+            last_inventory_sync_at, config, created_at, updated_at
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1 AND id = $2
      FOR UPDATE`,
     [vendorId, storeConnectionId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function findConnectionByIdAnyVendorForUpdate(
+  client: PoolClient,
+  storeConnectionId: number,
+): Promise<StoreConnectionRow | null> {
+  const result = await client.query<StoreConnectionRow>(
+    `SELECT id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+            access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
+            disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
+            last_inventory_sync_at, config, created_at, updated_at
+     FROM dropship.dropship_store_connections
+     WHERE id = $1
+     FOR UPDATE`,
+    [storeConnectionId],
   );
   return result.rows[0] ?? null;
 }
@@ -320,7 +405,7 @@ async function insertConnection(
      RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
                access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
-               last_inventory_sync_at, created_at, updated_at`,
+               last_inventory_sync_at, config, created_at, updated_at`,
     [
       input.vendorId,
       input.platform,
@@ -360,7 +445,7 @@ async function updateConnection(
      RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
                access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
                disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
-               last_inventory_sync_at, created_at, updated_at`,
+               last_inventory_sync_at, config, created_at, updated_at`,
     [
       storeConnectionId,
       input.vendorId,
@@ -411,6 +496,10 @@ async function recordAuditEvent(
     vendorId: number;
     storeConnectionId: number;
     eventType: string;
+    actor?: {
+      actorType: "vendor" | "admin" | "system";
+      actorId?: string;
+    };
     payload: Record<string, unknown>;
     occurredAt: Date;
   },
@@ -418,13 +507,14 @@ async function recordAuditEvent(
   await client.query(
     `INSERT INTO dropship.dropship_audit_events
       (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
-     VALUES ($1, $2, 'dropship_store_connection', $3, $4, 'vendor', $5, 'info', $6::jsonb, $7)`,
+     VALUES ($1, $2, 'dropship_store_connection', $3, $4, $5, $6, 'info', $7::jsonb, $8)`,
     [
       input.vendorId,
       input.storeConnectionId,
       String(input.storeConnectionId),
       input.eventType,
-      String(input.vendorId),
+      input.actor?.actorType ?? "vendor",
+      input.actor?.actorId ?? String(input.vendorId),
       JSON.stringify(input.payload),
       input.occurredAt,
     ],
@@ -450,9 +540,41 @@ function mapStoreConnectionRow(row: StoreConnectionRow): DropshipStoreConnection
     lastSyncAt: row.last_sync_at,
     lastOrderSyncAt: row.last_order_sync_at,
     lastInventorySyncAt: row.last_inventory_sync_at,
+    orderProcessingConfig: {
+      defaultWarehouseId: readOrderProcessingDefaultWarehouseId(row.config ?? {}),
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function mergeOrderProcessingConfig(
+  config: Record<string, unknown>,
+  input: { defaultWarehouseId: number | null },
+): Record<string, unknown> {
+  const orderProcessing = isRecord(config.orderProcessing)
+    ? { ...config.orderProcessing }
+    : {};
+  orderProcessing.defaultWarehouseId = input.defaultWarehouseId;
+  return {
+    ...config,
+    orderProcessing,
+  };
+}
+
+function readOrderProcessingDefaultWarehouseId(config: Record<string, unknown>): number | null {
+  const value = isRecord(config.orderProcessing)
+    ? config.orderProcessing.defaultWarehouseId
+    : undefined;
+  if (value === null || typeof value === "undefined" || value === "") {
+    return null;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function requiredRow<T>(row: T | undefined, message: string): T {
