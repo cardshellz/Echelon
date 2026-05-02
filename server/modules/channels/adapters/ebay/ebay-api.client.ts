@@ -38,6 +38,7 @@ const API_BASE_URLS = {
 const MAX_RETRIES = 3;
 const BASE_RETRY_DELAY_MS = 1000;
 const MAX_RETRY_DELAY_MS = 15000;
+const FULFILLMENT_VERIFY_DELAYS_MS = [0, 500, 1500, 3000] as const;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -300,12 +301,19 @@ export class EbayApiClient {
     const accessToken = await this.authService.getAccessToken(this.channelId);
     const url = `${this.baseUrl}${path}`;
 
-    return await this.createShippingFulfillmentWithRetry(
+    const result = await this.createShippingFulfillmentWithRetry(
       path,
       url,
       accessToken,
       fulfillment,
     );
+    await this.verifyShippingFulfillmentCreated(
+      orderId,
+      accessToken,
+      fulfillment,
+      result.fulfillmentId,
+    );
+    return result;
   }
 
   private async createShippingFulfillmentWithRetry(
@@ -393,6 +401,62 @@ export class EbayApiClient {
     }
 
     return {} as EbayShippingFulfillmentResponse;
+  }
+
+  private async verifyShippingFulfillmentCreated(
+    orderId: string,
+    accessToken: string,
+    fulfillment: EbayShippingFulfillmentRequest,
+    fulfillmentId?: string | null,
+  ): Promise<void> {
+    const path = buildEbayShippingFulfillmentPath(orderId);
+    const expectedTracking = fulfillment.trackingNumber;
+
+    for (const delayMs of FULFILLMENT_VERIFY_DELAYS_MS) {
+      if (delayMs > 0) {
+        await this.delay(delayMs);
+      }
+
+      const listUrl = `${this.baseUrl}${path}`;
+      const response = await fetch(listUrl, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+          "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+        },
+      });
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const body = await response.json().catch(() => null);
+      const fulfillments: any[] = Array.isArray(body?.fulfillments)
+        ? body.fulfillments
+        : [];
+      const matched = fulfillments.some((item) => {
+        const itemFulfillmentId =
+          typeof item?.fulfillmentId === "string" ? item.fulfillmentId : "";
+        const itemTracking =
+          typeof item?.shipmentTrackingNumber === "string"
+            ? item.shipmentTrackingNumber
+            : "";
+        return (
+          (fulfillmentId && itemFulfillmentId === fulfillmentId) ||
+          itemTracking === expectedTracking
+        );
+      });
+
+      if (matched) {
+        return;
+      }
+    }
+
+    throw new Error(
+      `eBay API POST ${path} returned success but fulfillment was not readable after verification; ` +
+        `tracking=${expectedTracking}, fulfillmentId=${fulfillmentId ?? "none"}`,
+    );
   }
 
   private formatEbayError(errorBody: string): string {

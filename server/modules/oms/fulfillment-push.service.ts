@@ -274,6 +274,50 @@ function resolveDropshipShippedAt(order: any, orderId: number): Date {
   throw new Error(`Dropship marketplace tracking requires shipped_at for order ${orderId}`);
 }
 
+function parseDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+function resolveEbayFulfillmentShippedDate(
+  candidate: unknown,
+  minimumDates: unknown[],
+  fallback: Date = new Date(),
+): Date {
+  const validFallback =
+    fallback instanceof Date && !Number.isNaN(fallback.getTime())
+      ? fallback
+      : new Date();
+  const minimumTime = minimumDates
+    .map(parseDate)
+    .filter((date): date is Date => date !== null)
+    .reduce<number | null>(
+      (latest, date) => Math.max(latest ?? date.getTime(), date.getTime()),
+      null,
+    );
+  const floorTime = minimumTime === null ? null : minimumTime + 1000;
+  const candidateDate = parseDate(candidate);
+
+  if (
+    candidateDate &&
+    (floorTime === null || candidateDate.getTime() > floorTime)
+  ) {
+    return candidateDate;
+  }
+
+  if (floorTime !== null && validFallback.getTime() <= floorTime) {
+    return new Date(floorTime);
+  }
+
+  return validFallback;
+}
+
 export function createFulfillmentPushService(
   db: any,
   ebayApiClient: EbayApiClient | null,
@@ -439,7 +483,10 @@ export function createFulfillmentPushService(
 
     const fulfillmentPayload: EbayShippingFulfillmentRequest = {
       lineItems,
-      shippedDate: (order.shippedAt || new Date()).toISOString(),
+      shippedDate: resolveEbayFulfillmentShippedDate(
+        order.shippedAt,
+        [order.orderedAt, order.createdAt],
+      ).toISOString(),
       shippingCarrierCode: mapCarrierCode(order.trackingCarrier),
       trackingNumber: normalizeEbayTrackingNumber(order.trackingNumber),
     };
@@ -484,6 +531,8 @@ export function createFulfillmentPushService(
         w.id AS wms_order_id,
         o.id AS oms_order_id,
         o.external_order_id AS external_order_id,
+        o.ordered_at AS ordered_at,
+        o.created_at AS oms_created_at,
         o.raw_payload AS raw_payload,
         o.tags AS tags,
         c.provider AS provider
@@ -593,7 +642,10 @@ export function createFulfillmentPushService(
 
     const fulfillmentPayload: EbayShippingFulfillmentRequest = {
       lineItems,
-      shippedDate: shippedAt.toISOString(),
+      shippedDate: resolveEbayFulfillmentShippedDate(
+        shippedAt,
+        [shipment.ordered_at, shipment.oms_created_at],
+      ).toISOString(),
       shippingCarrierCode: mapCarrierCode(carrier),
       trackingNumber: normalizeEbayTrackingNumber(trackingNumber),
     };
@@ -2049,6 +2101,7 @@ export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushServ
 
 // Exposed for unit testing the resolver in isolation.
 export const __test__ = {
+  resolveEbayFulfillmentShippedDate,
   resolveFulfillmentOrderLines,
   tryReadPathA,
   getOurShopifyLocationIds,

@@ -20,6 +20,7 @@ import {
   recomputeOrderStatusFromShipments,
   type ShipmentEvent,
 } from "../orders/shipment-rollup";
+import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
 
 const EBAY_CHANNEL_ID = 67;
@@ -894,7 +895,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     const trackingNumber = shipment.trackingNumber;
-    const shipDate = shipment.shipDate ? new Date(shipment.shipDate) : null;
+    const shipDate = shipment.shipDate
+      ? resolveShipStationShipmentTimestamp(shipment.shipDate, new Date())
+      : null;
 
     if (
       typeof trackingNumber === "string" &&
