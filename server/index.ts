@@ -558,15 +558,15 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
   // eBay order reconciliation — check for stuck orders every 4 hours
   if (process.env.DISABLE_SCHEDULERS !== 'true') {
-    setInterval(async () => {
+    const runEbayReconcile = async () => {
       try {
-        // Find eBay OMS orders stuck in "confirmed" for > 48 hours
+        // Find eBay OMS orders stuck in "confirmed" for > 2 hours
         const stuckOrders = await db.execute(sql`
-          SELECT o.id, o.external_order_id, o.order_number
+          SELECT o.id, o.external_order_id, o.order_number, o.shipstation_order_id
           FROM oms.oms_orders o
           WHERE o.channel_id = 67
             AND o.status = 'confirmed'
-            AND o.created_at < NOW() - INTERVAL '48 hours'
+            AND o.created_at < NOW() - INTERVAL '2 hours'
           LIMIT 50
         `);
         if (stuckOrders.rows.length === 0) return;
@@ -578,8 +578,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
         for (const order of stuckOrders.rows) {
           try {
-            // Check ShipStation for this order
-            const ssOrder = await ss.getOrderByKey(`EB-${order.order_number || order.external_order_id}`);
+            // Check ShipStation for this order using the mapped ID
+            if (!order.shipstation_order_id) continue;
+            const ssOrder = await ss.getOrderById(Number(order.shipstation_order_id));
             if (ssOrder && ssOrder.orderStatus === "shipped") {
               const shipment = ssOrder;
               await db.execute(sql`
@@ -608,7 +609,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       } catch (err: any) {
         console.warn("[eBay Reconcile] Sweep error:", err?.message);
       }
-    }, 4 * 60 * 60 * 1000); // Every 4 hours
+    };
+    
+    // Run immediately on boot, then every hour
+    setTimeout(runEbayReconcile, 5000);
+    setInterval(runEbayReconcile, 1 * 60 * 60 * 1000);
   }
 
   // OMS<->WMS reconciliation — catches webhook delivery failures where
