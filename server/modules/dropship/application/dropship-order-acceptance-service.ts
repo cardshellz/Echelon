@@ -50,6 +50,7 @@ export interface DropshipAcceptanceIntakeRecord {
   normalizedPayload: NormalizedDropshipOrderPayload;
   rawPayload: Record<string, unknown>;
   omsOrderId: number | null;
+  paymentHoldExpiresAt: Date | null;
 }
 
 export interface DropshipAcceptanceVendorContext {
@@ -236,9 +237,11 @@ export function buildDropshipOrderAcceptancePlan(
     );
   }
 
+  const activePaymentHoldExpiresAt = normalizeActivePaymentHoldExpiresAt(input.intake, input.acceptedAt);
   const paymentHoldExpiresAt = input.wallet.availableBalanceCents >= totalDebitCents
     ? null
-    : new Date(input.acceptedAt.getTime() + normalizePaymentHoldTimeout(input.paymentHoldTimeoutMinutes) * 60_000);
+    : activePaymentHoldExpiresAt
+      ?? new Date(input.acceptedAt.getTime() + normalizePaymentHoldTimeout(input.paymentHoldTimeoutMinutes) * 60_000);
 
   return {
     outcome: paymentHoldExpiresAt ? "payment_hold" : "accepted",
@@ -640,6 +643,33 @@ function normalizePaymentHoldTimeout(value: number): number {
   return Number.isInteger(value) && value > 0
     ? value
     : DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES;
+}
+
+function normalizeActivePaymentHoldExpiresAt(
+  intake: DropshipAcceptanceIntakeRecord,
+  acceptedAt: Date,
+): Date | null {
+  if (intake.status !== "payment_hold") {
+    return null;
+  }
+  if (!intake.paymentHoldExpiresAt) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED",
+      "Dropship payment hold intake is missing its expiration timestamp.",
+      { intakeId: intake.intakeId },
+    );
+  }
+  if (intake.paymentHoldExpiresAt <= acceptedAt) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+      "Dropship payment hold expired before order acceptance.",
+      {
+        intakeId: intake.intakeId,
+        paymentHoldExpiresAt: intake.paymentHoldExpiresAt.toISOString(),
+      },
+    );
+  }
+  return intake.paymentHoldExpiresAt;
 }
 
 function multiplyCents(amountCents: number, multiplier: number): number {

@@ -127,6 +127,48 @@ describe("DropshipOrderProcessingService", () => {
     expect(acceptanceService.lastInput).toBeNull();
     expect(repository.failure).toBeNull();
   });
+
+  it("cancels a payment hold that expires during processing", async () => {
+    const repository = new FakeProcessingRepository(makeClaim({
+      intake: {
+        ...baseIntake(),
+        status: "processing",
+        paymentHoldExpiresAt: new Date("2026-05-01T17:59:59.000Z"),
+      },
+    }));
+    const quoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService(new DropshipError(
+      "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+      "Dropship payment hold expired before order acceptance.",
+    ));
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: quoteService,
+      orderAcceptance: acceptanceService,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "cancelled",
+      failureCode: "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+      retryable: false,
+    });
+    expect(repository.expiredHold).toMatchObject({
+      intakeId: 1,
+      workerId: "worker-1",
+      now,
+    });
+    expect(repository.failure).toBeNull();
+    expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_PROCESSING_PAYMENT_HOLD_EXPIRED" });
+  });
 });
 
 describe("dropship order processing helpers", () => {
@@ -156,6 +198,7 @@ describe("dropship order processing helpers", () => {
 
 class FakeProcessingRepository implements DropshipOrderProcessingRepository {
   failure: Parameters<DropshipOrderProcessingRepository["markIntakeFailure"]>[0] | null = null;
+  expiredHold: Parameters<DropshipOrderProcessingRepository["markPaymentHoldExpired"]>[0] | null = null;
 
   constructor(private readonly claim: DropshipOrderProcessingClaim) {}
 
@@ -175,6 +218,13 @@ class FakeProcessingRepository implements DropshipOrderProcessingRepository {
     input: Parameters<DropshipOrderProcessingRepository["markIntakeFailure"]>[0],
   ): Promise<void> {
     this.failure = input;
+  }
+
+  async markPaymentHoldExpired(
+    input: Parameters<DropshipOrderProcessingRepository["markPaymentHoldExpired"]>[0],
+  ): Promise<boolean> {
+    this.expiredHold = input;
+    return true;
   }
 }
 
@@ -209,8 +259,13 @@ class FakeShippingQuoteService {
 class FakeAcceptanceService {
   lastInput: unknown = null;
 
+  constructor(private readonly error: Error | null = null) {}
+
   async acceptOrder(input: unknown): Promise<DropshipOrderAcceptanceResult> {
     this.lastInput = input;
+    if (this.error) {
+      throw this.error;
+    }
     return {
       outcome: "accepted",
       intakeId: 1,

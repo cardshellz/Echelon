@@ -104,6 +104,36 @@ describe("buildDropshipOrderAcceptancePlan", () => {
     expect(plan.totalDebitCents).toBe(2722);
   });
 
+  it("preserves an active payment hold expiration instead of extending the hold", () => {
+    const existingExpiresAt = new Date("2026-05-01T20:00:00.000Z");
+    const plan = buildDropshipOrderAcceptancePlan(makePlanningInput({
+      intake: {
+        ...makePlanningInput().intake,
+        status: "payment_hold",
+        paymentHoldExpiresAt: existingExpiresAt,
+      },
+      wallet: {
+        walletAccountId: 1,
+        availableBalanceCents: 100,
+        pendingBalanceCents: 10_000,
+        currency: "USD",
+      },
+    }));
+
+    expect(plan.outcome).toBe("payment_hold");
+    expect(plan.paymentHoldExpiresAt).toEqual(existingExpiresAt);
+  });
+
+  it("blocks acceptance after a payment hold has expired", () => {
+    expectDropshipError(() => buildDropshipOrderAcceptancePlan(makePlanningInput({
+      intake: {
+        ...makePlanningInput().intake,
+        status: "payment_hold",
+        paymentHoldExpiresAt: new Date("2026-05-01T17:59:59.000Z"),
+      },
+    })), "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED");
+  });
+
   it("blocks quote item mismatch before wallet or OMS effects", () => {
     expectDropshipError(() => buildDropshipOrderAcceptancePlan(makePlanningInput({
       quote: {
@@ -233,6 +263,7 @@ function makePlanningInput(
         },
       },
       omsOrderId: null,
+      paymentHoldExpiresAt: null,
     },
     vendor: {
       vendorId: 10,

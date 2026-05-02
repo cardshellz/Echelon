@@ -39,6 +39,7 @@ interface ListingCandidateRow {
 }
 
 const QUOTABLE_LISTING_STATUSES = new Set(["active", "drift_detected", "paused"]);
+const PAYMENT_HOLD_EXPIRED_REASON = "Payment hold expired before wallet funds were available.";
 
 export class PgDropshipOrderProcessingRepository implements DropshipOrderProcessingRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -240,6 +241,68 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
         });
       }
       await client.query("COMMIT");
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markPaymentHoldExpired(input: {
+    intakeId: number;
+    vendorId: number;
+    storeConnectionId: number;
+    workerId: string;
+    now: Date;
+  }): Promise<boolean> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query<ProcessingIntakeRow>(
+        `UPDATE dropship.dropship_order_intake AS oi
+         SET status = 'cancelled',
+             cancellation_status = 'payment_hold_expired',
+             rejection_reason = $4,
+             updated_at = $5
+         WHERE oi.id = $1
+           AND oi.vendor_id = $2
+           AND oi.store_connection_id = $3
+           AND oi.status = 'processing'
+           AND oi.payment_hold_expires_at IS NOT NULL
+           AND oi.payment_hold_expires_at <= $5
+         RETURNING oi.id, oi.vendor_id, oi.store_connection_id, oi.platform,
+                   oi.external_order_id, oi.status, oi.payment_hold_expires_at,
+                   oi.normalized_payload,
+                   (SELECT sc.config
+                    FROM dropship.dropship_store_connections sc
+                    WHERE sc.id = oi.store_connection_id) AS store_config`,
+        [
+          input.intakeId,
+          input.vendorId,
+          input.storeConnectionId,
+          PAYMENT_HOLD_EXPIRED_REASON,
+          input.now,
+        ],
+      );
+      const row = updated.rows[0];
+      if (row) {
+        await recordProcessingAuditEvent(client, {
+          intake: row,
+          eventType: "order_payment_hold_expired",
+          severity: "warning",
+          workerId: input.workerId,
+          payload: {
+            previousStatus: "processing",
+            cancellationStatus: "payment_hold_expired",
+            paymentHoldExpiresAt: row.payment_hold_expires_at?.toISOString() ?? null,
+            reason: PAYMENT_HOLD_EXPIRED_REASON,
+          },
+          occurredAt: input.now,
+        });
+      }
+      await client.query("COMMIT");
+      return Boolean(row);
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
