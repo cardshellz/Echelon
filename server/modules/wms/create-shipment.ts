@@ -82,6 +82,39 @@ export const ECHELON_COMBINED_CHILD_SHIPMENT_SOURCE = "echelon_combined_child";
  */
 const PLANNED_STATUS = "planned";
 
+async function resolveShipmentItemDefaults(
+  db: DbLike,
+  orderItemId: number,
+): Promise<{ productVariantId: number | null; fromLocationId: number | null }> {
+  const result = await db.execute(sql`
+    SELECT
+      oi.product_id AS product_variant_id,
+      COALESCE(wl.id, wl_by_code.id) AS from_location_id
+    FROM wms.order_items oi
+    LEFT JOIN warehouse.product_locations pl
+      ON pl.product_variant_id = oi.product_id
+     AND pl.location = oi.location
+     AND pl.is_primary = 1
+    LEFT JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+    LEFT JOIN warehouse.warehouse_locations wl_by_code ON wl_by_code.code = oi.location
+    WHERE oi.id = ${orderItemId}
+    LIMIT 1
+  `);
+  const row = result.rows[0] as any;
+  const productVariantId = Number(row?.product_variant_id);
+  const fromLocationId = Number(row?.from_location_id);
+  return {
+    productVariantId:
+      Number.isInteger(productVariantId) && productVariantId > 0
+        ? productVariantId
+        : null,
+    fromLocationId:
+      Number.isInteger(fromLocationId) && fromLocationId > 0
+        ? fromLocationId
+        : null,
+  };
+}
+
 /**
  * Raised by `linkChildToParentShipment` when the combined-group parent
  * has not yet had a `wms.outbound_shipments` row created. The caller
@@ -110,6 +143,10 @@ export interface CreateShipmentInput {
   id: number;
   /** wms.outbound_shipment_items.qty (full quantity — split happens later) */
   quantity: number;
+  /** wms.outbound_shipment_items.product_variant_id */
+  productVariantId?: number | null;
+  /** wms.outbound_shipment_items.from_location_id, when pick/bin data is known */
+  fromLocationId?: number | null;
 }
 
 export interface CreateShipmentResult {
@@ -200,7 +237,8 @@ export async function createShipmentForOrder(
   // (ops dashboards, SS parity checks) even when it carries no
   // inventory.
   if (orderItems.length > 0) {
-    const itemRows: InsertOutboundShipmentItem[] = orderItems.map((it) => {
+    const itemRows: InsertOutboundShipmentItem[] = [];
+    for (const it of orderItems) {
       if (!Number.isInteger(it.id) || it.id <= 0) {
         throw new Error(
           `createShipmentForOrder: orderItem.id must be a positive integer, got ${it.id}`,
@@ -211,12 +249,31 @@ export async function createShipmentForOrder(
           `createShipmentForOrder: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
         );
       }
-      return {
+      if (
+        it.productVariantId != null &&
+        (!Number.isInteger(it.productVariantId) || it.productVariantId <= 0)
+      ) {
+        throw new Error(
+          `createShipmentForOrder: orderItem.productVariantId must be a positive integer when provided, got ${it.productVariantId}`,
+        );
+      }
+      if (
+        it.fromLocationId != null &&
+        (!Number.isInteger(it.fromLocationId) || it.fromLocationId <= 0)
+      ) {
+        throw new Error(
+          `createShipmentForOrder: orderItem.fromLocationId must be a positive integer when provided, got ${it.fromLocationId}`,
+        );
+      }
+      const defaults = await resolveShipmentItemDefaults(db, it.id);
+      itemRows.push({
         shipmentId,
         orderItemId: it.id,
+        productVariantId: it.productVariantId ?? defaults.productVariantId,
+        fromLocationId: it.fromLocationId ?? defaults.fromLocationId,
         qty: it.quantity,
-      };
-    });
+      });
+    }
 
     await db.insert(outboundShipmentItems).values(itemRows);
   }
@@ -376,7 +433,8 @@ export async function linkChildToParentShipment(
   // line items. Empty items is valid (gift-card / pure-membership
   // children) — shipment row is still useful for reconcile.
   if (childOrderItems.length > 0) {
-    const itemRows: InsertOutboundShipmentItem[] = childOrderItems.map((it) => {
+    const itemRows: InsertOutboundShipmentItem[] = [];
+    for (const it of childOrderItems) {
       if (!Number.isInteger(it.id) || it.id <= 0) {
         throw new Error(
           `linkChildToParentShipment: orderItem.id must be a positive integer, got ${it.id}`,
@@ -387,12 +445,31 @@ export async function linkChildToParentShipment(
           `linkChildToParentShipment: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
         );
       }
-      return {
+      if (
+        it.productVariantId != null &&
+        (!Number.isInteger(it.productVariantId) || it.productVariantId <= 0)
+      ) {
+        throw new Error(
+          `linkChildToParentShipment: orderItem.productVariantId must be a positive integer when provided, got ${it.productVariantId}`,
+        );
+      }
+      if (
+        it.fromLocationId != null &&
+        (!Number.isInteger(it.fromLocationId) || it.fromLocationId <= 0)
+      ) {
+        throw new Error(
+          `linkChildToParentShipment: orderItem.fromLocationId must be a positive integer when provided, got ${it.fromLocationId}`,
+        );
+      }
+      const defaults = await resolveShipmentItemDefaults(db, it.id);
+      itemRows.push({
         shipmentId,
         orderItemId: it.id,
+        productVariantId: it.productVariantId ?? defaults.productVariantId,
+        fromLocationId: it.fromLocationId ?? defaults.fromLocationId,
         qty: it.quantity,
-      };
-    });
+      });
+    }
 
     await db.insert(outboundShipmentItems).values(itemRows);
   }

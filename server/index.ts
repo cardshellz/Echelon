@@ -3,6 +3,7 @@ import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
 import cookieParser from "cookie-parser";
+import { timingSafeEqual } from "crypto";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -17,7 +18,7 @@ import { startBillingScheduler } from "./modules/subscriptions/subscription.sche
 import { startDropshipListingPushWorker } from "./modules/dropship/infrastructure/dropship-listing-push-job-runner";
 import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastructure/dropship-order-processing-runner";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
-import { startWebhookRetryWorker, enqueueShipStationRetry } from "./modules/oms/webhook-retry.worker";
+import { startWebhookRetryWorker, enqueueShipStationRetry, enqueueDelayedTrackingPush } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
@@ -110,6 +111,98 @@ export function log(message: string, source = "express") {
   });
 
   console.log(`${formattedTime} [${source}] ${message}`);
+}
+
+let warnedMissingShipStationWebhookSecret = false;
+
+function safeCompareSecret(actual: string, expected: string): boolean {
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function getShipStationWebhookCredential(req: Request): string | null {
+  const bearer = req.get("authorization");
+  if (bearer?.toLowerCase().startsWith("bearer ")) {
+    return bearer.slice("bearer ".length).trim();
+  }
+
+  const headerSecret =
+    req.get("x-shipstation-webhook-secret") ||
+    req.get("x-shipstation-secret") ||
+    req.get("x-webhook-secret");
+  if (headerSecret) {
+    return headerSecret.trim();
+  }
+
+  const querySecret = req.query.secret;
+  if (typeof querySecret === "string") {
+    return querySecret.trim();
+  }
+
+  const bodySecret = (req.body as any)?.secret;
+  if (typeof bodySecret === "string") {
+    return bodySecret.trim();
+  }
+
+  return null;
+}
+
+function verifyShipStationWebhook(req: Request): { ok: boolean; status: number; reason: string } {
+  const expected = process.env.SHIPSTATION_WEBHOOK_SECRET?.trim();
+  const mustVerify =
+    process.env.NODE_ENV === "production" ||
+    process.env.SHIPSTATION_WEBHOOK_SECRET_REQUIRED === "true";
+
+  if (!expected) {
+    if (mustVerify) {
+      return {
+        ok: false,
+        status: 503,
+        reason: "SHIPSTATION_WEBHOOK_SECRET is required before accepting ShipStation webhooks",
+      };
+    }
+
+    if (!warnedMissingShipStationWebhookSecret) {
+      warnedMissingShipStationWebhookSecret = true;
+      console.warn(
+        "[ShipStation Webhook] SHIPSTATION_WEBHOOK_SECRET is not configured; accepting webhook only because production verification is not required",
+      );
+    }
+    return { ok: true, status: 200, reason: "secret not configured outside production" };
+  }
+
+  const actual = getShipStationWebhookCredential(req);
+  if (!actual || !safeCompareSecret(actual, expected)) {
+    return { ok: false, status: 401, reason: "invalid ShipStation webhook credential" };
+  }
+
+  return { ok: true, status: 200, reason: "verified" };
+}
+
+function isAllowedShipStationResourceUrl(resourceUrl: string): boolean {
+  try {
+    const parsed = new URL(resourceUrl);
+    return parsed.protocol === "https:" && parsed.hostname === "ssapi.shipstation.com";
+  } catch {
+    return false;
+  }
+}
+
+function buildShipStationWebhookTargetUrl(targetUrl: string): string {
+  const secret = process.env.SHIPSTATION_WEBHOOK_SECRET?.trim();
+  if (!secret) {
+    return targetUrl;
+  }
+
+  const parsed = new URL(targetUrl);
+  if (!parsed.searchParams.has("secret")) {
+    parsed.searchParams.set("secret", secret);
+  }
+  return parsed.toString();
 }
 
 app.use((req, res, next) => {
@@ -281,11 +374,21 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // Start Echelon sync scheduler (replaces old channelSync scheduler)
   startEchelonSyncScheduler(services, db);
 
-  // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware — unauthenticated) ---
+  // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware; shared-secret verified) ---
   app.post("/api/shipstation/webhooks/ship-notify", async (req, res) => {
     const { resource_url, resource_type } = req.body || {};
+    const verification = verifyShipStationWebhook(req);
+    if (!verification.ok) {
+      console.warn(`[ShipStation Webhook] Rejected SHIP_NOTIFY: ${verification.reason}`);
+      return res.status(verification.status).json({ error: "Unauthorized webhook" });
+    }
+
     if (resource_type !== "SHIP_NOTIFY" || !resource_url || typeof resource_url !== "string") {
       return res.status(400).json({ error: "Invalid webhook payload" });
+    }
+    if (!isAllowedShipStationResourceUrl(resource_url)) {
+      console.warn("[ShipStation Webhook] Rejected invalid resource_url host");
+      return res.status(400).json({ error: "Invalid webhook resource_url" });
     }
 
     try {
@@ -474,7 +577,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     try {
       const webhookUrl = process.env.SHIPSTATION_WEBHOOK_URL;
       if (services.shipStation.isConfigured() && webhookUrl) {
-        await services.shipStation.registerWebhook(webhookUrl);
+        await services.shipStation.registerWebhook(
+          buildShipStationWebhookTargetUrl(webhookUrl),
+        );
       } else if (services.shipStation.isConfigured() && !webhookUrl) {
         console.log(`[ShipStation] Skipping webhook registration - SHIPSTATION_WEBHOOK_URL unset.`);
       }
@@ -591,9 +696,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             if (ssOrder && ssOrder.orderStatus === "shipped") {
               const shipment = ssOrder;
               await db.execute(sql`
-                UPDATE oms_orders SET status = 'shipped',
+                UPDATE oms.oms_orders SET status = 'shipped',
                   tracking_number = ${shipment.trackingNumber || null},
-                  carrier = ${shipment.carrierCode || null},
+                  tracking_carrier = ${shipment.carrierCode || null},
+                  shipped_at = NOW(),
                   updated_at = NOW()
                 WHERE id = ${order.id}
               `);
@@ -686,6 +792,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           SELECT os.id AS shipment_id, os.order_id,
                  os.shipstation_order_id, os.status AS wms_shipment_status,
                  os.tracking_number, os.carrier,
+                 w.order_number,
                  w.oms_fulfillment_order_id AS oms_id
           FROM wms.outbound_shipments os
           JOIN wms.orders w ON w.id = os.order_id
@@ -722,7 +829,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
             // 2. Detect voided labels first (voidDate beats orderStatus)
             if (row.wms_shipment_status !== "voided") {
-              const ssShipments = await ss.getShipments(ssOrderId);
+              const ssShipments = await ss.getShipments(ssOrderId, {
+                orderNumber: row.order_number,
+              });
               const hasVoidedLabel = ssShipments.some(
                 (s: any) => s.voidDate != null,
               );
@@ -737,7 +846,30 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 ssOrder.orderStatus === "shipped" &&
                 row.wms_shipment_status !== "shipped"
               ) {
-                const ssShipments = await ss.getShipments(ssOrderId);
+                const ssShipments = await ss.getShipments(ssOrderId, {
+                  orderNumber: row.order_number,
+                });
+                if (
+                  ssShipments.length > 0 &&
+                  typeof ss.processShipmentNotification === "function"
+                ) {
+                  let processedFromService = 0;
+                  for (const ssShipment of ssShipments) {
+                    const result = await ss.processShipmentNotification(ssShipment);
+                    if (result?.processed) {
+                      processedFromService++;
+                    }
+                  }
+                  if (processedFromService > 0) {
+                    markedShipped += processedFromService;
+                    await db.execute(sql`
+                      UPDATE wms.outbound_shipments
+                      SET last_reconciled_at = NOW()
+                      WHERE id = ${shipmentId}
+                    `);
+                    continue;
+                  }
+                }
                 const latest = ssShipments[ssShipments.length - 1];
                 event = {
                   kind: "shipped",
@@ -823,10 +955,16 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               if (row.oms_id && row.oms_id.match(/^[0-9]+$/)) {
                 const omsId = Number(row.oms_id);
                 if (event.kind === "shipped") {
+                  const nextOmsStatus =
+                    rollup.warehouseStatus === "partially_shipped"
+                      ? "partially_shipped"
+                      : "shipped";
+                  const nextFulfillmentStatus =
+                    nextOmsStatus === "partially_shipped" ? "partial" : "fulfilled";
                   await db.execute(sql`
                     UPDATE oms.oms_orders SET
-                      status = 'shipped',
-                      fulfillment_status = 'fulfilled',
+                      status = ${nextOmsStatus},
+                      fulfillment_status = ${nextFulfillmentStatus},
                       tracking_number = ${event.trackingNumber},
                       tracking_carrier = ${event.carrier},
                       shipped_at = ${event.shipDate},
@@ -834,21 +972,45 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                     WHERE id = ${omsId}
                   `);
                   await db.execute(sql`
-                    UPDATE oms.oms_order_lines SET
-                      fulfillment_status = 'fulfilled',
-                      updated_at = NOW()
-                    WHERE order_id = ${omsId}
+                    WITH shipped_by_line AS (
+                      SELECT
+                        wi.oms_order_line_id AS oms_order_line_id,
+                        SUM(COALESCE(si.qty, 0))::int AS shipped_qty
+                      FROM wms.outbound_shipment_items si
+                      JOIN wms.outbound_shipments os ON os.id = si.shipment_id
+                      JOIN wms.order_items wi ON wi.id = si.order_item_id
+                      WHERE os.order_id = ${row.order_id}
+                        AND os.status IN ('shipped', 'returned', 'lost')
+                        AND wi.oms_order_line_id IS NOT NULL
+                      GROUP BY wi.oms_order_line_id
+                    ),
+                    line_status AS (
+                      SELECT
+                        ol.id AS oms_order_line_id,
+                        CASE
+                          WHEN COALESCE(s.shipped_qty, 0) >= COALESCE(ol.quantity, 0) THEN 'fulfilled'
+                          WHEN COALESCE(s.shipped_qty, 0) > 0 THEN 'partial'
+                          ELSE 'unfulfilled'
+                        END AS next_status
+                      FROM oms.oms_order_lines ol
+                      LEFT JOIN shipped_by_line s ON s.oms_order_line_id = ol.id
+                      WHERE ol.order_id = ${omsId}
+                    )
+                    UPDATE oms.oms_order_lines ol
+                    SET fulfillment_status = line_status.next_status,
+                        updated_at = NOW()
+                    FROM line_status
+                    WHERE ol.id = line_status.oms_order_line_id
                   `);
                   markedShipped++;
 
-                  // Push tracking to channels (Shopify / eBay)
+                  // Push tracking to channels through the delayed retry worker.
+                  // eBay tracking validation is asynchronous; the worker also
+                  // supports shipment-scoped pushes for split shipments.
                   try {
-                    const fulfillmentPush = (db as any).__fulfillmentPush || (services as any).fulfillmentPush;
-                    if (fulfillmentPush) {
-                      await fulfillmentPush.pushTracking(omsId);
-                    }
+                    await enqueueDelayedTrackingPush(db, omsId, shipmentId);
                   } catch (pushErr: any) {
-                    console.error(`[ShipStation Reconcile V2] Failed to push tracking for order ${omsId}:`, pushErr.message);
+                    console.error(`[ShipStation Reconcile V2] Failed to enqueue tracking push for order ${omsId}, shipment ${shipmentId}:`, pushErr.message);
                   }
                 } else if (event.kind === "cancelled") {
                   await db.execute(sql`

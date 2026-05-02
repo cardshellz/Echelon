@@ -89,6 +89,8 @@ export interface RetryFulfillmentPushService {
   pushShopifyFulfillment(
     shipmentId: number,
   ): Promise<{ shopifyFulfillmentId: string | null; alreadyPushed: boolean }>;
+  pushTracking?(orderId: number): Promise<boolean>;
+  pushTrackingForShipment?(shipmentId: number): Promise<boolean>;
 }
 
 /**
@@ -147,6 +149,7 @@ export async function enqueueShopifyFulfillmentRetry(
 export async function enqueueDelayedTrackingPush(
   dbArg: any,
   orderId: number,
+  shipmentId?: number,
 ): Promise<void> {
   if (
     typeof orderId !== "number" ||
@@ -157,11 +160,21 @@ export async function enqueueDelayedTrackingPush(
       `enqueueDelayedTrackingPush: orderId must be a positive integer (got ${orderId})`,
     );
   }
+  if (
+    shipmentId !== undefined &&
+    (typeof shipmentId !== "number" ||
+      !Number.isInteger(shipmentId) ||
+      shipmentId <= 0)
+  ) {
+    throw new Error(
+      `enqueueDelayedTrackingPush: shipmentId must be a positive integer when provided (got ${shipmentId})`,
+    );
+  }
 
   await dbArg.insert(webhookRetryQueue).values({
     provider: "internal",
     topic: "delayed_tracking_push",
-    payload: { orderId },
+    payload: shipmentId ? { orderId, shipmentId } : { orderId },
     attempts: 0,
     status: "pending",
     // 5-minute initial delay
@@ -235,7 +248,7 @@ export async function dispatchShopifyFulfillmentRetry(
   }
 
   const fulfillmentPush = resolveFulfillmentPushService(dbArg);
-  if (!fulfillmentPush) {
+  if (!fulfillmentPush || typeof fulfillmentPush.pushShopifyFulfillment !== "function") {
     // Service not wired — graceful degrade. Don't burn an attempt on a
     // boot-order issue; the next worker tick will likely succeed once
     // server/index.ts has stashed the service.
@@ -287,8 +300,9 @@ export async function dispatchDelayedTrackingPush(
   dbArg: any,
   item: { id: number; provider: string; topic: string; payload: any; attempts: number },
 ): Promise<"success" | "pending" | "dead" | "malformed"> {
-  const payload = item.payload as { orderId?: number } | null;
+  const payload = item.payload as { orderId?: number; shipmentId?: number } | null;
   const orderId = payload?.orderId;
+  const shipmentId = payload?.shipmentId;
 
   if (
     typeof orderId !== "number" ||
@@ -305,9 +319,29 @@ export async function dispatchDelayedTrackingPush(
     );
     return "malformed";
   }
+  if (
+    shipmentId !== undefined &&
+    (typeof shipmentId !== "number" ||
+      !Number.isInteger(shipmentId) ||
+      shipmentId <= 0)
+  ) {
+    await markRowDead(
+      dbArg,
+      item.id,
+      "malformed payload: shipmentId invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed delayed_tracking_push shipmentId)`,
+    );
+    return "malformed";
+  }
 
   const fulfillmentPush = resolveFulfillmentPushService(dbArg);
-  if (!fulfillmentPush || typeof fulfillmentPush.pushTracking !== "function") {
+  const hasShipmentPush =
+    shipmentId !== undefined &&
+    typeof fulfillmentPush?.pushTrackingForShipment === "function";
+  const hasOrderPush = typeof fulfillmentPush?.pushTracking === "function";
+  if (!fulfillmentPush || (!hasShipmentPush && !hasOrderPush)) {
     await keepPending(
       dbArg,
       item.id,
@@ -317,10 +351,19 @@ export async function dispatchDelayedTrackingPush(
   }
 
   try {
-    const pushed = await fulfillmentPush.pushTracking(orderId);
+    const pushed = hasShipmentPush
+      ? await fulfillmentPush.pushTrackingForShipment(shipmentId)
+      : await fulfillmentPush.pushTracking(orderId);
+    if (!pushed) {
+      throw new Error(
+        hasShipmentPush
+          ? `fulfillment push returned false for shipment ${shipmentId}`
+          : `fulfillment push returned false for order ${orderId}`,
+      );
+    }
     await markRowSuccess(dbArg, item.id);
     console.log(
-      `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) succeeded (pushed=${pushed})`,
+      `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) succeeded (pushed=${pushed})`,
     );
     return "success";
   } catch (err: any) {
@@ -328,15 +371,15 @@ export async function dispatchDelayedTrackingPush(
       dbArg,
       item,
       err?.message || String(err),
-      { topic: "delayed_tracking_push" },
+      { topic: "delayed_tracking_push", orderId, shipmentId },
     );
     if (status === "dead") {
       console.error(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) moved to DLQ after ${attempts} attempts`,
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) moved to DLQ after ${attempts} attempts`,
       );
     } else {
       console.warn(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -361,7 +404,7 @@ export async function recordRetryFailure(
   dbArg: any,
   item: { id: number; attempts: number; topic?: string; payload?: any },
   errMessage: string,
-  meta: { topic?: string; shipmentId?: number } = {},
+  meta: { topic?: string; orderId?: number; shipmentId?: number } = {},
 ): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date }> {
   const attempts = item.attempts + 1;
   const status: "dead" | "pending" = attempts >= MAX_ATTEMPTS ? "dead" : "pending";

@@ -116,9 +116,8 @@ describe("linkChildToParentShipment :: happy path", () => {
     expect(result.shipmentId).toBe(9001);
     expect(result.created).toBe(true);
 
-    // Two execute()s (child probe + parent lookup) then two inserts
-    // (shipment row + items batch).
-    expect(mock.getExecuteCalls()).toBe(2);
+    // Child probe + parent lookup + one item-default lookup per shipment item.
+    expect(mock.getExecuteCalls()).toBe(4);
 
     const inserts = mock.getInserts();
     expect(inserts.length).toBe(2);
@@ -144,11 +143,15 @@ describe("linkChildToParentShipment :: happy path", () => {
     expect(itemsInsert.values[0]).toEqual({
       shipmentId: 9001,
       orderItemId: 201,
+      productVariantId: null,
+      fromLocationId: null,
       qty: 2,
     });
     expect(itemsInsert.values[1]).toEqual({
       shipmentId: 9001,
       orderItemId: 202,
+      productVariantId: null,
+      fromLocationId: null,
       qty: 1,
     });
   });

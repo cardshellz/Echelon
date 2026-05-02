@@ -250,4 +250,60 @@ describe("eBay tracking push regression (2026-04-14)", () => {
       }),
     );
   });
+
+  it("routes dropship OMS orders to the dropship marketplace tracking service", async () => {
+    const dropshipTracking = {
+      pushForOmsOrder: vi.fn(async () => ({ status: "succeeded" })),
+    };
+    const { db } = makeMockDb({
+      order: {
+        ...mockOrder,
+        rawPayload: { dropship: { intakeId: 12, storeConnectionId: 40 } },
+      },
+      channel: { id: CHANNEL_ID, provider: "manual" },
+      lines: mockLines,
+    });
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+    svc.setDropshipMarketplaceTrackingService(dropshipTracking);
+
+    const result = await svc.pushTracking(ORDER_ID);
+
+    expect(result).toBe(true);
+    expect(dropshipTracking.pushForOmsOrder).toHaveBeenCalledWith(expect.objectContaining({
+      omsOrderId: ORDER_ID,
+      carrier: "usps",
+      trackingNumber: TRACKING,
+      shippedAt: mockOrder.shippedAt,
+    }));
+    expect(mockEbayClient.createShippingFulfillment).not.toHaveBeenCalled();
+  });
+
+  it("does not invent shippedAt for dropship marketplace tracking", async () => {
+    const dropshipTracking = {
+      pushForOmsOrder: vi.fn(async () => ({ status: "succeeded" })),
+    };
+    const { db, insertedEvents } = makeMockDb({
+      order: {
+        ...mockOrder,
+        shippedAt: null,
+        rawPayload: { dropship: { intakeId: 12, storeConnectionId: 40 } },
+      },
+      channel: { id: CHANNEL_ID, provider: "manual" },
+      lines: mockLines,
+    });
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+    svc.setDropshipMarketplaceTrackingService(dropshipTracking);
+
+    const result = await svc.pushTracking(ORDER_ID);
+
+    expect(result).toBe(false);
+    expect(dropshipTracking.pushForOmsOrder).not.toHaveBeenCalled();
+    expect(insertedEvents).toContainEqual(expect.objectContaining({
+      orderId: ORDER_ID,
+      eventType: "tracking_push_failed",
+      details: expect.objectContaining({
+        error: expect.stringContaining("requires shipped_at"),
+      }),
+    }));
+  });
 });

@@ -237,14 +237,28 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       .map((c) => c.sqlText);
     expect(executeSqls[0]).toMatch(/shipstation_order_id/);
 
-    // Verify OMS was updated via the fluent builder.
+    // Verify OMS was updated via the fluent builder and line fulfillment
+    // was derived from WMS shipment rows via raw SQL.
     const updateCalls = mock.calls.filter((c) => c.tag === "update");
-    // omsOrders update + omsOrderLines update (2 calls).
-    expect(updateCalls.length).toBeGreaterThanOrEqual(2);
+    expect(updateCalls.length).toBeGreaterThanOrEqual(1);
+    expect(executeSqls.some((text) => text.includes("shipped_by_line"))).toBe(true);
 
     // Verify the audit event was inserted.
     const insertCalls = mock.calls.filter((c) => c.tag === "insert");
     expect(insertCalls.length).toBe(1);
+  });
+
+  it("rejects non-ShipStation resource URLs before fetch", async () => {
+    const mock = makeDb([]);
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as any;
+
+    const svc = createShipStationService(mock.db);
+
+    await expect(
+      svc.processShipNotify("https://attacker.example/shipments?foo=bar"),
+    ).rejects.toThrow(/resource_url host is not allowed/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("handles a voided shipment → dispatches 'voided' (no OMS status change)", async () => {
@@ -791,12 +805,12 @@ describe("processShipNotify V2 :: error resilience", () => {
     vi.restoreAllMocks();
   });
 
-  it("swallows per-shipment errors and continues the batch", async () => {
+  it("continues the batch but rejects when any shipment fails", async () => {
     const good = makeShipmentPayload({ orderId: 1, orderKey: "echelon-wms-shp-1" });
     const broken = makeShipmentPayload({ orderId: 2, orderKey: "echelon-wms-shp-2" });
     const alsoGood = makeShipmentPayload({ orderId: 3, orderKey: "echelon-wms-shp-3" });
 
-    // good → normal happy-path responses (7 execute calls)
+    // good → normal happy-path responses (9 execute calls)
     // broken → V2 lookup returns a shipment that triggers an error
     //          in the rollup step (we throw from the UPDATE sql step)
     // alsoGood → normal happy-path again
@@ -823,6 +837,10 @@ describe("processShipNotify V2 :: error resilience", () => {
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "200" }] },
+      // OMS line status derivation
+      { rows: [] },
+      // shouldEnqueueDelayedTrackingPush provider lookup
+      { rows: [] },
     ];
 
     // Broken path: V2 lookup finds the shipment, then the mark-shipped
@@ -870,9 +888,13 @@ describe("processShipNotify V2 :: error resilience", () => {
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "202" }] },
+      // OMS line status derivation
+      { rows: [] },
+      // shouldEnqueueDelayedTrackingPush provider lookup
+      { rows: [] },
     ];
 
-    // Custom db: first 7 execute calls take from goodPath, next 3 from
+    // Custom db: first 9 execute calls take from goodPath, next 3 from
     // brokenPath (with the 3rd throwing), remainder from alsoGoodPath.
     const goodQ = [...goodPath];
     const brokenQ = [...brokenPath];
@@ -931,9 +953,9 @@ describe("processShipNotify V2 :: error resilience", () => {
     }) as any;
 
     const svc = createShipStationService(db);
-    const processed = await svc.processShipNotify("/foo");
-
-    // good + alsoGood processed; broken swallowed.
-    expect(processed).toBe(2);
+    await expect(svc.processShipNotify("/foo")).rejects.toMatchObject({
+      processed: 2,
+      failures: [{ shipmentId: 77777 }],
+    });
   });
 });

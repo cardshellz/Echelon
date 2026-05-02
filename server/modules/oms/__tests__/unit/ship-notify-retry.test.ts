@@ -54,7 +54,9 @@ import {
   dispatchShipStationRetry,
   recordRetryFailure,
   enqueueShopifyFulfillmentRetry,
+  enqueueDelayedTrackingPush,
   dispatchShopifyFulfillmentRetry,
+  dispatchDelayedTrackingPush,
 } from "../../webhook-retry.worker";
 
 // ─── DB mock helpers ─────────────────────────────────────────────────
@@ -73,9 +75,11 @@ function makeDb(opts: {
   shipStationService?: { processShipNotify: (url: string) => Promise<number> } | null;
   fulfillmentPush?:
     | {
-        pushShopifyFulfillment: (
+        pushShopifyFulfillment?: (
           shipmentId: number,
         ) => Promise<{ shopifyFulfillmentId: string | null; alreadyPushed: boolean }>;
+        pushTracking?: (orderId: number) => Promise<boolean>;
+        pushTrackingForShipment?: (shipmentId: number) => Promise<boolean>;
       }
     | null;
   insertThrows?: Error;
@@ -714,6 +718,57 @@ describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
 
     expect(outcome).toBe("pending");
     expect(updates[0]!.set.attempts).toBeUndefined();
+  });
+
+  it("retries delayed tracking push when pushTracking returns false", async () => {
+    const pushTracking = vi.fn(async () => false);
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushTracking } as any,
+    });
+
+    const outcome = await dispatchDelayedTrackingPush(db, {
+      id: 900,
+      provider: "internal",
+      topic: "delayed_tracking_push",
+      payload: { orderId: 77 },
+      attempts: 1,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(pushTracking).toHaveBeenCalledWith(77);
+    expect(updates[0]!.set.status).toBe("pending");
+    expect(updates[0]!.set.attempts).toBe(2);
+    expect(updates[0]!.set.lastError).toContain("fulfillment push returned false");
+  });
+
+  it("enqueues delayed tracking push with shipment scope when provided", async () => {
+    const { db, inserts } = makeDb();
+
+    await enqueueDelayedTrackingPush(db, 77, 501);
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]!.values.payload).toEqual({ orderId: 77, shipmentId: 501 });
+  });
+
+  it("dispatches delayed tracking push through shipment-scoped handler first", async () => {
+    const pushTracking = vi.fn(async () => true);
+    const pushTrackingForShipment = vi.fn(async () => true);
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushTracking, pushTrackingForShipment } as any,
+    });
+
+    const outcome = await dispatchDelayedTrackingPush(db, {
+      id: 901,
+      provider: "internal",
+      topic: "delayed_tracking_push",
+      payload: { orderId: 77, shipmentId: 501 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(pushTrackingForShipment).toHaveBeenCalledWith(501);
+    expect(pushTracking).not.toHaveBeenCalled();
+    expect(updates[0]!.set.status).toBe("success");
   });
 });
 

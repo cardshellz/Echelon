@@ -314,6 +314,7 @@ export class WmsSyncService {
                 .select({
                   id: wmsOrderItems.id,
                   quantity: wmsOrderItems.quantity,
+                  productVariantId: wmsOrderItems.productId,
                 })
                 .from(wmsOrderItems)
                 .where(eq(wmsOrderItems.orderId, newWmsOrder.id));
@@ -327,6 +328,7 @@ export class WmsSyncService {
                   childItems.map((i) => ({
                     id: i.id,
                     quantity: i.quantity ?? 0,
+                    productVariantId: i.productVariantId ?? null,
                   })),
                 );
               console.log(
@@ -359,23 +361,36 @@ export class WmsSyncService {
             // path guarantees a 1:1 pairing between omsLines and the
             // just-inserted wms.order_items rows.
             const insertedItems = await db
-              .select({ id: wmsOrderItems.id, omsOrderLineId: wmsOrderItems.omsOrderLineId })
+              .select({
+                id: wmsOrderItems.id,
+                omsOrderLineId: wmsOrderItems.omsOrderLineId,
+                productVariantId: wmsOrderItems.productId,
+              })
               .from(wmsOrderItems)
               .where(eq(wmsOrderItems.orderId, newWmsOrder.id));
 
-            const itemsByOmsLineId = new Map<number, number>();
+            const itemsByOmsLineId = new Map<number, { id: number; productVariantId: number | null }>();
             for (const row of insertedItems) {
-              if (row.omsOrderLineId != null) itemsByOmsLineId.set(row.omsOrderLineId, row.id);
+              if (row.omsOrderLineId != null) {
+                itemsByOmsLineId.set(row.omsOrderLineId, {
+                  id: row.id,
+                  productVariantId: row.productVariantId ?? null,
+                });
+              }
             }
 
             const shipmentItemInputs = omsLines
               .map((line) => {
-                const id = itemsByOmsLineId.get(line.id);
-                return id != null
-                  ? { id, quantity: line.quantity ?? 0 }
+                const item = itemsByOmsLineId.get(line.id);
+                return item != null
+                  ? {
+                      id: item.id,
+                      quantity: line.quantity ?? 0,
+                      productVariantId: item.productVariantId,
+                    }
                   : null;
               })
-              .filter((x): x is { id: number; quantity: number } => x !== null);
+              .filter((x): x is { id: number; quantity: number; productVariantId: number | null } => x !== null);
 
             const { shipmentId, created } = await createShipmentForOrder(
               db as any,
