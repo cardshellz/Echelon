@@ -13,6 +13,7 @@ export * from "./dropship-marketplace-listing-provider";
 export * from "./dropship-marketplace-listing-push-provider";
 export * from "./dropship-order-acceptance-service";
 export * from "./dropship-order-intake-service";
+export * from "./dropship-order-processing-service";
 export * from "./dropship-passkey-service";
 export * from "./dropship-shipping-dtos";
 export * from "./dropship-shipping-quote-service";

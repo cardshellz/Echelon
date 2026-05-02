@@ -15,6 +15,7 @@ import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { startDropshipListingPushWorker } from "./modules/dropship/infrastructure/dropship-listing-push-job-runner";
+import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastructure/dropship-order-processing-runner";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startWebhookRetryWorker, enqueueShipStationRetry } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
@@ -552,6 +553,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startWebhookRetryWorker();
         startFulfillmentSweeper(db);
         startDropshipListingPushWorker();
+        startDropshipOrderProcessingWorker();
       }
     }
   );
