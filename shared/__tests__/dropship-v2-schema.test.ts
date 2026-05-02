@@ -25,6 +25,7 @@ import {
   dropshipNotificationEvents,
   dropshipRmaInspections,
   dropshipRmas,
+  dropshipAuditEvents,
 } from "../schema/dropship.schema";
 
 const migrationSql = readFileSync(
@@ -57,6 +58,10 @@ const listingConfigBackfillMigrationSql = readFileSync(
 );
 const returnsNotificationsMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0097_dropship_returns_notifications.sql"),
+  "utf8",
+);
+const opsSurfacesMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0098_dropship_ops_surfaces.sql"),
   "utf8",
 );
 const releaseScript = readFileSync(
@@ -145,6 +150,15 @@ describe("Dropship V2 schema contract", () => {
     expect(returnsNotificationsMigrationSql).toContain("dropship_rma_idem_idx");
     expect(returnsNotificationsMigrationSql).toContain("dropship_rma_inspection_one_per_rma_idx");
     expect(returnsNotificationsMigrationSql).toContain("dropship_notification_idem_channel_idx");
+  });
+
+  it("indexes ops and audit surfaces for launch dashboards", () => {
+    expect((dropshipAuditEvents as any).severity.name).toBe("severity");
+    expect((dropshipAuditEvents as any).eventType.name).toBe("event_type");
+    expect(opsSurfacesMigrationSql).toContain("dropship_audit_severity_created_idx");
+    expect(opsSurfacesMigrationSql).toContain("dropship_audit_event_type_created_idx");
+    expect(opsSurfacesMigrationSql).toContain("dropship_listing_job_vendor_status_idx");
+    expect(opsSurfacesMigrationSql).toContain("dropship_tracking_push_vendor_status_idx");
   });
 
   it("keeps shipping quotes idempotent and shipping markup configurable", () => {

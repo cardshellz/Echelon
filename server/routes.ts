@@ -40,6 +40,7 @@ import { registerDropshipListingConfigRoutes } from "./modules/dropship/interfac
 import { registerDropshipWalletRoutes } from "./modules/dropship/interfaces/http/dropship-wallet.routes";
 import { registerDropshipNotificationRoutes } from "./modules/dropship/interfaces/http/dropship-notification.routes";
 import { registerDropshipReturnRoutes } from "./modules/dropship/interfaces/http/dropship-return.routes";
+import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -65,6 +66,7 @@ export async function registerRoutes(
   registerDropshipWalletRoutes(app);
   registerDropshipNotificationRoutes(app);
   registerDropshipReturnRoutes(app);
+  registerDropshipOpsSurfaceRoutes(app);
   registerDropshipListingRoutes(app);
   registerLocationRoutes(app);
   registerPickingRoutes(app);
