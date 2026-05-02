@@ -62,6 +62,7 @@ export const acceptDropshipOrderInputSchema = z.object({
   intakeId: positiveIdSchema,
   vendorId: positiveIdSchema,
   storeConnectionId: positiveIdSchema,
+  shippingQuoteSnapshotId: positiveIdSchema,
   idempotencyKey: idempotencyKeySchema,
   actor: actorSchema,
 }).strict();
