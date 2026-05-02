@@ -16,6 +16,7 @@ export const dropshipSensitiveActionEnum = [
   "wallet_funding_high_value",
   "bulk_listing_push",
   "high_risk_order_acceptance",
+  "manage_notification_preferences",
 ] as const;
 
 export type DropshipSensitiveAction = typeof dropshipSensitiveActionEnum[number];
