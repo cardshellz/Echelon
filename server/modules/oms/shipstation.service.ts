@@ -771,6 +771,24 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   // -------------------------------------------------------------------------
+  // Get order by orderNumber
+  // -------------------------------------------------------------------------
+
+  async function getOrderByNumber(orderNumber: string): Promise<any> {
+    if (!isConfigured()) return null;
+    try {
+      const result = await apiRequest<{ orders: any[] }>(
+        "GET",
+        `/orders?orderNumber=${encodeURIComponent(orderNumber)}`,
+      );
+      return result.orders?.[0] || null;
+    } catch (err: any) {
+      console.warn(`[ShipStation] getOrderByNumber ${orderNumber} failed:`, err.message);
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Process SHIP_NOTIFY webhook
   // -------------------------------------------------------------------------
   //
@@ -2015,6 +2033,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     getShipments,
     getOrderById,
     getOrderByKey,
+    getOrderByNumber,
     processShipNotify,
     registerWebhook,
     isConfigured,
