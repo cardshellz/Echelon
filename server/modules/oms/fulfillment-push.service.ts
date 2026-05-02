@@ -10,8 +10,8 @@
  * automatically reflects each fulfillment with its items + tracking and
  * marks the order "Partially fulfilled" until all shipments complete.
  *
- * No callers wire `pushShopifyFulfillment` in this commit — feature flag
- * `SHOPIFY_FULFILLMENT_PUSH_ENABLED` will gate it once C22 lands.
+ * ShipStation V2 calls `pushShopifyFulfillment` after shipped events, and
+ * `SHOPIFY_FULFILLMENT_PUSH_ENABLED=false` can disable the hot path.
  */
 
 import { eq, sql } from "drizzle-orm";
@@ -274,6 +274,50 @@ function resolveDropshipShippedAt(order: any, orderId: number): Date {
   throw new Error(`Dropship marketplace tracking requires shipped_at for order ${orderId}`);
 }
 
+function parseDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+function resolveEbayFulfillmentShippedDate(
+  candidate: unknown,
+  minimumDates: unknown[],
+  fallback: Date = new Date(),
+): Date {
+  const validFallback =
+    fallback instanceof Date && !Number.isNaN(fallback.getTime())
+      ? fallback
+      : new Date();
+  const minimumTime = minimumDates
+    .map(parseDate)
+    .filter((date): date is Date => date !== null)
+    .reduce<number | null>(
+      (latest, date) => Math.max(latest ?? date.getTime(), date.getTime()),
+      null,
+    );
+  const floorTime = minimumTime === null ? null : minimumTime + 1000;
+  const candidateDate = parseDate(candidate);
+
+  if (
+    candidateDate &&
+    (floorTime === null || candidateDate.getTime() > floorTime)
+  ) {
+    return candidateDate;
+  }
+
+  if (floorTime !== null && validFallback.getTime() <= floorTime) {
+    return new Date(floorTime);
+  }
+
+  return validFallback;
+}
+
 export function createFulfillmentPushService(
   db: any,
   ebayApiClient: EbayApiClient | null,
@@ -439,7 +483,10 @@ export function createFulfillmentPushService(
 
     const fulfillmentPayload: EbayShippingFulfillmentRequest = {
       lineItems,
-      shippedDate: (order.shippedAt || new Date()).toISOString(),
+      shippedDate: resolveEbayFulfillmentShippedDate(
+        order.shippedAt,
+        [order.orderedAt, order.createdAt],
+      ).toISOString(),
       shippingCarrierCode: mapCarrierCode(order.trackingCarrier),
       trackingNumber: normalizeEbayTrackingNumber(order.trackingNumber),
     };
@@ -484,6 +531,8 @@ export function createFulfillmentPushService(
         w.id AS wms_order_id,
         o.id AS oms_order_id,
         o.external_order_id AS external_order_id,
+        o.ordered_at AS ordered_at,
+        o.created_at AS oms_created_at,
         o.raw_payload AS raw_payload,
         o.tags AS tags,
         c.provider AS provider
@@ -593,7 +642,10 @@ export function createFulfillmentPushService(
 
     const fulfillmentPayload: EbayShippingFulfillmentRequest = {
       lineItems,
-      shippedDate: shippedAt.toISOString(),
+      shippedDate: resolveEbayFulfillmentShippedDate(
+        shippedAt,
+        [shipment.ordered_at, shipment.oms_created_at],
+      ).toISOString(),
       shippingCarrierCode: mapCarrierCode(carrier),
       trackingNumber: normalizeEbayTrackingNumber(trackingNumber),
     };
@@ -901,6 +953,18 @@ export function createFulfillmentPushService(
         { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "external_order_id", value: null },
       );
     }
+    const shopifyOrderGid = resolveShopifyOrderGid(order.external_order_id);
+    if (!shopifyOrderGid) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: order ${order.id} has invalid Shopify external_order_id`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "external_order_id",
+          value: order.external_order_id,
+        },
+      );
+    }
 
     // ---- 5. Shopify client must be set ---------------------------------
     if (!_shopifyClient) {
@@ -977,7 +1041,7 @@ export function createFulfillmentPushService(
       );
       resolved = await resolveFulfillmentOrderLines(
         _shopifyClient,
-        order.external_order_id.trim(),
+        shopifyOrderGid,
         positiveItems,
         shipmentId,
       );
@@ -1042,7 +1106,7 @@ export function createFulfillmentPushService(
       const foIds = Array.from(new Set(resolved.map((r) => r.fulfillmentOrderId)));
       const allowedFoIds = await fetchOurFulfillmentOrderIds(
         _shopifyClient,
-        order.external_order_id.trim(),
+        shopifyOrderGid,
         foIds,
         ourLocationIds,
         shipmentId,
@@ -1952,9 +2016,15 @@ async function getOurShopifyLocationIds(
       const chId = chResult?.rows?.[0]?.shopify_location_id;
       if (typeof chId === "string" && chId.length > 0) ids.push(chId);
     } catch (err: any) {
-      console.warn(
-        `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${err?.message ?? String(err)}`,
-      );
+      const message = err?.message ?? String(err);
+      if (
+        err?.code !== "42703" &&
+        !message.includes('column "shopify_location_id" does not exist')
+      ) {
+        console.warn(
+          `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${message}`,
+        );
+      }
     }
   }
 
@@ -2029,6 +2099,17 @@ async function fetchOurFulfillmentOrderIds(
   return allowed;
 }
 
+function resolveShopifyOrderGid(externalOrderId: string): string | null {
+  const trimmed = externalOrderId.trim();
+  if (trimmed.startsWith("gid://shopify/Order/")) {
+    return trimmed;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    return `gid://shopify/Order/${trimmed}`;
+  }
+  return null;
+}
+
 /**
  * Compare Shopify location ids regardless of GID/numeric form.
  *
@@ -2049,6 +2130,7 @@ export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushServ
 
 // Exposed for unit testing the resolver in isolation.
 export const __test__ = {
+  resolveEbayFulfillmentShippedDate,
   resolveFulfillmentOrderLines,
   tryReadPathA,
   getOurShopifyLocationIds,

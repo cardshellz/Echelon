@@ -18,8 +18,9 @@
  *     thin DI seam. If the underlying adapter changes (API version bump,
  *     retries, telemetry), one place to update.
  *
- *   - No callers in this commit; behind feature flag
- *     `SHOPIFY_FULFILLMENT_PUSH_ENABLED` once C22 wires it up.
+ *   - Production service wiring injects this client into the fulfillment
+ *     push service; `SHOPIFY_FULFILLMENT_PUSH_ENABLED=false` disables the
+ *     ShipStation hot path when needed.
  */
 
 // ---------------------------------------------------------------------------

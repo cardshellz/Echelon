@@ -641,6 +641,33 @@ describe("dispatchShopifyFulfillmentRetry :: failure path", () => {
     expect(nextMs).toBeLessThanOrEqual(after + 4 * 60_000 + 50);
   });
 
+  it("keeps pending without incrementing attempts when Shopify client is not initialized", async () => {
+    const push = vi.fn(async () => {
+      const err = new Error("shopify client not initialized") as any;
+      err.context = { code: "shopify_push_client_not_set" };
+      throw err;
+    });
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push },
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 702,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 257 },
+      attempts: 4,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBeUndefined();
+    expect(updates[0]!.set.attempts).toBeUndefined();
+    expect(updates[0]!.set.lastError).toBe(
+      "shopify fulfillment push client not initialized",
+    );
+  });
+
   it("marks dead and emits CRITICAL: log when attempts hit MAX_ATTEMPTS", async () => {
     const errSpy = vi.spyOn(console, "error");
     const push = vi.fn(async () => {

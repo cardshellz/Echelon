@@ -25,7 +25,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createFulfillmentPushService } from "../../fulfillment-push.service";
+import { createFulfillmentPushService, __test__ } from "../../fulfillment-push.service";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -249,6 +249,17 @@ describe("eBay tracking push regression (2026-04-14)", () => {
         trackingNumber: TRACKING,
       }),
     );
+  });
+
+  it("does not send eBay a shippedDate before the eBay order exists", async () => {
+    const fallbackNow = new Date("2026-05-02T18:49:25.469Z");
+    const shippedDate = __test__.resolveEbayFulfillmentShippedDate(
+      new Date("2026-05-02T04:00:00.000Z"),
+      [new Date("2026-05-02T14:59:24.456Z")],
+      fallbackNow,
+    );
+
+    expect(shippedDate.toISOString()).toBe(fallbackNow.toISOString());
   });
 
   it("routes dropship OMS orders to the dropship marketplace tracking service", async () => {

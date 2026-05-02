@@ -24,6 +24,7 @@ import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
+import { resolveShipStationShipmentTimestamp } from "./modules/oms/shipstation-date.util";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
 import { pool as dbPool } from "./db";
@@ -875,9 +876,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                   kind: "shipped",
                   trackingNumber: latest?.trackingNumber || row.tracking_number || "",
                   carrier: latest?.carrierCode || row.carrier || "other",
-                  shipDate: latest?.shipDate
-                    ? new Date(latest.shipDate)
-                    : new Date(),
+                  shipDate: resolveShipStationShipmentTimestamp(
+                    latest?.shipDate,
+                    new Date(),
+                  ),
                 };
               } else if (
                 ssOrder.orderStatus === "cancelled" &&
