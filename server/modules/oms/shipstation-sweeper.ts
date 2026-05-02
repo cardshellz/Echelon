@@ -2,8 +2,12 @@ import { db } from "../../../server/db";
 import { sql } from "drizzle-orm";
 
 /**
- * Sweeps the ShipStation awaiting_shipment queue to aggressively clear out
- * any stranded duplicates or zombie orders that Echelon already shipped.
+ * Sweeps the ShipStation awaiting_shipment queue and flags duplicate or
+ * stale Echelon-owned orders for review.
+ *
+ * This deliberately does not delete ShipStation orders. Manual splits and
+ * operator-created recovery orders are too easy to misclassify from a broad
+ * queue sweep; deletion belongs behind an explicit operator action.
  */
 export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   const baseUrl = "https://ssapi.shipstation.com";
@@ -13,7 +17,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   
   let page = 1;
   const pageSize = 100;
-  let totalCleared = 0;
+  let totalFlagged = 0;
   
   while (true) {
     const res = await fetch(`${baseUrl}/orders?orderStatus=awaiting_shipment&pageSize=${pageSize}&page=${page}`, {
@@ -67,37 +71,66 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
         }
       }
 
-      // 1. If the order is fully shipped/cancelled in Echelon, ALL SS copies are garbage.
-      // 2. If the order is NOT shipped (ready_to_ship), we should only have ONE SS copy.
-      //    If there are duplicates, we keep the wms one (`echelon-wms-shp-`) and nuke the oms one.
+      // 1. If the order is fully shipped/cancelled in Echelon, any
+      //    Echelon-owned awaiting_shipment copy is stale and needs review.
+      // 2. If the order is not shipped and multiple Echelon-owned copies
+      //    exist, flag the older OMS-level duplicates for review. Do not
+      //    touch manual/user-created ShipStation orders.
       
-      let toClear = [];
+      let toReview = [];
       if (isShippedOrCancelled) {
-        // If it's already shipped in Echelon, we only clear echelon-oms-* orders.
-        // We shouldn't blindly clear everything in case the user manually created a SS order.
-        toClear = orders.filter(o => o.orderKey?.startsWith("echelon-oms-") || o.orderKey?.startsWith("echelon-wms-shp-"));
+        toReview = orders.filter(o => o.orderKey?.startsWith("echelon-oms-") || o.orderKey?.startsWith("echelon-wms-shp-"));
       } else if (orders.length > 1) {
         // Find the wms order
         const wmsOrder = orders.find(o => o.orderKey?.startsWith("echelon-wms-shp-"));
         if (wmsOrder) {
-          // Only clear the old OMS duplicates! Do NOT clear manual splits or user-created orders.
-          toClear = orders.filter(o => o.orderKey?.startsWith("echelon-oms-"));
+          toReview = orders.filter(o => o.orderKey?.startsWith("echelon-oms-"));
         }
       }
 
-      for (const o of toClear) {
-        console.log(`[ShipStation Sweeper] DELETING mismatch/duplicate SS Order ${o.orderId} (${o.orderNumber})`);
-        const mRes = await fetch(`${baseUrl}/orders/${o.orderId}`, {
-          method: "DELETE",
-          headers: {
-            "Authorization": `Basic ${encodedAuth}`
-          }
-        });
+      for (const o of toReview) {
+        const orderKey = String(o.orderKey || "");
+        const wmsMatch = /^echelon-wms-shp-([1-9][0-9]*)$/.exec(orderKey);
+        const omsMatch = /^echelon-oms-([1-9][0-9]*)$/.exec(orderKey);
+        const details = {
+          shipStationOrderId: o.orderId ?? null,
+          shipStationOrderNumber: o.orderNumber ?? null,
+          orderKey,
+          queueStatus: o.orderStatus ?? "awaiting_shipment",
+          reason: isShippedOrCancelled
+            ? "echelon_shipped_or_cancelled_but_shipstation_awaiting"
+            : "duplicate_echelon_shipstation_order",
+        };
 
-        if (mRes.ok) {
-          totalCleared++;
-        } else {
-          console.warn(`[ShipStation Sweeper] Failed to delete SS Order ${o.orderId}:`, await mRes.text());
+        console.warn(
+          `[ShipStation Sweeper] Flagging SS queue review for ${o.orderId} (${o.orderNumber}, key=${orderKey})`,
+        );
+
+        if (wmsMatch) {
+          const shipmentId = Number(wmsMatch[1]);
+          await db.execute(sql`
+            UPDATE wms.outbound_shipments
+            SET requires_review = true,
+                review_reason = 'shipstation_queue_review',
+                updated_at = NOW()
+            WHERE id = ${shipmentId}
+          `);
+          totalFlagged++;
+          continue;
+        }
+
+        if (omsMatch) {
+          const omsOrderId = Number(omsMatch[1]);
+          await db.execute(sql`
+            INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+            VALUES (
+              ${omsOrderId},
+              'shipstation_queue_review_required',
+              ${JSON.stringify(details)}::jsonb,
+              NOW()
+            )
+          `);
+          totalFlagged++;
         }
       }
     }
@@ -106,7 +139,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
     page++;
   }
 
-  if (totalCleared > 0) {
-    console.log(`[ShipStation Sweeper] Done. Cleared ${totalCleared} straggler/duplicate orders from SS queue.`);
+  if (totalFlagged > 0) {
+    console.log(`[ShipStation Sweeper] Done. Flagged ${totalFlagged} straggler/duplicate orders for review.`);
   }
 }

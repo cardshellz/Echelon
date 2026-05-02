@@ -23,6 +23,7 @@ import type {
   ShopifyAdminGraphQLClient,
   ShopifyUserError,
 } from "../shopify/admin-gql-client";
+import { normalizeEbayTrackingNumber } from "../channels/adapters/ebay/ebay-fulfillment.util";
 
 // ---------------------------------------------------------------------------
 // Carrier code mapping: WMS/internal → eBay carrier codes
@@ -239,6 +240,40 @@ function shopifyTrackingCompany(carrier: string): string {
   return carrier.trim();
 }
 
+interface DropshipMarketplaceTrackingServiceHandle {
+  pushForOmsOrder(input: {
+    omsOrderId: number;
+    carrier: string;
+    trackingNumber: string;
+    shippedAt: Date;
+    idempotencyKey?: string;
+  }): Promise<{ status: string }>;
+}
+
+function isDropshipOmsOrder(order: any): boolean {
+  const rawPayload = order?.rawPayload;
+  if (rawPayload && typeof rawPayload === "object" && rawPayload.dropship) {
+    return true;
+  }
+  if (typeof order?.tags === "string") {
+    return order.tags.includes('"dropship"') || order.tags.includes("dropship");
+  }
+  return false;
+}
+
+function resolveDropshipShippedAt(order: any, orderId: number): Date {
+  if (order?.shippedAt instanceof Date && !Number.isNaN(order.shippedAt.getTime())) {
+    return order.shippedAt;
+  }
+  if (typeof order?.shippedAt === "string") {
+    const parsed = new Date(order.shippedAt);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+  throw new Error(`Dropship marketplace tracking requires shipped_at for order ${orderId}`);
+}
+
 export function createFulfillmentPushService(
   db: any,
   ebayApiClient: EbayApiClient | null,
@@ -249,6 +284,10 @@ export function createFulfillmentPushService(
   // env is wired up. Null here means callers that try to push will get a
   // structured `shopify_push_client_not_set` error and can defer.
   let _shopifyClient: ShopifyAdminGraphQLClient | null = null;
+  let _dropshipMarketplaceTrackingService:
+    | DropshipMarketplaceTrackingServiceHandle
+    | null
+    | undefined;
 
   /**
    * Set the eBay API client (called after service initialization when client is ready).
@@ -263,6 +302,49 @@ export function createFulfillmentPushService(
    */
   function setShopifyClient(client: ShopifyAdminGraphQLClient): void {
     _shopifyClient = client;
+  }
+
+  function setDropshipMarketplaceTrackingService(
+    service: DropshipMarketplaceTrackingServiceHandle,
+  ): void {
+    _dropshipMarketplaceTrackingService = service;
+  }
+
+  async function resolveDropshipMarketplaceTrackingService():
+    Promise<DropshipMarketplaceTrackingServiceHandle> {
+    if (_dropshipMarketplaceTrackingService !== undefined) {
+      if (!_dropshipMarketplaceTrackingService) {
+        throw new Error("Dropship marketplace tracking service is unavailable.");
+      }
+      return _dropshipMarketplaceTrackingService;
+    }
+    const mod = await import("../dropship/infrastructure/dropship-marketplace-tracking.factory");
+    _dropshipMarketplaceTrackingService = mod.createDropshipMarketplaceTrackingServiceFromEnv();
+    return _dropshipMarketplaceTrackingService;
+  }
+
+  async function pushDropshipMarketplaceTrackingIfNeeded(
+    order: any,
+    orderId: number,
+  ): Promise<boolean | null> {
+    if (!isDropshipOmsOrder(order)) {
+      return null;
+    }
+    const carrier = String(order.trackingCarrier).trim();
+    const trackingNumber = String(order.trackingNumber).trim();
+    const shippedAt = resolveDropshipShippedAt(order, orderId);
+    const service = await resolveDropshipMarketplaceTrackingService();
+    const result = await service.pushForOmsOrder({
+      omsOrderId: orderId,
+      carrier,
+      trackingNumber,
+      shippedAt,
+      idempotencyKey: `dropship:oms:${orderId}:tracking:${carrier.toLowerCase()}:${trackingNumber}`,
+    });
+    if (result.status === "not_dropship") {
+      return null;
+    }
+    return result.status === "succeeded" || result.status === "already_succeeded";
   }
 
   /**
@@ -298,6 +380,11 @@ export function createFulfillmentPushService(
     }
 
     try {
+      const dropshipPushed = await pushDropshipMarketplaceTrackingIfNeeded(order, orderId);
+      if (dropshipPushed !== null) {
+        return dropshipPushed;
+      }
+
       if (channel.provider === "ebay") {
         return await pushToEbay(order, orderId);
       } else if (channel.provider === "shopify") {
@@ -340,16 +427,21 @@ export function createFulfillmentPushService(
       return false;
     }
 
+    const lineItems = lines
+      .filter((l: any) => l.externalLineItemId && Number(l.quantity) > 0)
+      .map((l: any) => ({
+        lineItemId: l.externalLineItemId,
+        quantity: l.quantity,
+      }));
+    if (lineItems.length === 0) {
+      throw new Error(`No eBay external line item ids available for order ${orderId}`);
+    }
+
     const fulfillmentPayload: EbayShippingFulfillmentRequest = {
-      lineItems: lines
-        .filter((l: any) => l.externalLineItemId)
-        .map((l: any) => ({
-          lineItemId: l.externalLineItemId,
-          quantity: l.quantity,
-        })),
+      lineItems,
       shippedDate: (order.shippedAt || new Date()).toISOString(),
       shippingCarrierCode: mapCarrierCode(order.trackingCarrier),
-      trackingNumber: order.trackingNumber,
+      trackingNumber: normalizeEbayTrackingNumber(order.trackingNumber),
     };
 
     // Push to Card Shellz's eBay (or the originating channel)
@@ -373,99 +465,164 @@ export function createFulfillmentPushService(
       },
     });
 
-    // ------ VENDOR TRACKING PUSH ------
-    // If this is a dropship order (has vendor_id), also push tracking to the VENDOR's eBay
-    if (order.vendorId) {
-      try {
-        await pushTrackingToVendorEbay(order, orderId, fulfillmentPayload);
-      } catch (vendorPushErr: any) {
-        console.error(`[FulfillmentPush] Vendor eBay tracking push failed for order ${orderId}: ${vendorPushErr.message}`);
-        // Record failure but don't fail the overall push
-        await db.insert(omsOrderEvents).values({
-          orderId,
-          eventType: "vendor_tracking_push_failed",
-          details: { error: vendorPushErr.message, vendorId: order.vendorId },
-        });
-      }
-    }
 
     return true;
   }
 
-  /**
-   * Push tracking to a vendor's eBay account for a dropship order.
-   * Uses the vendor's OAuth token (not Card Shellz's).
-   */
-  async function pushTrackingToVendorEbay(
-    order: any,
-    orderId: number,
-    fulfillmentPayload: EbayShippingFulfillmentRequest,
-  ): Promise<void> {
-    const { getVendorEbayToken } = await import("../dropship/vendor-ebay.routes");
-    const https = await import("https");
-
-    const vendorId = order.vendorId;
-    const accessToken = await getVendorEbayToken(vendorId);
-    if (!accessToken) {
-      console.warn(`[FulfillmentPush] No valid eBay token for vendor ${vendorId} — skipping vendor tracking push`);
-      return;
+  async function pushTrackingForShipment(shipmentId: number): Promise<boolean> {
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new Error(`pushTrackingForShipment: shipmentId must be a positive integer (got ${shipmentId})`);
     }
 
-    // The vendor_order_ref is the eBay order ID on the vendor's account
-    const vendorOrderRef = order.vendorOrderRef || order.externalOrderId;
+    const shipmentResult: any = await db.execute(sql`
+      SELECT
+        os.id AS shipment_id,
+        os.status AS shipment_status,
+        os.carrier AS carrier,
+        os.tracking_number AS tracking_number,
+        os.shipped_at AS shipped_at,
+        w.id AS wms_order_id,
+        o.id AS oms_order_id,
+        o.external_order_id AS external_order_id,
+        o.raw_payload AS raw_payload,
+        o.tags AS tags,
+        c.provider AS provider
+      FROM wms.outbound_shipments os
+      JOIN wms.orders w ON w.id = os.order_id
+      JOIN oms.oms_orders o
+        ON w.oms_fulfillment_order_id ~ '^[0-9]+$'
+       AND o.id = (w.oms_fulfillment_order_id)::bigint
+      JOIN channels.channels c ON c.id = o.channel_id
+      WHERE os.id = ${shipmentId}
+      LIMIT 1
+    `);
+    const shipment = shipmentResult?.rows?.[0];
+    if (!shipment) {
+      console.error(`[FulfillmentPush] Shipment ${shipmentId} not found or not linked to OMS`);
+      return false;
+    }
 
-    const environment = process.env.EBAY_ENVIRONMENT || "production";
-    const hostname = environment === "sandbox" ? "api.sandbox.ebay.com" : "api.ebay.com";
-    const path = `/sell/fulfillment/v1/order/${encodeURIComponent(vendorOrderRef)}/shipping_fulfillment`;
+    const omsOrderId = Number(shipment.oms_order_id);
+    const carrier = String(shipment.carrier ?? "").trim();
+    const trackingNumber = String(shipment.tracking_number ?? "").trim();
+    const shippedAt = shipment.shipped_at instanceof Date
+      ? shipment.shipped_at
+      : new Date(shipment.shipped_at);
 
-    const payload = JSON.stringify(fulfillmentPayload);
+    if (!carrier || !trackingNumber) {
+      console.warn(`[FulfillmentPush] Shipment ${shipmentId} has no tracking info`);
+      return false;
+    }
+    if (Number.isNaN(shippedAt.getTime())) {
+      throw new Error(`Shipment ${shipmentId} has invalid shipped_at for tracking push`);
+    }
 
-    const result = await new Promise<any>((resolve, reject) => {
-      const options = {
-        hostname,
-        path,
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Language": "en-US",
-          "Accept-Language": "en-US",
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "Content-Length": Buffer.byteLength(payload),
-        },
-      };
+    const dropshipPushed = await pushDropshipMarketplaceTrackingIfNeeded(
+      {
+        rawPayload: shipment.raw_payload,
+        tags: shipment.tags,
+        trackingCarrier: carrier,
+        trackingNumber,
+        shippedAt,
+      },
+      omsOrderId,
+    );
+    if (dropshipPushed !== null) {
+      return dropshipPushed;
+    }
 
-      const req = https.request(options, (res: any) => {
-        let data = "";
-        res.on("data", (chunk: string) => (data += chunk));
-        res.on("end", () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
-          } else {
-            reject(new Error(`Vendor eBay tracking push failed (${res.statusCode}): ${data.substring(0, 500)}`));
-          }
-        });
-      });
-      req.on("error", reject);
-      req.write(payload);
-      req.end();
-    });
+    if (shipment.provider === "shopify") {
+      await pushShopifyFulfillment(shipmentId);
+      return true;
+    }
 
-    console.log(`[FulfillmentPush] Vendor eBay tracking pushed for order ${orderId}, vendor ${vendorId} → fulfillment ${result.fulfillmentId || "ok"}`);
+    if (shipment.provider !== "ebay") {
+      console.warn(`[FulfillmentPush] No shipment push handler for provider: ${shipment.provider}`);
+      return false;
+    }
+    if (!shipment.external_order_id) {
+      throw new Error(`Shipment ${shipmentId} is linked to an eBay OMS order without external_order_id`);
+    }
 
-    // Record vendor tracking push event
+    if (!_ebayApiClient) {
+      console.error(`[FulfillmentPush] eBay API client not available`);
+      return false;
+    }
+
+    const priorPush: any = await db.execute(sql`
+      SELECT id
+      FROM oms.oms_order_events
+      WHERE order_id = ${omsOrderId}
+        AND event_type = 'tracking_pushed'
+        AND details->>'provider' = 'ebay'
+        AND details->>'wmsShipmentId' = ${String(shipmentId)}
+        AND details->>'trackingNumber' = ${trackingNumber}
+      LIMIT 1
+    `);
+    if (priorPush?.rows?.[0]) {
+      console.log(`[FulfillmentPush] eBay tracking already pushed for shipment ${shipmentId}; idempotent skip`);
+      return true;
+    }
+
+    const lineResult: any = await db.execute(sql`
+      SELECT
+        ol.external_line_item_id AS external_line_item_id,
+        SUM(COALESCE(si.qty, 0))::int AS quantity
+      FROM wms.outbound_shipment_items si
+      JOIN wms.order_items wi ON wi.id = si.order_item_id
+      JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+      WHERE si.shipment_id = ${shipmentId}
+        AND COALESCE(si.qty, 0) > 0
+        AND ol.external_line_item_id IS NOT NULL
+      GROUP BY ol.external_line_item_id
+    `);
+    const lineItems = (lineResult?.rows ?? [])
+      .map((line: any) => ({
+        lineItemId: String(line.external_line_item_id ?? "").trim(),
+        quantity: Number(line.quantity),
+      }))
+      .filter((line: any) =>
+        line.lineItemId.length > 0 &&
+        Number.isInteger(line.quantity) &&
+        line.quantity > 0
+      );
+
+    if (lineItems.length === 0) {
+      throw new Error(`No eBay external line item ids available for shipment ${shipmentId}`);
+    }
+
+    const fulfillmentPayload: EbayShippingFulfillmentRequest = {
+      lineItems,
+      shippedDate: shippedAt.toISOString(),
+      shippingCarrierCode: mapCarrierCode(carrier),
+      trackingNumber: normalizeEbayTrackingNumber(trackingNumber),
+    };
+
+    const result = await _ebayApiClient.createShippingFulfillment(
+      shipment.external_order_id,
+      fulfillmentPayload,
+    );
+    const fulfillmentId = result?.fulfillmentId;
+    console.log(
+      `[FulfillmentPush] eBay tracking pushed for shipment ${shipmentId} (order ${omsOrderId}) -> fulfillment ${fulfillmentId ?? "(no id - accepted by eBay)"}`,
+    );
+
     await db.insert(omsOrderEvents).values({
-      orderId,
-      eventType: "vendor_tracking_pushed",
+      orderId: omsOrderId,
+      eventType: "tracking_pushed",
       details: {
         provider: "ebay",
-        vendorId,
-        fulfillmentId: result.fulfillmentId || null,
-        trackingNumber: order.trackingNumber,
-        carrier: order.trackingCarrier,
+        fulfillmentId: fulfillmentId ?? null,
+        wmsShipmentId: shipmentId,
+        trackingNumber,
+        carrier,
+        lineItems,
       },
     });
+
+    return true;
   }
+
 
   // -----------------------------------------------------------------------
   // Shopify fulfillment push (§6 Commit 21) — scaffolding only.
@@ -1507,8 +1664,10 @@ export function createFulfillmentPushService(
 
   return {
     pushTracking,
+    pushTrackingForShipment,
     setEbayClient,
     setShopifyClient,
+    setDropshipMarketplaceTrackingService,
     pushShopifyFulfillment,
     cancelShopifyFulfillment,
     updateShopifyFulfillmentTracking,

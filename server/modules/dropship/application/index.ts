@@ -12,6 +12,8 @@ export * from "./dropship-listing-push-worker-service";
 export * from "./dropship-marketplace-listing-provider";
 export * from "./dropship-marketplace-listing-push-provider";
 export * from "./dropship-marketplace-order-cancellation-provider";
+export * from "./dropship-marketplace-tracking-provider";
+export * from "./dropship-marketplace-tracking-service";
 export * from "./dropship-order-acceptance-service";
 export * from "./dropship-order-cancellation-service";
 export * from "./dropship-order-intake-service";

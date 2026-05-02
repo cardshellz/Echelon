@@ -21,6 +21,10 @@ import type {
   EbayBulkPriceQuantityResponse,
   EbayErrorResponse,
 } from "./ebay-types";
+import {
+  buildEbayShippingFulfillmentPath,
+  extractEbayFulfillmentIdFromLocation,
+} from "./ebay-fulfillment.util";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -282,7 +286,7 @@ export class EbayApiClient {
     orderId: string,
     fulfillment: EbayShippingFulfillmentRequest,
   ): Promise<EbayShippingFulfillmentResponse> {
-    const path = `/sell/fulfillment/v1/order/${orderId}/shipping_fulfillment`;
+    const path = buildEbayShippingFulfillmentPath(orderId);
 
     // DRY_RUN: log but don't call
     if (this.isDryRun) {
@@ -296,44 +300,91 @@ export class EbayApiClient {
     const accessToken = await this.authService.getAccessToken(this.channelId);
     const url = `${this.baseUrl}${path}`;
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-      },
-      body: JSON.stringify(fulfillment),
-    });
+    return await this.createShippingFulfillmentWithRetry(
+      path,
+      url,
+      accessToken,
+      fulfillment,
+    );
+  }
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      let errorDetail = errorBody;
+  private async createShippingFulfillmentWithRetry(
+    path: string,
+    url: string,
+    accessToken: string,
+    fulfillment: EbayShippingFulfillmentRequest,
+  ): Promise<EbayShippingFulfillmentResponse> {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const parsed: EbayErrorResponse = JSON.parse(errorBody);
-        errorDetail =
-          parsed.errors
-            ?.map((e) => `[${e.errorId}] ${e.message}`)
-            .join("; ") || errorBody;
-      } catch { /* use raw body */ }
-      throw new Error(
-        `eBay API POST ${path} failed (${response.status}): ${errorDetail}`,
-      );
-    }
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+          },
+          body: JSON.stringify(fulfillment),
+        });
 
-    // eBay returns 201 with empty body — fulfillmentId lives in Location header
-    // Location format: /sell/fulfillment/v1/order/{orderId}/shipping_fulfillment/{fulfillmentId}
-    const location = response.headers.get("Location") || response.headers.get("location");
-    if (location) {
-      const segments = location.split("/");
-      const fulfillmentId = segments[segments.length - 1];
-      if (fulfillmentId) {
-        return { fulfillmentId };
+        if (response.status === 429 && attempt < MAX_RETRIES) {
+          const retryAfter = parseInt(response.headers.get("Retry-After") || "5", 10);
+          console.warn(
+            `[EbayApi] Rate limited on POST ${path}, retrying in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})`,
+          );
+          await this.delay(retryAfter * 1000);
+          continue;
+        }
+
+        if (response.ok) {
+          return await this.parseCreateShippingFulfillmentResponse(response);
+        }
+
+        const errorBody = await response.text();
+        if (response.status >= 500 && attempt < MAX_RETRIES) {
+          const delay = this.getRetryDelay(attempt);
+          console.warn(
+            `[EbayApi] Server error ${response.status} on POST ${path}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
+          );
+          await this.delay(delay);
+          continue;
+        }
+
+        throw new Error(
+          `eBay API POST ${path} failed (${response.status}): ${this.formatEbayError(errorBody)}`,
+        );
+      } catch (err: any) {
+        if (
+          attempt < MAX_RETRIES &&
+          (err.code === "ECONNRESET" ||
+            err.code === "ETIMEDOUT" ||
+            err.code === "ENOTFOUND" ||
+            err.message?.includes("fetch failed"))
+        ) {
+          const delay = this.getRetryDelay(attempt);
+          console.warn(
+            `[EbayApi] Network error on POST ${path}: ${err.message}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
+          );
+          await this.delay(delay);
+          continue;
+        }
+        throw err;
       }
     }
 
-    // Fallback: if body is non-empty (defensive), parse it
+    throw new Error(`eBay API POST ${path} failed after ${MAX_RETRIES} retries`);
+  }
+
+  private async parseCreateShippingFulfillmentResponse(
+    response: Response,
+  ): Promise<EbayShippingFulfillmentResponse> {
+    const fulfillmentId = extractEbayFulfillmentIdFromLocation(
+      response.headers.get("Location") || response.headers.get("location"),
+    );
+    if (fulfillmentId) {
+      return { fulfillmentId };
+    }
+
     const text = await response.text();
     if (text) {
       try {
@@ -341,10 +392,19 @@ export class EbayApiClient {
       } catch { /* fall through */ }
     }
 
-    // No Location header and no body — return empty object so callers
-    // don't crash on undefined.  fulfillmentId will be undefined but
-    // the push itself succeeded (201).
     return {} as EbayShippingFulfillmentResponse;
+  }
+
+  private formatEbayError(errorBody: string): string {
+    let errorDetail = errorBody;
+    try {
+      const parsed: EbayErrorResponse = JSON.parse(errorBody);
+      errorDetail =
+        parsed.errors
+          ?.map((e) => `[${e.errorId}] ${e.message}`)
+          .join("; ") || errorBody;
+    } catch { /* use raw body */ }
+    return errorDetail;
   }
 
   // -------------------------------------------------------------------------

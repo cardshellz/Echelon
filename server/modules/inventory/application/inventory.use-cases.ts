@@ -217,6 +217,20 @@ export class InventoryUseCases {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
     await this.db.transaction(async (tx) => {
+      if (params.shipmentId && params.orderItemId) {
+        const existingShipmentTx = await tx.execute(sql`
+          SELECT id
+          FROM inventory.inventory_transactions
+          WHERE transaction_type = 'ship'
+            AND reference_id = ${params.shipmentId}
+            AND order_item_id = ${params.orderItemId}
+          LIMIT 1
+        `);
+        if (existingShipmentTx.rows.length > 0) {
+          return;
+        }
+      }
+
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -278,6 +292,10 @@ export class InventoryUseCases {
         targetState: "shipped",
         orderId: params.orderId,
         orderItemId: params.orderItemId ?? null,
+        shipmentId:
+          params.shipmentId && Number.isInteger(Number(params.shipmentId))
+            ? Number(params.shipmentId)
+            : null,
         referenceType: "order",
         referenceId: params.shipmentId ?? String(params.orderId),
         userId: params.userId ?? null,

@@ -88,8 +88,8 @@ describe("createShipmentForOrder :: happy path", () => {
     expect(result.created).toBe(true);
     expect(Number.isInteger(result.shipmentId)).toBe(true);
 
-    // Exactly one idempotency probe.
-    expect(mock.getExecuteCalls()).toBe(1);
+    // One idempotency probe plus one item-default lookup per shipment item.
+    expect(mock.getExecuteCalls()).toBe(3);
 
     // Two inserts: shipment, then items.
     const inserts = mock.getInserts();
@@ -111,11 +111,15 @@ describe("createShipmentForOrder :: happy path", () => {
     expect(itemsInsert.values[0]).toEqual({
       shipmentId: 9001,
       orderItemId: 101,
+      productVariantId: null,
+      fromLocationId: null,
       qty: 2,
     });
     expect(itemsInsert.values[1]).toEqual({
       shipmentId: 9001,
       orderItemId: 102,
+      productVariantId: null,
+      fromLocationId: null,
       qty: 1,
     });
   });

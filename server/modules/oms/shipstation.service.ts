@@ -20,8 +20,22 @@ import {
   recomputeOrderStatusFromShipments,
   type ShipmentEvent,
 } from "../orders/shipment-rollup";
+import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
 
 const EBAY_CHANNEL_ID = 67;
+const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
+const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
+
+class ShipStationWebhookProcessingError extends Error {
+  constructor(
+    message: string,
+    public readonly failures: Array<{ shipmentId: number | null; message: string }>,
+    public readonly processed: number,
+  ) {
+    super(message);
+    this.name = "ShipStationWebhookProcessingError";
+  }
+}
 
 // Feature flag: push Shopify fulfillments after a WMS shipment is marked
 // shipped via SHIP_NOTIFY V2. Default OFF — enabling this turns on the
@@ -520,6 +534,44 @@ interface ShipStationCreateOrderResponse {
   orderStatus: string;
 }
 
+function buildShipStationUrl(baseUrl: string, path: string): string {
+  if (!path.startsWith("http")) {
+    return `${baseUrl}${path}`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(path);
+  } catch {
+    throw new Error("ShipStation resource_url is not a valid URL");
+  }
+
+  if (parsed.protocol !== "https:" || parsed.hostname !== SHIPSTATION_RESOURCE_HOST) {
+    throw new Error(
+      `ShipStation resource_url host is not allowed: ${parsed.protocol}//${parsed.hostname}`,
+    );
+  }
+
+  return parsed.toString();
+}
+
+function parseWmsShipmentItemLineKey(lineItemKey: string | null | undefined): number | null {
+  if (typeof lineItemKey !== "string") return null;
+  const match = /^wms-item-([1-9][0-9]*)$/.exec(lineItemKey.trim());
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function withShipmentItemsIncluded(baseUrl: string, path: string): string {
+  const isAbsolute = path.startsWith("http");
+  const parsed = new URL(isAbsolute ? path : `${baseUrl}${path}`);
+  if (parsed.pathname.includes("/shipments")) {
+    parsed.searchParams.set("includeShipmentItems", "true");
+  }
+  return isAbsolute ? parsed.toString() : `${parsed.pathname}${parsed.search}`;
+}
+
 // ---------------------------------------------------------------------------
 // Carrier code mapping: ShipStation → eBay-compatible codes
 // ---------------------------------------------------------------------------
@@ -564,7 +616,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     body?: unknown,
     retries = 3
   ): Promise<T> {
-    const url = path.startsWith("http") ? path : `${baseUrl}${path}`;
+    const url = buildShipStationUrl(baseUrl, path);
     const headers: Record<string, string> = {
       Authorization: getAuthHeader(),
       "Content-Type": "application/json",
@@ -738,16 +790,16 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // parent's id. The orderNumber field (e.g. "#56826") is what stays
     // stable across all the splits.
     //
-    // Strategy: try orderId first (works for un-split orders, fastest),
-    // and if it returns nothing AND we have an orderNumber, fall back
-    // to filtering by orderNumber to catch all the children of split
-    // parents.
+    // Strategy: fetch by orderId and, when we also know the orderNumber,
+    // fetch by orderNumber too. Split children can exist while the parent
+    // query still returns one shipment, so fallback-only misses real child
+    // shipments.
     const byOrderId = await apiRequest<{ shipments: ShipStationShipment[] }>(
       "GET",
       `/shipments?orderId=${orderId}&includeShipmentItems=true`,
     );
     const idResults = byOrderId.shipments || [];
-    if (idResults.length > 0 || !opts?.orderNumber) {
+    if (!opts?.orderNumber) {
       return idResults;
     }
 
@@ -755,7 +807,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       "GET",
       `/shipments?orderNumber=${encodeURIComponent(opts.orderNumber)}&includeShipmentItems=true`,
     );
-    return byOrderNumber.shipments || [];
+    const merged = new Map<number, ShipStationShipment>();
+    for (const shipment of idResults) {
+      if (Number.isInteger(shipment.shipmentId)) {
+        merged.set(shipment.shipmentId, shipment);
+      }
+    }
+    for (const shipment of byOrderNumber.shipments || []) {
+      if (Number.isInteger(shipment.shipmentId)) {
+        merged.set(shipment.shipmentId, shipment);
+      }
+    }
+    return Array.from(merged.values());
   }
 
   // -------------------------------------------------------------------------
@@ -851,6 +914,317 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     return null;
   }
 
+  async function resolveWmsShipmentForShipNotify(
+    shipment: ShipStationShipment,
+  ): Promise<{ row: any | null; fallback: boolean }> {
+    const ssOrderId = shipment.orderId;
+    if (Number.isInteger(ssOrderId) && ssOrderId > 0) {
+      const byOrderId: any = await db.execute(sql`
+        SELECT id, order_id, status, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE shipstation_order_id = ${ssOrderId}
+        LIMIT 1
+      `);
+      const existing = byOrderId?.rows?.[0];
+      if (existing) {
+        return { row: existing, fallback: false };
+      }
+    }
+
+    const parsed = parseEchelonOrderKey(shipment.orderKey);
+    if (parsed?.source !== "wms-shipment") {
+      return { row: null, fallback: true };
+    }
+
+    const splitRow = await ensureSplitShipmentFromShipStation(
+      parsed.shipmentId,
+      shipment,
+    );
+    return { row: splitRow, fallback: false };
+  }
+
+  async function ensureSplitShipmentFromShipStation(
+    parentShipmentId: number,
+    shipment: ShipStationShipment,
+  ): Promise<any> {
+    if (!Number.isInteger(shipment.shipmentId) || shipment.shipmentId <= 0) {
+      throw new Error("ShipStation split shipment is missing shipmentId");
+    }
+    if (!Number.isInteger(shipment.orderId) || shipment.orderId <= 0) {
+      throw new Error("ShipStation split shipment is missing orderId");
+    }
+
+    const externalFulfillmentId = `shipstation_shipment:${shipment.shipmentId}`;
+    const existing: any = await db.execute(sql`
+      SELECT id, order_id, status, shipstation_order_id
+      FROM wms.outbound_shipments
+      WHERE external_fulfillment_id = ${externalFulfillmentId}
+         OR shipstation_order_id = ${shipment.orderId}
+      LIMIT 1
+    `);
+    if (existing?.rows?.[0]) {
+      return existing.rows[0];
+    }
+
+    const parentResult: any = await db.execute(sql`
+      SELECT id, order_id, channel_id, status, shipstation_order_id, shipstation_order_key
+      FROM wms.outbound_shipments
+      WHERE id = ${parentShipmentId}
+      LIMIT 1
+    `);
+    const parent = parentResult?.rows?.[0];
+    if (!parent) {
+      throw new Error(
+        `ShipStation split shipment references missing parent shipment ${parentShipmentId}`,
+      );
+    }
+
+    const inserted: any = await db.execute(sql`
+      INSERT INTO wms.outbound_shipments
+        (order_id, channel_id, external_fulfillment_id, source, status,
+         shipstation_order_id, shipstation_order_key, created_at, updated_at)
+      VALUES
+        (${parent.order_id}, ${parent.channel_id}, ${externalFulfillmentId},
+         ${SHIPSTATION_SPLIT_SOURCE}, 'queued',
+         ${shipment.orderId}, ${shipment.orderKey || parent.shipstation_order_key},
+         NOW(), NOW())
+      RETURNING id, order_id, status, shipstation_order_id
+    `);
+
+    const row = inserted?.rows?.[0];
+    if (!row) {
+      throw new Error(
+        `Failed to create WMS split shipment for ShipStation shipment ${shipment.shipmentId}`,
+      );
+    }
+    return row;
+  }
+
+  async function syncShipmentItemsFromShipStation(
+    targetShipmentId: number,
+    shipment: ShipStationShipment,
+  ): Promise<void> {
+    const ssItems = Array.isArray(shipment.shipmentItems)
+      ? shipment.shipmentItems
+      : [];
+    if (ssItems.length === 0) {
+      return;
+    }
+
+    const parsedItems = ssItems
+      .map((item) => ({
+        sourceShipmentItemId: parseWmsShipmentItemLineKey(item.lineItemKey),
+        qty: Number(item.quantity),
+      }))
+      .filter((item) =>
+        item.sourceShipmentItemId !== null &&
+        Number.isInteger(item.qty) &&
+        item.qty >= 0
+      ) as Array<{ sourceShipmentItemId: number; qty: number }>;
+
+    if (parsedItems.length === 0) {
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET requires_review = true,
+            review_reason = 'shipstation_split_items_unmapped',
+            updated_at = NOW()
+        WHERE id = ${targetShipmentId}
+      `);
+      throw new Error(
+        `ShipStation shipment ${shipment.shipmentId} has no parseable wms-item lineItemKey values`,
+      );
+    }
+
+    const targetItems: any = await db.execute(sql`
+      SELECT id, order_item_id
+      FROM wms.outbound_shipment_items
+      WHERE shipment_id = ${targetShipmentId}
+    `);
+    const targetItemIds = new Set(
+      (targetItems?.rows ?? []).map((row: any) => Number(row.id)),
+    );
+    const targetIsOriginal = parsedItems.some((item) =>
+      targetItemIds.has(item.sourceShipmentItemId),
+    );
+
+    const childItemsByOrderItemId = new Map<number, any>();
+    if (!targetIsOriginal) {
+      for (const row of targetItems?.rows ?? []) {
+        const orderItemId = Number(row.order_item_id);
+        if (Number.isInteger(orderItemId) && orderItemId > 0) {
+          childItemsByOrderItemId.set(orderItemId, row);
+        }
+      }
+    }
+
+    const touchedOriginalIds: number[] = [];
+    const touchedChildIds: number[] = [];
+    for (const item of parsedItems) {
+      const source: any = await db.execute(sql`
+        SELECT id, order_item_id, product_variant_id, from_location_id, box_id, weight_oz
+        FROM wms.outbound_shipment_items
+        WHERE id = ${item.sourceShipmentItemId}
+        LIMIT 1
+      `);
+      const sourceRow = source?.rows?.[0];
+      if (!sourceRow) {
+        await db.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET requires_review = true,
+              review_reason = 'shipstation_split_source_item_missing',
+              updated_at = NOW()
+          WHERE id = ${targetShipmentId}
+        `);
+        throw new Error(
+          `ShipStation shipment ${shipment.shipmentId} referenced missing WMS shipment item ${item.sourceShipmentItemId}`,
+        );
+      }
+
+      if (targetIsOriginal && targetItemIds.has(item.sourceShipmentItemId)) {
+        await db.execute(sql`
+          UPDATE wms.outbound_shipment_items
+          SET qty = ${item.qty},
+              tracking_id = ${String(shipment.shipmentId)}
+          WHERE id = ${item.sourceShipmentItemId}
+        `);
+        touchedOriginalIds.push(item.sourceShipmentItemId);
+      } else {
+        const orderItemId = Number(sourceRow.order_item_id);
+        const existingChild = Number.isInteger(orderItemId) && orderItemId > 0
+          ? childItemsByOrderItemId.get(orderItemId)
+          : null;
+
+        if (existingChild) {
+          await db.execute(sql`
+            UPDATE wms.outbound_shipment_items
+            SET product_variant_id = ${sourceRow.product_variant_id},
+                qty = ${item.qty},
+                from_location_id = ${sourceRow.from_location_id},
+                box_id = ${sourceRow.box_id},
+                weight_oz = ${sourceRow.weight_oz},
+                tracking_id = ${String(shipment.shipmentId)}
+            WHERE id = ${existingChild.id}
+          `);
+          touchedChildIds.push(Number(existingChild.id));
+        } else {
+          const inserted: any = await db.execute(sql`
+            INSERT INTO wms.outbound_shipment_items
+              (shipment_id, order_item_id, product_variant_id, qty,
+               from_location_id, box_id, weight_oz, tracking_id)
+            VALUES
+              (${targetShipmentId}, ${sourceRow.order_item_id}, ${sourceRow.product_variant_id},
+               ${item.qty}, ${sourceRow.from_location_id}, ${sourceRow.box_id},
+               ${sourceRow.weight_oz}, ${String(shipment.shipmentId)})
+            RETURNING id
+          `);
+          const insertedId = Number(inserted?.rows?.[0]?.id);
+          if (Number.isInteger(insertedId) && insertedId > 0) {
+            touchedChildIds.push(insertedId);
+          }
+        }
+      }
+    }
+
+    if (targetIsOriginal && touchedOriginalIds.length > 0) {
+      const touched = new Set(touchedOriginalIds);
+      for (const row of targetItems?.rows ?? []) {
+        const rowId = Number(row.id);
+        if (!touched.has(rowId)) {
+          await db.execute(sql`
+            UPDATE wms.outbound_shipment_items
+            SET qty = 0
+            WHERE id = ${rowId}
+          `);
+        }
+      }
+    }
+
+    if (!targetIsOriginal && touchedChildIds.length > 0) {
+      const touched = new Set(touchedChildIds);
+      for (const row of targetItems?.rows ?? []) {
+        const rowId = Number(row.id);
+        if (Number.isInteger(rowId) && rowId > 0 && !touched.has(rowId)) {
+          await db.execute(sql`
+            UPDATE wms.outbound_shipment_items
+            SET qty = 0,
+                tracking_id = ${String(shipment.shipmentId)}
+            WHERE id = ${rowId}
+          `);
+        }
+      }
+    }
+  }
+
+  async function loadValidatedInventoryShipmentItems(
+    shipmentId: number,
+  ): Promise<any[]> {
+    const itemsResult = await db.execute(sql`
+      SELECT id, order_item_id, product_variant_id, qty, from_location_id
+      FROM wms.outbound_shipment_items
+      WHERE shipment_id = ${shipmentId}
+    `);
+    const rows = itemsResult.rows as any[];
+    const invalidItems = rows.filter((item) =>
+      !item.product_variant_id ||
+      !item.from_location_id ||
+      !Number.isInteger(Number(item.qty)) ||
+      Number(item.qty) <= 0
+    );
+    if (invalidItems.length > 0) {
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET requires_review = true,
+            review_reason = 'inventory_deduction_missing_item_data',
+            updated_at = NOW()
+        WHERE id = ${shipmentId}
+      `);
+      throw new Error(
+        `Inventory deduction blocked for shipment ${shipmentId}: ${invalidItems.length} item(s) missing product_variant_id, from_location_id, or positive qty`,
+      );
+    }
+    return rows;
+  }
+
+  async function recordInventoryForShipment(
+    shipmentId: number,
+    wmsOrderId: number,
+    items: any[],
+  ): Promise<void> {
+    if (!inventoryCore || items.length === 0) {
+      return;
+    }
+
+    try {
+      for (const item of items) {
+        await inventoryCore.recordShipment({
+          productVariantId: item.product_variant_id,
+          warehouseLocationId: item.from_location_id,
+          qty: item.qty,
+          orderId: wmsOrderId,
+          orderItemId: item.order_item_id,
+          shipmentId: String(shipmentId),
+          userId: "system:shipstation:v2",
+        });
+        console.log(`[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})`);
+      }
+    } catch (invErr: any) {
+      console.error(`[ShipStation Webhook V2] Inventory deduction failed for shipment ${shipmentId}: ${invErr.message}`);
+      throw invErr;
+    }
+  }
+
+  async function shouldEnqueueDelayedTrackingPush(omsOrderId: number): Promise<boolean> {
+    const result: any = await db.execute(sql`
+      SELECT c.provider
+      FROM oms.oms_orders o
+      JOIN channels.channels c ON c.id = o.channel_id
+      WHERE o.id = ${omsOrderId}
+      LIMIT 1
+    `);
+    const provider = String(result?.rows?.[0]?.provider ?? "").toLowerCase();
+    return provider.length > 0 && provider !== "shopify";
+  }
+
   /**
    * V2 per-shipment handler. Returns `{ processed, fallback }`:
    *   - `fallback=true` means the shipment was NOT found by
@@ -863,33 +1237,29 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   async function processShipNotifyV2(
     shipment: ShipStationShipment,
   ): Promise<{ processed: boolean; fallback: boolean }> {
-    const ssOrderId = shipment.orderId;
-    if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) {
-      // Malformed SS id — fall back to legacy orderKey path.
-      return { processed: false, fallback: true };
-    }
-
-    const shipmentLookup: any = await db.execute(sql`
-      SELECT id, order_id, status
-      FROM wms.outbound_shipments
-      WHERE shipstation_order_id = ${ssOrderId}
-      LIMIT 1
-    `);
-    const wmsShipmentRow: any = shipmentLookup?.rows?.[0];
+    const resolved = await resolveWmsShipmentForShipNotify(shipment);
+    const wmsShipmentRow: any = resolved.row;
     if (!wmsShipmentRow) {
       // Pre-cutover order (pushed via pushOrder, no shipstation_order_id
       // on outbound_shipments). Fall back to legacy orderKey path.
-      return { processed: false, fallback: true };
+      return { processed: false, fallback: resolved.fallback };
     }
 
     const carrier = mapShipStationCarrier(shipment.carrierCode);
     const event = deriveEventFromSSShipment(shipment, carrier);
     if (!event) {
       console.log(
-        `[ShipStation Webhook V2] No actionable event for shipment ${wmsShipmentRow.id} (SS order ${ssOrderId}) — skipping`,
+        `[ShipStation Webhook V2] No actionable event for shipment ${wmsShipmentRow.id} (SS order ${shipment.orderId}) — skipping`,
       );
       return { processed: false, fallback: false };
     }
+
+    if (event.kind === "shipped") {
+      await syncShipmentItemsFromShipStation(wmsShipmentRow.id, shipment);
+    }
+    const inventoryItemsToRecord = event.kind === "shipped" && inventoryCore
+      ? await loadValidatedInventoryShipmentItems(wmsShipmentRow.id)
+      : [];
 
     // Forward the Shopify fulfillment-push handle so the void path
     // can hook `cancelShopifyFulfillment` (§6 Commit 17). The handle
@@ -906,6 +1276,13 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       console.log(
         `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already in target state — no-op`,
       );
+      if (event.kind === "shipped" && inventoryCore) {
+        await recordInventoryForShipment(
+          wmsShipmentRow.id,
+          wmsOrderId,
+          inventoryItemsToRecord,
+        );
+      }
       return { processed: false, fallback: false };
     }
 
@@ -940,7 +1317,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       return { processed: true, fallback: false };
     }
 
-    await updateOmsDerivedFromEvent(omsOrderId, event);
+    await updateOmsDerivedFromEvent(omsOrderId, event, {
+      wmsOrderId,
+      warehouseStatus: rollup.warehouseStatus,
+    });
     await recordShipmentEventV2(omsOrderId, event, shipment, {
       wmsFirst: true,
       wmsShipmentId: wmsShipmentRow.id,
@@ -948,36 +1328,19 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
     if (event.kind === "shipped") {
       if (inventoryCore) {
-        try {
-          const itemsResult = await db.execute(sql`
-            SELECT id, order_item_id, product_variant_id, qty, from_location_id
-            FROM wms.outbound_shipment_items
-            WHERE shipment_id = ${wmsShipmentRow.id}
-          `);
-          
-          for (const item of itemsResult.rows as any[]) {
-            if (!item.product_variant_id || !item.from_location_id || !item.qty) continue;
-            
-            await inventoryCore.recordShipment({
-              productVariantId: item.product_variant_id,
-              warehouseLocationId: item.from_location_id,
-              qty: item.qty,
-              orderId: wmsOrderId,
-              orderItemId: item.order_item_id,
-              shipmentId: String(wmsShipmentRow.id),
-              userId: "system:shipstation:v2",
-            });
-            console.log(`[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})`);
-          }
-        } catch (invErr: any) {
-          console.error(`[ShipStation Webhook V2] Inventory deduction failed for shipment ${wmsShipmentRow.id}: ${invErr.message}`);
-        }
+        await recordInventoryForShipment(
+          wmsShipmentRow.id,
+          wmsOrderId,
+          inventoryItemsToRecord,
+        );
       }
 
       try {
         const { enqueueDelayedTrackingPush } = await import("./webhook-retry.worker");
-        await enqueueDelayedTrackingPush(db, omsOrderId);
-        console.log(`[ShipStation Webhook V2] Enqueued delayed tracking push for order ${omsOrderId}`);
+        if (await shouldEnqueueDelayedTrackingPush(omsOrderId)) {
+          await enqueueDelayedTrackingPush(db, omsOrderId, wmsShipmentRow.id);
+          console.log(`[ShipStation Webhook V2] Enqueued delayed tracking push for order ${omsOrderId}, shipment ${wmsShipmentRow.id}`);
+        }
       } catch (pushErr: any) {
         console.error(
           `[ShipStation Webhook V2] Failed to enqueue tracking push for order ${omsOrderId}: ${pushErr.message}`,
@@ -1061,17 +1424,65 @@ export function createShipStationService(db: any, inventoryCore?: any) {
    * tail (OMS update + line-items fulfillment flag). Kept separate
    * from the legacy path so edits to V2 cannot silently diverge.
    */
+  async function updateOmsLineFulfillmentFromWms(
+    omsOrderId: number,
+    wmsOrderId: number,
+  ): Promise<void> {
+    await db.execute(sql`
+      WITH shipped_by_line AS (
+        SELECT
+          wi.oms_order_line_id AS oms_order_line_id,
+          SUM(COALESCE(si.qty, 0))::int AS shipped_qty
+        FROM wms.outbound_shipment_items si
+        JOIN wms.outbound_shipments os ON os.id = si.shipment_id
+        JOIN wms.order_items wi ON wi.id = si.order_item_id
+        WHERE os.order_id = ${wmsOrderId}
+          AND os.status IN ('shipped', 'returned', 'lost')
+          AND wi.oms_order_line_id IS NOT NULL
+        GROUP BY wi.oms_order_line_id
+      ),
+      line_status AS (
+        SELECT
+          ol.id AS oms_order_line_id,
+          CASE
+            WHEN COALESCE(s.shipped_qty, 0) >= COALESCE(ol.quantity, 0) THEN 'fulfilled'
+            WHEN COALESCE(s.shipped_qty, 0) > 0 THEN 'partial'
+            ELSE 'unfulfilled'
+          END AS next_status
+        FROM oms.oms_order_lines ol
+        LEFT JOIN shipped_by_line s ON s.oms_order_line_id = ol.id
+        WHERE ol.order_id = ${omsOrderId}
+      )
+      UPDATE oms.oms_order_lines ol
+      SET fulfillment_status = line_status.next_status,
+          updated_at = NOW()
+      FROM line_status
+      WHERE ol.id = line_status.oms_order_line_id
+    `);
+  }
+
   async function updateOmsDerivedFromEvent(
     omsOrderId: number,
     event: ShipmentEvent,
+    opts: {
+      wmsOrderId?: number;
+      warehouseStatus?: WmsWarehouseStatus;
+    } = {},
   ): Promise<void> {
     const now = new Date();
     if (event.kind === "shipped") {
+      const derivedStatus = opts.warehouseStatus
+        ? deriveOmsFromWms(opts.warehouseStatus)
+        : "shipped";
+      const nextStatus = derivedStatus ?? "shipped";
+      const nextFulfillmentStatus =
+        nextStatus === "partially_shipped" ? "partial" : "fulfilled";
+
       await db
         .update(omsOrders)
         .set({
-          status: "shipped",
-          fulfillmentStatus: "fulfilled",
+          status: nextStatus,
+          fulfillmentStatus: nextFulfillmentStatus,
           trackingNumber: event.trackingNumber,
           trackingCarrier: event.carrier,
           shippedAt: event.shipDate,
@@ -1079,10 +1490,14 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         })
         .where(eq(omsOrders.id, omsOrderId));
 
-      await db
-        .update(omsOrderLines)
-        .set({ fulfillmentStatus: "fulfilled" })
-        .where(eq(omsOrderLines.orderId, omsOrderId));
+      if (opts.wmsOrderId) {
+        await updateOmsLineFulfillmentFromWms(omsOrderId, opts.wmsOrderId);
+      } else {
+        await db
+          .update(omsOrderLines)
+          .set({ fulfillmentStatus: "fulfilled" })
+          .where(eq(omsOrderLines.orderId, omsOrderId));
+      }
       return;
     }
 
@@ -1527,43 +1942,55 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
   // ─── processShipNotify entry point (flag-gated) ────────────────
 
+  async function processShipmentNotification(
+    shipment: ShipStationShipment,
+  ): Promise<{ processed: boolean }> {
+    if (isShipNotifyV2Enabled()) {
+      const v2Result = await processShipNotifyV2(shipment);
+      if (v2Result.processed) {
+        return { processed: true };
+      }
+      if (!v2Result.fallback) {
+        return { processed: false };
+      }
+      return processShipNotifyLegacy(shipment);
+    }
+
+    return processShipNotifyLegacy(shipment);
+  }
+
   async function processShipNotify(resourceUrl: string): Promise<number> {
     // Fetch the actual shipment data from ShipStation
     const data = await apiRequest<{ shipments: ShipStationShipment[] }>(
       "GET",
-      resourceUrl,
+      withShipmentItemsIncluded(baseUrl, resourceUrl),
     );
 
     const shipments = data.shipments || [];
-    const useV2 = isShipNotifyV2Enabled();
     let processed = 0;
+    const failures: Array<{ shipmentId: number | null; message: string }> = [];
 
     for (const shipment of shipments) {
       try {
-        if (useV2) {
-          const v2Result = await processShipNotifyV2(shipment);
-          if (v2Result.processed) {
-            processed++;
-            continue;
-          }
-          if (!v2Result.fallback) {
-            // V2 handled the shipment (deliberate skip / no-op) —
-            // do NOT fall through to legacy, or we'd double-process.
-            continue;
-          }
-          // Fallback: shipment not found by shipstation_order_id, run
-          // the legacy orderKey path so pre-cutover orders still work.
-          const legacyResult = await processShipNotifyLegacy(shipment);
-          if (legacyResult.processed) processed++;
-        } else {
-          const legacyResult = await processShipNotifyLegacy(shipment);
-          if (legacyResult.processed) processed++;
-        }
+        const result = await processShipmentNotification(shipment);
+        if (result.processed) processed++;
       } catch (err: any) {
+        failures.push({
+          shipmentId: Number.isInteger(shipment.shipmentId) ? shipment.shipmentId : null,
+          message: err?.message || String(err),
+        });
         console.error(
-          `[ShipStation Webhook] Error processing shipment ${shipment.shipmentId}: ${err.message}`,
+          `[ShipStation Webhook] Error processing shipment ${shipment.shipmentId}: ${err?.message || String(err)}`,
         );
       }
+    }
+
+    if (failures.length > 0) {
+      throw new ShipStationWebhookProcessingError(
+        `ShipStation SHIP_NOTIFY processed ${processed}/${shipments.length} shipment(s); ${failures.length} failed`,
+        failures,
+        processed,
+      );
     }
 
     return processed;
@@ -2034,6 +2461,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     getOrderById,
     getOrderByKey,
     getOrderByNumber,
+    processShipmentNotification,
     processShipNotify,
     registerWebhook,
     isConfigured,
