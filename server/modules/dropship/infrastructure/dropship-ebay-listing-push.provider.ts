@@ -54,6 +54,7 @@ const EBAY_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const EBAY_SELLING_SCOPES = [
   "https://api.ebay.com/oauth/api_scope",
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
+  "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.account",
   "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ].join(" ");
