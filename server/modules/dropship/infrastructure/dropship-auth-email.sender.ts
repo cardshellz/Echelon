@@ -54,6 +54,8 @@ function getActionLabel(action: DropshipSensitiveAction): string {
       return "push listings in bulk";
     case "high_risk_order_acceptance":
       return "accept a high-risk order";
+    case "manage_notification_preferences":
+      return "manage notification preferences";
   }
 }
 

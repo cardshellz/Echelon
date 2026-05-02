@@ -22,6 +22,9 @@ import {
   dropshipVendorListings,
   dropshipWalletAccounts,
   dropshipWalletLedger,
+  dropshipNotificationEvents,
+  dropshipRmaInspections,
+  dropshipRmas,
 } from "../schema/dropship.schema";
 
 const migrationSql = readFileSync(
@@ -50,6 +53,10 @@ const listingConnectionConfigMigrationSql = readFileSync(
 );
 const listingConfigBackfillMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0095_dropship_listing_config_backfill.sql"),
+  "utf8",
+);
+const returnsNotificationsMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0097_dropship_returns_notifications.sql"),
   "utf8",
 );
 const releaseScript = readFileSync(
@@ -128,6 +135,16 @@ describe("Dropship V2 schema contract", () => {
     expect(migrationSql).toContain("dropship_rma_fault_chk");
     expect(migrationSql).toContain("dropship_notification_pref_critical_chk");
     expect(migrationSql).toContain("dropship_insurance_bps_chk");
+  });
+
+  it("keeps return inspection and notification retries idempotent", () => {
+    expect((dropshipRmas as any).idempotencyKey.name).toBe("idempotency_key");
+    expect((dropshipRmas as any).requestHash.name).toBe("request_hash");
+    expect((dropshipRmaInspections as any).idempotencyKey.name).toBe("idempotency_key");
+    expect((dropshipNotificationEvents as any).requestHash.name).toBe("request_hash");
+    expect(returnsNotificationsMigrationSql).toContain("dropship_rma_idem_idx");
+    expect(returnsNotificationsMigrationSql).toContain("dropship_rma_inspection_one_per_rma_idx");
+    expect(returnsNotificationsMigrationSql).toContain("dropship_notification_idem_channel_idx");
   });
 
   it("keeps shipping quotes idempotent and shipping markup configurable", () => {

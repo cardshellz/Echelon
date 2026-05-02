@@ -176,6 +176,7 @@ export const dropshipSensitiveActionEnum = [
   "wallet_funding_high_value",
   "bulk_listing_push",
   "high_risk_order_acceptance",
+  "manage_notification_preferences",
 ] as const;
 export type DropshipSensitiveAction = typeof dropshipSensitiveActionEnum[number];
 
@@ -263,7 +264,7 @@ export const dropshipSensitiveActionChallenges = dropshipSchema.table("dropship_
 }, (table) => [
   uniqueIndex("dropship_sensitive_challenge_idem_idx").on(table.idempotencyKey),
   index("dropship_sensitive_challenge_member_idx").on(table.memberId, table.createdAt),
-  check("dropship_sensitive_challenge_action_chk", sql`${table.action} IN ('account_bootstrap','connect_store','disconnect_store','change_password','change_contact_email','password_reset','register_passkey','add_funding_method','remove_funding_method','wallet_funding_high_value','bulk_listing_push','high_risk_order_acceptance')`),
+  check("dropship_sensitive_challenge_action_chk", sql`${table.action} IN ('account_bootstrap','connect_store','disconnect_store','change_password','change_contact_email','password_reset','register_passkey','add_funding_method','remove_funding_method','wallet_funding_high_value','bulk_listing_push','high_risk_order_acceptance','manage_notification_preferences')`),
   check("dropship_sensitive_challenge_method_chk", sql`${table.method} IN ('passkey','email_mfa')`),
   check("dropship_sensitive_challenge_attempts_chk", sql`${table.attempts} >= 0`),
 ]);
@@ -1041,9 +1042,12 @@ export const dropshipRmas = dropshipSchema.table("dropship_rmas", {
   receivedAt: timestamp("received_at", { withTimezone: true }),
   inspectedAt: timestamp("inspected_at", { withTimezone: true }),
   creditedAt: timestamp("credited_at", { withTimezone: true }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
+  requestHash: varchar("request_hash", { length: 64 }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("dropship_rma_number_idx").on(table.rmaNumber),
+  uniqueIndex("dropship_rma_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_rma_vendor_status_idx").on(table.vendorId, table.status),
   check("dropship_rma_status_chk", sql`${table.status} IN ('requested','in_transit','received','inspecting','approved','rejected','credited','closed')`),
   check("dropship_rma_window_chk", sql`${table.returnWindowDays} > 0`),
@@ -1079,9 +1083,13 @@ export const dropshipRmaInspections = dropshipSchema.table("dropship_rma_inspect
   creditCents: bigint("credit_cents", { mode: "number" }).notNull().default(0),
   feeCents: bigint("fee_cents", { mode: "number" }).notNull().default(0),
   inspectedBy: varchar("inspected_by", { length: 255 }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
+  requestHash: varchar("request_hash", { length: 64 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_rma_inspection_rma_idx").on(table.rmaId),
+  uniqueIndex("dropship_rma_inspection_one_per_rma_idx").on(table.rmaId),
+  uniqueIndex("dropship_rma_inspection_idem_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   check("dropship_rma_inspection_fault_chk", sql`${table.faultCategory} IS NULL OR ${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
   check("dropship_rma_inspection_money_chk", sql`${table.creditCents} >= 0 AND ${table.feeCents} >= 0`),
 ]);
@@ -1121,9 +1129,13 @@ export const dropshipNotificationEvents = dropshipSchema.table("dropship_notific
   status: varchar("status", { length: 30 }).notNull().default("pending"),
   deliveredAt: timestamp("delivered_at", { withTimezone: true }),
   readAt: timestamp("read_at", { withTimezone: true }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
+  requestHash: varchar("request_hash", { length: 64 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_notification_vendor_idx").on(table.vendorId, table.createdAt),
+  index("dropship_notification_unread_idx").on(table.vendorId, table.readAt, table.createdAt).where(sql`read_at IS NULL`),
+  uniqueIndex("dropship_notification_idem_channel_idx").on(table.idempotencyKey, table.channel).where(sql`idempotency_key IS NOT NULL`),
   check("dropship_notification_channel_chk", sql`${table.channel} IN ('email','in_app','sms','webhook')`),
 ]);
 
