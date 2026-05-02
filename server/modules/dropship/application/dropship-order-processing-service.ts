@@ -81,10 +81,18 @@ export interface DropshipOrderProcessingRepository {
     retryable: boolean;
     now: Date;
   }): Promise<void>;
+
+  markPaymentHoldExpired(input: {
+    intakeId: number;
+    vendorId: number;
+    storeConnectionId: number;
+    workerId: string;
+    now: Date;
+  }): Promise<boolean>;
 }
 
 export interface DropshipOrderProcessingResult {
-  outcome: "accepted" | "payment_hold" | "failed" | "skipped";
+  outcome: "accepted" | "payment_hold" | "failed" | "skipped" | "cancelled";
   intakeId: number;
   vendorId: number | null;
   storeConnectionId: number | null;
@@ -165,6 +173,39 @@ export class DropshipOrderProcessingService {
       return mapAcceptanceResult(acceptance);
     } catch (error) {
       const classified = classifyOrderProcessingError(error);
+      if (classified.code === "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED") {
+        const cancelled = await this.deps.repository.markPaymentHoldExpired({
+          intakeId: claim.intake.intakeId,
+          vendorId: claim.intake.vendorId,
+          storeConnectionId: claim.intake.storeConnectionId,
+          workerId: parsed.workerId,
+          now: this.deps.clock.now(),
+        });
+        if (cancelled) {
+          this.deps.logger.warn({
+            code: "DROPSHIP_ORDER_PROCESSING_PAYMENT_HOLD_EXPIRED",
+            message: "Dropship order processing cancelled an expired payment hold.",
+            context: {
+              intakeId: claim.intake.intakeId,
+              vendorId: claim.intake.vendorId,
+              storeConnectionId: claim.intake.storeConnectionId,
+            },
+          });
+          return {
+            outcome: "cancelled",
+            intakeId: claim.intake.intakeId,
+            vendorId: claim.intake.vendorId,
+            storeConnectionId: claim.intake.storeConnectionId,
+            shippingQuoteSnapshotId: null,
+            omsOrderId: null,
+            walletLedgerEntryId: null,
+            economicsSnapshotId: null,
+            failureCode: classified.code,
+            failureMessage: classified.message,
+            retryable: false,
+          };
+        }
+      }
       await this.deps.repository.markIntakeFailure({
         intakeId: claim.intake.intakeId,
         vendorId: claim.intake.vendorId,

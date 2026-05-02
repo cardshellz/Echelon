@@ -30,6 +30,7 @@ interface IntakeRow {
   external_order_id: string;
   external_order_number: string | null;
   status: string;
+  payment_hold_expires_at: Date | null;
   normalized_payload: NormalizedDropshipOrderPayload | null;
   raw_payload: Record<string, unknown> | null;
   oms_order_id: string | number | null;
@@ -313,7 +314,7 @@ async function loadIntakeForUpdate(
 ): Promise<DropshipAcceptanceIntakeRecord | null> {
   const result = await client.query<IntakeRow>(
     `SELECT id, channel_id, vendor_id, store_connection_id, platform,
-            external_order_id, external_order_number, status,
+            external_order_id, external_order_number, status, payment_hold_expires_at,
             normalized_payload, raw_payload, oms_order_id
      FROM dropship.dropship_order_intake
      WHERE id = $1
@@ -1128,6 +1129,7 @@ function mapIntakeRow(row: IntakeRow): DropshipAcceptanceIntakeRecord {
     normalizedPayload: row.normalized_payload,
     rawPayload: row.raw_payload ?? {},
     omsOrderId: row.oms_order_id === null ? null : toSafeInteger(row.oms_order_id, "oms_order_id"),
+    paymentHoldExpiresAt: row.payment_hold_expires_at,
   };
 }
 
