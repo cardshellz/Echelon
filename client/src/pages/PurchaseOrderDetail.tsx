@@ -2730,6 +2730,24 @@ export default function PurchaseOrderDetail() {
               </Button>
             )}
 
+            {/* Create shipment.
+                Visible whenever the PO has been sent and is not terminal.
+                Pre-sent POs (draft / pending_approval / approved) don't
+                need shipments yet — the shipment represents in-flight goods.
+                Cancelled / closed POs are terminal. */}
+            {["sent", "acknowledged", "shipped", "in_transit", "arrived", "receiving"].includes(po.physicalStatus ?? "") &&
+              !["cancelled", "closed"].includes(po.physicalStatus ?? "") && (
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowCreateShipmentDialog(true)}
+              >
+                <Package className="h-3.5 w-3.5 mr-2" />
+                Create shipment
+              </Button>
+            )}
+
             {/* Create receipt */}
             {(["arrived", "receiving", "acknowledged", "shipped", "in_transit", "sent", "partially_received"].includes(po.physicalStatus ?? "") ||
               ["sent", "acknowledged", "partially_received"].includes(po.status)) && (
