@@ -33,6 +33,7 @@ const EBAY_SCOPES = [
 
 const SHOPIFY_SCOPES = [
   "read_orders",
+  "write_orders",
   "write_products",
   "write_inventory",
   "read_locations",

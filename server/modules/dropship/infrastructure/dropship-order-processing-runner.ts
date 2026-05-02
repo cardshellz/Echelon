@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
+import { createDropshipOrderCancellationServiceFromEnv } from "./dropship-order-cancellation.factory";
 import { createDropshipOrderProcessingServiceFromEnv } from "./dropship-order-processing.factory";
 import { createDropshipPaymentHoldExpirationServiceFromEnv } from "./dropship-payment-hold-expiration.factory";
 
@@ -60,12 +61,24 @@ export async function runDropshipOrderProcessingSweep(input: {
   batchSize?: number;
   workerId?: string;
   now?: Date;
-} = {}): Promise<{ processed: number; failed: number; skipped: number; expired: number }> {
+} = {}): Promise<{
+  processed: number;
+  failed: number;
+  skipped: number;
+  expired: number;
+  cancellationSucceeded: number;
+  cancellationRetrying: number;
+  cancellationFailed: number;
+}> {
   const repository = input.repository ?? new PgDropshipOrderProcessingQueueRepository();
   const batchSize = input.batchSize ?? envPositiveInteger("DROPSHIP_ORDER_PROCESSING_WORKER_BATCH_SIZE", DEFAULT_BATCH_SIZE);
   const workerId = input.workerId ?? defaultWorkerId();
   const now = input.now ?? new Date();
   const expiration = await createDropshipPaymentHoldExpirationServiceFromEnv().expireExpiredPaymentHolds({
+    limit: batchSize,
+    workerId,
+  });
+  const cancellation = await createDropshipOrderCancellationServiceFromEnv().processPendingCancellations({
     limit: batchSize,
     workerId,
   });
@@ -105,7 +118,15 @@ export async function runDropshipOrderProcessingSweep(input: {
     }
   }
 
-  return { processed, failed, skipped, expired };
+  return {
+    processed,
+    failed,
+    skipped,
+    expired,
+    cancellationSucceeded: cancellation.succeeded,
+    cancellationRetrying: cancellation.retrying,
+    cancellationFailed: cancellation.failed,
+  };
 }
 
 export function startDropshipOrderProcessingWorker(): void {
@@ -122,7 +143,15 @@ export function startDropshipOrderProcessingWorker(): void {
     try {
       await withAdvisoryLock(DROPSHIP_ORDER_PROCESSING_WORKER_LOCK_ID, async () => {
         const result = await runDropshipOrderProcessingSweep();
-        if (result.processed > 0 || result.failed > 0 || result.skipped > 0 || result.expired > 0) {
+        if (
+          result.processed > 0
+          || result.failed > 0
+          || result.skipped > 0
+          || result.expired > 0
+          || result.cancellationSucceeded > 0
+          || result.cancellationRetrying > 0
+          || result.cancellationFailed > 0
+        ) {
           console.info(JSON.stringify({
             code: "DROPSHIP_ORDER_PROCESSING_SWEEP_COMPLETED",
             message: "Dropship order processing sweep completed.",
