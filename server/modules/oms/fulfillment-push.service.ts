@@ -10,8 +10,8 @@
  * automatically reflects each fulfillment with its items + tracking and
  * marks the order "Partially fulfilled" until all shipments complete.
  *
- * No callers wire `pushShopifyFulfillment` in this commit — feature flag
- * `SHOPIFY_FULFILLMENT_PUSH_ENABLED` will gate it once C22 lands.
+ * ShipStation V2 calls `pushShopifyFulfillment` after shipped events, and
+ * `SHOPIFY_FULFILLMENT_PUSH_ENABLED=false` can disable the hot path.
  */
 
 import { eq, sql } from "drizzle-orm";
@@ -953,6 +953,18 @@ export function createFulfillmentPushService(
         { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "external_order_id", value: null },
       );
     }
+    const shopifyOrderGid = resolveShopifyOrderGid(order.external_order_id);
+    if (!shopifyOrderGid) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: order ${order.id} has invalid Shopify external_order_id`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "external_order_id",
+          value: order.external_order_id,
+        },
+      );
+    }
 
     // ---- 5. Shopify client must be set ---------------------------------
     if (!_shopifyClient) {
@@ -1029,7 +1041,7 @@ export function createFulfillmentPushService(
       );
       resolved = await resolveFulfillmentOrderLines(
         _shopifyClient,
-        order.external_order_id.trim(),
+        shopifyOrderGid,
         positiveItems,
         shipmentId,
       );
@@ -1094,7 +1106,7 @@ export function createFulfillmentPushService(
       const foIds = Array.from(new Set(resolved.map((r) => r.fulfillmentOrderId)));
       const allowedFoIds = await fetchOurFulfillmentOrderIds(
         _shopifyClient,
-        order.external_order_id.trim(),
+        shopifyOrderGid,
         foIds,
         ourLocationIds,
         shipmentId,
@@ -2004,9 +2016,15 @@ async function getOurShopifyLocationIds(
       const chId = chResult?.rows?.[0]?.shopify_location_id;
       if (typeof chId === "string" && chId.length > 0) ids.push(chId);
     } catch (err: any) {
-      console.warn(
-        `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${err?.message ?? String(err)}`,
-      );
+      const message = err?.message ?? String(err);
+      if (
+        err?.code !== "42703" &&
+        !message.includes('column "shopify_location_id" does not exist')
+      ) {
+        console.warn(
+          `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${message}`,
+        );
+      }
     }
   }
 
@@ -2079,6 +2097,17 @@ async function fetchOurFulfillmentOrderIds(
     }
   }
   return allowed;
+}
+
+function resolveShopifyOrderGid(externalOrderId: string): string | null {
+  const trimmed = externalOrderId.trim();
+  if (trimmed.startsWith("gid://shopify/Order/")) {
+    return trimmed;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    return `gid://shopify/Order/${trimmed}`;
+  }
+  return null;
 }
 
 /**

@@ -55,6 +55,7 @@ import { createShipmentTrackingService } from "../modules/procurement/shipment-t
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createShipStationService } from "../modules/oms/shipstation.service";
+import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
 import { catalogStorage } from "../modules/catalog";
@@ -219,9 +220,11 @@ export function createServices(db: any) {
   // OMS — Unified Order Management (wired to WMS reservation service for proper ATP-gated reserves)
   const oms = createOmsService(db, reservation);
 
-  // Fulfillment Push — eBay API client created lazily when polling starts
-  // For now, pass null — the eBay client is created in server/index.ts when polling starts
+  // Fulfillment Push. eBay is injected later when polling starts; Shopify is
+  // wired here so ShipStation webhooks and retry workers can create Shopify
+  // fulfillments without relying on route-local setup.
   const fulfillmentPush = createFulfillmentPushService(db, null);
+  fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
 
   // ShipStation — order push + webhook integration
   const shipStation = createShipStationService(db, inventoryCore as any);

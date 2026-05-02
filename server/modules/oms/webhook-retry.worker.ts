@@ -3,6 +3,7 @@ import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
 
 const MAX_ATTEMPTS = 5;
+const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
 
 /**
  * Lazy default-db accessor. The worker is the only entry point that
@@ -213,6 +214,20 @@ function resolveFulfillmentPushService(
   return null;
 }
 
+function isShopifyClientNotReadyError(err: any): boolean {
+  const code =
+    err?.context?.code ??
+    err?.code ??
+    err?.cause?.code ??
+    null;
+  if (code === SHOPIFY_PUSH_CLIENT_NOT_SET) {
+    return true;
+  }
+
+  const message = String(err?.message ?? err ?? "").toLowerCase();
+  return message.includes("shopify client not initialized");
+}
+
 /**
  * Dispatch a single pending row for the Shopify-fulfillment-push retry
  * branch (`provider='internal' + topic='shopify_fulfillment_push'`).
@@ -271,6 +286,18 @@ export async function dispatchShopifyFulfillmentRetry(
     );
     return "success";
   } catch (err: any) {
+    if (isShopifyClientNotReadyError(err)) {
+      await keepPending(
+        dbArg,
+        item.id,
+        "shopify fulfillment push client not initialized",
+      );
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) deferred - Shopify client not initialized`,
+      );
+      return "pending";
+    }
+
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
       dbArg,
       item,

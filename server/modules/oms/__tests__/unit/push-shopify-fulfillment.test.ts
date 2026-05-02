@@ -348,6 +348,33 @@ describe("pushShopifyFulfillment :: happy path (Path B end-to-end)", () => {
     expect(client.calls[2].query).toContain("fulfillmentCreateV2");
   });
 
+  it("normalizes numeric Shopify order ids to GraphQL GIDs before querying Shopify", async () => {
+    db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow({ external_order_id: "123456789" })] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] },
+      { rows: [] },
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(client.calls[0].variables).toEqual({ id: SHOPIFY_ORDER_GID });
+    expect(client.calls[1].variables).toEqual({ id: SHOPIFY_ORDER_GID });
+  });
+
   it("builds a correctly-grouped lineItemsByFulfillmentOrder payload", async () => {
     const svc = createFulfillmentPushService(db.db, null);
     svc.setShopifyClient(client);
