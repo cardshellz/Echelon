@@ -198,6 +198,51 @@ export interface DropshipCatalogResponse {
   limit: number;
 }
 
+export type DropshipVendorSelectionScope = "catalog" | "product_line" | "category" | "product" | "variant";
+export type DropshipVendorSelectionAction = "include" | "exclude";
+
+export interface DropshipVendorSelectionRule {
+  id?: number;
+  revisionId?: number | null;
+  vendorId?: number;
+  scopeType: DropshipVendorSelectionScope;
+  action: DropshipVendorSelectionAction;
+  productLineId?: number | null;
+  productId?: number | null;
+  productVariantId?: number | null;
+  category?: string | null;
+  autoConnectNewSkus?: boolean;
+  autoListNewSkus?: boolean;
+  priority?: number;
+  metadata?: Record<string, unknown> | null;
+  isActive?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface DropshipVendorSelectionRuleInput {
+  scopeType: DropshipVendorSelectionScope;
+  action: DropshipVendorSelectionAction;
+  productLineId?: number | null;
+  productId?: number | null;
+  productVariantId?: number | null;
+  category?: string | null;
+  autoConnectNewSkus: boolean;
+  autoListNewSkus: boolean;
+  priority: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DropshipSelectionRulesResponse {
+  rules: DropshipVendorSelectionRule[];
+}
+
+export interface DropshipSelectionRulesReplaceResponse {
+  revisionId: number;
+  idempotentReplay: boolean;
+  rules: DropshipVendorSelectionRule[];
+}
+
 export interface DropshipOrderListItem {
   intakeId: number;
   platform: string;
@@ -363,6 +408,19 @@ export async function postJson<T>(url: string, body: unknown): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export async function putJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  return response.json() as Promise<T>;
+}
+
 export function buildStoreConnectionOAuthStartInput(input: {
   platform: DropshipStorePlatform;
   shopDomain: string;
@@ -398,6 +456,71 @@ export function normalizePortalReturnPath(value: string): string {
     throw new Error("Return path must be a relative portal path.");
   }
   return normalized;
+}
+
+export function createDropshipIdempotencyKey(prefix: string): string {
+  if (crypto.randomUUID) return `${prefix}:${crypto.randomUUID()}`;
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const suffix = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${prefix}:${suffix}`;
+}
+
+export function buildVariantSelectionReplacement(input: {
+  existingRules: readonly DropshipVendorSelectionRule[];
+  rows: readonly DropshipCatalogRow[];
+  action: DropshipVendorSelectionAction;
+}): DropshipVendorSelectionRuleInput[] {
+  const variantIds = uniquePositiveVariantIds(input.rows);
+  const activeRules = input.existingRules
+    .filter((rule) => rule.isActive !== false)
+    .map(toReplaceableSelectionRule)
+    .filter((rule) => !isTargetedVariantRule(rule, variantIds));
+
+  const actionRules = Array.from(variantIds).map((productVariantId) => ({
+    scopeType: "variant" as const,
+    action: input.action,
+    productLineId: null,
+    productId: null,
+    productVariantId,
+    category: null,
+    autoConnectNewSkus: input.action === "include",
+    autoListNewSkus: false,
+    priority: input.action === "include" ? 100 : 200,
+    metadata: {
+      source: "portal_catalog",
+    },
+  }));
+
+  return [...activeRules, ...actionRules];
+}
+
+function toReplaceableSelectionRule(rule: DropshipVendorSelectionRule): DropshipVendorSelectionRuleInput {
+  return {
+    scopeType: rule.scopeType,
+    action: rule.action,
+    productLineId: rule.productLineId ?? null,
+    productId: rule.productId ?? null,
+    productVariantId: rule.productVariantId ?? null,
+    category: rule.category?.trim() || null,
+    autoConnectNewSkus: rule.autoConnectNewSkus !== false,
+    autoListNewSkus: rule.autoListNewSkus === true,
+    priority: Number.isInteger(rule.priority) ? rule.priority! : 0,
+    metadata: rule.metadata ?? {},
+  };
+}
+
+function isTargetedVariantRule(rule: DropshipVendorSelectionRuleInput, variantIds: ReadonlySet<number>): boolean {
+  return rule.scopeType === "variant"
+    && typeof rule.productVariantId === "number"
+    && variantIds.has(rule.productVariantId);
+}
+
+function uniquePositiveVariantIds(rows: readonly DropshipCatalogRow[]): Set<number> {
+  const ids = rows
+    .map((row) => row.productVariantId)
+    .filter((id) => Number.isInteger(id) && id > 0);
+  return new Set(ids);
 }
 
 export function formatCents(cents: number): string {

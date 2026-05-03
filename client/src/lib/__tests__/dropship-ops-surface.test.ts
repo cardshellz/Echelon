@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildQueryUrl,
+  buildVariantSelectionReplacement,
   buildStoreConnectionOAuthStartInput,
   formatCents,
   formatStatus,
@@ -9,6 +10,7 @@ import {
   riskSeverityTone,
   sectionStatusTone,
 } from "../dropship-ops-surface";
+import type { DropshipCatalogRow, DropshipVendorSelectionRule } from "../dropship-ops-surface";
 
 describe("dropship ops surface client helpers", () => {
   it("formats integer cents without floating point display drift", () => {
@@ -74,4 +76,75 @@ describe("dropship ops surface client helpers", () => {
     expect(normalizeShopifyShopDomainInput("Vendor-Test")).toBe("vendor-test.myshopify.com");
     expect(normalizeShopifyShopDomainInput(" ")).toBe("");
   });
+
+  it("builds variant include replacements without carrying stale variant overrides", () => {
+    const replacement = buildVariantSelectionReplacement({
+      existingRules: [
+        makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" }),
+        makeSelectionRule({ id: 2, scopeType: "variant", action: "exclude", productVariantId: 42 }),
+        makeSelectionRule({ id: 3, scopeType: "variant", action: "include", productVariantId: 99 }),
+      ],
+      rows: [makeCatalogRow({ productVariantId: 42 })],
+      action: "include",
+    });
+
+    expect(replacement).toEqual([
+      expect.objectContaining({ scopeType: "catalog", action: "include" }),
+      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 99 }),
+      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 42 }),
+    ]);
+    expect(replacement.some((rule) => rule.action === "exclude" && rule.productVariantId === 42)).toBe(false);
+  });
+
+  it("builds variant exclude replacements for visible deselection", () => {
+    const replacement = buildVariantSelectionReplacement({
+      existingRules: [makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" })],
+      rows: [makeCatalogRow({ productVariantId: 42 }), makeCatalogRow({ productVariantId: 42 })],
+      action: "exclude",
+    });
+
+    expect(replacement).toEqual([
+      expect.objectContaining({ scopeType: "catalog", action: "include" }),
+      expect.objectContaining({ scopeType: "variant", action: "exclude", productVariantId: 42 }),
+    ]);
+  });
 });
+
+function makeSelectionRule(overrides: Partial<DropshipVendorSelectionRule>): DropshipVendorSelectionRule {
+  return {
+    scopeType: "variant",
+    action: "include",
+    productLineId: null,
+    productId: null,
+    productVariantId: 1,
+    category: null,
+    autoConnectNewSkus: true,
+    autoListNewSkus: false,
+    priority: 0,
+    isActive: true,
+    ...overrides,
+  };
+}
+
+function makeCatalogRow(overrides: Partial<DropshipCatalogRow>): DropshipCatalogRow {
+  return {
+    productId: 10,
+    productVariantId: 1,
+    productSku: "SKU",
+    productName: "Product",
+    variantSku: "VARIANT",
+    variantName: "Variant",
+    category: null,
+    productLineNames: [],
+    unitsPerVariant: 1,
+    selectionDecision: {
+      selected: false,
+      reason: "missing_vendor_include_rule",
+      marketplaceQuantity: 0,
+      quantityCapApplied: false,
+      autoConnectNewSkus: false,
+      autoListNewSkus: false,
+    },
+    ...overrides,
+  };
+}
