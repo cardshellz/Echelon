@@ -12,8 +12,10 @@ import {
   type CreateDropshipWalletFundingLedgerInput,
   type CreateDropshipWalletOrderDebitInput,
   type DropshipAutoReloadSettingRecord,
+  type DropshipAutoReloadResult,
   type DropshipFundingMethodMutationResult,
   type DropshipFundingMethodRecord,
+  type DropshipStripeAutoReloadPaymentIntent,
   type DropshipStripeFundingSetupSession,
   type DropshipStripeWalletFundingSession,
   type DropshipWalletAccountRecord,
@@ -296,6 +298,105 @@ describe("DropshipWalletService", () => {
     expect(logs.at(-1)).toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_CONFIGURED" });
   });
 
+  it("creates an off-session card auto-reload and credits the wallet ledger", async () => {
+    repository.autoReload = makeAutoReloadSetting({
+      fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+    });
+    repository.account = {
+      ...repository.account,
+      availableBalanceCents: 1000,
+    };
+
+    const result = await service.handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "funding_created",
+      vendorId: 10,
+      fundingMethodId: 99,
+      amountCents: 6500,
+      currency: "USD",
+      providerPaymentIntentId: "pi_auto_6500",
+      fundingLedgerEntryId: 1,
+      fundingStatus: "settled",
+    } satisfies Partial<DropshipAutoReloadResult>);
+    expect(repository.account.availableBalanceCents).toBe(7500);
+    expect(repository.ledger[0]).toMatchObject({
+      type: "funding",
+      status: "settled",
+      amountCents: 6500,
+      referenceType: "stripe_payment_intent",
+      referenceId: "pi_auto_6500",
+      idempotencyKey: "stripe-funding:pi_auto_6500",
+      fundingMethodId: 99,
+    });
+    expect(logs.at(-1)).toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_FUNDING_CREATED",
+      context: expect.objectContaining({
+        reason: "payment_hold",
+        intakeId: 456,
+        amountCents: 6500,
+      }),
+    });
+  });
+
+  it("records ACH auto-reload as pending until Stripe settlement", async () => {
+    repository.autoReload = makeAutoReloadSetting({
+      fundingMethodId: 100,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+    });
+
+    const result = await service.handleAutoReload({
+      vendorId: 10,
+      reason: "minimum_balance",
+      idempotencyKey: "auto-reload-minimum-1",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "funding_created",
+      amountCents: 5000,
+      fundingStatus: "pending",
+      providerPaymentIntentId: "pi_auto_5000",
+    });
+    expect(repository.account.availableBalanceCents).toBe(0);
+    expect(repository.account.pendingBalanceCents).toBe(5000);
+    expect(repository.ledger[0]).toMatchObject({
+      status: "pending",
+      amountCents: 5000,
+    });
+  });
+
+  it("skips payment-hold auto-reload when the needed amount exceeds the configured max", async () => {
+    repository.autoReload = makeAutoReloadSetting({
+      fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 6000,
+    });
+
+    const result = await service.handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "skipped",
+      skipReason: "amount_exceeds_max_single_reload",
+      fundingMethodId: 99,
+    });
+    expect(repository.ledger).toHaveLength(0);
+  });
+
   it("creates a Stripe setup session using the reusable provider customer", async () => {
     const session = await service.createStripeFundingSetupSessionForMember("member-1", {
       rail: "stripe_card",
@@ -401,6 +502,20 @@ class FakeFundingProvider implements DropshipWalletFundingProvider {
       amountCents: input.amountCents,
       currency: input.currency,
       expiresAt: now,
+    };
+  }
+
+  async createStripeAutoReloadPaymentIntent(
+    input: Parameters<DropshipWalletFundingProvider["createStripeAutoReloadPaymentIntent"]>[0],
+  ): Promise<DropshipStripeAutoReloadPaymentIntent> {
+    expect(input.providerCustomerId).toBe("cus_existing");
+    expect(input.providerPaymentMethodId).toMatch(/^pm_/);
+    return {
+      providerPaymentIntentId: `pi_auto_${input.amountCents}`,
+      status: input.rail === "stripe_ach" ? "pending" : "settled",
+      amountCents: input.amountCents,
+      currency: input.currency,
+      externalTransactionId: input.rail === "stripe_ach" ? null : `ch_auto_${input.amountCents}`,
     };
   }
 }
@@ -510,7 +625,11 @@ class FakeWalletRepository implements DropshipWalletRepository {
       referenceId: input.referenceId,
       idempotencyKey: input.idempotencyKey,
       fundingMethodId: input.fundingMethodId ?? null,
-      metadata: { requestHash: input.requestHash, rail: input.rail },
+      metadata: {
+        ...(input.metadata ?? {}),
+        requestHash: input.requestHash,
+        rail: input.rail,
+      },
       createdAt: input.occurredAt,
       settledAt: input.status === "settled" ? input.occurredAt : null,
     });
@@ -682,6 +801,23 @@ function makeAccount(): DropshipWalletAccountRecord {
     status: "active",
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+function makeAutoReloadSetting(
+  overrides: Partial<DropshipAutoReloadSettingRecord> = {},
+): DropshipAutoReloadSettingRecord {
+  return {
+    autoReloadSettingId: 1,
+    vendorId: 10,
+    fundingMethodId: 99,
+    enabled: true,
+    minimumBalanceCents: 5000,
+    maxSingleReloadCents: 25000,
+    paymentHoldTimeoutMinutes: 2880,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
   };
 }
 

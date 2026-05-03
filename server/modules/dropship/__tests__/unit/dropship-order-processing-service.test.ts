@@ -12,6 +12,7 @@ import {
   type DropshipOrderProcessingQuoteItem,
   type DropshipOrderProcessingRepository,
   type DropshipShippingQuoteResult,
+  type DropshipAutoReloadResult,
 } from "../../application";
 
 const now = new Date("2026-05-01T18:00:00.000Z");
@@ -61,6 +62,36 @@ describe("DropshipOrderProcessingService", () => {
     });
     expect(repository.failure).toBeNull();
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_PROCESSING_COMPLETED" });
+  });
+
+  it("starts minimum-balance auto-reload after an accepted order when configured", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const quoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService();
+    const walletAutoReload = new FakeWalletAutoReloadService();
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: quoteService,
+      orderAcceptance: acceptanceService,
+      walletAutoReload,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const input = {
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    };
+    const result = await service.processIntake(input);
+
+    expect(result.outcome).toBe("accepted");
+    expect(walletAutoReload.lastInput).toEqual({
+      vendorId: 10,
+      reason: "minimum_balance",
+      intakeId: 1,
+      idempotencyKey: deriveOrderProcessingIdempotencyKey("auto-reload-minimum", input),
+    });
   });
 
   it("marks the intake failed without quote or acceptance when warehouse config is missing", async () => {
@@ -126,6 +157,93 @@ describe("DropshipOrderProcessingService", () => {
     expect(quoteService.lastInput).toBeNull();
     expect(acceptanceService.lastInput).toBeNull();
     expect(repository.failure).toBeNull();
+  });
+
+  it("starts wallet auto-reload when acceptance leaves the intake on payment hold", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const quoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService(null, {
+      outcome: "payment_hold",
+      intakeId: 1,
+      vendorId: 10,
+      storeConnectionId: 22,
+      shippingQuoteSnapshotId: 33,
+      omsOrderId: null,
+      walletLedgerEntryId: null,
+      economicsSnapshotId: null,
+      totalDebitCents: 7500,
+      currency: "USD",
+      paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      idempotentReplay: false,
+    });
+    const walletAutoReload = new FakeWalletAutoReloadService();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: quoteService,
+      orderAcceptance: acceptanceService,
+      walletAutoReload,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const input = {
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    };
+    const result = await service.processIntake(input);
+
+    expect(result).toMatchObject({
+      outcome: "payment_hold",
+      intakeId: 1,
+    });
+    expect(walletAutoReload.lastInput).toEqual({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 1,
+      idempotencyKey: deriveOrderProcessingIdempotencyKey("auto-reload-payment-hold", input),
+    });
+    expect(repository.failure).toBeNull();
+  });
+
+  it("does not fail payment-hold processing when auto-reload fails", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const quoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService(null, {
+      outcome: "payment_hold",
+      intakeId: 1,
+      vendorId: 10,
+      storeConnectionId: 22,
+      shippingQuoteSnapshotId: 33,
+      omsOrderId: null,
+      walletLedgerEntryId: null,
+      economicsSnapshotId: null,
+      totalDebitCents: 7500,
+      currency: "USD",
+      paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      idempotentReplay: false,
+    });
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: quoteService,
+      orderAcceptance: acceptanceService,
+      walletAutoReload: new FakeWalletAutoReloadService(new Error("Stripe declined")),
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result.outcome).toBe("payment_hold");
+    expect(repository.failure).toBeNull();
+    expect(logs.some((event) => event.code === "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_FAILED")).toBe(true);
   });
 
   it("cancels a payment hold that expires during processing", async () => {
@@ -259,12 +377,18 @@ class FakeShippingQuoteService {
 class FakeAcceptanceService {
   lastInput: unknown = null;
 
-  constructor(private readonly error: Error | null = null) {}
+  constructor(
+    private readonly error: Error | null = null,
+    private readonly result: DropshipOrderAcceptanceResult | null = null,
+  ) {}
 
   async acceptOrder(input: unknown): Promise<DropshipOrderAcceptanceResult> {
     this.lastInput = input;
     if (this.error) {
       throw this.error;
+    }
+    if (this.result) {
+      return this.result;
     }
     return {
       outcome: "accepted",
@@ -278,6 +402,31 @@ class FakeAcceptanceService {
       totalDebitCents: 2722,
       currency: "USD",
       paymentHoldExpiresAt: null,
+      idempotentReplay: false,
+    };
+  }
+}
+
+class FakeWalletAutoReloadService {
+  lastInput: unknown = null;
+
+  constructor(private readonly error: Error | null = null) {}
+
+  async handleAutoReload(input: unknown): Promise<DropshipAutoReloadResult> {
+    this.lastInput = input;
+    if (this.error) {
+      throw this.error;
+    }
+    return {
+      outcome: "funding_created",
+      vendorId: 10,
+      fundingMethodId: 99,
+      amountCents: 6500,
+      currency: "USD",
+      providerPaymentIntentId: "pi_auto_1",
+      fundingLedgerEntryId: 501,
+      fundingStatus: "settled",
+      skipReason: null,
       idempotentReplay: false,
     };
   }
