@@ -13,6 +13,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminStoreConnectionsUrl,
   buildAdminTrackingPushRetryInput,
@@ -209,6 +210,31 @@ describe("dropship ops surface client helpers", () => {
       search: "",
       status: "all",
     })).toBe("/api/dropship/admin/returns?statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Ccredited%2Cclosed&page=1&limit=50");
+  });
+
+  it("builds admin return status update bodies with optional audit notes", () => {
+    expect(buildAdminReturnStatusUpdateInput({
+      idempotencyKey: "return-status-1",
+      status: "received",
+      notes: " package arrived ",
+    })).toEqual({
+      idempotencyKey: "return-status-1",
+      status: "received",
+      notes: "package arrived",
+    });
+    expect(buildAdminReturnStatusUpdateInput({
+      idempotencyKey: "return-status-2",
+      status: "closed",
+      notes: " ",
+    })).toEqual({
+      idempotencyKey: "return-status-2",
+      status: "closed",
+    });
+    expect(() => buildAdminReturnStatusUpdateInput({
+      idempotencyKey: "short",
+      status: "closed",
+      notes: "",
+    })).toThrow();
   });
 
   it("builds admin tracking push retry bodies with optional audit reasons", () => {

@@ -205,6 +205,11 @@ export interface DropshipRmaInspectionResult {
   idempotentReplay: boolean;
 }
 
+export interface DropshipRmaStatusUpdateResult {
+  rma: DropshipRmaDetail;
+  idempotentReplay: boolean;
+}
+
 export interface DropshipReturnRepository {
   listRmas(input: ListDropshipRmasInput): Promise<DropshipRmaListResult>;
   getRma(input: { rmaId: number; vendorId?: number }): Promise<DropshipRmaDetail | null>;
@@ -212,7 +217,7 @@ export interface DropshipReturnRepository {
     rma: DropshipRmaDetail;
     idempotentReplay: boolean;
   }>;
-  updateStatus(input: UpdateDropshipRmaStatusInput & { now: Date }): Promise<DropshipRmaDetail>;
+  updateStatus(input: UpdateDropshipRmaStatusInput & { requestHash: string; now: Date }): Promise<DropshipRmaStatusUpdateResult>;
   processInspection(input: ProcessDropshipRmaInspectionInput & { requestHash: string; now: Date }): Promise<DropshipRmaInspectionResult>;
 }
 
@@ -276,22 +281,25 @@ export class DropshipReturnService {
     return result;
   }
 
-  async updateStatus(input: unknown): Promise<DropshipRmaDetail> {
+  async updateStatus(input: unknown): Promise<DropshipRmaStatusUpdateResult> {
     const parsed = parseReturnInput(updateDropshipRmaStatusInputSchema, input, "DROPSHIP_RETURN_STATUS_INVALID_INPUT");
-    const rma = await this.deps.repository.updateStatus({
+    const result = await this.deps.repository.updateStatus({
       ...parsed,
+      requestHash: hashDropshipRmaStatusUpdate(parsed),
       now: this.deps.clock.now(),
     });
-    this.deps.logger.info({
-      code: "DROPSHIP_RMA_STATUS_UPDATED",
-      message: "Dropship RMA status was updated.",
-      context: {
-        rmaId: rma.rmaId,
-        status: rma.status,
-        idempotencyKey: parsed.idempotencyKey,
-      },
-    });
-    return rma;
+    if (!result.idempotentReplay) {
+      this.deps.logger.info({
+        code: "DROPSHIP_RMA_STATUS_UPDATED",
+        message: "Dropship RMA status was updated.",
+        context: {
+          rmaId: result.rma.rmaId,
+          status: result.rma.status,
+          idempotencyKey: parsed.idempotencyKey,
+        },
+      });
+    }
+    return result;
   }
 
   async processInspection(input: unknown): Promise<DropshipRmaInspectionResult> {
@@ -359,6 +367,16 @@ export function hashDropshipRmaInspection(input: ProcessDropshipRmaInspectionInp
     notes: input.notes ?? null,
     photos: input.photos,
     items: input.items,
+  });
+}
+
+export function hashDropshipRmaStatusUpdate(input: UpdateDropshipRmaStatusInput): string {
+  return hashReturnRequest({
+    rmaId: input.rmaId,
+    vendorId: input.vendorId ?? null,
+    status: input.status,
+    notes: input.notes ?? null,
+    actor: input.actor,
   });
 }
 

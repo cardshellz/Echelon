@@ -7,6 +7,7 @@ import {
   type DropshipRmaDetail,
   type DropshipRmaInspectionResult,
   type DropshipRmaListResult,
+  type DropshipRmaStatusUpdateResult,
   type ProcessDropshipRmaInspectionInput,
   type UpdateDropshipRmaStatusInput,
 } from "../../application/dropship-return-service";
@@ -56,6 +57,49 @@ describe("DropshipReturnService", () => {
     });
     expect(repository.lastCreateInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_RMA_CREATED" });
+  });
+
+  it("updates status with idempotency, request hash, actor, and clock context", async () => {
+    const repository = new FakeReturnRepository();
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs);
+
+    const result = await service.updateStatus({
+      rmaId: 1,
+      status: "received",
+      notes: "return arrived",
+      idempotencyKey: "status-rma-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result).toMatchObject({ idempotentReplay: false, rma: { status: "received" } });
+    expect(repository.lastStatusInput).toMatchObject({
+      rmaId: 1,
+      status: "received",
+      notes: "return arrived",
+      idempotencyKey: "status-rma-1",
+      now,
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+    expect(repository.lastStatusInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(logs[0]).toMatchObject({ code: "DROPSHIP_RMA_STATUS_UPDATED" });
+  });
+
+  it("does not duplicate service logs for idempotent status update replay", async () => {
+    const repository = new FakeReturnRepository();
+    repository.nextStatusReplay = true;
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs);
+
+    const result = await service.updateStatus({
+      rmaId: 1,
+      status: "received",
+      idempotencyKey: "status-rma-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.idempotentReplay).toBe(true);
+    expect(logs).toHaveLength(0);
   });
 
   it("rejects inspection item totals that do not match wallet adjustment totals", async () => {
@@ -111,7 +155,9 @@ describe("DropshipReturnService", () => {
 class FakeReturnRepository implements DropshipReturnRepository {
   lastListInput: Parameters<DropshipReturnRepository["listRmas"]>[0] | null = null;
   lastCreateInput: (CreateDropshipRmaInput & { requestHash: string; now: Date }) | null = null;
+  lastStatusInput: (UpdateDropshipRmaStatusInput & { requestHash: string; now: Date }) | null = null;
   lastInspectionInput: (ProcessDropshipRmaInspectionInput & { requestHash: string; now: Date }) | null = null;
+  nextStatusReplay = false;
 
   async listRmas(input: Parameters<DropshipReturnRepository["listRmas"]>[0]): Promise<DropshipRmaListResult> {
     this.lastListInput = input;
@@ -130,8 +176,12 @@ class FakeReturnRepository implements DropshipReturnRepository {
     return { rma: makeRmaDetail({ rmaNumber: input.rmaNumber }), idempotentReplay: false };
   }
 
-  async updateStatus(input: UpdateDropshipRmaStatusInput & { now: Date }): Promise<DropshipRmaDetail> {
-    return makeRmaDetail({ status: input.status });
+  async updateStatus(input: UpdateDropshipRmaStatusInput & { requestHash: string; now: Date }): Promise<DropshipRmaStatusUpdateResult> {
+    this.lastStatusInput = input;
+    return {
+      rma: makeRmaDetail({ status: input.status }),
+      idempotentReplay: this.nextStatusReplay,
+    };
   }
 
   async processInspection(

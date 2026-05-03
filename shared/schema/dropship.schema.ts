@@ -1062,6 +1062,27 @@ export const dropshipRmas = dropshipSchema.table("dropship_rmas", {
   check("dropship_rma_fault_chk", sql`${table.faultCategory} IS NULL OR ${table.faultCategory} IN ('card_shellz','vendor','customer','marketplace','carrier')`),
 ]);
 
+export const dropshipRmaStatusUpdates = dropshipSchema.table("dropship_rma_status_updates", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  rmaId: integer("rma_id").notNull().references(() => dropshipRmas.id, { onDelete: "cascade" }),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
+  previousStatus: varchar("previous_status", { length: 40 }).notNull(),
+  status: varchar("status", { length: 40 }).notNull(),
+  notes: text("notes"),
+  actorType: varchar("actor_type", { length: 40 }).notNull().default("system"),
+  actorId: varchar("actor_id", { length: 255 }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_rma_status_update_idem_idx").on(table.idempotencyKey),
+  index("dropship_rma_status_update_rma_created_idx").on(table.rmaId, table.createdAt),
+  index("dropship_rma_status_update_vendor_created_idx").on(table.vendorId, table.createdAt),
+  check("dropship_rma_status_update_previous_chk", sql`${table.previousStatus} IN ('requested','in_transit','received','inspecting','approved','rejected','credited','closed')`),
+  check("dropship_rma_status_update_status_chk", sql`${table.status} IN ('requested','in_transit','received','inspecting','approved','rejected','credited','closed')`),
+  check("dropship_rma_status_update_actor_chk", sql`${table.actorType} IN ('admin','system')`),
+]);
+
 export const dropshipRmaItems = dropshipSchema.table("dropship_rma_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   rmaId: integer("rma_id").notNull().references(() => dropshipRmas.id, { onDelete: "cascade" }),
@@ -1356,6 +1377,10 @@ export const insertDropshipRmaSchema = createInsertSchema(dropshipRmas).omit({
 } as const);
 export type InsertDropshipRma = z.infer<typeof insertDropshipRmaSchema>;
 export type DropshipRma = typeof dropshipRmas.$inferSelect;
+
+export const insertDropshipRmaStatusUpdateSchema = createInsertSchema(dropshipRmaStatusUpdates).omit(omitIdCreated);
+export type InsertDropshipRmaStatusUpdate = z.infer<typeof insertDropshipRmaStatusUpdateSchema>;
+export type DropshipRmaStatusUpdate = typeof dropshipRmaStatusUpdates.$inferSelect;
 
 export const insertDropshipRmaItemSchema = createInsertSchema(dropshipRmaItems).omit(omitIdCreated);
 export type InsertDropshipRmaItem = z.infer<typeof insertDropshipRmaItemSchema>;

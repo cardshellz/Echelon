@@ -43,6 +43,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminTrackingPushRetryInput,
   buildAdminStoreConnectionsUrl,
@@ -73,6 +74,7 @@ import {
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
+  type DropshipAdminReturnStatusUpdateResponse,
   type DropshipAdminStoreConnectionListItem,
   type DropshipAdminStoreConnectionListResponse,
   type DropshipAdminOpsOverview,
@@ -214,6 +216,13 @@ const returnOpsStatusFilters: ReturnOpsStatusFilter[] = [
 ];
 
 const returnOpsTerminalStatuses = new Set<DropshipRmaStatus>(["credited", "closed"]);
+
+const returnOpsUpdateStatuses: DropshipRmaStatus[] = [
+  "in_transit",
+  "received",
+  "inspecting",
+  "closed",
+];
 
 const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
   "all",
@@ -945,12 +954,18 @@ function NotificationOpsTab() {
 }
 
 function ReturnOpsTab() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ReturnOpsStatusFilter>("default");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "default" as ReturnOpsStatusFilter,
   });
+  const [statusInputs, setStatusInputs] = useState<Record<number, DropshipRmaStatus>>({});
+  const [statusNotes, setStatusNotes] = useState<Record<number, string>>({});
+  const [pendingRmaId, setPendingRmaId] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   const returnsUrl = useMemo(() => buildAdminReturnsUrl({
     search: appliedFilters.search,
@@ -968,14 +983,63 @@ function ReturnOpsTab() {
     setAppliedFilters({ search, status });
   }
 
+  function updatePendingStatus(rmaId: number, nextStatus: DropshipRmaStatus) {
+    setStatusInputs((current) => ({ ...current, [rmaId]: nextStatus }));
+  }
+
+  function updateStatusNote(rmaId: number, note: string) {
+    setStatusNotes((current) => ({ ...current, [rmaId]: note }));
+  }
+
+  async function saveReturnStatus(rma: DropshipReturnListItem) {
+    const nextStatus = statusInputs[rma.rmaId];
+    if (!nextStatus || nextStatus === rma.status) return;
+    setPendingRmaId(rma.rmaId);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminReturnStatusUpdateInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-return-status-${rma.rmaId}`),
+        status: nextStatus,
+        notes: statusNotes[rma.rmaId] ?? "",
+      });
+      const response = await postJson<DropshipAdminReturnStatusUpdateResponse>(
+        `/api/dropship/admin/returns/${rma.rmaId}/status`,
+        input,
+      );
+      setMessage(`RMA ${response.rma.rmaNumber} moved to ${formatStatus(response.rma.status)}.`);
+      setStatusNotes((current) => ({ ...current, [rma.rmaId]: "" }));
+      setStatusInputs((current) => {
+        const next = { ...current };
+        delete next[rma.rmaId];
+        return next;
+      });
+      await Promise.all([
+        returnsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship return status update failed.");
+    } finally {
+      setPendingRmaId(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      {returnsQuery.error && (
+      {(returnsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")}
+            {error || queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")}
           </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
 
@@ -1026,7 +1090,13 @@ function ReturnOpsTab() {
 
       <ReturnOpsTable
         isLoading={returnsQuery.isLoading || returnsQuery.isFetching}
+        onStatusChange={updatePendingStatus}
+        onStatusNoteChange={updateStatusNote}
+        onStatusSave={saveReturnStatus}
+        pendingRmaId={pendingRmaId}
         rmas={rmas}
+        statusInputs={statusInputs}
+        statusNotes={statusNotes}
         total={returnsQuery.data?.total ?? 0}
       />
     </div>
@@ -2097,11 +2167,23 @@ function NotificationEventsTable({
 
 function ReturnOpsTable({
   isLoading,
+  onStatusChange,
+  onStatusNoteChange,
+  onStatusSave,
+  pendingRmaId,
   rmas,
+  statusInputs,
+  statusNotes,
   total,
 }: {
   isLoading: boolean;
+  onStatusChange: (rmaId: number, status: DropshipRmaStatus) => void;
+  onStatusNoteChange: (rmaId: number, note: string) => void;
+  onStatusSave: (rma: DropshipReturnListItem) => void;
+  pendingRmaId: number | null;
   rmas: DropshipReturnListItem[];
+  statusInputs: Record<number, DropshipRmaStatus>;
+  statusNotes: Record<number, string>;
   total: number;
 }) {
   if (isLoading) {
@@ -2138,63 +2220,110 @@ function ReturnOpsTable({
             <TableHead>Tracking</TableHead>
             <TableHead>Milestones</TableHead>
             <TableHead className="w-[145px]">Updated</TableHead>
+            <TableHead className="w-[310px]">Status update</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rmas.map((rma) => (
-            <TableRow key={rma.rmaId}>
-              <TableCell>
-                <div className="font-mono text-sm">{rma.rmaNumber}</div>
-                <div className="text-xs text-muted-foreground">Window {rma.returnWindowDays}d</div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`}</div>
-                <div className="text-xs text-muted-foreground">
-                  {[
-                    rma.platform ? formatStatus(rma.platform) : null,
-                    rma.intakeId ? `Intake ${rma.intakeId}` : null,
-                    rma.omsOrderId ? `OMS ${rma.omsOrderId}` : null,
-                  ].filter(Boolean).join(" / ") || "No linked order"}
-                </div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>
-                  {formatStatus(rma.status)}
-                </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {returnOpsTerminalStatuses.has(rma.status) ? "Terminal" : "Open"}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div>{rma.faultCategory ? formatStatus(rma.faultCategory) : "Pending"}</div>
-                <div className="text-xs text-muted-foreground">{rma.reasonCode ? formatStatus(rma.reasonCode) : "No reason"}</div>
-              </TableCell>
-              <TableCell>
-                <div className="font-mono">{rma.itemCount} lines</div>
-                <div className="text-xs text-muted-foreground">{rma.totalQuantity} units</div>
-              </TableCell>
-              <TableCell>
-                <div className="max-w-[220px] truncate font-mono text-xs">{rma.returnTrackingNumber || "None"}</div>
-                <div className="text-xs text-muted-foreground">
-                  {rma.returnTrackingNumber ? "Tracking recorded" : "No return tracking"}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="text-xs text-muted-foreground">
-                  {rma.receivedAt ? `Received ${formatDateTime(rma.receivedAt)}` : "Not received"}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {rma.inspectedAt ? `Inspected ${formatDateTime(rma.inspectedAt)}` : "Not inspected"}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {rma.creditedAt ? `Credited ${formatDateTime(rma.creditedAt)}` : "Not credited"}
-                </div>
-              </TableCell>
-              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                {formatDateTime(rma.updatedAt)}
-              </TableCell>
-            </TableRow>
-          ))}
+          {rmas.map((rma) => {
+            const nextStatus = statusInputs[rma.rmaId] ?? rma.status;
+            const statusActionDisabled = pendingRmaId !== null
+              || nextStatus === rma.status
+              || rma.status === "credited";
+            return (
+              <TableRow key={rma.rmaId}>
+                <TableCell>
+                  <div className="font-mono text-sm">{rma.rmaNumber}</div>
+                  <div className="text-xs text-muted-foreground">Window {rma.returnWindowDays}d</div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {[
+                      rma.platform ? formatStatus(rma.platform) : null,
+                      rma.intakeId ? `Intake ${rma.intakeId}` : null,
+                      rma.omsOrderId ? `OMS ${rma.omsOrderId}` : null,
+                    ].filter(Boolean).join(" / ") || "No linked order"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>
+                    {formatStatus(rma.status)}
+                  </Badge>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {returnOpsTerminalStatuses.has(rma.status) ? "Terminal" : "Open"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div>{rma.faultCategory ? formatStatus(rma.faultCategory) : "Pending"}</div>
+                  <div className="text-xs text-muted-foreground">{rma.reasonCode ? formatStatus(rma.reasonCode) : "No reason"}</div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-mono">{rma.itemCount} lines</div>
+                  <div className="text-xs text-muted-foreground">{rma.totalQuantity} units</div>
+                </TableCell>
+                <TableCell>
+                  <div className="max-w-[220px] truncate font-mono text-xs">{rma.returnTrackingNumber || "None"}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {rma.returnTrackingNumber ? "Tracking recorded" : "No return tracking"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="text-xs text-muted-foreground">
+                    {rma.receivedAt ? `Received ${formatDateTime(rma.receivedAt)}` : "Not received"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {rma.inspectedAt ? `Inspected ${formatDateTime(rma.inspectedAt)}` : "Not inspected"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {rma.creditedAt ? `Credited ${formatDateTime(rma.creditedAt)}` : "Not credited"}
+                  </div>
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                  {formatDateTime(rma.updatedAt)}
+                </TableCell>
+                <TableCell>
+                  <div className="grid gap-2">
+                    <Select
+                      value={nextStatus}
+                      onValueChange={(value) => onStatusChange(rma.rmaId, value as DropshipRmaStatus)}
+                      disabled={rma.status === "credited"}
+                    >
+                      <SelectTrigger className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {returnOpsUpdateStatuses.map((option) => (
+                          <SelectItem key={option} value={option}>
+                            {formatStatus(option)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <div className="flex gap-2">
+                      <Input
+                        value={statusNotes[rma.rmaId] ?? ""}
+                        onChange={(event) => onStatusNoteChange(rma.rmaId, event.target.value)}
+                        placeholder="Optional audit note"
+                        maxLength={5000}
+                        disabled={rma.status === "credited"}
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="gap-2"
+                        disabled={statusActionDisabled}
+                        onClick={() => onStatusSave(rma)}
+                      >
+                        <Save className={pendingRmaId === rma.rmaId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                        Save
+                      </Button>
+                    </div>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </section>

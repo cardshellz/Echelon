@@ -13,6 +13,7 @@ import type {
   DropshipRmaListItem,
   DropshipRmaListResult,
   DropshipRmaStatus,
+  DropshipRmaStatusUpdateResult,
   ListDropshipRmasInput,
   ProcessDropshipRmaInspectionInput,
   UpdateDropshipRmaStatusInput,
@@ -78,6 +79,20 @@ interface RmaInspectionRow {
   created_at: Date;
 }
 
+interface RmaStatusUpdateRow {
+  id: number;
+  rma_id: number;
+  vendor_id: number;
+  previous_status: DropshipRmaStatus;
+  status: DropshipRmaStatus;
+  notes: string | null;
+  actor_type: "admin" | "system";
+  actor_id: string | null;
+  idempotency_key: string;
+  request_hash: string;
+  created_at: Date;
+}
+
 interface WalletAccountRow {
   id: number;
   vendor_id: number;
@@ -110,7 +125,7 @@ interface WalletLedgerRow {
 }
 
 type CreateRepositoryInput = CreateDropshipRmaInput & { requestHash: string; now: Date };
-type UpdateStatusRepositoryInput = UpdateDropshipRmaStatusInput & { now: Date };
+type UpdateStatusRepositoryInput = UpdateDropshipRmaStatusInput & { requestHash: string; now: Date };
 type ProcessInspectionRepositoryInput = ProcessDropshipRmaInspectionInput & { requestHash: string; now: Date };
 
 export class PgDropshipReturnRepository implements DropshipReturnRepository {
@@ -270,7 +285,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
     }
   }
 
-  async updateStatus(input: UpdateStatusRepositoryInput): Promise<DropshipRmaDetail> {
+  async updateStatus(input: UpdateStatusRepositoryInput): Promise<DropshipRmaStatusUpdateResult> {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
@@ -281,6 +296,16 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           vendorId: input.vendorId,
         });
       }
+      const replay = await findRmaStatusUpdateByIdempotencyKeyWithClient(client, input.idempotencyKey, true);
+      if (replay) {
+        assertStatusUpdateReplay(replay, input);
+        const detail = await getRmaDetailWithClient(client, { rmaId: replay.rma_id, vendorId: input.vendorId });
+        await client.query("COMMIT");
+        return {
+          rma: requiredRow(detail, "Dropship RMA detail was not found for status update replay."),
+          idempotentReplay: true,
+        };
+      }
       await client.query(
         `UPDATE dropship.dropship_rmas
          SET status = $2,
@@ -289,6 +314,18 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
          WHERE id = $1`,
         [input.rmaId, input.status, input.now],
       );
+      const statusUpdate = await insertRmaStatusUpdate(client, {
+        rmaId: input.rmaId,
+        vendorId: existing.vendor_id,
+        previousStatus: existing.status,
+        status: input.status,
+        notes: input.notes ?? null,
+        actorType: input.actor.actorType,
+        actorId: input.actor.actorId ?? null,
+        idempotencyKey: input.idempotencyKey,
+        requestHash: input.requestHash,
+        createdAt: input.now,
+      });
       await recordReturnAuditEvent(client, {
         vendorId: existing.vendor_id,
         entityId: String(input.rmaId),
@@ -300,14 +337,22 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           status: input.status,
           notes: input.notes ?? null,
           idempotencyKey: input.idempotencyKey,
+          statusUpdateId: statusUpdate.id,
         },
         createdAt: input.now,
       });
       const detail = await getRmaDetailWithClient(client, { rmaId: input.rmaId, vendorId: input.vendorId });
       await client.query("COMMIT");
-      return requiredRow(detail, "Dropship RMA detail was not found after status update.");
+      return {
+        rma: requiredRow(detail, "Dropship RMA detail was not found after status update."),
+        idempotentReplay: false,
+      };
     } catch (error) {
       await rollbackQuietly(client);
+      if (isUniqueViolation(error)) {
+        const replay = await this.findStatusUpdateReplayAfterUniqueConflict(input);
+        if (replay) return replay;
+      }
       throw error;
     } finally {
       client.release();
@@ -463,6 +508,32 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
       client.release();
     }
   }
+
+  private async findStatusUpdateReplayAfterUniqueConflict(
+    input: UpdateStatusRepositoryInput,
+  ): Promise<DropshipRmaStatusUpdateResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const replay = await findRmaStatusUpdateByIdempotencyKeyWithClient(client, input.idempotencyKey, true);
+      if (!replay) {
+        await client.query("COMMIT");
+        return null;
+      }
+      assertStatusUpdateReplay(replay, input);
+      const detail = await getRmaDetailWithClient(client, { rmaId: replay.rma_id, vendorId: input.vendorId });
+      await client.query("COMMIT");
+      return {
+        rma: requiredRow(detail, "Dropship RMA detail was not found for status update replay."),
+        idempotentReplay: true,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 async function getRmaDetailWithClient(
@@ -591,6 +662,61 @@ async function loadRmaForUpdate(
     params,
   );
   return result.rows[0] ?? null;
+}
+
+async function findRmaStatusUpdateByIdempotencyKeyWithClient(
+  client: PoolClient,
+  idempotencyKey: string,
+  forUpdate: boolean,
+): Promise<RmaStatusUpdateRow | null> {
+  const result = await client.query<RmaStatusUpdateRow>(
+    `SELECT id, rma_id, vendor_id, previous_status, status, notes,
+            actor_type, actor_id, idempotency_key, request_hash, created_at
+     FROM dropship.dropship_rma_status_updates
+     WHERE idempotency_key = $1
+     LIMIT 1
+     ${forUpdate ? "FOR UPDATE" : ""}`,
+    [idempotencyKey],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function insertRmaStatusUpdate(
+  client: PoolClient,
+  input: {
+    rmaId: number;
+    vendorId: number;
+    previousStatus: DropshipRmaStatus;
+    status: DropshipRmaStatus;
+    notes: string | null;
+    actorType: "admin" | "system";
+    actorId: string | null;
+    idempotencyKey: string;
+    requestHash: string;
+    createdAt: Date;
+  },
+): Promise<RmaStatusUpdateRow> {
+  const result = await client.query<RmaStatusUpdateRow>(
+    `INSERT INTO dropship.dropship_rma_status_updates
+      (rma_id, vendor_id, previous_status, status, notes, actor_type, actor_id,
+       idempotency_key, request_hash, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     RETURNING id, rma_id, vendor_id, previous_status, status, notes,
+               actor_type, actor_id, idempotency_key, request_hash, created_at`,
+    [
+      input.rmaId,
+      input.vendorId,
+      input.previousStatus,
+      input.status,
+      input.notes,
+      input.actorType,
+      input.actorId,
+      input.idempotencyKey,
+      input.requestHash,
+      input.createdAt,
+    ],
+  );
+  return requiredRow(result.rows[0], "Dropship RMA status update insert returned no row.");
 }
 
 async function findExistingInspectionForRma(
@@ -1016,6 +1142,23 @@ function assertInspectionReplay(
       {
         rmaId: inspection.rmaId,
         rmaInspectionId: inspection.rmaInspectionId,
+      },
+    );
+  }
+}
+
+function assertStatusUpdateReplay(
+  statusUpdate: RmaStatusUpdateRow,
+  input: UpdateStatusRepositoryInput,
+): void {
+  if (statusUpdate.request_hash !== input.requestHash || statusUpdate.rma_id !== input.rmaId) {
+    throw new DropshipError(
+      "DROPSHIP_RMA_STATUS_IDEMPOTENCY_CONFLICT",
+      "Dropship RMA status idempotency key was reused with a different request.",
+      {
+        rmaId: input.rmaId,
+        statusUpdateId: statusUpdate.id,
+        requestHashMatches: statusUpdate.request_hash === input.requestHash,
       },
     );
   }
