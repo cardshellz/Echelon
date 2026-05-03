@@ -283,16 +283,17 @@ describe("addLinesFromPO", () => {
     );
   });
 
-  // ─── Array binding regression (ANY() needs ::integer[] cast) ────
+  // ─── Array binding regression (ANY() needs ARRAY[]::integer[] via sql.join) ────
 
-  it("uses ::integer[] cast in ALL raw SQL ANY() calls to avoid pg array binding error", async () => {
+  it("builds real integer arrays with ARRAY[]::integer[] and sql.join in ALL raw SQL ANY() calls", async () => {
     const poLine = makeProductLine({ id: 5, orderQty: 100 });
     storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
 
     await svc.addLinesFromPO(1, 10, [{ poLineId: 5, qty: 40 }]);
 
     // Every tx.execute call receives a SQL template. Inspect the raw SQL
-    // fragments to confirm every ANY() usage includes the ::integer[] cast.
+    // fragments to confirm every ANY() usage uses ARRAY[]::integer[] pattern
+    // (Drizzle sql.join builds individual bound params inside ARRAY literal).
     const calls = mockTx.execute.mock.calls;
     expect(calls.length).toBeGreaterThanOrEqual(3);
 
@@ -300,6 +301,7 @@ describe("addLinesFromPO", () => {
       // query is a Drizzle sql`` template — its queryChunks contain the raw text
       const sqlText = JSON.stringify(query);
       if (sqlText.includes('ANY(')) {
+        expect(sqlText).toContain('ARRAY[');
         expect(sqlText).toContain('::integer[]');
       }
     }
