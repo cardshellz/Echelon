@@ -42,6 +42,7 @@ import {
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminStoreConnectionsUrl,
+  buildAdminTrackingPushesUrl,
   buildCatalogExposureRuleInput,
   buildStoreOrderProcessingConfigInput,
   countByKey,
@@ -71,10 +72,13 @@ import {
   type DropshipAdminOpsOverviewResponse,
   type DropshipAuditEventRecord,
   type DropshipAuditEventSearchResponse,
+  type DropshipAdminTrackingPushListItem,
+  type DropshipAdminTrackingPushListResponse,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
   type DropshipOpsOrderIntakeStatus,
   type DropshipListingPushJobStatus,
+  type DropshipTrackingPushStatus,
   type DropshipSeverity,
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipStorePlatform,
@@ -84,6 +88,7 @@ import {
 type AuditSeverityFilter = DropshipSeverity | "all";
 type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
 type ListingPushStatusFilter = DropshipListingPushJobStatus | "default" | "all";
+type TrackingPushStatusFilter = DropshipTrackingPushStatus | "default" | "all";
 type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
 type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
@@ -143,6 +148,15 @@ const listingPushStatusFilters: ListingPushStatusFilter[] = [
   "queued",
   "completed",
   "cancelled",
+];
+
+const trackingPushStatusFilters: TrackingPushStatusFilter[] = [
+  "default",
+  "all",
+  "failed",
+  "processing",
+  "queued",
+  "succeeded",
 ];
 
 export default function Dropship() {
@@ -258,6 +272,12 @@ function refreshAll() {
               Listing pushes
             </TabsTrigger>
             <TabsTrigger
+              value="tracking-pushes"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Tracking pushes
+            </TabsTrigger>
+            <TabsTrigger
               value="audit"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -289,6 +309,10 @@ function refreshAll() {
 
           <TabsContent value="listing-pushes" className="m-0">
             <ListingPushOpsTab />
+          </TabsContent>
+
+          <TabsContent value="tracking-pushes" className="m-0">
+            <TrackingPushOpsTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -442,6 +466,109 @@ function ListingPushOpsTab() {
         jobs={jobs}
         summary={listingPushJobsQuery.data?.summary ?? []}
         total={listingPushJobsQuery.data?.total ?? 0}
+      />
+    </div>
+  );
+}
+
+function TrackingPushOpsTab() {
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<TrackingPushStatusFilter>("default");
+  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "default" as TrackingPushStatusFilter,
+    platform: "all" as StoreConnectionPlatformFilter,
+  });
+
+  const trackingPushesUrl = useMemo(() => buildAdminTrackingPushesUrl({
+    search: appliedFilters.search,
+    status: appliedFilters.status,
+    platform: appliedFilters.platform,
+  }), [appliedFilters]);
+
+  const trackingPushesQuery = useQuery<DropshipAdminTrackingPushListResponse>({
+    queryKey: [trackingPushesUrl],
+    queryFn: () => fetchJson<DropshipAdminTrackingPushListResponse>(trackingPushesUrl),
+  });
+
+  const pushes = trackingPushesQuery.data?.items ?? [];
+
+  function applyTrackingPushFilters() {
+    setAppliedFilters({ search, status, platform });
+  }
+
+  return (
+    <div className="space-y-5">
+      {trackingPushesQuery.error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {queryErrorMessage(trackingPushesQuery.error, "Unable to load dropship tracking pushes.")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Tracking push operations</h2>
+            <p className="text-sm text-muted-foreground">
+              Review marketplace tracking notifications, fulfillment ids, failed pushes, and retry context.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Order, tracking, carrier, vendor, or error"
+              />
+            </div>
+            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+              <SelectTrigger className="lg:w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All platforms</SelectItem>
+                <SelectItem value="ebay">eBay</SelectItem>
+                <SelectItem value="shopify">Shopify</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={status} onValueChange={(value) => setStatus(value as TrackingPushStatusFilter)}>
+              <SelectTrigger className="lg:w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {trackingPushStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {trackingPushStatusLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyTrackingPushFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Matching pushes" value={String(trackingPushesQuery.data?.total ?? 0)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible failed" value={String(pushes.filter((push) => push.status === "failed").length)} />
+        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Visible attempts" value={String(pushes.reduce((sum, push) => sum + push.attemptCount, 0))} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible succeeded" value={String(pushes.filter((push) => push.status === "succeeded").length)} />
+      </section>
+
+      <TrackingPushesTable
+        isLoading={trackingPushesQuery.isLoading || trackingPushesQuery.isFetching}
+        pushes={pushes}
+        summary={trackingPushesQuery.data?.summary ?? []}
+        total={trackingPushesQuery.data?.total ?? 0}
       />
     </div>
   );
@@ -1149,6 +1276,117 @@ function ListingPushJobsTable({
   );
 }
 
+function TrackingPushesTable({
+  isLoading,
+  pushes,
+  summary,
+  total,
+}: {
+  isLoading: boolean;
+  pushes: DropshipAdminTrackingPushListItem[];
+  summary: DropshipAdminTrackingPushListResponse["summary"];
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="mt-4 space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (pushes.length === 0) {
+    return <EmptyState title="No tracking pushes" description="No dropship tracking pushes match the current filters." />;
+  }
+
+  return (
+    <section className="rounded-md border bg-card">
+      <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Tracking pushes</h2>
+          <p className="text-sm text-muted-foreground">{total} matching push{total === 1 ? "" : "es"}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {summary.map((entry) => (
+            <Badge key={entry.status} variant="outline" className={trackingPushStatusTone(entry.status)}>
+              {formatStatus(entry.status)} {entry.count}
+            </Badge>
+          ))}
+        </div>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-[110px]">Push</TableHead>
+            <TableHead>Order</TableHead>
+            <TableHead>Vendor/store</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Tracking</TableHead>
+            <TableHead>Latest issue</TableHead>
+            <TableHead className="w-[145px]">Updated</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {pushes.map((push) => (
+            <TableRow key={push.pushId}>
+              <TableCell>
+                <div className="font-mono text-sm">#{push.pushId}</div>
+                <div className="text-xs text-muted-foreground">Try {push.attemptCount}</div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{push.externalOrderNumber || push.externalOrderId}</div>
+                <div className="text-xs text-muted-foreground">
+                  OMS {push.omsOrderId} / Intake {push.intakeId}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{push.vendor.businessName || push.vendor.email || `Vendor ${push.vendor.vendorId}`}</div>
+                <div className="text-xs text-muted-foreground">
+                  {[push.storeConnection.externalDisplayName, push.storeConnection.shopDomain, formatStatus(push.platform)]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={trackingPushStatusTone(push.status)}>
+                  {formatStatus(push.status)}
+                </Badge>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {push.completedAt ? `Completed ${formatDateTime(push.completedAt)}` : `Shipped ${formatDateTime(push.shippedAt)}`}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{push.carrier}</div>
+                <div className="max-w-[220px] truncate text-xs text-muted-foreground">{push.trackingNumber}</div>
+                {push.externalFulfillmentId && (
+                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">Fulfillment {push.externalFulfillmentId}</div>
+                )}
+              </TableCell>
+              <TableCell>
+                {push.lastErrorCode || push.lastErrorMessage ? (
+                  <>
+                    <div className="font-medium">{push.lastErrorCode || "Tracking push failed"}</div>
+                    <div className="max-w-[320px] truncate text-xs text-muted-foreground">
+                      {push.lastErrorMessage || "No error message recorded"}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-sm text-muted-foreground">None</div>
+                )}
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                {formatDateTime(push.updatedAt)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </section>
+  );
+}
+
 function StoreConnectionsTable({
   connections,
   isLoading,
@@ -1717,6 +1955,12 @@ function listingPushStatusLabel(status: ListingPushStatusFilter): string {
   return formatStatus(status);
 }
 
+function trackingPushStatusLabel(status: TrackingPushStatusFilter): string {
+  if (status === "default") return "Needs attention";
+  if (status === "all") return "All statuses";
+  return formatStatus(status);
+}
+
 function orderStatusCount(
   summary: DropshipAdminOrderOpsListResponse["summary"],
   status: DropshipOpsOrderIntakeStatus,
@@ -1746,6 +1990,19 @@ function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {
 
 function listingPushStatusTone(status: DropshipListingPushJobStatus): string {
   if (status === "completed") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (status === "queued" || status === "processing") {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (status === "failed") {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function trackingPushStatusTone(status: DropshipTrackingPushStatus): string {
+  if (status === "succeeded") {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
   if (status === "queued" || status === "processing") {

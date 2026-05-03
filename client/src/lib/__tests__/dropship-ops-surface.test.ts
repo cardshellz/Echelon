@@ -12,6 +12,7 @@ import {
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminStoreConnectionsUrl,
+  buildAdminTrackingPushesUrl,
   buildStoreOrderProcessingConfigInput,
   buildCatalogExposureRuleInput,
   catalogExposureRecordToInput,
@@ -129,6 +130,26 @@ describe("dropship ops surface client helpers", () => {
       status: "all",
       platform: "shopify",
     })).toBe("/api/dropship/admin/listing-push-jobs?statuses=queued%2Cprocessing%2Ccompleted%2Cfailed%2Ccancelled&platform=shopify&page=1&limit=50");
+  });
+
+  it("builds admin tracking push URLs with optional operational filters", () => {
+    expect(buildAdminTrackingPushesUrl({
+      search: " tracking ",
+      status: "default",
+      platform: "all",
+    })).toBe("/api/dropship/admin/tracking-pushes?search=tracking&page=1&limit=50");
+    expect(buildAdminTrackingPushesUrl({
+      search: "",
+      status: "failed",
+      platform: "shopify",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/admin/tracking-pushes?statuses=failed&platform=shopify&page=2&limit=25");
+    expect(buildAdminTrackingPushesUrl({
+      search: "",
+      status: "all",
+      platform: "ebay",
+    })).toBe("/api/dropship/admin/tracking-pushes?statuses=queued%2Cprocessing%2Csucceeded%2Cfailed&platform=ebay&page=1&limit=50");
   });
 
   it("builds admin store connection URLs with optional filters", () => {
