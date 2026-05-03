@@ -489,7 +489,12 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
           .map((r: any) => r.purchase_order_line_id)
           .filter((id: any) => id != null),
       );
-      const linesToAdd = lockedLines.filter((l: any) => !existingPoLineIds.has(l.id));
+      // Intersect locked lines with candidates (defense-in-depth; SQL already
+      // filters by candidateLineIds, but this guards against any edge case)
+      const candidateIdSet = new Set(candidateLineIds);
+      const linesToAdd = lockedLines.filter(
+        (l: any) => candidateIdSet.has(l.id) && !existingPoLineIds.has(l.id),
+      );
 
       if (linesToAdd.length === 0) {
         throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
