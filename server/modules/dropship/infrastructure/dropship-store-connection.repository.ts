@@ -1,6 +1,8 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type {
+  DropshipAdminStoreConnectionListItem,
+  DropshipAdminStoreConnectionListResult,
   DropshipStoreConnectionProfile,
   DropshipStoreConnectionRepository,
   DropshipStoreConnectionSetupCheck,
@@ -34,6 +36,18 @@ interface StoreConnectionRow {
   config: Record<string, unknown> | null;
   created_at: Date;
   updated_at: Date;
+}
+
+interface AdminStoreConnectionRow extends StoreConnectionRow {
+  vendor_member_id: string;
+  vendor_business_name: string | null;
+  vendor_email: string | null;
+  vendor_status: string;
+  vendor_entitlement_status: string;
+  open_setup_check_count: string | number;
+  error_setup_check_count: string | number;
+  warning_setup_check_count: string | number;
+  total_count: string | number;
 }
 
 interface SetupCheckRow {
@@ -70,6 +84,48 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     } finally {
       client.release();
     }
+  }
+
+  async listForAdmin(input: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0]): Promise<DropshipAdminStoreConnectionListResult> {
+    const filters = buildAdminStoreConnectionFilters(input);
+    const offset = (input.page - 1) * input.limit;
+    const result = await this.dbPool.query<AdminStoreConnectionRow>(
+      `SELECT sc.id, sc.vendor_id, sc.platform, sc.external_account_id, sc.external_display_name,
+              sc.shop_domain, sc.access_token_ref, sc.refresh_token_ref, sc.token_expires_at,
+              sc.status, sc.setup_status, sc.disconnect_reason, sc.disconnected_at,
+              sc.grace_ends_at, sc.last_sync_at, sc.last_order_sync_at, sc.last_inventory_sync_at,
+              sc.config, sc.created_at, sc.updated_at,
+              v.member_id AS vendor_member_id,
+              v.business_name AS vendor_business_name,
+              v.email AS vendor_email,
+              v.status AS vendor_status,
+              v.entitlement_status AS vendor_entitlement_status,
+              COALESCE(check_counts.open_setup_check_count, 0) AS open_setup_check_count,
+              COALESCE(check_counts.error_setup_check_count, 0) AS error_setup_check_count,
+              COALESCE(check_counts.warning_setup_check_count, 0) AS warning_setup_check_count,
+              COUNT(*) OVER() AS total_count
+       FROM dropship.dropship_store_connections sc
+       INNER JOIN dropship.dropship_vendors v ON v.id = sc.vendor_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS open_setup_check_count,
+                COUNT(*) FILTER (WHERE severity = 'error') AS error_setup_check_count,
+                COUNT(*) FILTER (WHERE severity = 'warning') AS warning_setup_check_count
+         FROM dropship.dropship_store_setup_checks ssc
+         WHERE ssc.store_connection_id = sc.id
+           AND ssc.resolved_at IS NULL
+       ) check_counts ON true
+       ${filters.whereSql}
+       ORDER BY sc.updated_at DESC, sc.id DESC
+       LIMIT $${filters.params.length + 1} OFFSET $${filters.params.length + 2}`,
+      [...filters.params, input.limit, offset],
+    );
+
+    return {
+      items: result.rows.map(mapAdminStoreConnectionRow),
+      total: toSafeInteger(result.rows[0]?.total_count ?? 0, "store connection total count"),
+      page: input.page,
+      limit: input.limit,
+    };
   }
 
   async countActiveByVendorId(vendorId: number): Promise<number> {
@@ -332,6 +388,43 @@ async function countActiveByVendorIdWithClient(client: PoolClient, vendorId: num
   return Number(result.rows[0]?.count ?? 0);
 }
 
+function buildAdminStoreConnectionFilters(input: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0]): {
+  whereSql: string;
+  params: unknown[];
+} {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (input.statuses?.length) {
+    params.push(input.statuses);
+    clauses.push(`sc.status = ANY($${params.length}::text[])`);
+  }
+  if (input.platform) {
+    params.push(input.platform);
+    clauses.push(`sc.platform = $${params.length}`);
+  }
+  if (input.vendorId) {
+    params.push(input.vendorId);
+    clauses.push(`sc.vendor_id = $${params.length}`);
+  }
+  if (input.search) {
+    params.push(`%${input.search}%`);
+    clauses.push(`(
+      sc.external_account_id ILIKE $${params.length}
+      OR sc.external_display_name ILIKE $${params.length}
+      OR sc.shop_domain ILIKE $${params.length}
+      OR v.business_name ILIKE $${params.length}
+      OR v.email ILIKE $${params.length}
+      OR v.member_id ILIKE $${params.length}
+    )`);
+  }
+
+  return {
+    whereSql: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
+    params,
+  };
+}
+
 async function findReusableConnection(
   client: PoolClient,
   vendorId: number,
@@ -548,6 +641,25 @@ function mapStoreConnectionRow(row: StoreConnectionRow): DropshipStoreConnection
   };
 }
 
+function mapAdminStoreConnectionRow(row: AdminStoreConnectionRow): DropshipAdminStoreConnectionListItem {
+  return {
+    ...mapStoreConnectionRow(row),
+    vendor: {
+      vendorId: row.vendor_id,
+      memberId: row.vendor_member_id,
+      businessName: row.vendor_business_name,
+      email: row.vendor_email,
+      status: row.vendor_status,
+      entitlementStatus: row.vendor_entitlement_status,
+    },
+    setupCheckSummary: {
+      openCount: toSafeInteger(row.open_setup_check_count, "open setup check count"),
+      errorCount: toSafeInteger(row.error_setup_check_count, "error setup check count"),
+      warningCount: toSafeInteger(row.warning_setup_check_count, "warning setup check count"),
+    },
+  };
+}
+
 function mergeOrderProcessingConfig(
   config: Record<string, unknown>,
   input: { defaultWarehouseId: number | null },
@@ -582,6 +694,14 @@ function requiredRow<T>(row: T | undefined, message: string): T {
     throw new Error(message);
   }
   return row;
+}
+
+function toSafeInteger(value: string | number, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`Dropship ${label} is outside the safe integer range.`);
+  }
+  return parsed;
 }
 
 async function rollbackQuietly(client: PoolClient): Promise<void> {

@@ -13,6 +13,13 @@ export type DropshipOpsOrderIntakeStatus =
   | "payment_hold"
   | "cancelled"
   | "exception";
+export type DropshipStoreConnectionLifecycleStatus =
+  | "connected"
+  | "needs_reauth"
+  | "refresh_failed"
+  | "grace_period"
+  | "paused"
+  | "disconnected";
 
 const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
   "received",
@@ -338,6 +345,63 @@ export interface DropshipAdminOrderOpsActionResponse {
   status: DropshipOpsOrderIntakeStatus;
   idempotentReplay: boolean;
   updatedAt: string;
+}
+
+export interface DropshipStoreConnectionProfileResponse {
+  storeConnectionId: number;
+  vendorId: number;
+  platform: DropshipStorePlatform;
+  externalAccountId: string | null;
+  externalDisplayName: string | null;
+  shopDomain: string | null;
+  status: DropshipStoreConnectionLifecycleStatus;
+  setupStatus: string;
+  disconnectReason: string | null;
+  disconnectedAt: string | null;
+  graceEndsAt: string | null;
+  tokenExpiresAt: string | null;
+  hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  lastSyncAt: string | null;
+  lastOrderSyncAt: string | null;
+  lastInventorySyncAt: string | null;
+  orderProcessingConfig: {
+    defaultWarehouseId: number | null;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipAdminStoreConnectionListItem extends DropshipStoreConnectionProfileResponse {
+  vendor: {
+    vendorId: number;
+    memberId: string;
+    businessName: string | null;
+    email: string | null;
+    status: string;
+    entitlementStatus: string;
+  };
+  setupCheckSummary: {
+    openCount: number;
+    errorCount: number;
+    warningCount: number;
+  };
+}
+
+export interface DropshipAdminStoreConnectionListResponse {
+  items: DropshipAdminStoreConnectionListItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface DropshipStoreOrderProcessingConfigInput {
+  defaultWarehouseId: number | null;
+  idempotencyKey: string;
+}
+
+export interface DropshipStoreOrderProcessingConfigResponse {
+  connection: DropshipStoreConnectionProfileResponse;
 }
 
 export interface DropshipCatalogSelectionDecision {
@@ -734,6 +798,39 @@ export function buildAdminOrderIntakeUrl(input: {
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
+}
+
+export function buildAdminStoreConnectionsUrl(input: {
+  search: string;
+  status: DropshipStoreConnectionLifecycleStatus | "all";
+  platform: DropshipStorePlatform | "all";
+  page?: number;
+  limit?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/admin/store-connections", {
+    search: input.search.trim(),
+    statuses: input.status === "all" ? undefined : input.status,
+    platform: input.platform === "all" ? undefined : input.platform,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildStoreOrderProcessingConfigInput(input: {
+  defaultWarehouseId: string;
+  idempotencyKey: string;
+}): DropshipStoreOrderProcessingConfigInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  return {
+    idempotencyKey,
+    defaultWarehouseId: input.defaultWarehouseId.trim()
+      ? parsePositiveInteger(input.defaultWarehouseId, "defaultWarehouseId")
+      : null,
+  };
 }
 
 export function buildAdminOrderOpsActionInput(input: {

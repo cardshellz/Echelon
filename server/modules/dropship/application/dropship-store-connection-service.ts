@@ -16,6 +16,10 @@ import type {
   DropshipProvisionedVendorProfile,
   DropshipVendorProvisioningService,
 } from "./dropship-vendor-provisioning-service";
+import {
+  listDropshipAdminStoreConnectionsInputSchema,
+  type ListDropshipAdminStoreConnectionsInput,
+} from "./dropship-store-connection-dtos";
 
 export interface DropshipStoreConnectionProfile {
   storeConnectionId: number;
@@ -51,6 +55,29 @@ export interface DropshipStoreConnectionSetupCheck {
   message: string | null;
   lastCheckedAt: Date | null;
   resolvedAt: Date | null;
+}
+
+export interface DropshipAdminStoreConnectionListItem extends DropshipStoreConnectionProfile {
+  vendor: {
+    vendorId: number;
+    memberId: string;
+    businessName: string | null;
+    email: string | null;
+    status: string;
+    entitlementStatus: string;
+  };
+  setupCheckSummary: {
+    openCount: number;
+    errorCount: number;
+    warningCount: number;
+  };
+}
+
+export interface DropshipAdminStoreConnectionListResult {
+  items: DropshipAdminStoreConnectionListItem[];
+  total: number;
+  page: number;
+  limit: number;
 }
 
 export interface DropshipStoreConnectionTokenRecord {
@@ -132,6 +159,7 @@ export interface CompleteOAuthQuery {
 
 export interface DropshipStoreConnectionRepository {
   listByVendorId(vendorId: number): Promise<DropshipStoreConnectionProfile[]>;
+  listForAdmin(input: ListDropshipAdminStoreConnectionsInput): Promise<DropshipAdminStoreConnectionListResult>;
   countActiveByVendorId(vendorId: number): Promise<number>;
   connectStore(input: {
     vendorId: number;
@@ -197,6 +225,11 @@ export class DropshipStoreConnectionService {
     ]);
 
     return { vendor, connections, setupChecksByConnectionId };
+  }
+
+  async listForAdmin(input: unknown = {}): Promise<DropshipAdminStoreConnectionListResult> {
+    const parsed = parseListForAdminInput(input);
+    return this.deps.repository.listForAdmin(parsed);
   }
 
   async startOAuth(memberId: string, input: {
@@ -412,6 +445,24 @@ function normalizeDefaultWarehouseId(value: number | null): number | null {
     );
   }
   return value;
+}
+
+function parseListForAdminInput(input: unknown): ListDropshipAdminStoreConnectionsInput {
+  const result = listDropshipAdminStoreConnectionsInputSchema.safeParse(input);
+  if (!result.success) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_CONNECTION_LIST_INVALID_INPUT",
+      "Dropship store connection list input failed validation.",
+      {
+        issues: result.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          code: issue.code,
+          message: issue.message,
+        })),
+      },
+    );
+  }
+  return result.data;
 }
 
 function logDropshipStoreConnectionEvent(
