@@ -117,6 +117,7 @@ function sendDropshipStoreConnectionError(res: Response, error: unknown): Respon
 function statusForDropshipStoreConnectionError(code: string): number {
   switch (code) {
     case "DROPSHIP_INVALID_STORE_CONNECTION_REQUEST":
+    case "DROPSHIP_INVALID_OAUTH_RETURN_TO":
     case "DROPSHIP_STORE_PLATFORM_UNSUPPORTED":
     case "DROPSHIP_SHOP_DOMAIN_REQUIRED":
     case "DROPSHIP_INVALID_SHOP_DOMAIN":

@@ -6,6 +6,7 @@ import {
   assertDropshipStorePlatform,
   assertVendorCanConnectStore,
   calculateDisconnectGraceEndsAt,
+  normalizeDropshipOAuthReturnTo,
   normalizeShopifyShopDomain,
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipSupportedStorePlatform,
@@ -226,7 +227,7 @@ export class DropshipStoreConnectionService {
       nonce: randomUUID(),
       issuedAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
-      returnTo: input.returnTo?.trim() || null,
+      returnTo: normalizeDropshipOAuthReturnTo(input.returnTo),
     });
 
     return this.deps.oauthProviders[platform].createAuthorizationUrl({

@@ -22,6 +22,7 @@ import DropshipPortalAuth from "@/pages/dropship/DropshipPortalAuth";
 import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
 import DropshipPortalCatalog from "@/pages/dropship/DropshipPortalCatalog";
 import DropshipPortalNotifications from "@/pages/dropship/DropshipPortalNotifications";
+import DropshipPortalOnboarding from "@/pages/dropship/DropshipPortalOnboarding";
 import DropshipPortalOrders from "@/pages/dropship/DropshipPortalOrders";
 import DropshipPortalReturns from "@/pages/dropship/DropshipPortalReturns";
 import DropshipPortalSettings from "@/pages/dropship/DropshipPortalSettings";
@@ -182,6 +183,9 @@ function DropshipPortalRouter() {
       <Switch>
         <Route path={`${portalRoot}/login`} component={DropshipPortalAuth} />
         <Route path={`${portalRoot}/setup`} component={DropshipPortalAuth} />
+        <Route path={`${portalRoot}/onboarding`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalOnboarding} />
+        </Route>
         <Route path={`${portalRoot}/dashboard`}>
           <DropshipPortalProtectedRoute component={DropshipPortalDashboard} />
         </Route>
@@ -204,7 +208,7 @@ function DropshipPortalRouter() {
           <DropshipPortalProtectedRoute component={DropshipPortalNotifications} />
         </Route>
         <Route path={portalRoot || "/"}>
-          <Redirect to={dropshipPortalPath("/dashboard")} />
+          <Redirect to={dropshipPortalPath("/onboarding")} />
         </Route>
         <Route component={DropshipPortalAuth} />
       </Switch>
