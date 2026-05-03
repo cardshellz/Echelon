@@ -308,6 +308,15 @@ export interface DropshipDogfoodReadinessItem {
     defaultWarehouseId: number | null;
     adminCatalogIncludeRuleCount: number;
     vendorSelectionIncludeRuleCount: number;
+    activeShippingBoxCount: number;
+    activeShippingZoneRuleCount: number;
+    activeShippingRateTableCount: number;
+    activeShippingRateRowCount: number;
+    selectedVariantCount: number;
+    selectedPackageProfileCount: number;
+    selectedVariantMissingPackageProfileCount: number;
+    activeShippingMarkupPolicyCount: number;
+    activeShippingInsurancePolicyCount: number;
     listingConfigActive: boolean;
     setupOpenBlockerCount: number;
     walletAvailableBalanceCents: number;
