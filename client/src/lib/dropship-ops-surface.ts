@@ -13,6 +13,12 @@ export type DropshipOpsOrderIntakeStatus =
   | "payment_hold"
   | "cancelled"
   | "exception";
+export type DropshipListingPushJobStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "cancelled";
 export type DropshipStoreConnectionLifecycleStatus =
   | "connected"
   | "needs_reauth"
@@ -31,6 +37,14 @@ const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
   "payment_hold",
   "cancelled",
   "exception",
+];
+
+const allDropshipListingPushJobStatuses: DropshipListingPushJobStatus[] = [
+  "queued",
+  "processing",
+  "completed",
+  "failed",
+  "cancelled",
 ];
 
 export interface DropshipSettingsSection {
@@ -332,6 +346,49 @@ export interface DropshipAdminOrderOpsListResponse {
   limit: number;
   statuses: DropshipOpsOrderIntakeStatus[];
   summary: Array<{ status: DropshipOpsOrderIntakeStatus; count: number }>;
+}
+
+export interface DropshipAdminListingPushJobListItem {
+  jobId: number;
+  vendor: DropshipAdminOrderOpsVendorSummary;
+  storeConnection: DropshipAdminOrderOpsStoreSummary;
+  platform: string;
+  status: DropshipListingPushJobStatus;
+  jobType: string;
+  requestedBy: string | null;
+  requestedScope: Record<string, unknown> | null;
+  idempotencyKey: string | null;
+  requestHash: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  itemSummary: {
+    total: number;
+    queued: number;
+    processing: number;
+    completed: number;
+    failed: number;
+    blocked: number;
+    cancelled: number;
+  };
+  latestItemError: {
+    itemId: number;
+    productVariantId: number;
+    status: string;
+    errorCode: string | null;
+    errorMessage: string | null;
+    updatedAt: string;
+  } | null;
+}
+
+export interface DropshipAdminListingPushJobListResponse {
+  items: DropshipAdminListingPushJobListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  statuses: DropshipListingPushJobStatus[];
+  summary: Array<{ status: DropshipListingPushJobStatus; count: number }>;
 }
 
 export interface DropshipAdminOrderOpsActionInput {
@@ -795,6 +852,27 @@ export function buildAdminOrderIntakeUrl(input: {
   return buildQueryUrl("/api/dropship/admin/order-intake", {
     search: input.search.trim(),
     statuses,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildAdminListingPushJobsUrl(input: {
+  search: string;
+  status: DropshipListingPushJobStatus | "default" | "all";
+  platform: DropshipStorePlatform | "all";
+  page?: number;
+  limit?: number;
+}): string {
+  const statuses = input.status === "default"
+    ? undefined
+    : input.status === "all"
+      ? allDropshipListingPushJobStatuses.join(",")
+      : input.status;
+  return buildQueryUrl("/api/dropship/admin/listing-push-jobs", {
+    search: input.search.trim(),
+    statuses,
+    platform: input.platform === "all" ? undefined : input.platform,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
