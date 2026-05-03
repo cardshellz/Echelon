@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { DropshipError } from "../../domain/errors";
 import { normalizeShopifyShopDomain } from "../../domain/store-connection";
+import type { DropshipClock } from "../../application/dropship-ports";
 import type { DropshipOrderIntakeService } from "../../application/dropship-order-intake-service";
 import { createDropshipOrderIntakeServiceFromEnv } from "../../infrastructure/dropship-order-intake.factory";
 import {
@@ -24,10 +25,12 @@ export function registerDropshipMarketplaceOrderIntakeRoutes(
     orderIntakeService?: DropshipOrderIntakeService;
     sourceRepository?: DropshipOrderIntakeSourceRepository;
     shopifyWebhookSecrets?: readonly string[];
+    clock?: DropshipClock;
   } = {},
 ): void {
   const orderIntakeService = deps.orderIntakeService ?? createDropshipOrderIntakeServiceFromEnv();
   const sourceRepository = deps.sourceRepository ?? new PgDropshipOrderIntakeSourceRepository();
+  const clock = deps.clock ?? { now: () => new Date() };
 
   app.post("/api/dropship/webhooks/shopify/orders/paid", async (req, res) => {
     return handleShopifyOrderWebhook(req, res, {
@@ -46,6 +49,14 @@ export function registerDropshipMarketplaceOrderIntakeRoutes(
       requirePaid: true,
       secrets: deps.shopifyWebhookSecrets,
       topic: "orders/create",
+    });
+  });
+
+  app.post("/api/dropship/webhooks/shopify/app/uninstalled", async (req, res) => {
+    return handleShopifyAppUninstalledWebhook(req, res, {
+      sourceRepository,
+      secrets: deps.shopifyWebhookSecrets,
+      clock,
     });
   });
 }
@@ -124,6 +135,68 @@ async function handleShopifyOrderWebhook(
       action: result.action,
       intakeId: result.intake.intakeId,
       intakeStatus: result.intake.status,
+    });
+  } catch (error) {
+    return sendDropshipMarketplaceOrderIntakeError(res, error);
+  }
+}
+
+async function handleShopifyAppUninstalledWebhook(
+  req: Request,
+  res: Response,
+  input: {
+    sourceRepository: DropshipOrderIntakeSourceRepository;
+    secrets?: readonly string[];
+    clock: DropshipClock;
+  },
+): Promise<Response> {
+  try {
+    const rawBody = getRawBody(req);
+    const secrets = input.secrets ?? resolveShopifyDropshipWebhookSecrets();
+    if (secrets.length === 0) {
+      return res.status(503).json({
+        error: {
+          code: "DROPSHIP_SHOPIFY_WEBHOOK_SECRET_REQUIRED",
+          message: "Shopify dropship webhook secret is required.",
+        },
+      });
+    }
+
+    const hmacHeader = req.get("x-shopify-hmac-sha256");
+    if (!rawBody || !hmacHeader || !verifyShopifyDropshipWebhookHmac({ rawBody, hmacHeader, secrets })) {
+      return res.status(401).json({
+        error: {
+          code: "DROPSHIP_SHOPIFY_WEBHOOK_UNAUTHORIZED",
+          message: "Shopify dropship webhook signature verification failed.",
+        },
+      });
+    }
+
+    const payload = parseWebhookBody(req, rawBody);
+    const shopDomain = normalizeShopifyShopDomain(
+      req.get("x-shopify-shop-domain")
+        ?? readString(payload.myshopify_domain)
+        ?? "",
+    );
+    const result = await input.sourceRepository.markShopifyStoreUninstalled({
+      shopDomain,
+      occurredAt: input.clock.now(),
+      webhookId: req.get("x-shopify-webhook-id") ?? null,
+    });
+    if (!result.matched) {
+      logShopifyWebhookIgnored({
+        topic: "app/uninstalled",
+        reason: "store_connection_not_found",
+        shopDomain,
+      });
+      return res.status(202).json({ status: "ignored", reason: "store_connection_not_found" });
+    }
+
+    return res.status(200).json({
+      status: "disconnected",
+      changed: result.changed,
+      storeConnectionId: result.storeConnectionId,
+      previousStatus: result.previousStatus,
     });
   } catch (error) {
     return sendDropshipMarketplaceOrderIntakeError(res, error);
