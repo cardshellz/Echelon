@@ -19,6 +19,18 @@ export const DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES: DropshipOrderIntakeStatus[] =
   "rejected",
 ];
 
+export const DROPSHIP_ALL_INTAKE_STATUSES: DropshipOrderIntakeStatus[] = [
+  "received",
+  "processing",
+  "accepted",
+  "rejected",
+  "retrying",
+  "failed",
+  "payment_hold",
+  "cancelled",
+  "exception",
+];
+
 export interface DropshipOrderOpsActor {
   actorType: "admin" | "system";
   actorId?: string;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DROPSHIP_ALL_INTAKE_STATUSES,
   DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES,
   DropshipOrderOpsService,
   type DropshipLogEvent,
@@ -31,6 +32,27 @@ describe("DropshipOrderOpsService", () => {
       limit: 25,
       search: "EXT-1",
       statuses: DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES,
+    });
+  });
+
+  it("preserves explicit statuses for vendor order history reads", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const service = new DropshipOrderOpsService({
+      repository,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    await service.listIntakes({
+      vendorId: 10,
+      statuses: DROPSHIP_ALL_INTAKE_STATUSES,
+      page: 1,
+      limit: 50,
+    });
+
+    expect(repository.lastListInput).toMatchObject({
+      vendorId: 10,
+      statuses: DROPSHIP_ALL_INTAKE_STATUSES,
     });
   });
 
