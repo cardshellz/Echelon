@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Boxes, Search } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, Boxes, CheckCircle2, MinusCircle, PlusCircle, Search } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -16,18 +17,30 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  buildVariantSelectionReplacement,
   buildQueryUrl,
+  createDropshipIdempotencyKey,
   fetchJson,
   formatStatus,
+  putJson,
   type DropshipCatalogResponse,
   type DropshipCatalogRow,
+  type DropshipSelectionRulesReplaceResponse,
+  type DropshipSelectionRulesResponse,
+  type DropshipVendorSelectionAction,
 } from "@/lib/dropship-ops-surface";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
+type PendingSelectionAction = string | null;
+
 export default function DropshipPortalCatalog() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [selectedOnly, setSelectedOnly] = useState("false");
   const [applied, setApplied] = useState({ search: "", selectedOnly: "false" });
+  const [pendingSelectionAction, setPendingSelectionAction] = useState<PendingSelectionAction>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const catalogUrl = useMemo(() => buildQueryUrl("/api/dropship/catalog", {
     search: applied.search,
     selectedOnly: applied.selectedOnly,
@@ -38,6 +51,47 @@ export default function DropshipPortalCatalog() {
     queryKey: [catalogUrl],
     queryFn: () => fetchJson<DropshipCatalogResponse>(catalogUrl),
   });
+  const selectionRulesQuery = useQuery<DropshipSelectionRulesResponse>({
+    queryKey: ["/api/dropship/catalog/selection-rules"],
+    queryFn: () => fetchJson<DropshipSelectionRulesResponse>("/api/dropship/catalog/selection-rules"),
+  });
+  const visibleRows = catalogQuery.data?.rows ?? [];
+  const visibleSelectableRows = visibleRows.filter(canSelectRow);
+  const visibleSelectedRows = visibleRows.filter((row) => row.selectionDecision.selected);
+
+  async function replaceSelection(action: DropshipVendorSelectionAction, rows: readonly DropshipCatalogRow[], actionKey: string) {
+    if (!selectionRulesQuery.data) {
+      setError("Selection rules are still loading.");
+      return;
+    }
+    if (rows.length === 0) {
+      return;
+    }
+
+    setPendingSelectionAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      await putJson<DropshipSelectionRulesReplaceResponse>("/api/dropship/catalog/selection-rules", {
+        idempotencyKey: createDropshipIdempotencyKey(`catalog-${action}`),
+        rules: buildVariantSelectionReplacement({
+          existingRules: selectionRulesQuery.data.rules,
+          rows,
+          action,
+        }),
+      });
+      await Promise.all([
+        catalogQuery.refetch(),
+        selectionRulesQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+      ]);
+      setMessage(action === "include" ? "Catalog selection added." : "Catalog selection removed.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Catalog selection update failed.");
+    } finally {
+      setPendingSelectionAction(null);
+    }
+  }
 
   return (
     <DropshipPortalShell>
@@ -70,6 +124,29 @@ export default function DropshipPortalCatalog() {
           </div>
         </div>
 
+        {error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {message && (
+          <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900">
+            <CheckCircle2 className="h-4 w-4" />
+            <AlertDescription>{message}</AlertDescription>
+          </Alert>
+        )}
+        {selectionRulesQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {selectionRulesQuery.error instanceof Error
+                ? selectionRulesQuery.error.message
+                : "Unable to load catalog selection rules."}
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="mt-5 rounded-md border border-zinc-200 bg-white">
           {catalogQuery.isLoading ? (
             <div className="space-y-2 p-4">
@@ -78,7 +155,18 @@ export default function DropshipPortalCatalog() {
               <Skeleton className="h-12 w-full" />
             </div>
           ) : catalogQuery.data?.rows.length ? (
-            <CatalogTable rows={catalogQuery.data.rows} total={catalogQuery.data.total} />
+            <CatalogTable
+              bulkSelectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
+              pendingSelectionAction={pendingSelectionAction}
+              rows={catalogQuery.data.rows}
+              selectableRowCount={visibleSelectableRows.length}
+              selectedRowCount={visibleSelectedRows.length}
+              total={catalogQuery.data.total}
+              onBulkDeselect={() => replaceSelection("exclude", visibleSelectedRows, "bulk:exclude")}
+              onBulkSelect={() => replaceSelection("include", visibleSelectableRows, "bulk:include")}
+              onDeselectRow={(row) => replaceSelection("exclude", [row], `variant:${row.productVariantId}:exclude`)}
+              onSelectRow={(row) => replaceSelection("include", [row], `variant:${row.productVariantId}:include`)}
+            />
           ) : (
             <Empty className="p-8">
               <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
@@ -94,11 +182,57 @@ export default function DropshipPortalCatalog() {
   );
 }
 
-function CatalogTable({ rows, total }: { rows: DropshipCatalogRow[]; total: number }) {
+function CatalogTable({
+  bulkSelectionDisabled,
+  onBulkDeselect,
+  onBulkSelect,
+  onDeselectRow,
+  onSelectRow,
+  pendingSelectionAction,
+  rows,
+  selectableRowCount,
+  selectedRowCount,
+  total,
+}: {
+  bulkSelectionDisabled: boolean;
+  onBulkDeselect: () => void;
+  onBulkSelect: () => void;
+  onDeselectRow: (row: DropshipCatalogRow) => void;
+  onSelectRow: (row: DropshipCatalogRow) => void;
+  pendingSelectionAction: PendingSelectionAction;
+  rows: DropshipCatalogRow[];
+  selectableRowCount: number;
+  selectedRowCount: number;
+  total: number;
+}) {
   return (
     <>
-      <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 text-sm text-zinc-500">
+      <div className="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 text-sm text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
         <span>{total} row{total === 1 ? "" : "s"}</span>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9 gap-2"
+            disabled={bulkSelectionDisabled || selectableRowCount === 0}
+            onClick={onBulkSelect}
+          >
+            <PlusCircle className="h-4 w-4" />
+            Select visible
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9 gap-2"
+            disabled={bulkSelectionDisabled || selectedRowCount === 0}
+            onClick={onBulkDeselect}
+          >
+            <MinusCircle className="h-4 w-4" />
+            Remove visible
+          </Button>
+        </div>
       </div>
       <Table>
         <TableHeader>
@@ -108,6 +242,7 @@ function CatalogTable({ rows, total }: { rows: DropshipCatalogRow[]; total: numb
             <TableHead>Category</TableHead>
             <TableHead>Quantity</TableHead>
             <TableHead>Status</TableHead>
+            <TableHead className="text-right">Action</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -138,10 +273,41 @@ function CatalogTable({ rows, total }: { rows: DropshipCatalogRow[]; total: numb
                   {row.selectionDecision.selected ? "Selected" : formatStatus(row.selectionDecision.reason)}
                 </Badge>
               </TableCell>
+              <TableCell className="text-right">
+                {row.selectionDecision.selected ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-9 gap-2"
+                    disabled={pendingSelectionAction !== null}
+                    onClick={() => onDeselectRow(row)}
+                  >
+                    <MinusCircle className="h-4 w-4" />
+                    Remove
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-9 gap-2"
+                    disabled={pendingSelectionAction !== null || !canSelectRow(row)}
+                    onClick={() => onSelectRow(row)}
+                  >
+                    <PlusCircle className="h-4 w-4" />
+                    Select
+                  </Button>
+                )}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
     </>
   );
+}
+
+function canSelectRow(row: DropshipCatalogRow): boolean {
+  return !row.selectionDecision.selected && row.selectionDecision.reason !== "not_exposed_by_admin";
 }
