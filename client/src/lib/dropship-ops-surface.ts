@@ -1,6 +1,7 @@
 export type DropshipSectionStatus = "ready" | "attention_required" | "coming_soon";
 export type DropshipSeverity = "info" | "warning" | "error";
 export type DropshipStorePlatform = "ebay" | "shopify";
+export type DropshipDogfoodReadinessStatus = "ready" | "warning" | "blocked";
 export type DropshipCatalogExposureScope = "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipCatalogExposureAction = "include" | "exclude";
 export type DropshipOpsOrderIntakeStatus =
@@ -224,6 +225,57 @@ export interface DropshipAuditEventSearchResponse {
   total: number;
   page: number;
   limit: number;
+}
+
+export interface DropshipDogfoodReadinessCheck {
+  key: string;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+}
+
+export interface DropshipDogfoodReadinessItem {
+  vendor: {
+    vendorId: number;
+    memberId: string;
+    businessName: string | null;
+    email: string | null;
+    status: string;
+    entitlementStatus: string;
+  };
+  storeConnection: {
+    storeConnectionId: number | null;
+    platform: string | null;
+    status: string | null;
+    setupStatus: string | null;
+    externalDisplayName: string | null;
+    shopDomain: string | null;
+    updatedAt: string | null;
+  };
+  readinessStatus: DropshipDogfoodReadinessStatus;
+  blockerCount: number;
+  warningCount: number;
+  checks: DropshipDogfoodReadinessCheck[];
+  metrics: {
+    defaultWarehouseId: number | null;
+    adminCatalogIncludeRuleCount: number;
+    vendorSelectionIncludeRuleCount: number;
+    listingConfigActive: boolean;
+    setupOpenBlockerCount: number;
+    walletAvailableBalanceCents: number;
+    activeFundingMethodCount: number;
+    autoReloadEnabled: boolean;
+    notificationPreferenceCount: number;
+  };
+}
+
+export interface DropshipDogfoodReadinessResponse {
+  generatedAt: string;
+  items: DropshipDogfoodReadinessItem[];
+  total: number;
+  page: number;
+  limit: number;
+  summary: Array<{ status: DropshipDogfoodReadinessStatus; count: number }>;
 }
 
 export interface DropshipCatalogExposureDecision {
@@ -939,6 +991,22 @@ export function buildAdminTrackingPushesUrl(input: {
   return buildQueryUrl("/api/dropship/admin/tracking-pushes", {
     search: input.search.trim(),
     statuses,
+    platform: input.platform === "all" ? undefined : input.platform,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildAdminDogfoodReadinessUrl(input: {
+  search: string;
+  status: DropshipDogfoodReadinessStatus | "all";
+  platform: DropshipStorePlatform | "all";
+  page?: number;
+  limit?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/admin/dogfood-readiness", {
+    search: input.search.trim(),
+    status: input.status === "all" ? undefined : input.status,
     platform: input.platform === "all" ? undefined : input.platform,
     page: input.page ?? 1,
     limit: input.limit ?? 50,

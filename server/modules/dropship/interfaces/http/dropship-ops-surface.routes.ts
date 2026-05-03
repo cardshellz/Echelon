@@ -50,6 +50,25 @@ export function registerDropshipOpsSurfaceRoutes(
       return sendDropshipOpsSurfaceError(res, error);
     }
   });
+
+  app.get("/api/dropship/admin/dogfood-readiness", requirePermission("dropship", "view"), async (req, res) => {
+    try {
+      const result = await service.listDogfoodReadiness({
+        status: parseOptionalStringQuery(req.query.status) === "all"
+          ? undefined
+          : parseOptionalStringQuery(req.query.status),
+        platform: parseOptionalStringQuery(req.query.platform) === "all"
+          ? undefined
+          : parseOptionalStringQuery(req.query.platform),
+        search: parseOptionalStringQuery(req.query.search),
+        page: parsePositiveIntegerQuery(req.query.page, "page", 1),
+        limit: parsePositiveIntegerQuery(req.query.limit, "limit", 50),
+      });
+      return res.json(result);
+    } catch (error) {
+      return sendDropshipOpsSurfaceError(res, error);
+    }
+  });
 }
 
 function sendDropshipOpsSurfaceError(res: Response, error: unknown): Response {
@@ -76,6 +95,7 @@ function statusForDropshipOpsSurfaceError(code: string): number {
   switch (code) {
     case "DROPSHIP_OPS_OVERVIEW_INVALID_INPUT":
     case "DROPSHIP_AUDIT_SEARCH_INVALID_INPUT":
+    case "DROPSHIP_DOGFOOD_READINESS_INVALID_INPUT":
     case "DROPSHIP_OPS_SURFACE_INVALID_REQUEST":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":

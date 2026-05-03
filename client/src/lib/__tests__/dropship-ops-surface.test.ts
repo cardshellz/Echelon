@@ -8,6 +8,7 @@ import {
   buildStripeWalletFundingSessionInput,
   buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
+  buildAdminDogfoodReadinessUrl,
   buildAdminListingPushJobsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
@@ -93,6 +94,21 @@ describe("dropship ops surface client helpers", () => {
       exposedOnly: true,
       includeInactiveCatalog: false,
     })).toBe("/api/dropship/admin/catalog/preview?search=pack&exposedOnly=true&includeInactiveCatalog=false&page=1&limit=50");
+  });
+
+  it("builds admin dogfood readiness URLs with optional filters", () => {
+    expect(buildAdminDogfoodReadinessUrl({
+      search: " vendor ",
+      status: "blocked",
+      platform: "ebay",
+    })).toBe("/api/dropship/admin/dogfood-readiness?search=vendor&status=blocked&platform=ebay&page=1&limit=50");
+    expect(buildAdminDogfoodReadinessUrl({
+      search: "",
+      status: "all",
+      platform: "all",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/admin/dogfood-readiness?page=2&limit=25");
   });
 
   it("builds admin order intake URLs without forcing default status filters", () => {
