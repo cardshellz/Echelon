@@ -740,6 +740,31 @@ export default function PurchaseOrderDetail() {
   const [shipperOpen, setShipperOpen] = useState(false);
   const [shipperSearch, setShipperSearch] = useState("");
 
+  // Shippable lines state for Create Shipment dialog
+  // Map of poLineId → { checked, qty }. qty = 0 means unchecked.
+  const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; qty: number }>>({});
+  const [lineQtyErrors, setLineQtyErrors] = useState<Record<number, string>>({});
+
+  const { data: shippableLinesData } = useQuery<{ lines: any[] }>({
+    queryKey: [`/api/purchase-orders/${poId}/shippable-lines`],
+    enabled: !!poId && showCreateShipmentDialog,
+  });
+
+  // Initialize line selections when shippable lines load
+  useEffect(() => {
+    if (shippableLinesData?.lines && showCreateShipmentDialog) {
+      const selections: Record<number, { checked: boolean; qty: number }> = {};
+      for (const line of shippableLinesData.lines) {
+        if (!(line.id in lineSelections)) {
+          selections[line.id] = { checked: true, qty: line.remainingQty };
+        }
+      }
+      if (Object.keys(selections).length > 0) {
+        setLineSelections(prev => ({ ...prev, ...selections }));
+      }
+    }
+  }, [shippableLinesData, showCreateShipmentDialog]);
+
   // Fetch vendors for shipper dropdown
   type Vendor = { id: number; name: string; code: string };
   const { data: vendors = [], isLoading: vendorsLoading, isError: vendorsError, refetch: refetchVendors } = useQuery<Vendor[]>({
@@ -1484,12 +1509,46 @@ export default function PurchaseOrderDetail() {
         }),
       });
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
-      return res.json();
+      const shipment = await res.json();
+
+      // Chain: add selected lines from PO
+      const selectedLines = (shippableLinesData?.lines ?? [])
+        .filter((line: any) => lineSelections[line.id]?.checked && lineSelections[line.id]?.qty > 0)
+        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
+
+      if (selectedLines.length > 0) {
+        try {
+          const linesRes = await fetch(`/api/inbound-shipments/${shipment.id}/lines/from-po`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ purchaseOrderId: poId, lineSelections: selectedLines }),
+          });
+          if (!linesRes.ok) {
+            const err = await linesRes.json();
+            return { shipment, lineError: err.error || "Failed to add lines", lineCount: 0 };
+          }
+          return { shipment, lineError: null, lineCount: selectedLines.length };
+        } catch (e: any) {
+          return { shipment, lineError: e.message, lineCount: 0 };
+        }
+      }
+      return { shipment, lineError: null, lineCount: 0 };
     },
-    onSuccess: (shipment) => {
+    onSuccess: ({ shipment, lineError, lineCount }) => {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/shipments`] });
       setShowCreateShipmentDialog(false);
-      toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created — add line items on the shipment page` });
+      setLineSelections({});
+      if (lineError) {
+        toast({
+          title: "Shipment created",
+          description: `${shipment.shipmentNumber} created but failed to add lines: ${lineError}. You can add lines manually on the shipment page.`,
+          variant: "destructive",
+        });
+      } else if (lineCount > 0) {
+        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created with ${lineCount} line${lineCount === 1 ? "" : "s"}` });
+      } else {
+        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created` });
+      }
       navigate(`/shipments/${shipment.id}`);
     },
     onError: (err: Error) => {
@@ -3530,11 +3589,14 @@ export default function PurchaseOrderDetail() {
         </DialogContent>
       </Dialog>
       {/* ═══════ Create Shipment Dialog ═══════ */}
-      <Dialog open={showCreateShipmentDialog} onOpenChange={setShowCreateShipmentDialog}>
-        <DialogContent className="max-w-md">
+      <Dialog open={showCreateShipmentDialog} onOpenChange={(open) => {
+        setShowCreateShipmentDialog(open);
+        if (!open) { setLineSelections({}); setLineQtyErrors({}); }
+      }}>
+        <DialogContent className="max-w-2xl relative">
           <DialogHeader>
             <DialogTitle>Create Inbound Shipment</DialogTitle>
-            <DialogDescription>Set up shipment details. Add line items after creation.</DialogDescription>
+            <DialogDescription>Set up shipment details and select PO lines to include in this shipment.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
@@ -3659,14 +3721,130 @@ export default function PurchaseOrderDetail() {
               </div>
             </div>
 
+            {/* PO Lines Section */}
+            <div className="space-y-2 pt-2 border-t">
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="text-base">Lines from this PO</Label>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Selected lines will be added to the new shipment. Adjust quantities or uncheck lines for partial shipments.
+                  </p>
+                </div>
+                {shippableLinesData?.lines && shippableLinesData.lines.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs h-7"
+                    onClick={() => {
+                      const allChecked = shippableLinesData.lines.every((l: any) => lineSelections[l.id]?.checked);
+                      const next: Record<number, { checked: boolean; qty: number }> = {};
+                      for (const line of shippableLinesData.lines) {
+                        const prev = lineSelections[line.id];
+                        next[line.id] = {
+                          checked: !allChecked,
+                          qty: prev?.qty ?? line.remainingQty,
+                        };
+                      }
+                      setLineSelections(next);
+                    }}
+                  >
+                    {shippableLinesData.lines.every((l: any) => lineSelections[l.id]?.checked) ? "Deselect all" : "Select all"}
+                  </Button>
+                )}
+              </div>
+
+              {shippableLinesData?.lines && shippableLinesData.lines.length > 0 ? (
+                <div className="max-h-[300px] overflow-y-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-[40px]"></TableHead>
+                        <TableHead>SKU</TableHead>
+                        <TableHead>Description</TableHead>
+                        <TableHead className="text-right">Ordered</TableHead>
+                        <TableHead className="text-right">Shipped</TableHead>
+                        <TableHead className="text-right">Remaining</TableHead>
+                        <TableHead className="text-right w-[100px]">Qty to ship</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {shippableLinesData.lines.map((line: any) => {
+                        const sel = lineSelections[line.id] ?? { checked: true, qty: line.remainingQty };
+                        const error = lineQtyErrors[line.id];
+                        return (
+                          <TableRow key={line.id}>
+                            <TableCell>
+                              <Checkbox
+                                checked={sel.checked}
+                                onCheckedChange={(checked) => {
+                                  setLineSelections(prev => ({
+                                    ...prev,
+                                    [line.id]: { ...prev[line.id], checked: !!checked },
+                                  }));
+                                }}
+                              />
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">{line.sku || "—"}</TableCell>
+                            <TableCell className="text-xs text-muted-foreground truncate max-w-[150px]">
+                              {line.productName || line.description || "—"}
+                            </TableCell>
+                            <TableCell className="text-right text-xs">{line.orderQty}</TableCell>
+                            <TableCell className="text-right text-xs">{line.alreadyShippedQty}</TableCell>
+                            <TableCell className="text-right text-xs">{line.remainingQty}</TableCell>
+                            <TableCell>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={line.remainingQty}
+                                value={sel.qty}
+                                disabled={!sel.checked}
+                                className={`h-8 text-xs text-right ${error ? "border-destructive" : ""}`}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10) || 0;
+                                  setLineSelections(prev => ({
+                                    ...prev,
+                                    [line.id]: { ...prev[line.id], qty: val },
+                                  }));
+                                  if (val <= 0) {
+                                    setLineQtyErrors(prev => ({ ...prev, [line.id]: "Must be > 0" }));
+                                  } else if (val > line.remainingQty) {
+                                    setLineQtyErrors(prev => ({ ...prev, [line.id]: `Max ${line.remainingQty}` }));
+                                  } else {
+                                    setLineQtyErrors(prev => { const next = { ...prev }; delete next[line.id]; return next; });
+                                  }
+                                }}
+                              />
+                              {error && <p className="text-[10px] text-destructive mt-0.5">{error}</p>}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : showCreateShipmentDialog && shippableLinesData ? (
+                <p className="text-sm text-muted-foreground py-4 text-center">
+                  All lines on this PO have been shipped. View shipments below.
+                </p>
+              ) : null}
+            </div>
+
             <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowCreateShipmentDialog(false)}>Cancel</Button>
+              <Button variant="outline" onClick={() => { setShowCreateShipmentDialog(false); setLineSelections({}); setLineQtyErrors({}); }}>Cancel</Button>
               <Button
                 onClick={() => createShipmentMutation.mutate(newShipmentForm)}
-                disabled={createShipmentMutation.isPending || !newShipmentForm.shipperName.trim()}
+                disabled={
+                  createShipmentMutation.isPending ||
+                  !newShipmentForm.shipperName.trim() ||
+                  (shippableLinesData !== undefined && shippableLinesData.lines.length === 0) ||
+                  Object.keys(lineQtyErrors).length > 0
+                }
               >
                 {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}
               </Button>
+              {shippableLinesData !== undefined && shippableLinesData.lines.length === 0 && (
+                <p className="text-xs text-muted-foreground absolute -bottom-5 right-0">All lines already shipped — nothing to add.</p>
+              )}
             </div>
           </div>
         </DialogContent>
