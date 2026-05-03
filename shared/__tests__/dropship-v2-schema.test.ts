@@ -64,6 +64,10 @@ const opsSurfacesMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0098_dropship_ops_surfaces.sql"),
   "utf8",
 );
+const fundingMethodIdentityMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0099_dropship_funding_method_identity.sql"),
+  "utf8",
+);
 const releaseScript = readFileSync(
   resolve(process.cwd(), "scripts/release.sh"),
   "utf8",
@@ -124,6 +128,8 @@ describe("Dropship V2 schema contract", () => {
     expect(migrationSql).toContain("dropship_wallet_ref_idx");
     expect(migrationSql).toContain("WHERE reference_type IS NOT NULL AND reference_id IS NOT NULL");
     expect(migrationSql).toContain("dropship_wallet_idem_idx");
+    expect(fundingMethodIdentityMigrationSql).toContain("dropship_funding_provider_method_idx");
+    expect(fundingMethodIdentityMigrationSql).toContain("provider_payment_method_id IS NOT NULL");
     expect(migrationSql).toContain("CONSTRAINT dropship_wallet_ledger_amount_chk CHECK (amount_cents <> 0)");
   });
 

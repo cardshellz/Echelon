@@ -6,12 +6,14 @@ import type {
   CreateDropshipWalletFundingLedgerInput,
   CreateDropshipWalletOrderDebitInput,
   DropshipAutoReloadSettingRecord,
+  DropshipFundingMethodMutationResult,
   DropshipFundingMethodRecord,
   DropshipWalletAccountRecord,
   DropshipWalletLedgerRecord,
   DropshipWalletMutationResult,
   DropshipWalletOverview,
   DropshipWalletRepository,
+  UpsertDropshipFundingMethodRepositoryInput,
 } from "../application/dropship-wallet-service";
 
 interface WalletAccountRow {
@@ -30,11 +32,18 @@ interface FundingMethodRow {
   vendor_id: number;
   rail: DropshipFundingMethodRecord["rail"];
   status: string;
+  provider_customer_id: string | null;
+  provider_payment_method_id: string | null;
+  usdc_wallet_address: string | null;
   display_label: string | null;
   is_default: boolean;
   metadata: Record<string, unknown> | null;
   created_at: Date;
   updated_at: Date;
+}
+
+interface FundingMethodMutationRow extends FundingMethodRow {
+  inserted: boolean;
 }
 
 interface AutoReloadRow {
@@ -399,6 +408,112 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
     }
   }
 
+  async getReusableFundingProviderCustomerId(input: {
+    vendorId: number;
+    provider: "stripe";
+  }): Promise<string | null> {
+    const rails = input.provider === "stripe"
+      ? ["stripe_card", "stripe_ach"]
+      : [];
+    if (rails.length === 0) return null;
+
+    const result = await this.dbPool.query<{ provider_customer_id: string | null }>(
+      `SELECT provider_customer_id
+       FROM dropship.dropship_funding_methods
+       WHERE vendor_id = $1
+         AND rail = ANY($2::text[])
+         AND provider_customer_id IS NOT NULL
+       ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                updated_at DESC,
+                id DESC
+       LIMIT 1`,
+      [input.vendorId, rails],
+    );
+    return result.rows[0]?.provider_customer_id ?? null;
+  }
+
+  async upsertFundingMethod(
+    input: UpsertDropshipFundingMethodRepositoryInput,
+  ): Promise<DropshipFundingMethodMutationResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const hasActiveFundingMethod = await vendorHasActiveFundingMethodWithClient(client, input.vendorId);
+      const shouldBeDefault = input.isDefault || !hasActiveFundingMethod;
+
+      if (shouldBeDefault) {
+        await client.query(
+          `UPDATE dropship.dropship_funding_methods
+           SET is_default = false,
+               updated_at = $2
+           WHERE vendor_id = $1
+             AND status = 'active'
+             AND is_default = true`,
+          [input.vendorId, input.updatedAt],
+        );
+      }
+
+      const result = await client.query<FundingMethodMutationRow>(
+        `INSERT INTO dropship.dropship_funding_methods AS fm
+          (vendor_id, rail, status, provider_customer_id, provider_payment_method_id,
+           usdc_wallet_address, display_label, is_default, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $10)
+         ON CONFLICT (vendor_id, rail, provider_payment_method_id)
+           WHERE provider_payment_method_id IS NOT NULL
+         DO UPDATE
+           SET status = EXCLUDED.status,
+               provider_customer_id = EXCLUDED.provider_customer_id,
+               usdc_wallet_address = EXCLUDED.usdc_wallet_address,
+               display_label = EXCLUDED.display_label,
+               is_default = fm.is_default OR EXCLUDED.is_default,
+               metadata = EXCLUDED.metadata,
+               updated_at = EXCLUDED.updated_at
+         RETURNING id, vendor_id, rail, status, provider_customer_id,
+                   provider_payment_method_id, usdc_wallet_address, display_label,
+                   is_default, metadata, created_at, updated_at,
+                   (xmax = 0) AS inserted`,
+        [
+          input.vendorId,
+          input.rail,
+          input.status,
+          input.providerCustomerId,
+          input.providerPaymentMethodId,
+          input.usdcWalletAddress,
+          input.displayLabel,
+          shouldBeDefault,
+          JSON.stringify(input.metadata ?? {}),
+          input.updatedAt,
+        ],
+      );
+      const row = requiredRow(result.rows[0], "Dropship funding method upsert did not return a row.");
+      const fundingMethod = mapFundingMethodRow(row);
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_funding_methods",
+        entityId: String(fundingMethod.fundingMethodId),
+        eventType: row.inserted ? "funding_method_registered" : "funding_method_refreshed",
+        payload: {
+          fundingMethodId: fundingMethod.fundingMethodId,
+          rail: fundingMethod.rail,
+          status: fundingMethod.status,
+          displayLabel: fundingMethod.displayLabel,
+          isDefault: fundingMethod.isDefault,
+        },
+        createdAt: input.updatedAt,
+      });
+      await client.query("COMMIT");
+      return {
+        fundingMethod,
+        idempotentReplay: !row.inserted,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private async findLedgerReplayAfterUniqueConflict(
     input: {
       vendorId: number;
@@ -613,8 +728,9 @@ async function assertFundingMethodCanBeUsed(
 ): Promise<FundingMethodRow | null> {
   if (!input.fundingMethodId) return null;
   const result = await client.query<FundingMethodRow>(
-    `SELECT id, vendor_id, rail, status, display_label, is_default,
-            metadata, created_at, updated_at
+    `SELECT id, vendor_id, rail, status, provider_customer_id,
+            provider_payment_method_id, usdc_wallet_address, display_label,
+            is_default, metadata, created_at, updated_at
      FROM dropship.dropship_funding_methods
      WHERE id = $1
        AND vendor_id = $2
@@ -731,8 +847,9 @@ async function listFundingMethodsWithClient(
   vendorId: number,
 ): Promise<DropshipFundingMethodRecord[]> {
   const result = await client.query<FundingMethodRow>(
-    `SELECT id, vendor_id, rail, status, display_label, is_default,
-            metadata, created_at, updated_at
+    `SELECT id, vendor_id, rail, status, provider_customer_id,
+            provider_payment_method_id, usdc_wallet_address, display_label,
+            is_default, metadata, created_at, updated_at
      FROM dropship.dropship_funding_methods
      WHERE vendor_id = $1
      ORDER BY is_default DESC, created_at DESC, id DESC`,
@@ -754,6 +871,23 @@ async function getAutoReloadSettingWithClient(
     [vendorId],
   );
   return result.rows[0] ? mapAutoReloadRow(result.rows[0]) : null;
+}
+
+async function vendorHasActiveFundingMethodWithClient(
+  client: PoolClient,
+  vendorId: number,
+): Promise<boolean> {
+  const result = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM dropship.dropship_funding_methods
+       WHERE vendor_id = $1
+         AND status = 'active'
+       LIMIT 1
+     ) AS exists`,
+    [vendorId],
+  );
+  return result.rows[0]?.exists === true;
 }
 
 async function listLedgerWithClient(
@@ -874,6 +1008,9 @@ function mapFundingMethodRow(row: FundingMethodRow): DropshipFundingMethodRecord
     vendorId: row.vendor_id,
     rail: row.rail,
     status: row.status,
+    providerCustomerId: row.provider_customer_id,
+    providerPaymentMethodId: row.provider_payment_method_id,
+    usdcWalletAddress: row.usdc_wallet_address,
     displayLabel: row.display_label,
     isDefault: row.is_default,
     metadata: row.metadata ?? {},
