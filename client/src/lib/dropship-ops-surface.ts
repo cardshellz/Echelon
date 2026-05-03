@@ -958,6 +958,48 @@ export interface DropshipReturnListResponse {
   limit: number;
 }
 
+export interface DropshipAdminReturnStatusUpdateInput {
+  status: DropshipRmaStatus;
+  notes?: string;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminReturnStatusUpdateResponse {
+  rma: DropshipReturnListItem & {
+    labelSource: string | null;
+    vendorNotes: string | null;
+    idempotencyKey: string | null;
+    requestHash: string | null;
+    items: Array<{
+      rmaItemId: number;
+      rmaId: number;
+      productVariantId: number | null;
+      quantity: number;
+      status: string;
+      requestedCreditCents: number | null;
+      finalCreditCents: number | null;
+      feeCents: number | null;
+      createdAt: string;
+    }>;
+    inspections: Array<{
+      rmaInspectionId: number;
+      rmaId: number;
+      outcome: "approved" | "rejected";
+      faultCategory: DropshipReturnFaultCategory | null;
+      notes: string | null;
+      photos: Record<string, unknown>[];
+      creditCents: number;
+      feeCents: number;
+      inspectedBy: string | null;
+      idempotencyKey: string | null;
+      requestHash: string | null;
+      createdAt: string;
+    }>;
+    walletLedger: Array<Record<string, unknown>>;
+  };
+  idempotentReplay: boolean;
+}
+
 export interface DropshipNotificationListResponse {
   items: Array<{
     notificationEventId: number;
@@ -1235,6 +1277,26 @@ export function buildAdminTrackingPushRetryInput(input: {
   }
 
   return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function buildAdminReturnStatusUpdateInput(input: {
+  idempotencyKey: string;
+  status: DropshipRmaStatus;
+  notes: string;
+}): DropshipAdminReturnStatusUpdateInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  const notes = input.notes.trim();
+  if (notes.length > 5000) {
+    throw new Error("Notes must be 5000 characters or fewer.");
+  }
+
+  return notes
+    ? { idempotencyKey, status: input.status, notes }
+    : { idempotencyKey, status: input.status };
 }
 
 export function buildCatalogExposureRuleInput(input: {

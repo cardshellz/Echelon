@@ -81,14 +81,14 @@ export function registerDropshipReturnRoutes(
     requirePermission("dropship", "manage_operations"),
     async (req, res) => {
       try {
-        const rma = await service.updateStatus({
+        const result = await service.updateStatus({
           rmaId: parsePositiveInteger(req.params.rmaId, "rmaId"),
           status: req.body?.status,
           notes: req.body?.notes ?? null,
           idempotencyKey: resolveIdempotencyKey(req),
           actor: adminActor(req),
         });
-        return res.json({ rma });
+        return res.json(result);
       } catch (error) {
         return sendDropshipReturnError(res, error);
       }
@@ -153,6 +153,7 @@ function statusForDropshipReturnError(code: string): number {
     case "DROPSHIP_RMA_ITEM_NOT_FOUND":
       return 404;
     case "DROPSHIP_RMA_IDEMPOTENCY_CONFLICT":
+    case "DROPSHIP_RMA_STATUS_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_RMA_ALREADY_INSPECTED":
       return 409;
     case "DROPSHIP_WALLET_INSUFFICIENT_FUNDS":
