@@ -659,6 +659,7 @@ export const dropshipListingPushJobs = dropshipSchema.table("dropship_listing_pu
 }, (table) => [
   uniqueIndex("dropship_listing_job_idem_idx").on(table.vendorId, table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
   index("dropship_listing_job_status_idx").on(table.status),
+  index("dropship_listing_job_vendor_status_idx").on(table.vendorId, table.status, table.updatedAt),
   check("dropship_listing_job_status_chk", sql`${table.status} IN ('queued','processing','completed','failed','cancelled')`),
 ]);
 
@@ -995,6 +996,7 @@ export const dropshipMarketplaceTrackingPushes = dropshipSchema.table("dropship_
   uniqueIndex("dropship_tracking_push_idem_idx").on(table.idempotencyKey),
   index("dropship_tracking_push_intake_idx").on(table.intakeId),
   index("dropship_tracking_push_status_idx").on(table.status, table.updatedAt),
+  index("dropship_tracking_push_vendor_status_idx").on(table.vendorId, table.status, table.updatedAt),
   check("dropship_tracking_push_platform_chk", sql`${table.platform} IN ('ebay','shopify','tiktok','instagram','bigcommerce')`),
   check("dropship_tracking_push_status_chk", sql`${table.status} IN ('queued','processing','succeeded','failed')`),
   check("dropship_tracking_push_attempt_chk", sql`${table.attemptCount} >= 0`),
@@ -1170,6 +1172,9 @@ export const dropshipAuditEvents = dropshipSchema.table("dropship_audit_events",
 }, (table) => [
   index("dropship_audit_vendor_created_idx").on(table.vendorId, table.createdAt),
   index("dropship_audit_entity_idx").on(table.entityType, table.entityId),
+  index("dropship_audit_severity_created_idx").on(table.severity, table.createdAt),
+  index("dropship_audit_event_type_created_idx").on(table.eventType, table.createdAt),
+  index("dropship_audit_store_created_idx").on(table.storeConnectionId, table.createdAt).where(sql`store_connection_id IS NOT NULL`),
 ]);
 
 export const dropshipUsdcLedgerEntries = dropshipSchema.table("dropship_usdc_ledger_entries", {

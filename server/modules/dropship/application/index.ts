@@ -15,6 +15,7 @@ export * from "./dropship-marketplace-order-cancellation-provider";
 export * from "./dropship-marketplace-tracking-provider";
 export * from "./dropship-marketplace-tracking-service";
 export * from "./dropship-notification-service";
+export * from "./dropship-ops-surface-service";
 export * from "./dropship-order-acceptance-service";
 export * from "./dropship-order-cancellation-service";
 export * from "./dropship-order-intake-service";
