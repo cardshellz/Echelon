@@ -283,6 +283,40 @@ describe("addLinesFromPO", () => {
     );
   });
 
+  // ─── Array binding regression (ANY() needs ::integer[] cast) ────
+
+  it("uses ::integer[] cast in ALL raw SQL ANY() calls to avoid pg array binding error", async () => {
+    const poLine = makeProductLine({ id: 5, orderQty: 100 });
+    storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
+
+    await svc.addLinesFromPO(1, 10, [{ poLineId: 5, qty: 40 }]);
+
+    // Every tx.execute call receives a SQL template. Inspect the raw SQL
+    // fragments to confirm every ANY() usage includes the ::integer[] cast.
+    const calls = mockTx.execute.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+
+    for (const [query] of calls) {
+      // query is a Drizzle sql`` template — its queryChunks contain the raw text
+      const sqlText = JSON.stringify(query);
+      if (sqlText.includes('ANY(')) {
+        expect(sqlText).toContain('::integer[]');
+      }
+    }
+  });
+
+  it("throws early when candidateLineIds is empty (no extra DB calls)", async () => {
+    // PO exists but no lines match the filter
+    storage.getPurchaseOrderLines.mockResolvedValue([]);
+
+    await expect(
+      svc.addLinesFromPO(1, 10, [{ poLineId: 999, qty: 10 }]),
+    ).rejects.toThrow(/No new PO lines to add/);
+
+    // Transaction should never have been entered
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   // ─── Concurrency (documented limitation) ──────────────────────
 
   // A true concurrency test (two parallel addLinesFromPO calls on the same
