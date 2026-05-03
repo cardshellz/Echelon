@@ -15,6 +15,7 @@ import {
   type DropshipFundingMethodMutationResult,
   type DropshipFundingMethodRecord,
   type DropshipStripeFundingSetupSession,
+  type DropshipStripeWalletFundingSession,
   type DropshipWalletAccountRecord,
   type DropshipWalletFundingProvider,
   type DropshipWalletLedgerRecord,
@@ -106,6 +107,77 @@ describe("DropshipWalletService", () => {
       currency: "USD",
       idempotencyKey: "order-debit-123",
     })).rejects.toMatchObject({ code: "DROPSHIP_WALLET_INSUFFICIENT_FUNDS" });
+  });
+
+  it("settles pending ACH funding into the same ledger entry without double credit", async () => {
+    const pending = await service.creditFunding({
+      vendorId: 10,
+      fundingMethodId: 100,
+      rail: "stripe_ach",
+      status: "pending",
+      amountCents: 4000,
+      currency: "USD",
+      referenceType: "stripe_payment_intent",
+      referenceId: "pi_ach",
+      idempotencyKey: "stripe-funding:pi_ach",
+    });
+    const settled = await service.creditFunding({
+      vendorId: 10,
+      fundingMethodId: 100,
+      rail: "stripe_ach",
+      status: "settled",
+      amountCents: 4000,
+      currency: "USD",
+      referenceType: "stripe_payment_intent",
+      referenceId: "pi_ach",
+      externalTransactionId: "ch_ach",
+      idempotencyKey: "stripe-funding:pi_ach",
+    });
+
+    expect(pending.ledgerEntry.ledgerEntryId).toBe(settled.ledgerEntry.ledgerEntryId);
+    expect(settled.idempotentReplay).toBe(false);
+    expect(settled.account.availableBalanceCents).toBe(4000);
+    expect(settled.account.pendingBalanceCents).toBe(0);
+    expect(settled.ledgerEntry).toMatchObject({
+      status: "settled",
+      amountCents: 4000,
+      availableBalanceAfterCents: 4000,
+      pendingBalanceAfterCents: 0,
+      externalTransactionId: "ch_ach",
+    });
+    expect(repository.ledger).toHaveLength(1);
+  });
+
+  it("treats late pending wallet funding webhooks as idempotent after settlement", async () => {
+    const settled = await service.creditFunding({
+      vendorId: 10,
+      fundingMethodId: 100,
+      rail: "stripe_ach",
+      status: "settled",
+      amountCents: 4000,
+      currency: "USD",
+      referenceType: "stripe_payment_intent",
+      referenceId: "pi_ach_late",
+      externalTransactionId: "ch_ach",
+      idempotencyKey: "stripe-funding:pi_ach_late",
+    });
+    const latePending = await service.creditFunding({
+      vendorId: 10,
+      fundingMethodId: 100,
+      rail: "stripe_ach",
+      status: "pending",
+      amountCents: 4000,
+      currency: "USD",
+      referenceType: "stripe_payment_intent",
+      referenceId: "pi_ach_late",
+      idempotencyKey: "stripe-funding:pi_ach_late",
+    });
+
+    expect(latePending.idempotentReplay).toBe(true);
+    expect(latePending.ledgerEntry.ledgerEntryId).toBe(settled.ledgerEntry.ledgerEntryId);
+    expect(latePending.account.availableBalanceCents).toBe(4000);
+    expect(latePending.account.pendingBalanceCents).toBe(0);
+    expect(repository.ledger).toHaveLength(1);
   });
 
   it("debits accepted orders as negative settled ledger entries", async () => {
@@ -242,6 +314,32 @@ describe("DropshipWalletService", () => {
     });
   });
 
+  it("creates a Stripe wallet funding session with the selected active funding method", async () => {
+    const session = await service.createStripeWalletFundingSessionForMember("member-1", {
+      fundingMethodId: 99,
+      amountCents: 25000,
+      successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
+      cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
+    });
+
+    expect(session).toMatchObject({
+      checkoutUrl: "https://checkout.stripe.test/funding",
+      providerSessionId: "cs_funding_1",
+      providerCustomerId: "cus_existing",
+      amountCents: 25000,
+      currency: "USD",
+    });
+    expect(logs.at(-1)).toMatchObject({
+      code: "DROPSHIP_STRIPE_WALLET_FUNDING_SESSION_CREATED",
+      context: expect.objectContaining({
+        vendorId: 10,
+        fundingMethodId: 99,
+        amountCents: 25000,
+        rail: "stripe_card",
+      }),
+    });
+  });
+
   it("registers Stripe funding methods idempotently and defaults the first active method", async () => {
     repository.fundingMethods = [];
 
@@ -287,6 +385,21 @@ class FakeFundingProvider implements DropshipWalletFundingProvider {
       checkoutUrl: "https://checkout.stripe.test/session",
       providerSessionId: "cs_test_1",
       providerCustomerId: input.existingProviderCustomerId ?? "cus_created",
+      expiresAt: now,
+    };
+  }
+
+  async createStripeWalletFundingSession(
+    input: Parameters<DropshipWalletFundingProvider["createStripeWalletFundingSession"]>[0],
+  ): Promise<DropshipStripeWalletFundingSession> {
+    expect(input.existingProviderCustomerId).toBe("cus_existing");
+    expect(input.providerPaymentMethodId).toBe("pm_4242");
+    return {
+      checkoutUrl: "https://checkout.stripe.test/funding",
+      providerSessionId: "cs_funding_1",
+      providerCustomerId: input.existingProviderCustomerId ?? "cus_created",
+      amountCents: input.amountCents,
+      currency: input.currency,
       expiresAt: now,
     };
   }
@@ -336,6 +449,40 @@ class FakeWalletRepository implements DropshipWalletRepository {
     }
     const replay = this.findReplay(input.idempotencyKey, input.referenceType, input.referenceId);
     if (replay) {
+      if (replay.status === "settled" && input.status === "pending") {
+        this.assertReplay(replay, input.requestHash);
+        return { account: this.account, ledgerEntry: replay, idempotentReplay: true };
+      }
+      if (replay.status === "pending" && input.status === "settled") {
+        this.assertReplay(replay, input.requestHash);
+        const availableBalanceCents = this.account.availableBalanceCents + replay.amountCents;
+        const pendingBalanceCents = this.account.pendingBalanceCents - replay.amountCents;
+        this.account = {
+          ...this.account,
+          availableBalanceCents,
+          pendingBalanceCents,
+          updatedAt: input.occurredAt,
+        };
+        const settled: DropshipWalletLedgerRecord = {
+          ...replay,
+          status: "settled",
+          fundingMethodId: input.fundingMethodId ?? replay.fundingMethodId,
+          externalTransactionId: input.externalTransactionId ?? replay.externalTransactionId,
+          availableBalanceAfterCents: availableBalanceCents,
+          pendingBalanceAfterCents: pendingBalanceCents,
+          metadata: {
+            ...replay.metadata,
+            requestHash: input.requestHash,
+            rail: input.rail,
+            settledFromPending: true,
+          },
+          settledAt: input.occurredAt,
+        };
+        this.ledger = this.ledger.map((entry) =>
+          entry.ledgerEntryId === replay.ledgerEntryId ? settled : entry,
+        );
+        return { account: this.account, ledgerEntry: settled, idempotentReplay: false };
+      }
       this.assertReplay(replay, input.requestHash);
       return { account: this.account, ledgerEntry: replay, idempotentReplay: true };
     }

@@ -86,6 +86,13 @@ export const createDropshipStripeFundingSetupSessionInputSchema = z.object({
   cancelUrl: z.string().trim().url().max(1000),
 }).strict();
 
+export const createDropshipStripeWalletFundingSessionInputSchema = z.object({
+  fundingMethodId: positiveIdSchema,
+  amountCents: PositiveCentsSchema,
+  successUrl: z.string().trim().url().max(1000),
+  cancelUrl: z.string().trim().url().max(1000),
+}).strict();
+
 export const registerDropshipFundingMethodInputSchema = z.object({
   vendorId: positiveIdSchema,
   rail: dropshipWalletFundingRailSchema,
@@ -110,6 +117,7 @@ export type CreditDropshipWalletFundingInput = z.infer<typeof creditDropshipWall
 export type DebitDropshipWalletForOrderInput = z.infer<typeof debitDropshipWalletForOrderInputSchema>;
 export type ConfigureDropshipAutoReloadInput = z.infer<typeof configureDropshipAutoReloadInputSchema>;
 export type CreateDropshipStripeFundingSetupSessionInput = z.infer<typeof createDropshipStripeFundingSetupSessionInputSchema>;
+export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof createDropshipStripeWalletFundingSessionInputSchema>;
 export type RegisterDropshipFundingMethodInput = z.infer<typeof registerDropshipFundingMethodInputSchema>;
 
 export interface DropshipWalletAccountRecord {
@@ -195,6 +203,15 @@ export interface DropshipStripeFundingSetupSession {
   expiresAt: Date | null;
 }
 
+export interface DropshipStripeWalletFundingSession {
+  checkoutUrl: string;
+  providerSessionId: string;
+  providerCustomerId: string;
+  amountCents: number;
+  currency: string;
+  expiresAt: Date | null;
+}
+
 export interface DropshipWalletFundingProvider {
   createStripeSetupSession(input: {
     vendorId: number;
@@ -207,6 +224,21 @@ export interface DropshipWalletFundingProvider {
     cancelUrl: string;
     now: Date;
   }): Promise<DropshipStripeFundingSetupSession>;
+  createStripeWalletFundingSession(input: {
+    vendorId: number;
+    memberId: string;
+    fundingMethodId: number;
+    rail: DropshipStripeFundingSetupRail;
+    amountCents: number;
+    currency: string;
+    customerEmail: string | null;
+    customerName: string;
+    existingProviderCustomerId: string | null;
+    providerPaymentMethodId: string | null;
+    successUrl: string;
+    cancelUrl: string;
+    now: Date;
+  }): Promise<DropshipStripeWalletFundingSession>;
 }
 
 export interface DropshipWalletRepository {
@@ -405,6 +437,88 @@ export class DropshipWalletService {
     return session;
   }
 
+  async createStripeWalletFundingSessionForMember(
+    memberId: string,
+    input: unknown,
+  ): Promise<DropshipStripeWalletFundingSession> {
+    const parsed = parseWalletInput(createDropshipStripeWalletFundingSessionInputSchema, input);
+    const provider = this.deps.fundingProvider;
+    if (!provider) {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_PROVIDER_NOT_CONFIGURED",
+        "Dropship funding provider is not configured.",
+        { provider: "stripe" },
+      );
+    }
+
+    assertStripeWalletFundingAmount(parsed.amountCents);
+    const provisioned = await this.provisionVendor(memberId);
+    const vendor = provisioned.vendor;
+    const wallet = await this.deps.repository.getOverview({
+      vendorId: vendor.vendorId,
+      ledgerLimit: 1,
+      now: this.deps.clock.now(),
+    });
+    const fundingMethod = wallet.fundingMethods.find((method) => method.fundingMethodId === parsed.fundingMethodId);
+    if (!fundingMethod) {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_METHOD_NOT_FOUND",
+        "Dropship funding method was not found.",
+        { vendorId: vendor.vendorId, fundingMethodId: parsed.fundingMethodId },
+      );
+    }
+    if (fundingMethod.status !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_METHOD_NOT_ACTIVE",
+        "Dropship funding method is not active.",
+        { vendorId: vendor.vendorId, fundingMethodId: parsed.fundingMethodId, status: fundingMethod.status },
+      );
+    }
+    if (fundingMethod.rail !== "stripe_card" && fundingMethod.rail !== "stripe_ach") {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_METHOD_RAIL_UNSUPPORTED",
+        "Dropship wallet funding currently requires a Stripe card or ACH funding method.",
+        { vendorId: vendor.vendorId, fundingMethodId: parsed.fundingMethodId, rail: fundingMethod.rail },
+      );
+    }
+    if (!fundingMethod.providerCustomerId) {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_METHOD_PROVIDER_CUSTOMER_REQUIRED",
+        "Stripe wallet funding requires a provider customer id.",
+        { vendorId: vendor.vendorId, fundingMethodId: parsed.fundingMethodId },
+      );
+    }
+
+    const now = this.deps.clock.now();
+    const session = await provider.createStripeWalletFundingSession({
+      vendorId: vendor.vendorId,
+      memberId,
+      fundingMethodId: fundingMethod.fundingMethodId,
+      rail: fundingMethod.rail,
+      amountCents: parsed.amountCents,
+      currency: wallet.account.currency,
+      customerEmail: vendor.email,
+      customerName: vendor.businessName ?? vendor.contactName ?? vendor.email ?? `Dropship vendor ${vendor.vendorId}`,
+      existingProviderCustomerId: fundingMethod.providerCustomerId,
+      providerPaymentMethodId: fundingMethod.providerPaymentMethodId,
+      successUrl: parsed.successUrl,
+      cancelUrl: parsed.cancelUrl,
+      now,
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_STRIPE_WALLET_FUNDING_SESSION_CREATED",
+      message: "Dropship Stripe wallet funding session was created.",
+      context: {
+        vendorId: vendor.vendorId,
+        fundingMethodId: fundingMethod.fundingMethodId,
+        amountCents: parsed.amountCents,
+        rail: fundingMethod.rail,
+        providerSessionId: session.providerSessionId,
+      },
+    });
+    return session;
+  }
+
   async registerFundingMethod(input: unknown): Promise<DropshipFundingMethodMutationResult> {
     const parsed = parseWalletInput(registerDropshipFundingMethodInputSchema, input);
     const updatedAt = this.deps.clock.now();
@@ -430,6 +544,40 @@ export class DropshipWalletService {
   private async provisionVendor(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
     return this.deps.vendorProvisioning.provisionForMember(memberId);
   }
+}
+
+const DEFAULT_STRIPE_MIN_WALLET_FUNDING_CENTS = 1000;
+const DEFAULT_STRIPE_MAX_WALLET_FUNDING_CENTS = 500000;
+
+function assertStripeWalletFundingAmount(amountCents: number): void {
+  const minCents = parsePositiveEnvInteger(
+    process.env.DROPSHIP_STRIPE_MIN_WALLET_FUNDING_CENTS,
+    DEFAULT_STRIPE_MIN_WALLET_FUNDING_CENTS,
+  );
+  const maxCents = parsePositiveEnvInteger(
+    process.env.DROPSHIP_STRIPE_MAX_WALLET_FUNDING_CENTS,
+    DEFAULT_STRIPE_MAX_WALLET_FUNDING_CENTS,
+  );
+  if (minCents > maxCents) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_FUNDING_LIMITS_INVALID",
+      "Dropship wallet funding limits are misconfigured.",
+      { minCents, maxCents },
+    );
+  }
+  if (amountCents < minCents || amountCents > maxCents) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
+      "Dropship wallet funding amount is outside the configured range.",
+      { amountCents, minCents, maxCents },
+    );
+  }
+}
+
+function parsePositiveEnvInteger(value: string | undefined, fallback: number): number {
+  if (!value?.trim()) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function assertAutoReloadConfigIsUsable(input: ConfigureDropshipAutoReloadInput): void {
@@ -483,12 +631,10 @@ export function hashWalletFundingCreditRequest(input: CreditDropshipWalletFundin
     walletAccountId: input.walletAccountId ?? null,
     fundingMethodId: input.fundingMethodId ?? null,
     rail: input.rail,
-    status: input.status,
     amountCents: input.amountCents,
     currency: input.currency,
     referenceType: input.referenceType,
     referenceId: input.referenceId,
-    externalTransactionId: input.externalTransactionId ?? null,
   });
 }
 

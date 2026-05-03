@@ -417,6 +417,22 @@ export interface DropshipStripeFundingSetupSessionResponse {
   };
 }
 
+export interface DropshipStripeWalletFundingSessionInput {
+  fundingMethodId: number;
+  amountCents: number;
+  returnTo: string;
+}
+
+export interface DropshipStripeWalletFundingSessionResponse {
+  fundingSession: {
+    checkoutUrl: string;
+    providerSessionId: string;
+    amountCents: number;
+    currency: string;
+    expiresAt: string | null;
+  };
+}
+
 export interface DropshipReturnListItem {
   rmaId: number;
   rmaNumber: string;
@@ -622,6 +638,23 @@ export function buildStripeFundingSetupSessionInput(input: {
   }
   return {
     rail: input.rail,
+    returnTo: normalizePortalReturnPath(input.returnTo),
+  };
+}
+
+export function buildStripeWalletFundingSessionInput(input: {
+  fundingMethodId: string;
+  amount: string;
+  returnTo: string;
+}): DropshipStripeWalletFundingSessionInput {
+  const fundingMethodId = parsePositiveInteger(input.fundingMethodId, "fundingMethodId");
+  const amountCents = parseDollarInputToCents(input.amount, "fundingAmount");
+  if (amountCents <= 0) {
+    throw new Error("Funding amount must be greater than $0.00.");
+  }
+  return {
+    fundingMethodId,
+    amountCents,
     returnTo: normalizePortalReturnPath(input.returnTo),
   };
 }
