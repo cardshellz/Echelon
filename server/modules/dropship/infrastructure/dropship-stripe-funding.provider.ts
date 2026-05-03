@@ -1,13 +1,16 @@
 import Stripe from "stripe";
 import { DropshipError } from "../domain/errors";
 import type {
+  CreditDropshipWalletFundingInput,
   DropshipStripeFundingSetupRail,
+  DropshipStripeWalletFundingSession,
   DropshipWalletFundingProvider,
   RegisterDropshipFundingMethodInput,
 } from "../application/dropship-wallet-service";
 
 const STRIPE_API_VERSION = "2024-12-18.acacia";
 const STRIPE_FUNDING_SETUP_TYPE = "dropship_funding_setup";
+const STRIPE_WALLET_FUNDING_TYPE = "dropship_wallet_funding";
 
 export type DropshipStripeFundingWebhookEvent =
   | {
@@ -15,6 +18,13 @@ export type DropshipStripeFundingWebhookEvent =
       providerEventId: string;
       eventType: string;
       fundingMethod: RegisterDropshipFundingMethodInput;
+    }
+  | {
+      kind: "wallet_funding_recorded";
+      providerEventId: string;
+      eventType: string;
+      fundingMethod: RegisterDropshipFundingMethodInput;
+      fundingCredit: Omit<CreditDropshipWalletFundingInput, "fundingMethodId">;
     }
   | {
       kind: "ignored";
@@ -88,6 +98,81 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     };
   }
 
+  async createStripeWalletFundingSession(input: {
+    vendorId: number;
+    memberId: string;
+    fundingMethodId: number;
+    rail: DropshipStripeFundingSetupRail;
+    amountCents: number;
+    currency: string;
+    customerEmail: string | null;
+    customerName: string;
+    existingProviderCustomerId: string | null;
+    providerPaymentMethodId: string | null;
+    successUrl: string;
+    cancelUrl: string;
+    now: Date;
+  }): Promise<DropshipStripeWalletFundingSession> {
+    const stripe = this.getStripe();
+    const customerId = input.existingProviderCustomerId
+      ?? await this.createCustomer({
+        email: input.customerEmail,
+        name: input.customerName,
+        vendorId: input.vendorId,
+        memberId: input.memberId,
+      });
+    const metadata = {
+      type: STRIPE_WALLET_FUNDING_TYPE,
+      dropship_vendor_id: String(input.vendorId),
+      member_id: input.memberId,
+      funding_method_id: String(input.fundingMethodId),
+      requested_rail: input.rail,
+      requested_provider_payment_method_id: input.providerPaymentMethodId ?? "",
+      requested_at: input.now.toISOString(),
+    };
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer: customerId,
+      payment_method_types: paymentMethodTypesForRail(input.rail),
+      line_items: [
+        {
+          price_data: {
+            currency: input.currency.toLowerCase(),
+            product_data: {
+              name: "Card Shellz dropship wallet funding",
+            },
+            unit_amount: input.amountCents,
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: input.successUrl,
+      cancel_url: input.cancelUrl,
+      metadata,
+      payment_intent_data: {
+        setup_future_usage: "off_session",
+        metadata,
+      },
+    });
+
+    if (!session.url) {
+      throw new DropshipError(
+        "DROPSHIP_STRIPE_FUNDING_SESSION_URL_MISSING",
+        "Stripe did not return a checkout URL for wallet funding.",
+        { vendorId: input.vendorId, rail: input.rail, providerSessionId: session.id },
+      );
+    }
+
+    return {
+      checkoutUrl: session.url,
+      providerSessionId: session.id,
+      providerCustomerId: customerId,
+      amountCents: input.amountCents,
+      currency: input.currency,
+      expiresAt: typeof session.expires_at === "number" ? new Date(session.expires_at * 1000) : null,
+    };
+  }
+
   async parseWebhookEvent(input: {
     rawBody: Buffer;
     signature: string;
@@ -110,6 +195,9 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     }
     if (event.type === "setup_intent.succeeded") {
       return this.parseSetupIntentSucceeded(event);
+    }
+    if (event.type === "payment_intent.processing" || event.type === "payment_intent.succeeded") {
+      return this.parsePaymentIntentFundingEvent(event);
     }
 
     return {
@@ -226,6 +314,88 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     };
   }
 
+  private async parsePaymentIntentFundingEvent(event: Stripe.Event): Promise<DropshipStripeFundingWebhookEvent> {
+    const paymentIntent = event.data.object as Stripe.PaymentIntent;
+    if (paymentIntent.metadata?.type !== STRIPE_WALLET_FUNDING_TYPE) {
+      return {
+        kind: "ignored",
+        providerEventId: event.id,
+        eventType: event.type,
+        reason: "not_dropship_wallet_funding",
+      };
+    }
+
+    const metadata = paymentIntent.metadata ?? {};
+    const vendorId = parsePositiveInteger(metadata.dropship_vendor_id ?? metadata.vendor_id, "dropship_vendor_id");
+    const fundingMethodId = parseOptionalPositiveInteger(metadata.funding_method_id, "funding_method_id");
+    const paymentMethodId = idFromExpandable(paymentIntent.payment_method);
+    if (!paymentMethodId) {
+      throw new DropshipError(
+        "DROPSHIP_STRIPE_PAYMENT_METHOD_MISSING",
+        "Stripe wallet funding event did not include a payment method id.",
+        { providerEventId: event.id, paymentIntentId: paymentIntent.id, vendorId },
+      );
+    }
+
+    const paymentMethod = await this.getStripe().paymentMethods.retrieve(paymentMethodId);
+    const rail = railFromStripePaymentMethod(paymentMethod);
+    if (!rail) {
+      return {
+        kind: "ignored",
+        providerEventId: event.id,
+        eventType: event.type,
+        reason: `unsupported_payment_method:${paymentMethod.type}`,
+      };
+    }
+
+    const status = event.type === "payment_intent.succeeded" ? "settled" : "pending";
+    const amountCents = amountForPaymentIntent(paymentIntent, status);
+    const currency = paymentIntent.currency.toUpperCase();
+    const fundingMethod: RegisterDropshipFundingMethodInput = {
+      vendorId,
+      rail,
+      status: "active",
+      providerCustomerId: idFromExpandable(paymentIntent.customer),
+      providerPaymentMethodId: paymentMethod.id,
+      usdcWalletAddress: null,
+      displayLabel: displayLabelForPaymentMethod(paymentMethod),
+      isDefault: false,
+      metadata: sanitizedPaymentMethodMetadata({
+        paymentMethod,
+        setupIntentId: "",
+        setupSessionId: null,
+        providerEventId: event.id,
+        requestedRail: metadata.requested_rail ?? null,
+      }),
+    };
+    return {
+      kind: "wallet_funding_recorded",
+      providerEventId: event.id,
+      eventType: event.type,
+      fundingMethod,
+      fundingCredit: {
+        vendorId,
+        walletAccountId: undefined,
+        rail,
+        status,
+        amountCents,
+        currency,
+        referenceType: "stripe_payment_intent",
+        referenceId: paymentIntent.id,
+        externalTransactionId: idFromExpandable(paymentIntent.latest_charge) ?? undefined,
+        metadata: {
+          provider: "stripe",
+          providerEventId: event.id,
+          eventType: event.type,
+          paymentIntentStatus: paymentIntent.status,
+          fundingMethodId,
+          providerPaymentMethodId: paymentMethod.id,
+        },
+        idempotencyKey: `stripe-funding:${paymentIntent.id}`,
+      },
+    };
+  }
+
   private async createCustomer(input: {
     email: string | null;
     name: string;
@@ -307,6 +477,16 @@ function displayLabelForPaymentMethod(paymentMethod: Stripe.PaymentMethod): stri
   return "Stripe funding method";
 }
 
+function amountForPaymentIntent(
+  paymentIntent: Stripe.PaymentIntent,
+  status: CreditDropshipWalletFundingInput["status"],
+): number {
+  if (status === "settled" && Number.isSafeInteger(paymentIntent.amount_received) && paymentIntent.amount_received > 0) {
+    return paymentIntent.amount_received;
+  }
+  return paymentIntent.amount;
+}
+
 function sanitizedPaymentMethodMetadata(input: {
   paymentMethod: Stripe.PaymentMethod;
   setupIntentId: string;
@@ -317,7 +497,7 @@ function sanitizedPaymentMethodMetadata(input: {
   const base: Record<string, unknown> = {
     provider: "stripe",
     paymentMethodType: input.paymentMethod.type,
-    setupIntentId: input.setupIntentId,
+    setupIntentId: input.setupIntentId || null,
     setupSessionId: input.setupSessionId,
     providerEventId: input.providerEventId,
     requestedRail: input.requestedRail,
@@ -348,6 +528,11 @@ function idFromExpandable(value: string | { id?: string } | null | undefined): s
     return value.id;
   }
   return null;
+}
+
+function parseOptionalPositiveInteger(value: unknown, field: string): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  return parsePositiveInteger(value, field);
 }
 
 function parsePositiveInteger(value: unknown, field: string): number {

@@ -5,6 +5,7 @@ import {
   buildListingPushRequest,
   buildAutoReloadConfigInput,
   buildStripeFundingSetupSessionInput,
+  buildStripeWalletFundingSessionInput,
   buildVariantSelectionReplacement,
   buildStoreConnectionOAuthStartInput,
   formatCents,
@@ -226,6 +227,33 @@ describe("dropship ops surface client helpers", () => {
     })).toThrow();
     expect(() => buildStripeFundingSetupSessionInput({
       rail: "stripe_card",
+      returnTo: "https://attacker.example/wallet",
+    })).toThrow();
+  });
+
+  it("builds Stripe wallet funding session input with integer cents", () => {
+    expect(buildStripeWalletFundingSessionInput({
+      fundingMethodId: "99",
+      amount: "$250.00",
+      returnTo: "/wallet",
+    })).toEqual({
+      fundingMethodId: 99,
+      amountCents: 25000,
+      returnTo: "/wallet",
+    });
+    expect(() => buildStripeWalletFundingSessionInput({
+      fundingMethodId: "",
+      amount: "250",
+      returnTo: "/wallet",
+    })).toThrow();
+    expect(() => buildStripeWalletFundingSessionInput({
+      fundingMethodId: "99",
+      amount: "250.555",
+      returnTo: "/wallet",
+    })).toThrow();
+    expect(() => buildStripeWalletFundingSessionInput({
+      fundingMethodId: "99",
+      amount: "250",
       returnTo: "https://attacker.example/wallet",
     })).toThrow();
   });

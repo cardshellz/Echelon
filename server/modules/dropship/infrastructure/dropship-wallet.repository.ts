@@ -160,6 +160,61 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         referenceId: input.referenceId,
       });
       if (replay) {
+        if (replay.status === "settled" && input.status === "pending") {
+          assertLedgerReplayMatches(replay, {
+            type: "funding",
+            amountCents: input.amountCents,
+            currency: input.currency,
+            status: "settled",
+            referenceType: input.referenceType,
+            referenceId: input.referenceId,
+            requestHash: input.requestHash,
+          });
+          await client.query("COMMIT");
+          return {
+            account,
+            ledgerEntry: replay,
+            idempotentReplay: true,
+          };
+        }
+        if (replay.status === "pending" && input.status === "settled") {
+          assertLedgerReplayMatches(replay, {
+            type: "funding",
+            amountCents: input.amountCents,
+            currency: input.currency,
+            status: "pending",
+            referenceType: input.referenceType,
+            referenceId: input.referenceId,
+            requestHash: input.requestHash,
+          });
+          const settled = await settlePendingFundingWithClient(client, {
+            account,
+            ledgerEntry: replay,
+            fundingMethodId: input.fundingMethodId ?? null,
+            externalTransactionId: input.externalTransactionId ?? null,
+            metadata: {
+              ...(input.metadata ?? {}),
+              rail: input.rail,
+              requestHash: input.requestHash,
+              settledFromPending: true,
+            },
+            settledAt: input.occurredAt,
+          });
+          await recordWalletAuditEvent(client, {
+            vendorId: input.vendorId,
+            entityType: "dropship_wallet_ledger",
+            entityId: String(settled.ledgerEntry.ledgerEntryId),
+            eventType: "wallet_funding_settled",
+            payload: serializeLedgerForAudit(settled.ledgerEntry),
+            createdAt: input.occurredAt,
+          });
+          await client.query("COMMIT");
+          return {
+            account: settled.account,
+            ledgerEntry: settled.ledgerEntry,
+            idempotentReplay: false,
+          };
+        }
         assertLedgerReplayMatches(replay, {
           type: "funding",
           amountCents: input.amountCents,
@@ -524,6 +579,10 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       status?: DropshipWalletLedgerRecord["status"];
       amountCents: number;
       currency: string;
+      fundingMethodId?: number | null;
+      externalTransactionId?: string | null;
+      metadata?: Record<string, unknown>;
+      rail?: CreateDropshipWalletFundingLedgerInput["rail"];
       requestHash: string;
       occurredAt: Date;
     },
@@ -540,6 +599,57 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       if (!ledgerEntry) {
         await client.query("COMMIT");
         return null;
+      }
+      if ((input.type ?? "funding") === "funding" && ledgerEntry.status === "settled" && input.status === "pending") {
+        assertLedgerReplayMatches(ledgerEntry, {
+          type: "funding",
+          amountCents: input.amountCents,
+          currency: input.currency,
+          status: "settled",
+          referenceType: input.referenceType,
+          referenceId: input.referenceId,
+          requestHash: input.requestHash,
+        });
+        await client.query("COMMIT");
+        return {
+          account,
+          ledgerEntry,
+          idempotentReplay: true,
+        };
+      }
+      if ((input.type ?? "funding") === "funding" && ledgerEntry.status === "pending" && input.status === "settled") {
+        assertLedgerReplayMatches(ledgerEntry, {
+          type: "funding",
+          amountCents: input.amountCents,
+          currency: input.currency,
+          status: "pending",
+          referenceType: input.referenceType,
+          referenceId: input.referenceId,
+          requestHash: input.requestHash,
+        });
+        const settled = await settlePendingFundingWithClient(client, {
+          account,
+          ledgerEntry,
+          fundingMethodId: input.fundingMethodId ?? ledgerEntry.fundingMethodId,
+          externalTransactionId: input.externalTransactionId ?? ledgerEntry.externalTransactionId,
+          metadata: {
+            ...(input.metadata ?? {}),
+            ...(input.rail ? { rail: input.rail } : {}),
+            requestHash: input.requestHash,
+            settledFromPending: true,
+          },
+          settledAt: input.occurredAt,
+        });
+        await recordWalletAuditEvent(client, {
+          vendorId: input.vendorId,
+          entityType: "dropship_wallet_ledger",
+          entityId: String(settled.ledgerEntry.ledgerEntryId),
+          eventType: "wallet_funding_settled",
+          payload: serializeLedgerForAudit(settled.ledgerEntry),
+          createdAt: input.occurredAt,
+        });
+        await client.query("COMMIT");
+        return settled;
       }
       assertLedgerReplayMatches(ledgerEntry, {
         type: input.type ?? "funding",
@@ -584,6 +694,110 @@ export async function ensureDropshipWalletScaffoldingForVendor(
      ON CONFLICT (vendor_id) DO NOTHING`,
     [input.vendorId, input.now],
   );
+}
+
+async function settlePendingFundingWithClient(
+  client: PoolClient,
+  input: {
+    account: DropshipWalletAccountRecord;
+    ledgerEntry: DropshipWalletLedgerRecord;
+    fundingMethodId: number | null;
+    externalTransactionId: string | null;
+    metadata: Record<string, unknown>;
+    settledAt: Date;
+  },
+): Promise<DropshipWalletMutationResult> {
+  if (input.ledgerEntry.status !== "pending" || input.ledgerEntry.type !== "funding") {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_SETTLEMENT_STATE_INVALID",
+      "Only pending funding ledger entries can be settled.",
+      { ledgerEntryId: input.ledgerEntry.ledgerEntryId, status: input.ledgerEntry.status },
+    );
+  }
+  if (input.account.pendingBalanceCents < input.ledgerEntry.amountCents) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_PENDING_BALANCE_INVARIANT_FAILED",
+      "Dropship wallet pending balance is lower than the settlement amount.",
+      {
+        walletAccountId: input.account.walletAccountId,
+        ledgerEntryId: input.ledgerEntry.ledgerEntryId,
+        pendingBalanceCents: input.account.pendingBalanceCents,
+        amountCents: input.ledgerEntry.amountCents,
+      },
+    );
+  }
+
+  const nextAvailable = input.account.availableBalanceCents + input.ledgerEntry.amountCents;
+  const nextPending = input.account.pendingBalanceCents - input.ledgerEntry.amountCents;
+  const updatedAccount = await updateWalletBalancesWithClient(client, {
+    walletAccountId: input.account.walletAccountId,
+    vendorId: input.account.vendorId,
+    availableBalanceCents: nextAvailable,
+    pendingBalanceCents: nextPending,
+    updatedAt: input.settledAt,
+  });
+  const updatedLedger = await updateLedgerSettlementWithClient(client, {
+    ledgerEntryId: input.ledgerEntry.ledgerEntryId,
+    vendorId: input.ledgerEntry.vendorId,
+    availableBalanceAfterCents: nextAvailable,
+    pendingBalanceAfterCents: nextPending,
+    fundingMethodId: input.fundingMethodId ?? input.ledgerEntry.fundingMethodId,
+    externalTransactionId: input.externalTransactionId ?? input.ledgerEntry.externalTransactionId,
+    metadata: {
+      ...input.ledgerEntry.metadata,
+      ...input.metadata,
+    },
+    settledAt: input.settledAt,
+  });
+  return {
+    account: updatedAccount,
+    ledgerEntry: updatedLedger,
+    idempotentReplay: false,
+  };
+}
+
+async function updateLedgerSettlementWithClient(
+  client: PoolClient,
+  input: {
+    ledgerEntryId: number;
+    vendorId: number;
+    availableBalanceAfterCents: number;
+    pendingBalanceAfterCents: number;
+    fundingMethodId: number | null;
+    externalTransactionId: string | null;
+    metadata: Record<string, unknown>;
+    settledAt: Date;
+  },
+): Promise<DropshipWalletLedgerRecord> {
+  const result = await client.query<WalletLedgerRow>(
+    `UPDATE dropship.dropship_wallet_ledger
+     SET status = 'settled',
+         available_balance_after_cents = $3,
+         pending_balance_after_cents = $4,
+         funding_method_id = $5,
+         external_transaction_id = $6,
+         metadata = $7::jsonb,
+         settled_at = $8
+     WHERE id = $1
+       AND vendor_id = $2
+       AND type = 'funding'
+       AND status = 'pending'
+     RETURNING id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
+               available_balance_after_cents, pending_balance_after_cents,
+               reference_type, reference_id, idempotency_key, funding_method_id,
+               external_transaction_id, metadata, created_at, settled_at`,
+    [
+      input.ledgerEntryId,
+      input.vendorId,
+      input.availableBalanceAfterCents,
+      input.pendingBalanceAfterCents,
+      input.fundingMethodId,
+      input.externalTransactionId,
+      JSON.stringify(input.metadata),
+      input.settledAt,
+    ],
+  );
+  return mapLedgerRow(requiredRow(result.rows[0], "Dropship wallet pending funding settlement did not return a row."));
 }
 
 async function loadWalletAccountForMutation(

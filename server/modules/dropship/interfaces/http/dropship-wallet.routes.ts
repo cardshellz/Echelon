@@ -41,6 +41,12 @@ export function registerDropshipWalletRoutes(
         });
         if (event.kind === "funding_method_setup_completed") {
           await service.registerFundingMethod(event.fundingMethod);
+        } else if (event.kind === "wallet_funding_recorded") {
+          const fundingMethod = await service.registerFundingMethod(event.fundingMethod);
+          await service.creditFunding({
+            ...event.fundingCredit,
+            fundingMethodId: fundingMethod.fundingMethod.fundingMethodId,
+          });
         }
         return res.json({
           received: true,
@@ -113,6 +119,37 @@ export function registerDropshipWalletRoutes(
       }
     },
   );
+
+  app.post(
+    "/api/dropship/wallet/funding/stripe/checkout-session",
+    requireDropshipAuth,
+    requireDropshipSensitiveActionProof("wallet_funding_high_value"),
+    async (req, res) => {
+      try {
+        const { successUrl, cancelUrl } = buildWalletFundingReturnUrls(req, req.body?.returnTo);
+        const session = await service.createStripeWalletFundingSessionForMember(
+          req.session.dropship!.memberId,
+          {
+            fundingMethodId: req.body?.fundingMethodId,
+            amountCents: req.body?.amountCents,
+            successUrl,
+            cancelUrl,
+          },
+        );
+        return res.json({
+          fundingSession: {
+            checkoutUrl: session.checkoutUrl,
+            providerSessionId: session.providerSessionId,
+            amountCents: session.amountCents,
+            currency: session.currency,
+            expiresAt: session.expiresAt,
+          },
+        });
+      } catch (error) {
+        return sendDropshipWalletError(res, error);
+      }
+    },
+  );
 }
 
 function parseLedgerLimit(value: unknown): number | undefined {
@@ -144,12 +181,26 @@ function buildFundingSetupReturnUrls(req: Request, rawReturnTo: unknown): {
   successUrl: string;
   cancelUrl: string;
 } {
+  return buildStripeReturnUrls(req, rawReturnTo, "funding_setup");
+}
+
+function buildWalletFundingReturnUrls(req: Request, rawReturnTo: unknown): {
+  successUrl: string;
+  cancelUrl: string;
+} {
+  return buildStripeReturnUrls(req, rawReturnTo, "wallet_funding");
+}
+
+function buildStripeReturnUrls(req: Request, rawReturnTo: unknown, statusParam: string): {
+  successUrl: string;
+  cancelUrl: string;
+} {
   const returnPath = parsePortalReturnPath(rawReturnTo);
   const baseUrl = parsePortalBaseUrl(req);
   const successUrl = new URL(returnPath, baseUrl);
-  successUrl.searchParams.set("funding_setup", "success");
+  successUrl.searchParams.set(statusParam, "success");
   const cancelUrl = new URL(returnPath, baseUrl);
-  cancelUrl.searchParams.set("funding_setup", "cancelled");
+  cancelUrl.searchParams.set(statusParam, "cancelled");
   return {
     successUrl: successUrl.toString(),
     cancelUrl: cancelUrl.toString(),
@@ -249,6 +300,9 @@ function statusForDropshipWalletError(code: string): number {
     return 503;
   }
   if (code === "DROPSHIP_STRIPE_SETUP_SESSION_URL_MISSING") {
+    return 502;
+  }
+  if (code === "DROPSHIP_STRIPE_FUNDING_SESSION_URL_MISSING") {
     return 502;
   }
   return 400;
