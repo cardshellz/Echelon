@@ -25,6 +25,13 @@ export type DropshipTrackingPushStatus =
   | "processing"
   | "succeeded"
   | "failed";
+export type DropshipNotificationOpsStatus =
+  | "pending"
+  | "delivered"
+  | "failed";
+export type DropshipNotificationOpsChannel =
+  | "email"
+  | "in_app";
 export type DropshipStoreConnectionLifecycleStatus =
   | "connected"
   | "needs_reauth"
@@ -57,6 +64,12 @@ const allDropshipTrackingPushStatuses: DropshipTrackingPushStatus[] = [
   "queued",
   "processing",
   "succeeded",
+  "failed",
+];
+
+const allDropshipNotificationOpsStatuses: DropshipNotificationOpsStatus[] = [
+  "pending",
+  "delivered",
   "failed",
 ];
 
@@ -488,6 +501,36 @@ export interface DropshipAdminTrackingPushListResponse {
   limit: number;
   statuses: DropshipTrackingPushStatus[];
   summary: Array<{ status: DropshipTrackingPushStatus; count: number }>;
+}
+
+export type DropshipAdminNotificationOpsVendorSummary = DropshipAdminOrderOpsVendorSummary;
+
+export interface DropshipAdminNotificationOpsListItem {
+  notificationEventId: number;
+  vendor: DropshipAdminNotificationOpsVendorSummary;
+  eventType: string;
+  channel: DropshipNotificationOpsChannel;
+  critical: boolean;
+  title: string;
+  message: string | null;
+  payload: Record<string, unknown>;
+  status: DropshipNotificationOpsStatus;
+  deliveredAt: string | null;
+  readAt: string | null;
+  idempotencyKey: string | null;
+  requestHash: string | null;
+  createdAt: string;
+}
+
+export interface DropshipAdminNotificationOpsListResponse {
+  items: DropshipAdminNotificationOpsListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  statuses: DropshipNotificationOpsStatus[];
+  channels: DropshipNotificationOpsChannel[] | null;
+  summary: Array<{ status: DropshipNotificationOpsStatus; count: number }>;
+  channelSummary: Array<{ channel: DropshipNotificationOpsChannel; count: number }>;
 }
 
 export interface DropshipAdminTrackingPushRetryInput {
@@ -1019,6 +1062,32 @@ export function buildAdminTrackingPushesUrl(input: {
     search: input.search.trim(),
     statuses,
     platform: input.platform === "all" ? undefined : input.platform,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildAdminNotificationEventsUrl(input: {
+  search: string;
+  status: DropshipNotificationOpsStatus | "default" | "all";
+  channel: DropshipNotificationOpsChannel | "all";
+  critical: "all" | "critical" | "noncritical";
+  page?: number;
+  limit?: number;
+}): string {
+  const statuses = input.status === "default"
+    ? undefined
+    : input.status === "all"
+      ? allDropshipNotificationOpsStatuses.join(",")
+      : input.status;
+  const critical = input.critical === "all"
+    ? undefined
+    : input.critical === "critical";
+  return buildQueryUrl("/api/dropship/admin/notifications", {
+    search: input.search.trim(),
+    statuses,
+    channel: input.channel === "all" ? undefined : input.channel,
+    critical,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });

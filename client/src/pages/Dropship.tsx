@@ -40,6 +40,7 @@ import {
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
   buildAdminListingPushJobsUrl,
+  buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminTrackingPushRetryInput,
@@ -66,6 +67,8 @@ import {
   type DropshipAdminCatalogExposureRuleInput,
   type DropshipAdminListingPushJobListItem,
   type DropshipAdminListingPushJobListResponse,
+  type DropshipAdminNotificationOpsListItem,
+  type DropshipAdminNotificationOpsListResponse,
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
@@ -85,6 +88,8 @@ import {
   type DropshipOpsRiskBucket,
   type DropshipOpsOrderIntakeStatus,
   type DropshipListingPushJobStatus,
+  type DropshipNotificationOpsChannel,
+  type DropshipNotificationOpsStatus,
   type DropshipTrackingPushStatus,
   type DropshipSeverity,
   type DropshipStoreConnectionLifecycleStatus,
@@ -97,6 +102,9 @@ type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
 type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
 type ListingPushStatusFilter = DropshipListingPushJobStatus | "default" | "all";
 type TrackingPushStatusFilter = DropshipTrackingPushStatus | "default" | "all";
+type NotificationOpsStatusFilter = DropshipNotificationOpsStatus | "default" | "all";
+type NotificationOpsChannelFilter = DropshipNotificationOpsChannel | "all";
+type NotificationOpsCriticalFilter = "all" | "critical" | "noncritical";
 type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
 type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
@@ -165,6 +173,26 @@ const trackingPushStatusFilters: TrackingPushStatusFilter[] = [
   "processing",
   "queued",
   "succeeded",
+];
+
+const notificationOpsStatusFilters: NotificationOpsStatusFilter[] = [
+  "default",
+  "all",
+  "failed",
+  "pending",
+  "delivered",
+];
+
+const notificationOpsChannelFilters: NotificationOpsChannelFilter[] = [
+  "all",
+  "email",
+  "in_app",
+];
+
+const notificationOpsCriticalFilters: NotificationOpsCriticalFilter[] = [
+  "all",
+  "critical",
+  "noncritical",
 ];
 
 const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
@@ -255,7 +283,7 @@ function refreshAll() {
 
       <div className="flex-1 overflow-auto p-4 md:p-6">
         <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col">
-          <TabsList className="mb-5 h-auto w-full justify-start rounded-none border-b bg-transparent p-0">
+          <TabsList className="mb-5 h-auto w-full justify-start overflow-x-auto rounded-none border-b bg-transparent p-0">
             <TabsTrigger
               value="overview"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
@@ -299,6 +327,12 @@ function refreshAll() {
               Tracking pushes
             </TabsTrigger>
             <TabsTrigger
+              value="notifications"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Notifications
+            </TabsTrigger>
+            <TabsTrigger
               value="audit"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -338,6 +372,10 @@ function refreshAll() {
 
           <TabsContent value="tracking-pushes" className="m-0">
             <TrackingPushOpsTab />
+          </TabsContent>
+
+          <TabsContent value="notifications" className="m-0">
+            <NotificationOpsTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -750,6 +788,127 @@ function TrackingPushOpsTab() {
         pushes={pushes}
         summary={trackingPushesQuery.data?.summary ?? []}
         total={trackingPushesQuery.data?.total ?? 0}
+      />
+    </div>
+  );
+}
+
+function NotificationOpsTab() {
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<NotificationOpsStatusFilter>("default");
+  const [channel, setChannel] = useState<NotificationOpsChannelFilter>("all");
+  const [critical, setCritical] = useState<NotificationOpsCriticalFilter>("all");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "default" as NotificationOpsStatusFilter,
+    channel: "all" as NotificationOpsChannelFilter,
+    critical: "all" as NotificationOpsCriticalFilter,
+  });
+
+  const notificationEventsUrl = useMemo(() => buildAdminNotificationEventsUrl({
+    search: appliedFilters.search,
+    status: appliedFilters.status,
+    channel: appliedFilters.channel,
+    critical: appliedFilters.critical,
+  }), [appliedFilters]);
+
+  const notificationEventsQuery = useQuery<DropshipAdminNotificationOpsListResponse>({
+    queryKey: [notificationEventsUrl],
+    queryFn: () => fetchJson<DropshipAdminNotificationOpsListResponse>(notificationEventsUrl),
+  });
+
+  const events = notificationEventsQuery.data?.items ?? [];
+
+  function applyNotificationFilters() {
+    setAppliedFilters({ search, status, channel, critical });
+  }
+
+  return (
+    <div className="space-y-5">
+      {notificationEventsQuery.error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {queryErrorMessage(notificationEventsQuery.error, "Unable to load dropship notification events.")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Notification operations</h2>
+            <p className="text-sm text-muted-foreground">
+              Review vendor notification delivery, unread critical notices, and failed message events.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Event, title, vendor, email, or hash"
+              />
+            </div>
+            <Select value={channel} onValueChange={(value) => setChannel(value as NotificationOpsChannelFilter)}>
+              <SelectTrigger className="lg:w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {notificationOpsChannelFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {notificationOpsChannelLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={critical} onValueChange={(value) => setCritical(value as NotificationOpsCriticalFilter)}>
+              <SelectTrigger className="lg:w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {notificationOpsCriticalFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {notificationOpsCriticalLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={status} onValueChange={(value) => setStatus(value as NotificationOpsStatusFilter)}>
+              <SelectTrigger className="lg:w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {notificationOpsStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {notificationOpsStatusLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyNotificationFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<Bell className="h-4 w-4" />} label="Matching events" value={String(notificationEventsQuery.data?.total ?? 0)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible failed" value={String(events.filter((event) => event.status === "failed").length)} />
+        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Visible pending" value={String(events.filter((event) => event.status === "pending").length)} />
+        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Critical visible" value={String(events.filter((event) => event.critical).length)} />
+      </section>
+
+      <NotificationEventsTable
+        channelSummary={notificationEventsQuery.data?.channelSummary ?? []}
+        events={events}
+        isLoading={notificationEventsQuery.isLoading || notificationEventsQuery.isFetching}
+        summary={notificationEventsQuery.data?.summary ?? []}
+        total={notificationEventsQuery.data?.total ?? 0}
       />
     </div>
   );
@@ -1704,6 +1863,119 @@ function TrackingPushesTable({
   );
 }
 
+function NotificationEventsTable({
+  channelSummary,
+  events,
+  isLoading,
+  summary,
+  total,
+}: {
+  channelSummary: DropshipAdminNotificationOpsListResponse["channelSummary"];
+  events: DropshipAdminNotificationOpsListItem[];
+  isLoading: boolean;
+  summary: DropshipAdminNotificationOpsListResponse["summary"];
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="mt-4 space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (events.length === 0) {
+    return <EmptyState title="No notification events" description="No dropship notification events match the current filters." />;
+  }
+
+  return (
+    <section className="rounded-md border bg-card">
+      <div className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Notification events</h2>
+          <p className="text-sm text-muted-foreground">{total} matching event{total === 1 ? "" : "s"}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {summary.map((entry) => (
+            <Badge key={entry.status} variant="outline" className={notificationOpsStatusTone(entry.status)}>
+              {formatStatus(entry.status)} {entry.count}
+            </Badge>
+          ))}
+          {channelSummary.map((entry) => (
+            <Badge key={entry.channel} variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+              {formatStatus(entry.channel)} {entry.count}
+            </Badge>
+          ))}
+        </div>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-[115px]">Event</TableHead>
+            <TableHead>Vendor</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Channel</TableHead>
+            <TableHead>Message</TableHead>
+            <TableHead>Delivery</TableHead>
+            <TableHead className="w-[145px]">Created</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {events.map((event) => (
+            <TableRow key={event.notificationEventId}>
+              <TableCell>
+                <div className="font-mono text-sm">#{event.notificationEventId}</div>
+                <div className="max-w-[180px] truncate text-xs text-muted-foreground">{formatStatus(event.eventType)}</div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{event.vendor.businessName || event.vendor.email || `Vendor ${event.vendor.vendorId}`}</div>
+                <div className="text-xs text-muted-foreground">
+                  {[event.vendor.email, event.vendor.memberId].filter(Boolean).join(" / ") || formatStatus(event.vendor.status)}
+                </div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={notificationOpsStatusTone(event.status)}>
+                  {formatStatus(event.status)}
+                </Badge>
+                {event.critical && (
+                  <Badge variant="outline" className="ml-2 border-rose-200 bg-rose-50 text-rose-800">
+                    Critical
+                  </Badge>
+                )}
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{formatStatus(event.channel)}</div>
+                <div className="max-w-[220px] truncate text-xs text-muted-foreground">
+                  {event.requestHash || event.idempotencyKey || "No request hash"}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="max-w-[360px] truncate font-medium">{event.title}</div>
+                <div className="max-w-[360px] truncate text-xs text-muted-foreground">
+                  {event.message || "No message body"}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="text-sm">
+                  {event.deliveredAt ? `Delivered ${formatDateTime(event.deliveredAt)}` : "Not delivered"}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {event.readAt ? `Read ${formatDateTime(event.readAt)}` : "Unread or not tracked"}
+                </div>
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                {formatDateTime(event.createdAt)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </section>
+  );
+}
+
 function StoreConnectionsTable({
   connections,
   isLoading,
@@ -2285,6 +2557,23 @@ function trackingPushStatusLabel(status: TrackingPushStatusFilter): string {
   return formatStatus(status);
 }
 
+function notificationOpsStatusLabel(status: NotificationOpsStatusFilter): string {
+  if (status === "default") return "Needs attention";
+  if (status === "all") return "All statuses";
+  return formatStatus(status);
+}
+
+function notificationOpsChannelLabel(channel: NotificationOpsChannelFilter): string {
+  if (channel === "all") return "All channels";
+  return formatStatus(channel);
+}
+
+function notificationOpsCriticalLabel(critical: NotificationOpsCriticalFilter): string {
+  if (critical === "critical") return "Critical only";
+  if (critical === "noncritical") return "Non-critical only";
+  return "All criticality";
+}
+
 function orderStatusCount(
   summary: DropshipAdminOrderOpsListResponse["summary"],
   status: DropshipOpsOrderIntakeStatus,
@@ -2336,6 +2625,19 @@ function trackingPushStatusTone(status: DropshipTrackingPushStatus): string {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
   if (status === "queued" || status === "processing") {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (status === "failed") {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function notificationOpsStatusTone(status: DropshipNotificationOpsStatus): string {
+  if (status === "delivered") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (status === "pending") {
     return "border-amber-200 bg-amber-50 text-amber-900";
   }
   if (status === "failed") {
