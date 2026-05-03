@@ -10,6 +10,7 @@ export interface DropshipMarketplaceTrackingPushRecord {
   pushId: number;
   intakeId: number;
   omsOrderId: number;
+  wmsShipmentId: number | null;
   vendorId: number;
   storeConnectionId: number;
   platform: DropshipMarketplaceTrackingRequest["platform"];
@@ -33,6 +34,7 @@ export type DropshipMarketplaceTrackingClaim =
 export interface DropshipMarketplaceTrackingRepository {
   claimForOmsOrder(input: {
     omsOrderId: number;
+    wmsShipmentId?: number | null;
     carrier: string;
     trackingNumber: string;
     shippedAt: Date;
@@ -62,6 +64,7 @@ export interface DropshipMarketplaceTrackingServiceDependencies {
 
 export interface PushDropshipTrackingForOmsOrderInput {
   omsOrderId: number;
+  wmsShipmentId?: number | null;
   carrier: string;
   trackingNumber: string;
   shippedAt: Date;
@@ -82,10 +85,16 @@ export class DropshipMarketplaceTrackingService {
     validatePushInput(input);
     const now = this.deps.clock.now();
     const idempotencyKey = input.idempotencyKey
-      ?? buildTrackingIdempotencyKey(input.omsOrderId, input.carrier, input.trackingNumber);
+      ?? buildTrackingIdempotencyKey(
+        input.omsOrderId,
+        input.carrier,
+        input.trackingNumber,
+        input.wmsShipmentId,
+      );
 
     const claim = await this.deps.repository.claimForOmsOrder({
       omsOrderId: input.omsOrderId,
+      wmsShipmentId: input.wmsShipmentId ?? null,
       carrier: input.carrier.trim(),
       trackingNumber: input.trackingNumber.trim(),
       shippedAt: input.shippedAt,
@@ -113,6 +122,7 @@ export class DropshipMarketplaceTrackingService {
           pushId: push.pushId,
           intakeId: push.intakeId,
           omsOrderId: push.omsOrderId,
+          wmsShipmentId: push.wmsShipmentId,
           storeConnectionId: push.storeConnectionId,
           platform: push.platform,
           externalFulfillmentId: push.externalFulfillmentId,
@@ -163,6 +173,17 @@ function validatePushInput(input: PushDropshipTrackingForOmsOrderInput): void {
       retryable: false,
     });
   }
+  if (
+    input.wmsShipmentId !== undefined &&
+    input.wmsShipmentId !== null &&
+    (!Number.isInteger(input.wmsShipmentId) || input.wmsShipmentId <= 0)
+  ) {
+    throw new DropshipError("DROPSHIP_TRACKING_WMS_SHIPMENT_ID_INVALID", "WMS shipment id must be a positive integer.", {
+      omsOrderId: input.omsOrderId,
+      wmsShipmentId: input.wmsShipmentId,
+      retryable: false,
+    });
+  }
   if (!input.carrier?.trim()) {
     throw new DropshipError("DROPSHIP_TRACKING_CARRIER_REQUIRED", "Carrier is required for tracking push.", {
       omsOrderId: input.omsOrderId,
@@ -187,6 +208,10 @@ function buildTrackingIdempotencyKey(
   omsOrderId: number,
   carrier: string,
   trackingNumber: string,
+  wmsShipmentId?: number | null,
 ): string {
+  if (wmsShipmentId !== undefined && wmsShipmentId !== null) {
+    return `dropship:tracking:${omsOrderId}:shipment:${wmsShipmentId}:${carrier.trim().toLowerCase()}:${trackingNumber.trim()}`;
+  }
   return `dropship:tracking:${omsOrderId}:${carrier.trim().toLowerCase()}:${trackingNumber.trim()}`;
 }

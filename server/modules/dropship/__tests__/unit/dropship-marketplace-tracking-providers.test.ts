@@ -40,6 +40,7 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     const result = await provider.pushTracking({
       intakeId: 10,
       omsOrderId: 20,
+      wmsShipmentId: null,
       vendorId: 30,
       storeConnectionId: 40,
       platform: "ebay",
@@ -68,6 +69,7 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     await expect(provider.pushTracking({
       intakeId: 10,
       omsOrderId: 20,
+      wmsShipmentId: null,
       vendorId: 30,
       storeConnectionId: 40,
       platform: "ebay",
@@ -100,6 +102,7 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     const result = await provider.pushTracking({
       intakeId: 10,
       omsOrderId: 20,
+      wmsShipmentId: null,
       vendorId: 30,
       storeConnectionId: 40,
       platform: "ebay",
@@ -131,6 +134,7 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     const result = await provider.pushTracking({
       intakeId: 10,
       omsOrderId: 20,
+      wmsShipmentId: null,
       vendorId: 30,
       storeConnectionId: 40,
       platform: "ebay",

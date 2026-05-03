@@ -41,6 +41,7 @@ export interface DropshipTrackingPushOpsRecord {
   pushId: number;
   intakeId: number;
   omsOrderId: number;
+  wmsShipmentId: number | null;
   vendor: DropshipTrackingPushOpsVendorSummary;
   storeConnection: DropshipTrackingPushOpsStoreSummary;
   platform: string;
@@ -80,6 +81,7 @@ export interface DropshipTrackingPushOpsListResult {
 export interface DropshipTrackingPushRetryRequest {
   pushId: number;
   omsOrderId: number;
+  wmsShipmentId: number | null;
   carrier: string;
   trackingNumber: string;
   shippedAt: Date;
@@ -150,6 +152,7 @@ export class DropshipTrackingPushOpsService {
     try {
       result = await this.deps.marketplaceTracking.pushForOmsOrder({
         omsOrderId: retryRequest.omsOrderId,
+        wmsShipmentId: retryRequest.wmsShipmentId,
         carrier: retryRequest.carrier,
         trackingNumber: retryRequest.trackingNumber,
         shippedAt: retryRequest.shippedAt,
@@ -172,6 +175,7 @@ export class DropshipTrackingPushOpsService {
       context: {
         pushId: retryRequest.pushId,
         omsOrderId: retryRequest.omsOrderId,
+        wmsShipmentId: retryRequest.wmsShipmentId,
         resultStatus: result.status,
         idempotencyKey: parsed.idempotencyKey,
         trackingPushIdempotencyKey: retryRequest.idempotencyKey,

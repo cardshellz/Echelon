@@ -243,6 +243,7 @@ function shopifyTrackingCompany(carrier: string): string {
 interface DropshipMarketplaceTrackingServiceHandle {
   pushForOmsOrder(input: {
     omsOrderId: number;
+    wmsShipmentId?: number | null;
     carrier: string;
     trackingNumber: string;
     shippedAt: Date;
@@ -272,6 +273,20 @@ function resolveDropshipShippedAt(order: any, orderId: number): Date {
     }
   }
   throw new Error(`Dropship marketplace tracking requires shipped_at for order ${orderId}`);
+}
+
+function buildDropshipMarketplaceTrackingIdempotencyKey(input: {
+  omsOrderId: number;
+  wmsShipmentId: number | null;
+  carrier: string;
+  trackingNumber: string;
+}): string {
+  const carrier = input.carrier.trim().toLowerCase();
+  const trackingNumber = input.trackingNumber.trim();
+  if (input.wmsShipmentId !== null) {
+    return `dropship:oms:${input.omsOrderId}:shipment:${input.wmsShipmentId}:tracking:${carrier}:${trackingNumber}`;
+  }
+  return `dropship:oms:${input.omsOrderId}:tracking:${carrier}:${trackingNumber}`;
 }
 
 function parseDate(value: unknown): Date | null {
@@ -370,6 +385,7 @@ export function createFulfillmentPushService(
   async function pushDropshipMarketplaceTrackingIfNeeded(
     order: any,
     orderId: number,
+    options: { wmsShipmentId?: number | null } = {},
   ): Promise<boolean | null> {
     if (!isDropshipOmsOrder(order)) {
       return null;
@@ -380,10 +396,16 @@ export function createFulfillmentPushService(
     const service = await resolveDropshipMarketplaceTrackingService();
     const result = await service.pushForOmsOrder({
       omsOrderId: orderId,
+      wmsShipmentId: options.wmsShipmentId ?? null,
       carrier,
       trackingNumber,
       shippedAt,
-      idempotencyKey: `dropship:oms:${orderId}:tracking:${carrier.toLowerCase()}:${trackingNumber}`,
+      idempotencyKey: buildDropshipMarketplaceTrackingIdempotencyKey({
+        omsOrderId: orderId,
+        wmsShipmentId: options.wmsShipmentId ?? null,
+        carrier,
+        trackingNumber,
+      }),
     });
     if (result.status === "not_dropship") {
       return null;
@@ -575,6 +597,7 @@ export function createFulfillmentPushService(
         shippedAt,
       },
       omsOrderId,
+      { wmsShipmentId: shipmentId },
     );
     if (dropshipPushed !== null) {
       return dropshipPushed;

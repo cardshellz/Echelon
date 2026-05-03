@@ -8,6 +8,7 @@ export interface DropshipMarketplaceTrackingLineItem {
 export interface DropshipMarketplaceTrackingRequest {
   intakeId: number;
   omsOrderId: number;
+  wmsShipmentId: number | null;
   vendorId: number;
   storeConnectionId: number;
   platform: DropshipSourcePlatform;

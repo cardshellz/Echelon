@@ -708,6 +708,7 @@ export interface DropshipAdminTrackingPushListItem {
   pushId: number;
   intakeId: number;
   omsOrderId: number;
+  wmsShipmentId: number | null;
   vendor: DropshipAdminOrderOpsVendorSummary;
   storeConnection: DropshipAdminOrderOpsStoreSummary;
   platform: string;
@@ -783,6 +784,7 @@ export interface DropshipAdminTrackingPushRetryResponse {
     pushId: number;
     intakeId: number;
     omsOrderId: number;
+    wmsShipmentId: number | null;
     vendorId: number;
     storeConnectionId: number;
     platform: string;

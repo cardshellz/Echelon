@@ -1609,6 +1609,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // actually ran (legacy-OMS-only orders skip it).
     let omsOrderId: number;
     let wmsFirst: boolean;
+    let trackingPushShipmentId: number | null = null;
 
     if (parsed.source === "wms-shipment") {
           // =====================================================
@@ -1619,6 +1620,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           // hasWmsOrder branch.
           // =====================================================
       const shipmentId = parsed.shipmentId;
+      trackingPushShipmentId = shipmentId;
 
       const shipmentResult: any = await db.execute(sql`
         SELECT id, order_id, status
@@ -1924,6 +1926,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         serviceCode: shipment.serviceCode,
         shipDate: shipment.shipDate,
         wmsFirst,
+        ...(trackingPushShipmentId !== null ? { wmsShipmentId: trackingPushShipmentId } : {}),
       },
     });
 
@@ -1935,7 +1938,14 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     try {
       const fulfillmentPush = (db as any).__fulfillmentPush;
       if (fulfillmentPush) {
-        await fulfillmentPush.pushTracking(omsOrderId);
+        if (
+          trackingPushShipmentId !== null &&
+          typeof fulfillmentPush.pushTrackingForShipment === "function"
+        ) {
+          await fulfillmentPush.pushTrackingForShipment(trackingPushShipmentId);
+        } else if (typeof fulfillmentPush.pushTracking === "function") {
+          await fulfillmentPush.pushTracking(omsOrderId);
+        }
       }
     } catch (pushErr: any) {
       console.error(

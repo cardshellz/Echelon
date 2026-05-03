@@ -14,6 +14,7 @@ interface TrackingPushOpsRow {
   id: number;
   intake_id: number;
   oms_order_id: string | number;
+  wms_shipment_id: string | number | null;
   vendor_id: number;
   store_connection_id: number;
   platform: string;
@@ -51,6 +52,7 @@ interface TrackingPushRetryRow {
   id: number;
   intake_id: number;
   oms_order_id: string | number;
+  wms_shipment_id: string | number | null;
   vendor_id: number;
   store_connection_id: number;
   platform: string;
@@ -155,7 +157,7 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
              updated_at = $3
          WHERE id = $1
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id,
-                   platform, external_order_id, status, idempotency_key,
+                   wms_shipment_id, platform, external_order_id, status, idempotency_key,
                    carrier, tracking_number, shipped_at, attempt_count,
                    last_error_code, last_error_message, raw_result`,
         [
@@ -181,6 +183,7 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
         payload: {
           idempotencyKey: input.idempotencyKey,
           trackingPushIdempotencyKey: row.idempotency_key,
+          wmsShipmentId: toSafeOptionalPositiveInteger(row.wms_shipment_id, "wms_shipment_id"),
           previousStatus: existing.status,
           previousAttemptCount: toSafeNonNegativeInteger(existing.attempt_count, "attempt_count"),
           previousLastErrorCode: existing.last_error_code,
@@ -193,6 +196,7 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
       return {
         pushId: row.id,
         omsOrderId: toSafePositiveInteger(row.oms_order_id, "oms_order_id"),
+        wmsShipmentId: toSafeOptionalPositiveInteger(row.wms_shipment_id, "wms_shipment_id"),
         carrier: row.carrier,
         trackingNumber: row.tracking_number,
         shippedAt: row.shipped_at,
@@ -223,7 +227,7 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
          WHERE id = $1
            AND status = 'queued'
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id,
-                   platform, external_order_id, status, idempotency_key,
+                   wms_shipment_id, platform, external_order_id, status, idempotency_key,
                    carrier, tracking_number, shipped_at, attempt_count,
                    last_error_code, last_error_message, raw_result`,
         [
@@ -270,6 +274,7 @@ function trackingPushSelectSql(): string {
       tp.id,
       tp.intake_id,
       tp.oms_order_id,
+      tp.wms_shipment_id,
       tp.vendor_id,
       tp.store_connection_id,
       tp.platform,
@@ -372,6 +377,7 @@ function mapTrackingPushOpsRow(row: TrackingPushOpsRow): DropshipTrackingPushOps
     pushId: row.id,
     intakeId: row.intake_id,
     omsOrderId: toSafePositiveInteger(row.oms_order_id, "oms_order_id"),
+    wmsShipmentId: toSafeOptionalPositiveInteger(row.wms_shipment_id, "wms_shipment_id"),
     vendor: {
       vendorId: row.vendor_id,
       memberId: row.member_id,
@@ -415,7 +421,7 @@ async function loadTrackingPushForRetry(
 ): Promise<TrackingPushRetryRow | null> {
   const result = await client.query<TrackingPushRetryRow>(
     `SELECT id, intake_id, oms_order_id, vendor_id, store_connection_id,
-            platform, external_order_id, status, idempotency_key,
+            wms_shipment_id, platform, external_order_id, status, idempotency_key,
             carrier, tracking_number, shipped_at, attempt_count,
             last_error_code, last_error_message, raw_result
      FROM dropship.dropship_marketplace_tracking_pushes
@@ -455,6 +461,7 @@ async function recordTrackingPushOpsAuditEvent(
       JSON.stringify({
         intakeId: input.row.intake_id,
         omsOrderId: toSafePositiveInteger(input.row.oms_order_id, "oms_order_id"),
+        wmsShipmentId: toSafeOptionalPositiveInteger(input.row.wms_shipment_id, "wms_shipment_id"),
         platform: input.row.platform,
         externalOrderId: input.row.external_order_id,
         ...input.payload,
@@ -489,6 +496,13 @@ function toSafePositiveInteger(value: string | number, field: string): number {
     );
   }
   return parsed;
+}
+
+function toSafeOptionalPositiveInteger(value: string | number | null, field: string): number | null {
+  if (value === null) {
+    return null;
+  }
+  return toSafePositiveInteger(value, field);
 }
 
 function toSafeNonNegativeInteger(value: string | number, field: string): number {
