@@ -176,6 +176,44 @@ describe("DropshipStoreConnectionService", () => {
       code: "DROPSHIP_STORE_ORDER_PROCESSING_CONFIG_UPDATED",
     });
   });
+
+  it("lists store connections for admin review with parsed filters", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
+
+    const result = await service.listForAdmin({
+      statuses: ["needs_reauth"],
+      platform: "ebay",
+      vendorId: 10,
+      search: "External",
+      page: 1,
+      limit: 25,
+    });
+
+    expect(result.items[0]).toMatchObject({
+      storeConnectionId: 21,
+      status: "needs_reauth",
+      vendor: { vendorId: 10 },
+    });
+    expect(repository.lastListForAdminInput).toMatchObject({
+      statuses: ["needs_reauth"],
+      platform: "ebay",
+      vendorId: 10,
+      search: "External",
+      page: 1,
+      limit: 25,
+    });
+  });
+
+  it("rejects invalid admin store connection list filters before repository calls", async () => {
+    await expect(service.listForAdmin({
+      statuses: ["invalid"],
+      page: 1,
+      limit: 50,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_CONNECTION_LIST_INVALID_INPUT",
+    });
+    expect(repository.lastListForAdminInput).toBeNull();
+  });
 });
 
 class FakeVendorProvisioningService {
@@ -260,10 +298,38 @@ class FakeTokenCipher implements DropshipStoreTokenCipher {
 class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository {
   connections: DropshipStoreConnectionProfile[] = [];
   lastConnectInput: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0] | null = null;
+  lastListForAdminInput: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0] | null = null;
   lastOrderProcessingConfigInput: Parameters<DropshipStoreConnectionRepository["updateOrderProcessingConfig"]>[0] | null = null;
 
   async listByVendorId(): Promise<DropshipStoreConnectionProfile[]> {
     return this.connections;
+  }
+
+  async listForAdmin(
+    input: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0],
+  ): ReturnType<DropshipStoreConnectionRepository["listForAdmin"]> {
+    this.lastListForAdminInput = input;
+    return {
+      items: this.connections.map((connection) => ({
+        ...connection,
+        vendor: {
+          vendorId: connection.vendorId,
+          memberId: "member-1",
+          businessName: "Vendor",
+          email: "vendor@cardshellz.test",
+          status: "active",
+          entitlementStatus: "active",
+        },
+        setupCheckSummary: {
+          openCount: 1,
+          errorCount: connection.status === "needs_reauth" ? 1 : 0,
+          warningCount: 0,
+        },
+      })),
+      total: this.connections.length,
+      page: input.page,
+      limit: input.limit,
+    };
   }
 
   async countActiveByVendorId(): Promise<number> {

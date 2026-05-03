@@ -1,6 +1,15 @@
 import { z } from "zod";
 import { dropshipSupportedStorePlatforms } from "../domain/store-connection";
 
+export const dropshipStoreConnectionLifecycleStatusSchema = z.enum([
+  "connected",
+  "needs_reauth",
+  "refresh_failed",
+  "grace_period",
+  "paused",
+  "disconnected",
+]);
+
 export const startDropshipStoreConnectionOAuthInputSchema = z.object({
   platform: z.enum(dropshipSupportedStorePlatforms),
   shopDomain: z.string().trim().min(1).max(255).optional(),
@@ -32,6 +41,19 @@ export const disconnectDropshipStoreConnectionInputSchema = z.object({
 
 export type DisconnectDropshipStoreConnectionInput = z.infer<
   typeof disconnectDropshipStoreConnectionInputSchema
+>;
+
+export const listDropshipAdminStoreConnectionsInputSchema = z.object({
+  statuses: z.array(dropshipStoreConnectionLifecycleStatusSchema).min(1).max(6).optional(),
+  platform: z.enum(dropshipSupportedStorePlatforms).optional(),
+  vendorId: z.number().int().positive().optional(),
+  search: z.string().trim().min(1).max(255).optional(),
+  page: z.number().int().positive().max(10_000).default(1),
+  limit: z.number().int().positive().max(200).default(50),
+}).strict();
+
+export type ListDropshipAdminStoreConnectionsInput = z.infer<
+  typeof listDropshipAdminStoreConnectionsInputSchema
 >;
 
 export const updateDropshipStoreOrderProcessingConfigInputSchema = z.object({

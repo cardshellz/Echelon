@@ -10,6 +10,8 @@ import {
   buildAdminCatalogExposurePreviewUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminStoreConnectionsUrl,
+  buildStoreOrderProcessingConfigInput,
   buildCatalogExposureRuleInput,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
@@ -106,6 +108,42 @@ describe("dropship ops surface client helpers", () => {
       search: "",
       status: "all",
     })).toBe("/api/dropship/admin/order-intake?statuses=received%2Cprocessing%2Caccepted%2Crejected%2Cretrying%2Cfailed%2Cpayment_hold%2Ccancelled%2Cexception&page=1&limit=50");
+  });
+
+  it("builds admin store connection URLs with optional filters", () => {
+    expect(buildAdminStoreConnectionsUrl({
+      search: " vendor ",
+      status: "needs_reauth",
+      platform: "ebay",
+    })).toBe("/api/dropship/admin/store-connections?search=vendor&statuses=needs_reauth&platform=ebay&page=1&limit=50");
+    expect(buildAdminStoreConnectionsUrl({
+      search: "",
+      status: "all",
+      platform: "all",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/admin/store-connections?page=2&limit=25");
+  });
+
+  it("builds store order processing config inputs with nullable warehouse ids", () => {
+    expect(buildStoreOrderProcessingConfigInput({
+      defaultWarehouseId: " 3 ",
+      idempotencyKey: "warehouse-config-1",
+    })).toEqual({
+      defaultWarehouseId: 3,
+      idempotencyKey: "warehouse-config-1",
+    });
+    expect(buildStoreOrderProcessingConfigInput({
+      defaultWarehouseId: " ",
+      idempotencyKey: "warehouse-config-2",
+    })).toEqual({
+      defaultWarehouseId: null,
+      idempotencyKey: "warehouse-config-2",
+    });
+    expect(() => buildStoreOrderProcessingConfigInput({
+      defaultWarehouseId: "0",
+      idempotencyKey: "warehouse-config-3",
+    })).toThrow();
   });
 
   it("builds admin order ops action bodies with required reason guardrails", () => {

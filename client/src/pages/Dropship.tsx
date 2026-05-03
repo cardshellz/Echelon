@@ -40,7 +40,9 @@ import {
   buildAdminCatalogExposurePreviewUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminStoreConnectionsUrl,
   buildCatalogExposureRuleInput,
+  buildStoreOrderProcessingConfigInput,
   countByKey,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
@@ -60,6 +62,8 @@ import {
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
+  type DropshipAdminStoreConnectionListItem,
+  type DropshipAdminStoreConnectionListResponse,
   type DropshipAdminOpsOverview,
   type DropshipAdminOpsOverviewResponse,
   type DropshipAuditEventRecord,
@@ -68,10 +72,15 @@ import {
   type DropshipOpsRiskBucket,
   type DropshipOpsOrderIntakeStatus,
   type DropshipSeverity,
+  type DropshipStoreConnectionLifecycleStatus,
+  type DropshipStorePlatform,
+  type DropshipStoreOrderProcessingConfigResponse,
 } from "@/lib/dropship-ops-surface";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
+type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
+type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
 
@@ -109,6 +118,16 @@ const orderOpsStatusFilters: OrderOpsStatusFilter[] = [
   "received",
   "processing",
   "accepted",
+];
+
+const storeConnectionStatusFilters: StoreConnectionStatusFilter[] = [
+  "all",
+  "connected",
+  "needs_reauth",
+  "refresh_failed",
+  "grace_period",
+  "paused",
+  "disconnected",
 ];
 
 export default function Dropship() {
@@ -212,6 +231,12 @@ function refreshAll() {
               Order intake
             </TabsTrigger>
             <TabsTrigger
+              value="stores"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Store connections
+            </TabsTrigger>
+            <TabsTrigger
               value="audit"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -235,6 +260,10 @@ function refreshAll() {
 
           <TabsContent value="order-intake" className="m-0">
             <OrderIntakeOpsTab />
+          </TabsContent>
+
+          <TabsContent value="stores" className="m-0">
+            <StoreConnectionOpsTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -286,6 +315,170 @@ function refreshAll() {
           </TabsContent>
         </Tabs>
       </div>
+    </div>
+  );
+}
+
+function StoreConnectionOpsTab() {
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<StoreConnectionStatusFilter>("all");
+  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "all" as StoreConnectionStatusFilter,
+    platform: "all" as StoreConnectionPlatformFilter,
+  });
+  const [warehouseInputs, setWarehouseInputs] = useState<Record<number, string>>({});
+  const [savingConnectionId, setSavingConnectionId] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const storeConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
+    search: appliedFilters.search,
+    status: appliedFilters.status,
+    platform: appliedFilters.platform,
+  }), [appliedFilters]);
+
+  const storeConnectionsQuery = useQuery<DropshipAdminStoreConnectionListResponse>({
+    queryKey: [storeConnectionsUrl],
+    queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(storeConnectionsUrl),
+  });
+
+  const connections = useMemo(
+    () => storeConnectionsQuery.data?.items ?? [],
+    [storeConnectionsQuery.data?.items],
+  );
+  const attentionCount = connections.filter((connection) => storeConnectionNeedsAttention(connection)).length;
+
+  useEffect(() => {
+    setWarehouseInputs((current) => {
+      const next = { ...current };
+      for (const connection of connections) {
+        if (next[connection.storeConnectionId] === undefined) {
+          next[connection.storeConnectionId] = connection.orderProcessingConfig.defaultWarehouseId === null
+            ? ""
+            : String(connection.orderProcessingConfig.defaultWarehouseId);
+        }
+      }
+      return next;
+    });
+  }, [connections]);
+
+  function applyStoreFilters() {
+    setAppliedFilters({ search, status, platform });
+  }
+
+  async function saveWarehouseConfig(connection: DropshipAdminStoreConnectionListItem) {
+    setSavingConnectionId(connection.storeConnectionId);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildStoreOrderProcessingConfigInput({
+        defaultWarehouseId: warehouseInputs[connection.storeConnectionId] ?? "",
+        idempotencyKey: createDropshipIdempotencyKey(`admin-store-${connection.storeConnectionId}-warehouse`),
+      });
+      const response = await putJson<DropshipStoreOrderProcessingConfigResponse>(
+        `/api/dropship/admin/store-connections/${connection.storeConnectionId}/order-processing-config`,
+        input,
+      );
+      setMessage(`Store connection ${response.connection.storeConnectionId} warehouse config saved.`);
+      await Promise.all([
+        storeConnectionsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Store connection config update failed.");
+    } finally {
+      setSavingConnectionId(null);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {(storeConnectionsQuery.error || error) && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {error || queryErrorMessage(storeConnectionsQuery.error, "Unable to load dropship store connections.")}
+          </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Store connection health</h2>
+            <p className="text-sm text-muted-foreground">
+              Review connected vendor stores, token health, setup checks, sync recency, and order-processing warehouse config.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Vendor, store, domain, or member"
+              />
+            </div>
+            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+              <SelectTrigger className="lg:w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All platforms</SelectItem>
+                <SelectItem value="ebay">eBay</SelectItem>
+                <SelectItem value="shopify">Shopify</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={status} onValueChange={(value) => setStatus(value as StoreConnectionStatusFilter)}>
+              <SelectTrigger className="lg:w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {storeConnectionStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {option === "all" ? "All statuses" : formatStatus(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyStoreFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching connections" value={String(storeConnectionsQuery.data?.total ?? 0)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible needing attention" value={String(attentionCount)} />
+        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Connected visible" value={String(connections.filter((connection) => connection.status === "connected").length)} />
+        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Warehouse configured" value={String(connections.filter((connection) => connection.orderProcessingConfig.defaultWarehouseId !== null).length)} />
+      </section>
+
+      <StoreConnectionsTable
+        connections={connections}
+        isLoading={storeConnectionsQuery.isLoading || storeConnectionsQuery.isFetching}
+        savingConnectionId={savingConnectionId}
+        total={storeConnectionsQuery.data?.total ?? 0}
+        warehouseInputs={warehouseInputs}
+        onSaveWarehouseConfig={saveWarehouseConfig}
+        onWarehouseInputChange={(storeConnectionId, value) => setWarehouseInputs((current) => ({
+          ...current,
+          [storeConnectionId]: value,
+        }))}
+      />
     </div>
   );
 }
@@ -714,6 +907,146 @@ function CatalogExposureTab() {
         />
       </section>
     </div>
+  );
+}
+
+function StoreConnectionsTable({
+  connections,
+  isLoading,
+  onSaveWarehouseConfig,
+  onWarehouseInputChange,
+  savingConnectionId,
+  total,
+  warehouseInputs,
+}: {
+  connections: DropshipAdminStoreConnectionListItem[];
+  isLoading: boolean;
+  onSaveWarehouseConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
+  onWarehouseInputChange: (storeConnectionId: number, value: string) => void;
+  savingConnectionId: number | null;
+  total: number;
+  warehouseInputs: Record<number, string>;
+}) {
+  if (isLoading) {
+    return (
+      <div className="space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (connections.length === 0) {
+    return (
+      <Empty className="rounded-md border border-dashed p-8">
+        <EmptyMedia variant="icon"><Store /></EmptyMedia>
+        <EmptyHeader>
+          <EmptyTitle>No store connections</EmptyTitle>
+          <EmptyDescription>No dropship store connections match the current filters.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return (
+    <section className="rounded-md border bg-card">
+      <div className="flex items-center justify-between border-b px-4 py-3 text-sm text-muted-foreground">
+        <span>{total} store connection{total === 1 ? "" : "s"}</span>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Store</TableHead>
+            <TableHead>Vendor</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Tokens</TableHead>
+            <TableHead>Sync</TableHead>
+            <TableHead>Setup checks</TableHead>
+            <TableHead className="w-[260px]">Default warehouse</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {connections.map((connection) => (
+            <TableRow key={connection.storeConnectionId}>
+              <TableCell>
+                <div className="font-medium">
+                  {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {formatStatus(connection.platform)} connection {connection.storeConnectionId}
+                </div>
+                {connection.externalAccountId && (
+                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.externalAccountId}</div>
+                )}
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`}</div>
+                <div className="text-xs text-muted-foreground">{connection.vendor.memberId}</div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
+                  {formatStatus(connection.status)}
+                </Badge>
+                <div className="mt-1 text-xs text-muted-foreground">Setup {formatStatus(connection.setupStatus)}</div>
+                {connection.disconnectReason && (
+                  <div className="mt-1 max-w-[200px] truncate text-xs text-muted-foreground">{connection.disconnectReason}</div>
+                )}
+              </TableCell>
+              <TableCell>
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant="outline" className={connection.hasAccessToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"}>
+                    Access
+                  </Badge>
+                  <Badge variant="outline" className={connection.hasRefreshToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-600"}>
+                    Refresh
+                  </Badge>
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">Expires {formatDateTime(connection.tokenExpiresAt)}</div>
+              </TableCell>
+              <TableCell>
+                <div className="text-sm">Orders {formatDateTime(connection.lastOrderSyncAt)}</div>
+                <div className="text-xs text-muted-foreground">Inventory {formatDateTime(connection.lastInventorySyncAt)}</div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={connection.setupCheckSummary.errorCount > 0
+                  ? "border-rose-200 bg-rose-50 text-rose-800"
+                  : connection.setupCheckSummary.warningCount > 0
+                    ? "border-amber-200 bg-amber-50 text-amber-900"
+                    : "border-zinc-200 bg-zinc-50 text-zinc-700"}
+                >
+                  {connection.setupCheckSummary.openCount} open
+                </Badge>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {connection.setupCheckSummary.errorCount} error / {connection.setupCheckSummary.warningCount} warning
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Input
+                    value={warehouseInputs[connection.storeConnectionId] ?? ""}
+                    onChange={(event) => onWarehouseInputChange(connection.storeConnectionId, event.target.value)}
+                    placeholder="Warehouse ID"
+                    className="h-9"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-9 gap-2"
+                    disabled={savingConnectionId !== null}
+                    onClick={() => onSaveWarehouseConfig(connection)}
+                  >
+                    <Save className="h-4 w-4" />
+                    {savingConnectionId === connection.storeConnectionId ? "Saving" : "Save"}
+                  </Button>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </section>
   );
 }
 
@@ -1163,6 +1496,23 @@ function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {
   if (status === "failed" || status === "exception" || status === "rejected" || status === "cancelled") {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function storeConnectionNeedsAttention(connection: DropshipAdminStoreConnectionListItem): boolean {
+  return connection.status !== "connected"
+    || connection.setupStatus !== "ready"
+    || connection.setupCheckSummary.errorCount > 0
+    || connection.setupCheckSummary.warningCount > 0
+    || !connection.hasAccessToken;
+}
+
+function storeConnectionStatusTone(status: DropshipStoreConnectionLifecycleStatus): string {
+  if (status === "connected") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "needs_reauth" || status === "refresh_failed" || status === "grace_period") {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+  if (status === "paused") return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
