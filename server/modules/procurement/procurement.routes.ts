@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { z } from "zod";
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
@@ -2301,6 +2302,57 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // Returns PO lines eligible for shipping with alreadyShippedQty computed.
+  // Filters out non-product lines, closed/cancelled lines, and fully-shipped lines.
+  app.get("/api/purchase-orders/:id/shippable-lines", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const poId = Number(req.params.id);
+      const poLines = await purchasing.getPurchaseOrderLines(poId);
+      const shipmentLines = await shipmentTracking.getLinesByPo(poId);
+
+      // Compute alreadyShippedQty per PO line
+      const shippedQtyByPoLine = new Map<number, number>();
+      for (const sl of shipmentLines) {
+        if (sl.purchaseOrderLineId) {
+          shippedQtyByPoLine.set(
+            sl.purchaseOrderLineId,
+            (shippedQtyByPoLine.get(sl.purchaseOrderLineId) ?? 0) + (sl.qtyShipped ?? 0),
+          );
+        }
+      }
+
+      const result = (poLines as any[])
+        .filter((line) => {
+          // Only product lines
+          const isProduct = !line.lineType || line.lineType === "product";
+          if (!isProduct) return false;
+          // Skip closed/cancelled
+          if (line.status === "closed" || line.status === "cancelled") return false;
+          // Skip fully shipped
+          const orderQty = line.orderQty ?? 0;
+          const cancelledQty = line.cancelledQty ?? 0;
+          const alreadyShipped = shippedQtyByPoLine.get(line.id) ?? 0;
+          const remaining = orderQty - alreadyShipped - cancelledQty;
+          if (remaining <= 0) return false;
+          return true;
+        })
+        .map((line) => {
+          const orderQty = line.orderQty ?? 0;
+          const cancelledQty = line.cancelledQty ?? 0;
+          const alreadyShipped = shippedQtyByPoLine.get(line.id) ?? 0;
+          return {
+            ...line,
+            alreadyShippedQty: alreadyShipped,
+            remainingQty: orderQty - alreadyShipped - cancelledQty,
+          };
+        });
+
+      res.json({ lines: result });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/purchase-orders/:id/lines", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const line = await purchasing.addLine(Number(req.params.id), req.body, req.session.user?.id);
@@ -3235,11 +3287,25 @@ export function registerPurchasingRoutes(app: Express) {
 
   // ── Shipment Lines ──
 
+  const fromPoBodySchema = z.object({
+    purchaseOrderId: z.number().int().positive(),
+    lineIds: z.array(z.number().int().positive()).optional(),
+    lineSelections: z.array(z.object({ poLineId: z.number().int().positive(), qty: z.number().int().positive() })).optional(),
+  });
+
   app.post("/api/inbound-shipments/:id/lines/from-po", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const lines = await shipmentTracking.addLinesFromPO(Number(req.params.id), req.body.purchaseOrderId, req.body.lineIds);
+      const parsed = fromPoBodySchema.parse(req.body);
+      // New shape: lineSelections with per-line qty. Legacy shape: lineIds uses orderQty.
+      const lines = await shipmentTracking.addLinesFromPO(
+        Number(req.params.id),
+        parsed.purchaseOrderId,
+        parsed.lineSelections,
+        parsed.lineIds,
+      );
       res.status(201).json(lines);
     } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ error: "Invalid request body: " + error.errors.map(e => e.message).join(", ") });
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
     }

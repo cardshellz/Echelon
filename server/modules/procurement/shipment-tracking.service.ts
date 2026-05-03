@@ -412,7 +412,12 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
   // ─── Line management ───────────────────────────────────────────
 
-  async function addLinesFromPO(shipmentId: number, purchaseOrderId: number, lineIds?: number[]) {
+  async function addLinesFromPO(
+    shipmentId: number,
+    purchaseOrderId: number,
+    lineSelections?: Array<{ poLineId: number; qty: number }>,
+    lineIds?: number[],
+  ) {
     const shipment = await getShipment(shipmentId);
     if (shipment.status === "closed" || shipment.status === "cancelled") {
       throw new ShipmentTrackingError("Cannot add lines to a closed or cancelled shipment");
@@ -422,9 +427,21 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     if (!po) throw new ShipmentTrackingError("Purchase order not found", 404);
 
     const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
-    const candidateLines = lineIds
-      ? poLines.filter((l: any) => lineIds.includes(l.id))
-      : poLines;
+
+    // Build qty map from lineSelections (new behavior)
+    const qtyMap = new Map<number, number>(); // poLineId -> qty
+    if (lineSelections && lineSelections.length > 0) {
+      for (const sel of lineSelections) {
+        qtyMap.set(sel.poLineId, sel.qty);
+      }
+    }
+
+    // Legacy: lineIds filters to specific lines but uses orderQty
+    const candidateLines = qtyMap.size > 0
+      ? poLines.filter((l: any) => qtyMap.has(l.id))
+      : lineIds
+        ? poLines.filter((l: any) => lineIds.includes(l.id))
+        : poLines;
 
     // Deduplicate: skip PO lines already on this shipment
     const existingLines = await storage.getInboundShipmentLines(shipmentId);
@@ -437,12 +454,59 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
     }
 
+    // Compute alreadyShippedQty per PO line (across all non-cancelled shipments)
+    const allShipmentLines = await storage.getInboundShipmentLinesByPo(purchaseOrderId);
+    const shippedQtyByPoLine = new Map<number, number>();
+    for (const sl of allShipmentLines) {
+      if (sl.purchaseOrderLineId) {
+        shippedQtyByPoLine.set(
+          sl.purchaseOrderLineId,
+          (shippedQtyByPoLine.get(sl.purchaseOrderLineId) ?? 0) + (sl.qtyShipped ?? 0),
+        );
+      }
+    }
+
+    // Validate per-line when lineSelections provided
+    if (qtyMap.size > 0) {
+      for (const poLine of linesToAdd) {
+        const isProduct = !poLine.lineType || poLine.lineType === "product";
+        if (!isProduct) {
+          throw new ShipmentTrackingError(
+            `Line ${poLine.sku || poLine.id} is a ${poLine.lineType || "non-product"} line and cannot be shipped`,
+          );
+        }
+        if (poLine.status === "closed" || poLine.status === "cancelled") {
+          throw new ShipmentTrackingError(
+            `Line ${poLine.sku || poLine.id} is ${poLine.status} and cannot be shipped`,
+          );
+        }
+
+        const qty = qtyMap.get(poLine.id)!;
+        if (qty <= 0) {
+          throw new ShipmentTrackingError(
+            `Line ${poLine.sku || poLine.id}: qty must be > 0 (got ${qty})`,
+          );
+        }
+
+        const orderQty = poLine.orderQty ?? 0;
+        const cancelledQty = poLine.cancelledQty ?? 0;
+        const alreadyShipped = shippedQtyByPoLine.get(poLine.id) ?? 0;
+        const remaining = orderQty - alreadyShipped - cancelledQty;
+        if (qty > remaining) {
+          throw new ShipmentTrackingError(
+            `Line ${poLine.sku || poLine.id}: qty ${qty} exceeds remaining ${remaining} (ordered ${orderQty}, shipped ${alreadyShipped}, cancelled ${cancelledQty})`,
+          );
+        }
+      }
+    }
+
     const newLines: InsertInboundShipmentLine[] = [];
     for (const poLine of linesToAdd) {
       // Try to resolve dimensions: vendor_products first, then product_variants
       const dims = await resolveDimensionsForVariant(poLine.productVariantId, po.vendorId);
 
-      const qtyPieces = poLine.orderQty ?? 0;
+      // Use per-line qty from selections, or fall back to orderQty for legacy behavior
+      const qtyPieces = qtyMap.size > 0 ? qtyMap.get(poLine.id)! : (poLine.orderQty ?? 0);
 
       // Auto-compute cartonCount from SKU hierarchy (cases → pieces)
       let cartonCount: number | null = null;
