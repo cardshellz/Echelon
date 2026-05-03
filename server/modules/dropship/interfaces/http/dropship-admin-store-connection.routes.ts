@@ -2,9 +2,14 @@ import type { Express, Request, Response } from "express";
 import type { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipStoreConnectionService } from "../../application/dropship-store-connection-service";
-import { updateDropshipStoreOrderProcessingConfigInputSchema } from "../../application/dropship-store-connection-dtos";
+import type { DropshipStoreWebhookRepairService } from "../../application/dropship-store-webhook-repair-service";
+import {
+  repairDropshipStoreWebhooksRequestSchema,
+  updateDropshipStoreOrderProcessingConfigInputSchema,
+} from "../../application/dropship-store-connection-dtos";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipStoreConnectionServiceFromEnv } from "../../infrastructure/dropship-store-connection.factory";
+import { createDropshipStoreWebhookRepairServiceFromEnv } from "../../infrastructure/dropship-store-webhook-repair.factory";
 
 type SessionUser = {
   id: string;
@@ -13,6 +18,7 @@ type SessionUser = {
 export function registerDropshipAdminStoreConnectionRoutes(
   app: Express,
   service: DropshipStoreConnectionService = createDropshipStoreConnectionServiceFromEnv(),
+  webhookRepairService: DropshipStoreWebhookRepairService = createDropshipStoreWebhookRepairServiceFromEnv(),
 ): void {
   app.get(
     "/api/dropship/admin/store-connections",
@@ -51,6 +57,28 @@ export function registerDropshipAdminStoreConnectionRoutes(
           },
         });
         return res.json({ connection });
+      } catch (error) {
+        return sendDropshipAdminStoreConnectionError(res, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/dropship/admin/store-connections/:storeConnectionId/shopify-webhooks/repair",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
+        const input = parseBody(repairDropshipStoreWebhooksRequestSchema, req.body);
+        const result = await webhookRepairService.repairShopifyWebhooks({
+          storeConnectionId,
+          idempotencyKey: input.idempotencyKey,
+          actor: {
+            actorType: "admin",
+            actorId: sessionUser(req)?.id,
+          },
+        });
+        return res.json({ result });
       } catch (error) {
         return sendDropshipAdminStoreConnectionError(res, error);
       }
@@ -101,9 +129,23 @@ function statusForDropshipAdminStoreConnectionError(code: string): number {
     case "DROPSHIP_STORE_CONNECTION_LIST_INVALID_INPUT":
     case "DROPSHIP_INVALID_STORE_CONNECTION_REQUEST":
     case "DROPSHIP_STORE_ORDER_PROCESSING_WAREHOUSE_INVALID":
+    case "DROPSHIP_STORE_WEBHOOK_REPAIR_INVALID_INPUT":
+    case "DROPSHIP_STORE_WEBHOOK_REPAIR_PLATFORM_UNSUPPORTED":
+    case "DROPSHIP_SHOPIFY_SHOP_DOMAIN_REQUIRED":
       return 400;
     case "DROPSHIP_STORE_CONNECTION_NOT_FOUND":
       return 404;
+    case "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED":
+    case "DROPSHIP_STORE_ACCESS_TOKEN_REQUIRED":
+    case "DROPSHIP_STORE_REFRESH_TOKEN_REQUIRED":
+    case "DROPSHIP_TOKEN_PLATFORM_UNSUPPORTED":
+      return 409;
+    case "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL_REQUIRED":
+    case "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL_INVALID":
+    case "DROPSHIP_SHOPIFY_API_VERSION_INVALID":
+    case "DROPSHIP_TOKEN_VAULT_NOT_CONFIGURED":
+    case "DROPSHIP_TOKEN_KEY_INVALID":
+      return 503;
     default:
       return 500;
   }
