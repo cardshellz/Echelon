@@ -207,10 +207,11 @@ export function registerPurchasingRoutes(app: Express) {
   });
   
   app.post("/api/receiving", requirePermission("inventory", "adjust"), async (req, res) => {
+    let receiptNumber = "(unassigned)";
     try {
       const { sourceType, vendorId, warehouseId, poNumber, asnNumber, expectedDate, notes } = req.body;
       
-      const receiptNumber = await storage.generateReceiptNumber();
+      receiptNumber = await storage.generateReceiptNumber();
       const userId = req.session.user?.id || null;
       
       const order = await storage.createReceivingOrder({
@@ -230,6 +231,9 @@ export function registerPurchasingRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error creating receiving order:", error?.message || error);
       if (error?.stack) console.error(error.stack);
+      if (error?.code === "23505") {
+        return res.status(409).json({ error: `Receipt number '${receiptNumber}' already in use by an active record.` });
+      }
       res.status(500).json({ error: "Failed to create receiving order", details: error?.message });
     }
   });
@@ -3704,6 +3708,9 @@ export function registerPurchasingRoutes(app: Express) {
       });
       res.status(201).json(payment);
     } catch (err: any) {
+      if (err?.name === "ApLedgerError") {
+        return res.status(err.statusCode).json({ error: err.message });
+      }
       res.status(400).json({ error: err.message });
     }
   });

@@ -25,6 +25,19 @@ import {
   detectPastDue,
 } from "./po-exceptions.service";
 
+// ── Error class ─────────────────────────────────────────────────────
+
+export class ApLedgerError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 400,
+    public details?: any,
+  ) {
+    super(message);
+    this.name = "ApLedgerError";
+  }
+}
+
 // ─── PO Financial Aggregate Recompute ───────────────────────────────────────
 //
 // Called after any invoice or payment write that can affect a PO's financial
@@ -683,24 +696,35 @@ export async function recordPayment(data: {
     throw new Error(`Allocation total (${allocTotal}) exceeds payment total (${data.totalAmountCents})`);
   }
 
-  const [payment] = await db
-    .insert(apPayments)
-    .values({
-      paymentNumber,
-      vendorId: data.vendorId,
-      paymentDate: data.paymentDate,
-      paymentMethod: data.paymentMethod,
-      referenceNumber: data.referenceNumber,
-      checkNumber: data.checkNumber,
-      bankAccountLabel: data.bankAccountLabel,
-      totalAmountCents: data.totalAmountCents,
-      currency: data.currency ?? "USD",
-      status: data.status ?? "completed",
-      notes: data.notes,
-      createdBy: data.createdBy,
-      updatedBy: data.createdBy,
-    })
-    .returning();
+  let payment;
+  try {
+    [payment] = await db
+      .insert(apPayments)
+      .values({
+        paymentNumber,
+        vendorId: data.vendorId,
+        paymentDate: data.paymentDate,
+        paymentMethod: data.paymentMethod,
+        referenceNumber: data.referenceNumber,
+        checkNumber: data.checkNumber,
+        bankAccountLabel: data.bankAccountLabel,
+        totalAmountCents: data.totalAmountCents,
+        currency: data.currency ?? "USD",
+        status: data.status ?? "completed",
+        notes: data.notes,
+        createdBy: data.createdBy,
+        updatedBy: data.createdBy,
+      })
+      .returning();
+  } catch (error: any) {
+    if (error?.code === "23505") {
+      throw new ApLedgerError(
+        `Payment number '${paymentNumber}' already in use by an active record.`,
+        409,
+      );
+    }
+    throw error;
+  }
 
   if (data.allocations.length > 0) {
     await db.insert(apPaymentAllocations).values(

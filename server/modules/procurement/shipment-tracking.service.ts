@@ -291,13 +291,24 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     const shipmentNumber = (data as any).shipmentNumber || await storage.generateShipmentNumber();
     const allocationMethodDefault = data.mode ? MODE_DEFAULT_ALLOCATION[data.mode] || "by_volume" : "by_volume";
 
-    const shipment = await storage.createInboundShipment({
-      shipmentNumber,
-      status: "draft",
-      allocationMethodDefault,
-      createdBy: userId || null,
-      ...data,
-    } as any);
+    let shipment: InboundShipment;
+    try {
+      shipment = await storage.createInboundShipment({
+        shipmentNumber,
+        status: "draft",
+        allocationMethodDefault,
+        createdBy: userId || null,
+        ...data,
+      } as any);
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        throw new ShipmentTrackingError(
+          `Shipment number '${shipmentNumber}' already in use by an active record.`,
+          409,
+        );
+      }
+      throw error;
+    }
 
     await recordStatusChange(shipment.id, null, "draft", userId, "Shipment created");
     return shipment;
