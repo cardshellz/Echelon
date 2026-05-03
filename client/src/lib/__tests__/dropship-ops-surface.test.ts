@@ -3,6 +3,7 @@ import {
   buildQueryUrl,
   buildListingPreviewRequest,
   buildListingPushRequest,
+  buildAutoReloadConfigInput,
   buildVariantSelectionReplacement,
   buildStoreConnectionOAuthStartInput,
   formatCents,
@@ -10,6 +11,7 @@ import {
   listingPreviewPushableCount,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
+  parseDollarInputToCents,
   riskSeverityTone,
   sectionStatusTone,
 } from "../dropship-ops-surface";
@@ -149,6 +151,57 @@ describe("dropship ops surface client helpers", () => {
       productVariantIds: [42, 99],
       idempotencyKey: "push-1",
     });
+  });
+
+  it("parses dollar input to integer cents without floating point math", () => {
+    expect(parseDollarInputToCents("$1,234.56", "amount")).toBe(123456);
+    expect(parseDollarInputToCents("25", "amount")).toBe(2500);
+    expect(parseDollarInputToCents("25.5", "amount")).toBe(2550);
+    expect(() => parseDollarInputToCents("25.555", "amount")).toThrow();
+    expect(() => parseDollarInputToCents("-1", "amount")).toThrow();
+  });
+
+  it("builds auto-reload config input with integer cents and guardrails", () => {
+    expect(buildAutoReloadConfigInput({
+      enabled: true,
+      fundingMethodId: "99",
+      minimumBalance: "$50.00",
+      maxSingleReload: "250.00",
+      paymentHoldTimeoutMinutes: "2880",
+    })).toEqual({
+      enabled: true,
+      fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(buildAutoReloadConfigInput({
+      enabled: false,
+      fundingMethodId: "",
+      minimumBalance: "0",
+      maxSingleReload: "",
+      paymentHoldTimeoutMinutes: "2880",
+    })).toEqual({
+      enabled: false,
+      fundingMethodId: null,
+      minimumBalanceCents: 0,
+      maxSingleReloadCents: null,
+      paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(() => buildAutoReloadConfigInput({
+      enabled: true,
+      fundingMethodId: "",
+      minimumBalance: "50",
+      maxSingleReload: "250",
+      paymentHoldTimeoutMinutes: "2880",
+    })).toThrow();
+    expect(() => buildAutoReloadConfigInput({
+      enabled: true,
+      fundingMethodId: "99",
+      minimumBalance: "250",
+      maxSingleReload: "50",
+      paymentHoldTimeoutMinutes: "2880",
+    })).toThrow();
   });
 });
 

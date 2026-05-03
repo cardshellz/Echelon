@@ -390,6 +390,18 @@ export interface DropshipWalletResponse {
   };
 }
 
+export interface DropshipAutoReloadConfigInput {
+  fundingMethodId: number | null;
+  enabled: boolean;
+  minimumBalanceCents: number;
+  maxSingleReloadCents: number | null;
+  paymentHoldTimeoutMinutes: number;
+}
+
+export interface DropshipAutoReloadConfigResponse {
+  autoReload: NonNullable<DropshipWalletResponse["wallet"]["autoReload"]>;
+}
+
 export interface DropshipReturnListItem {
   rmaId: number;
   rmaNumber: string;
@@ -553,6 +565,55 @@ export function listingPreviewPushableCount(preview: DropshipListingPreviewResul
   return preview?.rows.filter((row) => row.previewStatus !== "blocked").length ?? 0;
 }
 
+export function buildAutoReloadConfigInput(input: {
+  enabled: boolean;
+  fundingMethodId: string;
+  minimumBalance: string;
+  maxSingleReload: string;
+  paymentHoldTimeoutMinutes: string;
+}): DropshipAutoReloadConfigInput {
+  const fundingMethodId = input.fundingMethodId.trim() ? parsePositiveInteger(input.fundingMethodId, "fundingMethodId") : null;
+  const minimumBalanceCents = parseDollarInputToCents(input.minimumBalance, "minimumBalance");
+  const maxSingleReloadCents = input.maxSingleReload.trim()
+    ? parseDollarInputToCents(input.maxSingleReload, "maxSingleReload")
+    : null;
+  const paymentHoldTimeoutMinutes = parsePositiveInteger(input.paymentHoldTimeoutMinutes, "paymentHoldTimeoutMinutes");
+
+  if (input.enabled && !fundingMethodId) {
+    throw new Error("Select an active funding method before enabling auto-reload.");
+  }
+  if (input.enabled && minimumBalanceCents <= 0) {
+    throw new Error("Minimum balance must be greater than $0.00 when auto-reload is enabled.");
+  }
+  if (input.enabled && maxSingleReloadCents !== null && maxSingleReloadCents < minimumBalanceCents) {
+    throw new Error("Maximum single reload must be at least the minimum balance.");
+  }
+
+  return {
+    enabled: input.enabled,
+    fundingMethodId,
+    minimumBalanceCents,
+    maxSingleReloadCents,
+    paymentHoldTimeoutMinutes,
+  };
+}
+
+export function parseDollarInputToCents(value: string, field: string): number {
+  const normalized = value.trim().replace(/^\$/, "").replace(/,/g, "");
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
+    throw new Error(`${field} must be a non-negative dollar amount with no more than two decimal places.`);
+  }
+
+  const [dollars, cents = ""] = normalized.split(".");
+  const dollarCents = Number(dollars) * 100;
+  const centValue = Number(cents.padEnd(2, "0"));
+  const result = dollarCents + centValue;
+  if (!Number.isSafeInteger(result)) {
+    throw new Error(`${field} is outside the supported currency range.`);
+  }
+  return result;
+}
+
 export function buildVariantSelectionReplacement(input: {
   existingRules: readonly DropshipVendorSelectionRule[];
   rows: readonly DropshipCatalogRow[];
@@ -619,6 +680,15 @@ function assertPositiveInteger(value: number, key: string): number {
     throw new Error(`${key} must be a positive integer.`);
   }
   return value;
+}
+
+function parsePositiveInteger(value: string, key: string): number {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${key} must be a positive integer.`);
+  }
+  const parsed = Number(normalized);
+  return assertPositiveInteger(parsed, key);
 }
 
 export function formatCents(cents: number): string {
