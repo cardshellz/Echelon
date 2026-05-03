@@ -30,11 +30,10 @@ export function registerSubscriptionRoutes(app: Express): void {
   // ─── Subscriber List ──────────────────────────────────────────
   app.get("/api/subscriptions/list", requireAuth, async (req: Request, res: Response) => {
     try {
-      const { status, billing_status, tier, search, limit, offset } = req.query;
+      const { status, billing_status, search, limit, offset } = req.query;
       const result = await storage.getSubscriberList({
         status: status as string,
         billing_status: billing_status as string,
-        tier: tier as string,
         search: search as string,
         limit: limit ? parseInt(limit as string) : 50,
         offset: offset ? parseInt(offset as string) : 0,
@@ -131,9 +130,9 @@ export function registerSubscriptionRoutes(app: Express): void {
   app.put("/api/subscriptions/plans/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
-      const { name, tier, billing_interval, price_cents, includes_dropship, is_active, priority_modifier } = req.body;
+      const { name, billing_interval, price_cents, includes_dropship, is_active, priority_modifier } = req.body;
       await storage.updatePlanDetails(id, {
-        name, tier, billing_interval, price_cents, includes_dropship, is_active, priority_modifier,
+        name, billing_interval, price_cents, includes_dropship, is_active, priority_modifier,
       });
       res.json({ success: true });
     } catch (err: any) {

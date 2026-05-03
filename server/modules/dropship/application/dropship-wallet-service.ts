@@ -93,6 +93,29 @@ export const createDropshipStripeWalletFundingSessionInputSchema = z.object({
   cancelUrl: z.string().trim().url().max(1000),
 }).strict();
 
+export const handleDropshipAutoReloadInputSchema = z.object({
+  vendorId: positiveIdSchema,
+  reason: z.enum(["minimum_balance", "payment_hold"]),
+  requiredBalanceCents: PositiveCentsSchema.optional(),
+  intakeId: positiveIdSchema.optional(),
+  idempotencyKey: idempotencyKeySchema,
+}).strict().superRefine((input, context) => {
+  if (input.reason === "payment_hold" && !input.requiredBalanceCents) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["requiredBalanceCents"],
+      message: "Payment hold auto-reload requires the required order balance.",
+    });
+  }
+  if (input.reason === "payment_hold" && !input.intakeId) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["intakeId"],
+      message: "Payment hold auto-reload requires the intake id.",
+    });
+  }
+});
+
 export const registerDropshipFundingMethodInputSchema = z.object({
   vendorId: positiveIdSchema,
   rail: dropshipWalletFundingRailSchema,
@@ -118,6 +141,7 @@ export type DebitDropshipWalletForOrderInput = z.infer<typeof debitDropshipWalle
 export type ConfigureDropshipAutoReloadInput = z.infer<typeof configureDropshipAutoReloadInputSchema>;
 export type CreateDropshipStripeFundingSetupSessionInput = z.infer<typeof createDropshipStripeFundingSetupSessionInputSchema>;
 export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof createDropshipStripeWalletFundingSessionInputSchema>;
+export type HandleDropshipAutoReloadInput = z.infer<typeof handleDropshipAutoReloadInputSchema>;
 export type RegisterDropshipFundingMethodInput = z.infer<typeof registerDropshipFundingMethodInputSchema>;
 
 export interface DropshipWalletAccountRecord {
@@ -212,6 +236,27 @@ export interface DropshipStripeWalletFundingSession {
   expiresAt: Date | null;
 }
 
+export interface DropshipStripeAutoReloadPaymentIntent {
+  providerPaymentIntentId: string;
+  status: Extract<DropshipWalletLedgerStatus, "pending" | "settled">;
+  amountCents: number;
+  currency: string;
+  externalTransactionId: string | null;
+}
+
+export interface DropshipAutoReloadResult {
+  outcome: "funding_created" | "skipped";
+  vendorId: number;
+  fundingMethodId: number | null;
+  amountCents: number;
+  currency: string;
+  providerPaymentIntentId: string | null;
+  fundingLedgerEntryId: number | null;
+  fundingStatus: Extract<DropshipWalletLedgerStatus, "pending" | "settled"> | null;
+  skipReason: string | null;
+  idempotentReplay: boolean;
+}
+
 export interface DropshipWalletFundingProvider {
   createStripeSetupSession(input: {
     vendorId: number;
@@ -239,6 +284,20 @@ export interface DropshipWalletFundingProvider {
     cancelUrl: string;
     now: Date;
   }): Promise<DropshipStripeWalletFundingSession>;
+  createStripeAutoReloadPaymentIntent(input: {
+    vendorId: number;
+    fundingMethodId: number;
+    rail: DropshipStripeFundingSetupRail;
+    amountCents: number;
+    currency: string;
+    providerCustomerId: string;
+    providerPaymentMethodId: string;
+    reason: HandleDropshipAutoReloadInput["reason"];
+    intakeId: number | null;
+    requiredBalanceCents: number | null;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<DropshipStripeAutoReloadPaymentIntent>;
 }
 
 export interface DropshipWalletRepository {
@@ -519,6 +578,116 @@ export class DropshipWalletService {
     return session;
   }
 
+  async handleAutoReload(input: unknown): Promise<DropshipAutoReloadResult> {
+    const parsed = parseWalletInput(handleDropshipAutoReloadInputSchema, input);
+    const provider = this.deps.fundingProvider;
+    if (!provider) {
+      return skippedAutoReload(parsed, "funding_provider_not_configured", "USD");
+    }
+
+    const now = this.deps.clock.now();
+    const wallet = await this.deps.repository.getOverview({
+      vendorId: parsed.vendorId,
+      ledgerLimit: 1,
+      now,
+    });
+    const setting = wallet.autoReload;
+    if (!setting?.enabled) {
+      return skippedAutoReload(parsed, "auto_reload_disabled", wallet.account.currency);
+    }
+    if (!setting.fundingMethodId) {
+      return skippedAutoReload(parsed, "funding_method_required", wallet.account.currency);
+    }
+
+    const fundingMethod = wallet.fundingMethods.find((method) => method.fundingMethodId === setting.fundingMethodId);
+    if (!fundingMethod) {
+      return skippedAutoReload(parsed, "funding_method_missing", wallet.account.currency, setting.fundingMethodId);
+    }
+    if (fundingMethod.status !== "active") {
+      return skippedAutoReload(parsed, "funding_method_not_active", wallet.account.currency, fundingMethod.fundingMethodId);
+    }
+    if (fundingMethod.rail !== "stripe_card" && fundingMethod.rail !== "stripe_ach") {
+      return skippedAutoReload(parsed, "funding_method_rail_unsupported", wallet.account.currency, fundingMethod.fundingMethodId);
+    }
+    if (!fundingMethod.providerCustomerId || !fundingMethod.providerPaymentMethodId) {
+      return skippedAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, fundingMethod.fundingMethodId);
+    }
+
+    const amount = calculateAutoReloadAmount({
+      availableBalanceCents: wallet.account.availableBalanceCents,
+      minimumBalanceCents: setting.minimumBalanceCents,
+      maxSingleReloadCents: setting.maxSingleReloadCents,
+      requiredBalanceCents: parsed.requiredBalanceCents ?? null,
+      reason: parsed.reason,
+    });
+    if (amount.outcome === "skipped") {
+      return skippedAutoReload(parsed, amount.skipReason, wallet.account.currency, fundingMethod.fundingMethodId);
+    }
+
+    const paymentIntent = await provider.createStripeAutoReloadPaymentIntent({
+      vendorId: parsed.vendorId,
+      fundingMethodId: fundingMethod.fundingMethodId,
+      rail: fundingMethod.rail,
+      amountCents: amount.amountCents,
+      currency: wallet.account.currency,
+      providerCustomerId: fundingMethod.providerCustomerId,
+      providerPaymentMethodId: fundingMethod.providerPaymentMethodId,
+      reason: parsed.reason,
+      intakeId: parsed.intakeId ?? null,
+      requiredBalanceCents: parsed.requiredBalanceCents ?? null,
+      idempotencyKey: `dropship-auto-reload:${parsed.idempotencyKey}`,
+      now,
+    });
+    const funding = await this.creditFunding({
+      vendorId: parsed.vendorId,
+      fundingMethodId: fundingMethod.fundingMethodId,
+      rail: fundingMethod.rail,
+      status: paymentIntent.status,
+      amountCents: paymentIntent.amountCents,
+      currency: paymentIntent.currency,
+      referenceType: "stripe_payment_intent",
+      referenceId: paymentIntent.providerPaymentIntentId,
+      externalTransactionId: paymentIntent.externalTransactionId ?? undefined,
+      metadata: {
+        provider: "stripe",
+        autoReload: true,
+        autoReloadReason: parsed.reason,
+        intakeId: parsed.intakeId ?? null,
+        requiredBalanceCents: parsed.requiredBalanceCents ?? null,
+      },
+      idempotencyKey: `stripe-funding:${paymentIntent.providerPaymentIntentId}`,
+    });
+
+    this.deps.logger.info({
+      code: "DROPSHIP_AUTO_RELOAD_FUNDING_CREATED",
+      message: "Dropship wallet auto-reload funding was created.",
+      context: {
+        vendorId: parsed.vendorId,
+        fundingMethodId: fundingMethod.fundingMethodId,
+        amountCents: paymentIntent.amountCents,
+        status: paymentIntent.status,
+        reason: parsed.reason,
+        intakeId: parsed.intakeId ?? null,
+        providerPaymentIntentId: paymentIntent.providerPaymentIntentId,
+        ledgerEntryId: funding.ledgerEntry.ledgerEntryId,
+        idempotentReplay: funding.idempotentReplay,
+      },
+    });
+
+    return {
+      outcome: "funding_created",
+      vendorId: parsed.vendorId,
+      fundingMethodId: fundingMethod.fundingMethodId,
+      amountCents: paymentIntent.amountCents,
+      currency: paymentIntent.currency,
+      providerPaymentIntentId: paymentIntent.providerPaymentIntentId,
+      fundingLedgerEntryId: funding.ledgerEntry.ledgerEntryId,
+      fundingStatus: paymentIntent.status,
+      skipReason: null,
+      idempotentReplay: funding.idempotentReplay,
+    };
+  }
+
   async registerFundingMethod(input: unknown): Promise<DropshipFundingMethodMutationResult> {
     const parsed = parseWalletInput(registerDropshipFundingMethodInputSchema, input);
     const updatedAt = this.deps.clock.now();
@@ -544,6 +713,46 @@ export class DropshipWalletService {
   private async provisionVendor(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
     return this.deps.vendorProvisioning.provisionForMember(memberId);
   }
+}
+
+function calculateAutoReloadAmount(input: {
+  availableBalanceCents: number;
+  minimumBalanceCents: number;
+  maxSingleReloadCents: number | null;
+  requiredBalanceCents: number | null;
+  reason: HandleDropshipAutoReloadInput["reason"];
+}): { outcome: "funding_created"; amountCents: number } | { outcome: "skipped"; skipReason: string } {
+  const targetBalanceCents = input.reason === "payment_hold"
+    ? Math.max(input.minimumBalanceCents, input.requiredBalanceCents ?? 0)
+    : input.minimumBalanceCents;
+  const amountNeededCents = targetBalanceCents - input.availableBalanceCents;
+  if (amountNeededCents <= 0) {
+    return { outcome: "skipped", skipReason: "balance_already_sufficient" };
+  }
+  if (input.maxSingleReloadCents !== null && amountNeededCents > input.maxSingleReloadCents) {
+    return { outcome: "skipped", skipReason: "amount_exceeds_max_single_reload" };
+  }
+  return { outcome: "funding_created", amountCents: amountNeededCents };
+}
+
+function skippedAutoReload(
+  input: HandleDropshipAutoReloadInput,
+  skipReason: string,
+  currency: string,
+  fundingMethodId: number | null = null,
+): DropshipAutoReloadResult {
+  return {
+    outcome: "skipped",
+    vendorId: input.vendorId,
+    fundingMethodId,
+    amountCents: 0,
+    currency,
+    providerPaymentIntentId: null,
+    fundingLedgerEntryId: null,
+    fundingStatus: null,
+    skipReason,
+    idempotentReplay: false,
+  };
 }
 
 const DEFAULT_STRIPE_MIN_WALLET_FUNDING_CENTS = 1000;

@@ -64,7 +64,6 @@ export async function processContractCreatedUseCase(payload: ContractWebhookPayl
         shopify_customer_id: shopifyCustomerId,
         first_name: customer.firstName,
         last_name: customer.lastName,
-        tier: targetPlan.tier,
       });
 
       const subscriptionId = await storage.createSubscription({
@@ -86,16 +85,11 @@ export async function processContractCreatedUseCase(payload: ContractWebhookPayl
         event_type: "created",
         event_source: "webhook",
         payload,
-        notes: `Plan: ${targetPlan.name}, Tier: ${targetPlan.tier}`,
+        notes: `Plan: ${targetPlan.name}`,
       });
 
       console.log(`[Subscription UseCase] Transacted Subscription ${subscriptionId} for Member ${memberId}`);
     });
-
-    const newTags = domain.determineCustomerTags(targetPlan.tier);
-    shopifyAdapter.addCustomerTags(customerGid, newTags).catch(err => 
-      console.warn(`[Subscription UseCase] Failed tag application: ${err.message}`)
-    );
 
   } catch (e) {
     throw e;
@@ -250,7 +244,6 @@ export async function changePlanUseCase(subscriptionId: number, newPlanId: numbe
     await db.transaction(async (tx) => {
       await storage.updateSubscriptionPlan(subscriptionId, newPlanId);
       await storage.upsertCurrentMembership(subscription.member_id, newPlanId, newPlan.name);
-      await storage.updateMemberTier(subscription.member_id, newPlan.tier);
 
       await storage.insertEvent({
         member_subscription_id: subscriptionId,
@@ -272,10 +265,7 @@ export async function changePlanUseCase(subscriptionId: number, newPlanId: numbe
     });
 
     if (subscription.member_shopify_id) {
-      const customerGid = `gid://shopify/Customer/${subscription.member_shopify_id}`;
-      shopifyAdapter.removeCustomerTags(customerGid, ["shellz-club-standard", "shellz-club-gold", "shellz-club-dropship"])
-        .then(() => shopifyAdapter.addCustomerTags(customerGid, domain.determineCustomerTags(newPlan.tier)))
-        .catch(err => console.warn(`[Subscription UseCase] Failed tag update: ${err.message}`));
+      // Tags logic deprecated and removed
     }
   } catch(e) {
     throw e;
@@ -305,7 +295,6 @@ export async function cancelSubscriptionUseCase(subscriptionId: number, reason: 
 
       if (otherActive.length === 0) {
         await storage.clearCurrentMembership(subscription.member_id);
-        await storage.updateMemberTier(subscription.member_id, "none");
       }
 
       await storage.insertEvent({
@@ -329,9 +318,7 @@ export async function cancelSubscriptionUseCase(subscriptionId: number, reason: 
 
     // Async externals
     if (subscription.member_shopify_id) {
-      const customerGid = `gid://shopify/Customer/${subscription.member_shopify_id}`;
-      shopifyAdapter.removeCustomerTags(customerGid, ["shellz-club", "shellz-club-standard", "shellz-club-gold", "shellz-club-dropship"])
-        .catch(err => console.warn(`[Subscription UseCase] Failed tag removal: ${err.message}`));
+      // Tags logic deprecated and removed
     }
 
     if (subscription.shopify_subscription_contract_gid) {

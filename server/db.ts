@@ -179,10 +179,10 @@ export async function runStartupMigrations(): Promise<void> {
         UNIQUE(channel_id, product_line_id)
       )
     `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_id ON product_line_products(product_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_line_id ON product_line_products(product_line_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_channel_id ON channel_product_lines(channel_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_product_line_id ON channel_product_lines(product_line_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_id ON catalog.product_line_products(product_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_line_id ON catalog.product_line_products(product_line_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_channel_id ON channels.channel_product_lines(channel_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_product_line_id ON channels.channel_product_lines(product_line_id)`);
     // Seed default product line
     await client.query(`
       INSERT INTO catalog.product_lines (code, name, description, sort_order)
@@ -192,16 +192,16 @@ export async function runStartupMigrations(): Promise<void> {
     // Assign all existing products to default line (idempotent)
     await client.query(`
       INSERT INTO catalog.product_line_products (product_line_id, product_id)
-      SELECT pl.id, p.id FROM product_lines pl, products p
+      SELECT pl.id, p.id FROM catalog.product_lines pl, catalog.products p
       WHERE pl.code = 'TRADING_CARD_SUPPLIES'
-        AND NOT EXISTS (SELECT 1 FROM product_line_products plp WHERE plp.product_line_id = pl.id AND plp.product_id = p.id)
+        AND NOT EXISTS (SELECT 1 FROM catalog.product_line_products plp WHERE plp.product_line_id = pl.id AND plp.product_id = p.id)
     `);
     // Assign default line to all active channels (idempotent)
     await client.query(`
-      INSERT INTO channel_product_lines (channel_id, product_line_id)
-      SELECT c.id, pl.id FROM channels.channels c, product_lines pl
+      INSERT INTO channels.channel_product_lines (channel_id, product_line_id)
+      SELECT c.id, pl.id FROM channels.channels c, catalog.product_lines pl
       WHERE pl.code = 'TRADING_CARD_SUPPLIES' AND c.status = 'active'
-        AND NOT EXISTS (SELECT 1 FROM channel_product_lines cpl WHERE cpl.channel_id = c.id AND cpl.product_line_id = pl.id)
+        AND NOT EXISTS (SELECT 1 FROM channels.channel_product_lines cpl WHERE cpl.channel_id = c.id AND cpl.product_line_id = pl.id)
     `);
     console.log("Checked product_lines tables and seeded defaults");
 
@@ -682,7 +682,7 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval VARCHAR(20)`);
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval_count INTEGER DEFAULT 1`);
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS price_cents INTEGER`);
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS tier VARCHAR(30) DEFAULT 'standard'`);
+
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS includes_dropship BOOLEAN DEFAULT false`);
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
 
@@ -705,7 +705,9 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Extend members table
     await client.query(`ALTER TABLE membership.members ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
-    await client.query(`ALTER TABLE membership.members ADD COLUMN IF NOT EXISTS tier VARCHAR(30) DEFAULT 'standard'`);
+    await client.query(`ALTER TABLE membership.plans DROP COLUMN IF EXISTS tier`);
+    await client.query(`ALTER TABLE membership.plans DROP COLUMN IF EXISTS tier_level`);
+    await client.query(`ALTER TABLE membership.members DROP COLUMN IF EXISTS tier`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_members_shopify_customer ON membership.members(shopify_customer_id) WHERE shopify_customer_id IS NOT NULL`);
 
     // subscription_billing_log

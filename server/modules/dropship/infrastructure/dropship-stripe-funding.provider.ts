@@ -2,9 +2,11 @@ import Stripe from "stripe";
 import { DropshipError } from "../domain/errors";
 import type {
   CreditDropshipWalletFundingInput,
+  DropshipStripeAutoReloadPaymentIntent,
   DropshipStripeFundingSetupRail,
   DropshipStripeWalletFundingSession,
   DropshipWalletFundingProvider,
+  HandleDropshipAutoReloadInput,
   RegisterDropshipFundingMethodInput,
 } from "../application/dropship-wallet-service";
 
@@ -170,6 +172,68 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       amountCents: input.amountCents,
       currency: input.currency,
       expiresAt: typeof session.expires_at === "number" ? new Date(session.expires_at * 1000) : null,
+    };
+  }
+
+  async createStripeAutoReloadPaymentIntent(input: {
+    vendorId: number;
+    fundingMethodId: number;
+    rail: DropshipStripeFundingSetupRail;
+    amountCents: number;
+    currency: string;
+    providerCustomerId: string;
+    providerPaymentMethodId: string;
+    reason: HandleDropshipAutoReloadInput["reason"];
+    intakeId: number | null;
+    requiredBalanceCents: number | null;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<DropshipStripeAutoReloadPaymentIntent> {
+    const stripe = this.getStripe();
+    const metadata = {
+      type: STRIPE_WALLET_FUNDING_TYPE,
+      dropship_vendor_id: String(input.vendorId),
+      funding_method_id: String(input.fundingMethodId),
+      requested_rail: input.rail,
+      requested_provider_payment_method_id: input.providerPaymentMethodId,
+      auto_reload: "true",
+      auto_reload_reason: input.reason,
+      intake_id: input.intakeId ? String(input.intakeId) : "",
+      required_balance_cents: input.requiredBalanceCents ? String(input.requiredBalanceCents) : "",
+      requested_at: input.now.toISOString(),
+    };
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: input.amountCents,
+      currency: input.currency.toLowerCase(),
+      customer: input.providerCustomerId,
+      payment_method: input.providerPaymentMethodId,
+      payment_method_types: paymentMethodTypesForRail(input.rail),
+      confirm: true,
+      off_session: true,
+      metadata,
+    }, {
+      idempotencyKey: input.idempotencyKey,
+    });
+    const status = walletFundingStatusForPaymentIntent(paymentIntent);
+    if (!status) {
+      throw new DropshipError(
+        "DROPSHIP_STRIPE_AUTO_RELOAD_PAYMENT_FAILED",
+        "Stripe auto-reload payment did not enter a fundable state.",
+        {
+          vendorId: input.vendorId,
+          fundingMethodId: input.fundingMethodId,
+          providerPaymentIntentId: paymentIntent.id,
+          paymentIntentStatus: paymentIntent.status,
+          lastPaymentErrorCode: paymentIntent.last_payment_error?.code ?? null,
+        },
+      );
+    }
+    return {
+      providerPaymentIntentId: paymentIntent.id,
+      status,
+      amountCents: amountForPaymentIntent(paymentIntent, status),
+      currency: paymentIntent.currency.toUpperCase(),
+      externalTransactionId: idFromExpandable(paymentIntent.latest_charge),
     };
   }
 
@@ -485,6 +549,14 @@ function amountForPaymentIntent(
     return paymentIntent.amount_received;
   }
   return paymentIntent.amount;
+}
+
+function walletFundingStatusForPaymentIntent(
+  paymentIntent: Stripe.PaymentIntent,
+): CreditDropshipWalletFundingInput["status"] | null {
+  if (paymentIntent.status === "succeeded") return "settled";
+  if (paymentIntent.status === "processing") return "pending";
+  return null;
 }
 
 function sanitizedPaymentMethodMetadata(input: {

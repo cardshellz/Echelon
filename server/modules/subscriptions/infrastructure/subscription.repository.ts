@@ -24,7 +24,6 @@ export async function getAllPlans(): Promise<PlanRecord[]> {
   const result = await db.select({
     id: sql<number>`CAST(${plans.id} AS INTEGER)`,
     name: plans.name,
-    tier: plans.tier,
     billing_interval: plans.billingInterval,
     billing_interval_count: plans.billingIntervalCount,
     price_cents: plans.priceCents,
@@ -40,7 +39,6 @@ export async function getActivePlans(): Promise<PlanRecord[]> {
   const result = await db.select({
     id: sql<number>`CAST(${plans.id} AS INTEGER)`,
     name: plans.name,
-    tier: plans.tier,
     billing_interval: plans.billingInterval,
     billing_interval_count: plans.billingIntervalCount,
     price_cents: plans.priceCents,
@@ -82,7 +80,6 @@ export async function updatePlanDetails(
   if (Object.keys(updates).length === 0) return;
   const dbUpdates: any = {};
   if (updates.name !== undefined) dbUpdates.name = updates.name;
-  if (updates.tier !== undefined) dbUpdates.tier = updates.tier;
   if (updates.billing_interval !== undefined) dbUpdates.billingInterval = updates.billing_interval;
   if (updates.billing_interval_count !== undefined) dbUpdates.billingIntervalCount = updates.billing_interval_count;
   if (updates.price_cents !== undefined) dbUpdates.priceCents = updates.price_cents;
@@ -97,7 +94,6 @@ export async function getPlanBySellingPlanGid(gid: string): Promise<PlanRecord |
   const result = await db.select({
     id: sql<number>`CAST(${plans.id} AS INTEGER)`,
     name: plans.name,
-    tier: plans.tier,
     billing_interval: plans.billingInterval,
     billing_interval_count: plans.billingIntervalCount,
     price_cents: plans.priceCents,
@@ -117,7 +113,6 @@ export async function getPlanById(planId: number): Promise<PlanRecord | null> {
   const result = await db.select({
     id: sql<number>`CAST(${plans.id} AS INTEGER)`,
     name: plans.name,
-    tier: plans.tier,
     billing_interval: plans.billingInterval,
     billing_interval_count: plans.billingIntervalCount,
     price_cents: plans.priceCents,
@@ -207,7 +202,6 @@ export async function upsertMember(data: {
   if (existing) {
     await db.update(members).set({
       shopifyCustomerId: String(data.shopify_customer_id),
-      tier: data.tier || existing.tier,
     }).where(eq(members.id, existing.id));
     return Number(existing.id);
   }
@@ -218,15 +212,12 @@ export async function upsertMember(data: {
     shopifyCustomerId: String(data.shopify_customer_id),
     firstName: data.first_name || null,
     lastName: data.last_name || null,
-    tier: data.tier || "standard",
     createdAt: new Date()
   }).returning({ id: members.id });
   return Number(result[0].id);
 }
 
-export async function updateMemberTier(memberId: number, tier: string): Promise<void> {
-  await db.update(members).set({ tier }).where(eq(members.id, String(memberId)));
-}
+
 
 // ─── Subscriptions ───────────────────────────────────────────────────
 
@@ -357,7 +348,6 @@ export async function getDueBillings(): Promise<SubscriptionRecord[]> {
     price_cents: plans.priceCents,
     billing_interval: plans.billingInterval,
     billing_interval_count: plans.billingIntervalCount,
-    tier: plans.tier,
     plan_name: plans.name
   }).from(memberSubscriptions)
     .innerJoin(plans, eq(plans.id, memberSubscriptions.planId))
@@ -523,25 +513,20 @@ export async function getEvents(filters?: {
 
 export async function getDashboardStats(): Promise<SubscriptionDashboardStats> {
   const activeResult = await db.select({
-    tier: plans.tier,
     cnt: sql<number>`COUNT(*)`,
     total_price: sql<number>`SUM(COALESCE(${plans.priceCents}, 0))`,
     billing_interval: plans.billingInterval,
   }).from(memberSubscriptions)
     .innerJoin(plans, eq(plans.id, memberSubscriptions.planId))
     .where(eq(memberSubscriptions.status, 'active'))
-    .groupBy(plans.tier, plans.billingInterval);
+    .groupBy(plans.billingInterval);
 
   let totalActive = 0;
-  let totalActiveStandard = 0;
-  let totalActiveGold = 0;
   let mrr = 0;
 
   for (const row of activeResult) {
     const count = Number(row.cnt);
     totalActive += count;
-    if (row.tier === "gold") totalActiveGold += count;
-    else totalActiveStandard += count;
 
     const price = Number(row.total_price || 0);
     if (row.billing_interval === "year") {
@@ -573,8 +558,6 @@ export async function getDashboardStats(): Promise<SubscriptionDashboardStats> {
 
   return {
     totalActive,
-    totalActiveStandard,
-    totalActiveGold,
     mrr,
     churnRate30: Math.round(churnRate30 * 10000) / 100,
     churnRate90: Math.round(churnRate90 * 10000) / 100,
@@ -589,7 +572,6 @@ export async function getDashboardStats(): Promise<SubscriptionDashboardStats> {
 export async function getSubscriberList(filters?: {
   status?: string;
   billing_status?: string;
-  tier?: string;
   search?: string;
   limit?: number;
   offset?: number;
@@ -610,7 +592,6 @@ export async function getSubscriberList(filters?: {
     last_name: members.lastName,
     shopify_customer_id: members.shopifyCustomerId,
     plan_name: plans.name,
-    tier: plans.tier,
     price_cents: plans.priceCents,
     billing_interval: plans.billingInterval
   }).from(memberSubscriptions)
@@ -620,7 +601,7 @@ export async function getSubscriberList(filters?: {
   const conditions = [];
   if (filters?.status) conditions.push(eq(memberSubscriptions.status, filters.status));
   if (filters?.billing_status) conditions.push(eq(memberSubscriptions.billingStatus, filters.billing_status));
-  if (filters?.tier) conditions.push(eq(plans.tier, filters.tier));
+
   if (filters?.search) {
     conditions.push(sql`(LOWER(${members.email}) LIKE ${'%' + filters.search.toLowerCase() + '%'} OR LOWER(${members.firstName} || ' ' || ${members.lastName}) LIKE ${'%' + filters.search.toLowerCase() + '%'})`);
   }
@@ -657,7 +638,6 @@ export async function getSubscriptionDetail(subscriptionId: number): Promise<any
     last_name: members.lastName,
     member_shopify_id: members.shopifyCustomerId,
     plan_name: plans.name,
-    tier: plans.tier,
     price_cents: plans.priceCents,
     billing_interval: plans.billingInterval,
     includes_dropship: plans.includesDropship

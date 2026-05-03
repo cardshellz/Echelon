@@ -99,6 +99,59 @@ describe("StripeDropshipFundingProvider", () => {
     }));
   });
 
+  it("creates off-session auto-reload payment intents with deterministic metadata", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({
+      stripeClient: stripe,
+      webhookSecret: "whsec_test",
+    });
+
+    const payment = await provider.createStripeAutoReloadPaymentIntent({
+      vendorId: 10,
+      fundingMethodId: 99,
+      rail: "stripe_card",
+      amountCents: 6500,
+      currency: "USD",
+      providerCustomerId: "cus_existing",
+      providerPaymentMethodId: "pm_4242",
+      reason: "payment_hold",
+      intakeId: 456,
+      requiredBalanceCents: 7500,
+      idempotencyKey: "dropship-auto-reload:key-1",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    });
+
+    expect(payment).toEqual({
+      providerPaymentIntentId: "pi_auto_1",
+      status: "settled",
+      amountCents: 6500,
+      currency: "USD",
+      externalTransactionId: "ch_auto_1",
+    });
+    expect(stripe.paymentIntents.create).toHaveBeenCalledWith(expect.objectContaining({
+      amount: 6500,
+      currency: "usd",
+      customer: "cus_existing",
+      payment_method: "pm_4242",
+      payment_method_types: ["card"],
+      confirm: true,
+      off_session: true,
+      metadata: expect.objectContaining({
+        type: "dropship_wallet_funding",
+        dropship_vendor_id: "10",
+        funding_method_id: "99",
+        requested_rail: "stripe_card",
+        requested_provider_payment_method_id: "pm_4242",
+        auto_reload: "true",
+        auto_reload_reason: "payment_hold",
+        intake_id: "456",
+        required_balance_cents: "7500",
+      }),
+    }), {
+      idempotencyKey: "dropship-auto-reload:key-1",
+    });
+  });
+
   it("parses verified setup webhooks into sanitized V2 funding methods", async () => {
     const stripe = makeStripeDouble();
     const provider = new StripeDropshipFundingProvider({
@@ -329,6 +382,17 @@ function makeStripeDouble() {
     webhooks: {
       constructEvent: vi.fn(),
     },
+    paymentIntents: {
+      create: vi.fn(async () => ({
+        id: "pi_auto_1",
+        status: "succeeded",
+        amount: 6500,
+        amount_received: 6500,
+        currency: "usd",
+        latest_charge: "ch_auto_1",
+        last_payment_error: null,
+      })),
+    },
     setupIntents: {
       retrieve: vi.fn(),
     },
@@ -339,6 +403,7 @@ function makeStripeDouble() {
     customers: { create: ReturnType<typeof vi.fn> };
     checkout: { sessions: { create: ReturnType<typeof vi.fn> } };
     webhooks: { constructEvent: ReturnType<typeof vi.fn> };
+    paymentIntents: { create: ReturnType<typeof vi.fn> };
     setupIntents: { retrieve: ReturnType<typeof vi.fn> };
     paymentMethods: { retrieve: ReturnType<typeof vi.fn> };
   };

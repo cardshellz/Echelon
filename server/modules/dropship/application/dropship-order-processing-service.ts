@@ -14,6 +14,10 @@ import type {
   DropshipShippingQuoteResult,
   DropshipShippingQuoteService,
 } from "./dropship-shipping-quote-service";
+import type {
+  DropshipAutoReloadResult,
+  DropshipWalletService,
+} from "./dropship-wallet-service";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -109,6 +113,7 @@ export interface DropshipOrderProcessingServiceDependencies {
   repository: DropshipOrderProcessingRepository;
   shippingQuote: Pick<DropshipShippingQuoteService, "quote">;
   orderAcceptance: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
+  walletAutoReload?: Pick<DropshipWalletService, "handleAutoReload">;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -167,6 +172,12 @@ export class DropshipOrderProcessingService {
           actorType: "job",
           actorId: parsed.workerId,
         },
+      });
+
+      await this.tryHandleAutoReload({
+        parsed,
+        claim,
+        acceptance,
       });
 
       this.logProcessed(parsed, claim, quote, acceptance);
@@ -267,6 +278,69 @@ export class DropshipOrderProcessingService {
       },
     });
   }
+
+  private async tryHandleAutoReload(input: {
+    parsed: ProcessDropshipOrderIntakeInput;
+    claim: DropshipOrderProcessingClaim;
+    acceptance: DropshipOrderAcceptanceResult;
+  }): Promise<DropshipAutoReloadResult | null> {
+    if (!this.deps.walletAutoReload) {
+      return null;
+    }
+    const autoReloadInput = input.acceptance.outcome === "payment_hold"
+      ? {
+          vendorId: input.claim.intake.vendorId,
+          reason: "payment_hold" as const,
+          requiredBalanceCents: input.acceptance.totalDebitCents,
+          intakeId: input.claim.intake.intakeId,
+          idempotencyKey: deriveOrderProcessingIdempotencyKey("auto-reload-payment-hold", input.parsed),
+        }
+      : {
+          vendorId: input.claim.intake.vendorId,
+          reason: "minimum_balance" as const,
+          intakeId: input.claim.intake.intakeId,
+          idempotencyKey: deriveOrderProcessingIdempotencyKey("auto-reload-minimum", input.parsed),
+        };
+    try {
+      const result = await this.deps.walletAutoReload.handleAutoReload(autoReloadInput);
+      if (
+        result.outcome === "skipped"
+        && (autoReloadInput.reason === "payment_hold" || result.skipReason !== "balance_already_sufficient")
+      ) {
+        this.deps.logger.warn({
+          code: autoReloadInput.reason === "payment_hold"
+            ? "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_SKIPPED"
+            : "DROPSHIP_ORDER_MINIMUM_BALANCE_AUTO_RELOAD_SKIPPED",
+          message: autoReloadInput.reason === "payment_hold"
+            ? "Dropship order payment hold auto-reload was skipped."
+            : "Dropship order minimum balance auto-reload was skipped.",
+          context: {
+            intakeId: input.claim.intake.intakeId,
+            vendorId: input.claim.intake.vendorId,
+            storeConnectionId: input.claim.intake.storeConnectionId,
+            skipReason: result.skipReason,
+          },
+        });
+      }
+      return result;
+    } catch (error) {
+      this.deps.logger.warn({
+        code: autoReloadInput.reason === "payment_hold"
+          ? "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_FAILED"
+          : "DROPSHIP_ORDER_MINIMUM_BALANCE_AUTO_RELOAD_FAILED",
+        message: autoReloadInput.reason === "payment_hold"
+          ? "Dropship order payment hold auto-reload failed."
+          : "Dropship order minimum balance auto-reload failed.",
+        context: {
+          intakeId: input.claim.intake.intakeId,
+          vendorId: input.claim.intake.vendorId,
+          storeConnectionId: input.claim.intake.storeConnectionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return null;
+    }
+  }
 }
 
 export function buildQuoteDestination(
@@ -322,7 +396,7 @@ export function aggregateQuoteItems(
 }
 
 export function deriveOrderProcessingIdempotencyKey(
-  stage: "quote" | "accept",
+  stage: "quote" | "accept" | "auto-reload-payment-hold" | "auto-reload-minimum",
   input: ProcessDropshipOrderIntakeInput,
 ): string {
   const digest = createHash("sha256").update(input.idempotencyKey).digest("hex").slice(0, 32);
