@@ -8,6 +8,7 @@ import {
   buildStripeWalletFundingSessionInput,
   buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
+  buildAdminListingPushJobsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminStoreConnectionsUrl,
@@ -108,6 +109,26 @@ describe("dropship ops surface client helpers", () => {
       search: "",
       status: "all",
     })).toBe("/api/dropship/admin/order-intake?statuses=received%2Cprocessing%2Caccepted%2Crejected%2Cretrying%2Cfailed%2Cpayment_hold%2Ccancelled%2Cexception&page=1&limit=50");
+  });
+
+  it("builds admin listing push job URLs with optional operational filters", () => {
+    expect(buildAdminListingPushJobsUrl({
+      search: " vendor ",
+      status: "default",
+      platform: "all",
+    })).toBe("/api/dropship/admin/listing-push-jobs?search=vendor&page=1&limit=50");
+    expect(buildAdminListingPushJobsUrl({
+      search: "",
+      status: "failed",
+      platform: "ebay",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/admin/listing-push-jobs?statuses=failed&platform=ebay&page=2&limit=25");
+    expect(buildAdminListingPushJobsUrl({
+      search: "",
+      status: "all",
+      platform: "shopify",
+    })).toBe("/api/dropship/admin/listing-push-jobs?statuses=queued%2Cprocessing%2Ccompleted%2Cfailed%2Ccancelled&platform=shopify&page=1&limit=50");
   });
 
   it("builds admin store connection URLs with optional filters", () => {

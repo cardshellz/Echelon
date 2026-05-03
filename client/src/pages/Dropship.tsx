@@ -38,6 +38,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   buildAdminCatalogExposurePreviewUrl,
+  buildAdminListingPushJobsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminStoreConnectionsUrl,
@@ -59,6 +60,8 @@ import {
   type DropshipAdminCatalogExposureRulesReplaceResponse,
   type DropshipAdminCatalogExposureRulesResponse,
   type DropshipAdminCatalogExposureRuleInput,
+  type DropshipAdminListingPushJobListItem,
+  type DropshipAdminListingPushJobListResponse,
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
@@ -71,6 +74,7 @@ import {
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
   type DropshipOpsOrderIntakeStatus,
+  type DropshipListingPushJobStatus,
   type DropshipSeverity,
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipStorePlatform,
@@ -79,6 +83,7 @@ import {
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
+type ListingPushStatusFilter = DropshipListingPushJobStatus | "default" | "all";
 type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
 type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
@@ -128,6 +133,16 @@ const storeConnectionStatusFilters: StoreConnectionStatusFilter[] = [
   "grace_period",
   "paused",
   "disconnected",
+];
+
+const listingPushStatusFilters: ListingPushStatusFilter[] = [
+  "default",
+  "all",
+  "failed",
+  "processing",
+  "queued",
+  "completed",
+  "cancelled",
 ];
 
 export default function Dropship() {
@@ -237,6 +252,12 @@ function refreshAll() {
               Store connections
             </TabsTrigger>
             <TabsTrigger
+              value="listing-pushes"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Listing pushes
+            </TabsTrigger>
+            <TabsTrigger
               value="audit"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -264,6 +285,10 @@ function refreshAll() {
 
           <TabsContent value="stores" className="m-0">
             <StoreConnectionOpsTab />
+          </TabsContent>
+
+          <TabsContent value="listing-pushes" className="m-0">
+            <ListingPushOpsTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -315,6 +340,109 @@ function refreshAll() {
           </TabsContent>
         </Tabs>
       </div>
+    </div>
+  );
+}
+
+function ListingPushOpsTab() {
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<ListingPushStatusFilter>("default");
+  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "default" as ListingPushStatusFilter,
+    platform: "all" as StoreConnectionPlatformFilter,
+  });
+
+  const listingPushJobsUrl = useMemo(() => buildAdminListingPushJobsUrl({
+    search: appliedFilters.search,
+    status: appliedFilters.status,
+    platform: appliedFilters.platform,
+  }), [appliedFilters]);
+
+  const listingPushJobsQuery = useQuery<DropshipAdminListingPushJobListResponse>({
+    queryKey: [listingPushJobsUrl],
+    queryFn: () => fetchJson<DropshipAdminListingPushJobListResponse>(listingPushJobsUrl),
+  });
+
+  const jobs = listingPushJobsQuery.data?.items ?? [];
+
+  function applyListingPushFilters() {
+    setAppliedFilters({ search, status, platform });
+  }
+
+  return (
+    <div className="space-y-5">
+      {listingPushJobsQuery.error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {queryErrorMessage(listingPushJobsQuery.error, "Unable to load dropship listing push jobs.")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Listing push operations</h2>
+            <p className="text-sm text-muted-foreground">
+              Review bulk listing push jobs, marketplace failures, blocked items, and vendor store context.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Job, vendor, store, error, or hash"
+              />
+            </div>
+            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+              <SelectTrigger className="lg:w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All platforms</SelectItem>
+                <SelectItem value="ebay">eBay</SelectItem>
+                <SelectItem value="shopify">Shopify</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={status} onValueChange={(value) => setStatus(value as ListingPushStatusFilter)}>
+              <SelectTrigger className="lg:w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {listingPushStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {listingPushStatusLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyListingPushFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Matching jobs" value={String(listingPushJobsQuery.data?.total ?? 0)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible failed jobs" value={String(jobs.filter((job) => job.status === "failed").length)} />
+        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Visible blocked items" value={String(jobs.reduce((sum, job) => sum + job.itemSummary.blocked, 0))} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible completed items" value={String(jobs.reduce((sum, job) => sum + job.itemSummary.completed, 0))} />
+      </section>
+
+      <ListingPushJobsTable
+        isLoading={listingPushJobsQuery.isLoading || listingPushJobsQuery.isFetching}
+        jobs={jobs}
+        summary={listingPushJobsQuery.data?.summary ?? []}
+        total={listingPushJobsQuery.data?.total ?? 0}
+      />
     </div>
   );
 }
@@ -910,6 +1038,117 @@ function CatalogExposureTab() {
   );
 }
 
+function ListingPushJobsTable({
+  isLoading,
+  jobs,
+  summary,
+  total,
+}: {
+  isLoading: boolean;
+  jobs: DropshipAdminListingPushJobListItem[];
+  summary: DropshipAdminListingPushJobListResponse["summary"];
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="mt-4 space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (jobs.length === 0) {
+    return <EmptyState title="No listing push jobs" description="No dropship listing push jobs match the current filters." />;
+  }
+
+  return (
+    <section className="rounded-md border bg-card">
+      <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Listing push jobs</h2>
+          <p className="text-sm text-muted-foreground">{total} matching job{total === 1 ? "" : "s"}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {summary.map((entry) => (
+            <Badge key={entry.status} variant="outline" className={listingPushStatusTone(entry.status)}>
+              {formatStatus(entry.status)} {entry.count}
+            </Badge>
+          ))}
+        </div>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-[110px]">Job</TableHead>
+            <TableHead>Vendor/store</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Items</TableHead>
+            <TableHead>Latest issue</TableHead>
+            <TableHead className="w-[145px]">Updated</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {jobs.map((job) => (
+            <TableRow key={job.jobId}>
+              <TableCell>
+                <div className="font-mono text-sm">#{job.jobId}</div>
+                <div className="text-xs text-muted-foreground">{formatStatus(job.jobType)}</div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{job.vendor.businessName || job.vendor.email || `Vendor ${job.vendor.vendorId}`}</div>
+                <div className="text-xs text-muted-foreground">
+                  {[job.storeConnection.externalDisplayName, job.storeConnection.shopDomain, formatStatus(job.platform)]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={listingPushStatusTone(job.status)}>
+                  {formatStatus(job.status)}
+                </Badge>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {job.completedAt ? `Completed ${formatDateTime(job.completedAt)}` : `Created ${formatDateTime(job.createdAt)}`}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{job.itemSummary.total} total</div>
+                <div className="text-xs text-muted-foreground">
+                  {[
+                    job.itemSummary.completed ? `${job.itemSummary.completed} done` : null,
+                    job.itemSummary.failed ? `${job.itemSummary.failed} failed` : null,
+                    job.itemSummary.blocked ? `${job.itemSummary.blocked} blocked` : null,
+                    job.itemSummary.processing ? `${job.itemSummary.processing} processing` : null,
+                    job.itemSummary.queued ? `${job.itemSummary.queued} queued` : null,
+                  ].filter(Boolean).join(" / ") || "No item counts"}
+                </div>
+              </TableCell>
+              <TableCell>
+                {job.latestItemError ? (
+                  <>
+                    <div className="font-medium">{job.latestItemError.errorCode || formatStatus(job.latestItemError.status)}</div>
+                    <div className="max-w-[360px] truncate text-xs text-muted-foreground">
+                      {job.latestItemError.errorMessage || `Variant ${job.latestItemError.productVariantId}`}
+                    </div>
+                  </>
+                ) : job.errorMessage ? (
+                  <div className="max-w-[360px] truncate text-sm text-muted-foreground">{job.errorMessage}</div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">None</div>
+                )}
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                {formatDateTime(job.updatedAt)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </section>
+  );
+}
+
 function StoreConnectionsTable({
   connections,
   isLoading,
@@ -1472,6 +1711,12 @@ function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
   return formatStatus(status);
 }
 
+function listingPushStatusLabel(status: ListingPushStatusFilter): string {
+  if (status === "default") return "Needs attention";
+  if (status === "all") return "All statuses";
+  return formatStatus(status);
+}
+
 function orderStatusCount(
   summary: DropshipAdminOrderOpsListResponse["summary"],
   status: DropshipOpsOrderIntakeStatus,
@@ -1494,6 +1739,19 @@ function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {
     return "border-amber-200 bg-amber-50 text-amber-900";
   }
   if (status === "failed" || status === "exception" || status === "rejected" || status === "cancelled") {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function listingPushStatusTone(status: DropshipListingPushJobStatus): string {
+  if (status === "completed") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (status === "queued" || status === "processing") {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (status === "failed") {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
