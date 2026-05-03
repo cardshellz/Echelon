@@ -305,6 +305,8 @@ export interface DropshipDogfoodReadinessItem {
   warningCount: number;
   checks: DropshipDogfoodReadinessCheck[];
   metrics: {
+    dropshipOmsChannelId: number | null;
+    dropshipOmsChannelCount: number;
     defaultWarehouseId: number | null;
     adminCatalogIncludeRuleCount: number;
     vendorSelectionIncludeRuleCount: number;
@@ -333,6 +335,39 @@ export interface DropshipDogfoodReadinessResponse {
   page: number;
   limit: number;
   summary: Array<{ status: DropshipDogfoodReadinessStatus; count: number }>;
+}
+
+export interface DropshipOmsChannelOption {
+  channelId: number;
+  name: string;
+  type: string;
+  provider: string;
+  status: string;
+  isDropshipOmsChannel: boolean;
+  markerSources: string[];
+  updatedAt: string;
+}
+
+export interface DropshipOmsChannelConfigOverview {
+  currentChannelId: number | null;
+  currentChannelCount: number;
+  channels: DropshipOmsChannelOption[];
+  generatedAt: string;
+}
+
+export interface DropshipAdminOmsChannelConfigResponse {
+  config: DropshipOmsChannelConfigOverview;
+}
+
+export interface DropshipAdminOmsChannelConfigureInput {
+  channelId: number;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminOmsChannelConfigureResponse {
+  config: DropshipOmsChannelConfigOverview;
+  selectedChannel: DropshipOmsChannelOption;
+  idempotentReplay: boolean;
 }
 
 export interface DropshipShippingBoxConfig {
@@ -1409,6 +1444,25 @@ export function buildAdminDogfoodReadinessUrl(input: {
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
+}
+
+export function buildAdminOmsChannelConfigUrl(): string {
+  return "/api/dropship/admin/oms-channel-config";
+}
+
+export function buildAdminOmsChannelConfigureInput(input: {
+  channelId: string | number;
+  idempotencyKey: string;
+}): DropshipAdminOmsChannelConfigureInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  return {
+    channelId: parsePositiveIntegerInput(input.channelId, "channelId"),
+    idempotencyKey,
+  };
 }
 
 export function buildAdminShippingConfigUrl(input: {

@@ -17,6 +17,7 @@ export * from "./dropship-marketplace-tracking-service";
 export * from "./dropship-notification-service";
 export * from "./dropship-notification-ops-dtos";
 export * from "./dropship-notification-ops-service";
+export * from "./dropship-oms-channel-config-service";
 export * from "./dropship-ops-surface-service";
 export * from "./dropship-order-acceptance-service";
 export * from "./dropship-order-cancellation-service";

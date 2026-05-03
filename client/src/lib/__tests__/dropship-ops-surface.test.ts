@@ -9,6 +9,8 @@ import {
   buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
+  buildAdminOmsChannelConfigUrl,
+  buildAdminOmsChannelConfigureInput,
   buildAdminListingPushJobsUrl,
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
@@ -120,6 +122,17 @@ describe("dropship ops surface client helpers", () => {
       page: 2,
       limit: 25,
     })).toBe("/api/dropship/admin/dogfood-readiness?page=2&limit=25");
+  });
+
+  it("builds admin OMS channel config requests", () => {
+    expect(buildAdminOmsChannelConfigUrl()).toBe("/api/dropship/admin/oms-channel-config");
+    expect(buildAdminOmsChannelConfigureInput({
+      channelId: " 7 ",
+      idempotencyKey: "oms-config-001",
+    })).toEqual({
+      channelId: 7,
+      idempotencyKey: "oms-config-001",
+    });
   });
 
   it("builds admin shipping config URLs with bounded list parameters", () => {

@@ -39,6 +39,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
+  buildAdminOmsChannelConfigUrl,
+  buildAdminOmsChannelConfigureInput,
   buildAdminListingPushJobsUrl,
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
@@ -81,6 +83,8 @@ import {
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
+  type DropshipAdminOmsChannelConfigResponse,
+  type DropshipAdminOmsChannelConfigureResponse,
   type DropshipAdminReturnStatusUpdateResponse,
   type DropshipAdminShippingConfigResponse,
   type DropshipAdminStoreConnectionListItem,
@@ -95,6 +99,7 @@ import {
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
   type DropshipDogfoodReadinessStatus,
+  type DropshipOmsChannelConfigOverview,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
   type DropshipOpsOrderIntakeStatus,
@@ -630,9 +635,14 @@ function refreshAll() {
 }
 
 function DogfoodReadinessTab() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<DogfoodReadinessStatusFilter>("all");
   const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [selectedOmsChannelId, setSelectedOmsChannelId] = useState("");
+  const [omsMessage, setOmsMessage] = useState("");
+  const [omsError, setOmsError] = useState("");
+  const [isSavingOmsChannel, setIsSavingOmsChannel] = useState(false);
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "all" as DogfoodReadinessStatusFilter,
@@ -649,24 +659,86 @@ function DogfoodReadinessTab() {
     queryKey: [readinessUrl],
     queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(readinessUrl),
   });
+  const omsChannelConfigUrl = buildAdminOmsChannelConfigUrl();
+  const omsChannelConfigQuery = useQuery<DropshipAdminOmsChannelConfigResponse>({
+    queryKey: [omsChannelConfigUrl],
+    queryFn: () => fetchJson<DropshipAdminOmsChannelConfigResponse>(omsChannelConfigUrl),
+  });
 
   const items = readinessQuery.data?.items ?? [];
   const summary = readinessQuery.data?.summary ?? [];
+  const omsConfig = omsChannelConfigQuery.data?.config ?? null;
+
+  useEffect(() => {
+    if (!omsConfig || selectedOmsChannelId) return;
+    const defaultChannelId = omsConfig.currentChannelId
+      ?? omsConfig.channels.find((channel) => channel.status === "active")?.channelId
+      ?? null;
+    if (defaultChannelId !== null) {
+      setSelectedOmsChannelId(String(defaultChannelId));
+    }
+  }, [omsConfig, selectedOmsChannelId]);
 
   function applyReadinessFilters() {
     setAppliedFilters({ search, status, platform });
   }
 
+  async function saveOmsChannel() {
+    setIsSavingOmsChannel(true);
+    setOmsError("");
+    setOmsMessage("");
+    try {
+      const input = buildAdminOmsChannelConfigureInput({
+        channelId: selectedOmsChannelId,
+        idempotencyKey: createDropshipIdempotencyKey("admin-oms-channel"),
+      });
+      const response = await putJson<DropshipAdminOmsChannelConfigureResponse>(
+        omsChannelConfigUrl,
+        input,
+      );
+      setSelectedOmsChannelId(String(response.selectedChannel.channelId));
+      setOmsMessage(`Internal Dropship OMS channel set to ${response.selectedChannel.name}.`);
+      await Promise.all([
+        omsChannelConfigQuery.refetch(),
+        readinessQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setOmsError(caught instanceof Error ? caught.message : "Dropship OMS channel save failed.");
+    } finally {
+      setIsSavingOmsChannel(false);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      {readinessQuery.error && (
+      {(readinessQuery.error || omsChannelConfigQuery.error || omsError) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {queryErrorMessage(readinessQuery.error, "Unable to load dropship dogfood readiness.")}
+            {omsError || queryErrorMessage(
+              readinessQuery.error ?? omsChannelConfigQuery.error,
+              "Unable to load dropship dogfood readiness.",
+            )}
           </AlertDescription>
         </Alert>
       )}
+      {omsMessage && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{omsMessage}</AlertDescription>
+        </Alert>
+      )}
+
+      <OmsChannelConfigPanel
+        config={omsConfig}
+        isLoading={omsChannelConfigQuery.isLoading || omsChannelConfigQuery.isFetching}
+        isSaving={isSavingOmsChannel}
+        selectedChannelId={selectedOmsChannelId}
+        onSave={saveOmsChannel}
+        onSelectChannel={setSelectedOmsChannelId}
+      />
 
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -2470,6 +2542,90 @@ function activeRateTableCount(config: DropshipShippingConfigOverview | undefined
   return config?.rateTables.filter((table) => table.status === "active").length ?? 0;
 }
 
+function OmsChannelConfigPanel({
+  config,
+  isLoading,
+  isSaving,
+  onSave,
+  onSelectChannel,
+  selectedChannelId,
+}: {
+  config: DropshipOmsChannelConfigOverview | null;
+  isLoading: boolean;
+  isSaving: boolean;
+  selectedChannelId: string;
+  onSelectChannel: (channelId: string) => void;
+  onSave: () => void;
+}) {
+  if (isLoading && !config) {
+    return (
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-6 w-64" />
+        <Skeleton className="mt-4 h-10 w-full max-w-xl" />
+      </section>
+    );
+  }
+
+  const activeChannels = config?.channels.filter((channel) => channel.status === "active") ?? [];
+  const markedChannels = config?.channels.filter((channel) => channel.isDropshipOmsChannel) ?? [];
+  const currentChannel = config?.channels.find((channel) => channel.channelId === config.currentChannelId) ?? null;
+  const selectedChannel = config?.channels.find((channel) => String(channel.channelId) === selectedChannelId) ?? null;
+  const hasSelection = selectedChannelId.trim().length > 0;
+  const hasAmbiguousConfig = (config?.currentChannelCount ?? 0) > 1;
+
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">Internal Dropship OMS channel</h2>
+            <Badge variant="outline" className={omsChannelConfigTone(config)}>
+              {omsChannelConfigLabel(config)}
+            </Badge>
+          </div>
+          <div className="mt-2 text-sm text-muted-foreground">
+            {currentChannel
+              ? `${currentChannel.name} is the active order-intake channel.`
+              : hasAmbiguousConfig
+                ? `${config?.currentChannelCount ?? 0} active channels are marked. Choose one to remove ambiguity.`
+                : "No active Dropship OMS channel is marked."}
+          </div>
+          {markedChannels.length > 0 && (
+            <div className="mt-1 text-xs text-muted-foreground">
+              Marked: {markedChannels.map((channel) => `${channel.name} (${formatStatus(channel.status)})`).join(", ")}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          <div className="min-w-0 sm:w-80">
+            <label className="text-sm font-medium">Channel</label>
+            <Select value={selectedChannelId} onValueChange={onSelectChannel} disabled={activeChannels.length === 0}>
+              <SelectTrigger className="mt-2">
+                <SelectValue placeholder="Select active channel" />
+              </SelectTrigger>
+              <SelectContent>
+                {activeChannels.map((channel) => (
+                  <SelectItem key={channel.channelId} value={String(channel.channelId)}>
+                    {channel.name} / {formatStatus(channel.provider)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button
+            className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+            disabled={!hasSelection || isSaving || activeChannels.length === 0}
+            onClick={onSave}
+          >
+            <Save className="h-4 w-4" />
+            {isSaving ? "Saving" : selectedChannel?.isDropshipOmsChannel ? "Confirm channel" : "Set channel"}
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function DogfoodReadinessTable({
   isLoading,
   items,
@@ -2585,6 +2741,9 @@ function DogfoodReadinessTable({
                   </div>
                   <div className="text-xs text-muted-foreground">
                     Markup {item.metrics.activeShippingMarkupPolicyCount} / Insurance {item.metrics.activeShippingInsurancePolicyCount}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    OMS {item.metrics.dropshipOmsChannelCount === 1 ? item.metrics.dropshipOmsChannelId : `${item.metrics.dropshipOmsChannelCount} marked`}
                   </div>
                 </TableCell>
                 <TableCell>
@@ -3761,6 +3920,20 @@ function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {
 function dogfoodReadinessStatusTone(status: DropshipDogfoodReadinessStatus): string {
   if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
+  return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function omsChannelConfigLabel(config: DropshipOmsChannelConfigOverview | null): string {
+  if (!config) return "Loading";
+  if (config.currentChannelCount === 1) return "Ready";
+  if (config.currentChannelCount > 1) return "Ambiguous";
+  return "Missing";
+}
+
+function omsChannelConfigTone(config: DropshipOmsChannelConfigOverview | null): string {
+  if (!config) return "border-zinc-200 bg-zinc-50 text-zinc-700";
+  if (config.currentChannelCount === 1) return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (config.currentChannelCount > 1) return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-rose-200 bg-rose-50 text-rose-800";
 }
 
