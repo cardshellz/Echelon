@@ -297,7 +297,7 @@ async function updateExistingIntakeWithClient(
   ));
 }
 
-async function resolveDropshipOmsChannelIdWithClient(client: PoolClient): Promise<number> {
+export async function resolveDropshipOmsChannelIdWithClient(client: PoolClient): Promise<number> {
   const configuredId = parseOptionalPositiveIntegerEnv(
     "DROPSHIP_OMS_CHANNEL_ID",
     process.env.DROPSHIP_OMS_CHANNEL_ID,
@@ -328,28 +328,46 @@ async function resolveDropshipOmsChannelIdWithClient(client: PoolClient): Promis
     return channel.id;
   }
 
-  const channelName = process.env.DROPSHIP_OMS_CHANNEL_NAME?.trim() || "Dropship OMS";
-  const channelProvider = process.env.DROPSHIP_OMS_CHANNEL_PROVIDER?.trim() || "manual";
   const result = await client.query<ChannelRow>(
-    `SELECT id, status
-     FROM channels.channels
-     WHERE LOWER(name) = LOWER($1)
-       AND provider = $2
-       AND status = 'active'
-     ORDER BY priority DESC, id ASC
-     LIMIT 1`,
-    [channelName, channelProvider],
+    `SELECT c.id, c.status
+     FROM channels.channels c
+     WHERE c.status = 'active'
+       AND (
+         LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms'
+         OR COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true'
+         OR EXISTS (
+           SELECT 1
+           FROM channels.channel_connections cc
+           WHERE cc.channel_id = c.id
+             AND (
+               LOWER(COALESCE(cc.metadata #>> '{dropship,role}', '')) = 'oms'
+               OR COALESCE(cc.metadata #>> '{features,dropshipOms}', 'false') = 'true'
+               OR COALESCE(cc.metadata #>> '{features,dropship_oms}', 'false') = 'true'
+             )
+         )
+       )
+     ORDER BY c.priority DESC, c.id ASC
+     LIMIT 2`,
   );
+  if (result.rows.length > 1) {
+    throw new DropshipError(
+      "DROPSHIP_OMS_CHANNEL_CONFIG_AMBIGUOUS",
+      "More than one active Dropship OMS channel is configured.",
+      {
+        channelIds: result.rows.map((row) => row.id),
+        envChannelId: "DROPSHIP_OMS_CHANNEL_ID",
+      },
+    );
+  }
   const channel = result.rows[0];
   if (!channel) {
     throw new DropshipError(
       "DROPSHIP_OMS_CHANNEL_CONFIG_REQUIRED",
-      "Dropship OMS channel must be configured before recording order intake.",
+      "Dropship OMS channel must be explicitly configured before recording order intake.",
       {
         envChannelId: "DROPSHIP_OMS_CHANNEL_ID",
-        envChannelName: "DROPSHIP_OMS_CHANNEL_NAME",
-        expectedName: channelName,
-        expectedProvider: channelProvider,
+        channelShippingConfig: { dropship: { role: "oms" } },
+        channelConnectionMetadata: { features: { dropshipOms: true } },
       },
     );
   }
