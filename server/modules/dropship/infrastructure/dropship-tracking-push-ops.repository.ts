@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type { DropshipTrackingPushStatus } from "../application/dropship-tracking-push-ops-dtos";
@@ -6,6 +6,7 @@ import type {
   DropshipTrackingPushOpsListResult,
   DropshipTrackingPushOpsRecord,
   DropshipTrackingPushOpsRepository,
+  DropshipTrackingPushRetryRequest,
   DropshipTrackingPushOpsStatusSummary,
 } from "../application/dropship-tracking-push-ops-service";
 
@@ -27,6 +28,7 @@ interface TrackingPushOpsRow {
   shipped_at: Date;
   external_fulfillment_id: string | null;
   attempt_count: string | number;
+  retryable: boolean | null;
   last_error_code: string | null;
   last_error_message: string | null;
   created_at: Date;
@@ -43,6 +45,25 @@ interface TrackingPushOpsRow {
   external_display_name: string | null;
   shop_domain: string | null;
   total_count: string | number;
+}
+
+interface TrackingPushRetryRow {
+  id: number;
+  intake_id: number;
+  oms_order_id: string | number;
+  vendor_id: number;
+  store_connection_id: number;
+  platform: string;
+  external_order_id: string;
+  status: DropshipTrackingPushStatus;
+  idempotency_key: string;
+  carrier: string;
+  tracking_number: string;
+  shipped_at: Date;
+  attempt_count: string | number;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  raw_result: Record<string, unknown> | null;
 }
 
 interface StatusCountRow {
@@ -91,6 +112,156 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
       client.release();
     }
   }
+
+  async prepareRetry(
+    input: Parameters<DropshipTrackingPushOpsRepository["prepareRetry"]>[0],
+  ): Promise<DropshipTrackingPushRetryRequest> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await loadTrackingPushForRetry(client, input.pushId);
+      if (!existing) {
+        throw new DropshipError(
+          "DROPSHIP_TRACKING_PUSH_OPS_PUSH_NOT_FOUND",
+          "Dropship tracking push was not found.",
+          { pushId: input.pushId },
+        );
+      }
+
+      if (existing.status !== "failed") {
+        throw new DropshipError(
+          "DROPSHIP_TRACKING_PUSH_OPS_STATUS_NOT_RETRYABLE",
+          "Only failed dropship tracking pushes can be retried.",
+          { pushId: input.pushId, status: existing.status },
+        );
+      }
+
+      if (!trackingPushFailureIsRetryable(existing.raw_result)) {
+        throw new DropshipError(
+          "DROPSHIP_TRACKING_PUSH_OPS_PUSH_NOT_RETRYABLE",
+          "Dropship tracking push failure was marked non-retryable.",
+          {
+            pushId: input.pushId,
+            lastErrorCode: existing.last_error_code,
+            lastErrorMessage: existing.last_error_message,
+          },
+        );
+      }
+
+      const updated = await client.query<TrackingPushRetryRow>(
+        `UPDATE dropship.dropship_marketplace_tracking_pushes
+         SET status = 'queued',
+             raw_result = COALESCE(raw_result, '{}'::jsonb) || $2::jsonb,
+             updated_at = $3
+         WHERE id = $1
+         RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id,
+                   platform, external_order_id, status, idempotency_key,
+                   carrier, tracking_number, shipped_at, attempt_count,
+                   last_error_code, last_error_message, raw_result`,
+        [
+          input.pushId,
+          JSON.stringify({
+            lastRetryRequest: {
+              idempotencyKey: input.idempotencyKey,
+              reason: input.reason ?? null,
+              actorType: input.actor.actorType,
+              actorId: input.actor.actorId ?? null,
+              requestedAt: input.now.toISOString(),
+            },
+          }),
+          input.now,
+        ],
+      );
+      const row = requiredRow(updated.rows[0], "Dropship tracking push retry did not return a row.");
+      await recordTrackingPushOpsAuditEvent(client, {
+        row,
+        eventType: "tracking_push_retry_requested",
+        actor: input.actor,
+        severity: "info",
+        payload: {
+          idempotencyKey: input.idempotencyKey,
+          trackingPushIdempotencyKey: row.idempotency_key,
+          previousStatus: existing.status,
+          previousAttemptCount: toSafeNonNegativeInteger(existing.attempt_count, "attempt_count"),
+          previousLastErrorCode: existing.last_error_code,
+          previousLastErrorMessage: existing.last_error_message,
+          reason: input.reason ?? null,
+        },
+        occurredAt: input.now,
+      });
+      await client.query("COMMIT");
+      return {
+        pushId: row.id,
+        omsOrderId: toSafePositiveInteger(row.oms_order_id, "oms_order_id"),
+        carrier: row.carrier,
+        trackingNumber: row.tracking_number,
+        shippedAt: row.shipped_at,
+        idempotencyKey: row.idempotency_key,
+        previousAttemptCount: toSafeNonNegativeInteger(existing.attempt_count, "attempt_count"),
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markPreparedRetryFailed(
+    input: Parameters<DropshipTrackingPushOpsRepository["markPreparedRetryFailed"]>[0],
+  ): Promise<void> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query<TrackingPushRetryRow>(
+        `UPDATE dropship.dropship_marketplace_tracking_pushes
+         SET status = 'failed',
+             last_error_code = $2,
+             last_error_message = $3,
+             raw_result = COALESCE(raw_result, '{}'::jsonb) || $4::jsonb,
+             updated_at = $5
+         WHERE id = $1
+           AND status = 'queued'
+         RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id,
+                   platform, external_order_id, status, idempotency_key,
+                   carrier, tracking_number, shipped_at, attempt_count,
+                   last_error_code, last_error_message, raw_result`,
+        [
+          input.pushId,
+          input.code,
+          input.message,
+          JSON.stringify({
+            lastFailure: {
+              retryable: input.retryable,
+              failedAt: input.now.toISOString(),
+            },
+          }),
+          input.now,
+        ],
+      );
+      const row = updated.rows[0];
+      if (row) {
+        await recordTrackingPushOpsAuditEvent(client, {
+          row,
+          eventType: "tracking_push_retry_prepare_failed",
+          actor: { actorType: "system" },
+          severity: input.retryable ? "warning" : "error",
+          payload: {
+            code: input.code,
+            message: input.message,
+            retryable: input.retryable,
+          },
+          occurredAt: input.now,
+        });
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 function trackingPushSelectSql(): string {
@@ -113,6 +284,7 @@ function trackingPushSelectSql(): string {
       tp.shipped_at,
       tp.external_fulfillment_id,
       tp.attempt_count,
+      COALESCE((tp.raw_result->'lastFailure'->>'retryable')::boolean, true) AS retryable,
       tp.last_error_code,
       tp.last_error_message,
       tp.created_at,
@@ -228,12 +400,76 @@ function mapTrackingPushOpsRow(row: TrackingPushOpsRow): DropshipTrackingPushOps
     shippedAt: row.shipped_at,
     externalFulfillmentId: row.external_fulfillment_id,
     attemptCount: toSafeNonNegativeInteger(row.attempt_count, "attempt_count"),
+    retryable: row.retryable !== false,
     lastErrorCode: row.last_error_code,
     lastErrorMessage: row.last_error_message,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
   };
+}
+
+async function loadTrackingPushForRetry(
+  client: PoolClient,
+  pushId: number,
+): Promise<TrackingPushRetryRow | null> {
+  const result = await client.query<TrackingPushRetryRow>(
+    `SELECT id, intake_id, oms_order_id, vendor_id, store_connection_id,
+            platform, external_order_id, status, idempotency_key,
+            carrier, tracking_number, shipped_at, attempt_count,
+            last_error_code, last_error_message, raw_result
+     FROM dropship.dropship_marketplace_tracking_pushes
+     WHERE id = $1
+     LIMIT 1
+     FOR UPDATE`,
+    [pushId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function recordTrackingPushOpsAuditEvent(
+  client: PoolClient,
+  input: {
+    row: TrackingPushRetryRow;
+    eventType: string;
+    actor: { actorType: "admin" | "system"; actorId?: string };
+    severity: "info" | "warning" | "error";
+    payload: Record<string, unknown>;
+    occurredAt: Date;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (vendor_id, store_connection_id, entity_type, entity_id, event_type,
+       actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, $2, 'dropship_marketplace_tracking_push', $3, $4,
+             $5, $6, $7, $8::jsonb, $9)`,
+    [
+      input.row.vendor_id,
+      input.row.store_connection_id,
+      String(input.row.id),
+      input.eventType,
+      input.actor.actorType,
+      input.actor.actorId ?? null,
+      input.severity,
+      JSON.stringify({
+        intakeId: input.row.intake_id,
+        omsOrderId: toSafePositiveInteger(input.row.oms_order_id, "oms_order_id"),
+        platform: input.row.platform,
+        externalOrderId: input.row.external_order_id,
+        ...input.payload,
+      }),
+      input.occurredAt,
+    ],
+  );
+}
+
+function trackingPushFailureIsRetryable(rawResult: Record<string, unknown> | null): boolean {
+  const lastFailure = rawResult?.lastFailure;
+  if (!lastFailure || typeof lastFailure !== "object" || Array.isArray(lastFailure)) {
+    return true;
+  }
+  return (lastFailure as { retryable?: unknown }).retryable !== false;
 }
 
 function mapStatusCountRow(row: StatusCountRow): DropshipTrackingPushOpsStatusSummary {
@@ -265,4 +501,17 @@ function toSafeNonNegativeInteger(value: string | number, field: string): number
     );
   }
   return parsed;
+}
+
+function requiredRow<T>(row: T | undefined, message: string): T {
+  if (!row) throw new Error(message);
+  return row;
+}
+
+async function rollbackQuietly(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    // Preserve the original failure.
+  }
 }

@@ -42,6 +42,7 @@ import {
   buildAdminListingPushJobsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminTrackingPushRetryInput,
   buildAdminStoreConnectionsUrl,
   buildAdminTrackingPushesUrl,
   buildCatalogExposureRuleInput,
@@ -76,6 +77,7 @@ import {
   type DropshipAuditEventSearchResponse,
   type DropshipAdminTrackingPushListItem,
   type DropshipAdminTrackingPushListResponse,
+  type DropshipAdminTrackingPushRetryResponse,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
   type DropshipDogfoodReadinessStatus,
@@ -598,6 +600,7 @@ function ListingPushOpsTab() {
 }
 
 function TrackingPushOpsTab() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<TrackingPushStatusFilter>("default");
   const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
@@ -606,6 +609,10 @@ function TrackingPushOpsTab() {
     status: "default" as TrackingPushStatusFilter,
     platform: "all" as StoreConnectionPlatformFilter,
   });
+  const [retryReason, setRetryReason] = useState("");
+  const [pendingRetryPushId, setPendingRetryPushId] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   const trackingPushesUrl = useMemo(() => buildAdminTrackingPushesUrl({
     search: appliedFilters.search,
@@ -624,14 +631,47 @@ function TrackingPushOpsTab() {
     setAppliedFilters({ search, status, platform });
   }
 
+  async function retryTrackingPush(push: DropshipAdminTrackingPushListItem) {
+    setPendingRetryPushId(push.pushId);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminTrackingPushRetryInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-tracking-retry-${push.pushId}`),
+        reason: retryReason,
+      });
+      const response = await postJson<DropshipAdminTrackingPushRetryResponse>(
+        `/api/dropship/admin/tracking-pushes/${push.pushId}/retry`,
+        input,
+      );
+      setMessage(`Tracking push ${response.pushId} retry returned ${formatStatus(response.status)}.`);
+      setRetryReason("");
+      await Promise.all([
+        trackingPushesQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship tracking push retry failed.");
+    } finally {
+      setPendingRetryPushId(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      {trackingPushesQuery.error && (
+      {(trackingPushesQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {queryErrorMessage(trackingPushesQuery.error, "Unable to load dropship tracking pushes.")}
+            {error || queryErrorMessage(trackingPushesQuery.error, "Unable to load dropship tracking pushes.")}
           </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
 
@@ -681,6 +721,19 @@ function TrackingPushOpsTab() {
             </Button>
           </div>
         </div>
+        <div className="mt-4 max-w-3xl">
+          <label className="text-sm font-medium" htmlFor="dropship-tracking-retry-reason">
+            Retry reason
+          </label>
+          <Input
+            id="dropship-tracking-retry-reason"
+            value={retryReason}
+            onChange={(event) => setRetryReason(event.target.value)}
+            placeholder="Optional retry audit note"
+            className="mt-2"
+            maxLength={1000}
+          />
+        </div>
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -692,6 +745,8 @@ function TrackingPushOpsTab() {
 
       <TrackingPushesTable
         isLoading={trackingPushesQuery.isLoading || trackingPushesQuery.isFetching}
+        onRetry={retryTrackingPush}
+        pendingRetryPushId={pendingRetryPushId}
         pushes={pushes}
         summary={trackingPushesQuery.data?.summary ?? []}
         total={trackingPushesQuery.data?.total ?? 0}
@@ -1522,11 +1577,15 @@ function ListingPushJobsTable({
 
 function TrackingPushesTable({
   isLoading,
+  onRetry,
+  pendingRetryPushId,
   pushes,
   summary,
   total,
 }: {
   isLoading: boolean;
+  onRetry: (push: DropshipAdminTrackingPushListItem) => void;
+  pendingRetryPushId: number | null;
   pushes: DropshipAdminTrackingPushListItem[];
   summary: DropshipAdminTrackingPushListResponse["summary"];
   total: number;
@@ -1570,6 +1629,7 @@ function TrackingPushesTable({
             <TableHead>Tracking</TableHead>
             <TableHead>Latest issue</TableHead>
             <TableHead className="w-[145px]">Updated</TableHead>
+            <TableHead className="w-[120px] text-right">Action</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -1622,6 +1682,19 @@ function TrackingPushesTable({
               </TableCell>
               <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                 {formatDateTime(push.updatedAt)}
+              </TableCell>
+              <TableCell className="text-right">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="gap-2"
+                  disabled={push.status !== "failed" || !push.retryable || pendingRetryPushId !== null}
+                  onClick={() => onRetry(push)}
+                >
+                  <RotateCcw className={pendingRetryPushId === push.pushId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                  Retry
+                </Button>
               </TableCell>
             </TableRow>
           ))}
