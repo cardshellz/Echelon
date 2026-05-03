@@ -45,10 +45,17 @@ import {
   buildAdminOrderOpsActionInput,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
+  buildAdminShippingConfigUrl,
   buildAdminTrackingPushRetryInput,
   buildAdminStoreConnectionsUrl,
   buildAdminTrackingPushesUrl,
   buildCatalogExposureRuleInput,
+  buildShippingBoxInput,
+  buildShippingInsurancePolicyInput,
+  buildShippingMarkupPolicyInput,
+  buildShippingPackageProfileInput,
+  buildShippingRateTableInput,
+  buildShippingZoneRuleInput,
   buildStoreOrderProcessingConfigInput,
   countByKey,
   catalogExposureRecordToInput,
@@ -75,6 +82,7 @@ import {
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminReturnStatusUpdateResponse,
+  type DropshipAdminShippingConfigResponse,
   type DropshipAdminStoreConnectionListItem,
   type DropshipAdminStoreConnectionListResponse,
   type DropshipAdminOpsOverview,
@@ -98,6 +106,7 @@ import {
   type DropshipRmaStatus,
   type DropshipTrackingPushStatus,
   type DropshipSeverity,
+  type DropshipShippingConfigOverview,
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipStorePlatform,
   type DropshipStoreOrderProcessingConfigResponse,
@@ -128,6 +137,76 @@ interface CatalogRuleFormState {
   notes: string;
 }
 
+interface ShippingBoxFormState {
+  code: string;
+  name: string;
+  lengthMm: string;
+  widthMm: string;
+  heightMm: string;
+  tareWeightGrams: string;
+  maxWeightGrams: string;
+  isActive: boolean;
+}
+
+interface ShippingPackageProfileFormState {
+  productVariantId: string;
+  weightGrams: string;
+  lengthMm: string;
+  widthMm: string;
+  heightMm: string;
+  shipAlone: boolean;
+  defaultCarrier: string;
+  defaultService: string;
+  defaultBoxId: string;
+  maxUnitsPerPackage: string;
+  isActive: boolean;
+}
+
+interface ShippingZoneRuleFormState {
+  originWarehouseId: string;
+  destinationCountry: string;
+  destinationRegion: string;
+  postalPrefix: string;
+  zone: string;
+  priority: string;
+  isActive: boolean;
+}
+
+interface ShippingRateTableFormState {
+  carrier: string;
+  service: string;
+  currency: string;
+  status: "draft" | "active" | "archived";
+  effectiveFrom: string;
+  effectiveTo: string;
+  warehouseId: string;
+  destinationZone: string;
+  minWeightGrams: string;
+  maxWeightGrams: string;
+  rate: string;
+}
+
+interface ShippingMarkupPolicyFormState {
+  name: string;
+  markupBps: string;
+  fixedMarkup: string;
+  minMarkup: string;
+  maxMarkup: string;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string;
+}
+
+interface ShippingInsurancePolicyFormState {
+  name: string;
+  feeBps: string;
+  minFee: string;
+  maxFee: string;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string;
+}
+
 const emptyCatalogRuleForm: CatalogRuleFormState = {
   scopeType: "catalog",
   action: "include",
@@ -137,6 +216,76 @@ const emptyCatalogRuleForm: CatalogRuleFormState = {
   category: "",
   priority: "0",
   notes: "",
+};
+
+const emptyShippingBoxForm: ShippingBoxFormState = {
+  code: "",
+  name: "",
+  lengthMm: "",
+  widthMm: "",
+  heightMm: "",
+  tareWeightGrams: "0",
+  maxWeightGrams: "",
+  isActive: true,
+};
+
+const emptyShippingPackageProfileForm: ShippingPackageProfileFormState = {
+  productVariantId: "",
+  weightGrams: "",
+  lengthMm: "",
+  widthMm: "",
+  heightMm: "",
+  shipAlone: false,
+  defaultCarrier: "",
+  defaultService: "",
+  defaultBoxId: "",
+  maxUnitsPerPackage: "",
+  isActive: true,
+};
+
+const emptyShippingZoneRuleForm: ShippingZoneRuleFormState = {
+  originWarehouseId: "",
+  destinationCountry: "US",
+  destinationRegion: "",
+  postalPrefix: "",
+  zone: "",
+  priority: "0",
+  isActive: true,
+};
+
+const emptyShippingRateTableForm: ShippingRateTableFormState = {
+  carrier: "USPS",
+  service: "Ground Advantage",
+  currency: "USD",
+  status: "active",
+  effectiveFrom: "",
+  effectiveTo: "",
+  warehouseId: "",
+  destinationZone: "",
+  minWeightGrams: "0",
+  maxWeightGrams: "",
+  rate: "",
+};
+
+const emptyShippingMarkupPolicyForm: ShippingMarkupPolicyFormState = {
+  name: "Default markup",
+  markupBps: "0",
+  fixedMarkup: "0.00",
+  minMarkup: "",
+  maxMarkup: "",
+  isActive: true,
+  effectiveFrom: "",
+  effectiveTo: "",
+};
+
+const emptyShippingInsurancePolicyForm: ShippingInsurancePolicyFormState = {
+  name: "Default insurance pool",
+  feeBps: "200",
+  minFee: "",
+  maxFee: "",
+  isActive: true,
+  effectiveFrom: "",
+  effectiveTo: "",
 };
 
 const orderOpsStatusFilters: OrderOpsStatusFilter[] = [
@@ -332,6 +481,12 @@ function refreshAll() {
               Catalog exposure
             </TabsTrigger>
             <TabsTrigger
+              value="shipping"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Shipping config
+            </TabsTrigger>
+            <TabsTrigger
               value="order-intake"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -391,6 +546,10 @@ function refreshAll() {
 
           <TabsContent value="catalog" className="m-0">
             <CatalogExposureTab />
+          </TabsContent>
+
+          <TabsContent value="shipping" className="m-0">
+            <ShippingConfigTab />
           </TabsContent>
 
           <TabsContent value="order-intake" className="m-0">
@@ -1692,6 +1851,623 @@ function CatalogExposureTab() {
       </section>
     </div>
   );
+}
+
+function ShippingConfigTab() {
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
+  const [boxForm, setBoxForm] = useState<ShippingBoxFormState>(emptyShippingBoxForm);
+  const [profileForm, setProfileForm] = useState<ShippingPackageProfileFormState>(emptyShippingPackageProfileForm);
+  const [zoneForm, setZoneForm] = useState<ShippingZoneRuleFormState>(emptyShippingZoneRuleForm);
+  const [rateForm, setRateForm] = useState<ShippingRateTableFormState>(emptyShippingRateTableForm);
+  const [markupForm, setMarkupForm] = useState<ShippingMarkupPolicyFormState>(emptyShippingMarkupPolicyForm);
+  const [insuranceForm, setInsuranceForm] = useState<ShippingInsurancePolicyFormState>(emptyShippingInsurancePolicyForm);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const shippingConfigUrl = useMemo(
+    () => buildAdminShippingConfigUrl({ search: appliedSearch, packageProfileLimit: 75, rateTableLimit: 25 }),
+    [appliedSearch],
+  );
+  const shippingQuery = useQuery<DropshipAdminShippingConfigResponse>({
+    queryKey: [shippingConfigUrl],
+    queryFn: () => fetchJson<DropshipAdminShippingConfigResponse>(shippingConfigUrl),
+  });
+  const config = shippingQuery.data?.config;
+
+  async function runShippingAction(action: string, task: () => Promise<void>) {
+    setPendingAction(action);
+    setError("");
+    setMessage("");
+    try {
+      await task();
+      await Promise.all([
+        shippingQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Shipping config save failed.");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  function applySearch() {
+    setAppliedSearch(search.trim());
+  }
+
+  async function saveBox() {
+    await runShippingAction("box", async () => {
+      await putJson("/api/dropship/admin/shipping/boxes", buildShippingBoxInput({
+        ...boxForm,
+        idempotencyKey: createDropshipIdempotencyKey("shipping-box"),
+      }));
+      setBoxForm(emptyShippingBoxForm);
+      setMessage("Box saved.");
+    });
+  }
+
+  async function savePackageProfile() {
+    await runShippingAction("profile", async () => {
+      await putJson("/api/dropship/admin/shipping/package-profiles", buildShippingPackageProfileInput({
+        ...profileForm,
+        idempotencyKey: createDropshipIdempotencyKey("shipping-package-profile"),
+      }));
+      setProfileForm(emptyShippingPackageProfileForm);
+      setMessage("Package profile saved.");
+    });
+  }
+
+  async function saveZoneRule() {
+    await runShippingAction("zone", async () => {
+      await putJson("/api/dropship/admin/shipping/zone-rules", buildShippingZoneRuleInput({
+        ...zoneForm,
+        idempotencyKey: createDropshipIdempotencyKey("shipping-zone-rule"),
+      }));
+      setZoneForm(emptyShippingZoneRuleForm);
+      setMessage("Zone rule saved.");
+    });
+  }
+
+  async function saveRateTable() {
+    await runShippingAction("rate", async () => {
+      await postJson("/api/dropship/admin/shipping/rate-tables", buildShippingRateTableInput({
+        ...rateForm,
+        idempotencyKey: createDropshipIdempotencyKey("shipping-rate-table"),
+      }));
+      setRateForm(emptyShippingRateTableForm);
+      setMessage("Rate table created.");
+    });
+  }
+
+  async function saveMarkupPolicy() {
+    await runShippingAction("markup", async () => {
+      await postJson("/api/dropship/admin/shipping/markup-policies", buildShippingMarkupPolicyInput({
+        ...markupForm,
+        idempotencyKey: createDropshipIdempotencyKey("shipping-markup-policy"),
+      }));
+      setMarkupForm(emptyShippingMarkupPolicyForm);
+      setMessage("Shipping markup policy created.");
+    });
+  }
+
+  async function saveInsurancePolicy() {
+    await runShippingAction("insurance", async () => {
+      await postJson("/api/dropship/admin/shipping/insurance-policies", buildShippingInsurancePolicyInput({
+        ...insuranceForm,
+        idempotencyKey: createDropshipIdempotencyKey("shipping-insurance-policy"),
+      }));
+      setInsuranceForm(emptyShippingInsurancePolicyForm);
+      setMessage("Insurance pool policy created.");
+    });
+  }
+
+  return (
+    <div className="space-y-5">
+      {(shippingQuery.error || error) && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {error || queryErrorMessage(shippingQuery.error, "Unable to load dropship shipping config.")}
+          </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
+        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Package profiles" value={String(config?.packageProfiles.length ?? 0)} />
+        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
+        <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
+      </section>
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg font-semibold">Shipping configuration</h2>
+            <p className="text-sm text-muted-foreground">Manage package data, zones, cached rates, markup, and insurance pool fees used by dropship quotes.</p>
+          </div>
+          <Input
+            className="lg:w-72"
+            placeholder="Search package profiles"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applySearch}>
+            <Search className="h-4 w-4" />
+            Apply
+          </Button>
+        </div>
+      </section>
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <ShippingBoxPanel
+          form={boxForm}
+          isSaving={pendingAction === "box"}
+          onChange={setBoxForm}
+          onSave={saveBox}
+        />
+        <ShippingPackageProfilePanel
+          boxes={config?.boxes ?? []}
+          form={profileForm}
+          isSaving={pendingAction === "profile"}
+          onChange={setProfileForm}
+          onSave={savePackageProfile}
+        />
+        <ShippingZoneRulePanel
+          form={zoneForm}
+          isSaving={pendingAction === "zone"}
+          onChange={setZoneForm}
+          onSave={saveZoneRule}
+        />
+        <ShippingRateTablePanel
+          form={rateForm}
+          isSaving={pendingAction === "rate"}
+          onChange={setRateForm}
+          onSave={saveRateTable}
+        />
+        <ShippingMarkupPolicyPanel
+          activePolicy={config?.activeMarkupPolicy ?? null}
+          form={markupForm}
+          isSaving={pendingAction === "markup"}
+          onChange={setMarkupForm}
+          onSave={saveMarkupPolicy}
+        />
+        <ShippingInsurancePolicyPanel
+          activePolicy={config?.activeInsurancePolicy ?? null}
+          form={insuranceForm}
+          isSaving={pendingAction === "insurance"}
+          onChange={setInsuranceForm}
+          onSave={saveInsurancePolicy}
+        />
+      </div>
+
+      <ShippingConfigTables config={config ?? null} isLoading={shippingQuery.isLoading} />
+    </div>
+  );
+}
+
+function ShippingBoxPanel({
+  form,
+  isSaving,
+  onChange,
+  onSave,
+}: {
+  form: ShippingBoxFormState;
+  isSaving: boolean;
+  onChange: Dispatch<SetStateAction<ShippingBoxFormState>>;
+  onSave: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <PanelHeader title="Boxes and mailers" detail="Required before any package can be cartonized." />
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <ShippingInput label="Code" value={form.code} onChange={(value) => onChange((current) => ({ ...current, code: value }))} />
+        <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
+        <ShippingInput label="Length mm" value={form.lengthMm} onChange={(value) => onChange((current) => ({ ...current, lengthMm: value }))} />
+        <ShippingInput label="Width mm" value={form.widthMm} onChange={(value) => onChange((current) => ({ ...current, widthMm: value }))} />
+        <ShippingInput label="Height mm" value={form.heightMm} onChange={(value) => onChange((current) => ({ ...current, heightMm: value }))} />
+        <ShippingInput label="Tare grams" value={form.tareWeightGrams} onChange={(value) => onChange((current) => ({ ...current, tareWeightGrams: value }))} />
+        <ShippingInput label="Max weight grams" value={form.maxWeightGrams} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxWeightGrams: value }))} />
+        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+      </div>
+      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+        <Save className="h-4 w-4" />
+        Save box
+      </Button>
+    </section>
+  );
+}
+
+function ShippingPackageProfilePanel({
+  boxes,
+  form,
+  isSaving,
+  onChange,
+  onSave,
+}: {
+  boxes: DropshipShippingConfigOverview["boxes"];
+  form: ShippingPackageProfileFormState;
+  isSaving: boolean;
+  onChange: Dispatch<SetStateAction<ShippingPackageProfileFormState>>;
+  onSave: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <PanelHeader title="Package profiles" detail="SKU-level weight, dimensions, and default package rules." />
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <ShippingInput label="Variant ID" value={form.productVariantId} onChange={(value) => onChange((current) => ({ ...current, productVariantId: value }))} />
+        <ShippingInput label="Weight grams" value={form.weightGrams} onChange={(value) => onChange((current) => ({ ...current, weightGrams: value }))} />
+        <ShippingInput label="Length mm" value={form.lengthMm} onChange={(value) => onChange((current) => ({ ...current, lengthMm: value }))} />
+        <ShippingInput label="Width mm" value={form.widthMm} onChange={(value) => onChange((current) => ({ ...current, widthMm: value }))} />
+        <ShippingInput label="Height mm" value={form.heightMm} onChange={(value) => onChange((current) => ({ ...current, heightMm: value }))} />
+        <ShippingInput label="Max units/package" value={form.maxUnitsPerPackage} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxUnitsPerPackage: value }))} />
+        <ShippingInput label="Default carrier" value={form.defaultCarrier} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultCarrier: value }))} />
+        <ShippingInput label="Default service" value={form.defaultService} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultService: value }))} />
+        <div>
+          <label className="text-sm font-medium">Default box</label>
+          <Select value={form.defaultBoxId || "none"} onValueChange={(value) => onChange((current) => ({ ...current, defaultBoxId: value === "none" ? "" : value }))}>
+            <SelectTrigger className="mt-2">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">No default box</SelectItem>
+              {boxes.map((box) => (
+                <SelectItem key={box.boxId} value={String(box.boxId)}>
+                  {box.code}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+        <div>
+          <label className="text-sm font-medium">Ship alone</label>
+          <Select value={form.shipAlone ? "yes" : "no"} onValueChange={(value) => onChange((current) => ({ ...current, shipAlone: value === "yes" }))}>
+            <SelectTrigger className="mt-2">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="no">No</SelectItem>
+              <SelectItem value="yes">Yes</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+        <Save className="h-4 w-4" />
+        Save profile
+      </Button>
+    </section>
+  );
+}
+
+function ShippingZoneRulePanel({
+  form,
+  isSaving,
+  onChange,
+  onSave,
+}: {
+  form: ShippingZoneRuleFormState;
+  isSaving: boolean;
+  onChange: Dispatch<SetStateAction<ShippingZoneRuleFormState>>;
+  onSave: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <PanelHeader title="Zones" detail="Origin warehouse and destination matching for cached rate lookups." />
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <ShippingInput label="Origin warehouse ID" value={form.originWarehouseId} onChange={(value) => onChange((current) => ({ ...current, originWarehouseId: value }))} />
+        <ShippingInput label="Country" value={form.destinationCountry} onChange={(value) => onChange((current) => ({ ...current, destinationCountry: value }))} />
+        <ShippingInput label="Region" value={form.destinationRegion} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, destinationRegion: value }))} />
+        <ShippingInput label="Postal prefix" value={form.postalPrefix} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, postalPrefix: value }))} />
+        <ShippingInput label="Zone" value={form.zone} onChange={(value) => onChange((current) => ({ ...current, zone: value }))} />
+        <ShippingInput label="Priority" value={form.priority} onChange={(value) => onChange((current) => ({ ...current, priority: value }))} />
+        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+      </div>
+      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+        <Save className="h-4 w-4" />
+        Save zone
+      </Button>
+    </section>
+  );
+}
+
+function ShippingRateTablePanel({
+  form,
+  isSaving,
+  onChange,
+  onSave,
+}: {
+  form: ShippingRateTableFormState;
+  isSaving: boolean;
+  onChange: Dispatch<SetStateAction<ShippingRateTableFormState>>;
+  onSave: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <PanelHeader title="Rate table" detail="Create a cached rate table with an initial weight band." />
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <ShippingInput label="Carrier" value={form.carrier} onChange={(value) => onChange((current) => ({ ...current, carrier: value }))} />
+        <ShippingInput label="Service" value={form.service} onChange={(value) => onChange((current) => ({ ...current, service: value }))} />
+        <ShippingInput label="Currency" value={form.currency} onChange={(value) => onChange((current) => ({ ...current, currency: value }))} />
+        <div>
+          <label className="text-sm font-medium">Status</label>
+          <Select value={form.status} onValueChange={(value) => onChange((current) => ({ ...current, status: value as ShippingRateTableFormState["status"] }))}>
+            <SelectTrigger className="mt-2">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="draft">Draft</SelectItem>
+              <SelectItem value="archived">Archived</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <ShippingInput label="Effective from" value={form.effectiveFrom} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveFrom: value }))} />
+        <ShippingInput label="Effective to" value={form.effectiveTo} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveTo: value }))} />
+        <ShippingInput label="Warehouse ID" value={form.warehouseId} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, warehouseId: value }))} />
+        <ShippingInput label="Destination zone" value={form.destinationZone} onChange={(value) => onChange((current) => ({ ...current, destinationZone: value }))} />
+        <ShippingInput label="Min grams" value={form.minWeightGrams} onChange={(value) => onChange((current) => ({ ...current, minWeightGrams: value }))} />
+        <ShippingInput label="Max grams" value={form.maxWeightGrams} onChange={(value) => onChange((current) => ({ ...current, maxWeightGrams: value }))} />
+        <ShippingInput label="Rate" value={form.rate} placeholder="5.25" onChange={(value) => onChange((current) => ({ ...current, rate: value }))} />
+      </div>
+      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+        <Save className="h-4 w-4" />
+        Create rate table
+      </Button>
+    </section>
+  );
+}
+
+function ShippingMarkupPolicyPanel({
+  activePolicy,
+  form,
+  isSaving,
+  onChange,
+  onSave,
+}: {
+  activePolicy: DropshipShippingConfigOverview["activeMarkupPolicy"];
+  form: ShippingMarkupPolicyFormState;
+  isSaving: boolean;
+  onChange: Dispatch<SetStateAction<ShippingMarkupPolicyFormState>>;
+  onSave: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <PanelHeader title="Markup policy" detail={activePolicy ? `Current: ${activePolicy.markupBps} bps + ${formatCents(activePolicy.fixedMarkupCents)}` : "No active markup policy."} />
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
+        <ShippingInput label="Markup bps" value={form.markupBps} onChange={(value) => onChange((current) => ({ ...current, markupBps: value }))} />
+        <ShippingInput label="Fixed markup" value={form.fixedMarkup} onChange={(value) => onChange((current) => ({ ...current, fixedMarkup: value }))} />
+        <ShippingInput label="Min markup" value={form.minMarkup} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, minMarkup: value }))} />
+        <ShippingInput label="Max markup" value={form.maxMarkup} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxMarkup: value }))} />
+        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+      </div>
+      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+        <Save className="h-4 w-4" />
+        Create markup policy
+      </Button>
+    </section>
+  );
+}
+
+function ShippingInsurancePolicyPanel({
+  activePolicy,
+  form,
+  isSaving,
+  onChange,
+  onSave,
+}: {
+  activePolicy: DropshipShippingConfigOverview["activeInsurancePolicy"];
+  form: ShippingInsurancePolicyFormState;
+  isSaving: boolean;
+  onChange: Dispatch<SetStateAction<ShippingInsurancePolicyFormState>>;
+  onSave: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <PanelHeader title="Insurance pool" detail={activePolicy ? `Current: ${activePolicy.feeBps} bps` : "No active insurance pool policy."} />
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
+        <ShippingInput label="Fee bps" value={form.feeBps} onChange={(value) => onChange((current) => ({ ...current, feeBps: value }))} />
+        <ShippingInput label="Min fee" value={form.minFee} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, minFee: value }))} />
+        <ShippingInput label="Max fee" value={form.maxFee} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxFee: value }))} />
+        <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
+      </div>
+      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+        <Save className="h-4 w-4" />
+        Create insurance policy
+      </Button>
+    </section>
+  );
+}
+
+function ShippingConfigTables({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) {
+    return (
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Skeleton className="h-48 w-full" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+    );
+  }
+  if (!config) {
+    return <EmptyState title="No shipping config" description="Dropship shipping configuration is not loaded." />;
+  }
+  return (
+    <div className="grid gap-5 xl:grid-cols-2">
+      <ShippingSimpleTable
+        title="Boxes"
+        emptyTitle="No boxes"
+        headers={["Code", "Size", "Weight", "Status"]}
+        rows={config.boxes.map((box) => [
+          box.code,
+          `${box.lengthMm} x ${box.widthMm} x ${box.heightMm} mm`,
+          `${box.tareWeightGrams}g tare${box.maxWeightGrams ? ` / ${box.maxWeightGrams}g max` : ""}`,
+          box.isActive ? "Active" : "Inactive",
+        ])}
+      />
+      <ShippingSimpleTable
+        title="Package profiles"
+        emptyTitle="No package profiles"
+        headers={["Variant", "Size", "Weight", "Status"]}
+        rows={config.packageProfiles.map((profile) => [
+          profile.variantSku || String(profile.productVariantId),
+          `${profile.lengthMm} x ${profile.widthMm} x ${profile.heightMm} mm`,
+          `${profile.weightGrams}g`,
+          profile.isActive ? "Active" : "Inactive",
+        ])}
+      />
+      <ShippingSimpleTable
+        title="Zones"
+        emptyTitle="No zone rules"
+        headers={["Warehouse", "Destination", "Zone", "Status"]}
+        rows={config.zoneRules.map((rule) => [
+          String(rule.originWarehouseId),
+          [rule.destinationCountry, rule.destinationRegion, rule.postalPrefix].filter(Boolean).join(" / "),
+          rule.zone,
+          rule.isActive ? "Active" : "Inactive",
+        ])}
+      />
+      <ShippingSimpleTable
+        title="Rate tables"
+        emptyTitle="No rate tables"
+        headers={["Carrier/service", "Status", "Rows", "Effective"]}
+        rows={config.rateTables.map((table) => [
+          `${table.carrier} ${table.service}`,
+          table.status,
+          String(table.rows.length),
+          formatDateTime(table.effectiveFrom),
+        ])}
+      />
+    </div>
+  );
+}
+
+function ShippingSimpleTable({
+  emptyTitle,
+  headers,
+  rows,
+  title,
+}: {
+  emptyTitle: string;
+  headers: string[];
+  rows: string[][];
+  title: string;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-lg font-semibold">{title}</h2>
+        <Badge variant="outline">{rows.length}</Badge>
+      </div>
+      {rows.length === 0 ? (
+        <Empty className="border border-dashed">
+          <EmptyHeader>
+            <EmptyTitle>{emptyTitle}</EmptyTitle>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <div className="overflow-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {headers.map((header) => <TableHead key={header}>{header}</TableHead>)}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row, rowIndex) => (
+                <TableRow key={`${title}-${rowIndex}`}>
+                  {row.map((cell, cellIndex) => (
+                    <TableCell key={`${title}-${rowIndex}-${cellIndex}`} className={cellIndex === 0 ? "font-medium" : "text-sm text-muted-foreground"}>
+                      {cell}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PanelHeader({ detail, title }: { detail: string; title: string }) {
+  return (
+    <div>
+      <h2 className="text-lg font-semibold">{title}</h2>
+      <p className="text-sm text-muted-foreground">{detail}</p>
+    </div>
+  );
+}
+
+function ShippingInput({
+  label,
+  onChange,
+  placeholder,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  value: string;
+}) {
+  return (
+    <div>
+      <label className="text-sm font-medium">{label}</label>
+      <Input
+        className="mt-2"
+        placeholder={placeholder}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </div>
+  );
+}
+
+function ShippingActiveSelect({
+  onChange,
+  value,
+}: {
+  onChange: (value: boolean) => void;
+  value: boolean;
+}) {
+  return (
+    <div>
+      <label className="text-sm font-medium">Status</label>
+      <Select value={value ? "active" : "inactive"} onValueChange={(nextValue) => onChange(nextValue === "active")}>
+        <SelectTrigger className="mt-2">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="active">Active</SelectItem>
+          <SelectItem value="inactive">Inactive</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function activeCount(items: Array<{ isActive: boolean }> | undefined): number {
+  return items?.filter((item) => item.isActive).length ?? 0;
+}
+
+function activeRateTableCount(config: DropshipShippingConfigOverview | undefined): number {
+  return config?.rateTables.filter((table) => table.status === "active").length ?? 0;
 }
 
 function DogfoodReadinessTable({
