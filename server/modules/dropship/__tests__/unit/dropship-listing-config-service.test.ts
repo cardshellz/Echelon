@@ -63,6 +63,25 @@ describe("DropshipListingConfigService", () => {
     });
   });
 
+  it("lets admins ensure a listing config without provisioning a member identity", async () => {
+    const result = await service.getForAdmin(22, {
+      actorType: "admin",
+      actorId: "admin-1",
+    });
+
+    expect(result.storeConnection).toMatchObject({ vendorId: 10, storeConnectionId: 22 });
+    expect(result.config).toMatchObject({
+      storeConnectionId: 22,
+      platform: "shopify",
+      isActive: true,
+    });
+    expect(repository.lastEnsureInput).toMatchObject({
+      vendorId: 10,
+      storeConnectionId: 22,
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+  });
+
   it("replaces listing config with normalized required keys and fields", async () => {
     const result = await service.replaceForMember("member-1", 22, {
       listingMode: "live",
@@ -85,6 +104,31 @@ describe("DropshipListingConfigService", () => {
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_LISTING_CONFIG_REPLACED" });
   });
 
+  it("lets admins replace listing config for any existing store connection", async () => {
+    const result = await service.replaceForAdmin(22, {
+      listingMode: "draft_first",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfig: { marketplaceId: "EBAY_US" },
+      requiredConfigKeys: [" marketplaceId ", "marketplaceId"],
+      requiredProductFields: ["sku", "title"],
+      isActive: true,
+    }, {
+      actorType: "admin",
+      actorId: "admin-1",
+    });
+
+    expect(result.config).toMatchObject({
+      marketplaceConfig: { marketplaceId: "EBAY_US" },
+      requiredConfigKeys: ["marketplaceId"],
+      requiredProductFields: ["sku", "title"],
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_LISTING_CONFIG_REPLACED",
+      context: expect.objectContaining({ actorType: "admin", storeConnectionId: 22 }),
+    });
+  });
+
   it("blocks updates for disconnected stores", async () => {
     repository.storeConnection = {
       ...repository.storeConnection,
@@ -99,6 +143,26 @@ describe("DropshipListingConfigService", () => {
       requiredConfigKeys: [],
       requiredProductFields: [],
       isActive: true,
+    })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED" });
+  });
+
+  it("blocks admin updates for disconnected stores", async () => {
+    repository.storeConnection = {
+      ...repository.storeConnection,
+      status: "disconnected",
+    };
+
+    await expect(service.replaceForAdmin(22, {
+      listingMode: "draft_first",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfig: {},
+      requiredConfigKeys: [],
+      requiredProductFields: [],
+      isActive: true,
+    }, {
+      actorType: "admin",
+      actorId: "admin-1",
     })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED" });
   });
 
@@ -139,6 +203,10 @@ class FakeListingConfigRepository implements DropshipListingConfigRepository {
   lastEnsureInput: EnsureDropshipStoreListingConfigRepositoryInput | null = null;
 
   async loadStoreConnectionContext(): Promise<DropshipListingConfigStoreConnectionContext | null> {
+    return this.storeConnection;
+  }
+
+  async loadStoreConnectionContextById(): Promise<DropshipListingConfigStoreConnectionContext | null> {
     return this.storeConnection;
   }
 

@@ -13,6 +13,11 @@ import {
 } from "../domain/store-connection";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 import type {
+  DropshipListingInventoryMode,
+  DropshipListingMode,
+  DropshipListingPriceMode,
+} from "./dropship-marketplace-listing-provider";
+import type {
   DropshipProvisionedVendorProfile,
   DropshipVendorProvisioningService,
 } from "./dropship-vendor-provisioning-service";
@@ -66,11 +71,23 @@ export interface DropshipAdminStoreConnectionListItem extends DropshipStoreConne
     status: string;
     entitlementStatus: string;
   };
+  listingConfig: DropshipAdminStoreListingConfigSummary;
   setupCheckSummary: {
     openCount: number;
     errorCount: number;
     warningCount: number;
   };
+}
+
+export interface DropshipAdminStoreListingConfigSummary {
+  isConfigured: boolean;
+  isActive: boolean;
+  listingMode: DropshipListingMode | null;
+  inventoryMode: DropshipListingInventoryMode | null;
+  priceMode: DropshipListingPriceMode | null;
+  requiredConfigKeys: string[];
+  requiredProductFields: string[];
+  updatedAt: Date | null;
 }
 
 export interface DropshipAdminStoreConnectionListResult {

@@ -56,6 +56,24 @@ export class PgDropshipListingConfigRepository implements DropshipListingConfigR
     }
   }
 
+  async loadStoreConnectionContextById(input: {
+    storeConnectionId: number;
+  }): Promise<DropshipListingConfigStoreConnectionContext | null> {
+    const client = await this.dbPool.connect();
+    try {
+      const result = await client.query<StoreConnectionContextRow>(
+        `SELECT vendor_id, id AS store_connection_id, platform, status, setup_status
+         FROM dropship.dropship_store_connections
+         WHERE id = $1
+         LIMIT 1`,
+        [input.storeConnectionId],
+      );
+      return result.rows[0] ? mapStoreConnectionContextRow(result.rows[0]) : null;
+    } finally {
+      client.release();
+    }
+  }
+
   async ensureDefaultConfig(
     input: EnsureDropshipStoreListingConfigRepositoryInput,
   ): Promise<DropshipStoreListingConfigRecord> {

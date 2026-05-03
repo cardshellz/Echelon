@@ -1,5 +1,6 @@
 import type { Express, Response } from "express";
 import type { z } from "zod";
+import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipListingConfigService } from "../../application/dropship-listing-config-service";
 import { replaceDropshipStoreListingConfigInputSchema } from "../../application/dropship-listing-config-dtos";
 import { DropshipError } from "../../domain/errors";
@@ -13,6 +14,41 @@ export function registerDropshipListingConfigRoutes(
   app: Express,
   service: DropshipListingConfigService = createDropshipListingConfigServiceFromEnv(),
 ): void {
+  app.get(
+    "/api/dropship/admin/store-connections/:storeConnectionId/listing-config",
+    requirePermission("dropship", "view"),
+    async (req, res) => {
+      try {
+        const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
+        const result = await service.getForAdmin(storeConnectionId, {
+          actorType: "admin",
+          actorId: sessionUserId(req),
+        });
+        return res.json(result);
+      } catch (error) {
+        return sendDropshipListingConfigError(res, error);
+      }
+    },
+  );
+
+  app.put(
+    "/api/dropship/admin/store-connections/:storeConnectionId/listing-config",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
+        const input = parseBody(replaceDropshipStoreListingConfigInputSchema, req.body);
+        const result = await service.replaceForAdmin(storeConnectionId, input, {
+          actorType: "admin",
+          actorId: sessionUserId(req),
+        });
+        return res.json(result);
+      } catch (error) {
+        return sendDropshipListingConfigError(res, error);
+      }
+    },
+  );
+
   app.get(
     "/api/dropship/store-connections/:storeConnectionId/listing-config",
     requireDropshipAuth,
@@ -76,6 +112,11 @@ function sendDropshipListingConfigError(res: Response, error: unknown): Response
       message: "Dropship listing config request failed.",
     },
   });
+}
+
+function sessionUserId(req: { session?: { user?: { id?: unknown } } }): string | null {
+  const userId = req.session?.user?.id;
+  return typeof userId === "string" && userId.trim() ? userId : null;
 }
 
 function statusForDropshipListingConfigError(code: string): number {

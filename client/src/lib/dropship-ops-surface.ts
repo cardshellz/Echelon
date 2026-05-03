@@ -2,6 +2,22 @@ export type DropshipSectionStatus = "ready" | "attention_required" | "coming_soo
 export type DropshipSeverity = "info" | "warning" | "error";
 export type DropshipStorePlatform = "ebay" | "shopify";
 export type DropshipDogfoodReadinessStatus = "ready" | "warning" | "blocked";
+export type DropshipListingMode = "draft_first" | "live" | "manual_only";
+export type DropshipListingInventoryMode = "managed_quantity_sync" | "manual_quantity" | "disabled";
+export type DropshipListingPriceMode = "vendor_defined" | "connection_default" | "disabled";
+export type DropshipListingRequiredProductField =
+  | "sku"
+  | "productName"
+  | "variantName"
+  | "title"
+  | "description"
+  | "category"
+  | "brand"
+  | "gtin"
+  | "mpn"
+  | "condition"
+  | "itemSpecifics"
+  | "imageUrls";
 export type DropshipCatalogExposureScope = "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipCatalogExposureAction = "include" | "exclude";
 export type DropshipOpsOrderIntakeStatus =
@@ -97,6 +113,32 @@ const allDropshipRmaStatuses: DropshipRmaStatus[] = [
   "rejected",
   "credited",
   "closed",
+];
+
+export const allDropshipListingModes: DropshipListingMode[] = ["draft_first", "live", "manual_only"];
+export const allDropshipListingInventoryModes: DropshipListingInventoryMode[] = [
+  "managed_quantity_sync",
+  "manual_quantity",
+  "disabled",
+];
+export const allDropshipListingPriceModes: DropshipListingPriceMode[] = [
+  "vendor_defined",
+  "connection_default",
+  "disabled",
+];
+export const allDropshipListingRequiredProductFields: DropshipListingRequiredProductField[] = [
+  "sku",
+  "productName",
+  "variantName",
+  "title",
+  "description",
+  "category",
+  "brand",
+  "gtin",
+  "mpn",
+  "condition",
+  "itemSpecifics",
+  "imageUrls",
 ];
 
 const defaultDropshipRmaOpsStatuses: DropshipRmaStatus[] = [
@@ -879,6 +921,32 @@ export interface DropshipStoreConnectionProfileResponse {
   updatedAt: string;
 }
 
+export interface DropshipStoreListingConfigProfileResponse {
+  id: number;
+  storeConnectionId: number;
+  platform: DropshipStorePlatform;
+  listingMode: DropshipListingMode;
+  inventoryMode: DropshipListingInventoryMode;
+  priceMode: DropshipListingPriceMode;
+  marketplaceConfig: Record<string, unknown>;
+  requiredConfigKeys: string[];
+  requiredProductFields: DropshipListingRequiredProductField[];
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipStoreListingConfigSummary {
+  isConfigured: boolean;
+  isActive: boolean;
+  listingMode: DropshipListingMode | null;
+  inventoryMode: DropshipListingInventoryMode | null;
+  priceMode: DropshipListingPriceMode | null;
+  requiredConfigKeys: string[];
+  requiredProductFields: DropshipListingRequiredProductField[];
+  updatedAt: string | null;
+}
+
 export interface DropshipAdminStoreConnectionListItem extends DropshipStoreConnectionProfileResponse {
   vendor: {
     vendorId: number;
@@ -888,6 +956,7 @@ export interface DropshipAdminStoreConnectionListItem extends DropshipStoreConne
     status: string;
     entitlementStatus: string;
   };
+  listingConfig: DropshipStoreListingConfigSummary;
   setupCheckSummary: {
     openCount: number;
     errorCount: number;
@@ -909,6 +978,27 @@ export interface DropshipStoreOrderProcessingConfigInput {
 
 export interface DropshipStoreOrderProcessingConfigResponse {
   connection: DropshipStoreConnectionProfileResponse;
+}
+
+export interface DropshipStoreListingConfigInput {
+  listingMode: DropshipListingMode;
+  inventoryMode: DropshipListingInventoryMode;
+  priceMode: DropshipListingPriceMode;
+  marketplaceConfig: Record<string, unknown>;
+  requiredConfigKeys: string[];
+  requiredProductFields: DropshipListingRequiredProductField[];
+  isActive: boolean;
+}
+
+export interface DropshipStoreListingConfigResponse {
+  storeConnection: {
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipStorePlatform;
+    status: DropshipStoreConnectionLifecycleStatus;
+    setupStatus: string;
+  };
+  config: DropshipStoreListingConfigProfileResponse;
 }
 
 export interface DropshipCatalogSelectionDecision {
@@ -1519,6 +1609,36 @@ export function buildStoreOrderProcessingConfigInput(input: {
   };
 }
 
+export function buildStoreListingConfigInput(input: {
+  listingMode: DropshipListingMode;
+  inventoryMode: DropshipListingInventoryMode;
+  priceMode: DropshipListingPriceMode;
+  marketplaceConfigJson: string;
+  requiredConfigKeys: string;
+  requiredProductFields: string;
+  isActive: boolean;
+}): DropshipStoreListingConfigInput {
+  if (!allDropshipListingModes.includes(input.listingMode)) {
+    throw new Error("listingMode is not supported.");
+  }
+  if (!allDropshipListingInventoryModes.includes(input.inventoryMode)) {
+    throw new Error("inventoryMode is not supported.");
+  }
+  if (!allDropshipListingPriceModes.includes(input.priceMode)) {
+    throw new Error("priceMode is not supported.");
+  }
+
+  return {
+    listingMode: input.listingMode,
+    inventoryMode: input.inventoryMode,
+    priceMode: input.priceMode,
+    marketplaceConfig: parseJsonObject(input.marketplaceConfigJson, "marketplaceConfig"),
+    requiredConfigKeys: parseRequiredConfigKeys(input.requiredConfigKeys),
+    requiredProductFields: parseRequiredProductFields(input.requiredProductFields),
+    isActive: input.isActive,
+  };
+}
+
 export function buildAdminOrderOpsActionInput(input: {
   idempotencyKey: string;
   reason: string;
@@ -2115,6 +2235,63 @@ function parseIntegerInput(value: string | number, key: string): number {
     throw new Error(`${key} is outside the supported integer range.`);
   }
   return parsed;
+}
+
+function parseJsonObject(value: string, key: string): Record<string, unknown> {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error(`${key} must be valid JSON.`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${key} must be a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseRequiredConfigKeys(value: string): string[] {
+  const keys = uniqueCsvTokens(value);
+  if (keys.length > 100) {
+    throw new Error("requiredConfigKeys must include 100 or fewer keys.");
+  }
+  for (const key of keys) {
+    if (!/^[A-Za-z0-9_.-]+$/.test(key) || key.length > 120) {
+      throw new Error("Required config keys may only contain letters, numbers, dots, underscores, and hyphens.");
+    }
+  }
+  return keys;
+}
+
+function parseRequiredProductFields(value: string): DropshipListingRequiredProductField[] {
+  const fields = uniqueCsvTokens(value);
+  if (fields.length > 25) {
+    throw new Error("requiredProductFields must include 25 or fewer fields.");
+  }
+  for (const field of fields) {
+    if (!allDropshipListingRequiredProductFields.includes(field as DropshipListingRequiredProductField)) {
+      throw new Error(`${field} is not a supported required product field.`);
+    }
+  }
+  return fields as DropshipListingRequiredProductField[];
+}
+
+function uniqueCsvTokens(value: string): string[] {
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const rawToken of value.split(",")) {
+    const token = rawToken.trim();
+    if (!token || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    tokens.push(token);
+  }
+  return tokens;
 }
 
 export function formatCents(cents: number): string {
