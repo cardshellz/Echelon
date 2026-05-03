@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -230,5 +230,35 @@ describe("Dropship V2 prototype retirement contract", () => {
     expect(routeRegistry).not.toContain("registerVendorPortalRoutes(app)");
     expect(routeRegistry).not.toContain("registerVendorEbayRoutes(app)");
     expect(appStartup).not.toContain("startVendorOrderPolling()");
+  });
+
+  it("removes Phase 0 implementation files from active source", () => {
+    const retiredFiles = [
+      "server/modules/dropship/admin.routes.ts",
+      "server/modules/dropship/vendor-auth.routes.ts",
+      "server/modules/dropship/vendor-auth.ts",
+      "server/modules/dropship/vendor-catalog.routes.ts",
+      "server/modules/dropship/vendor-ebay.routes.ts",
+      "server/modules/dropship/vendor-order-polling.ts",
+      "server/modules/dropship/vendor-orders.routes.ts",
+      "server/modules/dropship/vendor-portal.routes.ts",
+      "server/modules/dropship/vendor-wallet.routes.ts",
+      "server/modules/dropship/vendor-webhooks.ts",
+      "server/modules/dropship/wallet.service.ts",
+      "server/modules/dropship/application/catalogOrchestrator.ts",
+      "server/modules/dropship/application/onboardingOrchestrator.ts",
+      "server/modules/dropship/application/orderOrchestrator.ts",
+      "server/modules/dropship/application/walletOrchestrator.ts",
+      "server/modules/dropship/interfaces/http/agent.controller.ts",
+      "server/modules/dropship/interfaces/http/catalog.controller.ts",
+      "server/modules/dropship/interfaces/http/vendor.controller.ts",
+      "server/modules/dropship/interfaces/http/wallet.controller.ts",
+      "server/modules/dropship/infrastructure/ebay.client.ts",
+      "server/modules/dropship/infrastructure/stripe.client.ts",
+    ];
+
+    for (const file of retiredFiles) {
+      expect(existsSync(resolve(process.cwd(), file)), file).toBe(false);
+    }
   });
 });
