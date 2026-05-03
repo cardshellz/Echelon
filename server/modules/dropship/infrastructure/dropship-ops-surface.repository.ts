@@ -88,6 +88,15 @@ interface DogfoodReadinessRow {
   listing_config_active: boolean | null;
   admin_catalog_include_rule_count: string | number;
   vendor_selection_include_rule_count: string | number;
+  active_shipping_box_count: string | number;
+  active_shipping_zone_rule_count: string | number;
+  active_shipping_rate_table_count: string | number;
+  active_shipping_rate_row_count: string | number;
+  selected_variant_count: string | number;
+  selected_package_profile_count: string | number;
+  selected_variant_missing_package_profile_count: string | number;
+  active_shipping_markup_policy_count: string | number;
+  active_shipping_insurance_policy_count: string | number;
   setup_open_blocker_count: string | number;
   setup_check_open_blocker_count: string | number;
   wallet_status: string | null;
@@ -333,12 +342,21 @@ function dogfoodReadinessSql(): string {
       sc.shop_domain,
       sc.access_token_ref,
       sc.updated_at,
-      sc.config #>> '{orderProcessing,defaultWarehouseId}' AS default_warehouse_id_text,
+      store_defaults.default_warehouse_id::text AS default_warehouse_id_text,
       slc.id AS listing_config_id,
       slc.platform AS listing_config_platform,
       slc.is_active AS listing_config_active,
       COALESCE(admin_catalog.include_rule_count, 0) AS admin_catalog_include_rule_count,
       COALESCE(selection_rules.include_rule_count, 0) AS vendor_selection_include_rule_count,
+      COALESCE(shipping_boxes.active_box_count, 0) AS active_shipping_box_count,
+      COALESCE(shipping_zones.active_zone_rule_count, 0) AS active_shipping_zone_rule_count,
+      COALESCE(shipping_rates.active_rate_table_count, 0) AS active_shipping_rate_table_count,
+      COALESCE(shipping_rates.active_rate_row_count, 0) AS active_shipping_rate_row_count,
+      COALESCE(package_readiness.selected_variant_count, 0) AS selected_variant_count,
+      COALESCE(package_readiness.selected_package_profile_count, 0) AS selected_package_profile_count,
+      COALESCE(package_readiness.selected_variant_missing_package_profile_count, 0) AS selected_variant_missing_package_profile_count,
+      COALESCE(shipping_policies.active_markup_policy_count, 0) AS active_shipping_markup_policy_count,
+      COALESCE(shipping_policies.active_insurance_policy_count, 0) AS active_shipping_insurance_policy_count,
       COALESCE(setup_blockers.open_blocker_count, 0) AS setup_open_blocker_count,
       COALESCE(setup_checks.open_blocker_count, 0) AS setup_check_open_blocker_count,
       wa.status AS wallet_status,
@@ -351,6 +369,14 @@ function dogfoodReadinessSql(): string {
     LEFT JOIN dropship.dropship_store_listing_configs slc ON slc.store_connection_id = sc.id
     LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = v.id
     LEFT JOIN dropship.dropship_auto_reload_settings ars ON ars.vendor_id = v.id
+    LEFT JOIN LATERAL (
+      SELECT
+        CASE
+          WHEN (sc.config #>> '{orderProcessing,defaultWarehouseId}') ~ '^[1-9][0-9]*$'
+            THEN (sc.config #>> '{orderProcessing,defaultWarehouseId}')::integer
+          ELSE NULL
+        END AS default_warehouse_id
+    ) store_defaults ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS include_rule_count
       FROM dropship.dropship_catalog_rules cr
@@ -366,6 +392,108 @@ function dogfoodReadinessSql(): string {
         AND vsr.action = 'include'
         AND vsr.is_active = true
     ) selection_rules ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS active_box_count
+      FROM dropship.dropship_box_catalog bc
+      WHERE bc.is_active = true
+    ) shipping_boxes ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS active_zone_rule_count
+      FROM dropship.dropship_zone_rules zr
+      WHERE store_defaults.default_warehouse_id IS NOT NULL
+        AND zr.origin_warehouse_id = store_defaults.default_warehouse_id
+        AND zr.is_active = true
+    ) shipping_zones ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(DISTINCT rt.id) AS active_rate_table_count,
+        COUNT(rr.id) AS active_rate_row_count
+      FROM dropship.dropship_rate_tables rt
+      INNER JOIN dropship.dropship_rate_table_rows rr ON rr.rate_table_id = rt.id
+      WHERE store_defaults.default_warehouse_id IS NOT NULL
+        AND rt.status = 'active'
+        AND rt.effective_from <= now()
+        AND (rt.effective_to IS NULL OR rt.effective_to > now())
+        AND (rr.warehouse_id = store_defaults.default_warehouse_id OR rr.warehouse_id IS NULL)
+        AND EXISTS (
+          SELECT 1
+          FROM dropship.dropship_zone_rules zr_rate
+          WHERE zr_rate.origin_warehouse_id = store_defaults.default_warehouse_id
+            AND zr_rate.is_active = true
+            AND zr_rate.zone = rr.destination_zone
+        )
+    ) shipping_rates ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) AS selected_variant_count,
+        COUNT(*) FILTER (WHERE selected_variants.has_active_package_profile) AS selected_package_profile_count,
+        COUNT(*) FILTER (WHERE NOT selected_variants.has_active_package_profile) AS selected_variant_missing_package_profile_count
+      FROM (
+        SELECT
+          pv.id AS product_variant_id,
+          EXISTS (
+            SELECT 1
+            FROM dropship.dropship_package_profiles pp
+            WHERE pp.product_variant_id = pv.id
+              AND pp.is_active = true
+          ) AS has_active_package_profile
+        FROM catalog.product_variants pv
+        INNER JOIN catalog.products p ON p.id = pv.product_id
+        WHERE pv.is_active = true
+          AND p.is_active = true
+          AND EXISTS (
+            SELECT 1
+            FROM dropship.dropship_catalog_rules cr
+            WHERE cr.action = 'include'
+              AND cr.is_active = true
+              AND (cr.starts_at IS NULL OR cr.starts_at <= now())
+              AND (cr.ends_at IS NULL OR cr.ends_at > now())
+              AND ${catalogVariantRuleMatchSql("cr")}
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM dropship.dropship_catalog_rules cr
+            WHERE cr.action = 'exclude'
+              AND cr.is_active = true
+              AND (cr.starts_at IS NULL OR cr.starts_at <= now())
+              AND (cr.ends_at IS NULL OR cr.ends_at > now())
+              AND ${catalogVariantRuleMatchSql("cr")}
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM dropship.dropship_vendor_selection_rules vsr
+            WHERE vsr.vendor_id = v.id
+              AND vsr.action = 'include'
+              AND vsr.is_active = true
+              AND ${catalogVariantRuleMatchSql("vsr")}
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM dropship.dropship_vendor_selection_rules vsr
+            WHERE vsr.vendor_id = v.id
+              AND vsr.action = 'exclude'
+              AND vsr.is_active = true
+              AND ${catalogVariantRuleMatchSql("vsr")}
+          )
+      ) selected_variants
+    ) package_readiness ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        (
+          SELECT COUNT(*)
+          FROM dropship.dropship_shipping_markup_config smc
+          WHERE smc.is_active = true
+            AND smc.effective_from <= now()
+            AND (smc.effective_to IS NULL OR smc.effective_to > now())
+        ) AS active_markup_policy_count,
+        (
+          SELECT COUNT(*)
+          FROM dropship.dropship_insurance_pool_config ipc
+          WHERE ipc.is_active = true
+            AND ipc.effective_from <= now()
+            AND (ipc.effective_to IS NULL OR ipc.effective_to > now())
+        ) AS active_insurance_policy_count
+    ) shipping_policies ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS open_blocker_count
       FROM dropship.dropship_setup_blockers sb
@@ -422,6 +550,28 @@ function buildDogfoodReadinessFilters(input: {
     whereSql: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
     params,
   };
+}
+
+function catalogVariantRuleMatchSql(ruleAlias: string): string {
+  return `(
+    ${ruleAlias}.scope_type = 'catalog'
+    OR (
+      ${ruleAlias}.scope_type = 'product_line'
+      AND ${ruleAlias}.product_line_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM catalog.product_line_products plp_match
+        WHERE plp_match.product_id = p.id
+          AND plp_match.product_line_id = ${ruleAlias}.product_line_id
+      )
+    )
+    OR (
+      ${ruleAlias}.scope_type = 'category'
+      AND NULLIF(LOWER(BTRIM(${ruleAlias}.category)), '') = NULLIF(LOWER(BTRIM(p.category)), '')
+    )
+    OR (${ruleAlias}.scope_type = 'product' AND ${ruleAlias}.product_id = p.id)
+    OR (${ruleAlias}.scope_type = 'variant' AND ${ruleAlias}.product_variant_id = pv.id)
+  )`;
 }
 
 function buildRiskBuckets(input: {
@@ -481,6 +631,15 @@ function buildRiskBuckets(input: {
 function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadinessItem {
   const adminCatalogIncludeRuleCount = toNumber(row.admin_catalog_include_rule_count);
   const vendorSelectionIncludeRuleCount = toNumber(row.vendor_selection_include_rule_count);
+  const activeShippingBoxCount = toNumber(row.active_shipping_box_count);
+  const activeShippingZoneRuleCount = toNumber(row.active_shipping_zone_rule_count);
+  const activeShippingRateTableCount = toNumber(row.active_shipping_rate_table_count);
+  const activeShippingRateRowCount = toNumber(row.active_shipping_rate_row_count);
+  const selectedVariantCount = toNumber(row.selected_variant_count);
+  const selectedPackageProfileCount = toNumber(row.selected_package_profile_count);
+  const selectedVariantMissingPackageProfileCount = toNumber(row.selected_variant_missing_package_profile_count);
+  const activeShippingMarkupPolicyCount = toNumber(row.active_shipping_markup_policy_count);
+  const activeShippingInsurancePolicyCount = toNumber(row.active_shipping_insurance_policy_count);
   const setupOpenBlockerCount = toNumber(row.setup_open_blocker_count) + toNumber(row.setup_check_open_blocker_count);
   const walletAvailableBalanceCents = toNumber(row.available_balance_cents ?? 0);
   const activeFundingMethodCount = toNumber(row.active_funding_method_count);
@@ -494,6 +653,15 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     defaultWarehouseId,
     adminCatalogIncludeRuleCount,
     vendorSelectionIncludeRuleCount,
+    activeShippingBoxCount,
+    activeShippingZoneRuleCount,
+    activeShippingRateTableCount,
+    activeShippingRateRowCount,
+    selectedVariantCount,
+    selectedPackageProfileCount,
+    selectedVariantMissingPackageProfileCount,
+    activeShippingMarkupPolicyCount,
+    activeShippingInsurancePolicyCount,
     listingConfigActive,
     setupOpenBlockerCount,
     walletAvailableBalanceCents,
@@ -529,6 +697,15 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
       defaultWarehouseId,
       adminCatalogIncludeRuleCount,
       vendorSelectionIncludeRuleCount,
+      activeShippingBoxCount,
+      activeShippingZoneRuleCount,
+      activeShippingRateTableCount,
+      activeShippingRateRowCount,
+      selectedVariantCount,
+      selectedPackageProfileCount,
+      selectedVariantMissingPackageProfileCount,
+      activeShippingMarkupPolicyCount,
+      activeShippingInsurancePolicyCount,
       listingConfigActive,
       setupOpenBlockerCount,
       walletAvailableBalanceCents,
@@ -544,6 +721,15 @@ function buildDogfoodChecks(input: {
   defaultWarehouseId: number | null;
   adminCatalogIncludeRuleCount: number;
   vendorSelectionIncludeRuleCount: number;
+  activeShippingBoxCount: number;
+  activeShippingZoneRuleCount: number;
+  activeShippingRateTableCount: number;
+  activeShippingRateRowCount: number;
+  selectedVariantCount: number;
+  selectedPackageProfileCount: number;
+  selectedVariantMissingPackageProfileCount: number;
+  activeShippingMarkupPolicyCount: number;
+  activeShippingInsurancePolicyCount: number;
   listingConfigActive: boolean;
   setupOpenBlockerCount: number;
   walletAvailableBalanceCents: number;
@@ -588,6 +774,62 @@ function buildDogfoodChecks(input: {
       message: input.defaultWarehouseId !== null
         ? `Default warehouse ${input.defaultWarehouseId} configured.`
         : "Default order-processing warehouse is missing.",
+    },
+    {
+      key: "shipping_boxes",
+      label: "Shipping boxes",
+      status: input.activeShippingBoxCount > 0 ? "ready" : "blocked",
+      message: input.activeShippingBoxCount > 0
+        ? `${input.activeShippingBoxCount} active shipping box(es) configured.`
+        : "No active shipping boxes are configured.",
+    },
+    {
+      key: "shipping_zones",
+      label: "Shipping zones",
+      status: input.defaultWarehouseId !== null && input.activeShippingZoneRuleCount > 0 ? "ready" : "blocked",
+      message: input.defaultWarehouseId === null
+        ? "Shipping zones cannot be evaluated until a default warehouse is configured."
+        : input.activeShippingZoneRuleCount > 0
+          ? `${input.activeShippingZoneRuleCount} active zone rule(s) exist for warehouse ${input.defaultWarehouseId}.`
+          : `No active shipping zone rules exist for warehouse ${input.defaultWarehouseId}.`,
+    },
+    {
+      key: "shipping_rates",
+      label: "Shipping rates",
+      status: input.defaultWarehouseId !== null && input.activeShippingRateTableCount > 0 && input.activeShippingRateRowCount > 0
+        ? "ready"
+        : "blocked",
+      message: input.defaultWarehouseId === null
+        ? "Shipping rates cannot be evaluated until a default warehouse is configured."
+        : input.activeShippingRateTableCount > 0 && input.activeShippingRateRowCount > 0
+          ? `${input.activeShippingRateRowCount} active rate row(s) across ${input.activeShippingRateTableCount} table(s).`
+          : `No active shipping rate rows are available for warehouse ${input.defaultWarehouseId}.`,
+    },
+    {
+      key: "package_profiles",
+      label: "Package profiles",
+      status: input.selectedVariantCount > 0 && input.selectedVariantMissingPackageProfileCount === 0 ? "ready" : "blocked",
+      message: input.selectedVariantCount === 0
+        ? "No active selected variants are exposed for package-profile evaluation."
+        : input.selectedVariantMissingPackageProfileCount === 0
+          ? `${input.selectedPackageProfileCount} selected variant package profile(s) ready.`
+          : `${input.selectedVariantMissingPackageProfileCount} of ${input.selectedVariantCount} selected variant(s) are missing active package profiles.`,
+    },
+    {
+      key: "shipping_markup_policy",
+      label: "Shipping markup policy",
+      status: input.activeShippingMarkupPolicyCount > 0 ? "ready" : "warning",
+      message: input.activeShippingMarkupPolicyCount > 0
+        ? `${input.activeShippingMarkupPolicyCount} active shipping markup policy record(s).`
+        : "No active shipping markup policy is configured; quote defaults will be used.",
+    },
+    {
+      key: "shipping_insurance_policy",
+      label: "Shipping insurance policy",
+      status: input.activeShippingInsurancePolicyCount > 0 ? "ready" : "warning",
+      message: input.activeShippingInsurancePolicyCount > 0
+        ? `${input.activeShippingInsurancePolicyCount} active insurance policy record(s).`
+        : "No active insurance policy is configured; quote defaults will be used.",
     },
     {
       key: "listing_config",

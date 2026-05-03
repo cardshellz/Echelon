@@ -2508,6 +2508,7 @@ function DogfoodReadinessTable({
             <TableHead>Status</TableHead>
             <TableHead>Blocking checks</TableHead>
             <TableHead>Catalog</TableHead>
+            <TableHead>Shipping</TableHead>
             <TableHead>Wallet</TableHead>
             <TableHead className="w-[145px]">Store updated</TableHead>
           </TableRow>
@@ -2568,6 +2569,22 @@ function DogfoodReadinessTable({
                   </div>
                   <div className="text-xs text-muted-foreground">
                     Warehouse {item.metrics.defaultWarehouseId ?? "missing"} / Listing config {item.metrics.listingConfigActive ? "active" : "not ready"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="text-sm">
+                    Profiles: <span className="font-mono">{item.metrics.selectedPackageProfileCount}</span>
+                    {" / "}
+                    <span className={item.metrics.selectedVariantMissingPackageProfileCount > 0 ? "font-mono text-rose-700" : "font-mono"}>
+                      {item.metrics.selectedVariantMissingPackageProfileCount}
+                    </span>
+                    {" missing"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Boxes {item.metrics.activeShippingBoxCount} / Zones {item.metrics.activeShippingZoneRuleCount} / Rate rows {item.metrics.activeShippingRateRowCount}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Markup {item.metrics.activeShippingMarkupPolicyCount} / Insurance {item.metrics.activeShippingInsurancePolicyCount}
                   </div>
                 </TableCell>
                 <TableCell>
