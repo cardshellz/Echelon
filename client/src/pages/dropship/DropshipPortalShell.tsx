@@ -5,6 +5,7 @@ import {
   Boxes,
   ClipboardList,
   LayoutDashboard,
+  ListChecks,
   LogOut,
   RotateCcw,
   Settings,
@@ -15,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
 
 const navItems = [
+  { label: "Onboarding", href: "/onboarding", icon: <ListChecks className="h-4 w-4" /> },
   { label: "Dashboard", href: "/dashboard", icon: <LayoutDashboard className="h-4 w-4" /> },
   { label: "Catalog", href: "/catalog", icon: <Boxes className="h-4 w-4" /> },
   { label: "Orders", href: "/orders", icon: <ClipboardList className="h-4 w-4" /> },

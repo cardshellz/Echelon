@@ -1,5 +1,6 @@
 export type DropshipSectionStatus = "ready" | "attention_required" | "coming_soon";
 export type DropshipSeverity = "info" | "warning" | "error";
+export type DropshipStorePlatform = "ebay" | "shopify";
 
 export interface DropshipSettingsSection {
   key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
@@ -18,6 +19,68 @@ export interface DropshipStoreConnectionSummary {
   externalDisplayName: string | null;
   shopDomain: string | null;
   updatedAt: string;
+}
+
+export interface DropshipOnboardingStep {
+  key: "vendor_profile" | "store_connection" | "catalog_available" | "catalog_selection";
+  label: string;
+  status: "complete" | "incomplete" | "blocked";
+  required: boolean;
+}
+
+export interface DropshipOnboardingState {
+  vendor: {
+    vendorId: number;
+    memberId: string;
+    businessName: string | null;
+    contactName: string | null;
+    email: string | null;
+    phone: string | null;
+    status: string;
+    entitlementStatus: string;
+    membershipGraceEndsAt: string | null;
+    includedStoreConnections: number;
+  };
+  entitlement: {
+    memberId: string;
+    cardShellzEmail: string | null;
+    status: "active" | "grace" | "lapsed" | "suspended" | "not_entitled";
+    planId: string | null;
+    planName: string | null;
+    subscriptionId: string | null;
+    includesDropship: boolean;
+    reasonCode: string;
+  };
+  storeConnections: {
+    activeCount: number;
+    connectedCount: number;
+    needsAttentionCount: number;
+    totalCount: number;
+    includedLimit: number;
+    canConnectStore: boolean;
+  };
+  catalog: {
+    adminExposureRuleCount: number;
+    vendorSelectionRuleCount: number;
+    adminCatalogAvailable: boolean;
+    hasVendorSelection: boolean;
+  };
+  steps: DropshipOnboardingStep[];
+}
+
+export interface DropshipStoreConnectionOAuthStartInput {
+  platform: DropshipStorePlatform;
+  shopDomain?: string;
+  returnTo?: string;
+}
+
+export interface DropshipStoreConnectionOAuthStartResponse {
+  authorizationUrl: string;
+  platform: DropshipStorePlatform;
+  shopDomain: string | null;
+  expiresAt: string;
+  scopes: string[];
+  environment: string;
 }
 
 export interface DropshipVendorSettingsOverview {
@@ -285,6 +348,56 @@ export async function fetchJson<T>(url: string): Promise<T> {
     throw new Error(await responseErrorMessage(response));
   }
   return response.json() as Promise<T>;
+}
+
+export async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  return response.json() as Promise<T>;
+}
+
+export function buildStoreConnectionOAuthStartInput(input: {
+  platform: DropshipStorePlatform;
+  shopDomain: string;
+  returnTo: string;
+}): DropshipStoreConnectionOAuthStartInput {
+  const returnTo = normalizePortalReturnPath(input.returnTo);
+  if (input.platform === "ebay") {
+    return { platform: input.platform, returnTo };
+  }
+
+  return {
+    platform: input.platform,
+    shopDomain: normalizeShopifyShopDomainInput(input.shopDomain),
+    returnTo,
+  };
+}
+
+export function normalizeShopifyShopDomainInput(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  if (!normalized) return "";
+  return normalized.includes(".") ? normalized : `${normalized}.myshopify.com`;
+}
+
+export function normalizePortalReturnPath(value: string): string {
+  const normalized = value.trim();
+  if (
+    normalized.length > 500 ||
+    !normalized.startsWith("/") ||
+    normalized.startsWith("//") ||
+    normalized.includes("\\") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(normalized)
+  ) {
+    throw new Error("Return path must be a relative portal path.");
+  }
+  return normalized;
 }
 
 export function formatCents(cents: number): string {

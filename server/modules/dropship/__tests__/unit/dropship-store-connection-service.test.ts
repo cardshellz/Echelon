@@ -19,7 +19,7 @@ import type {
   DropshipProvisionedVendorProfile,
   DropshipVendorProvisioningService,
 } from "../../application/dropship-vendor-provisioning-service";
-import { normalizeShopifyShopDomain } from "../../domain/store-connection";
+import { normalizeDropshipOAuthReturnTo, normalizeShopifyShopDomain } from "../../domain/store-connection";
 import { DropshipError } from "../../domain/errors";
 
 const now = new Date("2026-05-01T15:00:00.000Z");
@@ -29,6 +29,14 @@ describe("dropship store connection domain", () => {
     expect(normalizeShopifyShopDomain("CardShellz-Test")).toBe("cardshellz-test.myshopify.com");
     expect(normalizeShopifyShopDomain("https://cardshellz-test.myshopify.com/")).toBe("cardshellz-test.myshopify.com");
     expect(() => normalizeShopifyShopDomain("cardshellz.com")).toThrow(DropshipError);
+  });
+
+  it("keeps OAuth return targets inside the portal path space", () => {
+    expect(normalizeDropshipOAuthReturnTo(" /onboarding ")).toBe("/onboarding");
+    expect(normalizeDropshipOAuthReturnTo(undefined)).toBeNull();
+    expect(() => normalizeDropshipOAuthReturnTo("https://attacker.example")).toThrow(DropshipError);
+    expect(() => normalizeDropshipOAuthReturnTo("//attacker.example")).toThrow(DropshipError);
+    expect(() => normalizeDropshipOAuthReturnTo("/\\attacker")).toThrow(DropshipError);
   });
 });
 
@@ -88,6 +96,17 @@ describe("DropshipStoreConnectionService", () => {
     await expect(service.startOAuth("member-1", { platform: "ebay" })).rejects.toMatchObject({
       code: "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
     });
+  });
+
+  it("rejects external OAuth return targets before signing state", async () => {
+    await expect(service.startOAuth("member-1", {
+      platform: "ebay",
+      returnTo: "https://attacker.example/callback",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_INVALID_OAUTH_RETURN_TO",
+    });
+
+    expect(stateSigner.lastPayload).toBeNull();
   });
 
   it("completes OAuth by connecting the store with sealed token refs", async () => {

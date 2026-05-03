@@ -45,6 +45,27 @@ export function normalizeShopifyShopDomain(shopDomain: string): string {
   return withSuffix;
 }
 
+export function normalizeDropshipOAuthReturnTo(returnTo: string | undefined): string | null {
+  const normalized = returnTo?.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (
+    normalized.length > 500 ||
+    !normalized.startsWith("/") ||
+    normalized.startsWith("//") ||
+    normalized.includes("\\") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(normalized)
+  ) {
+    throw new DropshipError("DROPSHIP_INVALID_OAUTH_RETURN_TO", "Dropship OAuth return path must be a relative portal path.", {
+      returnTo,
+    });
+  }
+
+  return normalized;
+}
+
 export function assertVendorCanConnectStore(input: {
   vendorStatus: string;
   activeConnectionCount: number;

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildQueryUrl, formatCents, formatStatus, riskSeverityTone, sectionStatusTone } from "../dropship-ops-surface";
+import {
+  buildQueryUrl,
+  buildStoreConnectionOAuthStartInput,
+  formatCents,
+  formatStatus,
+  normalizePortalReturnPath,
+  normalizeShopifyShopDomainInput,
+  riskSeverityTone,
+  sectionStatusTone,
+} from "../dropship-ops-surface";
 
 describe("dropship ops surface client helpers", () => {
   it("formats integer cents without floating point display drift", () => {
@@ -31,5 +40,38 @@ describe("dropship ops surface client helpers", () => {
       selectedOnly: false,
       vendorId: undefined,
     })).toBe("/api/dropship/orders?statuses=accepted&page=1&selectedOnly=false");
+  });
+
+  it("builds store OAuth start payloads with platform-specific fields", () => {
+    expect(buildStoreConnectionOAuthStartInput({
+      platform: "ebay",
+      shopDomain: "ignored",
+      returnTo: " /onboarding ",
+    })).toEqual({
+      platform: "ebay",
+      returnTo: "/onboarding",
+    });
+    expect(buildStoreConnectionOAuthStartInput({
+      platform: "shopify",
+      shopDomain: "Vendor-Test",
+      returnTo: "/onboarding",
+    })).toEqual({
+      platform: "shopify",
+      shopDomain: "vendor-test.myshopify.com",
+      returnTo: "/onboarding",
+    });
+  });
+
+  it("keeps portal return paths relative", () => {
+    expect(normalizePortalReturnPath("/settings")).toBe("/settings");
+    expect(() => normalizePortalReturnPath("https://attacker.example")).toThrow();
+    expect(() => normalizePortalReturnPath("//attacker.example")).toThrow();
+    expect(() => normalizePortalReturnPath(`/${"x".repeat(501)}`)).toThrow();
+  });
+
+  it("normalizes Shopify shop domains before OAuth start", () => {
+    expect(normalizeShopifyShopDomainInput("https://Vendor-Test.myshopify.com/")).toBe("vendor-test.myshopify.com");
+    expect(normalizeShopifyShopDomainInput("Vendor-Test")).toBe("vendor-test.myshopify.com");
+    expect(normalizeShopifyShopDomainInput(" ")).toBe("");
   });
 });

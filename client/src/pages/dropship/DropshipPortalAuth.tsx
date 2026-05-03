@@ -34,7 +34,7 @@ export default function DropshipPortalAuth() {
 
   useEffect(() => {
     if (isAuthenticated) {
-      setLocation(dropshipPortalPath("/dashboard"));
+      setLocation(dropshipPortalPath("/onboarding"));
     }
   }, [isAuthenticated, setLocation]);
 
@@ -158,7 +158,7 @@ export default function DropshipPortalAuth() {
               disabled={!canUsePasskey || pendingAction === "passkey"}
               onClick={() => run("passkey", async () => {
                 await loginWithPasskey(emailValue() || undefined);
-                setLocation(dropshipPortalPath("/dashboard"));
+                setLocation(dropshipPortalPath("/onboarding"));
               })}
               className="mt-4 h-11 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
             >
@@ -185,7 +185,7 @@ export default function DropshipPortalAuth() {
                     event.preventDefault();
                     run("password", async () => {
                       await loginWithPassword({ email: emailValue(), password });
-                      setLocation(dropshipPortalPath("/dashboard"));
+                      setLocation(dropshipPortalPath("/onboarding"));
                     });
                   }}
                 >
@@ -273,7 +273,7 @@ export default function DropshipPortalAuth() {
                         verificationCode,
                         password: setupPassword,
                       });
-                      setLocation(dropshipPortalPath("/dashboard"));
+                      setLocation(dropshipPortalPath("/onboarding"));
                     })}
                     className="h-11 w-full gap-2 bg-emerald-600 hover:bg-emerald-700"
                   >
