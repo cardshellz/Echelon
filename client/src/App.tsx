@@ -20,6 +20,12 @@ import VendorWallet from "@/pages/vendor/VendorWallet";
 import VendorSettings from "@/pages/vendor/VendorSettings";
 import DropshipPortalAuth from "@/pages/dropship/DropshipPortalAuth";
 import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
+import DropshipPortalCatalog from "@/pages/dropship/DropshipPortalCatalog";
+import DropshipPortalNotifications from "@/pages/dropship/DropshipPortalNotifications";
+import DropshipPortalOrders from "@/pages/dropship/DropshipPortalOrders";
+import DropshipPortalReturns from "@/pages/dropship/DropshipPortalReturns";
+import DropshipPortalSettings from "@/pages/dropship/DropshipPortalSettings";
+import DropshipPortalWallet from "@/pages/dropship/DropshipPortalWallet";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Orders from "@/pages/Orders";
@@ -178,6 +184,24 @@ function DropshipPortalRouter() {
         <Route path={`${portalRoot}/setup`} component={DropshipPortalAuth} />
         <Route path={`${portalRoot}/dashboard`}>
           <DropshipPortalProtectedRoute component={DropshipPortalDashboard} />
+        </Route>
+        <Route path={`${portalRoot}/catalog`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalCatalog} />
+        </Route>
+        <Route path={`${portalRoot}/orders`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalOrders} />
+        </Route>
+        <Route path={`${portalRoot}/wallet`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalWallet} />
+        </Route>
+        <Route path={`${portalRoot}/returns`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalReturns} />
+        </Route>
+        <Route path={`${portalRoot}/settings`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalSettings} />
+        </Route>
+        <Route path={`${portalRoot}/notifications`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalNotifications} />
         </Route>
         <Route path={portalRoot || "/"}>
           <Redirect to={dropshipPortalPath("/dashboard")} />

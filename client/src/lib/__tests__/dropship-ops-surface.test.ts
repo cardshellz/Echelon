@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCents, formatStatus, riskSeverityTone, sectionStatusTone } from "../dropship-ops-surface";
+import { buildQueryUrl, formatCents, formatStatus, riskSeverityTone, sectionStatusTone } from "../dropship-ops-surface";
 
 describe("dropship ops surface client helpers", () => {
   it("formats integer cents without floating point display drift", () => {
@@ -21,5 +21,15 @@ describe("dropship ops surface client helpers", () => {
     expect(riskSeverityTone("error")).toContain("rose");
     expect(riskSeverityTone("warning")).toContain("amber");
     expect(riskSeverityTone("info")).toContain("zinc");
+  });
+
+  it("builds query URLs without empty filters", () => {
+    expect(buildQueryUrl("/api/dropship/orders", {
+      search: "",
+      statuses: "accepted",
+      page: 1,
+      selectedOnly: false,
+      vendorId: undefined,
+    })).toBe("/api/dropship/orders?statuses=accepted&page=1&selectedOnly=false");
   });
 });

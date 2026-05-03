@@ -173,7 +173,7 @@ function parsePositiveInteger(value: string | undefined, key: string): number {
 }
 
 function buildPortalRedirect(status: "connected" | "error", returnTo: string | null, errorCode?: string): string {
-  const url = new URL(returnTo || "/dropship/settings", DROPSHIP_PORTAL_URL);
+  const url = new URL(returnTo || "/settings", DROPSHIP_PORTAL_URL);
   url.searchParams.set("storeConnection", status);
   if (errorCode) {
     url.searchParams.set("error", errorCode);

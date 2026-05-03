@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation } from "wouter";
 import {
   AlertCircle,
   ArrowRight,
@@ -10,7 +9,6 @@ import {
   Clock,
   Fingerprint,
   KeyRound,
-  LogOut,
   Mail,
   Plug,
   ShieldCheck,
@@ -23,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
+import { useDropshipAuth } from "@/lib/dropship-auth";
 import {
   fetchJson,
   formatCents,
@@ -34,8 +32,9 @@ import {
   type DropshipSettingsSection,
   type DropshipStoreConnectionSummary,
 } from "@/lib/dropship-ops-surface";
+import { DropshipPortalShell } from "./DropshipPortalShell";
 
-type PendingAction = "send-code" | "verify-code" | "passkey-proof" | "register-passkey" | "logout" | null;
+type PendingAction = "send-code" | "verify-code" | "passkey-proof" | "register-passkey" | null;
 
 const sectionIcons: Record<DropshipSettingsSection["key"], React.ReactNode> = {
   account: <ShieldCheck className="h-4 w-4" />,
@@ -48,9 +47,7 @@ const sectionIcons: Record<DropshipSettingsSection["key"], React.ReactNode> = {
 };
 
 export default function DropshipPortalDashboard() {
-  const [, setLocation] = useLocation();
   const {
-    logout,
     passkeysSupported,
     principal,
     registerPasskey,
@@ -101,34 +98,7 @@ export default function DropshipPortalDashboard() {
   }
 
   return (
-    <main className="min-h-screen bg-zinc-50 text-zinc-950">
-      <header className="border-b border-zinc-200 bg-white">
-        <div className="mx-auto flex min-h-16 w-full max-w-7xl items-center justify-between px-4 sm:px-6">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-md bg-[#C060E0] text-white">
-              <ShieldCheck className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-base font-semibold">Card Shellz .ops</div>
-              <div className="text-xs text-zinc-500">Dropship portal</div>
-            </div>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-2"
-            disabled={pendingAction === "logout"}
-            onClick={() => run("logout", async () => {
-              await logout();
-              setLocation(dropshipPortalPath("/login"));
-            })}
-          >
-            <LogOut className="h-4 w-4" />
-            Sign out
-          </Button>
-        </div>
-      </header>
-
+    <DropshipPortalShell>
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
         {settingsQuery.error && (
           <Alert variant="destructive" className="mb-4">
@@ -248,7 +218,7 @@ export default function DropshipPortalDashboard() {
           </div>
         </section>
       </div>
-    </main>
+    </DropshipPortalShell>
   );
 }
 

@@ -106,6 +106,179 @@ export interface DropshipAuditEventSearchResponse {
   limit: number;
 }
 
+export interface DropshipCatalogSelectionDecision {
+  selected: boolean;
+  reason: string;
+  marketplaceQuantity: number;
+  quantityCapApplied: boolean;
+  autoConnectNewSkus: boolean;
+  autoListNewSkus: boolean;
+}
+
+export interface DropshipCatalogRow {
+  productId: number;
+  productVariantId: number;
+  productSku: string | null;
+  productName: string;
+  variantSku: string | null;
+  variantName: string;
+  category: string | null;
+  productLineNames: string[];
+  unitsPerVariant: number;
+  selectionDecision: DropshipCatalogSelectionDecision;
+}
+
+export interface DropshipCatalogResponse {
+  rows: DropshipCatalogRow[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface DropshipOrderListItem {
+  intakeId: number;
+  platform: string;
+  externalOrderId: string;
+  externalOrderNumber: string | null;
+  status: string;
+  paymentHoldExpiresAt: string | null;
+  rejectionReason: string | null;
+  cancellationStatus: string | null;
+  omsOrderId: number | null;
+  receivedAt: string;
+  acceptedAt: string | null;
+  updatedAt: string;
+  lineCount: number;
+  totalQuantity: number;
+  shipTo: {
+    name?: string;
+    company?: string;
+    city?: string;
+    region?: string;
+    postalCode?: string;
+    country?: string;
+  } | null;
+  storeConnection: {
+    storeConnectionId: number;
+    platform: string;
+    status: string;
+    setupStatus: string;
+    externalDisplayName: string | null;
+    shopDomain: string | null;
+  };
+}
+
+export interface DropshipOrderListResponse {
+  items: DropshipOrderListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  statuses: string[];
+  summary: Array<{ status: string; count: number }>;
+}
+
+export interface DropshipWalletResponse {
+  wallet: {
+    account: {
+      walletAccountId: number;
+      vendorId: number;
+      availableBalanceCents: number;
+      pendingBalanceCents: number;
+      currency: string;
+      status: string;
+      createdAt: string;
+      updatedAt: string;
+    };
+    autoReload: {
+      autoReloadSettingId: number;
+      enabled: boolean;
+      minimumBalanceCents: number;
+      maxSingleReloadCents: number | null;
+      paymentHoldTimeoutMinutes: number;
+      fundingMethodId: number | null;
+      updatedAt: string;
+    } | null;
+    fundingMethods: Array<{
+      fundingMethodId: number;
+      rail: string;
+      status: string;
+      displayLabel: string | null;
+      isDefault: boolean;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+    recentLedger: Array<{
+      ledgerEntryId: number;
+      type: string;
+      status: string;
+      amountCents: number;
+      currency: string;
+      availableBalanceAfterCents: number | null;
+      pendingBalanceAfterCents: number | null;
+      referenceType: string | null;
+      referenceId: string | null;
+      createdAt: string;
+      settledAt: string | null;
+    }>;
+  };
+}
+
+export interface DropshipReturnListItem {
+  rmaId: number;
+  rmaNumber: string;
+  status: string;
+  reasonCode: string | null;
+  faultCategory: string | null;
+  returnWindowDays: number;
+  returnTrackingNumber: string | null;
+  requestedAt: string;
+  receivedAt: string | null;
+  inspectedAt: string | null;
+  creditedAt: string | null;
+  updatedAt: string;
+  itemCount: number;
+  totalQuantity: number;
+  platform: string | null;
+  intakeId: number | null;
+  omsOrderId: number | null;
+}
+
+export interface DropshipReturnListResponse {
+  items: DropshipReturnListItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface DropshipNotificationListResponse {
+  items: Array<{
+    notificationEventId: number;
+    eventType: string;
+    channel: "email" | "in_app";
+    critical: boolean;
+    title: string;
+    message: string | null;
+    status: string;
+    deliveredAt: string | null;
+    readAt: string | null;
+    createdAt: string;
+  }>;
+  total: number;
+  page: number;
+  limit: number;
+  unreadOnly: boolean;
+}
+
+export function buildQueryUrl(path: string, params: Record<string, string | number | boolean | undefined | null>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    query.set(key, String(value));
+  }
+  const queryString = query.toString();
+  return queryString ? `${path}?${queryString}` : path;
+}
+
 export async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { credentials: "include" });
   if (!response.ok) {
