@@ -198,6 +198,65 @@ export interface DropshipCatalogResponse {
   limit: number;
 }
 
+export interface DropshipListingPreviewRow {
+  productVariantId: number;
+  productId: number;
+  sku: string | null;
+  title: string;
+  platform: string;
+  listingMode: string | null;
+  currentListingStatus: string;
+  previewStatus: "ready" | "blocked" | "warning";
+  blockers: string[];
+  warnings: string[];
+  marketplaceQuantity: number;
+  priceCents: number | null;
+  previewHash: string;
+}
+
+export interface DropshipListingPreviewResult {
+  vendorId: number;
+  storeConnectionId: number;
+  platform: string;
+  generatedAt: string;
+  rows: DropshipListingPreviewRow[];
+  summary: {
+    total: number;
+    ready: number;
+    blocked: number;
+    warning: number;
+  };
+}
+
+export interface DropshipListingPreviewResponse {
+  preview: DropshipListingPreviewResult;
+}
+
+export interface DropshipListingPushResponse {
+  job: {
+    jobId: number;
+    vendorId: number;
+    storeConnectionId: number;
+    status: string;
+    idempotencyKey: string | null;
+    requestHash: string | null;
+    createdAt: string;
+    updatedAt: string;
+  };
+  items: Array<{
+    itemId: number;
+    jobId: number;
+    listingId: number | null;
+    productVariantId: number;
+    status: string;
+    previewHash: string | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+  }>;
+  preview: DropshipListingPreviewResult;
+  idempotentReplay: boolean;
+}
+
 export type DropshipVendorSelectionScope = "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipVendorSelectionAction = "include" | "exclude";
 
@@ -466,6 +525,34 @@ export function createDropshipIdempotencyKey(prefix: string): string {
   return `${prefix}:${suffix}`;
 }
 
+export function buildListingPreviewRequest(input: {
+  storeConnectionId: number;
+  rows: readonly DropshipCatalogRow[];
+}): { storeConnectionId: number; productVariantIds: number[] } {
+  return {
+    storeConnectionId: assertPositiveInteger(input.storeConnectionId, "storeConnectionId"),
+    productVariantIds: uniqueSelectedVariantIds(input.rows),
+  };
+}
+
+export function buildListingPushRequest(input: {
+  storeConnectionId: number;
+  preview: DropshipListingPreviewResult;
+  idempotencyKey: string;
+}): { storeConnectionId: number; productVariantIds: number[]; idempotencyKey: string } {
+  return {
+    storeConnectionId: assertPositiveInteger(input.storeConnectionId, "storeConnectionId"),
+    productVariantIds: input.preview.rows
+      .filter((row) => row.previewStatus !== "blocked")
+      .map((row) => row.productVariantId),
+    idempotencyKey: input.idempotencyKey,
+  };
+}
+
+export function listingPreviewPushableCount(preview: DropshipListingPreviewResult | null | undefined): number {
+  return preview?.rows.filter((row) => row.previewStatus !== "blocked").length ?? 0;
+}
+
 export function buildVariantSelectionReplacement(input: {
   existingRules: readonly DropshipVendorSelectionRule[];
   rows: readonly DropshipCatalogRow[];
@@ -521,6 +608,17 @@ function uniquePositiveVariantIds(rows: readonly DropshipCatalogRow[]): Set<numb
     .map((row) => row.productVariantId)
     .filter((id) => Number.isInteger(id) && id > 0);
   return new Set(ids);
+}
+
+function uniqueSelectedVariantIds(rows: readonly DropshipCatalogRow[]): number[] {
+  return Array.from(uniquePositiveVariantIds(rows.filter((row) => row.selectionDecision.selected)));
+}
+
+function assertPositiveInteger(value: number, key: string): number {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${key} must be a positive integer.`);
+  }
+  return value;
 }
 
 export function formatCents(cents: number): string {

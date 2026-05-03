@@ -1,16 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
   buildQueryUrl,
+  buildListingPreviewRequest,
+  buildListingPushRequest,
   buildVariantSelectionReplacement,
   buildStoreConnectionOAuthStartInput,
   formatCents,
   formatStatus,
+  listingPreviewPushableCount,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   riskSeverityTone,
   sectionStatusTone,
 } from "../dropship-ops-surface";
-import type { DropshipCatalogRow, DropshipVendorSelectionRule } from "../dropship-ops-surface";
+import type {
+  DropshipCatalogRow,
+  DropshipListingPreviewResult,
+  DropshipVendorSelectionRule,
+} from "../dropship-ops-surface";
 
 describe("dropship ops surface client helpers", () => {
   it("formats integer cents without floating point display drift", () => {
@@ -108,6 +115,41 @@ describe("dropship ops surface client helpers", () => {
       expect.objectContaining({ scopeType: "variant", action: "exclude", productVariantId: 42 }),
     ]);
   });
+
+  it("builds listing preview requests from selected catalog rows only", () => {
+    expect(buildListingPreviewRequest({
+      storeConnectionId: 12,
+      rows: [
+        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
+        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
+        makeCatalogRow({ productVariantId: 99, selectionDecision: makeSelectionDecision(false) }),
+      ],
+    })).toEqual({
+      storeConnectionId: 12,
+      productVariantIds: [42],
+    });
+  });
+
+  it("builds listing push requests from non-blocked preview rows only", () => {
+    const preview = makeListingPreview({
+      rows: [
+        makeListingPreviewRow({ productVariantId: 42, previewStatus: "ready" }),
+        makeListingPreviewRow({ productVariantId: 99, previewStatus: "warning" }),
+        makeListingPreviewRow({ productVariantId: 100, previewStatus: "blocked" }),
+      ],
+    });
+
+    expect(listingPreviewPushableCount(preview)).toBe(2);
+    expect(buildListingPushRequest({
+      storeConnectionId: 12,
+      preview,
+      idempotencyKey: "push-1",
+    })).toEqual({
+      storeConnectionId: 12,
+      productVariantIds: [42, 99],
+      idempotencyKey: "push-1",
+    });
+  });
 });
 
 function makeSelectionRule(overrides: Partial<DropshipVendorSelectionRule>): DropshipVendorSelectionRule {
@@ -137,14 +179,56 @@ function makeCatalogRow(overrides: Partial<DropshipCatalogRow>): DropshipCatalog
     category: null,
     productLineNames: [],
     unitsPerVariant: 1,
-    selectionDecision: {
-      selected: false,
-      reason: "missing_vendor_include_rule",
-      marketplaceQuantity: 0,
-      quantityCapApplied: false,
-      autoConnectNewSkus: false,
-      autoListNewSkus: false,
+    selectionDecision: makeSelectionDecision(false),
+    ...overrides,
+  };
+}
+
+function makeSelectionDecision(selected: boolean): DropshipCatalogRow["selectionDecision"] {
+  return {
+    selected,
+    reason: selected ? "selected" : "missing_vendor_include_rule",
+    marketplaceQuantity: selected ? 5 : 0,
+    quantityCapApplied: false,
+    autoConnectNewSkus: selected,
+    autoListNewSkus: false,
+  };
+}
+
+function makeListingPreview(overrides: Partial<DropshipListingPreviewResult>): DropshipListingPreviewResult {
+  return {
+    vendorId: 1,
+    storeConnectionId: 12,
+    platform: "ebay",
+    generatedAt: "2026-05-03T12:00:00.000Z",
+    rows: [],
+    summary: {
+      total: 0,
+      ready: 0,
+      blocked: 0,
+      warning: 0,
     },
+    ...overrides,
+  };
+}
+
+function makeListingPreviewRow(
+  overrides: Partial<DropshipListingPreviewResult["rows"][number]>,
+): DropshipListingPreviewResult["rows"][number] {
+  return {
+    productVariantId: 1,
+    productId: 10,
+    sku: "SKU",
+    title: "Listing",
+    platform: "ebay",
+    listingMode: "live",
+    currentListingStatus: "not_listed",
+    previewStatus: "ready",
+    blockers: [],
+    warnings: [],
+    marketplaceQuantity: 5,
+    priceCents: 1299,
+    previewHash: "hash",
     ...overrides,
   };
 }
