@@ -271,13 +271,7 @@ export class DropshipWalletService {
 
   async configureAutoReload(input: unknown): Promise<DropshipAutoReloadSettingRecord> {
     const parsed = parseWalletInput(configureDropshipAutoReloadInputSchema, input);
-    if (parsed.enabled && !parsed.fundingMethodId) {
-      throw new DropshipError(
-        "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_REQUIRED",
-        "Auto-reload requires an active funding method.",
-        { vendorId: parsed.vendorId },
-      );
-    }
+    assertAutoReloadConfigIsUsable(parsed);
     const updatedAt = this.deps.clock.now();
     const setting = await this.deps.repository.configureAutoReload({
       ...parsed,
@@ -299,6 +293,51 @@ export class DropshipWalletService {
 
   private async provisionVendor(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
     return this.deps.vendorProvisioning.provisionForMember(memberId);
+  }
+}
+
+function assertAutoReloadConfigIsUsable(input: ConfigureDropshipAutoReloadInput): void {
+  if (!input.enabled) {
+    return;
+  }
+
+  if (!input.fundingMethodId) {
+    throw new DropshipError(
+      "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_REQUIRED",
+      "Auto-reload requires an active funding method.",
+      { vendorId: input.vendorId },
+    );
+  }
+
+  if (input.minimumBalanceCents <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS",
+      "Auto-reload minimum balance must be greater than zero when enabled.",
+      { vendorId: input.vendorId, minimumBalanceCents: input.minimumBalanceCents },
+    );
+  }
+
+  if (input.maxSingleReloadCents !== null && input.maxSingleReloadCents <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS",
+      "Auto-reload maximum single reload must be greater than zero when provided.",
+      { vendorId: input.vendorId, maxSingleReloadCents: input.maxSingleReloadCents },
+    );
+  }
+
+  if (
+    input.maxSingleReloadCents !== null
+    && input.maxSingleReloadCents < input.minimumBalanceCents
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS",
+      "Auto-reload maximum single reload must be at least the minimum balance.",
+      {
+        vendorId: input.vendorId,
+        minimumBalanceCents: input.minimumBalanceCents,
+        maxSingleReloadCents: input.maxSingleReloadCents,
+      },
+    );
   }
 }
 

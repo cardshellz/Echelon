@@ -177,6 +177,47 @@ describe("DropshipWalletService", () => {
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_REQUIRED" });
   });
+
+  it("rejects enabled auto-reload thresholds that cannot safely reload", async () => {
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 0,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS" });
+
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 10000,
+      maxSingleReloadCents: 5000,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS" });
+  });
+
+  it("configures auto-reload with an active funding method", async () => {
+    const setting = await service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    });
+
+    expect(setting).toMatchObject({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(logs.at(-1)).toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_CONFIGURED" });
+  });
 });
 
 class FakeVendorProvisioningService {

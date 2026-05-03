@@ -1,7 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
-import { CreditCard, History, Wallet } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, CheckCircle2, CreditCard, Fingerprint, History, Mail, Save, Wallet } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
+import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -12,20 +19,124 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  buildAutoReloadConfigInput,
   fetchJson,
   formatCents,
   formatDateTime,
   formatStatus,
+  putJson,
+  type DropshipAutoReloadConfigResponse,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
+import { useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
+type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | null;
+
 export default function DropshipPortalWallet() {
+  const queryClient = useQueryClient();
+  const {
+    principal,
+    sensitiveProofs,
+    startEmailStepUp,
+    verifyEmailStepUp,
+    verifyPasskeyStepUp,
+  } = useDropshipAuth();
+  const [autoReloadEnabled, setAutoReloadEnabled] = useState(true);
+  const [fundingMethodId, setFundingMethodId] = useState("");
+  const [minimumBalance, setMinimumBalance] = useState("50.00");
+  const [maxSingleReload, setMaxSingleReload] = useState("250.00");
+  const [paymentHoldTimeoutMinutes, setPaymentHoldTimeoutMinutes] = useState("2880");
+  const [emailCodeSent, setEmailCodeSent] = useState(false);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [pendingWalletAction, setPendingWalletAction] = useState<PendingWalletAction>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const walletQuery = useQuery<DropshipWalletResponse>({
     queryKey: ["/api/dropship/wallet?limit=50"],
     queryFn: () => fetchJson<DropshipWalletResponse>("/api/dropship/wallet?limit=50"),
   });
   const wallet = walletQuery.data?.wallet;
+  const activeFundingMethods = wallet?.fundingMethods.filter((method) => method.status === "active") ?? [];
+  const activeProof = (() => {
+    const proof = sensitiveProofs.add_funding_method;
+    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
+  })();
+
+  useEffect(() => {
+    if (!wallet) return;
+    const defaultFundingMethodId = wallet.autoReload?.fundingMethodId
+      ?? activeFundingMethods.find((method) => method.isDefault)?.fundingMethodId
+      ?? activeFundingMethods[0]?.fundingMethodId
+      ?? null;
+    setAutoReloadEnabled(wallet.autoReload?.enabled ?? true);
+    setFundingMethodId(defaultFundingMethodId ? String(defaultFundingMethodId) : "");
+    setMinimumBalance(centsToDollarInput(wallet.autoReload?.minimumBalanceCents ?? 5000));
+    setMaxSingleReload(wallet.autoReload?.maxSingleReloadCents === null || wallet.autoReload?.maxSingleReloadCents === undefined
+      ? "250.00"
+      : centsToDollarInput(wallet.autoReload.maxSingleReloadCents));
+    setPaymentHoldTimeoutMinutes(String(wallet.autoReload?.paymentHoldTimeoutMinutes ?? 2880));
+  }, [wallet?.autoReload, wallet?.fundingMethods]);
+
+  async function saveAutoReload() {
+    if (!activeProof) {
+      if (principal?.hasPasskey) {
+        const verified = await runWalletAction("passkey-proof", async () => {
+          await verifyPasskeyStepUp("add_funding_method");
+        });
+        if (!verified) return;
+      } else if (!emailCodeSent) {
+        await runWalletAction("send-code", async () => {
+          await startEmailStepUp("add_funding_method");
+          setEmailCodeSent(true);
+          setMessage("Verification code sent.");
+        });
+        return;
+      } else {
+        const verified = await runWalletAction("verify-code", async () => {
+          await verifyEmailStepUp({
+            action: "add_funding_method",
+            verificationCode,
+          });
+        });
+        if (!verified) return;
+      }
+    }
+
+    await runWalletAction("save", async () => {
+      const input = buildAutoReloadConfigInput({
+        enabled: autoReloadEnabled,
+        fundingMethodId,
+        minimumBalance,
+        maxSingleReload,
+        paymentHoldTimeoutMinutes,
+      });
+      await putJson<DropshipAutoReloadConfigResponse>("/api/dropship/wallet/auto-reload", input);
+      await Promise.all([
+        walletQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+      ]);
+      setEmailCodeSent(false);
+      setVerificationCode("");
+      setMessage("Auto-reload settings saved.");
+    });
+  }
+
+  async function runWalletAction(action: PendingWalletAction, task: () => Promise<void>): Promise<boolean> {
+    setPendingWalletAction(action);
+    setError("");
+    setMessage("");
+    try {
+      await task();
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Wallet request failed.");
+      return false;
+    } finally {
+      setPendingWalletAction(null);
+    }
+  }
 
   return (
     <DropshipPortalShell>
@@ -55,6 +166,38 @@ export default function DropshipPortalWallet() {
                 detail={wallet.autoReload ? `Minimum ${formatCents(wallet.autoReload.minimumBalanceCents)}` : "No configuration"}
               />
             </section>
+
+            {error && (
+              <Alert variant="destructive" className="mt-5">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+            {message && (
+              <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900">
+                <CheckCircle2 className="h-4 w-4" />
+                <AlertDescription>{message}</AlertDescription>
+              </Alert>
+            )}
+
+            <AutoReloadPanel
+              activeFundingMethods={activeFundingMethods}
+              autoReloadEnabled={autoReloadEnabled}
+              emailCodeSent={emailCodeSent}
+              fundingMethodId={fundingMethodId}
+              maxSingleReload={maxSingleReload}
+              minimumBalance={minimumBalance}
+              paymentHoldTimeoutMinutes={paymentHoldTimeoutMinutes}
+              pendingWalletAction={pendingWalletAction}
+              verificationCode={verificationCode}
+              onAutoReloadEnabledChange={setAutoReloadEnabled}
+              onFundingMethodIdChange={setFundingMethodId}
+              onMaxSingleReloadChange={setMaxSingleReload}
+              onMinimumBalanceChange={setMinimumBalance}
+              onPaymentHoldTimeoutMinutesChange={setPaymentHoldTimeoutMinutes}
+              onSave={saveAutoReload}
+              onVerificationCodeChange={setVerificationCode}
+            />
 
             <section className="mt-5 grid gap-5 xl:grid-cols-[0.8fr_1.2fr]">
               <div className="rounded-md border border-zinc-200 bg-white p-4">
@@ -139,6 +282,139 @@ export default function DropshipPortalWallet() {
   );
 }
 
+function AutoReloadPanel({
+  activeFundingMethods,
+  autoReloadEnabled,
+  emailCodeSent,
+  fundingMethodId,
+  maxSingleReload,
+  minimumBalance,
+  onAutoReloadEnabledChange,
+  onFundingMethodIdChange,
+  onMaxSingleReloadChange,
+  onMinimumBalanceChange,
+  onPaymentHoldTimeoutMinutesChange,
+  onSave,
+  onVerificationCodeChange,
+  paymentHoldTimeoutMinutes,
+  pendingWalletAction,
+  verificationCode,
+}: {
+  activeFundingMethods: DropshipWalletResponse["wallet"]["fundingMethods"];
+  autoReloadEnabled: boolean;
+  emailCodeSent: boolean;
+  fundingMethodId: string;
+  maxSingleReload: string;
+  minimumBalance: string;
+  onAutoReloadEnabledChange: (value: boolean) => void;
+  onFundingMethodIdChange: (value: string) => void;
+  onMaxSingleReloadChange: (value: string) => void;
+  onMinimumBalanceChange: (value: string) => void;
+  onPaymentHoldTimeoutMinutesChange: (value: string) => void;
+  onSave: () => void;
+  onVerificationCodeChange: (value: string) => void;
+  paymentHoldTimeoutMinutes: string;
+  pendingWalletAction: PendingWalletAction;
+  verificationCode: string;
+}) {
+  const saveDisabled = pendingWalletAction !== null
+    || (autoReloadEnabled && activeFundingMethods.length === 0)
+    || (emailCodeSent && verificationCode.length !== 6);
+
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Auto-reload</h2>
+          <p className="mt-1 text-sm text-zinc-500">Required before order processing can run without manual payment holds.</p>
+        </div>
+        <Select value={autoReloadEnabled ? "enabled" : "disabled"} onValueChange={(value) => onAutoReloadEnabledChange(value === "enabled")}>
+          <SelectTrigger className="h-10 sm:w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="enabled">Enabled</SelectItem>
+            <SelectItem value="disabled">Disabled</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-4">
+        <div className="space-y-2 lg:col-span-2">
+          <Label>Funding method</Label>
+          <Select
+            value={fundingMethodId}
+            onValueChange={onFundingMethodIdChange}
+            disabled={activeFundingMethods.length === 0}
+          >
+            <SelectTrigger className="h-10">
+              <SelectValue placeholder="Select active funding method" />
+            </SelectTrigger>
+            <SelectContent>
+              {activeFundingMethods.map((method) => (
+                <SelectItem key={method.fundingMethodId} value={String(method.fundingMethodId)}>
+                  {method.displayLabel || formatStatus(method.rail)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="auto-reload-minimum">Minimum balance</Label>
+          <Input id="auto-reload-minimum" value={minimumBalance} onChange={(event) => onMinimumBalanceChange(event.target.value)} className="h-10" />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="auto-reload-max">Max reload</Label>
+          <Input id="auto-reload-max" value={maxSingleReload} onChange={(event) => onMaxSingleReloadChange(event.target.value)} className="h-10" />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="payment-hold-timeout">Payment hold minutes</Label>
+          <Input
+            id="payment-hold-timeout"
+            value={paymentHoldTimeoutMinutes}
+            onChange={(event) => onPaymentHoldTimeoutMinutesChange(event.target.value)}
+            className="h-10"
+          />
+        </div>
+      </div>
+
+      {activeFundingMethods.length === 0 && (
+        <div className="mt-4 rounded-md border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          No active V2 funding method is available yet. Stripe ACH/card and USDC funding method onboarding is the next funding-rail slice.
+        </div>
+      )}
+
+      {emailCodeSent && (
+        <div className="mt-4 max-w-sm space-y-2">
+          <Label>Verification code</Label>
+          <InputOTP
+            maxLength={6}
+            value={verificationCode}
+            onChange={onVerificationCodeChange}
+            containerClassName="justify-between"
+          >
+            <InputOTPGroup>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
+        </div>
+      )}
+
+      <Button
+        type="button"
+        className="mt-4 h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={saveDisabled}
+        onClick={onSave}
+      >
+        {walletButtonIcon(pendingWalletAction, emailCodeSent)}
+        {walletButtonLabel(pendingWalletAction, emailCodeSent)}
+      </Button>
+    </section>
+  );
+}
+
 function Metric({ detail, title, value }: { detail?: string; title: string; value: string }) {
   return (
     <div className="rounded-md border border-zinc-200 bg-white p-4">
@@ -147,4 +423,26 @@ function Metric({ detail, title, value }: { detail?: string; title: string; valu
       {detail && <div className="mt-1 text-sm text-zinc-500">{detail}</div>}
     </div>
   );
+}
+
+function centsToDollarInput(cents: number): string {
+  if (!Number.isSafeInteger(cents) || cents < 0) return "0.00";
+  const dollars = Math.trunc(cents / 100);
+  const remainder = cents % 100;
+  return `${dollars}.${String(remainder).padStart(2, "0")}`;
+}
+
+function walletButtonLabel(pendingWalletAction: PendingWalletAction, emailCodeSent: boolean): string {
+  if (pendingWalletAction === "send-code") return "Sending code";
+  if (pendingWalletAction === "verify-code") return "Verifying code";
+  if (pendingWalletAction === "passkey-proof") return "Waiting for passkey";
+  if (pendingWalletAction === "save") return "Saving";
+  if (emailCodeSent) return "Verify and save";
+  return "Save auto-reload";
+}
+
+function walletButtonIcon(pendingWalletAction: PendingWalletAction, emailCodeSent: boolean) {
+  if (pendingWalletAction === "passkey-proof") return <Fingerprint className="h-4 w-4" />;
+  if (pendingWalletAction === "send-code" || (emailCodeSent && pendingWalletAction !== "save")) return <Mail className="h-4 w-4" />;
+  return <Save className="h-4 w-4" />;
 }
