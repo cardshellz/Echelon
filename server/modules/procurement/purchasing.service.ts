@@ -842,33 +842,43 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     const poNumber = await storage.generatePoNumber();
 
-    const po = await storage.createPurchaseOrder({
-      poNumber,
-      vendorId: data.vendorId,
-      warehouseId: data.warehouseId,
-      status: "draft",
-      poType: data.poType || "standard",
-      priority: data.priority || "normal",
-      expectedDeliveryDate: data.expectedDeliveryDate,
-      shipToAddress: data.shipToAddress,
-      shippingMethod: data.shippingMethod,
-      incoterms: data.incoterms,
-      freightTerms: data.freightTerms,
-      vendorNotes: data.vendorNotes,
-      internalNotes: data.internalNotes,
-      currency: vendor.currency || "USD",
-      paymentTermsDays: vendor.paymentTermsDays,
-      paymentTermsType: vendor.paymentTermsType,
-      shipFromAddress: vendor.shipFromAddress,
-      createdBy: data.createdBy,
-      updatedBy: data.createdBy,
-    }, {
+    try {
+      const po = await storage.createPurchaseOrder({
+        poNumber,
+        vendorId: data.vendorId,
+        warehouseId: data.warehouseId,
+        status: "draft",
+        poType: data.poType || "standard",
+        priority: data.priority || "normal",
+        expectedDeliveryDate: data.expectedDeliveryDate,
+        shipToAddress: data.shipToAddress,
+        shippingMethod: data.shippingMethod,
+        incoterms: data.incoterms,
+        freightTerms: data.freightTerms,
+        vendorNotes: data.vendorNotes,
+        internalNotes: data.internalNotes,
+        currency: vendor.currency || "USD",
+        paymentTermsDays: vendor.paymentTermsDays,
+        paymentTermsType: vendor.paymentTermsType,
+        shipFromAddress: vendor.shipFromAddress,
+        createdBy: data.createdBy,
+        updatedBy: data.createdBy,
+      }, {
         fromStatus: null,
         toStatus: "draft",
         changedBy: data.createdBy,
         notes: "PO created"
       });
-    return po;
+      return po;
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        throw new PurchasingError(
+          `PO number '${poNumber}' already in use by an active record.`,
+          409,
+        );
+      }
+      throw error;
+    }
   }
 
   async function updatePO(id: number, updates: Record<string, any>, userId?: string) {
@@ -1528,17 +1538,28 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     // Create receiving order
     const receiptNumber = await storage.generateReceiptNumber();
-    const receivingOrder = await storage.createReceivingOrder({
-      receiptNumber,
-      poNumber: po.poNumber,
-      purchaseOrderId: po.id,
-      sourceType: "po",
-      vendorId: po.vendorId,
-      warehouseId: po.warehouseId,
-      status: "draft",
-      expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
-      createdBy: userId,
-    });
+    let receivingOrder;
+    try {
+      receivingOrder = await storage.createReceivingOrder({
+        receiptNumber,
+        poNumber: po.poNumber,
+        purchaseOrderId: po.id,
+        sourceType: "po",
+        vendorId: po.vendorId,
+        warehouseId: po.warehouseId,
+        status: "draft",
+        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
+        createdBy: userId,
+      });
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        throw new PurchasingError(
+          `Receipt number '${receiptNumber}' already in use by an active record.`,
+          409,
+        );
+      }
+      throw error;
+    }
 
     // Auto-assign putaway locations from product_locations if available
     let productLocationMap = new Map<number, number>(); // productVariantId → warehouseLocationId
