@@ -165,6 +165,17 @@ export interface DropshipStoreTokenCipher {
   }): DropshipStoreConnectionTokenRecord;
 }
 
+export interface DropshipStoreConnectionPostConnectProvider {
+  afterStoreConnected(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+    shopDomain: string | null;
+    accessToken: string;
+    connectedAt: Date;
+  }): Promise<void>;
+}
+
 export interface CompleteOAuthQuery {
   platform?: DropshipSupportedStorePlatform;
   code?: string;
@@ -218,6 +229,7 @@ export interface DropshipStoreConnectionServiceDependencies {
   oauthProviders: Record<DropshipSupportedStorePlatform, DropshipMarketplaceOAuthProvider>;
   stateSigner: DropshipOAuthStateSigner;
   tokenCipher: DropshipStoreTokenCipher;
+  postConnectProvider?: DropshipStoreConnectionPostConnectProvider;
   clock: DropshipClock;
   logger: DropshipLogger;
   disconnectGraceHours?: number;
@@ -372,6 +384,15 @@ export class DropshipStoreConnectionService {
       },
     });
 
+    await this.runPostConnectSetup({
+      vendorId: vendor.vendorId,
+      storeConnectionId: connection.storeConnectionId,
+      platform,
+      shopDomain: state.shopDomain,
+      accessToken: grant.accessToken,
+      connectedAt: now,
+    });
+
     return {
       connection,
       returnTo: state.returnTo,
@@ -436,6 +457,36 @@ export class DropshipStoreConnectionService {
 
     return connection;
   }
+
+  private async runPostConnectSetup(input: Parameters<DropshipStoreConnectionPostConnectProvider["afterStoreConnected"]>[0]): Promise<void> {
+    if (!this.deps.postConnectProvider) {
+      return;
+    }
+
+    try {
+      await this.deps.postConnectProvider.afterStoreConnected(input);
+      this.deps.logger.info({
+        code: "DROPSHIP_STORE_POST_CONNECT_SETUP_COMPLETED",
+        message: "Dropship store post-connect setup completed.",
+        context: {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          platform: input.platform,
+        },
+      });
+    } catch (error) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_STORE_POST_CONNECT_SETUP_FAILED",
+        message: "Dropship store post-connect setup failed after the connection was persisted.",
+        context: {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          platform: input.platform,
+          cause: formatDropshipStoreConnectionSetupError(error),
+        },
+      });
+    }
+  }
 }
 
 export function makeDropshipStoreConnectionLogger(): DropshipLogger {
@@ -462,6 +513,24 @@ function normalizeDefaultWarehouseId(value: number | null): number | null {
     );
   }
   return value;
+}
+
+function formatDropshipStoreConnectionSetupError(error: unknown): Record<string, unknown> {
+  if (error instanceof DropshipError) {
+    return {
+      code: error.code,
+      message: error.message,
+      context: error.context ?? {},
+    };
+  }
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+    };
+  }
+  return {
+    message: String(error),
+  };
 }
 
 function parseListForAdminInput(input: unknown): ListDropshipAdminStoreConnectionsInput {

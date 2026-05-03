@@ -6,6 +6,7 @@ import {
   type DropshipMarketplaceOAuthProvider,
   type DropshipOAuthStatePayload,
   type DropshipOAuthStateSigner,
+  type DropshipStoreConnectionPostConnectProvider,
   type DropshipStoreConnectionOAuthStart,
   type DropshipStoreConnectionProfile,
   type DropshipStoreConnectionRepository,
@@ -44,6 +45,7 @@ describe("DropshipStoreConnectionService", () => {
   let repository: FakeStoreConnectionRepository;
   let vendorProvisioning: FakeVendorProvisioningService;
   let stateSigner: FakeStateSigner;
+  let postConnectProvider: FakePostConnectProvider;
   let logs: DropshipLogEvent[];
   let service: DropshipStoreConnectionService;
 
@@ -51,6 +53,7 @@ describe("DropshipStoreConnectionService", () => {
     repository = new FakeStoreConnectionRepository();
     vendorProvisioning = new FakeVendorProvisioningService();
     stateSigner = new FakeStateSigner();
+    postConnectProvider = new FakePostConnectProvider();
     logs = [];
     service = new DropshipStoreConnectionService({
       vendorProvisioning: vendorProvisioning as unknown as DropshipVendorProvisioningService,
@@ -61,6 +64,7 @@ describe("DropshipStoreConnectionService", () => {
       },
       stateSigner,
       tokenCipher: new FakeTokenCipher(),
+      postConnectProvider,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -138,6 +142,76 @@ describe("DropshipStoreConnectionService", () => {
     });
     expect(repository.lastConnectInput?.tokenRecords.map((record) => record.tokenKind)).toEqual(["access", "refresh"]);
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_STORE_CONNECTED" });
+  });
+
+  it("runs post-connect setup with the live access token after the store is persisted", async () => {
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "shopify",
+      shopDomain: "vendor-test.myshopify.com",
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+    };
+
+    const result = await service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "shopify",
+      shop: "vendor-test.myshopify.com",
+    });
+
+    expect(result.connection.storeConnectionId).toBe(20);
+    expect(postConnectProvider.calls).toEqual([{
+      vendorId: 10,
+      storeConnectionId: 20,
+      platform: "shopify",
+      shopDomain: "vendor-test.myshopify.com",
+      accessToken: "access-token",
+      connectedAt: now,
+    }]);
+  });
+
+  it("does not fail OAuth completion when post-connect setup fails after persistence", async () => {
+    postConnectProvider.error = new DropshipError(
+      "DROPSHIP_SHOPIFY_WEBHOOK_SUBSCRIPTION_HTTP_ERROR",
+      "Shopify webhook subscription setup failed.",
+      { retryable: true },
+    );
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "shopify",
+      shopDomain: "vendor-test.myshopify.com",
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+    };
+
+    const result = await service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "shopify",
+      shop: "vendor-test.myshopify.com",
+    });
+
+    expect(result.connection.status).toBe("connected");
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "DROPSHIP_STORE_CONNECTED" }),
+      expect.objectContaining({
+        code: "DROPSHIP_STORE_POST_CONNECT_SETUP_FAILED",
+        context: expect.objectContaining({
+          vendorId: 10,
+          storeConnectionId: 20,
+          platform: "shopify",
+        }),
+      }),
+    ]));
   });
 
   it("disconnects into grace and clears token presence", async () => {
@@ -272,6 +346,20 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
       externalAccountId: `external-${this.platform}`,
       externalDisplayName: `External ${this.platform}`,
     };
+  }
+}
+
+class FakePostConnectProvider implements DropshipStoreConnectionPostConnectProvider {
+  calls: Array<Parameters<DropshipStoreConnectionPostConnectProvider["afterStoreConnected"]>[0]> = [];
+  error: Error | null = null;
+
+  async afterStoreConnected(
+    input: Parameters<DropshipStoreConnectionPostConnectProvider["afterStoreConnected"]>[0],
+  ): Promise<void> {
+    this.calls.push(input);
+    if (this.error) {
+      throw this.error;
+    }
   }
 }
 

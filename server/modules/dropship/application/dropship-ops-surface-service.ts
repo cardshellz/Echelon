@@ -306,6 +306,7 @@ export function buildDropshipSystemReadinessChecks(
     buildOAuthStateCheck(env),
     buildEbayOAuthCheck(env),
     buildShopifyOAuthCheck(env),
+    buildShopifyWebhookSubscriptionCheck(env),
     buildStripeFundingCheck(env),
   ];
 }
@@ -426,6 +427,47 @@ function buildShopifyOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadiness
   };
 }
 
+function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const configured = firstConfiguredEnv(env, [
+    "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL",
+    "DROPSHIP_PUBLIC_BASE_URL",
+    "DROPSHIP_API_BASE_URL",
+    "APP_BASE_URL",
+    "PUBLIC_APP_URL",
+  ]);
+  const requiredEnv = [
+    "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL or DROPSHIP_PUBLIC_BASE_URL or DROPSHIP_API_BASE_URL or APP_BASE_URL or PUBLIC_APP_URL",
+  ];
+  if (!configured) {
+    return {
+      key: "shopify_webhook_subscriptions",
+      label: "Shopify webhook subscriptions",
+      status: "blocked",
+      message: "Shopify order intake webhook subscriptions require a public HTTPS API base URL.",
+      requiredEnv,
+    };
+  }
+
+  const value = env[configured]?.trim() ?? "";
+  if (!isValidHttpsUrl(value)) {
+    return {
+      key: "shopify_webhook_subscriptions",
+      label: "Shopify webhook subscriptions",
+      status: "blocked",
+      message: `${configured} must be a valid HTTPS URL.`,
+      requiredEnv,
+    };
+  }
+
+  return {
+    key: "shopify_webhook_subscriptions",
+    label: "Shopify webhook subscriptions",
+    status: "ready",
+    message: `Shopify order intake webhooks will be registered against ${configured}.`,
+    requiredEnv,
+  };
+}
+
 function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
   const missing = missingEnv(env, ["STRIPE_SECRET_KEY"]);
   const hasWebhookSecret = hasEnv(env, "DROPSHIP_STRIPE_WEBHOOK_SECRET")
@@ -474,6 +516,14 @@ function missingEnv(env: NodeJS.ProcessEnv, keys: string[]): string[] {
 
 function hasEnv(env: NodeJS.ProcessEnv, key: string): boolean {
   return Boolean(env[key]?.trim());
+}
+
+function isValidHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export function buildDropshipSettingsSections(input: {

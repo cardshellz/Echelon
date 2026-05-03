@@ -60,6 +60,7 @@ describe("DropshipOpsSurfaceService", () => {
       SHOPIFY_API_KEY: "shopify-key",
       SHOPIFY_API_SECRET: "shopify-secret",
       DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI: "https://cardshellz.io/api/dropship/store-connections/oauth/callback",
+      DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL: "https://echelon.cardshellz.io",
       STRIPE_SECRET_KEY: "stripe-secret",
       DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook",
     });
@@ -83,6 +84,7 @@ describe("DropshipOpsSurfaceService", () => {
       requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
     });
     expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "warning" });
   });
 
@@ -141,6 +143,7 @@ describe("DropshipOpsSurfaceService", () => {
       expect.objectContaining({ key: "token_vault" }),
       expect.objectContaining({ key: "ebay_oauth" }),
       expect.objectContaining({ key: "shopify_oauth" }),
+      expect.objectContaining({ key: "shopify_webhook_subscriptions" }),
     ]));
     expect(repository.lastDogfoodInput).toMatchObject({
       status: "blocked",
