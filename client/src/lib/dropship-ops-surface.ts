@@ -3,6 +3,28 @@ export type DropshipSeverity = "info" | "warning" | "error";
 export type DropshipStorePlatform = "ebay" | "shopify";
 export type DropshipCatalogExposureScope = "catalog" | "product_line" | "category" | "product" | "variant";
 export type DropshipCatalogExposureAction = "include" | "exclude";
+export type DropshipOpsOrderIntakeStatus =
+  | "received"
+  | "processing"
+  | "accepted"
+  | "rejected"
+  | "retrying"
+  | "failed"
+  | "payment_hold"
+  | "cancelled"
+  | "exception";
+
+const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
+  "received",
+  "processing",
+  "accepted",
+  "rejected",
+  "retrying",
+  "failed",
+  "payment_hold",
+  "cancelled",
+  "exception",
+];
 
 export interface DropshipSettingsSection {
   key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
@@ -241,6 +263,81 @@ export interface DropshipAdminCatalogExposurePreviewResponse {
   total: number;
   page: number;
   limit: number;
+}
+
+export interface DropshipAdminOrderOpsVendorSummary {
+  vendorId: number;
+  memberId: string;
+  businessName: string | null;
+  email: string | null;
+  status: string;
+  entitlementStatus: string;
+}
+
+export interface DropshipAdminOrderOpsStoreSummary {
+  storeConnectionId: number;
+  platform: string;
+  status: string;
+  setupStatus: string;
+  externalDisplayName: string | null;
+  shopDomain: string | null;
+}
+
+export interface DropshipAdminOrderOpsAuditSummary {
+  eventType: string;
+  severity: string;
+  createdAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface DropshipAdminOrderOpsIntakeListItem {
+  intakeId: number;
+  vendor: DropshipAdminOrderOpsVendorSummary;
+  storeConnection: DropshipAdminOrderOpsStoreSummary;
+  platform: string;
+  externalOrderId: string;
+  externalOrderNumber: string | null;
+  status: DropshipOpsOrderIntakeStatus;
+  paymentHoldExpiresAt: string | null;
+  rejectionReason: string | null;
+  cancellationStatus: string | null;
+  omsOrderId: number | null;
+  receivedAt: string;
+  acceptedAt: string | null;
+  updatedAt: string;
+  lineCount: number;
+  totalQuantity: number;
+  shipTo: {
+    name?: string;
+    company?: string;
+    city?: string;
+    region?: string;
+    postalCode?: string;
+    country?: string;
+  } | null;
+  latestAuditEvent: DropshipAdminOrderOpsAuditSummary | null;
+}
+
+export interface DropshipAdminOrderOpsListResponse {
+  items: DropshipAdminOrderOpsIntakeListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  statuses: DropshipOpsOrderIntakeStatus[];
+  summary: Array<{ status: DropshipOpsOrderIntakeStatus; count: number }>;
+}
+
+export interface DropshipAdminOrderOpsActionInput {
+  idempotencyKey: string;
+  reason?: string;
+}
+
+export interface DropshipAdminOrderOpsActionResponse {
+  intakeId: number;
+  previousStatus: DropshipOpsOrderIntakeStatus;
+  status: DropshipOpsOrderIntakeStatus;
+  idempotentReplay: boolean;
+  updatedAt: string;
 }
 
 export interface DropshipCatalogSelectionDecision {
@@ -618,6 +715,46 @@ export function buildAdminCatalogExposurePreviewUrl(input: {
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
+}
+
+export function buildAdminOrderIntakeUrl(input: {
+  search: string;
+  status: DropshipOpsOrderIntakeStatus | "default" | "all";
+  page?: number;
+  limit?: number;
+}): string {
+  const statuses = input.status === "default"
+    ? undefined
+    : input.status === "all"
+      ? allDropshipOpsOrderIntakeStatuses.join(",")
+      : input.status;
+  return buildQueryUrl("/api/dropship/admin/order-intake", {
+    search: input.search.trim(),
+    statuses,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildAdminOrderOpsActionInput(input: {
+  idempotencyKey: string;
+  reason: string;
+  requireReason: boolean;
+}): DropshipAdminOrderOpsActionInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  const reason = input.reason.trim();
+  if (input.requireReason && !reason) {
+    throw new Error("Reason is required.");
+  }
+  if (reason.length > 1000) {
+    throw new Error("Reason must be 1000 characters or fewer.");
+  }
+
+  return reason ? { idempotencyKey, reason } : { idempotencyKey };
 }
 
 export function buildCatalogExposureRuleInput(input: {

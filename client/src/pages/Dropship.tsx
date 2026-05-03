@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   Bell,
@@ -38,6 +38,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   buildAdminCatalogExposurePreviewUrl,
+  buildAdminOrderIntakeUrl,
+  buildAdminOrderOpsActionInput,
   buildCatalogExposureRuleInput,
   countByKey,
   catalogExposureRecordToInput,
@@ -46,6 +48,7 @@ import {
   fetchJson,
   formatDateTime,
   formatStatus,
+  postJson,
   putJson,
   queryErrorMessage,
   riskSeverityTone,
@@ -54,16 +57,21 @@ import {
   type DropshipAdminCatalogExposureRulesReplaceResponse,
   type DropshipAdminCatalogExposureRulesResponse,
   type DropshipAdminCatalogExposureRuleInput,
+  type DropshipAdminOrderOpsActionResponse,
+  type DropshipAdminOrderOpsIntakeListItem,
+  type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOpsOverview,
   type DropshipAdminOpsOverviewResponse,
   type DropshipAuditEventRecord,
   type DropshipAuditEventSearchResponse,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
+  type DropshipOpsOrderIntakeStatus,
   type DropshipSeverity,
 } from "@/lib/dropship-ops-surface";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
+type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
 
@@ -88,6 +96,20 @@ const emptyCatalogRuleForm: CatalogRuleFormState = {
   priority: "0",
   notes: "",
 };
+
+const orderOpsStatusFilters: OrderOpsStatusFilter[] = [
+  "default",
+  "all",
+  "payment_hold",
+  "retrying",
+  "failed",
+  "exception",
+  "rejected",
+  "cancelled",
+  "received",
+  "processing",
+  "accepted",
+];
 
 export default function Dropship() {
   const [auditSearch, setAuditSearch] = useState("");
@@ -184,6 +206,12 @@ function refreshAll() {
               Catalog exposure
             </TabsTrigger>
             <TabsTrigger
+              value="order-intake"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Order intake
+            </TabsTrigger>
+            <TabsTrigger
               value="audit"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -203,6 +231,10 @@ function refreshAll() {
 
           <TabsContent value="catalog" className="m-0">
             <CatalogExposureTab />
+          </TabsContent>
+
+          <TabsContent value="order-intake" className="m-0">
+            <OrderIntakeOpsTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -254,6 +286,152 @@ function refreshAll() {
           </TabsContent>
         </Tabs>
       </div>
+    </div>
+  );
+}
+
+function OrderIntakeOpsTab() {
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<OrderOpsStatusFilter>("default");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "default" as OrderOpsStatusFilter,
+  });
+  const [actionReason, setActionReason] = useState("");
+  const [pendingAction, setPendingAction] = useState<{
+    intakeId: number;
+    action: "retry" | "exception";
+  } | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const orderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
+    search: appliedFilters.search,
+    status: appliedFilters.status,
+  }), [appliedFilters]);
+
+  const orderIntakeQuery = useQuery<DropshipAdminOrderOpsListResponse>({
+    queryKey: [orderIntakeUrl],
+    queryFn: () => fetchJson<DropshipAdminOrderOpsListResponse>(orderIntakeUrl),
+  });
+
+  function applyOrderFilters() {
+    setAppliedFilters({ search, status });
+  }
+
+  async function runOrderAction(
+    intake: DropshipAdminOrderOpsIntakeListItem,
+    action: "retry" | "exception",
+  ) {
+    setPendingAction({ intakeId: intake.intakeId, action });
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminOrderOpsActionInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-order-${action}-${intake.intakeId}`),
+        reason: actionReason,
+        requireReason: action === "exception",
+      });
+      const response = await postJson<DropshipAdminOrderOpsActionResponse>(
+        `/api/dropship/admin/order-intake/${intake.intakeId}/${action}`,
+        input,
+      );
+      setMessage(`Order intake ${response.intakeId} moved from ${formatStatus(response.previousStatus)} to ${formatStatus(response.status)}.`);
+      setActionReason("");
+      await Promise.all([
+        orderIntakeQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship order intake action failed.");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {(orderIntakeQuery.error || error) && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {error || queryErrorMessage(orderIntakeQuery.error, "Unable to load dropship order intake exceptions.")}
+          </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Order intake exceptions</h2>
+            <p className="text-sm text-muted-foreground">
+              Review marketplace intake rows, retry recoverable failures, and mark unresolved rows as ops exceptions.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Order, vendor, store, or customer"
+              />
+            </div>
+            <Select value={status} onValueChange={(value) => setStatus(value as OrderOpsStatusFilter)}>
+              <SelectTrigger className="lg:w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {orderOpsStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {orderOpsStatusLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyOrderFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.45fr]">
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-order-ops-reason">Action reason</label>
+            <Input
+              id="dropship-order-ops-reason"
+              className="mt-2"
+              value={actionReason}
+              onChange={(event) => setActionReason(event.target.value)}
+              placeholder="Required for exception; optional for retry"
+              maxLength={1000}
+            />
+          </div>
+          <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+            Actions are idempotent and audited. Retry moves the row back to the processing queue; exception marks it for manual resolution.
+          </div>
+        </div>
+      </section>
+
+      <OrderIntakeSummary summary={orderIntakeQuery.data?.summary ?? []} total={orderIntakeQuery.data?.total ?? 0} />
+
+      <OrderIntakeOpsTable
+        isLoading={orderIntakeQuery.isLoading || orderIntakeQuery.isFetching}
+        items={orderIntakeQuery.data?.items ?? []}
+        pendingAction={pendingAction}
+        total={orderIntakeQuery.data?.total ?? 0}
+        onRunAction={runOrderAction}
+      />
     </div>
   );
 }
@@ -539,6 +717,150 @@ function CatalogExposureTab() {
   );
 }
 
+function OrderIntakeSummary({
+  summary,
+  total,
+}: {
+  summary: DropshipAdminOrderOpsListResponse["summary"];
+  total: number;
+}) {
+  return (
+    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <CatalogMetric icon={<ClipboardList className="h-4 w-4" />} label="Matching intakes" value={String(total)} />
+      <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Payment holds" value={String(orderStatusCount(summary, "payment_hold"))} />
+      <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Retrying" value={String(orderStatusCount(summary, "retrying"))} />
+      <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Failed or exception" value={String(orderStatusCount(summary, "failed") + orderStatusCount(summary, "exception"))} />
+    </section>
+  );
+}
+
+function OrderIntakeOpsTable({
+  isLoading,
+  items,
+  onRunAction,
+  pendingAction,
+  total,
+}: {
+  isLoading: boolean;
+  items: DropshipAdminOrderOpsIntakeListItem[];
+  onRunAction: (intake: DropshipAdminOrderOpsIntakeListItem, action: "retry" | "exception") => void;
+  pendingAction: { intakeId: number; action: "retry" | "exception" } | null;
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <Empty className="rounded-md border border-dashed p-8">
+        <EmptyMedia variant="icon"><ClipboardList /></EmptyMedia>
+        <EmptyHeader>
+          <EmptyTitle>No order intake rows</EmptyTitle>
+          <EmptyDescription>No dropship order intake rows match the current filters.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return (
+    <section className="rounded-md border bg-card">
+      <div className="flex items-center justify-between border-b px-4 py-3 text-sm text-muted-foreground">
+        <span>{total} intake row{total === 1 ? "" : "s"}</span>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Order</TableHead>
+            <TableHead>Vendor / store</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Ship to</TableHead>
+            <TableHead>Latest audit</TableHead>
+            <TableHead>Updated</TableHead>
+            <TableHead className="w-[210px]">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {items.map((intake) => (
+            <TableRow key={intake.intakeId}>
+              <TableCell>
+                <div className="font-medium">{intake.externalOrderNumber || intake.externalOrderId}</div>
+                <div className="text-xs text-muted-foreground">
+                  {formatStatus(intake.platform)} intake {intake.intakeId}
+                </div>
+                {intake.omsOrderId && (
+                  <div className="text-xs text-muted-foreground">OMS {intake.omsOrderId}</div>
+                )}
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{intake.vendor.businessName || intake.vendor.email || `Vendor ${intake.vendor.vendorId}`}</div>
+                <div className="text-xs text-muted-foreground">
+                  {intake.storeConnection.externalDisplayName || intake.storeConnection.shopDomain || formatStatus(intake.storeConnection.platform)}
+                </div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={orderIntakeStatusTone(intake.status)}>
+                  {formatStatus(intake.status)}
+                </Badge>
+                {intake.rejectionReason && (
+                  <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">{intake.rejectionReason}</div>
+                )}
+                {intake.paymentHoldExpiresAt && (
+                  <div className="mt-1 text-xs text-muted-foreground">Hold expires {formatDateTime(intake.paymentHoldExpiresAt)}</div>
+                )}
+              </TableCell>
+              <TableCell>{orderShipToLabel(intake)}</TableCell>
+              <TableCell>
+                {intake.latestAuditEvent ? (
+                  <>
+                    <div className="font-medium">{formatStatus(intake.latestAuditEvent.eventType)}</div>
+                    <div className="text-xs text-muted-foreground">{formatDateTime(intake.latestAuditEvent.createdAt)}</div>
+                  </>
+                ) : (
+                  <span className="text-sm text-muted-foreground">None</span>
+                )}
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{formatDateTime(intake.updatedAt)}</TableCell>
+              <TableCell>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-2"
+                    disabled={pendingAction !== null}
+                    onClick={() => onRunAction(intake, "retry")}
+                  >
+                    <RefreshCw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    Retry
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-2"
+                    disabled={pendingAction !== null}
+                    onClick={() => onRunAction(intake, "exception")}
+                  >
+                    <AlertCircle className="h-4 w-4" />
+                    Exception
+                  </Button>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </section>
+  );
+}
+
 function CatalogRuleTargetInput({
   ruleForm,
   setRuleForm,
@@ -809,6 +1131,39 @@ function catalogRuleTargetLabel(rule: DropshipAdminCatalogExposureRuleInput): st
 function catalogExposureActionTone(action: CatalogExposureActionFilter): string {
   if (action === "include") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
+  if (status === "default") return "Needs attention";
+  if (status === "all") return "All statuses";
+  return formatStatus(status);
+}
+
+function orderStatusCount(
+  summary: DropshipAdminOrderOpsListResponse["summary"],
+  status: DropshipOpsOrderIntakeStatus,
+): number {
+  return summary.find((entry) => entry.status === status)?.count ?? 0;
+}
+
+function orderShipToLabel(intake: DropshipAdminOrderOpsIntakeListItem): string {
+  const shipTo = intake.shipTo;
+  if (!shipTo) return "None";
+  const locality = [shipTo.city, shipTo.region, shipTo.postalCode].filter(Boolean).join(", ");
+  return locality || shipTo.country || shipTo.name || "Available";
+}
+
+function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {
+  if (status === "accepted" || status === "processing") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (status === "payment_hold" || status === "retrying" || status === "received") {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (status === "failed" || status === "exception" || status === "rejected" || status === "cancelled") {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
 function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
