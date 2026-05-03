@@ -21,6 +21,7 @@ import type {
   InboundShipmentStatusHistory,
   InventoryLot,
 } from "@shared/schema";
+import { inboundShipmentLines } from "@shared/schema";
 import { sql as sqlTag } from "drizzle-orm";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
@@ -129,7 +130,7 @@ const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
 
 export type ShipmentTrackingService = ReturnType<typeof createShipmentTrackingService>;
 
-export function createShipmentTrackingService(_db: any, storage: Storage) {
+export function createShipmentTrackingService(db: any, storage: Storage) {
 
   // ─── Private helpers ────────────────────────────────────────────
 
@@ -418,6 +419,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     lineSelections?: Array<{ poLineId: number; qty: number }>,
     lineIds?: number[],
   ) {
+    // Pre-flight checks (non-locked reads OK — shipment status is not contended)
     const shipment = await getShipment(shipmentId);
     if (shipment.status === "closed" || shipment.status === "cancelled") {
       throw new ShipmentTrackingError("Cannot add lines to a closed or cancelled shipment");
@@ -443,72 +445,12 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
         ? poLines.filter((l: any) => lineIds.includes(l.id))
         : poLines;
 
-    // Deduplicate: skip PO lines already on this shipment
-    const existingLines = await storage.getInboundShipmentLines(shipmentId);
-    const existingPoLineIds = new Set(
-      existingLines.filter((l: any) => l.purchaseOrderLineId).map((l: any) => l.purchaseOrderLineId)
-    );
-    const linesToAdd = candidateLines.filter((l: any) => !existingPoLineIds.has(l.id));
-
-    if (linesToAdd.length === 0) {
-      throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
-    }
-
-    // Compute alreadyShippedQty per PO line (across all non-cancelled shipments)
-    const allShipmentLines = await storage.getInboundShipmentLinesByPo(purchaseOrderId);
-    const shippedQtyByPoLine = new Map<number, number>();
-    for (const sl of allShipmentLines) {
-      if (sl.purchaseOrderLineId) {
-        shippedQtyByPoLine.set(
-          sl.purchaseOrderLineId,
-          (shippedQtyByPoLine.get(sl.purchaseOrderLineId) ?? 0) + (sl.qtyShipped ?? 0),
-        );
-      }
-    }
-
-    // Validate per-line when lineSelections provided
-    if (qtyMap.size > 0) {
-      for (const poLine of linesToAdd) {
-        const isProduct = !poLine.lineType || poLine.lineType === "product";
-        if (!isProduct) {
-          throw new ShipmentTrackingError(
-            `Line ${poLine.sku || poLine.id} is a ${poLine.lineType || "non-product"} line and cannot be shipped`,
-          );
-        }
-        if (poLine.status === "closed" || poLine.status === "cancelled") {
-          throw new ShipmentTrackingError(
-            `Line ${poLine.sku || poLine.id} is ${poLine.status} and cannot be shipped`,
-          );
-        }
-
-        const qty = qtyMap.get(poLine.id)!;
-        if (qty <= 0) {
-          throw new ShipmentTrackingError(
-            `Line ${poLine.sku || poLine.id}: qty must be > 0 (got ${qty})`,
-          );
-        }
-
-        const orderQty = poLine.orderQty ?? 0;
-        const cancelledQty = poLine.cancelledQty ?? 0;
-        const alreadyShipped = shippedQtyByPoLine.get(poLine.id) ?? 0;
-        const remaining = orderQty - alreadyShipped - cancelledQty;
-        if (qty > remaining) {
-          throw new ShipmentTrackingError(
-            `Line ${poLine.sku || poLine.id}: qty ${qty} exceeds remaining ${remaining} (ordered ${orderQty}, shipped ${alreadyShipped}, cancelled ${cancelledQty})`,
-          );
-        }
-      }
-    }
-
-    const newLines: InsertInboundShipmentLine[] = [];
-    for (const poLine of linesToAdd) {
-      // Try to resolve dimensions: vendor_products first, then product_variants
+    // Resolve dimensions + cartonCount outside the tx (read-only, not contended)
+    const lineMeta = new Map<number, { dims: any; cartonCount: number | null; qtyPieces: number }>();
+    for (const poLine of candidateLines) {
       const dims = await resolveDimensionsForVariant(poLine.productVariantId, po.vendorId);
-
-      // Use per-line qty from selections, or fall back to orderQty for legacy behavior
       const qtyPieces = qtyMap.size > 0 ? qtyMap.get(poLine.id)! : (poLine.orderQty ?? 0);
 
-      // Auto-compute cartonCount from SKU hierarchy (cases → pieces)
       let cartonCount: number | null = null;
       if (poLine.productVariantId) {
         const pv = await storage.getProductVariantById(poLine.productVariantId);
@@ -518,32 +460,126 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
         }
       }
 
-      const computed = computeLineTotals({
-        qtyShipped: qtyPieces,
-        cartonCount,
-        weightKg: dims.weightKg,
-        lengthCm: dims.lengthCm,
-        widthCm: dims.widthCm,
-        heightCm: dims.heightCm,
-      });
-
-      newLines.push({
-        inboundShipmentId: shipmentId,
-        purchaseOrderId,
-        purchaseOrderLineId: poLine.id,
-        productVariantId: poLine.productVariantId,
-        sku: poLine.sku || null,
-        qtyShipped: qtyPieces,
-        cartonCount,
-        weightKg: dims.weightKg,
-        lengthCm: dims.lengthCm,
-        widthCm: dims.widthCm,
-        heightCm: dims.heightCm,
-        ...computed,
-      } as any);
+      lineMeta.set(poLine.id, { dims, cartonCount, qtyPieces });
     }
 
-    const created = await storage.bulkCreateInboundShipmentLines(newLines);
+    const candidateLineIds = candidateLines.map((l: any) => l.id);
+
+    // ── Atomic: lock PO lines, re-read shipped qty, validate, insert ──
+    const created = await db.transaction(async (tx: any) => {
+      // 1. Lock candidate PO lines (serializes concurrent adds on same lines)
+      const lockedRows = await tx.execute(sqlTag`
+        SELECT id, line_type, status, order_qty, cancelled_qty, sku
+        FROM procurement.purchase_order_lines
+        WHERE id = ANY(${candidateLineIds})
+        FOR UPDATE
+      `);
+
+      const lockedLines = lockedRows.rows as any[];
+
+      // Deduplicate: skip PO lines already on this shipment
+      const existingOnShipment = await tx.execute(sqlTag`
+        SELECT purchase_order_line_id
+        FROM procurement.inbound_shipment_lines
+        WHERE inbound_shipment_id = ${shipmentId}
+          AND purchase_order_line_id = ANY(${candidateLineIds})
+      `);
+      const existingPoLineIds = new Set(
+        existingOnShipment.rows
+          .map((r: any) => r.purchase_order_line_id)
+          .filter((id: any) => id != null),
+      );
+      const linesToAdd = lockedLines.filter((l: any) => !existingPoLineIds.has(l.id));
+
+      if (linesToAdd.length === 0) {
+        throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
+      }
+
+      // 2. Re-read alreadyShippedQty AFTER the lock (fresh data)
+      const shippedResult = await tx.execute(sqlTag`
+        SELECT
+          isl.purchase_order_line_id,
+          COALESCE(SUM(isl.qty_shipped), 0) AS already_shipped
+        FROM procurement.inbound_shipment_lines isl
+        JOIN procurement.inbound_shipments s ON s.id = isl.inbound_shipment_id
+        WHERE isl.purchase_order_line_id = ANY(${candidateLineIds})
+          AND s.status != 'cancelled'
+        GROUP BY isl.purchase_order_line_id
+      `);
+
+      const shippedQtyByPoLine = new Map<number, number>();
+      for (const row of shippedResult.rows as any[]) {
+        shippedQtyByPoLine.set(
+          Number(row.purchase_order_line_id),
+          Number(row.already_shipped),
+        );
+      }
+
+      // 3. Validate per-line against locked, re-read data
+      if (qtyMap.size > 0) {
+        for (const poLine of linesToAdd) {
+          const isProduct = !poLine.line_type || poLine.line_type === "product";
+          if (!isProduct) {
+            throw new ShipmentTrackingError(
+              `Line ${poLine.sku || poLine.id} is a ${poLine.line_type || "non-product"} line and cannot be shipped`,
+            );
+          }
+          if (poLine.status === "closed" || poLine.status === "cancelled") {
+            throw new ShipmentTrackingError(
+              `Line ${poLine.sku || poLine.id} is ${poLine.status} and cannot be shipped`,
+            );
+          }
+
+          const qty = qtyMap.get(poLine.id)!;
+          if (qty <= 0) {
+            throw new ShipmentTrackingError(
+              `Line ${poLine.sku || poLine.id}: qty must be > 0 (got ${qty})`,
+            );
+          }
+
+          const orderQty = poLine.order_qty ?? 0;
+          const cancelledQty = poLine.cancelled_qty ?? 0;
+          const alreadyShipped = shippedQtyByPoLine.get(poLine.id) ?? 0;
+          const remaining = orderQty - alreadyShipped - cancelledQty;
+          if (qty > remaining) {
+            throw new ShipmentTrackingError(
+              `Line ${poLine.sku || poLine.id}: qty ${qty} exceeds remaining ${remaining} (ordered ${orderQty}, shipped ${alreadyShipped}, cancelled ${cancelledQty})`,
+            );
+          }
+        }
+      }
+
+      // 4. Insert new lines inside the transaction
+      const newLines = linesToAdd.map((poLine: any) => {
+        const meta = lineMeta.get(poLine.id)!;
+        const computed = computeLineTotals({
+          qtyShipped: meta.qtyPieces,
+          cartonCount: meta.cartonCount,
+          weightKg: meta.dims.weightKg,
+          lengthCm: meta.dims.lengthCm,
+          widthCm: meta.dims.widthCm,
+          heightCm: meta.dims.heightCm,
+        });
+
+        return {
+          inboundShipmentId: shipmentId,
+          purchaseOrderId,
+          purchaseOrderLineId: poLine.id,
+          productVariantId: poLine.product_variant_id,
+          sku: poLine.sku || null,
+          qtyShipped: meta.qtyPieces,
+          cartonCount: meta.cartonCount,
+          weightKg: meta.dims.weightKg,
+          lengthCm: meta.dims.lengthCm,
+          widthCm: meta.dims.widthCm,
+          heightCm: meta.dims.heightCm,
+          ...computed,
+        };
+      });
+
+      return await tx.insert(inboundShipmentLines).values(newLines).returning();
+    });
+
     await recomputeShipmentTotals(shipmentId);
     return created;
   }
