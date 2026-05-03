@@ -40,6 +40,11 @@ export interface DropshipMarketplaceCredentialRepository {
   }): Promise<DropshipMarketplaceStoreCredentials>;
 }
 
+interface DropshipMarketplaceTokenCipher {
+  seal(input: Parameters<AesGcmDropshipStoreTokenCipher["seal"]>[0]): DropshipStoreConnectionTokenRecord;
+  open(input: Parameters<AesGcmDropshipStoreTokenCipher["open"]>[0]): string;
+}
+
 interface StoreConnectionCredentialRow {
   id: number;
   vendor_id: number;
@@ -67,7 +72,7 @@ interface TokenRow {
 export class PgDropshipMarketplaceCredentialRepository implements DropshipMarketplaceCredentialRepository {
   constructor(
     private readonly dbPool: Pool = defaultPool,
-    private readonly tokenCipher: AesGcmDropshipStoreTokenCipher = AesGcmDropshipStoreTokenCipher.fromEnv(),
+    private readonly tokenCipher: DropshipMarketplaceTokenCipher = new LazyEnvDropshipMarketplaceTokenCipher(),
   ) {}
 
   async loadForStoreConnection(input: {
@@ -171,6 +176,16 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
   }
 }
 
+class LazyEnvDropshipMarketplaceTokenCipher implements DropshipMarketplaceTokenCipher {
+  seal(input: Parameters<AesGcmDropshipStoreTokenCipher["seal"]>[0]): DropshipStoreConnectionTokenRecord {
+    return AesGcmDropshipStoreTokenCipher.fromEnv().seal(input);
+  }
+
+  open(input: Parameters<AesGcmDropshipStoreTokenCipher["open"]>[0]): string {
+    return AesGcmDropshipStoreTokenCipher.fromEnv().open(input);
+  }
+}
+
 async function loadConnection(
   client: PoolClient,
   input: {
@@ -246,7 +261,7 @@ async function insertTokenRecord(
 function mapCredentials(input: {
   connection: StoreConnectionCredentialRow;
   tokens: TokenRow[];
-  tokenCipher: AesGcmDropshipStoreTokenCipher;
+  tokenCipher: DropshipMarketplaceTokenCipher;
 }): DropshipMarketplaceStoreCredentials {
   const accessTokenRow = input.tokens.find((row) => {
     return row.token_kind === "access" && row.token_ref === input.connection.access_token_ref;
