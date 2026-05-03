@@ -6,7 +6,6 @@ export interface SellingPlanConfig {
   billingInterval: "MONTH" | "YEAR";
   billingIntervalCount: number;
   priceCents: number;
-  tier: "standard" | "gold";
   includesDropship: boolean;
   planId: number; // maps to plans.id
 }
@@ -78,7 +77,6 @@ export interface SubscriptionRecord {
 export interface PlanRecord {
   id: number;
   name: string;
-  tier: string;
   billing_interval: string | null;
   billing_interval_count: number;
   price_cents: number | null;
@@ -118,8 +116,6 @@ export interface SubscriptionEvent {
 
 export interface SubscriptionDashboardStats {
   totalActive: number;
-  totalActiveStandard: number;
-  totalActiveGold: number;
   mrr: number; // in cents
   churnRate30: number;
   churnRate90: number;

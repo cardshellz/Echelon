@@ -81,33 +81,6 @@ export async function getShopifyCustomer(customerGid: string): Promise<{ email: 
   return data.customer || null;
 }
 
-/**
- * Add tags on a Shopify customer
- */
-export async function addCustomerTags(customerGid: string, tags: string[]): Promise<void> {
-  const mutation = `
-    mutation tagsAdd($id: ID!, $tags: [String!]!) {
-      tagsAdd(id: $id, tags: $tags) {
-        userErrors { field message }
-      }
-    }
-  `;
-  await shopifyGraphQL(mutation, { id: customerGid, tags });
-}
-
-/**
- * Remove tags on a Shopify customer
- */
-export async function removeCustomerTags(customerGid: string, tags: string[]): Promise<void> {
-  const mutation = `
-    mutation tagsRemove($id: ID!, $tags: [String!]!) {
-      tagsRemove(id: $id, tags: $tags) {
-        userErrors { field message }
-      }
-    }
-  `;
-  await shopifyGraphQL(mutation, { id: customerGid, tags });
-}
 
 /**
  * Cancels a subscription contract via Draft mutations

@@ -27,7 +27,7 @@ export const members = membershipSchema.table("members", {
   birthdayLastAwarded: integer("birthday_last_awarded"),
   phone: text("phone"),
   emailIsSynthetic: boolean("email_is_synthetic"),
-  tier: varchar("tier"),
+
   stripeCustomerId: text("stripe_customer_id"),
   stripeSubscriptionId: text("stripe_subscription_id"),
   createdAt: timestamp("created_at").defaultNow(),
@@ -43,8 +43,7 @@ export type Member = typeof members.$inferSelect;
 export const plans = membershipSchema.table("plans", {
   id: varchar("id").primaryKey(),
   name: text("name"),
-  tierLevel: integer("tier_level"),
-  tier: varchar("tier"),
+
   priorityModifier: integer("priority_modifier").notNull().default(5),
   priceCents: bigint("price_cents", { mode: "number" }),
   billingInterval: text("billing_interval"),

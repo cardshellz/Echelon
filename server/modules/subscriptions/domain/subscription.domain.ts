@@ -65,7 +65,7 @@ export function resolveTargetPlan(
     const normalizedInterval = interval === "year" ? "yearly" : interval === "month" ? "monthly" : interval;
     
     // Find a standard tier plan that matches the billing interval
-    const plan = activePlans.find(p => p.billing_interval === normalizedInterval && p.tier === "standard");
+    const plan = activePlans.find(p => p.billing_interval === normalizedInterval);
     if (plan) return plan;
   }
 
@@ -77,18 +77,6 @@ export function resolveTargetPlan(
   return null;
 }
 
-/**
- * Determines the tags a member should receive based on their tier.
- */
-export function determineCustomerTags(tier: string): string[] {
-  const tags = ["shellz-club"];
-  if (tier === "gold") {
-    tags.push("shellz-club-gold", "shellz-club-dropship");
-  } else {
-    tags.push("shellz-club-standard");
-  }
-  return tags;
-}
 
 /**
  * Calculates if a subscription's dunning limit is crossed.

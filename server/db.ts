@@ -682,7 +682,7 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval VARCHAR(20)`);
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval_count INTEGER DEFAULT 1`);
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS price_cents INTEGER`);
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS tier VARCHAR(30) DEFAULT 'standard'`);
+
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS includes_dropship BOOLEAN DEFAULT false`);
     await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
 
@@ -705,7 +705,9 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Extend members table
     await client.query(`ALTER TABLE membership.members ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
-    await client.query(`ALTER TABLE membership.members ADD COLUMN IF NOT EXISTS tier VARCHAR(30) DEFAULT 'standard'`);
+    await client.query(`ALTER TABLE membership.plans DROP COLUMN IF EXISTS tier`);
+    await client.query(`ALTER TABLE membership.plans DROP COLUMN IF EXISTS tier_level`);
+    await client.query(`ALTER TABLE membership.members DROP COLUMN IF EXISTS tier`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_members_shopify_customer ON membership.members(shopify_customer_id) WHERE shopify_customer_id IS NOT NULL`);
 
     // subscription_billing_log
