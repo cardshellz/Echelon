@@ -1,25 +1,26 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { 
-  RefreshCw, 
-  ExternalLink, 
-  CheckCircle2, 
-  AlertCircle,
-  ArrowRight,
-  Globe,
-  Plus,
-  Store,
-  LinkIcon
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  AlertCircle,
+  Bell,
+  ClipboardList,
+  FileSearch,
+  History,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  ShieldAlert,
+  Store,
+  Truck,
+  Wallet,
+} from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -29,374 +30,434 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Progress } from "@/components/ui/progress";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import { Empty, EmptyHeader, EmptyTitle, EmptyDescription, EmptyMedia } from "@/components/ui/empty";
+  countByKey,
+  fetchJson,
+  formatDateTime,
+  formatStatus,
+  riskSeverityTone,
+  type DropshipAdminOpsOverview,
+  type DropshipAdminOpsOverviewResponse,
+  type DropshipAuditEventRecord,
+  type DropshipAuditEventSearchResponse,
+  type DropshipOpsCount,
+  type DropshipOpsRiskBucket,
+  type DropshipSeverity,
+} from "@/lib/dropship-ops-surface";
 
-const platforms = [
-  { id: "shopify", name: "Shopify", icon: "https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" },
-  { id: "ebay", name: "eBay", icon: "https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" },
-  { id: "amazon", name: "Amazon", icon: "https://upload.wikimedia.org/wikipedia/commons/a/a9/Amazon_logo.svg" },
-];
+type AuditSeverityFilter = DropshipSeverity | "all";
 
 export default function Dropship() {
-  const [isConnectOpen, setIsConnectOpen] = useState(false);
-
-  const { data: vendorsResponse } = useQuery({
-    queryKey: ["/api/admin/vendors"],
-    queryFn: async () => {
-      const res = await fetch("/api/admin/vendors");
-      if (!res.ok) throw new Error("Failed to fetch vendors");
-      return res.json();
-    }
-  });
-  
-  const { data: catalogResponse } = useQuery({
-    queryKey: ["/api/admin/dropship-catalog"],
-    queryFn: async () => {
-      const res = await fetch("/api/admin/dropship-catalog");
-      if (!res.ok) throw new Error("Failed to fetch catalog");
-      return res.json();
-    }
+  const [auditSearch, setAuditSearch] = useState("");
+  const [auditSeverity, setAuditSeverity] = useState<AuditSeverityFilter>("all");
+  const [appliedAuditFilters, setAppliedAuditFilters] = useState({
+    search: "",
+    severity: "all" as AuditSeverityFilter,
   });
 
-  const vendorsList = vendorsResponse?.vendors || [];
-  const vendors = vendorsList.map((v: any) => ({
-    id: v.id,
-    name: v.name,
-    status: v.status === "active" ? "Active" : v.status === "suspended" ? "Suspended" : "Pending",
-    platform: v.ebay_connected ? "eBay" : "Shopify",
-    lastSync: new Date(v.created_at).toLocaleDateString(),
-    health: 100, // API health still hardcoded for now
-    listings: v.listings_count || 0,
-    balance: "$" + ((v.wallet_balance_cents || 0) / 100).toFixed(2),
-    pendingOrders: v.pending_orders || 0,
-  }));
+  const auditUrl = useMemo(() => {
+    const params = new URLSearchParams({ page: "1", limit: "25" });
+    if (appliedAuditFilters.search.trim()) params.set("search", appliedAuditFilters.search.trim());
+    if (appliedAuditFilters.severity !== "all") params.set("severity", appliedAuditFilters.severity);
+    return `/api/dropship/admin/audit-events?${params.toString()}`;
+  }, [appliedAuditFilters]);
 
-  const syncCatalog = catalogResponse?.catalog || [];
+  const overviewQuery = useQuery<DropshipAdminOpsOverviewResponse>({
+    queryKey: ["/api/dropship/admin/ops/overview"],
+    queryFn: () => fetchJson<DropshipAdminOpsOverviewResponse>("/api/dropship/admin/ops/overview"),
+  });
+  const auditQuery = useQuery<DropshipAuditEventSearchResponse>({
+    queryKey: [auditUrl],
+    queryFn: () => fetchJson<DropshipAuditEventSearchResponse>(auditUrl),
+  });
 
-  const totalUnsettled = vendorsList.reduce((acc: number, v: any) => acc + (v.wallet_balance_cents || 0), 0);
-  const totalPendingOrders = vendorsList.reduce((acc: number, v: any) => acc + (v.pending_orders || 0), 0);
-  const formattedUnsettled = "$" + (totalUnsettled / 100).toFixed(2);
+  const overview = overviewQuery.data?.overview;
+
+  function applyAuditFilters() {
+    setAppliedAuditFilters({
+      search: auditSearch,
+      severity: auditSeverity,
+    });
+  }
+
+  function refreshAll() {
+    void overviewQuery.refetch();
+    void auditQuery.refetch();
+  }
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="border-b bg-card p-2 md:p-6 pb-4">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
+    <div className="flex h-full flex-col bg-background">
+      <div className="border-b bg-card px-4 py-5 md:px-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2" data-testid="text-page-title">
-              <Globe className="h-6 w-6 text-primary" />
-              Dropship Network
+            <h1 className="flex items-center gap-2 text-2xl font-bold tracking-normal" data-testid="text-page-title">
+              <ShieldAlert className="h-6 w-6 text-[#C060E0]" />
+              Dropship Ops
             </h1>
-            <p className="text-muted-foreground mt-1 text-sm">
-              Manage external vendors, sync inventory to their stores, and automate fulfillment.
+            <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
+              Monitor .ops setup blockers, store health, order intake exceptions, listing pushes, tracking pushes, returns, notifications, and audit history.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" className="gap-2 min-h-[44px]" data-testid="button-force-sync">
-              <RefreshCw size={16} /> Force Sync
+          <div className="flex flex-wrap items-center gap-2">
+            {overview && (
+              <Badge variant="outline" className="h-9 px-3">
+                Updated {formatDateTime(overview.generatedAt)}
+              </Badge>
+            )}
+            <Button
+              variant="outline"
+              className="h-9 gap-2"
+              disabled={overviewQuery.isFetching || auditQuery.isFetching}
+              onClick={refreshAll}
+            >
+              <RefreshCw className={overviewQuery.isFetching || auditQuery.isFetching ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              Refresh
             </Button>
-            
-            <Dialog open={isConnectOpen} onOpenChange={setIsConnectOpen}>
-              <DialogTrigger asChild>
-                <Button className="gap-2 min-h-[44px]" data-testid="button-connect-store">
-                  <Plus size={16} /> Connect Store
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
-                <DialogHeader>
-                  <DialogTitle>Connect New Store</DialogTitle>
-                  <DialogDescription>
-                    Select a platform to integrate. Orders will automatically sync to your WMS.
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="grid gap-4 py-4">
-                  <div className="grid grid-cols-1 gap-4">
-                     {platforms.map((platform) => (
-                       <Button key={platform.id} variant="outline" className="h-16 min-h-[44px] justify-start px-4 hover:border-primary hover:bg-primary/5 group relative overflow-hidden" data-testid={`button-platform-${platform.id}`}>
-                         <div className="absolute inset-0 bg-gradient-to-r from-transparent via-transparent to-primary/5 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
-                         <div className="h-8 w-8 mr-4 flex items-center justify-center">
-                            <img src={platform.icon} alt={platform.name} className="max-h-full max-w-full object-contain" />
-                         </div>
-                         <div className="flex flex-col items-start">
-                           <span className="font-semibold text-base">{platform.name}</span>
-                           <span className="text-xs text-muted-foreground">Connect via OAuth 2.0</span>
-                         </div>
-                         <ArrowRight className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-primary" size={16} />
-                       </Button>
-                     ))}
-                  </div>
-                  <div className="relative my-2">
-                    <div className="absolute inset-0 flex items-center">
-                      <span className="w-full border-t" />
-                    </div>
-                    <div className="relative flex justify-center text-xs uppercase">
-                      <span className="bg-background px-2 text-muted-foreground">
-                        Or manual API
-                      </span>
-                    </div>
-                  </div>
-                  <div className="grid w-full items-center gap-1.5">
-                    <Label htmlFor="api-key" className="text-sm">Custom API Key</Label>
-                    <Input 
-                      id="api-key" 
-                      placeholder="sk_live_..." 
-                      className="w-full h-11"
-                      autoComplete="off"
-                      autoCorrect="off"
-                      autoCapitalize="off"
-                      spellCheck={false}
-                      data-testid="input-api-key"
-                    />
-                  </div>
-                </div>
-                <DialogFooter className="flex-col gap-2 sm:flex-row">
-                  <Button variant="outline" onClick={() => setIsConnectOpen(false)} className="min-h-[44px]" data-testid="button-cancel-connect">Cancel</Button>
-                  <Button type="submit" className="min-h-[44px]" data-testid="button-verify-connection">Verify Connection</Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 mb-2">
-          <div className="bg-muted/30 p-2 md:p-3 rounded-md border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Active Channels</div>
-            <div className="text-xl md:text-2xl font-bold font-mono text-foreground mt-1" data-testid="text-active-channels">{vendors.length}</div>
-          </div>
-          <div className="bg-muted/30 p-2 md:p-3 rounded-md border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Synced Listings</div>
-            <div className="text-xl md:text-2xl font-bold font-mono text-foreground mt-1" data-testid="text-synced-listings">{syncCatalog.length}</div>
-          </div>
-          <div className="bg-muted/30 p-2 md:p-3 rounded-md border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Pending Orders</div>
-            <div className="text-xl md:text-2xl font-bold font-mono text-primary mt-1" data-testid="text-pending-orders">{totalPendingOrders}</div>
-          </div>
-          <div className="bg-muted/30 p-2 md:p-3 rounded-md border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Unsettled Balance</div>
-            <div className="text-xl md:text-2xl font-bold font-mono text-emerald-600 mt-1" data-testid="text-unsettled-balance">{formattedUnsettled}</div>
-          </div>
-        </div>
+        {(overviewQuery.error || auditQuery.error) && (
+          <Alert variant="destructive" className="mt-4">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {errorMessage(overviewQuery.error ?? auditQuery.error)}
+            </AlertDescription>
+          </Alert>
+        )}
       </div>
 
-      <div className="flex-1 p-2 md:p-6 overflow-hidden flex flex-col">
-        <Tabs defaultValue="vendors" className="flex-1 flex flex-col">
-          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent mb-4 md:mb-6 flex-wrap">
-            <TabsTrigger 
-              value="vendors" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 md:px-4 py-2 text-sm"
-              data-testid="tab-vendors"
+      <div className="flex-1 overflow-auto p-4 md:p-6">
+        <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col">
+          <TabsList className="mb-5 h-auto w-full justify-start rounded-none border-b bg-transparent p-0">
+            <TabsTrigger
+              value="overview"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
-              Connected Vendors
+              Overview
             </TabsTrigger>
-            <TabsTrigger 
-              value="catalog" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 md:px-4 py-2 text-sm"
-              data-testid="tab-catalog"
+            <TabsTrigger
+              value="audit"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
-              Catalog Sync
-            </TabsTrigger>
-            <TabsTrigger 
-              value="reconciliation" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 md:px-4 py-2 text-sm"
-              data-testid="tab-reconciliation"
-            >
-              Financials
+              Audit events
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="vendors" className="mt-0">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {vendors.length === 0 ? (
-                <div className="col-span-full">
-                  <Empty data-testid="empty-vendors">
-                    <EmptyMedia variant="icon">
-                      <Store />
-                    </EmptyMedia>
-                    <EmptyHeader>
-                      <EmptyTitle>No Vendors Connected</EmptyTitle>
-                      <EmptyDescription>
-                        Connect an external store to start syncing inventory and automating fulfillment.
-                      </EmptyDescription>
-                    </EmptyHeader>
-                    <Button onClick={() => setIsConnectOpen(true)} className="gap-2" data-testid="button-connect-first-store">
-                      <Plus size={16} /> Connect Store
-                    </Button>
-                  </Empty>
-                </div>
-              ) : (
-                <>
-                  {vendors.map((vendor: any) => (
-                    <Card key={vendor.id} className="overflow-visible" data-testid={`card-vendor-${vendor.id}`}>
-                      <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-2 bg-muted/20">
-                        <CardTitle className="text-base font-medium">
-                          {vendor.name}
-                        </CardTitle>
-                        <Badge variant={vendor.status === "Active" ? "outline" : "destructive"} className={vendor.status === "Active" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : ""}>
-                          {vendor.status}
-                        </Badge>
-                      </CardHeader>
-                      <CardContent className="pt-4">
-                        <div className="flex items-center gap-4 mb-4">
-                          <div className="h-10 w-10 rounded-full bg-slate-100 flex items-center justify-center border text-slate-500 font-bold overflow-hidden p-2">
-                             {vendor.platform === "Shopify" && <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" alt="Shopify" className="w-full h-full object-contain" />}
-                             {vendor.platform === "eBay" && <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" alt="eBay" className="w-full h-full object-contain" />}
-                          </div>
-                          <div className="space-y-1">
-                            <p className="text-sm font-medium leading-none">Platform: {vendor.platform}</p>
-                            <p className="text-xs text-muted-foreground">Last sync: {vendor.lastSync}</p>
-                          </div>
-                        </div>
-                        
-                        <div className="space-y-3">
-                          <div>
-                            <div className="flex justify-between text-xs mb-1">
-                              <span className="text-muted-foreground">API Health</span>
-                              <span className={vendor.health > 90 ? "text-emerald-600" : "text-amber-600"}>{vendor.health}%</span>
-                            </div>
-                            <Progress value={vendor.health} className="h-1.5" />
-                          </div>
-                          
-                          <div className="flex justify-between items-center pt-2 border-t">
-                            <span className="text-sm text-muted-foreground">Listings</span>
-                            <span className="font-mono font-medium">{vendor.listings}</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-sm text-muted-foreground">Owed Balance</span>
-                            <span className="font-mono font-bold text-emerald-600">{vendor.balance}</span>
-                          </div>
-                        </div>
-
-                        <Button variant="outline" className="w-full mt-4 min-h-[44px] text-xs" data-testid={`button-manage-vendor-${vendor.id}`}>
-                          Manage Settings
-                        </Button>
-                      </CardContent>
-                    </Card>
-                  ))}
-                  <Card 
-                    className="border-dashed border-2 flex flex-col items-center justify-center p-6 text-center cursor-pointer hover-elevate"
-                    onClick={() => setIsConnectOpen(true)}
-                    data-testid="card-add-vendor"
-                  >
-                    <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-4">
-                      <Plus className="h-6 w-6 text-muted-foreground" />
-                    </div>
-                    <h3 className="font-semibold">Add New Vendor</h3>
-                    <p className="text-sm text-muted-foreground mt-1 mb-4">Connect an eBay, Shopify, or Amazon account.</p>
-                    <Button variant="secondary" size="sm" className="min-h-[44px]">Connect Store</Button>
-                  </Card>
-                </>
-              )}
-            </div>
+          <TabsContent value="overview" className="m-0 space-y-5">
+            {overviewQuery.isLoading ? (
+              <OverviewSkeleton />
+            ) : overview ? (
+              <OverviewTab overview={overview} />
+            ) : (
+              <EmptyState title="No ops data" description="The dropship ops overview did not return any data." />
+            )}
           </TabsContent>
 
-          <TabsContent value="catalog" className="mt-0 flex-1 overflow-auto">
-            {syncCatalog.length === 0 ? (
-              <Empty data-testid="empty-catalog">
-                <EmptyMedia variant="icon">
-                  <LinkIcon />
-                </EmptyMedia>
-                <EmptyHeader>
-                  <EmptyTitle>No Catalog Listings</EmptyTitle>
-                  <EmptyDescription>
-                    Connect a vendor and sync products to see catalog listings here.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : (
-              <>
-                <div className="md:hidden space-y-3">
-                  {syncCatalog.map((item: any, i: number) => (
-                    <Card key={i} className="p-3" data-testid={`card-catalog-${i}`}>
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <p className="font-mono text-sm font-medium">{item.sku}</p>
-                          <p className="text-sm text-muted-foreground">{item.name}</p>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          {item.status.includes("Synced") && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
-                          {item.status.includes("Pending") && <RefreshCw className="h-4 w-4 text-amber-500 animate-spin-slow" />}
-                          {(item.status.includes("Error") || item.status.includes("OOS")) && <AlertCircle className="h-4 w-4 text-rose-500" />}
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs mb-2">
-                        <div>
-                          <span className="text-muted-foreground">Vendor: </span>
-                          <span>{item.vendor}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">Price: </span>
-                          <span className="font-mono">{item.price}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">Ext ID: </span>
-                          <span className="font-mono">{item.extId}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">Status: </span>
-                          <span>{item.status}</span>
-                        </div>
-                      </div>
-                      <Button variant="ghost" size="sm" className="w-full min-h-[44px]">Details</Button>
-                    </Card>
-                  ))}
+          <TabsContent value="audit" className="m-0 space-y-4">
+            <div className="rounded-md border bg-card p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+                <div className="min-w-0 flex-1">
+                  <label className="text-sm font-medium" htmlFor="dropship-audit-search">
+                    Search
+                  </label>
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="relative min-w-0 flex-1">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        id="dropship-audit-search"
+                        value={auditSearch}
+                        onChange={(event) => setAuditSearch(event.target.value)}
+                        className="pl-9"
+                        placeholder="Event type, entity, or actor"
+                      />
+                    </div>
+                  </div>
                 </div>
-                
-                <div className="hidden md:block rounded-md border bg-card">
-                  <Table>
-                    <TableHeader className="bg-muted/40 sticky top-0">
-                      <TableRow>
-                        <TableHead className="w-[180px]">Internal SKU</TableHead>
-                        <TableHead>Product</TableHead>
-                        <TableHead>Vendor</TableHead>
-                        <TableHead>External ID</TableHead>
-                        <TableHead>Price</TableHead>
-                        <TableHead>Sync Status</TableHead>
-                        <TableHead></TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {syncCatalog.map((item: any, i: number) => (
-                        <TableRow key={i} data-testid={`row-catalog-${i}`}>
-                          <TableCell className="font-mono-sku font-medium">{item.sku}</TableCell>
-                          <TableCell>{item.name}</TableCell>
-                          <TableCell>
-                            <span className="text-xs">{item.vendor}</span>
-                          </TableCell>
-                          <TableCell className="font-mono text-xs text-muted-foreground flex items-center gap-1">
-                            {item.extId} <ExternalLink size={10} />
-                          </TableCell>
-                          <TableCell className="font-mono">{item.price}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-2">
-                              {item.status.includes("Synced") && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
-                              {item.status.includes("Pending") && <RefreshCw className="h-4 w-4 text-amber-500 animate-spin-slow" />}
-                              {(item.status.includes("Error") || item.status.includes("OOS")) && <AlertCircle className="h-4 w-4 text-rose-500" />}
-                              <span className="text-sm">{item.status}</span>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <Button variant="ghost" size="sm" className="h-8">Details</Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                <div className="w-full lg:w-48">
+                  <label className="text-sm font-medium">Severity</label>
+                  <Select value={auditSeverity} onValueChange={(value) => setAuditSeverity(value as AuditSeverityFilter)}>
+                    <SelectTrigger className="mt-2">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All severities</SelectItem>
+                      <SelectItem value="info">Info</SelectItem>
+                      <SelectItem value="warning">Warning</SelectItem>
+                      <SelectItem value="error">Error</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
-              </>
-            )}
+                <Button className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyAuditFilters}>
+                  <FileSearch className="h-4 w-4" />
+                  Apply
+                </Button>
+              </div>
+            </div>
+
+            <AuditEventsTable
+              events={auditQuery.data?.items ?? []}
+              isLoading={auditQuery.isLoading || auditQuery.isFetching}
+              total={auditQuery.data?.total ?? 0}
+            />
           </TabsContent>
         </Tabs>
       </div>
     </div>
   );
+}
+
+function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
+  return (
+    <>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <MetricTile
+          icon={<Store className="h-4 w-4" />}
+          label="Store connections needing attention"
+          value={String(riskCount(overview.riskBuckets, "store_connections_attention"))}
+        />
+        <MetricTile
+          icon={<Wallet className="h-4 w-4" />}
+          label="Payment holds"
+          value={String(riskCount(overview.riskBuckets, "payment_holds"))}
+        />
+        <MetricTile
+          icon={<Truck className="h-4 w-4" />}
+          label="Tracking push failures"
+          value={String(riskCount(overview.riskBuckets, "tracking_push_failures"))}
+        />
+        <MetricTile
+          icon={<Bell className="h-4 w-4" />}
+          label="Notification failures"
+          value={String(riskCount(overview.riskBuckets, "notification_delivery_failures"))}
+        />
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
+        <section className="rounded-md border bg-card p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Risk buckets</h2>
+              <p className="text-sm text-muted-foreground">Launch-critical blockers and exceptions</p>
+            </div>
+            <Badge variant="outline">
+              {overview.riskBuckets.reduce((sum, bucket) => sum + bucket.count, 0)} open
+            </Badge>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {overview.riskBuckets.map((bucket) => (
+              <RiskBucketCard key={bucket.key} bucket={bucket} />
+            ))}
+          </div>
+        </section>
+
+        <section className="rounded-md border bg-card p-4">
+          <div>
+            <h2 className="text-lg font-semibold">Status counts</h2>
+            <p className="text-sm text-muted-foreground">Current state by dropship subsystem</p>
+          </div>
+          <div className="mt-4 grid gap-3">
+            <StatusCountGroup title="Vendors" counts={overview.vendorStatusCounts} icon={<ShieldAlert className="h-4 w-4" />} />
+            <StatusCountGroup title="Store connections" counts={overview.storeConnectionStatusCounts} icon={<Store className="h-4 w-4" />} />
+            <StatusCountGroup title="Order intake" counts={overview.orderIntakeStatusCounts} icon={<ClipboardList className="h-4 w-4" />} />
+            <StatusCountGroup title="Listing push jobs" counts={overview.listingPushJobStatusCounts} icon={<RefreshCw className="h-4 w-4" />} />
+            <StatusCountGroup title="Tracking pushes" counts={overview.trackingPushStatusCounts} icon={<Truck className="h-4 w-4" />} />
+            <StatusCountGroup title="Returns" counts={overview.rmaStatusCounts} icon={<RotateCcw className="h-4 w-4" />} />
+            <StatusCountGroup title="Notifications" counts={overview.notificationStatusCounts} icon={<Bell className="h-4 w-4" />} />
+          </div>
+        </section>
+      </div>
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Recent audit events</h2>
+            <p className="text-sm text-muted-foreground">Latest dropship operational trail</p>
+          </div>
+          <History className="h-5 w-5 text-muted-foreground" />
+        </div>
+        <AuditEventsTable events={overview.recentAuditEvents} isLoading={false} total={overview.recentAuditEvents.length} compact />
+      </section>
+    </>
+  );
+}
+
+function MetricTile({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-md border bg-card p-4">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <div className="mt-3 text-2xl font-bold">{value}</div>
+    </div>
+  );
+}
+
+function RiskBucketCard({ bucket }: { bucket: DropshipOpsRiskBucket }) {
+  return (
+    <div className="rounded-md border p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="font-semibold">{bucket.label}</h3>
+          <p className="mt-1 text-sm text-muted-foreground">{formatStatus(bucket.severity)} severity</p>
+        </div>
+        <Badge variant="outline" className={riskSeverityTone(bucket.severity)}>
+          {bucket.count}
+        </Badge>
+      </div>
+    </div>
+  );
+}
+
+function StatusCountGroup({
+  counts,
+  icon,
+  title,
+}: {
+  counts: DropshipOpsCount[];
+  icon: React.ReactNode;
+  title: string;
+}) {
+  return (
+    <div className="rounded-md border p-3">
+      <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+        {icon}
+        {title}
+      </div>
+      {counts.length === 0 ? (
+        <div className="text-sm text-muted-foreground">No rows</div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {counts.map((count) => (
+            <Badge key={count.key} variant="outline" className="gap-2">
+              {formatStatus(count.key)}
+              <span className="font-mono">{count.count}</span>
+            </Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuditEventsTable({
+  compact = false,
+  events,
+  isLoading,
+  total,
+}: {
+  compact?: boolean;
+  events: DropshipAuditEventRecord[];
+  isLoading: boolean;
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="mt-4 space-y-2">
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-full" />
+      </div>
+    );
+  }
+
+  if (events.length === 0) {
+    return <EmptyState title="No audit events" description="No matching dropship audit events were found." />;
+  }
+
+  return (
+    <div className="mt-4 rounded-md border">
+      <div className="flex items-center justify-between border-b px-3 py-2 text-sm text-muted-foreground">
+        <span>{total} event{total === 1 ? "" : "s"}</span>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-[145px]">Time</TableHead>
+            <TableHead>Event</TableHead>
+            <TableHead>Vendor</TableHead>
+            {!compact && <TableHead>Entity</TableHead>}
+            <TableHead>Severity</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {events.map((event) => (
+            <TableRow key={event.auditEventId}>
+              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                {formatDateTime(event.createdAt)}
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{formatStatus(event.eventType)}</div>
+                <div className="text-xs text-muted-foreground">{event.actorType}{event.actorId ? `: ${event.actorId}` : ""}</div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{event.vendorBusinessName || event.vendorEmail || "System"}</div>
+                {event.storeDisplayName && <div className="text-xs text-muted-foreground">{event.storeDisplayName}</div>}
+              </TableCell>
+              {!compact && (
+                <TableCell>
+                  <div className="font-medium">{formatStatus(event.entityType)}</div>
+                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">{event.entityId || "None"}</div>
+                </TableCell>
+              )}
+              <TableCell>
+                <Badge variant="outline" className={riskSeverityTone(event.severity)}>
+                  {formatStatus(event.severity)}
+                </Badge>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function EmptyState({ description, title }: { description: string; title: string }) {
+  return (
+    <Empty className="mt-4 rounded-md border border-dashed">
+      <EmptyMedia variant="icon">
+        <FileSearch />
+      </EmptyMedia>
+      <EmptyHeader>
+        <EmptyTitle>{title}</EmptyTitle>
+        <EmptyDescription>{description}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function OverviewSkeleton() {
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <Skeleton key={index} className="h-24 w-full" />
+        ))}
+      </div>
+      <div className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
+        <Skeleton className="h-96 w-full" />
+        <Skeleton className="h-96 w-full" />
+      </div>
+    </div>
+  );
+}
+
+function riskCount(buckets: DropshipOpsRiskBucket[], key: string): number {
+  return countByKey(
+    buckets.map((bucket) => ({ key: bucket.key, count: bucket.count })),
+    key,
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Dropship ops request failed.";
 }
