@@ -779,7 +779,6 @@ export default function PurchaseOrderDetail() {
     amountDollars: "",   // pre-filled when dialog opens from first unpaid invoice
     notes: "",
     invoiceId: null as number | null,  // which invoice this payment allocates to
-    forceOverride: false,
   });
 
   const [newLine, setNewLine] = useState({
@@ -1226,7 +1225,6 @@ export default function PurchaseOrderDetail() {
           bankAccountLabel: payment.bankAccountLabel || undefined,
           totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
           notes: payment.notes || undefined,
-          forceOverride: payment.forceOverride || undefined,
           allocations: [{
             vendorInvoiceId: payment.invoiceId,
             appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
@@ -1254,7 +1252,6 @@ export default function PurchaseOrderDetail() {
         checkNumber: "",
         bankAccountLabel: "",
         notes: "",
-        forceOverride: false,
       }));
       toast({ title: "Payment recorded" });
     },
@@ -3689,50 +3686,7 @@ export default function PurchaseOrderDetail() {
               <Label>Notes</Label>
               <Input placeholder="Optional" value={payment.notes} onChange={(e) => setPayment(p => ({ ...p, notes: e.target.value }))} />
             </div>
-            {/* 3-way match banner (mirrors APInvoiceDetail.tsx logic) */}
-            {(() => {
-              const amountCents = dollarsToCents(payment.amountDollars || "0");
-              const selectedInvoice = invoicesData?.invoices?.find((i: any) => i.id === payment.invoiceId);
-              const balance = selectedInvoice?.balanceCents ?? 0;
-              const isFinalPayment = amountCents > 0 && amountCents >= balance;
-              const isPartial = amountCents > 0 && amountCents < balance;
 
-              if (isPartial) {
-                return (
-                  <div className="rounded-md border border-blue-200 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm">
-                    <div className="font-medium">Partial payment</div>
-                    <div className="text-xs text-muted-foreground mt-0.5">
-                      Remaining balance after this payment: {formatCents(balance - amountCents)}.
-                      The 3-way match runs when the final payment settles the invoice.
-                    </div>
-                  </div>
-                );
-              }
-
-              if (isFinalPayment) {
-                return (
-                  <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
-                    <label className="flex items-start gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        className="mt-1"
-                        checked={payment.forceOverride}
-                        onChange={(e) => setPayment(p => ({ ...p, forceOverride: e.target.checked }))}
-                      />
-                      <div className="text-sm">
-                        <div className="font-medium">Override 3-way match check</div>
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          This payment will fully settle the invoice. Server will require the
-                          invoice lines to be matched against PO lines and receipts. Check this
-                          only if the match is intentionally pending.
-                        </div>
-                      </div>
-                    </label>
-                  </div>
-                );
-              }
-              return null;
-            })()}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
               <Button

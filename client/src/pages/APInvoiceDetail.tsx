@@ -191,10 +191,6 @@ export default function APInvoiceDetail() {
     bankAccountLabel: "",
     amountDollars: "",
     notes: "",
-    // Bypass the server's 3-way match check (PO line <-> receipt <->
-    // invoice line). Default false; user opts in when matching has been
-    // resolved manually or the invoice predates the matching system.
-    forceOverride: false,
   });
 
   // Queries
@@ -301,10 +297,6 @@ export default function APInvoiceDetail() {
         bankAccountLabel: payment.bankAccountLabel || undefined,
         totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
         notes: payment.notes || undefined,
-        // Server-side 3-way match override. Only sent when user explicitly
-        // opts in via the dialog checkbox; default off keeps the safety net
-        // active for normal flows.
-        forceOverride: payment.forceOverride || undefined,
         allocations: [{
           vendorInvoiceId: invoiceId,
           appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
@@ -316,7 +308,7 @@ export default function APInvoiceDetail() {
       invalidate();
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       setShowPaymentDialog(false);
-      setPayment({ paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", amountDollars: "", notes: "", forceOverride: false });
+      setPayment({ paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", amountDollars: "", notes: "" });
       toast({ title: "Payment recorded" });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
@@ -970,61 +962,7 @@ export default function APInvoiceDetail() {
               <Label>Notes</Label>
               <Input placeholder="Optional" value={payment.notes} onChange={(e) => setPayment(p => ({ ...p, notes: e.target.value }))} />
             </div>
-            {/*
-              3-way match override.
-              Server runs the match only when this payment SETTLES the invoice
-              (balance hits zero). Partial payments / deposits flow through
-              without match — goods may not have arrived yet. The override
-              checkbox is only relevant when this payment is the final one;
-              hidden otherwise to avoid noise.
-              (Server logic is the source of truth; this UI just mirrors it.)
-            */}
-            {(() => {
-              const amountCents = dollarsToCents(payment.amountDollars || "0");
-              const balance = invoice.balanceCents ?? 0;
-              const isFinalPayment = amountCents > 0 && amountCents >= balance;
-              const isPartial = amountCents > 0 && amountCents < balance;
 
-              if (isPartial) {
-                return (
-                  <div className="rounded-md border border-blue-200 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm">
-                    <div className="font-medium">Partial payment</div>
-                    <div className="text-xs text-muted-foreground mt-0.5">
-                      Remaining balance after this payment: {formatCents(balance - amountCents)}.
-                      The 3-way match runs when the final payment settles the invoice.
-                    </div>
-                  </div>
-                );
-              }
-
-              if (isFinalPayment) {
-                return (
-                  <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3">
-                    <label className="flex items-start gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        className="mt-1"
-                        checked={payment.forceOverride}
-                        onChange={(e) => setPayment(p => ({ ...p, forceOverride: e.target.checked }))}
-                      />
-                      <div className="text-sm">
-                        <div className="font-medium">
-                          Override 3-way match check
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          This payment will fully settle the invoice. Server
-                          will require the invoice lines to be matched against
-                          PO lines and receipts. Check this only if the match
-                          is intentionally pending (legacy invoice, pre-system
-                          PO, or goods verified manually).
-                        </div>
-                      </div>
-                    </label>
-                  </div>
-                );
-              }
-              return null;
-            })()}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
               <Button onClick={() => paymentMutation.mutate()} disabled={!payment.amountDollars || paymentMutation.isPending}>
