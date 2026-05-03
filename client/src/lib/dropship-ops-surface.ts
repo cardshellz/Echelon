@@ -1001,6 +1001,20 @@ export interface DropshipStoreListingConfigResponse {
   config: DropshipStoreListingConfigProfileResponse;
 }
 
+export interface DropshipAdminStoreWebhookRepairInput {
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminStoreWebhookRepairResponse {
+  result: {
+    storeConnectionId: number;
+    vendorId: number;
+    platform: "shopify";
+    shopDomain: string;
+    repairedAt: string;
+  };
+}
+
 export interface DropshipCatalogSelectionDecision {
   selected: boolean;
   reason: string;
@@ -1636,6 +1650,14 @@ export function buildStoreListingConfigInput(input: {
     requiredConfigKeys: parseRequiredConfigKeys(input.requiredConfigKeys),
     requiredProductFields: parseRequiredProductFields(input.requiredProductFields),
     isActive: input.isActive,
+  };
+}
+
+export function buildAdminStoreWebhookRepairInput(input: {
+  idempotencyKey: string;
+}): DropshipAdminStoreWebhookRepairInput {
+  return {
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
 }
 

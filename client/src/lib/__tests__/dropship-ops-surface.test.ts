@@ -19,6 +19,7 @@ import {
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
   buildAdminStoreConnectionsUrl,
+  buildAdminStoreWebhookRepairInput,
   buildAdminTrackingPushRetryInput,
   buildAdminTrackingPushesUrl,
   buildShippingBoxInput,
@@ -498,6 +499,17 @@ describe("dropship ops surface client helpers", () => {
       requiredConfigKeys: "",
       requiredProductFields: "unsupported",
       isActive: true,
+    })).toThrow();
+  });
+
+  it("builds admin store webhook repair inputs with idempotency guardrails", () => {
+    expect(buildAdminStoreWebhookRepairInput({
+      idempotencyKey: " repair-shopify-webhooks-1 ",
+    })).toEqual({
+      idempotencyKey: "repair-shopify-webhooks-1",
+    });
+    expect(() => buildAdminStoreWebhookRepairInput({
+      idempotencyKey: "short",
     })).toThrow();
   });
 

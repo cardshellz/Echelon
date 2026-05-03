@@ -55,6 +55,7 @@ import {
   buildAdminShippingConfigUrl,
   buildAdminTrackingPushRetryInput,
   buildAdminStoreConnectionsUrl,
+  buildAdminStoreWebhookRepairInput,
   buildAdminTrackingPushesUrl,
   buildCatalogExposureRuleInput,
   buildShippingBoxInput,
@@ -95,6 +96,7 @@ import {
   type DropshipAdminShippingConfigResponse,
   type DropshipAdminStoreConnectionListItem,
   type DropshipAdminStoreConnectionListResponse,
+  type DropshipAdminStoreWebhookRepairResponse,
   type DropshipAdminOpsOverview,
   type DropshipAdminOpsOverviewResponse,
   type DropshipAuditEventRecord,
@@ -1377,6 +1379,7 @@ function StoreConnectionOpsTab() {
   const [loadingListingConfigId, setLoadingListingConfigId] = useState<number | null>(null);
   const [savingListingConfigId, setSavingListingConfigId] = useState<number | null>(null);
   const [savingConnectionId, setSavingConnectionId] = useState<number | null>(null);
+  const [repairingWebhookConnectionId, setRepairingWebhookConnectionId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -1442,6 +1445,31 @@ function StoreConnectionOpsTab() {
       setError(caught instanceof Error ? caught.message : "Store connection config update failed.");
     } finally {
       setSavingConnectionId(null);
+    }
+  }
+
+  async function repairShopifyWebhooks(connection: DropshipAdminStoreConnectionListItem) {
+    setRepairingWebhookConnectionId(connection.storeConnectionId);
+    setError("");
+    setMessage("");
+    try {
+      const response = await postJson<DropshipAdminStoreWebhookRepairResponse>(
+        `/api/dropship/admin/store-connections/${connection.storeConnectionId}/shopify-webhooks/repair`,
+        buildAdminStoreWebhookRepairInput({
+          idempotencyKey: createDropshipIdempotencyKey(`admin-store-${connection.storeConnectionId}-shopify-webhooks-repair`),
+        }),
+      );
+      setMessage(`Shopify webhooks repaired for ${response.result.shopDomain}.`);
+      await Promise.all([
+        storeConnectionsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Shopify webhook repair failed.");
+    } finally {
+      setRepairingWebhookConnectionId(null);
     }
   }
 
@@ -1581,7 +1609,9 @@ function StoreConnectionOpsTab() {
         isLoading={storeConnectionsQuery.isLoading || storeConnectionsQuery.isFetching}
         loadingListingConfigId={loadingListingConfigId}
         onEditListingConfig={editListingConfig}
+        onRepairShopifyWebhooks={repairShopifyWebhooks}
         savingConnectionId={savingConnectionId}
+        repairingWebhookConnectionId={repairingWebhookConnectionId}
         total={storeConnectionsQuery.data?.total ?? 0}
         warehouseInputs={warehouseInputs}
         onSaveWarehouseConfig={saveWarehouseConfig}
@@ -3594,8 +3624,10 @@ function StoreConnectionsTable({
   isLoading,
   loadingListingConfigId,
   onEditListingConfig,
+  onRepairShopifyWebhooks,
   onSaveWarehouseConfig,
   onWarehouseInputChange,
+  repairingWebhookConnectionId,
   savingConnectionId,
   total,
   warehouseInputs,
@@ -3604,8 +3636,10 @@ function StoreConnectionsTable({
   isLoading: boolean;
   loadingListingConfigId: number | null;
   onEditListingConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
+  onRepairShopifyWebhooks: (connection: DropshipAdminStoreConnectionListItem) => void;
   onSaveWarehouseConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
   onWarehouseInputChange: (storeConnectionId: number, value: string) => void;
+  repairingWebhookConnectionId: number | null;
   savingConnectionId: number | null;
   total: number;
   warehouseInputs: Record<number, string>;
@@ -3648,105 +3682,126 @@ function StoreConnectionsTable({
             <TableHead>Setup checks</TableHead>
             <TableHead className="w-[230px]">Listing config</TableHead>
             <TableHead className="w-[260px]">Default warehouse</TableHead>
+            <TableHead className="w-[190px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {connections.map((connection) => (
-            <TableRow key={connection.storeConnectionId}>
-              <TableCell>
-                <div className="font-medium">
-                  {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {formatStatus(connection.platform)} connection {connection.storeConnectionId}
-                </div>
-                {connection.externalAccountId && (
-                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.externalAccountId}</div>
-                )}
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`}</div>
-                <div className="text-xs text-muted-foreground">{connection.vendor.memberId}</div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
-                  {formatStatus(connection.status)}
-                </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">Setup {formatStatus(connection.setupStatus)}</div>
-                {connection.disconnectReason && (
-                  <div className="mt-1 max-w-[200px] truncate text-xs text-muted-foreground">{connection.disconnectReason}</div>
-                )}
-              </TableCell>
-              <TableCell>
-                <div className="flex flex-wrap gap-1">
-                  <Badge variant="outline" className={connection.hasAccessToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"}>
-                    Access
+          {connections.map((connection) => {
+            const canRepairShopifyWebhooks = connection.platform === "shopify" && connection.status === "connected";
+            return (
+              <TableRow key={connection.storeConnectionId}>
+                <TableCell>
+                  <div className="font-medium">
+                    {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {formatStatus(connection.platform)} connection {connection.storeConnectionId}
+                  </div>
+                  {connection.externalAccountId && (
+                    <div className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.externalAccountId}</div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`}</div>
+                  <div className="text-xs text-muted-foreground">{connection.vendor.memberId}</div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
+                    {formatStatus(connection.status)}
                   </Badge>
-                  <Badge variant="outline" className={connection.hasRefreshToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-600"}>
-                    Refresh
+                  <div className="mt-1 text-xs text-muted-foreground">Setup {formatStatus(connection.setupStatus)}</div>
+                  {connection.disconnectReason && (
+                    <div className="mt-1 max-w-[200px] truncate text-xs text-muted-foreground">{connection.disconnectReason}</div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className="flex flex-wrap gap-1">
+                    <Badge variant="outline" className={connection.hasAccessToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"}>
+                      Access
+                    </Badge>
+                    <Badge variant="outline" className={connection.hasRefreshToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-600"}>
+                      Refresh
+                    </Badge>
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">Expires {formatDateTime(connection.tokenExpiresAt)}</div>
+                </TableCell>
+                <TableCell>
+                  <div className="text-sm">Orders {formatDateTime(connection.lastOrderSyncAt)}</div>
+                  <div className="text-xs text-muted-foreground">Inventory {formatDateTime(connection.lastInventorySyncAt)}</div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={connection.setupCheckSummary.errorCount > 0
+                    ? "border-rose-200 bg-rose-50 text-rose-800"
+                    : connection.setupCheckSummary.warningCount > 0
+                      ? "border-amber-200 bg-amber-50 text-amber-900"
+                      : "border-zinc-200 bg-zinc-50 text-zinc-700"}
+                  >
+                    {connection.setupCheckSummary.openCount} open
                   </Badge>
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">Expires {formatDateTime(connection.tokenExpiresAt)}</div>
-              </TableCell>
-              <TableCell>
-                <div className="text-sm">Orders {formatDateTime(connection.lastOrderSyncAt)}</div>
-                <div className="text-xs text-muted-foreground">Inventory {formatDateTime(connection.lastInventorySyncAt)}</div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={connection.setupCheckSummary.errorCount > 0
-                  ? "border-rose-200 bg-rose-50 text-rose-800"
-                  : connection.setupCheckSummary.warningCount > 0
-                    ? "border-amber-200 bg-amber-50 text-amber-900"
-                    : "border-zinc-200 bg-zinc-50 text-zinc-700"}
-                >
-                  {connection.setupCheckSummary.openCount} open
-                </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {connection.setupCheckSummary.errorCount} error / {connection.setupCheckSummary.warningCount} warning
-                </div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={listingConfigSummaryTone(connection)}>
-                  {listingConfigSummaryLabel(connection)}
-                </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {connection.listingConfig.listingMode ? formatStatus(connection.listingConfig.listingMode) : "No mode"}
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="mt-2 h-9 gap-2"
-                  disabled={loadingListingConfigId !== null}
-                  onClick={() => onEditListingConfig(connection)}
-                >
-                  <FileSearch className={loadingListingConfigId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                  {loadingListingConfigId === connection.storeConnectionId ? "Loading" : "Edit"}
-                </Button>
-              </TableCell>
-              <TableCell>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Input
-                    value={warehouseInputs[connection.storeConnectionId] ?? ""}
-                    onChange={(event) => onWarehouseInputChange(connection.storeConnectionId, event.target.value)}
-                    placeholder="Warehouse ID"
-                    className="h-9"
-                  />
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {connection.setupCheckSummary.errorCount} error / {connection.setupCheckSummary.warningCount} warning
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={listingConfigSummaryTone(connection)}>
+                    {listingConfigSummaryLabel(connection)}
+                  </Badge>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {connection.listingConfig.listingMode ? formatStatus(connection.listingConfig.listingMode) : "No mode"}
+                  </div>
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="h-9 gap-2"
-                    disabled={savingConnectionId !== null}
-                    onClick={() => onSaveWarehouseConfig(connection)}
+                    className="mt-2 h-9 gap-2"
+                    disabled={loadingListingConfigId !== null}
+                    onClick={() => onEditListingConfig(connection)}
                   >
-                    <Save className="h-4 w-4" />
-                    {savingConnectionId === connection.storeConnectionId ? "Saving" : "Save"}
+                    <FileSearch className={loadingListingConfigId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    {loadingListingConfigId === connection.storeConnectionId ? "Loading" : "Edit"}
                   </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-          ))}
+                </TableCell>
+                <TableCell>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <Input
+                      value={warehouseInputs[connection.storeConnectionId] ?? ""}
+                      onChange={(event) => onWarehouseInputChange(connection.storeConnectionId, event.target.value)}
+                      placeholder="Warehouse ID"
+                      className="h-9"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 gap-2"
+                      disabled={savingConnectionId !== null}
+                      onClick={() => onSaveWarehouseConfig(connection)}
+                    >
+                      <Save className="h-4 w-4" />
+                      {savingConnectionId === connection.storeConnectionId ? "Saving" : "Save"}
+                    </Button>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  {canRepairShopifyWebhooks ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 gap-2"
+                      disabled={repairingWebhookConnectionId !== null}
+                      onClick={() => onRepairShopifyWebhooks(connection)}
+                    >
+                      <RefreshCw className={repairingWebhookConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      {repairingWebhookConnectionId === connection.storeConnectionId ? "Repairing" : "Repair webhooks"}
+                    </Button>
+                  ) : (
+                    <span className="text-sm text-muted-foreground">Unavailable</span>
+                  )}
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </section>
