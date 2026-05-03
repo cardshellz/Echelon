@@ -13,6 +13,7 @@ import {
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminStoreConnectionsUrl,
+  buildAdminTrackingPushRetryInput,
   buildAdminTrackingPushesUrl,
   buildStoreOrderProcessingConfigInput,
   buildCatalogExposureRuleInput,
@@ -166,6 +167,26 @@ describe("dropship ops surface client helpers", () => {
       status: "all",
       platform: "ebay",
     })).toBe("/api/dropship/admin/tracking-pushes?statuses=queued%2Cprocessing%2Csucceeded%2Cfailed&platform=ebay&page=1&limit=50");
+  });
+
+  it("builds admin tracking push retry bodies with optional audit reasons", () => {
+    expect(buildAdminTrackingPushRetryInput({
+      idempotencyKey: "tracking-retry-1",
+      reason: " marketplace timeout ",
+    })).toEqual({
+      idempotencyKey: "tracking-retry-1",
+      reason: "marketplace timeout",
+    });
+    expect(buildAdminTrackingPushRetryInput({
+      idempotencyKey: "tracking-retry-2",
+      reason: " ",
+    })).toEqual({
+      idempotencyKey: "tracking-retry-2",
+    });
+    expect(() => buildAdminTrackingPushRetryInput({
+      idempotencyKey: "short",
+      reason: "",
+    })).toThrow();
   });
 
   it("builds admin store connection URLs with optional filters", () => {

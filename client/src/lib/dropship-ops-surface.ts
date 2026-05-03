@@ -473,6 +473,7 @@ export interface DropshipAdminTrackingPushListItem {
   shippedAt: string;
   externalFulfillmentId: string | null;
   attemptCount: number;
+  retryable: boolean;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   createdAt: string;
@@ -487,6 +488,32 @@ export interface DropshipAdminTrackingPushListResponse {
   limit: number;
   statuses: DropshipTrackingPushStatus[];
   summary: Array<{ status: DropshipTrackingPushStatus; count: number }>;
+}
+
+export interface DropshipAdminTrackingPushRetryInput {
+  idempotencyKey: string;
+  reason?: string;
+}
+
+export interface DropshipAdminTrackingPushRetryResponse {
+  pushId: number;
+  previousStatus: DropshipTrackingPushStatus;
+  status: "not_dropship" | "already_succeeded" | "succeeded";
+  idempotentReplay: boolean;
+  updatedPush: {
+    pushId: number;
+    intakeId: number;
+    omsOrderId: number;
+    vendorId: number;
+    storeConnectionId: number;
+    platform: string;
+    status: string;
+    externalOrderId: string;
+    trackingNumber: string;
+    carrier: string;
+    attemptCount: number;
+    externalFulfillmentId: string | null;
+  } | null;
 }
 
 export interface DropshipAdminOrderOpsActionInput {
@@ -1060,6 +1087,23 @@ export function buildAdminOrderOpsActionInput(input: {
   if (input.requireReason && !reason) {
     throw new Error("Reason is required.");
   }
+  if (reason.length > 1000) {
+    throw new Error("Reason must be 1000 characters or fewer.");
+  }
+
+  return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function buildAdminTrackingPushRetryInput(input: {
+  idempotencyKey: string;
+  reason: string;
+}): DropshipAdminTrackingPushRetryInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  const reason = input.reason.trim();
   if (reason.length > 1000) {
     throw new Error("Reason must be 1000 characters or fewer.");
   }
