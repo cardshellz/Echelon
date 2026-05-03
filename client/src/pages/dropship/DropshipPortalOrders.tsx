@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ClipboardList, Search } from "lucide-react";
+import { AlertCircle, ClipboardList, Search } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -20,6 +21,7 @@ import {
   fetchJson,
   formatDateTime,
   formatStatus,
+  queryErrorMessage,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
 } from "@/lib/dropship-ops-surface";
@@ -84,6 +86,15 @@ export default function DropshipPortalOrders() {
           </div>
         </div>
 
+        {ordersQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(ordersQuery.error, "Unable to load dropship orders.")}
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="mt-5 rounded-md border border-zinc-200 bg-white">
           {ordersQuery.isLoading ? (
             <div className="space-y-2 p-4">
@@ -91,6 +102,14 @@ export default function DropshipPortalOrders() {
               <Skeleton className="h-12 w-full" />
               <Skeleton className="h-12 w-full" />
             </div>
+          ) : ordersQuery.error ? (
+            <Empty className="p-8">
+              <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
+              <EmptyHeader>
+                <EmptyTitle>Orders unavailable</EmptyTitle>
+                <EmptyDescription>The orders API request failed.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : ordersQuery.data?.items.length ? (
             <OrdersTable orders={ordersQuery.data.items} total={ordersQuery.data.total} />
           ) : (

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type React from "react";
-import { Bell, KeyRound, Mail, Plug, Settings, Store, Wallet } from "lucide-react";
+import { AlertCircle, Bell, KeyRound, Mail, Plug, Settings, Store, Wallet } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -9,6 +10,7 @@ import {
   formatCents,
   formatDateTime,
   formatStatus,
+  queryErrorMessage,
   sectionStatusTone,
   type DropshipSettingsResponse,
   type DropshipSettingsSection,
@@ -42,6 +44,15 @@ export default function DropshipPortalSettings() {
           </h1>
           <p className="mt-1 text-sm text-zinc-500">Account, store connection, wallet, notification, return contact, and Phase 2 surfaces.</p>
         </div>
+
+        {settingsQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(settingsQuery.error, "Unable to load dropship settings.")}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {settingsQuery.isLoading ? (
           <div className="mt-5 grid gap-4 lg:grid-cols-3">
@@ -91,8 +102,10 @@ export default function DropshipPortalSettings() {
           <Empty className="mt-5 rounded-md border border-dashed p-8">
             <EmptyMedia variant="icon"><Settings /></EmptyMedia>
             <EmptyHeader>
-              <EmptyTitle>No settings</EmptyTitle>
-              <EmptyDescription>Dropship settings could not be loaded.</EmptyDescription>
+              <EmptyTitle>{settingsQuery.error ? "Settings unavailable" : "No settings"}</EmptyTitle>
+              <EmptyDescription>
+                {settingsQuery.error ? "The settings API request failed." : "Dropship settings could not be loaded."}
+              </EmptyDescription>
             </EmptyHeader>
           </Empty>
         )}

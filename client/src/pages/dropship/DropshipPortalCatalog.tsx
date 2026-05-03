@@ -41,6 +41,7 @@ import {
   listingPreviewPushableCount,
   postJson,
   putJson,
+  queryErrorMessage,
   type DropshipCatalogResponse,
   type DropshipCatalogRow,
   type DropshipListingPreviewResponse,
@@ -288,9 +289,7 @@ export default function DropshipPortalCatalog() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {selectionRulesQuery.error instanceof Error
-                ? selectionRulesQuery.error.message
-                : "Unable to load catalog selection rules."}
+              {queryErrorMessage(selectionRulesQuery.error, "Unable to load catalog selection rules.")}
             </AlertDescription>
           </Alert>
         )}
@@ -298,9 +297,15 @@ export default function DropshipPortalCatalog() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {settingsQuery.error instanceof Error
-                ? settingsQuery.error.message
-                : "Unable to load store connections."}
+              {queryErrorMessage(settingsQuery.error, "Unable to load store connections.")}
+            </AlertDescription>
+          </Alert>
+        )}
+        {catalogQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(catalogQuery.error, "Unable to load dropship catalog.")}
             </AlertDescription>
           </Alert>
         )}
@@ -332,6 +337,14 @@ export default function DropshipPortalCatalog() {
               <Skeleton className="h-12 w-full" />
               <Skeleton className="h-12 w-full" />
             </div>
+          ) : catalogQuery.error ? (
+            <Empty className="p-8">
+              <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
+              <EmptyHeader>
+                <EmptyTitle>Catalog unavailable</EmptyTitle>
+                <EmptyDescription>The catalog API request failed.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : catalogQuery.data?.rows.length ? (
             <CatalogTable
               bulkSelectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}

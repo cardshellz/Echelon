@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { RotateCcw, Search } from "lucide-react";
+import { AlertCircle, RotateCcw, Search } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -20,6 +21,7 @@ import {
   fetchJson,
   formatDateTime,
   formatStatus,
+  queryErrorMessage,
   type DropshipReturnListItem,
   type DropshipReturnListResponse,
 } from "@/lib/dropship-ops-surface";
@@ -74,6 +76,15 @@ export default function DropshipPortalReturns() {
           </div>
         </div>
 
+        {returnsQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")}
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="mt-5 rounded-md border border-zinc-200 bg-white">
           {returnsQuery.isLoading ? (
             <div className="space-y-2 p-4">
@@ -81,6 +92,14 @@ export default function DropshipPortalReturns() {
               <Skeleton className="h-12 w-full" />
               <Skeleton className="h-12 w-full" />
             </div>
+          ) : returnsQuery.error ? (
+            <Empty className="p-8">
+              <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
+              <EmptyHeader>
+                <EmptyTitle>Returns unavailable</EmptyTitle>
+                <EmptyDescription>The returns API request failed.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : returnsQuery.data?.items.length ? (
             <ReturnsTable returns={returnsQuery.data.items} total={returnsQuery.data.total} />
           ) : (
