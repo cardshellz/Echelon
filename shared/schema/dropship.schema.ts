@@ -726,7 +726,13 @@ export const dropshipFundingMethods = dropshipSchema.table("dropship_funding_met
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("dropship_funding_default_vendor_idx").on(table.vendorId).where(sql`is_default = true AND status = 'active'`),
+  uniqueIndex("dropship_funding_provider_method_idx")
+    .on(table.vendorId, table.rail, table.providerPaymentMethodId)
+    .where(sql`${table.providerPaymentMethodId} IS NOT NULL`),
   index("dropship_funding_vendor_idx").on(table.vendorId),
+  index("dropship_funding_provider_customer_idx")
+    .on(table.vendorId, table.providerCustomerId)
+    .where(sql`${table.providerCustomerId} IS NOT NULL`),
   check("dropship_funding_rail_chk", sql`${table.rail} IN ('stripe_ach','stripe_card','usdc_base','manual')`),
 ]);
 

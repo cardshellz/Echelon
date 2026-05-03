@@ -402,6 +402,21 @@ export interface DropshipAutoReloadConfigResponse {
   autoReload: NonNullable<DropshipWalletResponse["wallet"]["autoReload"]>;
 }
 
+export type DropshipStripeFundingRail = "stripe_card" | "stripe_ach";
+
+export interface DropshipStripeFundingSetupSessionInput {
+  rail: DropshipStripeFundingRail;
+  returnTo: string;
+}
+
+export interface DropshipStripeFundingSetupSessionResponse {
+  setupSession: {
+    checkoutUrl: string;
+    providerSessionId: string;
+    expiresAt: string | null;
+  };
+}
+
 export interface DropshipReturnListItem {
   rmaId: number;
   rmaNumber: string;
@@ -595,6 +610,19 @@ export function buildAutoReloadConfigInput(input: {
     minimumBalanceCents,
     maxSingleReloadCents,
     paymentHoldTimeoutMinutes,
+  };
+}
+
+export function buildStripeFundingSetupSessionInput(input: {
+  rail: string;
+  returnTo: string;
+}): DropshipStripeFundingSetupSessionInput {
+  if (input.rail !== "stripe_card" && input.rail !== "stripe_ach") {
+    throw new Error("Funding rail must be card or ACH.");
+  }
+  return {
+    rail: input.rail,
+    returnTo: normalizePortalReturnPath(input.returnTo),
   };
 }
 

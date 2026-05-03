@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, CheckCircle2, CreditCard, Fingerprint, History, Mail, Save, Wallet } from "lucide-react";
+import { AlertCircle, CheckCircle2, CreditCard, Fingerprint, History, Landmark, Mail, Save, Wallet } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,18 +20,22 @@ import {
 } from "@/components/ui/table";
 import {
   buildAutoReloadConfigInput,
+  buildStripeFundingSetupSessionInput,
   fetchJson,
   formatCents,
   formatDateTime,
   formatStatus,
+  postJson,
   putJson,
   type DropshipAutoReloadConfigResponse,
+  type DropshipStripeFundingRail,
+  type DropshipStripeFundingSetupSessionResponse,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
-import { useDropshipAuth } from "@/lib/dropship-auth";
+import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
-type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | null;
+type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | "stripe-card" | "stripe-ach" | null;
 
 export default function DropshipPortalWallet() {
   const queryClient = useQueryClient();
@@ -79,29 +83,7 @@ export default function DropshipPortalWallet() {
   }, [wallet?.autoReload, wallet?.fundingMethods]);
 
   async function saveAutoReload() {
-    if (!activeProof) {
-      if (principal?.hasPasskey) {
-        const verified = await runWalletAction("passkey-proof", async () => {
-          await verifyPasskeyStepUp("add_funding_method");
-        });
-        if (!verified) return;
-      } else if (!emailCodeSent) {
-        await runWalletAction("send-code", async () => {
-          await startEmailStepUp("add_funding_method");
-          setEmailCodeSent(true);
-          setMessage("Verification code sent.");
-        });
-        return;
-      } else {
-        const verified = await runWalletAction("verify-code", async () => {
-          await verifyEmailStepUp({
-            action: "add_funding_method",
-            verificationCode,
-          });
-        });
-        if (!verified) return;
-      }
-    }
+    if (!await ensureWalletSensitiveProof()) return;
 
     await runWalletAction("save", async () => {
       const input = buildAutoReloadConfigInput({
@@ -120,6 +102,43 @@ export default function DropshipPortalWallet() {
       setEmailCodeSent(false);
       setVerificationCode("");
       setMessage("Auto-reload settings saved.");
+    });
+  }
+
+  async function startStripeFundingSetup(rail: DropshipStripeFundingRail) {
+    if (!await ensureWalletSensitiveProof()) return;
+
+    await runWalletAction(rail === "stripe_card" ? "stripe-card" : "stripe-ach", async () => {
+      const returnTo = `${window.location.pathname}${window.location.search}` || dropshipPortalPath("/wallet");
+      const input = buildStripeFundingSetupSessionInput({ rail, returnTo });
+      const response = await postJson<DropshipStripeFundingSetupSessionResponse>(
+        "/api/dropship/wallet/funding-methods/stripe/setup-session",
+        input,
+      );
+      window.location.assign(response.setupSession.checkoutUrl);
+    });
+  }
+
+  async function ensureWalletSensitiveProof(): Promise<boolean> {
+    if (activeProof) return true;
+    if (principal?.hasPasskey) {
+      return runWalletAction("passkey-proof", async () => {
+        await verifyPasskeyStepUp("add_funding_method");
+      });
+    }
+    if (!emailCodeSent) {
+      await runWalletAction("send-code", async () => {
+        await startEmailStepUp("add_funding_method");
+        setEmailCodeSent(true);
+        setMessage("Verification code sent. Enter it below, then retry the wallet action.");
+      });
+      return false;
+    }
+    return runWalletAction("verify-code", async () => {
+      await verifyEmailStepUp({
+        action: "add_funding_method",
+        verificationCode,
+      });
     });
   }
 
@@ -201,12 +220,35 @@ export default function DropshipPortalWallet() {
 
             <section className="mt-5 grid gap-5 xl:grid-cols-[0.8fr_1.2fr]">
               <div className="rounded-md border border-zinc-200 bg-white p-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <h2 className="text-lg font-semibold">Funding methods</h2>
                     <p className="text-sm text-zinc-500">Configured rails</p>
                   </div>
-                  <CreditCard className="h-5 w-5 text-zinc-400" />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 gap-2"
+                      disabled={pendingWalletAction !== null || (emailCodeSent && verificationCode.length !== 6)}
+                      onClick={() => startStripeFundingSetup("stripe_card")}
+                    >
+                      <CreditCard className="h-4 w-4" />
+                      {pendingWalletAction === "stripe-card" ? "Starting card" : "Add card"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 gap-2"
+                      disabled={pendingWalletAction !== null || (emailCodeSent && verificationCode.length !== 6)}
+                      onClick={() => startStripeFundingSetup("stripe_ach")}
+                    >
+                      <Landmark className="h-4 w-4" />
+                      {pendingWalletAction === "stripe-ach" ? "Starting ACH" : "Add ACH"}
+                    </Button>
+                  </div>
                 </div>
                 {wallet.fundingMethods.length ? (
                   <div className="mt-4 space-y-3">
@@ -436,6 +478,8 @@ function walletButtonLabel(pendingWalletAction: PendingWalletAction, emailCodeSe
   if (pendingWalletAction === "send-code") return "Sending code";
   if (pendingWalletAction === "verify-code") return "Verifying code";
   if (pendingWalletAction === "passkey-proof") return "Waiting for passkey";
+  if (pendingWalletAction === "stripe-card") return "Starting card setup";
+  if (pendingWalletAction === "stripe-ach") return "Starting ACH setup";
   if (pendingWalletAction === "save") return "Saving";
   if (emailCodeSent) return "Verify and save";
   return "Save auto-reload";
@@ -443,6 +487,8 @@ function walletButtonLabel(pendingWalletAction: PendingWalletAction, emailCodeSe
 
 function walletButtonIcon(pendingWalletAction: PendingWalletAction, emailCodeSent: boolean) {
   if (pendingWalletAction === "passkey-proof") return <Fingerprint className="h-4 w-4" />;
+  if (pendingWalletAction === "stripe-ach") return <Landmark className="h-4 w-4" />;
+  if (pendingWalletAction === "stripe-card") return <CreditCard className="h-4 w-4" />;
   if (pendingWalletAction === "send-code" || (emailCodeSent && pendingWalletAction !== "save")) return <Mail className="h-4 w-4" />;
   return <Save className="h-4 w-4" />;
 }

@@ -12,12 +12,16 @@ import {
   type CreateDropshipWalletFundingLedgerInput,
   type CreateDropshipWalletOrderDebitInput,
   type DropshipAutoReloadSettingRecord,
+  type DropshipFundingMethodMutationResult,
   type DropshipFundingMethodRecord,
+  type DropshipStripeFundingSetupSession,
   type DropshipWalletAccountRecord,
+  type DropshipWalletFundingProvider,
   type DropshipWalletLedgerRecord,
   type DropshipWalletMutationResult,
   type DropshipWalletOverview,
   type DropshipWalletRepository,
+  type UpsertDropshipFundingMethodRepositoryInput,
 } from "../../application/dropship-wallet-service";
 
 const now = new Date("2026-05-01T20:00:00.000Z");
@@ -33,6 +37,7 @@ describe("DropshipWalletService", () => {
     service = new DropshipWalletService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
+      fundingProvider: new FakeFundingProvider(),
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -218,7 +223,74 @@ describe("DropshipWalletService", () => {
     });
     expect(logs.at(-1)).toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_CONFIGURED" });
   });
+
+  it("creates a Stripe setup session using the reusable provider customer", async () => {
+    const session = await service.createStripeFundingSetupSessionForMember("member-1", {
+      rail: "stripe_card",
+      successUrl: "https://cardshellz.io/wallet?funding_setup=success",
+      cancelUrl: "https://cardshellz.io/wallet?funding_setup=cancelled",
+    });
+
+    expect(session).toMatchObject({
+      checkoutUrl: "https://checkout.stripe.test/session",
+      providerSessionId: "cs_test_1",
+      providerCustomerId: "cus_existing",
+    });
+    expect(logs.at(-1)).toMatchObject({
+      code: "DROPSHIP_STRIPE_FUNDING_SETUP_SESSION_CREATED",
+      context: expect.objectContaining({ rail: "stripe_card" }),
+    });
+  });
+
+  it("registers Stripe funding methods idempotently and defaults the first active method", async () => {
+    repository.fundingMethods = [];
+
+    const first = await service.registerFundingMethod({
+      vendorId: 10,
+      rail: "stripe_card",
+      status: "active",
+      providerCustomerId: "cus_1",
+      providerPaymentMethodId: "pm_1",
+      usdcWalletAddress: null,
+      displayLabel: "Visa ending in 4242",
+      isDefault: false,
+      metadata: { provider: "stripe", last4: "4242" },
+    });
+    const replay = await service.registerFundingMethod({
+      vendorId: 10,
+      rail: "stripe_card",
+      status: "active",
+      providerCustomerId: "cus_1",
+      providerPaymentMethodId: "pm_1",
+      usdcWalletAddress: null,
+      displayLabel: "Visa ending in 4242",
+      isDefault: false,
+      metadata: { provider: "stripe", last4: "4242" },
+    });
+
+    expect(first.fundingMethod).toMatchObject({
+      fundingMethodId: 1,
+      providerPaymentMethodId: "pm_1",
+      isDefault: true,
+    });
+    expect(first.idempotentReplay).toBe(false);
+    expect(replay.idempotentReplay).toBe(true);
+    expect(repository.fundingMethods).toHaveLength(1);
+    expect(logs.filter((event) => event.code === "DROPSHIP_FUNDING_METHOD_REGISTERED")).toHaveLength(1);
+  });
 });
+
+class FakeFundingProvider implements DropshipWalletFundingProvider {
+  async createStripeSetupSession(input: Parameters<DropshipWalletFundingProvider["createStripeSetupSession"]>[0]): Promise<DropshipStripeFundingSetupSession> {
+    expect(input.existingProviderCustomerId).toBe("cus_existing");
+    return {
+      checkoutUrl: "https://checkout.stripe.test/session",
+      providerSessionId: "cs_test_1",
+      providerCustomerId: input.existingProviderCustomerId ?? "cus_created",
+      expiresAt: now,
+    };
+  }
+}
 
 class FakeVendorProvisioningService {
   async provisionForMember(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
@@ -351,6 +423,61 @@ class FakeWalletRepository implements DropshipWalletRepository {
     return this.autoReload;
   }
 
+  async getReusableFundingProviderCustomerId(): Promise<string | null> {
+    return this.fundingMethods.find((method) =>
+      (method.rail === "stripe_card" || method.rail === "stripe_ach")
+      && method.providerCustomerId
+    )?.providerCustomerId ?? null;
+  }
+
+  async upsertFundingMethod(
+    input: UpsertDropshipFundingMethodRepositoryInput,
+  ): Promise<DropshipFundingMethodMutationResult> {
+    const existing = this.fundingMethods.find((method) =>
+      method.vendorId === input.vendorId
+      && method.rail === input.rail
+      && method.providerPaymentMethodId === input.providerPaymentMethodId
+    );
+    const isDefault = input.isDefault || this.fundingMethods.every((method) => method.status !== "active");
+    if (isDefault) {
+      this.fundingMethods = this.fundingMethods.map((method) => ({ ...method, isDefault: false }));
+    }
+    if (existing) {
+      const updated = {
+        ...existing,
+        status: input.status,
+        providerCustomerId: input.providerCustomerId,
+        providerPaymentMethodId: input.providerPaymentMethodId,
+        usdcWalletAddress: input.usdcWalletAddress,
+        displayLabel: input.displayLabel,
+        isDefault: existing.isDefault || isDefault,
+        metadata: input.metadata ?? {},
+        updatedAt: input.updatedAt,
+      };
+      this.fundingMethods = this.fundingMethods.map((method) =>
+        method.fundingMethodId === existing.fundingMethodId ? updated : method,
+      );
+      return { fundingMethod: updated, idempotentReplay: true };
+    }
+
+    const fundingMethod: DropshipFundingMethodRecord = {
+      fundingMethodId: this.fundingMethods.length + 1,
+      vendorId: input.vendorId,
+      rail: input.rail,
+      status: input.status,
+      providerCustomerId: input.providerCustomerId,
+      providerPaymentMethodId: input.providerPaymentMethodId,
+      usdcWalletAddress: input.usdcWalletAddress,
+      displayLabel: input.displayLabel,
+      isDefault,
+      metadata: input.metadata ?? {},
+      createdAt: input.updatedAt,
+      updatedAt: input.updatedAt,
+    };
+    this.fundingMethods.push(fundingMethod);
+    return { fundingMethod, idempotentReplay: false };
+  }
+
   private findReplay(
     idempotencyKey: string,
     referenceType: string,
@@ -417,6 +544,9 @@ function makeFundingMethod(overrides: Partial<DropshipFundingMethodRecord> = {})
     vendorId: 10,
     rail: "stripe_card",
     status: "active",
+    providerCustomerId: "cus_existing",
+    providerPaymentMethodId: "pm_4242",
+    usdcWalletAddress: null,
     displayLabel: "Visa ending in 4242",
     isDefault: true,
     metadata: {},

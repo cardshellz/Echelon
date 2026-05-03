@@ -4,6 +4,7 @@ import {
   buildListingPreviewRequest,
   buildListingPushRequest,
   buildAutoReloadConfigInput,
+  buildStripeFundingSetupSessionInput,
   buildVariantSelectionReplacement,
   buildStoreConnectionOAuthStartInput,
   formatCents,
@@ -201,6 +202,31 @@ describe("dropship ops surface client helpers", () => {
       minimumBalance: "250",
       maxSingleReload: "50",
       paymentHoldTimeoutMinutes: "2880",
+    })).toThrow();
+  });
+
+  it("builds Stripe funding setup session input with relative return path guardrails", () => {
+    expect(buildStripeFundingSetupSessionInput({
+      rail: "stripe_card",
+      returnTo: "/wallet",
+    })).toEqual({
+      rail: "stripe_card",
+      returnTo: "/wallet",
+    });
+    expect(buildStripeFundingSetupSessionInput({
+      rail: "stripe_ach",
+      returnTo: "/dropship-portal/wallet?tab=funding",
+    })).toEqual({
+      rail: "stripe_ach",
+      returnTo: "/dropship-portal/wallet?tab=funding",
+    });
+    expect(() => buildStripeFundingSetupSessionInput({
+      rail: "manual",
+      returnTo: "/wallet",
+    })).toThrow();
+    expect(() => buildStripeFundingSetupSessionInput({
+      rail: "stripe_card",
+      returnTo: "https://attacker.example/wallet",
     })).toThrow();
   });
 });
