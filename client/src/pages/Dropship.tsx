@@ -115,6 +115,7 @@ import {
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipStorePlatform,
   type DropshipStoreOrderProcessingConfigResponse,
+  type DropshipSystemReadinessCheck,
 } from "@/lib/dropship-ops-surface";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
@@ -667,6 +668,7 @@ function DogfoodReadinessTab() {
 
   const items = readinessQuery.data?.items ?? [];
   const summary = readinessQuery.data?.summary ?? [];
+  const systemChecks = readinessQuery.data?.systemChecks ?? [];
   const omsConfig = omsChannelConfigQuery.data?.config ?? null;
 
   useEffect(() => {
@@ -738,6 +740,11 @@ function DogfoodReadinessTab() {
         selectedChannelId={selectedOmsChannelId}
         onSave={saveOmsChannel}
         onSelectChannel={setSelectedOmsChannelId}
+      />
+
+      <SystemReadinessPanel
+        checks={systemChecks}
+        isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
       />
 
       <section className="rounded-md border bg-card p-4">
@@ -2626,6 +2633,70 @@ function OmsChannelConfigPanel({
   );
 }
 
+function SystemReadinessPanel({
+  checks,
+  isLoading,
+}: {
+  checks: DropshipSystemReadinessCheck[];
+  isLoading: boolean;
+}) {
+  if (isLoading && checks.length === 0) {
+    return (
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-6 w-56" />
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <Skeleton key={index} className="h-24 w-full" />
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  if (checks.length === 0) {
+    return null;
+  }
+
+  const blockedCount = checks.filter((check) => check.status === "blocked").length;
+  const warningCount = checks.filter((check) => check.status === "warning").length;
+
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">System prerequisites</h2>
+          <p className="text-sm text-muted-foreground">
+            {blockedCount} blocked / {warningCount} warning
+          </p>
+        </div>
+        <Badge variant="outline" className={systemReadinessTone(blockedCount, warningCount)}>
+          {blockedCount > 0 ? "Blocked" : warningCount > 0 ? "Warning" : "Ready"}
+        </Badge>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {checks.map((check) => (
+          <div key={check.key} className="rounded-md border p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-medium">{check.label}</div>
+                <div className="mt-1 text-sm text-muted-foreground">{check.message}</div>
+              </div>
+              <Badge variant="outline" className={dogfoodReadinessStatusTone(check.status)}>
+                {formatStatus(check.status)}
+              </Badge>
+            </div>
+            {check.status !== "ready" && (
+              <div className="mt-2 text-xs text-muted-foreground">
+                Env: {check.requiredEnv.join(", ")}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function DogfoodReadinessTable({
   isLoading,
   items,
@@ -3935,6 +4006,12 @@ function omsChannelConfigTone(config: DropshipOmsChannelConfigOverview | null): 
   if (config.currentChannelCount === 1) return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (config.currentChannelCount > 1) return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function systemReadinessTone(blockedCount: number, warningCount: number): string {
+  if (blockedCount > 0) return "border-rose-200 bg-rose-50 text-rose-800";
+  if (warningCount > 0) return "border-amber-200 bg-amber-50 text-amber-900";
+  return "border-emerald-200 bg-emerald-50 text-emerald-800";
 }
 
 function listingPushStatusTone(status: DropshipListingPushJobStatus): string {

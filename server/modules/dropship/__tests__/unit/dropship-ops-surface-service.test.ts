@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
+  buildDropshipSystemReadinessChecks,
   buildDropshipSettingsSections,
   DropshipOpsSurfaceService,
   type DropshipAdminOpsOverview,
@@ -46,6 +47,43 @@ describe("DropshipOpsSurfaceService", () => {
       "auto_reload_required",
       "funding_method_required",
     ]);
+  });
+
+  it("surfaces launch-critical system configuration without exposing secret values", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      DROPSHIP_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString("base64"),
+      DROPSHIP_TOKEN_KEY_ID: "key-v1",
+      DROPSHIP_STORE_OAUTH_STATE_SECRET: "a".repeat(32),
+      EBAY_CLIENT_ID: "ebay-client",
+      EBAY_CLIENT_SECRET: "ebay-secret",
+      EBAY_VENDOR_RUNAME: "Cardshellz_Cardshellz-vendor-oauth",
+      SHOPIFY_API_KEY: "shopify-key",
+      SHOPIFY_API_SECRET: "shopify-secret",
+      DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI: "https://cardshellz.io/api/dropship/store-connections/oauth/callback",
+      STRIPE_SECRET_KEY: "stripe-secret",
+      DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook",
+    });
+
+    expect(checks.every((check) => check.status === "ready")).toBe(true);
+    expect(JSON.stringify(checks)).not.toContain("ebay-secret");
+    expect(JSON.stringify(checks)).not.toContain("shopify-secret");
+    expect(JSON.stringify(checks)).not.toContain("stripe-secret");
+  });
+
+  it("blocks dogfood system readiness when OAuth prerequisites are missing", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      DROPSHIP_TOKEN_ENCRYPTION_KEY: "not-valid",
+      SESSION_SECRET: "short",
+    });
+
+    expect(checks.find((check) => check.key === "token_vault")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "oauth_state_signing")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "ebay_oauth")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+    });
+    expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "warning" });
   });
 
   it("scopes vendor settings through Shellz Club member provisioning", async () => {
@@ -99,6 +137,11 @@ describe("DropshipOpsSurfaceService", () => {
     });
 
     expect(result.summary).toEqual([{ status: "blocked", count: 1 }]);
+    expect(result.systemChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "token_vault" }),
+      expect.objectContaining({ key: "ebay_oauth" }),
+      expect.objectContaining({ key: "shopify_oauth" }),
+    ]));
     expect(repository.lastDogfoodInput).toMatchObject({
       status: "blocked",
       platform: "ebay",
@@ -171,6 +214,7 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
       page: input.page,
       limit: input.limit,
       summary: [{ status: "blocked", count: 1 }],
+      systemChecks: [],
     };
   }
 }

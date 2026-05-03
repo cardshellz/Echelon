@@ -305,6 +305,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       page: input.page,
       limit: input.limit,
       summary: summarizeDogfoodReadiness(allItems),
+      systemChecks: [],
     };
   }
 

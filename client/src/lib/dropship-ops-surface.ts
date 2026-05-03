@@ -282,6 +282,14 @@ export interface DropshipDogfoodReadinessCheck {
   message: string;
 }
 
+export interface DropshipSystemReadinessCheck {
+  key: string;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  requiredEnv: string[];
+}
+
 export interface DropshipDogfoodReadinessItem {
   vendor: {
     vendorId: number;
@@ -335,6 +343,7 @@ export interface DropshipDogfoodReadinessResponse {
   page: number;
   limit: number;
   summary: Array<{ status: DropshipDogfoodReadinessStatus; count: number }>;
+  systemChecks: DropshipSystemReadinessCheck[];
 }
 
 export interface DropshipOmsChannelOption {

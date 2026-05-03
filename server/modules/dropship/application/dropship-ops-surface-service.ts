@@ -144,6 +144,14 @@ export interface DropshipDogfoodReadinessCheck {
   message: string;
 }
 
+export interface DropshipSystemReadinessCheck {
+  key: string;
+  label: string;
+  status: "ready" | "warning" | "blocked";
+  message: string;
+  requiredEnv: string[];
+}
+
 export interface DropshipDogfoodReadinessItem {
   vendor: {
     vendorId: number;
@@ -202,6 +210,7 @@ export interface DropshipDogfoodReadinessResult {
   page: number;
   limit: number;
   summary: DropshipDogfoodReadinessSummary[];
+  systemChecks: DropshipSystemReadinessCheck[];
 }
 
 export interface DropshipOpsSurfaceRepository {
@@ -282,8 +291,189 @@ export class DropshipOpsSurfaceService {
         platform: parsed.platform ?? null,
       },
     });
-    return result;
+    return {
+      ...result,
+      systemChecks: buildDropshipSystemReadinessChecks(process.env),
+    };
   }
+}
+
+export function buildDropshipSystemReadinessChecks(
+  env: NodeJS.ProcessEnv,
+): DropshipSystemReadinessCheck[] {
+  return [
+    buildTokenVaultCheck(env),
+    buildOAuthStateCheck(env),
+    buildEbayOAuthCheck(env),
+    buildShopifyOAuthCheck(env),
+    buildStripeFundingCheck(env),
+  ];
+}
+
+function buildTokenVaultCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const key = env.DROPSHIP_TOKEN_ENCRYPTION_KEY?.trim();
+  if (!key) {
+    return {
+      key: "token_vault",
+      label: "Token vault",
+      status: "blocked",
+      message: "DROPSHIP_TOKEN_ENCRYPTION_KEY is required before vendor store OAuth can persist tokens.",
+      requiredEnv: ["DROPSHIP_TOKEN_ENCRYPTION_KEY"],
+    };
+  }
+
+  if (!isValidTokenEncryptionKey(key)) {
+    return {
+      key: "token_vault",
+      label: "Token vault",
+      status: "blocked",
+      message: "DROPSHIP_TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes as base64 or hex.",
+      requiredEnv: ["DROPSHIP_TOKEN_ENCRYPTION_KEY"],
+    };
+  }
+
+  return {
+    key: "token_vault",
+    label: "Token vault",
+    status: "ready",
+    message: `Store token encryption is configured with key id ${env.DROPSHIP_TOKEN_KEY_ID || "dropship-token-key-v1"}.`,
+    requiredEnv: ["DROPSHIP_TOKEN_ENCRYPTION_KEY"],
+  };
+}
+
+function buildOAuthStateCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const configured = firstConfiguredEnv(env, [
+    "DROPSHIP_STORE_OAUTH_STATE_SECRET",
+    "DROPSHIP_AUTH_CHALLENGE_SECRET",
+    "SESSION_SECRET",
+  ]);
+  if (!configured) {
+    return {
+      key: "oauth_state_signing",
+      label: "OAuth state signing",
+      status: "blocked",
+      message: "Store OAuth state signing requires a secret of at least 32 characters.",
+      requiredEnv: ["DROPSHIP_STORE_OAUTH_STATE_SECRET", "DROPSHIP_AUTH_CHALLENGE_SECRET", "SESSION_SECRET"],
+    };
+  }
+
+  if ((env[configured]?.trim().length ?? 0) < 32) {
+    return {
+      key: "oauth_state_signing",
+      label: "OAuth state signing",
+      status: "blocked",
+      message: `${configured} is configured but shorter than the 32 character minimum.`,
+      requiredEnv: ["DROPSHIP_STORE_OAUTH_STATE_SECRET", "DROPSHIP_AUTH_CHALLENGE_SECRET", "SESSION_SECRET"],
+    };
+  }
+
+  return {
+    key: "oauth_state_signing",
+    label: "OAuth state signing",
+    status: "ready",
+    message: `Store OAuth state signing is configured through ${configured}.`,
+    requiredEnv: ["DROPSHIP_STORE_OAUTH_STATE_SECRET", "DROPSHIP_AUTH_CHALLENGE_SECRET", "SESSION_SECRET"],
+  };
+}
+
+function buildEbayOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const missing = missingEnv(env, ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET"]);
+  const hasRuName = hasEnv(env, "EBAY_VENDOR_RUNAME") || hasEnv(env, "EBAY_RUNAME");
+  if (!hasRuName) {
+    missing.push("EBAY_VENDOR_RUNAME or EBAY_RUNAME");
+  }
+  if (missing.length > 0) {
+    return {
+      key: "ebay_oauth",
+      label: "eBay OAuth",
+      status: "blocked",
+      message: `eBay vendor store OAuth is missing ${missing.join(", ")}.`,
+      requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+    };
+  }
+
+  return {
+    key: "ebay_oauth",
+    label: "eBay OAuth",
+    status: "ready",
+    message: `eBay vendor OAuth is configured for ${env.EBAY_ENVIRONMENT === "sandbox" ? "sandbox" : "production"}.`,
+    requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+  };
+}
+
+function buildShopifyOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const missing = missingEnv(env, ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET"]);
+  const hasRedirectUri = hasEnv(env, "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI") || hasEnv(env, "SHOPIFY_OAUTH_REDIRECT_URI");
+  if (!hasRedirectUri) {
+    missing.push("DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI");
+  }
+  if (missing.length > 0) {
+    return {
+      key: "shopify_oauth",
+      label: "Shopify OAuth",
+      status: "blocked",
+      message: `Shopify vendor store OAuth is missing ${missing.join(", ")}.`,
+      requiredEnv: ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI"],
+    };
+  }
+
+  return {
+    key: "shopify_oauth",
+    label: "Shopify OAuth",
+    status: "ready",
+    message: "Shopify vendor OAuth is configured.",
+    requiredEnv: ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI"],
+  };
+}
+
+function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const missing = missingEnv(env, ["STRIPE_SECRET_KEY"]);
+  const hasWebhookSecret = hasEnv(env, "DROPSHIP_STRIPE_WEBHOOK_SECRET")
+    || hasEnv(env, "STRIPE_DROPSHIP_WEBHOOK_SECRET")
+    || hasEnv(env, "STRIPE_WEBHOOK_SECRET");
+  if (!hasWebhookSecret) {
+    missing.push("DROPSHIP_STRIPE_WEBHOOK_SECRET or STRIPE_DROPSHIP_WEBHOOK_SECRET or STRIPE_WEBHOOK_SECRET");
+  }
+  if (missing.length > 0) {
+    return {
+      key: "stripe_funding",
+      label: "Stripe funding",
+      status: "warning",
+      message: `Stripe wallet funding is missing ${missing.join(", ")}.`,
+      requiredEnv: ["STRIPE_SECRET_KEY", "DROPSHIP_STRIPE_WEBHOOK_SECRET or STRIPE_DROPSHIP_WEBHOOK_SECRET or STRIPE_WEBHOOK_SECRET"],
+    };
+  }
+
+  return {
+    key: "stripe_funding",
+    label: "Stripe funding",
+    status: "ready",
+    message: "Stripe wallet funding and webhook verification are configured.",
+    requiredEnv: ["STRIPE_SECRET_KEY", "DROPSHIP_STRIPE_WEBHOOK_SECRET or STRIPE_DROPSHIP_WEBHOOK_SECRET or STRIPE_WEBHOOK_SECRET"],
+  };
+}
+
+function isValidTokenEncryptionKey(rawKey: string): boolean {
+  if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
+    return Buffer.from(rawKey, "hex").length === 32;
+  }
+  try {
+    return Buffer.from(rawKey, "base64").length === 32;
+  } catch {
+    return false;
+  }
+}
+
+function firstConfiguredEnv(env: NodeJS.ProcessEnv, keys: string[]): string | null {
+  return keys.find((key) => hasEnv(env, key)) ?? null;
+}
+
+function missingEnv(env: NodeJS.ProcessEnv, keys: string[]): string[] {
+  return keys.filter((key) => !hasEnv(env, key));
+}
+
+function hasEnv(env: NodeJS.ProcessEnv, key: string): boolean {
+  return Boolean(env[key]?.trim());
 }
 
 export function buildDropshipSettingsSections(input: {
