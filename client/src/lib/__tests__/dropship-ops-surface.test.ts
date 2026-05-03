@@ -8,6 +8,8 @@ import {
   buildStripeWalletFundingSessionInput,
   buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
+  buildAdminOrderIntakeUrl,
+  buildAdminOrderOpsActionInput,
   buildCatalogExposureRuleInput,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
@@ -87,6 +89,51 @@ describe("dropship ops surface client helpers", () => {
       exposedOnly: true,
       includeInactiveCatalog: false,
     })).toBe("/api/dropship/admin/catalog/preview?search=pack&exposedOnly=true&includeInactiveCatalog=false&page=1&limit=50");
+  });
+
+  it("builds admin order intake URLs without forcing default status filters", () => {
+    expect(buildAdminOrderIntakeUrl({
+      search: " EXT-1 ",
+      status: "default",
+    })).toBe("/api/dropship/admin/order-intake?search=EXT-1&page=1&limit=50");
+    expect(buildAdminOrderIntakeUrl({
+      search: "",
+      status: "failed",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/admin/order-intake?statuses=failed&page=2&limit=25");
+    expect(buildAdminOrderIntakeUrl({
+      search: "",
+      status: "all",
+    })).toBe("/api/dropship/admin/order-intake?statuses=received%2Cprocessing%2Caccepted%2Crejected%2Cretrying%2Cfailed%2Cpayment_hold%2Ccancelled%2Cexception&page=1&limit=50");
+  });
+
+  it("builds admin order ops action bodies with required reason guardrails", () => {
+    expect(buildAdminOrderOpsActionInput({
+      idempotencyKey: "retry-intake-1",
+      reason: " repaired config ",
+      requireReason: false,
+    })).toEqual({
+      idempotencyKey: "retry-intake-1",
+      reason: "repaired config",
+    });
+    expect(buildAdminOrderOpsActionInput({
+      idempotencyKey: "retry-intake-2",
+      reason: " ",
+      requireReason: false,
+    })).toEqual({
+      idempotencyKey: "retry-intake-2",
+    });
+    expect(() => buildAdminOrderOpsActionInput({
+      idempotencyKey: "short",
+      reason: "valid",
+      requireReason: false,
+    })).toThrow();
+    expect(() => buildAdminOrderOpsActionInput({
+      idempotencyKey: "exception-intake-1",
+      reason: " ",
+      requireReason: true,
+    })).toThrow();
   });
 
   it("builds catalog exposure rule inputs with exact scope targets", () => {
