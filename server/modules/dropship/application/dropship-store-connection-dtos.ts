@@ -64,3 +64,11 @@ export const updateDropshipStoreOrderProcessingConfigInputSchema = z.object({
 export type UpdateDropshipStoreOrderProcessingConfigInput = z.infer<
   typeof updateDropshipStoreOrderProcessingConfigInputSchema
 >;
+
+export const repairDropshipStoreWebhooksRequestSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(200),
+}).strict();
+
+export type RepairDropshipStoreWebhooksRequest = z.infer<
+  typeof repairDropshipStoreWebhooksRequestSchema
+>;
