@@ -7,6 +7,7 @@ import type {
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import { EbayDropshipMarketplaceTrackingProvider } from "./dropship-ebay-tracking.provider";
 import { PgDropshipMarketplaceCredentialRepository } from "./dropship-marketplace-credentials";
+import { ShopifyDropshipMarketplaceTrackingProvider } from "./dropship-shopify-tracking.provider";
 
 export class DropshipMarketplaceTrackingProviderRouter implements DropshipMarketplaceTrackingProvider {
   constructor(
@@ -32,5 +33,6 @@ export function createDropshipMarketplaceTrackingProviderFromEnv(): DropshipMark
   const credentials = new PgDropshipMarketplaceCredentialRepository();
   return new DropshipMarketplaceTrackingProviderRouter({
     ebay: new EbayDropshipMarketplaceTrackingProvider(credentials),
+    shopify: new ShopifyDropshipMarketplaceTrackingProvider(credentials),
   });
 }
