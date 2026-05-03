@@ -181,8 +181,8 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_id ON catalog.product_line_products(product_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_line_id ON catalog.product_line_products(product_line_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_channel_id ON catalog.channel_product_lines(channel_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_product_line_id ON catalog.channel_product_lines(product_line_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_channel_id ON channels.channel_product_lines(channel_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_product_line_id ON channels.channel_product_lines(product_line_id)`);
     // Seed default product line
     await client.query(`
       INSERT INTO catalog.product_lines (code, name, description, sort_order)
@@ -198,10 +198,10 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     // Assign default line to all active channels (idempotent)
     await client.query(`
-      INSERT INTO catalog.channel_product_lines (channel_id, product_line_id)
+      INSERT INTO channels.channel_product_lines (channel_id, product_line_id)
       SELECT c.id, pl.id FROM channels.channels c, catalog.product_lines pl
       WHERE pl.code = 'TRADING_CARD_SUPPLIES' AND c.status = 'active'
-        AND NOT EXISTS (SELECT 1 FROM catalog.channel_product_lines cpl WHERE cpl.channel_id = c.id AND cpl.product_line_id = pl.id)
+        AND NOT EXISTS (SELECT 1 FROM channels.channel_product_lines cpl WHERE cpl.channel_id = c.id AND cpl.product_line_id = pl.id)
     `);
     console.log("Checked product_lines tables and seeded defaults");
 
