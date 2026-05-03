@@ -737,6 +737,14 @@ export default function PurchaseOrderDetail() {
     forwarderName: "",
     carrierName: "",
   });
+  const [shipperOpen, setShipperOpen] = useState(false);
+  const [shipperSearch, setShipperSearch] = useState("");
+
+  // Fetch vendors for shipper dropdown
+  type Vendor = { id: number; name: string; code: string };
+  const { data: vendors = [], isLoading: vendorsLoading, isError: vendorsError, refetch: refetchVendors } = useQuery<Vendor[]>({
+    queryKey: ["/api/vendors"],
+  });
 
   // Inline charge editing state
   const [editingIncoterms, setEditingIncoterms] = useState(false);
@@ -3558,12 +3566,76 @@ export default function PurchaseOrderDetail() {
             </div>
 
             <div className="space-y-2">
-              <Label>Shipper (Origin Supplier)</Label>
-              <Input
-                value={newShipmentForm.shipperName}
-                onChange={(e) => setNewShipmentForm(prev => ({ ...prev, shipperName: e.target.value }))}
-                className="h-10"
-              />
+              <Label>Shipper (Origin Supplier) *</Label>
+              {vendorsLoading ? (
+                <Button variant="outline" disabled className="w-full justify-between h-10 font-normal">
+                  Loading vendors...
+                </Button>
+              ) : vendorsError ? (
+                <div className="space-y-1">
+                  <Button variant="outline" disabled className="w-full justify-between h-10 font-normal text-destructive">
+                    Error loading vendors
+                  </Button>
+                  <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => refetchVendors()}>Retry</Button>
+                </div>
+              ) : vendors.length === 0 ? (
+                <div className="space-y-1">
+                  <Button variant="outline" disabled className="w-full justify-between h-10 font-normal">
+                    No vendors found
+                  </Button>
+                  <a href="/vendors" className="text-xs text-primary hover:underline">Add a vendor first.</a>
+                </div>
+              ) : (
+                <Popover open={shipperOpen} onOpenChange={setShipperOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      className="w-full justify-between h-10 font-normal"
+                    >
+                      <span className="truncate">
+                        {newShipmentForm.shipperName
+                          ? vendors.find(v => v.name === newShipmentForm.shipperName)?.name || newShipmentForm.shipperName
+                          : "Select shipper..."}
+                      </span>
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                    <Command shouldFilter={false}>
+                      <CommandInput
+                        placeholder="Search vendors..."
+                        value={shipperSearch}
+                        onValueChange={setShipperSearch}
+                      />
+                      <CommandList>
+                        <CommandEmpty>No vendors found.</CommandEmpty>
+                        <CommandGroup>
+                          {vendors
+                            .filter(v => v.name.toLowerCase().includes(shipperSearch.toLowerCase()))
+                            .map(v => (
+                              <CommandItem
+                                key={v.id}
+                                value={v.name}
+                                onSelect={() => {
+                                  setNewShipmentForm(prev => ({ ...prev, shipperName: v.name }));
+                                  setShipperOpen(false);
+                                  setShipperSearch("");
+                                }}
+                              >
+                                <Check className={`mr-2 h-4 w-4 ${newShipmentForm.shipperName === v.name ? "opacity-100" : "opacity-0"}`} />
+                                {v.name}
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Don't see your supplier? <a href="/vendors" className="text-primary hover:underline">Add a vendor.</a>
+              </p>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -3591,7 +3663,7 @@ export default function PurchaseOrderDetail() {
               <Button variant="outline" onClick={() => setShowCreateShipmentDialog(false)}>Cancel</Button>
               <Button
                 onClick={() => createShipmentMutation.mutate(newShipmentForm)}
-                disabled={createShipmentMutation.isPending}
+                disabled={createShipmentMutation.isPending || !newShipmentForm.shipperName.trim()}
               >
                 {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}
               </Button>
