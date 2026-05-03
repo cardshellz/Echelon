@@ -1,6 +1,8 @@
 export type DropshipSectionStatus = "ready" | "attention_required" | "coming_soon";
 export type DropshipSeverity = "info" | "warning" | "error";
 export type DropshipStorePlatform = "ebay" | "shopify";
+export type DropshipCatalogExposureScope = "catalog" | "product_line" | "category" | "product" | "variant";
+export type DropshipCatalogExposureAction = "include" | "exclude";
 
 export interface DropshipSettingsSection {
   key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
@@ -164,6 +166,78 @@ export interface DropshipAdminOpsOverviewResponse {
 
 export interface DropshipAuditEventSearchResponse {
   items: DropshipAuditEventRecord[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface DropshipCatalogExposureDecision {
+  exposed: boolean;
+  reason: string;
+  includeRuleIds: number[];
+  excludeRuleIds: number[];
+}
+
+export interface DropshipAdminCatalogExposureRule {
+  id?: number;
+  revisionId?: number | null;
+  scopeType: DropshipCatalogExposureScope;
+  action: DropshipCatalogExposureAction;
+  productLineId: number | null;
+  productId: number | null;
+  productVariantId: number | null;
+  category: string | null;
+  priority: number;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  isActive?: boolean;
+  notes: string | null;
+  metadata?: Record<string, unknown> | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface DropshipAdminCatalogExposureRuleInput {
+  scopeType: DropshipCatalogExposureScope;
+  action: DropshipCatalogExposureAction;
+  productLineId: number | null;
+  productId: number | null;
+  productVariantId: number | null;
+  category: string | null;
+  priority: number;
+  startsAt: string | null;
+  endsAt: string | null;
+  notes: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface DropshipAdminCatalogExposureRulesResponse {
+  rules: DropshipAdminCatalogExposureRule[];
+}
+
+export interface DropshipAdminCatalogExposureRulesReplaceResponse {
+  revisionId: number;
+  idempotentReplay: boolean;
+  rules: DropshipAdminCatalogExposureRule[];
+}
+
+export interface DropshipAdminCatalogExposurePreviewRow {
+  productId: number;
+  productVariantId: number;
+  productLineIds: number[];
+  category: string | null;
+  productIsActive: boolean;
+  variantIsActive: boolean;
+  productSku: string | null;
+  productName: string;
+  variantSku: string | null;
+  variantName: string;
+  productLineNames: string[];
+  decision: DropshipCatalogExposureDecision;
+}
+
+export interface DropshipAdminCatalogExposurePreviewResponse {
+  rows: DropshipAdminCatalogExposurePreviewRow[];
   total: number;
   page: number;
   limit: number;
@@ -530,6 +604,99 @@ export function queryErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+export function buildAdminCatalogExposurePreviewUrl(input: {
+  search: string;
+  exposedOnly: boolean;
+  includeInactiveCatalog: boolean;
+  page?: number;
+  limit?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/admin/catalog/preview", {
+    search: input.search.trim(),
+    exposedOnly: input.exposedOnly,
+    includeInactiveCatalog: input.includeInactiveCatalog,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildCatalogExposureRuleInput(input: {
+  scopeType: DropshipCatalogExposureScope;
+  action: DropshipCatalogExposureAction;
+  productLineId?: string | number | null;
+  productId?: string | number | null;
+  productVariantId?: string | number | null;
+  category?: string | null;
+  priority?: string | number | null;
+  notes?: string | null;
+  metadata?: Record<string, unknown>;
+}): DropshipAdminCatalogExposureRuleInput {
+  const priority = input.priority === undefined || input.priority === null || input.priority === ""
+    ? 0
+    : parseIntegerInput(input.priority, "priority");
+  const rule: DropshipAdminCatalogExposureRuleInput = {
+    scopeType: input.scopeType,
+    action: input.action,
+    productLineId: null,
+    productId: null,
+    productVariantId: null,
+    category: null,
+    priority,
+    startsAt: null,
+    endsAt: null,
+    notes: input.notes?.trim() || null,
+    metadata: input.metadata ?? {},
+  };
+
+  if (input.scopeType === "product_line") {
+    rule.productLineId = parsePositiveIntegerInput(input.productLineId, "productLineId");
+  } else if (input.scopeType === "product") {
+    rule.productId = parsePositiveIntegerInput(input.productId, "productId");
+  } else if (input.scopeType === "variant") {
+    rule.productVariantId = parsePositiveIntegerInput(input.productVariantId, "productVariantId");
+  } else if (input.scopeType === "category") {
+    const category = input.category?.trim();
+    if (!category) {
+      throw new Error("category is required for category exposure rules.");
+    }
+    rule.category = category;
+  }
+
+  return rule;
+}
+
+export function catalogExposureRecordToInput(
+  rule: DropshipAdminCatalogExposureRule,
+): DropshipAdminCatalogExposureRuleInput {
+  return {
+    scopeType: rule.scopeType,
+    action: rule.action,
+    productLineId: rule.productLineId ?? null,
+    productId: rule.productId ?? null,
+    productVariantId: rule.productVariantId ?? null,
+    category: rule.category?.trim() || null,
+    priority: rule.priority,
+    startsAt: rule.startsAt ?? null,
+    endsAt: rule.endsAt ?? null,
+    notes: rule.notes?.trim() || null,
+    metadata: rule.metadata ?? {},
+  };
+}
+
+export function catalogExposureRuleKey(rule: Pick<
+  DropshipAdminCatalogExposureRuleInput,
+  "scopeType" | "action" | "productLineId" | "productId" | "productVariantId" | "category"
+>): string {
+  return [
+    rule.scopeType,
+    rule.action,
+    rule.productLineId ?? "",
+    rule.productId ?? "",
+    rule.productVariantId ?? "",
+    rule.category?.trim().toLowerCase() ?? "",
+  ].join(":");
+}
+
 export function buildStoreConnectionOAuthStartInput(input: {
   platform: DropshipStorePlatform;
   shopDomain: string;
@@ -757,6 +924,34 @@ function parsePositiveInteger(value: string, key: string): number {
   }
   const parsed = Number(normalized);
   return assertPositiveInteger(parsed, key);
+}
+
+function parsePositiveIntegerInput(value: string | number | null | undefined, key: string): number {
+  if (typeof value === "number") {
+    return assertPositiveInteger(value, key);
+  }
+  if (typeof value === "string") {
+    return parsePositiveInteger(value, key);
+  }
+  throw new Error(`${key} must be a positive integer.`);
+}
+
+function parseIntegerInput(value: string | number, key: string): number {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value)) {
+      throw new Error(`${key} must be an integer.`);
+    }
+    return value;
+  }
+  const normalized = value.trim();
+  if (!/^-?\d+$/.test(normalized)) {
+    throw new Error(`${key} must be an integer.`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${key} is outside the supported integer range.`);
+  }
+  return parsed;
 }
 
 export function formatCents(cents: number): string {

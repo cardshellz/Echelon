@@ -7,6 +7,10 @@ import {
   buildStripeFundingSetupSessionInput,
   buildStripeWalletFundingSessionInput,
   buildVariantSelectionReplacement,
+  buildAdminCatalogExposurePreviewUrl,
+  buildCatalogExposureRuleInput,
+  catalogExposureRecordToInput,
+  catalogExposureRuleKey,
   buildStoreConnectionOAuthStartInput,
   formatCents,
   formatStatus,
@@ -75,6 +79,94 @@ describe("dropship ops surface client helpers", () => {
       selectedOnly: false,
       vendorId: undefined,
     })).toBe("/api/dropship/orders?statuses=accepted&page=1&selectedOnly=false");
+  });
+
+  it("builds admin catalog exposure preview URLs with explicit filters", () => {
+    expect(buildAdminCatalogExposurePreviewUrl({
+      search: " pack ",
+      exposedOnly: true,
+      includeInactiveCatalog: false,
+    })).toBe("/api/dropship/admin/catalog/preview?search=pack&exposedOnly=true&includeInactiveCatalog=false&page=1&limit=50");
+  });
+
+  it("builds catalog exposure rule inputs with exact scope targets", () => {
+    expect(buildCatalogExposureRuleInput({
+      scopeType: "variant",
+      action: "exclude",
+      productVariantId: "42",
+      category: "ignored",
+      priority: "200",
+      notes: "  hold for review ",
+    })).toEqual({
+      scopeType: "variant",
+      action: "exclude",
+      productLineId: null,
+      productId: null,
+      productVariantId: 42,
+      category: null,
+      priority: 200,
+      startsAt: null,
+      endsAt: null,
+      notes: "hold for review",
+      metadata: {},
+    });
+    expect(buildCatalogExposureRuleInput({
+      scopeType: "category",
+      action: "include",
+      category: " Supplies ",
+    })).toEqual(expect.objectContaining({
+      scopeType: "category",
+      action: "include",
+      category: "Supplies",
+    }));
+    expect(() => buildCatalogExposureRuleInput({
+      scopeType: "product_line",
+      action: "include",
+      productLineId: "",
+    })).toThrow();
+  });
+
+  it("dedupes catalog exposure rules by scope, action, and normalized target", () => {
+    expect(catalogExposureRuleKey(buildCatalogExposureRuleInput({
+      scopeType: "category",
+      action: "include",
+      category: " Supplies ",
+    }))).toBe(catalogExposureRuleKey(buildCatalogExposureRuleInput({
+      scopeType: "category",
+      action: "include",
+      category: "supplies",
+    })));
+  });
+
+  it("preserves catalog exposure effective windows when loading records into draft rules", () => {
+    expect(catalogExposureRecordToInput({
+      id: 1,
+      revisionId: 2,
+      scopeType: "catalog",
+      action: "include",
+      productLineId: null,
+      productId: null,
+      productVariantId: null,
+      category: null,
+      priority: 0,
+      startsAt: "2026-05-01T00:00:00.000Z",
+      endsAt: "2026-06-01T00:00:00.000Z",
+      isActive: true,
+      notes: " launch ",
+      metadata: { source: "test" },
+    })).toEqual({
+      scopeType: "catalog",
+      action: "include",
+      productLineId: null,
+      productId: null,
+      productVariantId: null,
+      category: null,
+      priority: 0,
+      startsAt: "2026-05-01T00:00:00.000Z",
+      endsAt: "2026-06-01T00:00:00.000Z",
+      notes: "launch",
+      metadata: { source: "test" },
+    });
   });
 
   it("builds store OAuth start payloads with platform-specific fields", () => {

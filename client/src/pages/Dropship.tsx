@@ -1,13 +1,19 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertCircle,
   Bell,
+  Boxes,
+  CheckCircle2,
   ClipboardList,
   FileSearch,
   History,
+  MinusCircle,
+  PlusCircle,
   RefreshCw,
   RotateCcw,
+  Save,
   Search,
   ShieldAlert,
   Store,
@@ -31,11 +37,23 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  buildAdminCatalogExposurePreviewUrl,
+  buildCatalogExposureRuleInput,
   countByKey,
+  catalogExposureRecordToInput,
+  catalogExposureRuleKey,
+  createDropshipIdempotencyKey,
   fetchJson,
   formatDateTime,
   formatStatus,
+  putJson,
+  queryErrorMessage,
   riskSeverityTone,
+  type DropshipAdminCatalogExposurePreviewResponse,
+  type DropshipAdminCatalogExposurePreviewRow,
+  type DropshipAdminCatalogExposureRulesReplaceResponse,
+  type DropshipAdminCatalogExposureRulesResponse,
+  type DropshipAdminCatalogExposureRuleInput,
   type DropshipAdminOpsOverview,
   type DropshipAdminOpsOverviewResponse,
   type DropshipAuditEventRecord,
@@ -46,6 +64,30 @@ import {
 } from "@/lib/dropship-ops-surface";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
+type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
+type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
+
+interface CatalogRuleFormState {
+  scopeType: CatalogExposureScopeFilter;
+  action: CatalogExposureActionFilter;
+  productLineId: string;
+  productId: string;
+  productVariantId: string;
+  category: string;
+  priority: string;
+  notes: string;
+}
+
+const emptyCatalogRuleForm: CatalogRuleFormState = {
+  scopeType: "catalog",
+  action: "include",
+  productLineId: "",
+  productId: "",
+  productVariantId: "",
+  category: "",
+  priority: "0",
+  notes: "",
+};
 
 export default function Dropship() {
   const [auditSearch, setAuditSearch] = useState("");
@@ -80,7 +122,7 @@ export default function Dropship() {
     });
   }
 
-  function refreshAll() {
+function refreshAll() {
     void overviewQuery.refetch();
     void auditQuery.refetch();
   }
@@ -136,6 +178,12 @@ export default function Dropship() {
               Overview
             </TabsTrigger>
             <TabsTrigger
+              value="catalog"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Catalog exposure
+            </TabsTrigger>
+            <TabsTrigger
               value="audit"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -151,6 +199,10 @@ export default function Dropship() {
             ) : (
               <EmptyState title="No ops data" description="The dropship ops overview did not return any data." />
             )}
+          </TabsContent>
+
+          <TabsContent value="catalog" className="m-0">
+            <CatalogExposureTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -204,6 +256,559 @@ export default function Dropship() {
       </div>
     </div>
   );
+}
+
+function CatalogExposureTab() {
+  const [search, setSearch] = useState("");
+  const [exposedOnly, setExposedOnly] = useState("false");
+  const [includeInactiveCatalog, setIncludeInactiveCatalog] = useState("false");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    exposedOnly: "false",
+    includeInactiveCatalog: "false",
+  });
+  const [draftRules, setDraftRules] = useState<DropshipAdminCatalogExposureRuleInput[]>([]);
+  const [loadedRulesKey, setLoadedRulesKey] = useState("");
+  const [ruleForm, setRuleForm] = useState<CatalogRuleFormState>(emptyCatalogRuleForm);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const previewUrl = useMemo(() => buildAdminCatalogExposurePreviewUrl({
+    search: appliedFilters.search,
+    exposedOnly: appliedFilters.exposedOnly === "true",
+    includeInactiveCatalog: appliedFilters.includeInactiveCatalog === "true",
+  }), [appliedFilters]);
+
+  const rulesQuery = useQuery<DropshipAdminCatalogExposureRulesResponse>({
+    queryKey: ["/api/dropship/admin/catalog/rules"],
+    queryFn: () => fetchJson<DropshipAdminCatalogExposureRulesResponse>("/api/dropship/admin/catalog/rules"),
+  });
+  const previewQuery = useQuery<DropshipAdminCatalogExposurePreviewResponse>({
+    queryKey: [previewUrl],
+    queryFn: () => fetchJson<DropshipAdminCatalogExposurePreviewResponse>(previewUrl),
+  });
+
+  const previewRows = previewQuery.data?.rows ?? [];
+  const exposedPreviewCount = previewRows.filter((row) => row.decision.exposed).length;
+  const blockedPreviewCount = previewRows.length - exposedPreviewCount;
+
+  useEffect(() => {
+    if (!rulesQuery.data) return;
+    const activeInputs = rulesQuery.data.rules
+      .filter((rule) => rule.isActive !== false)
+      .map(catalogExposureRecordToInput);
+    const nextRulesKey = activeInputs
+      .map((rule) => `${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
+      .sort()
+      .join("|");
+    if (nextRulesKey === loadedRulesKey) return;
+    setDraftRules(activeInputs);
+    setLoadedRulesKey(nextRulesKey);
+  }, [loadedRulesKey, rulesQuery.data]);
+
+  function applyCatalogFilters() {
+    setAppliedFilters({ search, exposedOnly, includeInactiveCatalog });
+  }
+
+  function addRuleFromForm() {
+    try {
+      upsertDraftRule(buildCatalogExposureRuleInput(ruleForm));
+      setMessage("Catalog exposure rule added to draft.");
+      setError("");
+    } catch (caught) {
+      setMessage("");
+      setError(caught instanceof Error ? caught.message : "Catalog exposure rule is invalid.");
+    }
+  }
+
+  function addVariantRule(row: DropshipAdminCatalogExposurePreviewRow, action: CatalogExposureActionFilter) {
+    const rule = buildCatalogExposureRuleInput({
+      scopeType: "variant",
+      action,
+      productVariantId: row.productVariantId,
+      priority: action === "include" ? 100 : 200,
+      notes: `${action === "include" ? "Include" : "Exclude"} ${row.variantSku || `variant ${row.productVariantId}`}`,
+    });
+    upsertDraftRule(rule);
+    setMessage(`${action === "include" ? "Include" : "Exclude"} variant rule added to draft.`);
+    setError("");
+  }
+
+  function upsertDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
+    const ruleKey = catalogExposureRuleKey(rule);
+    setDraftRules((current) => [
+      ...current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey),
+      rule,
+    ]);
+  }
+
+  function removeDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
+    const ruleKey = catalogExposureRuleKey(rule);
+    setDraftRules((current) => current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey));
+  }
+
+  async function saveDraftRules() {
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await putJson<DropshipAdminCatalogExposureRulesReplaceResponse>(
+        "/api/dropship/admin/catalog/rules",
+        {
+          idempotencyKey: createDropshipIdempotencyKey("admin-catalog-exposure"),
+          rules: draftRules,
+        },
+      );
+      setMessage(`Catalog exposure rules saved as revision ${result.revisionId}.`);
+      await Promise.all([rulesQuery.refetch(), previewQuery.refetch()]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Catalog exposure save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {(rulesQuery.error || previewQuery.error || error) && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {error
+              || queryErrorMessage(rulesQuery.error ?? previewQuery.error, "Dropship catalog exposure request failed.")}
+          </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active rules" value={String(rulesQuery.data?.rules.length ?? 0)} />
+        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Draft rules" value={String(draftRules.length)} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Exposed preview rows" value={String(exposedPreviewCount)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Blocked preview rows" value={String(blockedPreviewCount)} />
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
+        <section className="rounded-md border bg-card p-4">
+          <div>
+            <h2 className="text-lg font-semibold">Rule draft</h2>
+            <p className="text-sm text-muted-foreground">Define the catalog Card Shellz makes available to dropship vendors.</p>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-sm font-medium">Scope</label>
+              <Select
+                value={ruleForm.scopeType}
+                onValueChange={(value) => setRuleForm((current) => ({
+                  ...current,
+                  scopeType: value as CatalogExposureScopeFilter,
+                }))}
+              >
+                <SelectTrigger className="mt-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="catalog">Entire catalog</SelectItem>
+                  <SelectItem value="product_line">Product line</SelectItem>
+                  <SelectItem value="category">Category</SelectItem>
+                  <SelectItem value="product">Product</SelectItem>
+                  <SelectItem value="variant">Variant</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-sm font-medium">Action</label>
+              <Select
+                value={ruleForm.action}
+                onValueChange={(value) => setRuleForm((current) => ({
+                  ...current,
+                  action: value as CatalogExposureActionFilter,
+                }))}
+              >
+                <SelectTrigger className="mt-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="include">Include</SelectItem>
+                  <SelectItem value="exclude">Exclude</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <CatalogRuleTargetInput ruleForm={ruleForm} setRuleForm={setRuleForm} />
+
+            <div>
+              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-priority">Priority</label>
+              <Input
+                id="dropship-catalog-rule-priority"
+                className="mt-2"
+                value={ruleForm.priority}
+                onChange={(event) => setRuleForm((current) => ({ ...current, priority: event.target.value }))}
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-notes">Notes</label>
+              <Input
+                id="dropship-catalog-rule-notes"
+                className="mt-2"
+                value={ruleForm.notes}
+                onChange={(event) => setRuleForm((current) => ({ ...current, notes: event.target.value }))}
+                placeholder="Optional admin note"
+              />
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+            <Button type="button" variant="outline" className="gap-2" onClick={addRuleFromForm}>
+              <PlusCircle className="h-4 w-4" />
+              Add draft rule
+            </Button>
+            <Button type="button" variant="outline" onClick={() => setRuleForm(emptyCatalogRuleForm)}>
+              Reset form
+            </Button>
+            <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={saving} onClick={saveDraftRules}>
+              <Save className="h-4 w-4" />
+              {saving ? "Saving" : "Save rules"}
+            </Button>
+          </div>
+        </section>
+
+        <CatalogDraftRulesTable
+          rules={draftRules}
+          isLoading={rulesQuery.isLoading}
+          onRemoveRule={removeDraftRule}
+        />
+      </div>
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Catalog preview</h2>
+            <p className="text-sm text-muted-foreground">Verify current exposure decisions before vendors select products.</p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Search SKU, product, or variant"
+              />
+            </div>
+            <Select value={exposedOnly} onValueChange={setExposedOnly}>
+              <SelectTrigger className="lg:w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="false">All rows</SelectItem>
+                <SelectItem value="true">Exposed only</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={includeInactiveCatalog} onValueChange={setIncludeInactiveCatalog}>
+              <SelectTrigger className="lg:w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="false">Active only</SelectItem>
+                <SelectItem value="true">Include inactive</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyCatalogFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+
+        <CatalogPreviewTable
+          isLoading={previewQuery.isLoading || previewQuery.isFetching}
+          rows={previewRows}
+          total={previewQuery.data?.total ?? 0}
+          onAddVariantRule={addVariantRule}
+        />
+      </section>
+    </div>
+  );
+}
+
+function CatalogRuleTargetInput({
+  ruleForm,
+  setRuleForm,
+}: {
+  ruleForm: CatalogRuleFormState;
+  setRuleForm: Dispatch<SetStateAction<CatalogRuleFormState>>;
+}) {
+  const config = catalogRuleTargetInputConfig(ruleForm.scopeType);
+  if (!config) return null;
+
+  return (
+    <div>
+      <label className="text-sm font-medium" htmlFor={`dropship-catalog-rule-${config.key}`}>
+        {config.label}
+      </label>
+      <Input
+        id={`dropship-catalog-rule-${config.key}`}
+        className="mt-2"
+        value={ruleForm[config.key]}
+        onChange={(event) => setRuleForm((current) => ({ ...current, [config.key]: event.target.value }))}
+        placeholder={config.placeholder}
+      />
+    </div>
+  );
+}
+
+function CatalogDraftRulesTable({
+  isLoading,
+  onRemoveRule,
+  rules,
+}: {
+  isLoading: boolean;
+  onRemoveRule: (rule: DropshipAdminCatalogExposureRuleInput) => void;
+  rules: DropshipAdminCatalogExposureRuleInput[];
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Draft rule set</h2>
+          <p className="text-sm text-muted-foreground">Saving replaces the active admin exposure rule set.</p>
+        </div>
+        <Badge variant="outline">{rules.length} draft</Badge>
+      </div>
+
+      {isLoading ? (
+        <div className="mt-4 space-y-2">
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+        </div>
+      ) : rules.length === 0 ? (
+        <Empty className="mt-4 rounded-md border border-dashed p-8">
+          <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
+          <EmptyHeader>
+            <EmptyTitle>No draft rules</EmptyTitle>
+            <EmptyDescription>No catalog is exposed until at least one include rule is saved.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <div className="mt-4 rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Rule</TableHead>
+                <TableHead>Target</TableHead>
+                <TableHead>Priority</TableHead>
+                <TableHead>Notes</TableHead>
+                <TableHead className="w-[92px]">Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rules.map((rule) => (
+                <TableRow key={catalogExposureRuleKey(rule)}>
+                  <TableCell>
+                    <Badge variant="outline" className={catalogExposureActionTone(rule.action)}>
+                      {formatStatus(rule.action)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-medium">{formatStatus(rule.scopeType)}</div>
+                    <div className="text-xs text-muted-foreground">{catalogRuleTargetLabel(rule)}</div>
+                  </TableCell>
+                  <TableCell className="font-mono">{rule.priority}</TableCell>
+                  <TableCell className="max-w-[260px] truncate text-sm text-muted-foreground">{rule.notes || "None"}</TableCell>
+                  <TableCell>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2"
+                      onClick={() => onRemoveRule(rule)}
+                    >
+                      <MinusCircle className="h-4 w-4" />
+                      Remove
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CatalogPreviewTable({
+  isLoading,
+  onAddVariantRule,
+  rows,
+  total,
+}: {
+  isLoading: boolean;
+  onAddVariantRule: (row: DropshipAdminCatalogExposurePreviewRow, action: CatalogExposureActionFilter) => void;
+  rows: DropshipAdminCatalogExposurePreviewRow[];
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="mt-4 space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (rows.length === 0) {
+    return (
+      <Empty className="mt-4 rounded-md border border-dashed p-8">
+        <EmptyMedia variant="icon"><FileSearch /></EmptyMedia>
+        <EmptyHeader>
+          <EmptyTitle>No catalog rows</EmptyTitle>
+          <EmptyDescription>No catalog preview rows match the current filters.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return (
+    <div className="mt-4 rounded-md border">
+      <div className="flex items-center justify-between border-b px-3 py-2 text-sm text-muted-foreground">
+        <span>{total} row{total === 1 ? "" : "s"}</span>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Catalog row</TableHead>
+            <TableHead>Category</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Decision</TableHead>
+            <TableHead className="w-[220px]">Draft variant rule</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={row.productVariantId}>
+              <TableCell>
+                <div className="font-medium">{row.productName}</div>
+                <div className="text-xs text-muted-foreground">
+                  {[row.productSku, row.variantSku, row.variantName].filter(Boolean).join(" / ") || `Variant ${row.productVariantId}`}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div>{row.category || "None"}</div>
+                <div className="max-w-[220px] truncate text-xs text-muted-foreground">
+                  {row.productLineNames.length ? row.productLineNames.join(", ") : "No product line"}
+                </div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={row.productIsActive && row.variantIsActive
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-amber-200 bg-amber-50 text-amber-900"}
+                >
+                  {row.productIsActive && row.variantIsActive ? "Active" : "Inactive"}
+                </Badge>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={row.decision.exposed
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-zinc-200 bg-zinc-50 text-zinc-700"}
+                >
+                  {row.decision.exposed ? "Exposed" : "Blocked"}
+                </Badge>
+                <div className="mt-1 text-xs text-muted-foreground">{formatStatus(row.decision.reason)}</div>
+              </TableCell>
+              <TableCell>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-2"
+                    onClick={() => onAddVariantRule(row, "include")}
+                  >
+                    <PlusCircle className="h-4 w-4" />
+                    Include
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-2"
+                    onClick={() => onAddVariantRule(row, "exclude")}
+                  >
+                    <MinusCircle className="h-4 w-4" />
+                    Exclude
+                  </Button>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function CatalogMetric({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-md border bg-card p-4">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-3 text-2xl font-bold">{value}</div>
+    </div>
+  );
+}
+
+function catalogRuleTargetInputConfig(scopeType: CatalogExposureScopeFilter): {
+  key: "productLineId" | "productId" | "productVariantId" | "category";
+  label: string;
+  placeholder: string;
+} | null {
+  if (scopeType === "product_line") {
+    return { key: "productLineId", label: "Product line ID", placeholder: "123" };
+  }
+  if (scopeType === "product") {
+    return { key: "productId", label: "Product ID", placeholder: "123" };
+  }
+  if (scopeType === "variant") {
+    return { key: "productVariantId", label: "Variant ID", placeholder: "123" };
+  }
+  if (scopeType === "category") {
+    return { key: "category", label: "Category", placeholder: "Sealed wax" };
+  }
+  return null;
+}
+
+function catalogRuleTargetLabel(rule: DropshipAdminCatalogExposureRuleInput): string {
+  if (rule.scopeType === "catalog") return "Entire active catalog";
+  if (rule.scopeType === "product_line") return `Product line ${rule.productLineId}`;
+  if (rule.scopeType === "product") return `Product ${rule.productId}`;
+  if (rule.scopeType === "variant") return `Variant ${rule.productVariantId}`;
+  return rule.category || "Category";
+}
+
+function catalogExposureActionTone(action: CatalogExposureActionFilter): string {
+  if (action === "include") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  return "border-rose-200 bg-rose-50 text-rose-800";
 }
 
 function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
