@@ -25,12 +25,17 @@ describe("ShopifyDropshipWebhookSubscriptionProvider", () => {
     const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body));
       expect(body.variables).toMatchObject({
-        topics: ["ORDERS_CREATE", "ORDERS_PAID"],
+        topics: ["APP_UNINSTALLED", "ORDERS_CREATE", "ORDERS_PAID"],
       });
       return jsonResponse({
         data: {
           webhookSubscriptions: {
             nodes: [
+              {
+                id: "gid://shopify/WebhookSubscription/0",
+                topic: "APP_UNINSTALLED",
+                uri: "https://echelon.cardshellz.io/api/dropship/webhooks/shopify/app/uninstalled",
+              },
               {
                 id: "gid://shopify/WebhookSubscription/1",
                 topic: "ORDERS_CREATE",
@@ -86,6 +91,18 @@ describe("ShopifyDropshipWebhookSubscriptionProvider", () => {
           webhookSubscriptionCreate: {
             webhookSubscription: {
               id: "gid://shopify/WebhookSubscription/2",
+              topic: "APP_UNINSTALLED",
+              uri: "https://echelon.cardshellz.io/api/dropship/webhooks/shopify/app/uninstalled",
+            },
+            userErrors: [],
+          },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          webhookSubscriptionCreate: {
+            webhookSubscription: {
+              id: "gid://shopify/WebhookSubscription/3",
               topic: "ORDERS_PAID",
               uri: "https://echelon.cardshellz.io/api/dropship/webhooks/shopify/orders/paid",
             },
@@ -97,9 +114,16 @@ describe("ShopifyDropshipWebhookSubscriptionProvider", () => {
 
     await provider.afterStoreConnected(makeShopifyConnectInput());
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
     const mutationBody = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
     expect(mutationBody.variables).toEqual({
+      topic: "APP_UNINSTALLED",
+      webhookSubscription: {
+        uri: "https://echelon.cardshellz.io/api/dropship/webhooks/shopify/app/uninstalled",
+      },
+    });
+    const secondMutationBody = JSON.parse(String(fetchImpl.mock.calls[2]?.[1]?.body));
+    expect(secondMutationBody.variables).toEqual({
       topic: "ORDERS_PAID",
       webhookSubscription: {
         uri: "https://echelon.cardshellz.io/api/dropship/webhooks/shopify/orders/paid",
@@ -154,7 +178,7 @@ describe("ShopifyDropshipWebhookSubscriptionProvider", () => {
     expect(thrown).toMatchObject({
       code: "DROPSHIP_SHOPIFY_WEBHOOK_SUBSCRIPTION_REJECTED",
       context: expect.objectContaining({
-        topic: "ORDERS_CREATE",
+        topic: "APP_UNINSTALLED",
         retryable: false,
       }),
     } satisfies Partial<DropshipError>);

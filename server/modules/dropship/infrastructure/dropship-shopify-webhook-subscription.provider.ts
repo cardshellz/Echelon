@@ -4,7 +4,7 @@ import type { DropshipStoreConnectionPostConnectProvider } from "../application/
 
 type FetchLike = typeof fetch;
 
-type ShopifyWebhookTopic = "ORDERS_CREATE" | "ORDERS_PAID";
+type ShopifyWebhookTopic = "APP_UNINSTALLED" | "ORDERS_CREATE" | "ORDERS_PAID";
 
 interface ShopifyWebhookSubscriptionConfig {
   apiVersion: string;
@@ -60,6 +60,10 @@ const SHOPIFY_WEBHOOK_SUBSCRIPTION_PAGE_SIZE = 100;
 const SHOPIFY_WEBHOOK_SUBSCRIPTION_MAX_PAGES = 10;
 
 const SHOPIFY_DROPSHIP_WEBHOOK_SUBSCRIPTIONS = [
+  {
+    topic: "APP_UNINSTALLED",
+    path: "/api/dropship/webhooks/shopify/app/uninstalled",
+  },
   {
     topic: "ORDERS_CREATE",
     path: "/api/dropship/webhooks/shopify/orders/create",
