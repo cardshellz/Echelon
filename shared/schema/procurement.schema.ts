@@ -1,4 +1,5 @@
 import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, date } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -199,7 +200,7 @@ export const receivingOrders = procurementSchema.table("receiving_orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // Identification
-  receiptNumber: varchar("receipt_number", { length: 50 }).notNull().unique(), // Auto-generated RCV-YYYYMMDD-XXX
+  receiptNumber: varchar("receipt_number", { length: 50 }).notNull(), // Auto-generated RCV-YYYYMMDD-XXX (partial unique index in table constraints)
   poNumber: varchar("po_number", { length: 100 }), // External PO number from vendor
   purchaseOrderId: integer("purchase_order_id"), // FK to purchase_orders (added post-definition)
   asnNumber: varchar("asn_number", { length: 100 }), // Advance shipment notice number
@@ -232,7 +233,9 @@ export const receivingOrders = procurementSchema.table("receiving_orders", {
   closedBy: varchar("closed_by", { length: 100 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("receiving_orders_receipt_number_active_uidx").on(table.receiptNumber).where(sql`status <> 'cancelled'`),
+]);
 
 export const insertReceivingOrderSchema = createInsertSchema(receivingOrders).omit({
   id: true,
@@ -309,7 +312,7 @@ export type ReceivingLine = typeof receivingLines.$inferSelect;
 
 export const purchaseOrders = procurementSchema.table("purchase_orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  poNumber: varchar("po_number", { length: 30 }).notNull().unique(), // Auto: PO-YYYYMMDD-###
+  poNumber: varchar("po_number", { length: 30 }).notNull(), // Auto: PO-YYYYMMDD-### (partial unique index in table constraints)
   vendorId: integer("vendor_id").notNull().references(() => vendors.id),
   warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }), // Ship-to warehouse
   shipToAddress: text("ship_to_address"), // Override warehouse address
@@ -408,7 +411,9 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   invoicedTotalCents: bigint("invoiced_total_cents", { mode: "number" }).notNull().default(0),
   paidTotalCents: bigint("paid_total_cents", { mode: "number" }).notNull().default(0),
   outstandingCents: bigint("outstanding_cents", { mode: "number" }).notNull().default(0),
-});
+}, (table) => [
+  uniqueIndex("purchase_orders_po_number_active_uidx").on(table.poNumber).where(sql`status <> 'cancelled'`),
+]);
 
 export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders).omit({
   id: true,
@@ -611,7 +616,7 @@ export type PoReceipt = typeof poReceipts.$inferSelect;
 
 export const inboundShipments = procurementSchema.table("inbound_shipments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  shipmentNumber: varchar("shipment_number", { length: 30 }).notNull().unique(),
+  shipmentNumber: varchar("shipment_number", { length: 30 }).notNull(), // partial unique index: active records only (see migration 067)
   status: varchar("status", { length: 20 }).notNull().default("draft"),
   mode: varchar("mode", { length: 20 }),
   carrierName: varchar("carrier_name", { length: 100 }),
@@ -653,7 +658,9 @@ export const inboundShipments = procurementSchema.table("inbound_shipments", {
   closedAt: timestamp("closed_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("inbound_shipments_shipment_number_active_uidx").on(table.shipmentNumber).where(sql`status <> 'cancelled'`),
+]);
 
 export const insertInboundShipmentSchema = createInsertSchema(inboundShipments).omit({
   id: true,
@@ -985,7 +992,7 @@ export type VendorInvoiceAttachment = typeof vendorInvoiceAttachments.$inferSele
 
 export const apPayments = procurementSchema.table("ap_payments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  paymentNumber: varchar("payment_number", { length: 30 }).notNull().unique(), // Auto: PAY-YYYYMMDD-###
+  paymentNumber: varchar("payment_number", { length: 30 }).notNull(), // Auto: PAY-YYYYMMDD-### (partial unique index in table constraints)
 
   vendorId: integer("vendor_id").notNull().references(() => vendors.id),
 
@@ -1010,7 +1017,9 @@ export const apPayments = procurementSchema.table("ap_payments", {
   updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("ap_payments_payment_number_active_uidx").on(table.paymentNumber).where(sql`voided_at IS NULL`),
+]);
 
 export const insertApPaymentSchema = createInsertSchema(apPayments).omit({
   id: true,
