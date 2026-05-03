@@ -19,6 +19,11 @@ export type DropshipListingPushJobStatus =
   | "completed"
   | "failed"
   | "cancelled";
+export type DropshipTrackingPushStatus =
+  | "queued"
+  | "processing"
+  | "succeeded"
+  | "failed";
 export type DropshipStoreConnectionLifecycleStatus =
   | "connected"
   | "needs_reauth"
@@ -45,6 +50,13 @@ const allDropshipListingPushJobStatuses: DropshipListingPushJobStatus[] = [
   "completed",
   "failed",
   "cancelled",
+];
+
+const allDropshipTrackingPushStatuses: DropshipTrackingPushStatus[] = [
+  "queued",
+  "processing",
+  "succeeded",
+  "failed",
 ];
 
 export interface DropshipSettingsSection {
@@ -389,6 +401,40 @@ export interface DropshipAdminListingPushJobListResponse {
   limit: number;
   statuses: DropshipListingPushJobStatus[];
   summary: Array<{ status: DropshipListingPushJobStatus; count: number }>;
+}
+
+export interface DropshipAdminTrackingPushListItem {
+  pushId: number;
+  intakeId: number;
+  omsOrderId: number;
+  vendor: DropshipAdminOrderOpsVendorSummary;
+  storeConnection: DropshipAdminOrderOpsStoreSummary;
+  platform: string;
+  externalOrderId: string;
+  externalOrderNumber: string | null;
+  sourceOrderId: string | null;
+  status: DropshipTrackingPushStatus;
+  idempotencyKey: string;
+  requestHash: string;
+  carrier: string;
+  trackingNumber: string;
+  shippedAt: string;
+  externalFulfillmentId: string | null;
+  attemptCount: number;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface DropshipAdminTrackingPushListResponse {
+  items: DropshipAdminTrackingPushListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  statuses: DropshipTrackingPushStatus[];
+  summary: Array<{ status: DropshipTrackingPushStatus; count: number }>;
 }
 
 export interface DropshipAdminOrderOpsActionInput {
@@ -870,6 +916,27 @@ export function buildAdminListingPushJobsUrl(input: {
       ? allDropshipListingPushJobStatuses.join(",")
       : input.status;
   return buildQueryUrl("/api/dropship/admin/listing-push-jobs", {
+    search: input.search.trim(),
+    statuses,
+    platform: input.platform === "all" ? undefined : input.platform,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildAdminTrackingPushesUrl(input: {
+  search: string;
+  status: DropshipTrackingPushStatus | "default" | "all";
+  platform: DropshipStorePlatform | "all";
+  page?: number;
+  limit?: number;
+}): string {
+  const statuses = input.status === "default"
+    ? undefined
+    : input.status === "all"
+      ? allDropshipTrackingPushStatuses.join(",")
+      : input.status;
+  return buildQueryUrl("/api/dropship/admin/tracking-pushes", {
     search: input.search.trim(),
     statuses,
     platform: input.platform === "all" ? undefined : input.platform,
