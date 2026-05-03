@@ -486,7 +486,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       const lockedRows = await tx.execute(sqlTag`
         SELECT id, line_type, status, order_qty, cancelled_qty, sku
         FROM procurement.purchase_order_lines
-        WHERE id = ANY(${candidateLineIds}::integer[])
+        WHERE id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
         FOR UPDATE
       `);
 
@@ -497,7 +497,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         SELECT purchase_order_line_id
         FROM procurement.inbound_shipment_lines
         WHERE inbound_shipment_id = ${shipmentId}
-          AND purchase_order_line_id = ANY(${candidateLineIds}::integer[])
+          AND purchase_order_line_id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
       `);
       const existingPoLineIds = new Set(
         existingOnShipment.rows
@@ -522,7 +522,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
           COALESCE(SUM(isl.qty_shipped), 0) AS already_shipped
         FROM procurement.inbound_shipment_lines isl
         JOIN procurement.inbound_shipments s ON s.id = isl.inbound_shipment_id
-        WHERE isl.purchase_order_line_id = ANY(${candidateLineIds}::integer[])
+        WHERE isl.purchase_order_line_id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
           AND s.status != 'cancelled'
         GROUP BY isl.purchase_order_line_id
       `);
