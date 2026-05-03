@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildQueryUrl,
   buildListingPreviewRequest,
@@ -10,10 +10,12 @@ import {
   buildStoreConnectionOAuthStartInput,
   formatCents,
   formatStatus,
+  fetchJson,
   listingPreviewPushableCount,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   parseDollarInputToCents,
+  queryErrorMessage,
   riskSeverityTone,
   sectionStatusTone,
 } from "../dropship-ops-surface";
@@ -24,10 +26,30 @@ import type {
 } from "../dropship-ops-surface";
 
 describe("dropship ops surface client helpers", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("formats integer cents without floating point display drift", () => {
     expect(formatCents(0)).toBe("$0.00");
     expect(formatCents(123456)).toBe("$1,234.56");
     expect(formatCents(-987)).toBe("-$9.87");
+  });
+
+  it("surfaces common API error body shapes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      json: async () => ({ error: "Unauthorized dropship session." }),
+    } as Response)));
+
+    await expect(fetchJson("/api/dropship/orders")).rejects.toThrow("Unauthorized dropship session.");
+  });
+
+  it("falls back to explicit query error messages", () => {
+    expect(queryErrorMessage(new Error("Store connection failed."), "Fallback")).toBe("Store connection failed.");
+    expect(queryErrorMessage({ code: "UNKNOWN" }, "Fallback")).toBe("Fallback");
   });
 
   it("normalizes API status tokens for display", () => {

@@ -523,6 +523,13 @@ export async function putJson<T>(url: string, body: unknown): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export function queryErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return fallback;
+}
+
 export function buildStoreConnectionOAuthStartInput(input: {
   platform: DropshipStorePlatform;
   shopDomain: string;
@@ -801,8 +808,14 @@ export function countByKey(counts: DropshipOpsCount[], key: string): number {
 async function responseErrorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json();
+    if (typeof body?.error === "string" && body.error.trim()) {
+      return body.error;
+    }
     if (typeof body?.error?.message === "string") {
       return body.error.message;
+    }
+    if (typeof body?.message === "string" && body.message.trim()) {
+      return body.message;
     }
   } catch {
     // Fall through to status text.

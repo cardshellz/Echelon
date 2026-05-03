@@ -28,6 +28,7 @@ import {
   formatStatus,
   postJson,
   putJson,
+  queryErrorMessage,
   type DropshipAutoReloadConfigResponse,
   type DropshipStripeFundingRail,
   type DropshipStripeFundingSetupSessionResponse,
@@ -193,6 +194,15 @@ export default function DropshipPortalWallet() {
           </h1>
           <p className="mt-1 text-sm text-zinc-500">Balance, auto-reload configuration, funding methods, and ledger history.</p>
         </div>
+
+        {walletQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(walletQuery.error, "Unable to load dropship wallet.")}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {walletQuery.isLoading ? (
           <div className="mt-5 grid gap-4 lg:grid-cols-3">
@@ -363,7 +373,17 @@ export default function DropshipPortalWallet() {
               </div>
             </section>
           </>
-        ) : null}
+        ) : (
+          <Empty className="mt-5 rounded-md border border-dashed p-8">
+            <EmptyMedia variant="icon"><Wallet /></EmptyMedia>
+            <EmptyHeader>
+              <EmptyTitle>{walletQuery.error ? "Wallet unavailable" : "No wallet"}</EmptyTitle>
+              <EmptyDescription>
+                {walletQuery.error ? "The wallet API request failed." : "Dropship wallet state could not be loaded."}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
       </div>
     </DropshipPortalShell>
   );

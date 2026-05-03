@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { Bell } from "lucide-react";
+import { AlertCircle, Bell } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -7,6 +8,7 @@ import {
   fetchJson,
   formatDateTime,
   formatStatus,
+  queryErrorMessage,
   type DropshipNotificationListResponse,
 } from "@/lib/dropship-ops-surface";
 import { DropshipPortalShell } from "./DropshipPortalShell";
@@ -29,6 +31,15 @@ export default function DropshipPortalNotifications() {
           <p className="mt-1 text-sm text-zinc-500">Dropship account, order, wallet, store, listing, and return notifications.</p>
         </div>
 
+        {notificationsQuery.error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(notificationsQuery.error, "Unable to load dropship alerts.")}
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="mt-5 rounded-md border border-zinc-200 bg-white">
           {notificationsQuery.isLoading ? (
             <div className="space-y-2 p-4">
@@ -36,6 +47,14 @@ export default function DropshipPortalNotifications() {
               <Skeleton className="h-20 w-full" />
               <Skeleton className="h-20 w-full" />
             </div>
+          ) : notificationsQuery.error ? (
+            <Empty className="p-8">
+              <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
+              <EmptyHeader>
+                <EmptyTitle>Alerts unavailable</EmptyTitle>
+                <EmptyDescription>The alerts API request failed.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : notifications.length ? (
             <div className="divide-y divide-zinc-200">
               {notifications.map((notification) => (
