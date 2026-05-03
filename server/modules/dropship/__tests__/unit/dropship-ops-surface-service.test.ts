@@ -5,6 +5,7 @@ import {
   DropshipOpsSurfaceService,
   type DropshipAdminOpsOverview,
   type DropshipAuditEventSearchResult,
+  type DropshipDogfoodReadinessResult,
   type DropshipOpsSurfaceRepository,
   type DropshipVendorSettingsOverview,
 } from "../../application/dropship-ops-surface-service";
@@ -83,12 +84,51 @@ describe("DropshipOpsSurfaceService", () => {
       context: { vendorId: 10 },
     });
   });
+
+  it("lists dogfood readiness with validated filters and generated timestamp", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs);
+
+    const result = await service.listDogfoodReadiness({
+      status: "blocked",
+      platform: "ebay",
+      search: " vendor ",
+      page: 2,
+      limit: 10,
+    });
+
+    expect(result.summary).toEqual([{ status: "blocked", count: 1 }]);
+    expect(repository.lastDogfoodInput).toMatchObject({
+      status: "blocked",
+      platform: "ebay",
+      search: "vendor",
+      page: 2,
+      limit: 10,
+      generatedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_DOGFOOD_READINESS_VIEWED",
+      context: { status: "blocked", platform: "ebay" },
+    });
+  });
+
+  it("validates dogfood readiness status before repository access", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const service = makeService(repository, []);
+
+    await expect(service.listDogfoodReadiness({ status: "not_ready" })).rejects.toMatchObject({
+      code: "DROPSHIP_DOGFOOD_READINESS_INVALID_INPUT",
+    });
+    expect(repository.lastDogfoodInput).toBeNull();
+  });
 });
 
 class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
   lastSettingsVendorId: number | null = null;
   lastOverviewInput: Parameters<DropshipOpsSurfaceRepository["getAdminOpsOverview"]>[0] | null = null;
   lastAuditSearch: Parameters<DropshipOpsSurfaceRepository["searchAuditEvents"]>[0] | null = null;
+  lastDogfoodInput: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0] | null = null;
 
   async getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview> {
     this.lastSettingsVendorId = vendorId;
@@ -118,6 +158,20 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
   ): Promise<DropshipAuditEventSearchResult> {
     this.lastAuditSearch = input;
     return { items: [], total: 0, page: input.page, limit: input.limit };
+  }
+
+  async listDogfoodReadiness(
+    input: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0],
+  ): Promise<DropshipDogfoodReadinessResult> {
+    this.lastDogfoodInput = input;
+    return {
+      generatedAt: input.generatedAt,
+      items: [],
+      total: 0,
+      page: input.page,
+      limit: input.limit,
+      summary: [{ status: "blocked", count: 1 }],
+    };
   }
 }
 

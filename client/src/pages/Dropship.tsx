@@ -38,6 +38,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   buildAdminCatalogExposurePreviewUrl,
+  buildAdminDogfoodReadinessUrl,
   buildAdminListingPushJobsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
@@ -50,6 +51,7 @@ import {
   catalogExposureRuleKey,
   createDropshipIdempotencyKey,
   fetchJson,
+  formatCents,
   formatDateTime,
   formatStatus,
   postJson,
@@ -74,6 +76,9 @@ import {
   type DropshipAuditEventSearchResponse,
   type DropshipAdminTrackingPushListItem,
   type DropshipAdminTrackingPushListResponse,
+  type DropshipDogfoodReadinessItem,
+  type DropshipDogfoodReadinessResponse,
+  type DropshipDogfoodReadinessStatus,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
   type DropshipOpsOrderIntakeStatus,
@@ -86,6 +91,7 @@ import {
 } from "@/lib/dropship-ops-surface";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
+type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
 type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
 type ListingPushStatusFilter = DropshipListingPushJobStatus | "default" | "all";
 type TrackingPushStatusFilter = DropshipTrackingPushStatus | "default" | "all";
@@ -157,6 +163,13 @@ const trackingPushStatusFilters: TrackingPushStatusFilter[] = [
   "processing",
   "queued",
   "succeeded",
+];
+
+const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
+  "all",
+  "blocked",
+  "warning",
+  "ready",
 ];
 
 export default function Dropship() {
@@ -248,6 +261,12 @@ function refreshAll() {
               Overview
             </TabsTrigger>
             <TabsTrigger
+              value="dogfood"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Dogfood readiness
+            </TabsTrigger>
+            <TabsTrigger
               value="catalog"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -293,6 +312,10 @@ function refreshAll() {
             ) : (
               <EmptyState title="No ops data" description="The dropship ops overview did not return any data." />
             )}
+          </TabsContent>
+
+          <TabsContent value="dogfood" className="m-0">
+            <DogfoodReadinessTab />
           </TabsContent>
 
           <TabsContent value="catalog" className="m-0">
@@ -364,6 +387,109 @@ function refreshAll() {
           </TabsContent>
         </Tabs>
       </div>
+    </div>
+  );
+}
+
+function DogfoodReadinessTab() {
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<DogfoodReadinessStatusFilter>("all");
+  const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "all" as DogfoodReadinessStatusFilter,
+    platform: "all" as StoreConnectionPlatformFilter,
+  });
+
+  const readinessUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
+    search: appliedFilters.search,
+    status: appliedFilters.status,
+    platform: appliedFilters.platform,
+  }), [appliedFilters]);
+
+  const readinessQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [readinessUrl],
+    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(readinessUrl),
+  });
+
+  const items = readinessQuery.data?.items ?? [];
+  const summary = readinessQuery.data?.summary ?? [];
+
+  function applyReadinessFilters() {
+    setAppliedFilters({ search, status, platform });
+  }
+
+  return (
+    <div className="space-y-5">
+      {readinessQuery.error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {queryErrorMessage(readinessQuery.error, "Unable to load dropship dogfood readiness.")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Dogfood readiness</h2>
+            <p className="text-sm text-muted-foreground">
+              Validate each vendor/store against the minimum internal launch checklist before running live orders.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Vendor, member, store, or domain"
+              />
+            </div>
+            <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
+              <SelectTrigger className="lg:w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All platforms</SelectItem>
+                <SelectItem value="ebay">eBay</SelectItem>
+                <SelectItem value="shopify">Shopify</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={status} onValueChange={(value) => setStatus(value as DogfoodReadinessStatusFilter)}>
+              <SelectTrigger className="lg:w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {dogfoodReadinessStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {option === "all" ? "All statuses" : formatStatus(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyReadinessFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Ready" value={String(readinessSummaryCount(summary, "ready"))} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Blocked" value={String(readinessSummaryCount(summary, "blocked"))} />
+        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Warnings" value={String(readinessSummaryCount(summary, "warning"))} />
+        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching rows" value={String(readinessQuery.data?.total ?? 0)} />
+      </section>
+
+      <DogfoodReadinessTable
+        isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
+        items={items}
+        total={readinessQuery.data?.total ?? 0}
+      />
     </div>
   );
 }
@@ -1165,6 +1291,124 @@ function CatalogExposureTab() {
   );
 }
 
+function DogfoodReadinessTable({
+  isLoading,
+  items,
+  total,
+}: {
+  isLoading: boolean;
+  items: DropshipDogfoodReadinessItem[];
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="mt-4 space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return <EmptyState title="No readiness rows" description="No dropship vendor/store rows match the current filters." />;
+  }
+
+  return (
+    <section className="rounded-md border bg-card">
+      <div className="flex items-center justify-between border-b px-4 py-3">
+        <div>
+          <h2 className="text-lg font-semibold">Launch checklist</h2>
+          <p className="text-sm text-muted-foreground">{total} matching row{total === 1 ? "" : "s"}</p>
+        </div>
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Vendor/store</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Blocking checks</TableHead>
+            <TableHead>Catalog</TableHead>
+            <TableHead>Wallet</TableHead>
+            <TableHead className="w-[145px]">Store updated</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {items.map((item) => {
+            const blockingChecks = item.checks.filter((check) => check.status === "blocked");
+            const warningChecks = item.checks.filter((check) => check.status === "warning");
+            return (
+              <TableRow key={`${item.vendor.vendorId}:${item.storeConnection.storeConnectionId ?? "none"}`}>
+                <TableCell>
+                  <div className="font-medium">{item.vendor.businessName || item.vendor.email || `Vendor ${item.vendor.vendorId}`}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {[item.storeConnection.externalDisplayName, item.storeConnection.shopDomain, item.storeConnection.platform ? formatStatus(item.storeConnection.platform) : null]
+                      .filter(Boolean)
+                      .join(" / ") || item.vendor.memberId}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={dogfoodReadinessStatusTone(item.readinessStatus)}>
+                    {formatStatus(item.readinessStatus)}
+                  </Badge>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {item.blockerCount} blocker{item.blockerCount === 1 ? "" : "s"} / {item.warningCount} warning{item.warningCount === 1 ? "" : "s"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  {blockingChecks.length > 0 ? (
+                    <div className="space-y-1">
+                      {blockingChecks.slice(0, 3).map((check) => (
+                        <div key={check.key} className="max-w-[360px] truncate text-sm">
+                          <span className="font-medium">{check.label}:</span>{" "}
+                          <span className="text-muted-foreground">{check.message}</span>
+                        </div>
+                      ))}
+                      {blockingChecks.length > 3 && (
+                        <div className="text-xs text-muted-foreground">+{blockingChecks.length - 3} more blocker(s)</div>
+                      )}
+                    </div>
+                  ) : warningChecks.length > 0 ? (
+                    <div className="space-y-1">
+                      {warningChecks.slice(0, 2).map((check) => (
+                        <div key={check.key} className="max-w-[360px] truncate text-sm text-muted-foreground">
+                          {check.label}: {check.message}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground">All required checks ready</div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className="text-sm">
+                    Admin include: <span className="font-mono">{item.metrics.adminCatalogIncludeRuleCount}</span>
+                  </div>
+                  <div className="text-sm">
+                    Vendor include: <span className="font-mono">{item.metrics.vendorSelectionIncludeRuleCount}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Warehouse {item.metrics.defaultWarehouseId ?? "missing"} / Listing config {item.metrics.listingConfigActive ? "active" : "not ready"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="text-sm">{formatCents(item.metrics.walletAvailableBalanceCents)}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {item.metrics.activeFundingMethodCount} funding method{item.metrics.activeFundingMethodCount === 1 ? "" : "s"} / Auto reload {item.metrics.autoReloadEnabled ? "on" : "off"}
+                  </div>
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                  {formatDateTime(item.storeConnection.updatedAt)}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </section>
+  );
+}
+
 function ListingPushJobsTable({
   isLoading,
   jobs,
@@ -1949,6 +2193,13 @@ function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
   return formatStatus(status);
 }
 
+function readinessSummaryCount(
+  summary: DropshipDogfoodReadinessResponse["summary"],
+  status: DropshipDogfoodReadinessStatus,
+): number {
+  return summary.find((entry) => entry.status === status)?.count ?? 0;
+}
+
 function listingPushStatusLabel(status: ListingPushStatusFilter): string {
   if (status === "default") return "Needs attention";
   if (status === "all") return "All statuses";
@@ -1986,6 +2237,12 @@ function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function dogfoodReadinessStatusTone(status: DropshipDogfoodReadinessStatus): string {
+  if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
+  return "border-rose-200 bg-rose-50 text-rose-800";
 }
 
 function listingPushStatusTone(status: DropshipListingPushJobStatus): string {

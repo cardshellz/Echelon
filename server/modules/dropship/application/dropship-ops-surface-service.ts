@@ -28,8 +28,19 @@ const adminOpsOverviewInputSchema = z.object({
   storeConnectionId: positiveIdSchema.optional(),
 }).strict();
 
+const dogfoodReadinessStatusSchema = z.enum(["ready", "warning", "blocked"]);
+const dogfoodReadinessInputSchema = z.object({
+  status: dogfoodReadinessStatusSchema.optional(),
+  platform: z.enum(["ebay", "shopify"]).optional(),
+  search: optionalStringSchema,
+  page: pageSchema,
+  limit: limitSchema,
+}).strict();
+
 export type SearchDropshipAuditEventsInput = z.infer<typeof searchAuditEventsInputSchema>;
 export type GetDropshipAdminOpsOverviewInput = z.infer<typeof adminOpsOverviewInputSchema>;
+export type DropshipDogfoodReadinessStatus = z.infer<typeof dogfoodReadinessStatusSchema>;
+export type ListDropshipDogfoodReadinessInput = z.infer<typeof dogfoodReadinessInputSchema>;
 
 export interface DropshipOpsSettingsSection {
   key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
@@ -126,12 +137,71 @@ export interface DropshipAdminOpsOverview {
   recentAuditEvents: DropshipAuditEventRecord[];
 }
 
+export interface DropshipDogfoodReadinessCheck {
+  key: string;
+  label: string;
+  status: "ready" | "warning" | "blocked";
+  message: string;
+}
+
+export interface DropshipDogfoodReadinessItem {
+  vendor: {
+    vendorId: number;
+    memberId: string;
+    businessName: string | null;
+    email: string | null;
+    status: string;
+    entitlementStatus: string;
+  };
+  storeConnection: {
+    storeConnectionId: number | null;
+    platform: string | null;
+    status: string | null;
+    setupStatus: string | null;
+    externalDisplayName: string | null;
+    shopDomain: string | null;
+    updatedAt: Date | null;
+  };
+  readinessStatus: DropshipDogfoodReadinessStatus;
+  blockerCount: number;
+  warningCount: number;
+  checks: DropshipDogfoodReadinessCheck[];
+  metrics: {
+    defaultWarehouseId: number | null;
+    adminCatalogIncludeRuleCount: number;
+    vendorSelectionIncludeRuleCount: number;
+    listingConfigActive: boolean;
+    setupOpenBlockerCount: number;
+    walletAvailableBalanceCents: number;
+    activeFundingMethodCount: number;
+    autoReloadEnabled: boolean;
+    notificationPreferenceCount: number;
+  };
+}
+
+export interface DropshipDogfoodReadinessSummary {
+  status: DropshipDogfoodReadinessStatus;
+  count: number;
+}
+
+export interface DropshipDogfoodReadinessResult {
+  generatedAt: Date;
+  items: DropshipDogfoodReadinessItem[];
+  total: number;
+  page: number;
+  limit: number;
+  summary: DropshipDogfoodReadinessSummary[];
+}
+
 export interface DropshipOpsSurfaceRepository {
   getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview>;
   getAdminOpsOverview(
     input: GetDropshipAdminOpsOverviewInput & { generatedAt: Date },
   ): Promise<DropshipAdminOpsOverview>;
   searchAuditEvents(input: SearchDropshipAuditEventsInput): Promise<DropshipAuditEventSearchResult>;
+  listDogfoodReadiness(
+    input: ListDropshipDogfoodReadinessInput & { generatedAt: Date },
+  ): Promise<DropshipDogfoodReadinessResult>;
 }
 
 export class DropshipOpsSurfaceService {
@@ -178,6 +248,30 @@ export class DropshipOpsSurfaceService {
       "DROPSHIP_AUDIT_SEARCH_INVALID_INPUT",
     );
     return this.deps.repository.searchAuditEvents(parsed);
+  }
+
+  async listDogfoodReadiness(input: unknown = {}): Promise<DropshipDogfoodReadinessResult> {
+    const parsed = parseOpsSurfaceInput(
+      dogfoodReadinessInputSchema,
+      input,
+      "DROPSHIP_DOGFOOD_READINESS_INVALID_INPUT",
+    );
+    const result = await this.deps.repository.listDogfoodReadiness({
+      ...parsed,
+      generatedAt: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_DOGFOOD_READINESS_VIEWED",
+      message: "Dropship dogfood readiness was loaded.",
+      context: {
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        status: parsed.status ?? null,
+        platform: parsed.platform ?? null,
+      },
+    });
+    return result;
   }
 }
 

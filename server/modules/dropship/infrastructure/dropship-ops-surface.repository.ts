@@ -5,6 +5,10 @@ import {
   type DropshipAdminOpsOverview,
   type DropshipAuditEventRecord,
   type DropshipAuditEventSearchResult,
+  type DropshipDogfoodReadinessCheck,
+  type DropshipDogfoodReadinessItem,
+  type DropshipDogfoodReadinessResult,
+  type DropshipDogfoodReadinessStatus,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
   type DropshipOpsSurfaceRepository,
@@ -61,6 +65,36 @@ interface AuditEventRow {
   payload: Record<string, unknown> | null;
   created_at: Date;
   total_count?: string | number;
+}
+
+interface DogfoodReadinessRow {
+  vendor_id: number;
+  member_id: string;
+  business_name: string | null;
+  email: string | null;
+  vendor_status: string;
+  entitlement_status: string;
+  store_connection_id: number | null;
+  platform: string | null;
+  store_status: string | null;
+  setup_status: string | null;
+  external_display_name: string | null;
+  shop_domain: string | null;
+  access_token_ref: string | null;
+  updated_at: Date | null;
+  default_warehouse_id_text: string | null;
+  listing_config_id: number | null;
+  listing_config_platform: string | null;
+  listing_config_active: boolean | null;
+  admin_catalog_include_rule_count: string | number;
+  vendor_selection_include_rule_count: string | number;
+  setup_open_blocker_count: string | number;
+  setup_check_open_blocker_count: string | number;
+  wallet_status: string | null;
+  available_balance_cents: string | number | null;
+  active_funding_method_count: string | number;
+  auto_reload_enabled: boolean | null;
+  notification_preference_count: string | number;
 }
 
 export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
@@ -236,6 +270,33 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
     };
   }
 
+  async listDogfoodReadiness(
+    input: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0],
+  ): Promise<DropshipDogfoodReadinessResult> {
+    const filters = buildDogfoodReadinessFilters(input);
+    const result = await this.dbPool.query<DogfoodReadinessRow>(
+      `${dogfoodReadinessSql()}
+       ${filters.whereSql}
+       ORDER BY v.updated_at DESC, v.id DESC, sc.updated_at DESC NULLS LAST, sc.id DESC NULLS LAST`,
+      filters.params,
+    );
+
+    const allItems = result.rows.map(mapDogfoodReadinessRow);
+    const filteredItems = input.status
+      ? allItems.filter((item) => item.readinessStatus === input.status)
+      : allItems;
+    const offset = (input.page - 1) * input.limit;
+
+    return {
+      generatedAt: input.generatedAt,
+      items: filteredItems.slice(offset, offset + input.limit),
+      total: filteredItems.length,
+      page: input.page,
+      limit: input.limit,
+      summary: summarizeDogfoodReadiness(allItems),
+    };
+  }
+
   private async countByStatus(
     tableName: string,
     statusColumn: string,
@@ -253,6 +314,114 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
     );
     return result.rows.map(mapCountRow);
   }
+}
+
+function dogfoodReadinessSql(): string {
+  return `
+    SELECT
+      v.id AS vendor_id,
+      v.member_id,
+      v.business_name,
+      v.email,
+      v.status AS vendor_status,
+      v.entitlement_status,
+      sc.id AS store_connection_id,
+      sc.platform,
+      sc.status AS store_status,
+      sc.setup_status,
+      sc.external_display_name,
+      sc.shop_domain,
+      sc.access_token_ref,
+      sc.updated_at,
+      sc.config #>> '{orderProcessing,defaultWarehouseId}' AS default_warehouse_id_text,
+      slc.id AS listing_config_id,
+      slc.platform AS listing_config_platform,
+      slc.is_active AS listing_config_active,
+      COALESCE(admin_catalog.include_rule_count, 0) AS admin_catalog_include_rule_count,
+      COALESCE(selection_rules.include_rule_count, 0) AS vendor_selection_include_rule_count,
+      COALESCE(setup_blockers.open_blocker_count, 0) AS setup_open_blocker_count,
+      COALESCE(setup_checks.open_blocker_count, 0) AS setup_check_open_blocker_count,
+      wa.status AS wallet_status,
+      wa.available_balance_cents,
+      COALESCE(funding.active_funding_method_count, 0) AS active_funding_method_count,
+      ars.enabled AS auto_reload_enabled,
+      COALESCE(notification_prefs.preference_count, 0) AS notification_preference_count
+    FROM dropship.dropship_vendors v
+    LEFT JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
+    LEFT JOIN dropship.dropship_store_listing_configs slc ON slc.store_connection_id = sc.id
+    LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = v.id
+    LEFT JOIN dropship.dropship_auto_reload_settings ars ON ars.vendor_id = v.id
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS include_rule_count
+      FROM dropship.dropship_catalog_rules cr
+      WHERE cr.action = 'include'
+        AND cr.is_active = true
+        AND (cr.starts_at IS NULL OR cr.starts_at <= now())
+        AND (cr.ends_at IS NULL OR cr.ends_at > now())
+    ) admin_catalog ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS include_rule_count
+      FROM dropship.dropship_vendor_selection_rules vsr
+      WHERE vsr.vendor_id = v.id
+        AND vsr.action = 'include'
+        AND vsr.is_active = true
+    ) selection_rules ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS open_blocker_count
+      FROM dropship.dropship_setup_blockers sb
+      WHERE sb.vendor_id = v.id
+        AND (sb.store_connection_id = sc.id OR (sc.id IS NULL AND sb.store_connection_id IS NULL))
+        AND sb.status <> 'resolved'
+        AND sb.severity IN ('blocker', 'error')
+    ) setup_blockers ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS open_blocker_count
+      FROM dropship.dropship_store_setup_checks ssc
+      WHERE ssc.vendor_id = v.id
+        AND (ssc.store_connection_id = sc.id OR (sc.id IS NULL AND ssc.store_connection_id IS NULL))
+        AND ssc.resolved_at IS NULL
+        AND ssc.status NOT IN ('passed', 'ready', 'resolved')
+        AND ssc.severity IN ('blocker', 'error')
+    ) setup_checks ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS active_funding_method_count
+      FROM dropship.dropship_funding_methods fm
+      WHERE fm.vendor_id = v.id
+        AND fm.status = 'active'
+    ) funding ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS preference_count
+      FROM dropship.dropship_notification_preferences np
+      WHERE np.vendor_id = v.id
+    ) notification_prefs ON true
+  `;
+}
+
+function buildDogfoodReadinessFilters(input: {
+  platform?: string;
+  search?: string;
+}): { whereSql: string; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (input.platform) {
+    params.push(input.platform);
+    clauses.push(`sc.platform = $${params.length}`);
+  }
+  if (input.search) {
+    params.push(`%${input.search.trim()}%`);
+    clauses.push(`(
+      v.member_id ILIKE $${params.length}
+      OR v.business_name ILIKE $${params.length}
+      OR v.email ILIKE $${params.length}
+      OR sc.external_display_name ILIKE $${params.length}
+      OR sc.shop_domain ILIKE $${params.length}
+      OR sc.platform ILIKE $${params.length}
+    )`);
+  }
+  return {
+    whereSql: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
+    params,
+  };
 }
 
 function buildRiskBuckets(input: {
@@ -307,6 +476,188 @@ function buildRiskBuckets(input: {
       count: sumCounts(input.notificationStatusCounts, ["failed"]),
     },
   ];
+}
+
+function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadinessItem {
+  const adminCatalogIncludeRuleCount = toNumber(row.admin_catalog_include_rule_count);
+  const vendorSelectionIncludeRuleCount = toNumber(row.vendor_selection_include_rule_count);
+  const setupOpenBlockerCount = toNumber(row.setup_open_blocker_count) + toNumber(row.setup_check_open_blocker_count);
+  const walletAvailableBalanceCents = toNumber(row.available_balance_cents ?? 0);
+  const activeFundingMethodCount = toNumber(row.active_funding_method_count);
+  const notificationPreferenceCount = toNumber(row.notification_preference_count);
+  const defaultWarehouseId = parsePositiveIntegerOrNull(row.default_warehouse_id_text);
+  const listingConfigActive = row.listing_config_id !== null
+    && row.listing_config_active === true
+    && row.listing_config_platform === row.platform;
+  const checks = buildDogfoodChecks({
+    row,
+    defaultWarehouseId,
+    adminCatalogIncludeRuleCount,
+    vendorSelectionIncludeRuleCount,
+    listingConfigActive,
+    setupOpenBlockerCount,
+    walletAvailableBalanceCents,
+    activeFundingMethodCount,
+    notificationPreferenceCount,
+  });
+  const blockerCount = checks.filter((check) => check.status === "blocked").length;
+  const warningCount = checks.filter((check) => check.status === "warning").length;
+
+  return {
+    vendor: {
+      vendorId: row.vendor_id,
+      memberId: row.member_id,
+      businessName: row.business_name,
+      email: row.email,
+      status: row.vendor_status,
+      entitlementStatus: row.entitlement_status,
+    },
+    storeConnection: {
+      storeConnectionId: row.store_connection_id,
+      platform: row.platform,
+      status: row.store_status,
+      setupStatus: row.setup_status,
+      externalDisplayName: row.external_display_name,
+      shopDomain: row.shop_domain,
+      updatedAt: row.updated_at,
+    },
+    readinessStatus: blockerCount > 0 ? "blocked" : warningCount > 0 ? "warning" : "ready",
+    blockerCount,
+    warningCount,
+    checks,
+    metrics: {
+      defaultWarehouseId,
+      adminCatalogIncludeRuleCount,
+      vendorSelectionIncludeRuleCount,
+      listingConfigActive,
+      setupOpenBlockerCount,
+      walletAvailableBalanceCents,
+      activeFundingMethodCount,
+      autoReloadEnabled: row.auto_reload_enabled === true,
+      notificationPreferenceCount,
+    },
+  };
+}
+
+function buildDogfoodChecks(input: {
+  row: DogfoodReadinessRow;
+  defaultWarehouseId: number | null;
+  adminCatalogIncludeRuleCount: number;
+  vendorSelectionIncludeRuleCount: number;
+  listingConfigActive: boolean;
+  setupOpenBlockerCount: number;
+  walletAvailableBalanceCents: number;
+  activeFundingMethodCount: number;
+  notificationPreferenceCount: number;
+}): DropshipDogfoodReadinessCheck[] {
+  return [
+    {
+      key: "vendor_entitlement",
+      label: "Vendor entitlement",
+      status: input.row.vendor_status === "active" && input.row.entitlement_status === "active" ? "ready" : "blocked",
+      message: input.row.vendor_status === "active" && input.row.entitlement_status === "active"
+        ? "Vendor and .ops entitlement are active."
+        : `Vendor is ${input.row.vendor_status}; entitlement is ${input.row.entitlement_status}.`,
+    },
+    {
+      key: "store_connection",
+      label: "Store connection",
+      status: input.row.store_connection_id !== null
+        && input.row.store_status === "connected"
+        && Boolean(input.row.access_token_ref)
+        ? "ready"
+        : "blocked",
+      message: input.row.store_connection_id === null
+        ? "No store connection exists."
+        : input.row.store_status === "connected" && Boolean(input.row.access_token_ref)
+          ? "Store connection is connected with an access token."
+          : `Store is ${input.row.store_status ?? "missing"}; token ${input.row.access_token_ref ? "present" : "missing"}.`,
+    },
+    {
+      key: "setup_checks",
+      label: "Setup checks",
+      status: input.row.setup_status === "ready" && input.setupOpenBlockerCount === 0 ? "ready" : "blocked",
+      message: input.row.setup_status === "ready" && input.setupOpenBlockerCount === 0
+        ? "Store setup checks are ready."
+        : `Setup is ${input.row.setup_status ?? "missing"} with ${input.setupOpenBlockerCount} open blocker(s).`,
+    },
+    {
+      key: "order_warehouse",
+      label: "Order warehouse",
+      status: input.defaultWarehouseId !== null ? "ready" : "blocked",
+      message: input.defaultWarehouseId !== null
+        ? `Default warehouse ${input.defaultWarehouseId} configured.`
+        : "Default order-processing warehouse is missing.",
+    },
+    {
+      key: "listing_config",
+      label: "Listing configuration",
+      status: input.listingConfigActive ? "ready" : "blocked",
+      message: input.listingConfigActive
+        ? "Store listing configuration is active."
+        : "Store listing configuration is missing, inactive, or platform-mismatched.",
+    },
+    {
+      key: "admin_catalog",
+      label: "Admin catalog",
+      status: input.adminCatalogIncludeRuleCount > 0 ? "ready" : "blocked",
+      message: input.adminCatalogIncludeRuleCount > 0
+        ? `${input.adminCatalogIncludeRuleCount} active include rule(s) expose catalog.`
+        : "No active admin include rule exposes catalog.",
+    },
+    {
+      key: "vendor_selection",
+      label: "Vendor selection",
+      status: input.vendorSelectionIncludeRuleCount > 0 ? "ready" : "blocked",
+      message: input.vendorSelectionIncludeRuleCount > 0
+        ? `${input.vendorSelectionIncludeRuleCount} active vendor include rule(s) exist.`
+        : "Vendor has not selected any catalog.",
+    },
+    {
+      key: "wallet",
+      label: "Wallet",
+      status: input.walletAvailableBalanceCents > 0 || input.activeFundingMethodCount > 0 ? "ready" : "warning",
+      message: input.walletAvailableBalanceCents > 0
+        ? `Wallet has ${input.walletAvailableBalanceCents} available cent(s).`
+        : input.activeFundingMethodCount > 0
+          ? `${input.activeFundingMethodCount} active funding method(s) exist.`
+          : "Wallet has no available balance or active funding method.",
+    },
+    {
+      key: "auto_reload",
+      label: "Auto reload",
+      status: input.row.auto_reload_enabled === true ? "ready" : "warning",
+      message: input.row.auto_reload_enabled === true
+        ? "Auto reload is enabled."
+        : "Auto reload is disabled or not configured.",
+    },
+    {
+      key: "notifications",
+      label: "Notifications",
+      status: input.notificationPreferenceCount > 0 ? "ready" : "warning",
+      message: input.notificationPreferenceCount > 0
+        ? `${input.notificationPreferenceCount} notification preference override(s) configured.`
+        : "No notification preferences are configured.",
+    },
+  ];
+}
+
+function summarizeDogfoodReadiness(
+  items: readonly DropshipDogfoodReadinessItem[],
+): Array<{ status: DropshipDogfoodReadinessStatus; count: number }> {
+  return [
+    { status: "ready", count: items.filter((item) => item.readinessStatus === "ready").length },
+    { status: "warning", count: items.filter((item) => item.readinessStatus === "warning").length },
+    { status: "blocked", count: items.filter((item) => item.readinessStatus === "blocked").length },
+  ];
+}
+
+function parsePositiveIntegerOrNull(value: string | null): number | null {
+  if (!value || !/^[1-9]\d*$/.test(value)) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function buildScopeFilters(
