@@ -43,6 +43,7 @@ import {
 import {
   detectQtyVariance,
   detectPastDue,
+  detectMatchMismatch,
 } from "./po-exceptions.service";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
@@ -1394,9 +1395,63 @@ export function createPurchasingService(db: any, storage: Storage) {
     return result;
   }
 
+  /**
+   * Close a PO.
+   *
+   * Before closing, checks for 3-way match discrepancies on any linked
+   * vendor invoices. If any invoice line has a match_status that is not
+   * 'matched' or 'pending', the close is refused with a 409 error.
+   *
+   * There is no forceOverride flag on close(). To close despite mismatches,
+   * use closeShort(reason) which records per-line close-short reasons and
+   * is the single "close with known issues" path.
+   */
   async function close(id: number, userId?: string, notes?: string) {
     const po = await storage.getPurchaseOrderById(id);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
+
+    // ── 3-way match gate ────────────────────────────────────────────
+    // Check linked invoices for match discrepancies before allowing close.
+    // This replaces the former payment-time gate; receipts exist by close
+    // time so the match is actually possible.
+    const poLinks = await db
+      .select({ vendorInvoiceId: vendorInvoicePoLinksTable.vendorInvoiceId })
+      .from(vendorInvoicePoLinksTable)
+      .where(eq(vendorInvoicePoLinksTable.purchaseOrderId, id));
+
+    if (poLinks.length > 0) {
+      const invoiceIds = [...new Set(poLinks.map((l: any) => l.vendorInvoiceId as number))] as number[];
+
+      const mismatchedLines: Array<{ invoiceId: number; invoiceNumber: string; matchStatus: string }> = await db
+        .select({
+          invoiceId: vendorInvoiceLines.vendorInvoiceId,
+          invoiceNumber: vendorInvoicesTable.invoiceNumber,
+          matchStatus: vendorInvoiceLines.matchStatus,
+        })
+        .from(vendorInvoiceLines)
+        .innerJoin(vendorInvoicesTable, eq(vendorInvoiceLines.vendorInvoiceId, vendorInvoicesTable.id))
+        .where(
+          and(
+            inArray(vendorInvoiceLines.vendorInvoiceId, invoiceIds),
+            sql`${vendorInvoiceLines.matchStatus} NOT IN ('matched', 'pending')`,
+          ),
+        );
+
+      if (mismatchedLines.length > 0) {
+        // Refresh exceptions on each linked invoice so the PO detail page
+        // shows the discrepancy before the user tries close-short.
+        for (const invId of invoiceIds) {
+          await detectMatchMismatch(invId as number);
+        }
+
+        const invoiceNumbers = [...new Set(mismatchedLines.map((l) => l.invoiceNumber))];
+        throw new PurchasingError(
+          `Cannot close PO — 3-way match discrepancy. Invoice${invoiceNumbers.length !== 1 ? "s" : ""} ${invoiceNumbers.join(", ")} have ${mismatchedLines.length} line${mismatchedLines.length !== 1 ? "s" : ""} with match issues. Use close-short (with reason) to close anyway.`,
+          409,
+        );
+      }
+    }
+
     assertTransition(po.status, "closed");
 
     return await storage.updatePurchaseOrderStatusWithHistory(id, {

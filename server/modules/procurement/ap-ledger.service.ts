@@ -673,7 +673,6 @@ export async function recordPayment(data: {
   notes?: string;
   status?: string;
   allocations: Array<{ vendorInvoiceId: number; appliedAmountCents: number; notes?: string }>;
-  forceOverride?: boolean;
   createdBy?: string;
 }) {
   const paymentNumber = await generatePaymentNumber();
@@ -682,80 +681,6 @@ export async function recordPayment(data: {
   const allocTotal = data.allocations.reduce((s, a) => s + a.appliedAmountCents, 0);
   if (allocTotal > data.totalAmountCents) {
     throw new Error(`Allocation total (${allocTotal}) exceeds payment total (${data.totalAmountCents})`);
-  }
-
-  // 3-Way Match Check before Payment.
-  //
-  // Original behavior: ran on every payment, blocking deposits and partial
-  // payments because goods haven't arrived yet (invoice lines stay matchStatus
-  // = pending until receipts reconcile).
-  //
-  // Revised 2026-05-01 (per Overlord): one invoice can have multiple
-  // payments. The match should only gate the FINAL payment that settles the
-  // invoice. Partial payments / deposits flow through without match. The
-  // final payment runs the gate, and forceOverride remains the escape hatch
-  // for legacy / pre-system invoices.
-  //
-  // We compute, per allocation, what the invoice's balance would be AFTER
-  // this payment lands. Only allocations that would zero (or push negative)
-  // the balance trigger the match check. Partial allocations are skipped.
-  const invoiceIds = data.allocations.map(a => a.vendorInvoiceId);
-  if (invoiceIds.length > 0) {
-    // Pull current balances + numbers for the invoices being paid.
-    const invoices = await db
-      .select({
-        id: vendorInvoices.id,
-        invoiceNumber: vendorInvoices.invoiceNumber,
-        balanceCents: vendorInvoices.balanceCents,
-      })
-      .from(vendorInvoices)
-      .where(inArray(vendorInvoices.id, invoiceIds));
-
-    // Build a map: invoiceId -> total cents being applied across all
-    // allocations in THIS payment that target it. (Defensive: rare for the
-    // dialog to allocate twice, but the API allows it.)
-    const allocPerInvoice = new Map<number, number>();
-    for (const alloc of data.allocations) {
-      allocPerInvoice.set(
-        alloc.vendorInvoiceId,
-        (allocPerInvoice.get(alloc.vendorInvoiceId) ?? 0) + alloc.appliedAmountCents,
-      );
-    }
-
-    // Determine which invoices this payment fully settles.
-    const invoicesBeingSettled = invoices.filter(inv => {
-      const applied = allocPerInvoice.get(inv.id) ?? 0;
-      const balanceAfter = (inv.balanceCents ?? 0) - applied;
-      return balanceAfter <= 0;
-    });
-
-    if (invoicesBeingSettled.length > 0) {
-      const settledIds = invoicesBeingSettled.map(i => i.id);
-      const lines = await db
-        .select({
-          id: vendorInvoiceLines.id,
-          matchStatus: vendorInvoiceLines.matchStatus,
-          invoiceNumber: vendorInvoices.invoiceNumber,
-        })
-        .from(vendorInvoiceLines)
-        .innerJoin(vendorInvoices, eq(vendorInvoiceLines.vendorInvoiceId, vendorInvoices.id))
-        .where(inArray(vendorInvoiceLines.vendorInvoiceId, settledIds));
-
-      const mismatches = lines.filter(l => l.matchStatus !== "matched");
-
-      if (mismatches.length > 0) {
-        if (!data.forceOverride) {
-          const e = new Error(
-            `3-Way Match Discrepancy: Invoice ${mismatches[0].invoiceNumber} has lines that are not fully matched (Status: ${mismatches[0].matchStatus}). This payment would settle the invoice, so the 3-way match must pass. Provide forceOverride=true to pay anyway.`,
-          );
-          (e as any).statusCode = 409;
-          throw e;
-        } else {
-          data.notes = (data.notes ? data.notes + "\n" : "") +
-            "WARNING: Paid via manual admin override despite 3-way match discrepancy.";
-        }
-      }
-    }
   }
 
   const [payment] = await db
