@@ -30,8 +30,12 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_package_profiles");
     expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_rate_table_rows");
     expect(String(query.mock.calls[0]?.[0])).toContain("zr_rate.zone = rr.destination_zone");
+    expect(String(query.mock.calls[0]?.[0])).toContain("c.shipping_config #>> '{dropship,role}'");
+    expect(String(query.mock.calls[0]?.[0])).toContain("cc.metadata #>> '{features,dropshipOms}'");
     expect(result.total).toBe(1);
     expect(result.items[0]?.metrics).toMatchObject({
+      dropshipOmsChannelId: 7,
+      dropshipOmsChannelCount: 1,
       activeShippingBoxCount: 2,
       activeShippingZoneRuleCount: 1,
       activeShippingRateTableCount: 1,
@@ -43,6 +47,10 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       activeShippingInsurancePolicyCount: 0,
     });
     expect(result.items[0]?.readinessStatus).toBe("blocked");
+    expect(result.items[0]?.checks.find((check) => check.key === "dropship_oms_channel")).toMatchObject({
+      status: "ready",
+      message: "Internal Dropship OMS channel 7 is configured.",
+    });
     expect(result.items[0]?.checks.find((check) => check.key === "package_profiles")).toMatchObject({
       status: "blocked",
       message: "1 of 3 selected variant(s) are missing active package profiles.",
@@ -56,6 +64,45 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(result.items[0]?.checks.find((check) => check.key === "shipping_insurance_policy")).toMatchObject({
       status: "warning",
     });
+  });
+
+  it("blocks dogfood readiness when the internal Dropship OMS channel is missing or ambiguous", async () => {
+    const query = vi.fn(async () => ({
+      rows: [
+        makeDogfoodReadinessRow({
+          dropship_oms_channel_id_text: null,
+          dropship_oms_channel_count: "0",
+        }),
+        makeDogfoodReadinessRow({
+          vendor_id: 11,
+          member_id: "member-2",
+          dropship_oms_channel_id_text: "7",
+          dropship_oms_channel_count: "2",
+        }),
+      ],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodReadiness({
+      generatedAt: now,
+      page: 1,
+      limit: 50,
+    });
+
+    expect(result.items).toHaveLength(2);
+    expect(result.items[0]?.checks.find((check) => check.key === "dropship_oms_channel")).toMatchObject({
+      status: "blocked",
+      message: "No active internal Dropship OMS channel is marked in channel configuration.",
+    });
+    expect(result.items[1]?.checks.find((check) => check.key === "dropship_oms_channel")).toMatchObject({
+      status: "blocked",
+      message: "2 active Dropship OMS channels are marked; exactly one is required.",
+    });
+    expect(result.summary).toEqual([
+      { status: "ready", count: 0 },
+      { status: "warning", count: 0 },
+      { status: "blocked", count: 2 },
+    ]);
   });
 });
 
@@ -75,6 +122,8 @@ function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
     shop_domain: null,
     access_token_ref: "secret-ref",
     updated_at: now,
+    dropship_oms_channel_id_text: "7",
+    dropship_oms_channel_count: "1",
     default_warehouse_id_text: "1",
     listing_config_id: 30,
     listing_config_platform: "ebay",

@@ -167,6 +167,8 @@ export interface DropshipDogfoodReadinessItem {
   warningCount: number;
   checks: DropshipDogfoodReadinessCheck[];
   metrics: {
+    dropshipOmsChannelId: number | null;
+    dropshipOmsChannelCount: number;
     defaultWarehouseId: number | null;
     adminCatalogIncludeRuleCount: number;
     vendorSelectionIncludeRuleCount: number;

@@ -82,6 +82,8 @@ interface DogfoodReadinessRow {
   shop_domain: string | null;
   access_token_ref: string | null;
   updated_at: Date | null;
+  dropship_oms_channel_id_text: string | null;
+  dropship_oms_channel_count: string | number;
   default_warehouse_id_text: string | null;
   listing_config_id: number | null;
   listing_config_platform: string | null;
@@ -342,6 +344,8 @@ function dogfoodReadinessSql(): string {
       sc.shop_domain,
       sc.access_token_ref,
       sc.updated_at,
+      dropship_oms.channel_id::text AS dropship_oms_channel_id_text,
+      COALESCE(dropship_oms.channel_count, 0) AS dropship_oms_channel_count,
       store_defaults.default_warehouse_id::text AS default_warehouse_id_text,
       slc.id AS listing_config_id,
       slc.platform AS listing_config_platform,
@@ -369,6 +373,29 @@ function dogfoodReadinessSql(): string {
     LEFT JOIN dropship.dropship_store_listing_configs slc ON slc.store_connection_id = sc.id
     LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = v.id
     LEFT JOIN dropship.dropship_auto_reload_settings ars ON ars.vendor_id = v.id
+    LEFT JOIN LATERAL (
+      SELECT MIN(marked_channels.id) AS channel_id,
+             COUNT(*) AS channel_count
+      FROM (
+        SELECT DISTINCT c.id
+        FROM channels.channels c
+        WHERE c.status = 'active'
+          AND (
+            LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms'
+            OR COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true'
+            OR EXISTS (
+              SELECT 1
+              FROM channels.channel_connections cc
+              WHERE cc.channel_id = c.id
+                AND (
+                  LOWER(COALESCE(cc.metadata #>> '{dropship,role}', '')) = 'oms'
+                  OR COALESCE(cc.metadata #>> '{features,dropshipOms}', 'false') = 'true'
+                  OR COALESCE(cc.metadata #>> '{features,dropship_oms}', 'false') = 'true'
+                )
+            )
+          )
+      ) marked_channels
+    ) dropship_oms ON true
     LEFT JOIN LATERAL (
       SELECT
         CASE
@@ -629,6 +656,8 @@ function buildRiskBuckets(input: {
 }
 
 function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadinessItem {
+  const dropshipOmsChannelId = parsePositiveIntegerOrNull(row.dropship_oms_channel_id_text);
+  const dropshipOmsChannelCount = toNumber(row.dropship_oms_channel_count);
   const adminCatalogIncludeRuleCount = toNumber(row.admin_catalog_include_rule_count);
   const vendorSelectionIncludeRuleCount = toNumber(row.vendor_selection_include_rule_count);
   const activeShippingBoxCount = toNumber(row.active_shipping_box_count);
@@ -650,6 +679,8 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     && row.listing_config_platform === row.platform;
   const checks = buildDogfoodChecks({
     row,
+    dropshipOmsChannelId,
+    dropshipOmsChannelCount,
     defaultWarehouseId,
     adminCatalogIncludeRuleCount,
     vendorSelectionIncludeRuleCount,
@@ -694,6 +725,8 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     warningCount,
     checks,
     metrics: {
+      dropshipOmsChannelId,
+      dropshipOmsChannelCount,
       defaultWarehouseId,
       adminCatalogIncludeRuleCount,
       vendorSelectionIncludeRuleCount,
@@ -718,6 +751,8 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
 
 function buildDogfoodChecks(input: {
   row: DogfoodReadinessRow;
+  dropshipOmsChannelId: number | null;
+  dropshipOmsChannelCount: number;
   defaultWarehouseId: number | null;
   adminCatalogIncludeRuleCount: number;
   vendorSelectionIncludeRuleCount: number;
@@ -737,6 +772,16 @@ function buildDogfoodChecks(input: {
   notificationPreferenceCount: number;
 }): DropshipDogfoodReadinessCheck[] {
   return [
+    {
+      key: "dropship_oms_channel",
+      label: "Dropship OMS channel",
+      status: input.dropshipOmsChannelCount === 1 ? "ready" : "blocked",
+      message: input.dropshipOmsChannelCount === 1 && input.dropshipOmsChannelId !== null
+        ? `Internal Dropship OMS channel ${input.dropshipOmsChannelId} is configured.`
+        : input.dropshipOmsChannelCount === 0
+          ? "No active internal Dropship OMS channel is marked in channel configuration."
+          : `${input.dropshipOmsChannelCount} active Dropship OMS channels are marked; exactly one is required.`,
+    },
     {
       key: "vendor_entitlement",
       label: "Vendor entitlement",
