@@ -15,9 +15,16 @@ import {
   buildAdminOrderOpsActionInput,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
+  buildAdminShippingConfigUrl,
   buildAdminStoreConnectionsUrl,
   buildAdminTrackingPushRetryInput,
   buildAdminTrackingPushesUrl,
+  buildShippingBoxInput,
+  buildShippingInsurancePolicyInput,
+  buildShippingMarkupPolicyInput,
+  buildShippingPackageProfileInput,
+  buildShippingRateTableInput,
+  buildShippingZoneRuleInput,
   buildStoreOrderProcessingConfigInput,
   buildCatalogExposureRuleInput,
   catalogExposureRecordToInput,
@@ -113,6 +120,14 @@ describe("dropship ops surface client helpers", () => {
       page: 2,
       limit: 25,
     })).toBe("/api/dropship/admin/dogfood-readiness?page=2&limit=25");
+  });
+
+  it("builds admin shipping config URLs with bounded list parameters", () => {
+    expect(buildAdminShippingConfigUrl({
+      search: "  sku-1 ",
+      packageProfileLimit: 25,
+      rateTableLimit: 10,
+    })).toBe("/api/dropship/admin/shipping/config?search=sku-1&packageProfileLimit=25&rateTableLimit=10");
   });
 
   it("builds admin order intake URLs without forcing default status filters", () => {
@@ -234,6 +249,135 @@ describe("dropship ops surface client helpers", () => {
       idempotencyKey: "short",
       status: "closed",
       notes: "",
+    })).toThrow();
+  });
+
+  it("builds admin shipping config mutation bodies", () => {
+    expect(buildShippingBoxInput({
+      code: " small mailer ",
+      name: "Small Mailer",
+      lengthMm: "230",
+      widthMm: "160",
+      heightMm: "10",
+      tareWeightGrams: "12",
+      maxWeightGrams: "",
+      isActive: true,
+      idempotencyKey: "shipping-box-1",
+    })).toEqual({
+      code: "small mailer",
+      name: "Small Mailer",
+      lengthMm: 230,
+      widthMm: 160,
+      heightMm: 10,
+      tareWeightGrams: 12,
+      maxWeightGrams: null,
+      isActive: true,
+      idempotencyKey: "shipping-box-1",
+    });
+
+    expect(buildShippingPackageProfileInput({
+      productVariantId: "10",
+      weightGrams: "100",
+      lengthMm: "200",
+      widthMm: "120",
+      heightMm: "20",
+      shipAlone: false,
+      defaultCarrier: "USPS",
+      defaultService: "",
+      defaultBoxId: "",
+      maxUnitsPerPackage: "4",
+      isActive: true,
+      idempotencyKey: "package-profile-1",
+    })).toMatchObject({
+      productVariantId: 10,
+      maxUnitsPerPackage: 4,
+      defaultService: null,
+    });
+
+    expect(buildShippingZoneRuleInput({
+      originWarehouseId: "1",
+      destinationCountry: "us",
+      destinationRegion: "",
+      postalPrefix: "15",
+      zone: "zone 2",
+      priority: "10",
+      isActive: true,
+      idempotencyKey: "zone-rule-1",
+    })).toMatchObject({
+      originWarehouseId: 1,
+      destinationCountry: "US",
+      postalPrefix: "15",
+      zone: "zone 2",
+      priority: 10,
+    });
+
+    expect(buildShippingRateTableInput({
+      carrier: "USPS",
+      service: "Ground Advantage",
+      currency: "usd",
+      status: "active",
+      effectiveFrom: "",
+      effectiveTo: "",
+      warehouseId: "",
+      destinationZone: "2",
+      minWeightGrams: "0",
+      maxWeightGrams: "450",
+      rate: "5.25",
+      idempotencyKey: "rate-table-1",
+    })).toMatchObject({
+      carrier: "USPS",
+      currency: "USD",
+      rows: [{ warehouseId: null, destinationZone: "2", minWeightGrams: 0, maxWeightGrams: 450, rateCents: 525 }],
+    });
+
+    expect(buildShippingInsurancePolicyInput({
+      name: "Carrier pool",
+      feeBps: "200",
+      minFee: "",
+      maxFee: "",
+      isActive: true,
+      effectiveFrom: "",
+      effectiveTo: "",
+      idempotencyKey: "insurance-policy-1",
+    })).toMatchObject({ feeBps: 200, minFeeCents: null, maxFeeCents: null });
+
+    expect(buildShippingMarkupPolicyInput({
+      name: "Default markup",
+      markupBps: "0",
+      fixedMarkup: "0",
+      minMarkup: "",
+      maxMarkup: "",
+      isActive: true,
+      effectiveFrom: "",
+      effectiveTo: "",
+      idempotencyKey: "markup-policy-1",
+    })).toMatchObject({ markupBps: 0, fixedMarkupCents: 0 });
+  });
+
+  it("rejects malformed admin shipping config mutation bodies", () => {
+    expect(() => buildShippingRateTableInput({
+      carrier: "USPS",
+      service: "Ground Advantage",
+      currency: "USD",
+      status: "active",
+      effectiveFrom: "",
+      effectiveTo: "",
+      warehouseId: "",
+      destinationZone: "2",
+      minWeightGrams: "500",
+      maxWeightGrams: "100",
+      rate: "5.25",
+      idempotencyKey: "rate-table-2",
+    })).toThrow();
+    expect(() => buildShippingInsurancePolicyInput({
+      name: "Carrier pool",
+      feeBps: "10001",
+      minFee: "",
+      maxFee: "",
+      isActive: true,
+      effectiveFrom: "",
+      effectiveTo: "",
+      idempotencyKey: "insurance-policy-2",
     })).toThrow();
   });
 

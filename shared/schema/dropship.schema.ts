@@ -1204,6 +1204,23 @@ export const dropshipAuditEvents = dropshipSchema.table("dropship_audit_events",
   index("dropship_audit_store_created_idx").on(table.storeConnectionId, table.createdAt).where(sql`store_connection_id IS NOT NULL`),
 ]);
 
+export const dropshipAdminConfigCommands = dropshipSchema.table("dropship_admin_config_commands", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  commandType: varchar("command_type", { length: 100 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 128 }).notNull(),
+  entityType: varchar("entity_type", { length: 100 }).notNull(),
+  entityId: varchar("entity_id", { length: 255 }),
+  actorType: varchar("actor_type", { length: 40 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("dropship_admin_config_command_idem_idx").on(table.idempotencyKey),
+  index("dropship_admin_config_command_type_created_idx").on(table.commandType, table.createdAt),
+  check("dropship_admin_config_command_actor_chk", sql`${table.actorType} IN ('admin','system')`),
+]);
+
 export const dropshipUsdcLedgerEntries = dropshipSchema.table("dropship_usdc_ledger_entries", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
@@ -1405,6 +1422,10 @@ export type DropshipNotificationPreference = typeof dropshipNotificationPreferen
 export const insertDropshipAuditEventSchema = createInsertSchema(dropshipAuditEvents).omit(omitIdCreated);
 export type InsertDropshipAuditEvent = z.infer<typeof insertDropshipAuditEventSchema>;
 export type DropshipAuditEvent = typeof dropshipAuditEvents.$inferSelect;
+
+export const insertDropshipAdminConfigCommandSchema = createInsertSchema(dropshipAdminConfigCommands).omit(omitIdCreated);
+export type InsertDropshipAdminConfigCommand = z.infer<typeof insertDropshipAdminConfigCommandSchema>;
+export type DropshipAdminConfigCommand = typeof dropshipAdminConfigCommands.$inferSelect;
 
 export const insertDropshipUsdcLedgerEntrySchema = createInsertSchema(dropshipUsdcLedgerEntries).omit({
   id: true,

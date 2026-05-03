@@ -326,6 +326,198 @@ export interface DropshipDogfoodReadinessResponse {
   summary: Array<{ status: DropshipDogfoodReadinessStatus; count: number }>;
 }
 
+export interface DropshipShippingBoxConfig {
+  boxId: number;
+  code: string;
+  name: string;
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+  tareWeightGrams: number;
+  maxWeightGrams: number | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipShippingPackageProfileConfig {
+  packageProfileId: number;
+  productVariantId: number;
+  productSku: string | null;
+  productName: string | null;
+  variantSku: string | null;
+  variantName: string | null;
+  weightGrams: number;
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+  shipAlone: boolean;
+  defaultCarrier: string | null;
+  defaultService: string | null;
+  defaultBoxId: number | null;
+  maxUnitsPerPackage: number | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipShippingZoneRuleConfig {
+  zoneRuleId: number;
+  originWarehouseId: number;
+  destinationCountry: string;
+  destinationRegion: string | null;
+  postalPrefix: string | null;
+  zone: string;
+  priority: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipShippingRateTableRowConfig {
+  rateTableRowId: number;
+  rateTableId: number;
+  warehouseId: number | null;
+  destinationZone: string;
+  minWeightGrams: number;
+  maxWeightGrams: number;
+  rateCents: number;
+  createdAt: string;
+}
+
+export interface DropshipShippingRateTableConfig {
+  rateTableId: number;
+  carrier: string;
+  service: string;
+  currency: string;
+  status: string;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  rows: DropshipShippingRateTableRowConfig[];
+}
+
+export interface DropshipShippingMarkupPolicyConfig {
+  policyId: number;
+  name: string;
+  markupBps: number;
+  fixedMarkupCents: number;
+  minMarkupCents: number | null;
+  maxMarkupCents: number | null;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  createdAt: string;
+}
+
+export interface DropshipShippingInsurancePolicyConfig {
+  policyId: number;
+  name: string;
+  feeBps: number;
+  minFeeCents: number | null;
+  maxFeeCents: number | null;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  createdAt: string;
+}
+
+export interface DropshipShippingConfigOverview {
+  boxes: DropshipShippingBoxConfig[];
+  packageProfiles: DropshipShippingPackageProfileConfig[];
+  zoneRules: DropshipShippingZoneRuleConfig[];
+  rateTables: DropshipShippingRateTableConfig[];
+  activeMarkupPolicy: DropshipShippingMarkupPolicyConfig | null;
+  activeInsurancePolicy: DropshipShippingInsurancePolicyConfig | null;
+  generatedAt: string;
+}
+
+export interface DropshipAdminShippingConfigResponse {
+  config: DropshipShippingConfigOverview;
+}
+
+export interface DropshipShippingBoxInput {
+  boxId?: number;
+  code: string;
+  name: string;
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+  tareWeightGrams: number;
+  maxWeightGrams: number | null;
+  isActive: boolean;
+  idempotencyKey: string;
+}
+
+export interface DropshipShippingPackageProfileInput {
+  productVariantId: number;
+  weightGrams: number;
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+  shipAlone: boolean;
+  defaultCarrier: string | null;
+  defaultService: string | null;
+  defaultBoxId: number | null;
+  maxUnitsPerPackage: number | null;
+  isActive: boolean;
+  idempotencyKey: string;
+}
+
+export interface DropshipShippingZoneRuleInput {
+  zoneRuleId?: number;
+  originWarehouseId: number;
+  destinationCountry: string;
+  destinationRegion: string | null;
+  postalPrefix: string | null;
+  zone: string;
+  priority: number;
+  isActive: boolean;
+  idempotencyKey: string;
+}
+
+export interface DropshipShippingRateTableInput {
+  carrier: string;
+  service: string;
+  currency: string;
+  status: "draft" | "active" | "archived";
+  effectiveFrom?: string;
+  effectiveTo: string | null;
+  rows: Array<{
+    warehouseId: number | null;
+    destinationZone: string;
+    minWeightGrams: number;
+    maxWeightGrams: number;
+    rateCents: number;
+  }>;
+  metadata: Record<string, unknown>;
+  idempotencyKey: string;
+}
+
+export interface DropshipShippingMarkupPolicyInput {
+  name: string;
+  markupBps: number;
+  fixedMarkupCents: number;
+  minMarkupCents: number | null;
+  maxMarkupCents: number | null;
+  isActive: boolean;
+  effectiveFrom?: string;
+  effectiveTo: string | null;
+  idempotencyKey: string;
+}
+
+export interface DropshipShippingInsurancePolicyInput {
+  name: string;
+  feeBps: number;
+  minFeeCents: number | null;
+  maxFeeCents: number | null;
+  isActive: boolean;
+  effectiveFrom?: string;
+  effectiveTo: string | null;
+  idempotencyKey: string;
+}
+
 export interface DropshipCatalogExposureDecision {
   exposed: boolean;
   reason: string;
@@ -1208,6 +1400,18 @@ export function buildAdminDogfoodReadinessUrl(input: {
   });
 }
 
+export function buildAdminShippingConfigUrl(input: {
+  search?: string;
+  packageProfileLimit?: number;
+  rateTableLimit?: number;
+} = {}): string {
+  return buildQueryUrl("/api/dropship/admin/shipping/config", {
+    search: input.search?.trim() || undefined,
+    packageProfileLimit: input.packageProfileLimit ?? 50,
+    rateTableLimit: input.rateTableLimit ?? 25,
+  });
+}
+
 export function buildAdminStoreConnectionsUrl(input: {
   search: string;
   status: DropshipStoreConnectionLifecycleStatus | "all";
@@ -1297,6 +1501,173 @@ export function buildAdminReturnStatusUpdateInput(input: {
   return notes
     ? { idempotencyKey, status: input.status, notes }
     : { idempotencyKey, status: input.status };
+}
+
+export function buildShippingBoxInput(input: {
+  boxId?: string;
+  code: string;
+  name: string;
+  lengthMm: string;
+  widthMm: string;
+  heightMm: string;
+  tareWeightGrams: string;
+  maxWeightGrams: string;
+  isActive: boolean;
+  idempotencyKey: string;
+}): DropshipShippingBoxInput {
+  return {
+    boxId: input.boxId?.trim() ? parsePositiveInteger(input.boxId, "boxId") : undefined,
+    code: requiredTrimmedString(input.code, "code", 80),
+    name: requiredTrimmedString(input.name, "name", 200),
+    lengthMm: parsePositiveInteger(input.lengthMm, "lengthMm"),
+    widthMm: parsePositiveInteger(input.widthMm, "widthMm"),
+    heightMm: parsePositiveInteger(input.heightMm, "heightMm"),
+    tareWeightGrams: parseNonNegativeInteger(input.tareWeightGrams, "tareWeightGrams"),
+    maxWeightGrams: input.maxWeightGrams.trim() ? parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams") : null,
+    isActive: input.isActive,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
+export function buildShippingPackageProfileInput(input: {
+  productVariantId: string;
+  weightGrams: string;
+  lengthMm: string;
+  widthMm: string;
+  heightMm: string;
+  shipAlone: boolean;
+  defaultCarrier: string;
+  defaultService: string;
+  defaultBoxId: string;
+  maxUnitsPerPackage: string;
+  isActive: boolean;
+  idempotencyKey: string;
+}): DropshipShippingPackageProfileInput {
+  return {
+    productVariantId: parsePositiveInteger(input.productVariantId, "productVariantId"),
+    weightGrams: parsePositiveInteger(input.weightGrams, "weightGrams"),
+    lengthMm: parsePositiveInteger(input.lengthMm, "lengthMm"),
+    widthMm: parsePositiveInteger(input.widthMm, "widthMm"),
+    heightMm: parsePositiveInteger(input.heightMm, "heightMm"),
+    shipAlone: input.shipAlone,
+    defaultCarrier: input.defaultCarrier.trim() || null,
+    defaultService: input.defaultService.trim() || null,
+    defaultBoxId: input.defaultBoxId.trim() ? parsePositiveInteger(input.defaultBoxId, "defaultBoxId") : null,
+    maxUnitsPerPackage: input.maxUnitsPerPackage.trim()
+      ? parsePositiveInteger(input.maxUnitsPerPackage, "maxUnitsPerPackage")
+      : null,
+    isActive: input.isActive,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
+export function buildShippingZoneRuleInput(input: {
+  zoneRuleId?: string;
+  originWarehouseId: string;
+  destinationCountry: string;
+  destinationRegion: string;
+  postalPrefix: string;
+  zone: string;
+  priority: string;
+  isActive: boolean;
+  idempotencyKey: string;
+}): DropshipShippingZoneRuleInput {
+  return {
+    zoneRuleId: input.zoneRuleId?.trim() ? parsePositiveInteger(input.zoneRuleId, "zoneRuleId") : undefined,
+    originWarehouseId: parsePositiveInteger(input.originWarehouseId, "originWarehouseId"),
+    destinationCountry: requiredTrimmedString(input.destinationCountry, "destinationCountry", 2).toUpperCase(),
+    destinationRegion: input.destinationRegion.trim() || null,
+    postalPrefix: input.postalPrefix.trim() || null,
+    zone: requiredTrimmedString(input.zone, "zone", 40),
+    priority: parseIntegerInput(input.priority, "priority"),
+    isActive: input.isActive,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
+export function buildShippingRateTableInput(input: {
+  carrier: string;
+  service: string;
+  currency: string;
+  status: "draft" | "active" | "archived";
+  effectiveFrom: string;
+  effectiveTo: string;
+  warehouseId: string;
+  destinationZone: string;
+  minWeightGrams: string;
+  maxWeightGrams: string;
+  rate: string;
+  idempotencyKey: string;
+}): DropshipShippingRateTableInput {
+  const minWeightGrams = parseNonNegativeInteger(input.minWeightGrams, "minWeightGrams");
+  const maxWeightGrams = parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams");
+  if (maxWeightGrams < minWeightGrams) {
+    throw new Error("maxWeightGrams must be greater than or equal to minWeightGrams.");
+  }
+
+  return {
+    carrier: requiredTrimmedString(input.carrier, "carrier", 50),
+    service: requiredTrimmedString(input.service, "service", 80),
+    currency: requiredTrimmedString(input.currency, "currency", 3).toUpperCase(),
+    status: input.status,
+    effectiveFrom: input.effectiveFrom.trim() || undefined,
+    effectiveTo: input.effectiveTo.trim() || null,
+    rows: [{
+      warehouseId: input.warehouseId.trim() ? parsePositiveInteger(input.warehouseId, "warehouseId") : null,
+      destinationZone: requiredTrimmedString(input.destinationZone, "destinationZone", 40),
+      minWeightGrams,
+      maxWeightGrams,
+      rateCents: parseDollarInputToCents(input.rate, "rate"),
+    }],
+    metadata: {},
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
+export function buildShippingMarkupPolicyInput(input: {
+  name: string;
+  markupBps: string;
+  fixedMarkup: string;
+  minMarkup: string;
+  maxMarkup: string;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string;
+  idempotencyKey: string;
+}): DropshipShippingMarkupPolicyInput {
+  return {
+    name: requiredTrimmedString(input.name, "name", 120),
+    markupBps: parseBasisPoints(input.markupBps, "markupBps"),
+    fixedMarkupCents: parseDollarInputToCents(input.fixedMarkup || "0", "fixedMarkup"),
+    minMarkupCents: input.minMarkup.trim() ? parseDollarInputToCents(input.minMarkup, "minMarkup") : null,
+    maxMarkupCents: input.maxMarkup.trim() ? parseDollarInputToCents(input.maxMarkup, "maxMarkup") : null,
+    isActive: input.isActive,
+    effectiveFrom: input.effectiveFrom.trim() || undefined,
+    effectiveTo: input.effectiveTo.trim() || null,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
+export function buildShippingInsurancePolicyInput(input: {
+  name: string;
+  feeBps: string;
+  minFee: string;
+  maxFee: string;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string;
+  idempotencyKey: string;
+}): DropshipShippingInsurancePolicyInput {
+  return {
+    name: requiredTrimmedString(input.name, "name", 120),
+    feeBps: parseBasisPoints(input.feeBps, "feeBps"),
+    minFeeCents: input.minFee.trim() ? parseDollarInputToCents(input.minFee, "minFee") : null,
+    maxFeeCents: input.maxFee.trim() ? parseDollarInputToCents(input.maxFee, "maxFee") : null,
+    isActive: input.isActive,
+    effectiveFrom: input.effectiveFrom.trim() || undefined,
+    effectiveTo: input.effectiveTo.trim() || null,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
 }
 
 export function buildCatalogExposureRuleInput(input: {
@@ -1603,6 +1974,45 @@ function parsePositiveInteger(value: string, key: string): number {
   }
   const parsed = Number(normalized);
   return assertPositiveInteger(parsed, key);
+}
+
+function parseNonNegativeInteger(value: string, key: string): number {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${key} must be a non-negative integer.`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${key} is outside the supported integer range.`);
+  }
+  return parsed;
+}
+
+function parseBasisPoints(value: string, key: string): number {
+  const parsed = parseNonNegativeInteger(value, key);
+  if (parsed > 10000) {
+    throw new Error(`${key} must be 10000 or fewer.`);
+  }
+  return parsed;
+}
+
+function normalizeIdempotencyKey(value: string): string {
+  const idempotencyKey = value.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+  return idempotencyKey;
+}
+
+function requiredTrimmedString(value: string, key: string, maxLength: number): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`${key} is required.`);
+  }
+  if (trimmed.length > maxLength) {
+    throw new Error(`${key} must be ${maxLength} characters or fewer.`);
+  }
+  return trimmed;
 }
 
 function parsePositiveIntegerInput(value: string | number | null | undefined, key: string): number {
