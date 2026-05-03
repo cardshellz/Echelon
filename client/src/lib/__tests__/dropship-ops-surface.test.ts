@@ -10,6 +10,7 @@ import {
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
   buildAdminListingPushJobsUrl,
+  buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminStoreConnectionsUrl,
@@ -167,6 +168,29 @@ describe("dropship ops surface client helpers", () => {
       status: "all",
       platform: "ebay",
     })).toBe("/api/dropship/admin/tracking-pushes?statuses=queued%2Cprocessing%2Csucceeded%2Cfailed&platform=ebay&page=1&limit=50");
+  });
+
+  it("builds admin notification event URLs with optional operational filters", () => {
+    expect(buildAdminNotificationEventsUrl({
+      search: " payment ",
+      status: "default",
+      channel: "all",
+      critical: "all",
+    })).toBe("/api/dropship/admin/notifications?search=payment&page=1&limit=50");
+    expect(buildAdminNotificationEventsUrl({
+      search: "",
+      status: "failed",
+      channel: "email",
+      critical: "critical",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/admin/notifications?statuses=failed&channel=email&critical=true&page=2&limit=25");
+    expect(buildAdminNotificationEventsUrl({
+      search: "",
+      status: "all",
+      channel: "in_app",
+      critical: "noncritical",
+    })).toBe("/api/dropship/admin/notifications?statuses=pending%2Cdelivered%2Cfailed&channel=in_app&critical=false&page=1&limit=50");
   });
 
   it("builds admin tracking push retry bodies with optional audit reasons", () => {
