@@ -32,6 +32,21 @@ export type DropshipNotificationOpsStatus =
 export type DropshipNotificationOpsChannel =
   | "email"
   | "in_app";
+export type DropshipRmaStatus =
+  | "requested"
+  | "in_transit"
+  | "received"
+  | "inspecting"
+  | "approved"
+  | "rejected"
+  | "credited"
+  | "closed";
+export type DropshipReturnFaultCategory =
+  | "card_shellz"
+  | "vendor"
+  | "customer"
+  | "marketplace"
+  | "carrier";
 export type DropshipStoreConnectionLifecycleStatus =
   | "connected"
   | "needs_reauth"
@@ -71,6 +86,26 @@ const allDropshipNotificationOpsStatuses: DropshipNotificationOpsStatus[] = [
   "pending",
   "delivered",
   "failed",
+];
+
+const allDropshipRmaStatuses: DropshipRmaStatus[] = [
+  "requested",
+  "in_transit",
+  "received",
+  "inspecting",
+  "approved",
+  "rejected",
+  "credited",
+  "closed",
+];
+
+const defaultDropshipRmaOpsStatuses: DropshipRmaStatus[] = [
+  "requested",
+  "in_transit",
+  "received",
+  "inspecting",
+  "approved",
+  "rejected",
 ];
 
 export interface DropshipSettingsSection {
@@ -896,9 +931,12 @@ export interface DropshipStripeWalletFundingSessionResponse {
 export interface DropshipReturnListItem {
   rmaId: number;
   rmaNumber: string;
-  status: string;
+  vendorId: number;
+  vendorName: string | null;
+  vendorEmail: string | null;
+  status: DropshipRmaStatus;
   reasonCode: string | null;
-  faultCategory: string | null;
+  faultCategory: DropshipReturnFaultCategory | null;
   returnWindowDays: number;
   returnTrackingNumber: string | null;
   requestedAt: string;
@@ -1088,6 +1126,25 @@ export function buildAdminNotificationEventsUrl(input: {
     statuses,
     channel: input.channel === "all" ? undefined : input.channel,
     critical,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildAdminReturnsUrl(input: {
+  search: string;
+  status: DropshipRmaStatus | "default" | "all";
+  page?: number;
+  limit?: number;
+}): string {
+  const statuses = input.status === "default"
+    ? defaultDropshipRmaOpsStatuses.join(",")
+    : input.status === "all"
+      ? allDropshipRmaStatuses.join(",")
+      : input.status;
+  return buildQueryUrl("/api/dropship/admin/returns", {
+    search: input.search.trim(),
+    statuses,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
