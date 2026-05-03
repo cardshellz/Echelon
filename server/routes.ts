@@ -47,6 +47,7 @@ import { registerDropshipOrderRoutes } from "./modules/dropship/interfaces/http/
 import { registerDropshipNotificationRoutes } from "./modules/dropship/interfaces/http/dropship-notification.routes";
 import { registerDropshipReturnRoutes } from "./modules/dropship/interfaces/http/dropship-return.routes";
 import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
+import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -58,6 +59,7 @@ export async function registerRoutes(
 
   // Subscription webhooks BEFORE auth middleware (unauthenticated, HMAC-verified)
   registerSubscriptionWebhookRoutes(app);
+  registerDropshipMarketplaceOrderIntakeRoutes(app);
 
   registerAuthRoutes(app);
   registerDropshipAuthRoutes(app);
