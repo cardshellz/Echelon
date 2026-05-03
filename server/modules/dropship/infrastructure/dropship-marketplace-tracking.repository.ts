@@ -17,6 +17,7 @@ interface TrackingPushRow {
   id: number;
   intake_id: number;
   oms_order_id: string | number;
+  wms_shipment_id: string | number | null;
   vendor_id: number;
   store_connection_id: number;
   platform: DropshipMarketplaceTrackingRequest["platform"];
@@ -54,6 +55,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
 
   async claimForOmsOrder(input: {
     omsOrderId: number;
+    wmsShipmentId?: number | null;
     carrier: string;
     trackingNumber: string;
     shippedAt: Date;
@@ -69,7 +71,10 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
         return { status: "not_dropship" };
       }
 
-      const lineItems = await loadLineItemsForOmsOrder(client, input.omsOrderId);
+      const lineItems = await loadLineItemsForOmsOrder(client, {
+        omsOrderId: input.omsOrderId,
+        wmsShipmentId: input.wmsShipmentId ?? null,
+      });
       const request = buildTrackingRequest({ input, intake, lineItems });
       const requestHash = hashRequest(request);
       const row = await insertOrLoadPush(client, request, requestHash, input.now);
@@ -101,6 +106,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
         payload: {
           intakeId: claimed.intake_id,
           omsOrderId: toSafeInteger(claimed.oms_order_id, "oms_order_id"),
+          wmsShipmentId: toSafeOptionalInteger(claimed.wms_shipment_id, "wms_shipment_id"),
           platform: claimed.platform,
           externalOrderId: claimed.external_order_id,
           attemptCount: claimed.attempt_count,
@@ -142,7 +148,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                    external_order_id, external_order_number, source_order_id, status,
                    idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-                   external_fulfillment_id, attempt_count`,
+                   wms_shipment_id, external_fulfillment_id, attempt_count`,
         [
           input.pushId,
           input.result.externalFulfillmentId,
@@ -160,6 +166,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
         severity: "info",
         payload: {
           intakeId: row.intake_id,
+          wmsShipmentId: toSafeOptionalInteger(row.wms_shipment_id, "wms_shipment_id"),
           externalFulfillmentId: row.external_fulfillment_id,
           attemptCount: row.attempt_count,
         },
@@ -196,7 +203,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                    external_order_id, external_order_number, source_order_id, status,
                    idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-                   external_fulfillment_id, attempt_count`,
+                   wms_shipment_id, external_fulfillment_id, attempt_count`,
         [
           input.pushId,
           input.code,
@@ -215,6 +222,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
         severity: input.retryable ? "warning" : "error",
         payload: {
           intakeId: row.intake_id,
+          wmsShipmentId: toSafeOptionalInteger(row.wms_shipment_id, "wms_shipment_id"),
           code: input.code,
           message: input.message,
           retryable: input.retryable,
@@ -250,14 +258,39 @@ async function loadIntakeForOmsOrder(
 
 async function loadLineItemsForOmsOrder(
   client: PoolClient,
-  omsOrderId: number,
+  input: {
+    omsOrderId: number;
+    wmsShipmentId: number | null;
+  },
 ): Promise<DropshipMarketplaceTrackingLineItem[]> {
+  if (input.wmsShipmentId !== null) {
+    const result = await client.query<LineItemRow>(
+      `SELECT
+         ol.external_line_item_id,
+         SUM(COALESCE(si.qty, 0))::int AS quantity
+       FROM wms.outbound_shipment_items si
+       INNER JOIN wms.order_items wi ON wi.id = si.order_item_id
+       INNER JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+       WHERE si.shipment_id = $1
+         AND ol.order_id = $2
+         AND COALESCE(si.qty, 0) > 0
+       GROUP BY ol.external_line_item_id
+       ORDER BY MIN(si.id) ASC`,
+      [input.wmsShipmentId, input.omsOrderId],
+    );
+    return result.rows.map((row) => ({
+      externalLineItemId: row.external_line_item_id,
+      quantity: Number(row.quantity),
+    }));
+  }
+
   const result = await client.query<LineItemRow>(
     `SELECT external_line_item_id, quantity
      FROM oms.oms_order_lines
      WHERE order_id = $1
+       AND COALESCE(quantity, 0) > 0
      ORDER BY id ASC`,
-    [omsOrderId],
+    [input.omsOrderId],
   );
   return result.rows.map((row) => ({
     externalLineItemId: row.external_line_item_id,
@@ -268,6 +301,7 @@ async function loadLineItemsForOmsOrder(
 function buildTrackingRequest(input: {
   input: {
     omsOrderId: number;
+    wmsShipmentId?: number | null;
     carrier: string;
     trackingNumber: string;
     shippedAt: Date;
@@ -279,6 +313,7 @@ function buildTrackingRequest(input: {
   return {
     intakeId: input.intake.id,
     omsOrderId: input.input.omsOrderId,
+    wmsShipmentId: input.input.wmsShipmentId ?? null,
     vendorId: input.intake.vendor_id,
     storeConnectionId: input.intake.store_connection_id,
     platform: input.intake.platform,
@@ -304,16 +339,16 @@ async function insertOrLoadPush(
       (intake_id, oms_order_id, vendor_id, store_connection_id, platform,
        external_order_id, external_order_number, source_order_id, status,
        idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-       created_at, updated_at)
+       wms_shipment_id, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5,
        $6, $7, $8, 'queued',
        $9, $10, $11, $12, $13,
-       $14, $14)
+       $14, $15, $15)
      ON CONFLICT (idempotency_key) DO NOTHING
      RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                external_order_id, external_order_number, source_order_id, status,
                idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-               external_fulfillment_id, attempt_count`,
+               wms_shipment_id, external_fulfillment_id, attempt_count`,
     [
       request.intakeId,
       request.omsOrderId,
@@ -328,6 +363,7 @@ async function insertOrLoadPush(
       request.carrier,
       request.trackingNumber,
       request.shippedAt,
+      request.wmsShipmentId,
       now,
     ],
   );
@@ -338,7 +374,7 @@ async function insertOrLoadPush(
     `SELECT id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
             external_order_id, external_order_number, source_order_id, status,
             idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-            external_fulfillment_id, attempt_count
+            wms_shipment_id, external_fulfillment_id, attempt_count
      FROM dropship.dropship_marketplace_tracking_pushes
      WHERE idempotency_key = $1
      FOR UPDATE`,
@@ -363,7 +399,7 @@ async function markPushProcessing(
      RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                external_order_id, external_order_number, source_order_id, status,
                idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-               external_fulfillment_id, attempt_count`,
+               wms_shipment_id, external_fulfillment_id, attempt_count`,
     [pushId, now],
   );
   return requiredRow(result.rows[0], "Tracking push claim did not return a row.");
@@ -406,6 +442,7 @@ function mapPushRow(row: TrackingPushRow): DropshipMarketplaceTrackingPushRecord
     pushId: row.id,
     intakeId: row.intake_id,
     omsOrderId: toSafeInteger(row.oms_order_id, "oms_order_id"),
+    wmsShipmentId: toSafeOptionalInteger(row.wms_shipment_id, "wms_shipment_id"),
     vendorId: row.vendor_id,
     storeConnectionId: row.store_connection_id,
     platform: row.platform,
@@ -423,6 +460,7 @@ function hashRequest(request: DropshipMarketplaceTrackingRequest): string {
     .update(JSON.stringify({
       intakeId: request.intakeId,
       omsOrderId: request.omsOrderId,
+      wmsShipmentId: request.wmsShipmentId,
       storeConnectionId: request.storeConnectionId,
       platform: request.platform,
       externalOrderId: request.externalOrderId,
@@ -444,6 +482,13 @@ function toSafeInteger(value: string | number, field: string): number {
     });
   }
   return numeric;
+}
+
+function toSafeOptionalInteger(value: string | number | null, field: string): number | null {
+  if (value === null) {
+    return null;
+  }
+  return toSafeInteger(value, field);
 }
 
 function requiredRow<T>(row: T | undefined, message: string): T {

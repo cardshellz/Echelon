@@ -78,6 +78,7 @@ describe("DropshipTrackingPushOpsService", () => {
     });
     expect(marketplaceTracking.inputs[0]).toEqual({
       omsOrderId: 500,
+      wmsShipmentId: 700,
       carrier: "USPS",
       trackingNumber: "94001111",
       shippedAt: new Date("2026-05-02T10:00:00.000Z"),
@@ -177,6 +178,7 @@ class FakeTrackingPushOpsRepository implements DropshipTrackingPushOpsRepository
     return {
       pushId: input.pushId,
       omsOrderId: 500,
+      wmsShipmentId: 700,
       carrier: "USPS",
       trackingNumber: "94001111",
       shippedAt: new Date("2026-05-02T10:00:00.000Z"),
@@ -195,6 +197,7 @@ class FakeTrackingPushOpsRepository implements DropshipTrackingPushOpsRepository
 class FakeMarketplaceTrackingService {
   inputs: Array<{
     omsOrderId: number;
+    wmsShipmentId?: number | null;
     carrier: string;
     trackingNumber: string;
     shippedAt: Date;
@@ -204,6 +207,7 @@ class FakeMarketplaceTrackingService {
 
   async pushForOmsOrder(input: {
     omsOrderId: number;
+    wmsShipmentId?: number | null;
     carrier: string;
     trackingNumber: string;
     shippedAt: Date;
@@ -219,6 +223,7 @@ class FakeMarketplaceTrackingService {
         pushId: 42,
         intakeId: 10,
         omsOrderId: input.omsOrderId,
+        wmsShipmentId: input.wmsShipmentId ?? null,
         vendorId: 20,
         storeConnectionId: 30,
         platform: "ebay" as const,

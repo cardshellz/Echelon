@@ -2783,7 +2783,11 @@ function TrackingPushesTable({
               <TableCell>
                 <div className="font-medium">{push.externalOrderNumber || push.externalOrderId}</div>
                 <div className="text-xs text-muted-foreground">
-                  OMS {push.omsOrderId} / Intake {push.intakeId}
+                  {[
+                    `OMS ${push.omsOrderId}`,
+                    push.wmsShipmentId ? `Shipment ${push.wmsShipmentId}` : null,
+                    `Intake ${push.intakeId}`,
+                  ].filter(Boolean).join(" / ")}
                 </div>
               </TableCell>
               <TableCell>

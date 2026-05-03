@@ -19,6 +19,7 @@ import { channels } from "./channels.schema";
 import { productLines, products, productVariants } from "./catalog.schema";
 import { members, memberSubscriptions, plans } from "./membership.schema";
 import { omsOrders } from "./oms.schema";
+import { outboundShipments } from "./orders.schema";
 import { warehouses } from "./warehouse.schema";
 
 export const dropshipSchema = pgSchema("dropship");
@@ -978,6 +979,7 @@ export const dropshipMarketplaceTrackingPushes = dropshipSchema.table("dropship_
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   intakeId: integer("intake_id").notNull().references(() => dropshipOrderIntake.id, { onDelete: "cascade" }),
   omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
+  wmsShipmentId: integer("wms_shipment_id").references(() => outboundShipments.id, { onDelete: "set null" }),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id, { onDelete: "cascade" }),
   storeConnectionId: integer("store_connection_id").notNull().references(() => dropshipStoreConnections.id, { onDelete: "cascade" }),
   platform: varchar("platform", { length: 30 }).notNull(),
@@ -1001,6 +1003,7 @@ export const dropshipMarketplaceTrackingPushes = dropshipSchema.table("dropship_
 }, (table) => [
   uniqueIndex("dropship_tracking_push_idem_idx").on(table.idempotencyKey),
   index("dropship_tracking_push_intake_idx").on(table.intakeId),
+  index("dropship_tracking_push_wms_shipment_idx").on(table.wmsShipmentId),
   index("dropship_tracking_push_status_idx").on(table.status, table.updatedAt),
   index("dropship_tracking_push_vendor_status_idx").on(table.vendorId, table.status, table.updatedAt),
   check("dropship_tracking_push_platform_chk", sql`${table.platform} IN ('ebay','shopify','tiktok','instagram','bigcommerce')`),
