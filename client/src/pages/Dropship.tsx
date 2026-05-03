@@ -43,6 +43,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnsUrl,
   buildAdminTrackingPushRetryInput,
   buildAdminStoreConnectionsUrl,
   buildAdminTrackingPushesUrl,
@@ -90,6 +91,9 @@ import {
   type DropshipListingPushJobStatus,
   type DropshipNotificationOpsChannel,
   type DropshipNotificationOpsStatus,
+  type DropshipReturnListItem,
+  type DropshipReturnListResponse,
+  type DropshipRmaStatus,
   type DropshipTrackingPushStatus,
   type DropshipSeverity,
   type DropshipStoreConnectionLifecycleStatus,
@@ -105,6 +109,7 @@ type TrackingPushStatusFilter = DropshipTrackingPushStatus | "default" | "all";
 type NotificationOpsStatusFilter = DropshipNotificationOpsStatus | "default" | "all";
 type NotificationOpsChannelFilter = DropshipNotificationOpsChannel | "all";
 type NotificationOpsCriticalFilter = "all" | "critical" | "noncritical";
+type ReturnOpsStatusFilter = DropshipRmaStatus | "default" | "all";
 type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
 type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
@@ -194,6 +199,21 @@ const notificationOpsCriticalFilters: NotificationOpsCriticalFilter[] = [
   "critical",
   "noncritical",
 ];
+
+const returnOpsStatusFilters: ReturnOpsStatusFilter[] = [
+  "default",
+  "all",
+  "requested",
+  "in_transit",
+  "received",
+  "inspecting",
+  "approved",
+  "rejected",
+  "credited",
+  "closed",
+];
+
+const returnOpsTerminalStatuses = new Set<DropshipRmaStatus>(["credited", "closed"]);
 
 const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
   "all",
@@ -333,6 +353,12 @@ function refreshAll() {
               Notifications
             </TabsTrigger>
             <TabsTrigger
+              value="returns"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Returns
+            </TabsTrigger>
+            <TabsTrigger
               value="audit"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -376,6 +402,10 @@ function refreshAll() {
 
           <TabsContent value="notifications" className="m-0">
             <NotificationOpsTab />
+          </TabsContent>
+
+          <TabsContent value="returns" className="m-0">
+            <ReturnOpsTab />
           </TabsContent>
 
           <TabsContent value="audit" className="m-0 space-y-4">
@@ -909,6 +939,95 @@ function NotificationOpsTab() {
         isLoading={notificationEventsQuery.isLoading || notificationEventsQuery.isFetching}
         summary={notificationEventsQuery.data?.summary ?? []}
         total={notificationEventsQuery.data?.total ?? 0}
+      />
+    </div>
+  );
+}
+
+function ReturnOpsTab() {
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<ReturnOpsStatusFilter>("default");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "default" as ReturnOpsStatusFilter,
+  });
+
+  const returnsUrl = useMemo(() => buildAdminReturnsUrl({
+    search: appliedFilters.search,
+    status: appliedFilters.status,
+  }), [appliedFilters]);
+
+  const returnsQuery = useQuery<DropshipReturnListResponse>({
+    queryKey: [returnsUrl],
+    queryFn: () => fetchJson<DropshipReturnListResponse>(returnsUrl),
+  });
+
+  const rmas = returnsQuery.data?.items ?? [];
+
+  function applyReturnFilters() {
+    setAppliedFilters({ search, status });
+  }
+
+  return (
+    <div className="space-y-5">
+      {returnsQuery.error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Return operations</h2>
+            <p className="text-sm text-muted-foreground">
+              Review RMAs, return tracking, fault assignment, inspection progress, and final credit state.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row">
+            <div className="relative min-w-0 lg:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="pl-9"
+                placeholder="RMA, order, tracking, or vendor"
+              />
+            </div>
+            <Select value={status} onValueChange={(value) => setStatus(value as ReturnOpsStatusFilter)}>
+              <SelectTrigger className="lg:w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {returnOpsStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {returnOpsStatusLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyReturnFilters}>
+              <FileSearch className="h-4 w-4" />
+              Apply
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<RotateCcw className="h-4 w-4" />} label="Matching RMAs" value={String(returnsQuery.data?.total ?? 0)} />
+        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Visible open" value={String(rmas.filter((rma) => !returnOpsTerminalStatuses.has(rma.status)).length)} />
+        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Awaiting inspection" value={String(rmas.filter((rma) => rma.status === "received" || rma.status === "inspecting").length)} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible credited" value={String(rmas.filter((rma) => rma.status === "credited").length)} />
+      </section>
+
+      <ReturnOpsTable
+        isLoading={returnsQuery.isLoading || returnsQuery.isFetching}
+        rmas={rmas}
+        total={returnsQuery.data?.total ?? 0}
       />
     </div>
   );
@@ -1976,6 +2095,112 @@ function NotificationEventsTable({
   );
 }
 
+function ReturnOpsTable({
+  isLoading,
+  rmas,
+  total,
+}: {
+  isLoading: boolean;
+  rmas: DropshipReturnListItem[];
+  total: number;
+}) {
+  if (isLoading) {
+    return (
+      <div className="mt-4 space-y-2">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-12 w-full" />
+      </div>
+    );
+  }
+
+  if (rmas.length === 0) {
+    return <EmptyState title="No returns" description="No dropship RMAs match the current filters." />;
+  }
+
+  return (
+    <section className="rounded-md border bg-card">
+      <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+        <div>
+          <h2 className="text-lg font-semibold">Returns</h2>
+          <p className="text-sm text-muted-foreground">{total} matching RMA{total === 1 ? "" : "s"}</p>
+        </div>
+        <RotateCcw className="h-5 w-5 text-muted-foreground" />
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-[110px]">RMA</TableHead>
+            <TableHead>Vendor/order</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Fault</TableHead>
+            <TableHead>Items</TableHead>
+            <TableHead>Tracking</TableHead>
+            <TableHead>Milestones</TableHead>
+            <TableHead className="w-[145px]">Updated</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rmas.map((rma) => (
+            <TableRow key={rma.rmaId}>
+              <TableCell>
+                <div className="font-mono text-sm">{rma.rmaNumber}</div>
+                <div className="text-xs text-muted-foreground">Window {rma.returnWindowDays}d</div>
+              </TableCell>
+              <TableCell>
+                <div className="font-medium">{rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`}</div>
+                <div className="text-xs text-muted-foreground">
+                  {[
+                    rma.platform ? formatStatus(rma.platform) : null,
+                    rma.intakeId ? `Intake ${rma.intakeId}` : null,
+                    rma.omsOrderId ? `OMS ${rma.omsOrderId}` : null,
+                  ].filter(Boolean).join(" / ") || "No linked order"}
+                </div>
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>
+                  {formatStatus(rma.status)}
+                </Badge>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {returnOpsTerminalStatuses.has(rma.status) ? "Terminal" : "Open"}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div>{rma.faultCategory ? formatStatus(rma.faultCategory) : "Pending"}</div>
+                <div className="text-xs text-muted-foreground">{rma.reasonCode ? formatStatus(rma.reasonCode) : "No reason"}</div>
+              </TableCell>
+              <TableCell>
+                <div className="font-mono">{rma.itemCount} lines</div>
+                <div className="text-xs text-muted-foreground">{rma.totalQuantity} units</div>
+              </TableCell>
+              <TableCell>
+                <div className="max-w-[220px] truncate font-mono text-xs">{rma.returnTrackingNumber || "None"}</div>
+                <div className="text-xs text-muted-foreground">
+                  {rma.returnTrackingNumber ? "Tracking recorded" : "No return tracking"}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="text-xs text-muted-foreground">
+                  {rma.receivedAt ? `Received ${formatDateTime(rma.receivedAt)}` : "Not received"}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {rma.inspectedAt ? `Inspected ${formatDateTime(rma.inspectedAt)}` : "Not inspected"}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {rma.creditedAt ? `Credited ${formatDateTime(rma.creditedAt)}` : "Not credited"}
+                </div>
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                {formatDateTime(rma.updatedAt)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </section>
+  );
+}
+
 function StoreConnectionsTable({
   connections,
   isLoading,
@@ -2574,6 +2799,12 @@ function notificationOpsCriticalLabel(critical: NotificationOpsCriticalFilter): 
   return "All criticality";
 }
 
+function returnOpsStatusLabel(status: ReturnOpsStatusFilter): string {
+  if (status === "default") return "Open returns";
+  if (status === "all") return "All statuses";
+  return formatStatus(status);
+}
+
 function orderStatusCount(
   summary: DropshipAdminOrderOpsListResponse["summary"],
   status: DropshipOpsOrderIntakeStatus,
@@ -2641,6 +2872,19 @@ function notificationOpsStatusTone(status: DropshipNotificationOpsStatus): strin
     return "border-amber-200 bg-amber-50 text-amber-900";
   }
   if (status === "failed") {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function returnOpsStatusTone(status: DropshipRmaStatus): string {
+  if (status === "credited" || status === "closed") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (status === "approved" || status === "received" || status === "inspecting") {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (status === "rejected") {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
   return "border-zinc-200 bg-zinc-50 text-zinc-700";

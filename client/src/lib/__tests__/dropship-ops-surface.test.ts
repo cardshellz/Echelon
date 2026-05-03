@@ -13,6 +13,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnsUrl,
   buildAdminStoreConnectionsUrl,
   buildAdminTrackingPushRetryInput,
   buildAdminTrackingPushesUrl,
@@ -191,6 +192,23 @@ describe("dropship ops surface client helpers", () => {
       channel: "in_app",
       critical: "noncritical",
     })).toBe("/api/dropship/admin/notifications?statuses=pending%2Cdelivered%2Cfailed&channel=in_app&critical=false&page=1&limit=50");
+  });
+
+  it("builds admin return URLs with optional operational filters", () => {
+    expect(buildAdminReturnsUrl({
+      search: " rma ",
+      status: "default",
+    })).toBe("/api/dropship/admin/returns?search=rma&statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected&page=1&limit=50");
+    expect(buildAdminReturnsUrl({
+      search: "",
+      status: "inspecting",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/admin/returns?statuses=inspecting&page=2&limit=25");
+    expect(buildAdminReturnsUrl({
+      search: "",
+      status: "all",
+    })).toBe("/api/dropship/admin/returns?statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Ccredited%2Cclosed&page=1&limit=50");
   });
 
   it("builds admin tracking push retry bodies with optional audit reasons", () => {
