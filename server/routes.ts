@@ -35,6 +35,7 @@ import { registerDropshipAdminListingPushOpsRoutes } from "./modules/dropship/in
 import { registerDropshipAdminTrackingPushOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-tracking-push-ops.routes";
 import { registerDropshipAdminNotificationOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-notification-ops.routes";
 import { registerDropshipAdminShippingConfigRoutes } from "./modules/dropship/interfaces/http/dropship-admin-shipping-config.routes";
+import { registerDropshipAdminOmsChannelConfigRoutes } from "./modules/dropship/interfaces/http/dropship-admin-oms-channel-config.routes";
 import { registerDropshipVendorCatalogRoutes } from "./modules/dropship/interfaces/http/dropship-vendor-catalog.routes";
 import { registerDropshipOnboardingRoutes } from "./modules/dropship/interfaces/http/dropship-onboarding.routes";
 import { registerDropshipStoreConnectionRoutes } from "./modules/dropship/interfaces/http/dropship-store-connection.routes";
@@ -67,6 +68,7 @@ export async function registerRoutes(
   registerDropshipAdminTrackingPushOpsRoutes(app);
   registerDropshipAdminNotificationOpsRoutes(app);
   registerDropshipAdminShippingConfigRoutes(app);
+  registerDropshipAdminOmsChannelConfigRoutes(app);
   registerDropshipVendorCatalogRoutes(app);
   registerDropshipOnboardingRoutes(app);
   registerDropshipStoreConnectionRoutes(app);
