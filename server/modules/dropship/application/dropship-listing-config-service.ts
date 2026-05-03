@@ -28,6 +28,11 @@ export interface DropshipListingConfigStoreConnectionContext {
   setupStatus: string;
 }
 
+export interface DropshipListingConfigActor {
+  actorType: "vendor" | "admin" | "system";
+  actorId: string | null;
+}
+
 export interface DropshipStoreListingConfigRecord extends DropshipStoreListingConfig {
   createdAt: Date;
   updatedAt: Date;
@@ -38,10 +43,7 @@ export interface ReplaceDropshipStoreListingConfigRepositoryInput {
   storeConnectionId: number;
   platform: DropshipSourcePlatform;
   config: NormalizedDropshipStoreListingConfigInput;
-  actor: {
-    actorType: "vendor" | "admin" | "system";
-    actorId: string | null;
-  };
+  actor: DropshipListingConfigActor;
   now: Date;
 }
 
@@ -49,16 +51,16 @@ export interface EnsureDropshipStoreListingConfigRepositoryInput {
   vendorId: number;
   storeConnectionId: number;
   platform: DropshipSourcePlatform;
-  actor: {
-    actorType: "vendor" | "admin" | "system";
-    actorId: string | null;
-  };
+  actor: DropshipListingConfigActor;
   now: Date;
 }
 
 export interface DropshipListingConfigRepository {
   loadStoreConnectionContext(input: {
     vendorId: number;
+    storeConnectionId: number;
+  }): Promise<DropshipListingConfigStoreConnectionContext | null>;
+  loadStoreConnectionContextById(input: {
     storeConnectionId: number;
   }): Promise<DropshipListingConfigStoreConnectionContext | null>;
   ensureDefaultConfig(
@@ -98,6 +100,22 @@ export class DropshipListingConfigService {
     });
 
     return { vendor, storeConnection, config };
+  }
+
+  async getForAdmin(storeConnectionId: number, actor: DropshipListingConfigActor): Promise<{
+    storeConnection: DropshipListingConfigStoreConnectionContext;
+    config: DropshipStoreListingConfigRecord;
+  }> {
+    const storeConnection = await this.requireStoreConnectionForAdmin(storeConnectionId);
+    const config = await this.deps.repository.ensureDefaultConfig({
+      vendorId: storeConnection.vendorId,
+      storeConnectionId,
+      platform: storeConnection.platform,
+      actor,
+      now: this.deps.clock.now(),
+    });
+
+    return { storeConnection, config };
   }
 
   async replaceForMember(memberId: string, storeConnectionId: number, input: unknown): Promise<{
@@ -143,6 +161,51 @@ export class DropshipListingConfigService {
     return { vendor, storeConnection, config };
   }
 
+  async replaceForAdmin(
+    storeConnectionId: number,
+    input: unknown,
+    actor: DropshipListingConfigActor,
+  ): Promise<{
+    storeConnection: DropshipListingConfigStoreConnectionContext;
+    config: DropshipStoreListingConfigRecord;
+  }> {
+    const parsed = replaceDropshipStoreListingConfigInputSchema.parse(input);
+    const storeConnection = await this.requireStoreConnectionForAdmin(storeConnectionId);
+    if (storeConnection.status === "disconnected") {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED",
+        "Disconnected store connections cannot be updated for dropship listing configuration.",
+        { vendorId: storeConnection.vendorId, storeConnectionId },
+      );
+    }
+
+    const config = await this.deps.repository.replaceConfig({
+      vendorId: storeConnection.vendorId,
+      storeConnectionId,
+      platform: storeConnection.platform,
+      config: normalizeListingConfigInput(parsed),
+      actor,
+      now: this.deps.clock.now(),
+    });
+
+    this.deps.logger.info({
+      code: "DROPSHIP_LISTING_CONFIG_REPLACED",
+      message: "Dropship store listing configuration replaced.",
+      context: {
+        vendorId: storeConnection.vendorId,
+        storeConnectionId,
+        platform: storeConnection.platform,
+        listingMode: config.listingMode,
+        inventoryMode: config.inventoryMode,
+        priceMode: config.priceMode,
+        isActive: config.isActive,
+        actorType: actor.actorType,
+      },
+    });
+
+    return { storeConnection, config };
+  }
+
   private async requireStoreConnection(
     vendorId: number,
     storeConnectionId: number,
@@ -156,6 +219,22 @@ export class DropshipListingConfigService {
         "DROPSHIP_STORE_CONNECTION_NOT_FOUND",
         "Dropship store connection was not found.",
         { vendorId, storeConnectionId },
+      );
+    }
+    return storeConnection;
+  }
+
+  private async requireStoreConnectionForAdmin(
+    storeConnectionId: number,
+  ): Promise<DropshipListingConfigStoreConnectionContext> {
+    const storeConnection = await this.deps.repository.loadStoreConnectionContextById({
+      storeConnectionId,
+    });
+    if (!storeConnection) {
+      throw new DropshipError(
+        "DROPSHIP_STORE_CONNECTION_NOT_FOUND",
+        "Dropship store connection was not found.",
+        { storeConnectionId },
       );
     }
     return storeConnection;

@@ -44,6 +44,14 @@ interface AdminStoreConnectionRow extends StoreConnectionRow {
   vendor_email: string | null;
   vendor_status: string;
   vendor_entitlement_status: string;
+  listing_config_id: number | null;
+  listing_config_active: boolean | null;
+  listing_config_listing_mode: DropshipAdminStoreConnectionListItem["listingConfig"]["listingMode"];
+  listing_config_inventory_mode: DropshipAdminStoreConnectionListItem["listingConfig"]["inventoryMode"];
+  listing_config_price_mode: DropshipAdminStoreConnectionListItem["listingConfig"]["priceMode"];
+  listing_config_required_config_keys: unknown;
+  listing_config_required_product_fields: unknown;
+  listing_config_updated_at: Date | null;
   open_setup_check_count: string | number;
   error_setup_check_count: string | number;
   warning_setup_check_count: string | number;
@@ -100,12 +108,21 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
               v.email AS vendor_email,
               v.status AS vendor_status,
               v.entitlement_status AS vendor_entitlement_status,
+              slc.id AS listing_config_id,
+              slc.is_active AS listing_config_active,
+              slc.listing_mode AS listing_config_listing_mode,
+              slc.inventory_mode AS listing_config_inventory_mode,
+              slc.price_mode AS listing_config_price_mode,
+              slc.required_config_keys AS listing_config_required_config_keys,
+              slc.required_product_fields AS listing_config_required_product_fields,
+              slc.updated_at AS listing_config_updated_at,
               COALESCE(check_counts.open_setup_check_count, 0) AS open_setup_check_count,
               COALESCE(check_counts.error_setup_check_count, 0) AS error_setup_check_count,
               COALESCE(check_counts.warning_setup_check_count, 0) AS warning_setup_check_count,
               COUNT(*) OVER() AS total_count
        FROM dropship.dropship_store_connections sc
        INNER JOIN dropship.dropship_vendors v ON v.id = sc.vendor_id
+       LEFT JOIN dropship.dropship_store_listing_configs slc ON slc.store_connection_id = sc.id
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS open_setup_check_count,
                 COUNT(*) FILTER (WHERE severity = 'error') AS error_setup_check_count,
@@ -652,6 +669,16 @@ function mapAdminStoreConnectionRow(row: AdminStoreConnectionRow): DropshipAdmin
       status: row.vendor_status,
       entitlementStatus: row.vendor_entitlement_status,
     },
+    listingConfig: {
+      isConfigured: row.listing_config_id !== null,
+      isActive: row.listing_config_active === true,
+      listingMode: row.listing_config_listing_mode,
+      inventoryMode: row.listing_config_inventory_mode,
+      priceMode: row.listing_config_price_mode,
+      requiredConfigKeys: stringArrayFromJson(row.listing_config_required_config_keys),
+      requiredProductFields: stringArrayFromJson(row.listing_config_required_product_fields),
+      updatedAt: row.listing_config_updated_at,
+    },
     setupCheckSummary: {
       openCount: toSafeInteger(row.open_setup_check_count, "open setup check count"),
       errorCount: toSafeInteger(row.error_setup_check_count, "error setup check count"),
@@ -687,6 +714,12 @@ function readOrderProcessingDefaultWarehouseId(config: Record<string, unknown>):
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function stringArrayFromJson(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
 }
 
 function requiredRow<T>(row: T | undefined, message: string): T {

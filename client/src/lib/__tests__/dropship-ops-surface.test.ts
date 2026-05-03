@@ -32,6 +32,7 @@ import {
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
   buildStoreConnectionOAuthStartInput,
+  buildStoreListingConfigInput,
   formatCents,
   formatStatus,
   fetchJson,
@@ -447,6 +448,56 @@ describe("dropship ops surface client helpers", () => {
     expect(() => buildStoreOrderProcessingConfigInput({
       defaultWarehouseId: "0",
       idempotencyKey: "warehouse-config-3",
+    })).toThrow();
+  });
+
+  it("builds store listing config inputs from explicit admin form state", () => {
+    expect(buildStoreListingConfigInput({
+      listingMode: "draft_first",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfigJson: "{ \"marketplaceId\": \"EBAY_US\" }",
+      requiredConfigKeys: " marketplaceId, marketplaceId, businessPolicies.paymentPolicyId ",
+      requiredProductFields: "sku, title",
+      isActive: true,
+    })).toEqual({
+      listingMode: "draft_first",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfig: { marketplaceId: "EBAY_US" },
+      requiredConfigKeys: ["marketplaceId", "businessPolicies.paymentPolicyId"],
+      requiredProductFields: ["sku", "title"],
+      isActive: true,
+    });
+  });
+
+  it("rejects invalid store listing config form state", () => {
+    expect(() => buildStoreListingConfigInput({
+      listingMode: "draft_first",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfigJson: "[]",
+      requiredConfigKeys: "",
+      requiredProductFields: "",
+      isActive: true,
+    })).toThrow();
+    expect(() => buildStoreListingConfigInput({
+      listingMode: "draft_first",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfigJson: "{}",
+      requiredConfigKeys: "bad key",
+      requiredProductFields: "",
+      isActive: true,
+    })).toThrow();
+    expect(() => buildStoreListingConfigInput({
+      listingMode: "draft_first",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfigJson: "{}",
+      requiredConfigKeys: "",
+      requiredProductFields: "unsupported",
+      isActive: true,
     })).toThrow();
   });
 
