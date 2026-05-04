@@ -1,9 +1,11 @@
 import { DropshipError } from "../domain/errors";
 import type { DropshipOrderIntakeStatus, NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
 import {
+  getDropshipOrderOpsIntakeDetailInputSchema,
   listDropshipOrderOpsIntakesInputSchema,
   markDropshipOrderOpsExceptionInputSchema,
   retryDropshipOrderOpsIntakeInputSchema,
+  type GetDropshipOrderOpsIntakeDetailInput,
   type ListDropshipOrderOpsIntakesInput,
   type MarkDropshipOrderOpsExceptionInput,
   type RetryDropshipOrderOpsIntakeInput,
@@ -82,6 +84,88 @@ export interface DropshipOrderOpsIntakeListItem {
   latestAuditEvent: DropshipOrderOpsAuditSummary | null;
 }
 
+export interface DropshipOrderOpsIntakeLine {
+  lineIndex: number;
+  externalLineItemId: string | null;
+  externalListingId: string | null;
+  externalOfferId: string | null;
+  sku: string | null;
+  productVariantId: number | null;
+  quantity: number;
+  unitRetailPriceCents: number | null;
+  lineRetailTotalCents: number | null;
+  title: string | null;
+}
+
+export interface DropshipOrderOpsIntakeTotals {
+  retailSubtotalCents: number | null;
+  shippingPaidCents: number | null;
+  taxCents: number | null;
+  discountCents: number | null;
+  grandTotalCents: number | null;
+  currency: string;
+}
+
+export interface DropshipOrderOpsEconomicsSnapshot {
+  economicsSnapshotId: number;
+  shippingQuoteSnapshotId: number | null;
+  warehouseId: number | null;
+  currency: string;
+  retailSubtotalCents: number;
+  wholesaleSubtotalCents: number;
+  shippingCents: number;
+  insurancePoolCents: number;
+  feesCents: number;
+  totalDebitCents: number;
+  pricingSnapshot: Record<string, unknown>;
+  createdAt: Date;
+}
+
+export interface DropshipOrderOpsShippingQuoteSnapshot {
+  quoteSnapshotId: number;
+  warehouseId: number;
+  currency: string;
+  destinationCountry: string;
+  destinationPostalCode: string | null;
+  packageCount: number;
+  baseRateCents: number;
+  markupCents: number;
+  insurancePoolCents: number;
+  dunnageCents: number;
+  totalShippingCents: number;
+  quotePayload: Record<string, unknown>;
+  createdAt: Date;
+}
+
+export interface DropshipOrderOpsWalletLedgerEntry {
+  walletLedgerEntryId: number;
+  type: string;
+  status: string;
+  amountCents: number;
+  currency: string;
+  availableBalanceAfterCents: number | null;
+  pendingBalanceAfterCents: number | null;
+  createdAt: Date;
+  settledAt: Date | null;
+}
+
+export interface DropshipOrderOpsAuditEventDetail extends DropshipOrderOpsAuditSummary {
+  actorType: string;
+  actorId: string | null;
+}
+
+export interface DropshipOrderOpsIntakeDetail extends DropshipOrderOpsIntakeListItem {
+  sourceOrderId: string | null;
+  orderedAt: string | null;
+  marketplaceStatus: string | null;
+  totals: DropshipOrderOpsIntakeTotals | null;
+  lines: DropshipOrderOpsIntakeLine[];
+  economicsSnapshot: DropshipOrderOpsEconomicsSnapshot | null;
+  shippingQuoteSnapshot: DropshipOrderOpsShippingQuoteSnapshot | null;
+  walletLedgerEntry: DropshipOrderOpsWalletLedgerEntry | null;
+  auditEvents: DropshipOrderOpsAuditEventDetail[];
+}
+
 export interface DropshipOrderOpsStatusSummary {
   status: DropshipOrderIntakeStatus;
   count: number;
@@ -109,6 +193,8 @@ export interface DropshipOrderOpsRepository {
     statuses: DropshipOrderIntakeStatus[];
   }): Promise<DropshipOrderOpsIntakeListResult>;
 
+  getIntakeDetail(input: GetDropshipOrderOpsIntakeDetailInput): Promise<DropshipOrderOpsIntakeDetail | null>;
+
   retryIntake(input: RetryDropshipOrderOpsIntakeInput & {
     now: Date;
   }): Promise<DropshipOrderOpsActionResult>;
@@ -133,6 +219,23 @@ export class DropshipOrderOpsService {
       ...parsed,
       statuses: parsed.statuses ?? DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES,
     });
+  }
+
+  async getIntakeDetail(input: unknown): Promise<DropshipOrderOpsIntakeDetail> {
+    const parsed = parseDetailInput(input);
+    const detail = await this.deps.repository.getIntakeDetail(parsed);
+    if (!detail) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_INTAKE_NOT_FOUND",
+        "Dropship order intake was not found.",
+        {
+          intakeId: parsed.intakeId,
+          vendorId: parsed.vendorId,
+          storeConnectionId: parsed.storeConnectionId,
+        },
+      );
+    }
+    return detail;
   }
 
   async retryIntake(input: unknown): Promise<DropshipOrderOpsActionResult> {
@@ -192,6 +295,14 @@ function parseListInput(input: unknown): ListDropshipOrderOpsIntakesInput {
   const result = listDropshipOrderOpsIntakesInputSchema.safeParse(input);
   if (!result.success) {
     throw validationError("DROPSHIP_ORDER_OPS_LIST_INVALID_INPUT", result.error.issues);
+  }
+  return result.data;
+}
+
+function parseDetailInput(input: unknown): GetDropshipOrderOpsIntakeDetailInput {
+  const result = getDropshipOrderOpsIntakeDetailInputSchema.safeParse(input);
+  if (!result.success) {
+    throw validationError("DROPSHIP_ORDER_OPS_DETAIL_INVALID_INPUT", result.error.issues);
   }
   return result.data;
 }

@@ -43,6 +43,19 @@ export function registerDropshipOrderRoutes(
     }
   });
 
+  app.get("/api/dropship/orders/:intakeId", requireDropshipAuth, async (req, res) => {
+    try {
+      const provisioned = await vendorProvisioningService.provisionForMember(req.session.dropship!.memberId);
+      const result = await orderOpsService.getIntakeDetail({
+        intakeId: parsePositiveIntegerPath(req.params.intakeId, "intakeId"),
+        vendorId: provisioned.vendor.vendorId,
+      });
+      return res.json({ order: result });
+    } catch (error) {
+      return sendDropshipOrderError(res, error);
+    }
+  });
+
   app.post(
     "/api/dropship/orders/:intakeId/accept",
     requireDropshipAuth,
@@ -127,6 +140,7 @@ function sendDropshipOrderError(res: Response, error: unknown): Response {
 function statusForDropshipOrderError(code: string): number {
   switch (code) {
     case "DROPSHIP_ORDER_OPS_LIST_INVALID_INPUT":
+    case "DROPSHIP_ORDER_OPS_DETAIL_INVALID_INPUT":
     case "DROPSHIP_ORDER_INVALID_REQUEST":
     case "DROPSHIP_ORDER_ACCEPTANCE_WORKFLOW_INVALID_INPUT":
     case "DROPSHIP_ORDER_DEFAULT_WAREHOUSE_REQUIRED":
@@ -149,6 +163,7 @@ function statusForDropshipOrderError(code: string): number {
     case "DROPSHIP_ORDER_STORE_BLOCKED":
       return 403;
     case "DROPSHIP_ORDER_INTAKE_NOT_FOUND":
+    case "DROPSHIP_ORDER_OPS_INTAKE_NOT_FOUND":
     case "DROPSHIP_STORE_CONNECTION_REQUIRED":
       return 404;
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":

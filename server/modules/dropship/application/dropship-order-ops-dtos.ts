@@ -29,6 +29,12 @@ export const listDropshipOrderOpsIntakesInputSchema = z.object({
   limit: z.number().int().positive().max(200).default(50),
 }).strict();
 
+export const getDropshipOrderOpsIntakeDetailInputSchema = z.object({
+  intakeId: positiveIdSchema,
+  vendorId: positiveIdSchema.optional(),
+  storeConnectionId: positiveIdSchema.optional(),
+}).strict();
+
 export const retryDropshipOrderOpsIntakeInputSchema = z.object({
   intakeId: positiveIdSchema,
   reason: z.string().trim().max(1000).optional(),
@@ -44,5 +50,6 @@ export const markDropshipOrderOpsExceptionInputSchema = z.object({
 }).strict();
 
 export type ListDropshipOrderOpsIntakesInput = z.infer<typeof listDropshipOrderOpsIntakesInputSchema>;
+export type GetDropshipOrderOpsIntakeDetailInput = z.infer<typeof getDropshipOrderOpsIntakeDetailInputSchema>;
 export type RetryDropshipOrderOpsIntakeInput = z.infer<typeof retryDropshipOrderOpsIntakeInputSchema>;
 export type MarkDropshipOrderOpsExceptionInput = z.infer<typeof markDropshipOrderOpsExceptionInputSchema>;

@@ -1166,10 +1166,14 @@ export interface DropshipOrderListItem {
   shipTo: {
     name?: string;
     company?: string;
+    address1?: string;
+    address2?: string;
     city?: string;
     region?: string;
     postalCode?: string;
     country?: string;
+    phone?: string;
+    email?: string;
   } | null;
   storeConnection: {
     storeConnectionId: number;
@@ -1181,6 +1185,92 @@ export interface DropshipOrderListItem {
   };
 }
 
+export interface DropshipOrderDetailLine {
+  lineIndex: number;
+  externalLineItemId: string | null;
+  externalListingId: string | null;
+  externalOfferId: string | null;
+  sku: string | null;
+  productVariantId: number | null;
+  quantity: number;
+  unitRetailPriceCents: number | null;
+  lineRetailTotalCents: number | null;
+  title: string | null;
+}
+
+export interface DropshipOrderDetailTotals {
+  retailSubtotalCents: number | null;
+  shippingPaidCents: number | null;
+  taxCents: number | null;
+  discountCents: number | null;
+  grandTotalCents: number | null;
+  currency: string;
+}
+
+export interface DropshipOrderEconomicsSnapshot {
+  economicsSnapshotId: number;
+  shippingQuoteSnapshotId: number | null;
+  warehouseId: number | null;
+  currency: string;
+  retailSubtotalCents: number;
+  wholesaleSubtotalCents: number;
+  shippingCents: number;
+  insurancePoolCents: number;
+  feesCents: number;
+  totalDebitCents: number;
+  pricingSnapshot: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface DropshipOrderShippingQuoteSnapshot {
+  quoteSnapshotId: number;
+  warehouseId: number;
+  currency: string;
+  destinationCountry: string;
+  destinationPostalCode: string | null;
+  packageCount: number;
+  baseRateCents: number;
+  markupCents: number;
+  insurancePoolCents: number;
+  dunnageCents: number;
+  totalShippingCents: number;
+  quotePayload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface DropshipOrderWalletLedgerEntry {
+  walletLedgerEntryId: number;
+  type: string;
+  status: string;
+  amountCents: number;
+  currency: string;
+  availableBalanceAfterCents: number | null;
+  pendingBalanceAfterCents: number | null;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+export interface DropshipOrderAuditEventDetail {
+  eventType: string;
+  actorType: string;
+  actorId: string | null;
+  severity: DropshipSeverity;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface DropshipOrderDetail extends DropshipOrderListItem {
+  sourceOrderId: string | null;
+  orderedAt: string | null;
+  marketplaceStatus: string | null;
+  totals: DropshipOrderDetailTotals | null;
+  lines: DropshipOrderDetailLine[];
+  economicsSnapshot: DropshipOrderEconomicsSnapshot | null;
+  shippingQuoteSnapshot: DropshipOrderShippingQuoteSnapshot | null;
+  walletLedgerEntry: DropshipOrderWalletLedgerEntry | null;
+  auditEvents: DropshipOrderAuditEventDetail[];
+}
+
 export interface DropshipOrderListResponse {
   items: DropshipOrderListItem[];
   total: number;
@@ -1188,6 +1278,10 @@ export interface DropshipOrderListResponse {
   limit: number;
   statuses: string[];
   summary: Array<{ status: string; count: number }>;
+}
+
+export interface DropshipOrderDetailResponse {
+  order: DropshipOrderDetail;
 }
 
 export interface DropshipOrderAcceptInput {

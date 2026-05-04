@@ -4,10 +4,16 @@ import { DropshipError } from "../domain/errors";
 import type { DropshipOrderIntakeStatus, NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type {
   DropshipOrderOpsActionResult,
+  DropshipOrderOpsAuditEventDetail,
+  DropshipOrderOpsEconomicsSnapshot,
+  DropshipOrderOpsIntakeDetail,
+  DropshipOrderOpsIntakeLine,
   DropshipOrderOpsIntakeListItem,
   DropshipOrderOpsIntakeListResult,
   DropshipOrderOpsRepository,
+  DropshipOrderOpsShippingQuoteSnapshot,
   DropshipOrderOpsStatusSummary,
+  DropshipOrderOpsWalletLedgerEntry,
 } from "../application/dropship-order-ops-service";
 
 interface OpsIntakeRow {
@@ -46,6 +52,53 @@ interface OpsIntakeRow {
 interface StatusCountRow {
   status: DropshipOrderIntakeStatus;
   count: string | number;
+}
+
+interface OpsIntakeDetailRow extends OpsIntakeRow {
+  source_order_id: string | null;
+  economics_snapshot_id: number | null;
+  economics_shipping_quote_snapshot_id: number | null;
+  economics_warehouse_id: number | null;
+  economics_currency: string | null;
+  retail_subtotal_cents: string | number | null;
+  wholesale_subtotal_cents: string | number | null;
+  shipping_cents: string | number | null;
+  economics_insurance_pool_cents: string | number | null;
+  fees_cents: string | number | null;
+  total_debit_cents: string | number | null;
+  pricing_snapshot: Record<string, unknown> | null;
+  economics_created_at: Date | null;
+  quote_snapshot_id: number | null;
+  quote_warehouse_id: number | null;
+  quote_currency: string | null;
+  quote_destination_country: string | null;
+  quote_destination_postal_code: string | null;
+  quote_package_count: number | null;
+  base_rate_cents: string | number | null;
+  markup_cents: string | number | null;
+  quote_insurance_pool_cents: string | number | null;
+  dunnage_cents: string | number | null;
+  total_shipping_cents: string | number | null;
+  quote_payload: Record<string, unknown> | null;
+  quote_created_at: Date | null;
+  wallet_ledger_entry_id: number | null;
+  wallet_ledger_type: string | null;
+  wallet_ledger_status: string | null;
+  wallet_ledger_amount_cents: string | number | null;
+  wallet_ledger_currency: string | null;
+  available_balance_after_cents: string | number | null;
+  pending_balance_after_cents: string | number | null;
+  wallet_ledger_created_at: Date | null;
+  wallet_ledger_settled_at: Date | null;
+}
+
+interface AuditEventRow {
+  event_type: string;
+  actor_type: string;
+  actor_id: string | null;
+  severity: string;
+  payload: Record<string, unknown> | null;
+  created_at: Date;
 }
 
 interface ActionIntakeRow {
@@ -107,6 +160,36 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
         statuses: input.statuses,
         summary: summary.rows.map(mapStatusCountRow),
       };
+    } finally {
+      client.release();
+    }
+  }
+
+  async getIntakeDetail(
+    input: Parameters<DropshipOrderOpsRepository["getIntakeDetail"]>[0],
+  ): Promise<DropshipOrderOpsIntakeDetail | null> {
+    const client = await this.dbPool.connect();
+    try {
+      const filters = buildDetailFilters(input);
+      const result = await client.query<OpsIntakeDetailRow>(
+        `${opsIntakeDetailSelectSql()}
+         ${filters.whereSql}
+         LIMIT 1`,
+        filters.params,
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+
+      const auditEvents = await client.query<AuditEventRow>(
+        `SELECT event_type, actor_type, actor_id, severity, payload, created_at
+         FROM dropship.dropship_audit_events
+         WHERE entity_type = 'dropship_order_intake'
+           AND entity_id = $1
+         ORDER BY created_at DESC, id DESC
+         LIMIT 20`,
+        [String(input.intakeId)],
+      );
+      return mapOpsIntakeDetailRow(row, auditEvents.rows);
     } finally {
       client.release();
     }
@@ -277,6 +360,93 @@ function opsIntakeListSelectSql(): string {
   ` + opsIntakeBaseFromSql();
 }
 
+function opsIntakeDetailSelectSql(): string {
+  return `
+    SELECT
+      oi.id,
+      oi.vendor_id,
+      oi.store_connection_id,
+      oi.platform,
+      oi.external_order_id,
+      oi.external_order_number,
+      oi.source_order_id,
+      oi.status,
+      oi.payment_hold_expires_at,
+      oi.rejection_reason,
+      oi.cancellation_status,
+      oi.normalized_payload,
+      oi.oms_order_id,
+      oi.received_at,
+      oi.accepted_at,
+      oi.updated_at,
+      v.member_id,
+      v.business_name,
+      v.email,
+      v.status AS vendor_status,
+      v.entitlement_status,
+      sc.platform AS store_platform,
+      sc.status AS store_status,
+      sc.setup_status,
+      sc.external_display_name,
+      sc.shop_domain,
+      latest.event_type AS latest_event_type,
+      latest.severity AS latest_event_severity,
+      latest.created_at AS latest_event_created_at,
+      latest.payload AS latest_event_payload,
+      1 AS total_count,
+      econ.id AS economics_snapshot_id,
+      econ.shipping_quote_snapshot_id AS economics_shipping_quote_snapshot_id,
+      econ.warehouse_id AS economics_warehouse_id,
+      econ.currency AS economics_currency,
+      econ.retail_subtotal_cents,
+      econ.wholesale_subtotal_cents,
+      econ.shipping_cents,
+      econ.insurance_pool_cents AS economics_insurance_pool_cents,
+      econ.fees_cents,
+      econ.total_debit_cents,
+      econ.pricing_snapshot,
+      econ.created_at AS economics_created_at,
+      quote.id AS quote_snapshot_id,
+      quote.warehouse_id AS quote_warehouse_id,
+      quote.currency AS quote_currency,
+      quote.destination_country AS quote_destination_country,
+      quote.destination_postal_code AS quote_destination_postal_code,
+      quote.package_count AS quote_package_count,
+      quote.base_rate_cents,
+      quote.markup_cents,
+      quote.insurance_pool_cents AS quote_insurance_pool_cents,
+      quote.dunnage_cents,
+      quote.total_shipping_cents,
+      quote.quote_payload,
+      quote.created_at AS quote_created_at,
+      ledger.id AS wallet_ledger_entry_id,
+      ledger.type AS wallet_ledger_type,
+      ledger.status AS wallet_ledger_status,
+      ledger.amount_cents AS wallet_ledger_amount_cents,
+      ledger.currency AS wallet_ledger_currency,
+      ledger.available_balance_after_cents,
+      ledger.pending_balance_after_cents,
+      ledger.created_at AS wallet_ledger_created_at,
+      ledger.settled_at AS wallet_ledger_settled_at
+    ${opsIntakeBaseFromSql()}
+    LEFT JOIN dropship.dropship_order_economics_snapshots econ
+      ON econ.intake_id = oi.id
+    LEFT JOIN dropship.dropship_shipping_quote_snapshots quote
+      ON quote.id = econ.shipping_quote_snapshot_id
+    LEFT JOIN LATERAL (
+      SELECT wl.id, wl.type, wl.status, wl.amount_cents, wl.currency,
+             wl.available_balance_after_cents, wl.pending_balance_after_cents,
+             wl.created_at, wl.settled_at
+      FROM dropship.dropship_wallet_ledger wl
+      WHERE wl.reference_type = 'order_intake'
+        AND wl.reference_id = oi.id::text
+        AND wl.type = 'order_debit'
+      ORDER BY wl.id ASC
+      LIMIT 1
+    ) ledger ON true
+  `;
+}
+
 function opsIntakeBaseFromSql(): string {
   return `
     FROM dropship.dropship_order_intake oi
@@ -333,6 +503,29 @@ function buildOpsIntakeFilters(
   };
 }
 
+function buildDetailFilters(input: {
+  intakeId: number;
+  vendorId?: number;
+  storeConnectionId?: number;
+}): { whereSql: string; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  params.push(input.intakeId);
+  clauses.push(`oi.id = $${params.length}`);
+  if (input.vendorId) {
+    params.push(input.vendorId);
+    clauses.push(`oi.vendor_id = $${params.length}`);
+  }
+  if (input.storeConnectionId) {
+    params.push(input.storeConnectionId);
+    clauses.push(`oi.store_connection_id = $${params.length}`);
+  }
+  return {
+    whereSql: `WHERE ${clauses.join(" AND ")}`,
+    params,
+  };
+}
+
 async function loadActionIntakeForUpdate(
   client: PoolClient,
   intakeId: number,
@@ -383,6 +576,25 @@ async function recordOpsAuditEvent(
   );
 }
 
+function mapOpsIntakeDetailRow(
+  row: OpsIntakeDetailRow,
+  auditEvents: AuditEventRow[],
+): DropshipOrderOpsIntakeDetail {
+  const payload = row.normalized_payload ?? { lines: [] };
+  return {
+    ...mapOpsIntakeRow(row),
+    sourceOrderId: row.source_order_id,
+    orderedAt: normalizeOptionalString(payload.orderedAt),
+    marketplaceStatus: normalizeOptionalString(payload.marketplaceStatus),
+    totals: mapNormalizedTotals(payload.totals),
+    lines: mapNormalizedLines(payload.lines),
+    economicsSnapshot: mapEconomicsSnapshot(row),
+    shippingQuoteSnapshot: mapShippingQuoteSnapshot(row),
+    walletLedgerEntry: mapWalletLedgerEntry(row),
+    auditEvents: auditEvents.map(mapAuditEventDetail),
+  };
+}
+
 function mapOpsIntakeRow(row: OpsIntakeRow): DropshipOrderOpsIntakeListItem {
   const payload = row.normalized_payload ?? { lines: [] };
   const lines = Array.isArray(payload.lines) ? payload.lines : [];
@@ -429,6 +641,103 @@ function mapOpsIntakeRow(row: OpsIntakeRow): DropshipOrderOpsIntakeListItem {
   };
 }
 
+function mapNormalizedLines(lines: NormalizedDropshipOrderPayload["lines"] | undefined): DropshipOrderOpsIntakeLine[] {
+  if (!Array.isArray(lines)) return [];
+  return lines.map((line, index) => {
+    const quantity = normalizePositiveInteger(line.quantity) ?? 0;
+    const unitRetailPriceCents = normalizeOptionalSafeInteger(line.unitRetailPriceCents);
+    return {
+      lineIndex: index,
+      externalLineItemId: normalizeOptionalString(line.externalLineItemId),
+      externalListingId: normalizeOptionalString(line.externalListingId),
+      externalOfferId: normalizeOptionalString(line.externalOfferId),
+      sku: normalizeOptionalString(line.sku),
+      productVariantId: normalizePositiveInteger(line.productVariantId),
+      quantity,
+      unitRetailPriceCents,
+      lineRetailTotalCents: unitRetailPriceCents === null ? null : safeMultiply(unitRetailPriceCents, quantity),
+      title: normalizeOptionalString(line.title),
+    };
+  });
+}
+
+function mapNormalizedTotals(
+  totals: NormalizedDropshipOrderPayload["totals"] | undefined,
+): DropshipOrderOpsIntakeDetail["totals"] {
+  if (!totals || typeof totals !== "object") return null;
+  return {
+    retailSubtotalCents: normalizeOptionalSafeInteger(totals.retailSubtotalCents),
+    shippingPaidCents: normalizeOptionalSafeInteger(totals.shippingPaidCents),
+    taxCents: normalizeOptionalSafeInteger(totals.taxCents),
+    discountCents: normalizeOptionalSafeInteger(totals.discountCents),
+    grandTotalCents: normalizeOptionalSafeInteger(totals.grandTotalCents),
+    currency: normalizeCurrency(totals.currency),
+  };
+}
+
+function mapEconomicsSnapshot(row: OpsIntakeDetailRow): DropshipOrderOpsEconomicsSnapshot | null {
+  if (row.economics_snapshot_id === null || row.economics_created_at === null) return null;
+  return {
+    economicsSnapshotId: row.economics_snapshot_id,
+    shippingQuoteSnapshotId: row.economics_shipping_quote_snapshot_id,
+    warehouseId: row.economics_warehouse_id,
+    currency: row.economics_currency ?? "USD",
+    retailSubtotalCents: requiredSafeInteger(row.retail_subtotal_cents, "retail_subtotal_cents"),
+    wholesaleSubtotalCents: requiredSafeInteger(row.wholesale_subtotal_cents, "wholesale_subtotal_cents"),
+    shippingCents: requiredSafeInteger(row.shipping_cents, "shipping_cents"),
+    insurancePoolCents: requiredSafeInteger(row.economics_insurance_pool_cents, "economics_insurance_pool_cents"),
+    feesCents: requiredSafeInteger(row.fees_cents, "fees_cents"),
+    totalDebitCents: requiredSafeInteger(row.total_debit_cents, "total_debit_cents"),
+    pricingSnapshot: row.pricing_snapshot ?? {},
+    createdAt: row.economics_created_at,
+  };
+}
+
+function mapShippingQuoteSnapshot(row: OpsIntakeDetailRow): DropshipOrderOpsShippingQuoteSnapshot | null {
+  if (row.quote_snapshot_id === null || row.quote_warehouse_id === null || row.quote_created_at === null) return null;
+  return {
+    quoteSnapshotId: row.quote_snapshot_id,
+    warehouseId: row.quote_warehouse_id,
+    currency: row.quote_currency ?? "USD",
+    destinationCountry: row.quote_destination_country ?? "US",
+    destinationPostalCode: row.quote_destination_postal_code,
+    packageCount: row.quote_package_count ?? 0,
+    baseRateCents: requiredSafeInteger(row.base_rate_cents, "base_rate_cents"),
+    markupCents: requiredSafeInteger(row.markup_cents, "markup_cents"),
+    insurancePoolCents: requiredSafeInteger(row.quote_insurance_pool_cents, "quote_insurance_pool_cents"),
+    dunnageCents: requiredSafeInteger(row.dunnage_cents, "dunnage_cents"),
+    totalShippingCents: requiredSafeInteger(row.total_shipping_cents, "total_shipping_cents"),
+    quotePayload: row.quote_payload ?? {},
+    createdAt: row.quote_created_at,
+  };
+}
+
+function mapWalletLedgerEntry(row: OpsIntakeDetailRow): DropshipOrderOpsWalletLedgerEntry | null {
+  if (row.wallet_ledger_entry_id === null || row.wallet_ledger_created_at === null) return null;
+  return {
+    walletLedgerEntryId: row.wallet_ledger_entry_id,
+    type: row.wallet_ledger_type ?? "order_debit",
+    status: row.wallet_ledger_status ?? "unknown",
+    amountCents: requiredSafeInteger(row.wallet_ledger_amount_cents, "wallet_ledger_amount_cents"),
+    currency: row.wallet_ledger_currency ?? "USD",
+    availableBalanceAfterCents: optionalSafeInteger(row.available_balance_after_cents, "available_balance_after_cents"),
+    pendingBalanceAfterCents: optionalSafeInteger(row.pending_balance_after_cents, "pending_balance_after_cents"),
+    createdAt: row.wallet_ledger_created_at,
+    settledAt: row.wallet_ledger_settled_at,
+  };
+}
+
+function mapAuditEventDetail(row: AuditEventRow): DropshipOrderOpsAuditEventDetail {
+  return {
+    eventType: row.event_type,
+    actorType: row.actor_type,
+    actorId: row.actor_id,
+    severity: row.severity,
+    payload: row.payload ?? {},
+    createdAt: row.created_at,
+  };
+}
+
 function mapStatusCountRow(row: StatusCountRow): DropshipOrderOpsStatusSummary {
   return {
     status: row.status,
@@ -448,6 +757,47 @@ function mapActionResult(
     idempotentReplay,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeCurrency(value: unknown): string {
+  const parsed = normalizeOptionalString(value)?.toUpperCase();
+  return parsed && /^[A-Z]{3}$/.test(parsed) ? parsed : "USD";
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return null;
+  return value;
+}
+
+function normalizeOptionalSafeInteger(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
+  return value;
+}
+
+function safeMultiply(left: number, right: number): number | null {
+  const result = left * right;
+  return Number.isSafeInteger(result) ? result : null;
+}
+
+function requiredSafeInteger(value: string | number | null, field: string): number {
+  if (value === null) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_OPS_INTEGER_REQUIRED",
+      "Dropship order detail integer value is required.",
+      { field },
+    );
+  }
+  return toSafeInteger(value, field);
+}
+
+function optionalSafeInteger(value: string | number | null, field: string): number | null {
+  if (value === null) return null;
+  return toSafeInteger(value, field);
 }
 
 function sumLineQuantities(lines: readonly unknown[]): number {
