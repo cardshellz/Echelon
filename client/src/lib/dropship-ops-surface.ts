@@ -1488,6 +1488,67 @@ export interface DropshipReturnListResponse {
   limit: number;
 }
 
+export interface DropshipReturnItem {
+  rmaItemId: number;
+  rmaId: number;
+  productVariantId: number | null;
+  quantity: number;
+  status: string;
+  requestedCreditCents: number | null;
+  finalCreditCents: number | null;
+  feeCents: number | null;
+  createdAt: string;
+}
+
+export interface DropshipReturnInspection {
+  rmaInspectionId: number;
+  rmaId: number;
+  outcome: "approved" | "rejected";
+  faultCategory: DropshipReturnFaultCategory | null;
+  notes: string | null;
+  photos: Record<string, unknown>[];
+  creditCents: number;
+  feeCents: number;
+  inspectedBy: string | null;
+  idempotencyKey: string | null;
+  requestHash: string | null;
+  createdAt: string;
+}
+
+export interface DropshipReturnWalletLedgerEntry {
+  ledgerEntryId: number;
+  walletAccountId: number | null;
+  vendorId: number;
+  type: string;
+  status: string;
+  amountCents: number;
+  currency: string;
+  availableBalanceAfterCents: number | null;
+  pendingBalanceAfterCents: number | null;
+  referenceType: string | null;
+  referenceId: string | null;
+  idempotencyKey: string | null;
+  fundingMethodId: number | null;
+  externalTransactionId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+export interface DropshipReturnDetail extends DropshipReturnListItem {
+  labelSource: string | null;
+  vendorNotes: string | null;
+  idempotencyKey: string | null;
+  requestHash: string | null;
+  items: DropshipReturnItem[];
+  inspections: DropshipReturnInspection[];
+  walletLedger: DropshipReturnWalletLedgerEntry[];
+}
+
+export interface DropshipReturnDetailResponse {
+  rma: DropshipReturnDetail;
+}
+
 export interface DropshipAdminReturnStatusUpdateInput {
   status: DropshipRmaStatus;
   notes?: string;
@@ -1495,38 +1556,7 @@ export interface DropshipAdminReturnStatusUpdateInput {
 }
 
 export interface DropshipAdminReturnStatusUpdateResponse {
-  rma: DropshipReturnListItem & {
-    labelSource: string | null;
-    vendorNotes: string | null;
-    idempotencyKey: string | null;
-    requestHash: string | null;
-    items: Array<{
-      rmaItemId: number;
-      rmaId: number;
-      productVariantId: number | null;
-      quantity: number;
-      status: string;
-      requestedCreditCents: number | null;
-      finalCreditCents: number | null;
-      feeCents: number | null;
-      createdAt: string;
-    }>;
-    inspections: Array<{
-      rmaInspectionId: number;
-      rmaId: number;
-      outcome: "approved" | "rejected";
-      faultCategory: DropshipReturnFaultCategory | null;
-      notes: string | null;
-      photos: Record<string, unknown>[];
-      creditCents: number;
-      feeCents: number;
-      inspectedBy: string | null;
-      idempotencyKey: string | null;
-      requestHash: string | null;
-      createdAt: string;
-    }>;
-    walletLedger: Array<Record<string, unknown>>;
-  };
+  rma: DropshipReturnDetail;
   idempotentReplay: boolean;
 }
 
