@@ -12,6 +12,7 @@ import {
   type DropshipProvisionedVendorProfile,
   type DropshipStoreConnectionSummary,
   type DropshipVendorProvisioningRepository,
+  type DropshipWalletSetupSummary,
 } from "../../application/dropship-vendor-provisioning-service";
 import { resolveDropshipVendorProvisioningStatus } from "../../domain/vendor-provisioning";
 
@@ -130,18 +131,54 @@ describe("DropshipVendorProvisioningService", () => {
       adminExposureRuleCount: 2,
       vendorSelectionRuleCount: 0,
     };
+    repository.walletSetupSummary = {
+      availableBalanceCents: 0,
+      pendingBalanceCents: 2500,
+      activeFundingMethodCount: 1,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+    };
 
     const state = await service.getOnboardingState("member-1");
 
     expect(state.storeConnections.canConnectStore).toBe(true);
     expect(state.catalog.adminCatalogAvailable).toBe(true);
     expect(state.catalog.hasVendorSelection).toBe(false);
+    expect(state.wallet).toMatchObject({
+      activeFundingMethodCount: 1,
+      autoReloadConfigured: true,
+      hasSpendableBalance: false,
+      walletReady: false,
+    });
     expect(state.steps).toMatchObject([
       { key: "vendor_profile", status: "complete" },
       { key: "store_connection", status: "incomplete" },
       { key: "catalog_available", status: "complete" },
       { key: "catalog_selection", status: "incomplete" },
+      { key: "wallet_payment", status: "incomplete" },
     ]);
+  });
+
+  it("marks wallet onboarding complete only when funding, auto-reload, and spendable balance are present", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "active",
+    });
+    repository.walletSetupSummary = {
+      availableBalanceCents: 10000,
+      pendingBalanceCents: 0,
+      activeFundingMethodCount: 1,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+    };
+
+    const state = await service.getOnboardingState("member-1");
+
+    expect(state.wallet.walletReady).toBe(true);
+    expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({
+      status: "complete",
+    });
   });
 });
 
@@ -173,6 +210,14 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
   catalogSetupSummary: DropshipCatalogSetupSummary = {
     adminExposureRuleCount: 0,
     vendorSelectionRuleCount: 0,
+  };
+  walletSetupSummary: DropshipWalletSetupSummary = {
+    availableBalanceCents: 0,
+    pendingBalanceCents: 0,
+    activeFundingMethodCount: 0,
+    autoReloadEnabled: true,
+    autoReloadFundingMethodId: null,
+    autoReloadFundingMethodActive: false,
   };
   lastProvisionInput: DropshipProvisionVendorRepositoryInput | null = null;
 
@@ -211,6 +256,10 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
 
   async getCatalogSetupSummary(): Promise<DropshipCatalogSetupSummary> {
     return this.catalogSetupSummary;
+  }
+
+  async getWalletSetupSummary(): Promise<DropshipWalletSetupSummary> {
+    return this.walletSetupSummary;
   }
 }
 

@@ -53,10 +53,20 @@ export interface DropshipCatalogSetupSummary {
   vendorSelectionRuleCount: number;
 }
 
+export interface DropshipWalletSetupSummary {
+  availableBalanceCents: number;
+  pendingBalanceCents: number;
+  activeFundingMethodCount: number;
+  autoReloadEnabled: boolean;
+  autoReloadFundingMethodId: number | null;
+  autoReloadFundingMethodActive: boolean;
+}
+
 export interface DropshipVendorProvisioningRepository {
   provisionVendor(input: DropshipProvisionVendorRepositoryInput): Promise<DropshipProvisionVendorRepositoryResult>;
   getStoreConnectionSummary(vendorId: number): Promise<DropshipStoreConnectionSummary>;
   getCatalogSetupSummary(vendorId: number): Promise<DropshipCatalogSetupSummary>;
+  getWalletSetupSummary(vendorId: number): Promise<DropshipWalletSetupSummary>;
 }
 
 export interface DropshipVendorProvisioningServiceDependencies {
@@ -67,7 +77,7 @@ export interface DropshipVendorProvisioningServiceDependencies {
 }
 
 export interface DropshipOnboardingStep {
-  key: "vendor_profile" | "store_connection" | "catalog_available" | "catalog_selection";
+  key: "vendor_profile" | "store_connection" | "catalog_available" | "catalog_selection" | "wallet_payment";
   label: string;
   status: "complete" | "incomplete" | "blocked";
   required: boolean;
@@ -84,6 +94,12 @@ export interface DropshipOnboardingState {
     adminCatalogAvailable: boolean;
     hasVendorSelection: boolean;
   };
+  wallet: DropshipWalletSetupSummary & {
+    hasActiveFundingMethod: boolean;
+    autoReloadConfigured: boolean;
+    hasSpendableBalance: boolean;
+    walletReady: boolean;
+  };
   steps: DropshipOnboardingStep[];
 }
 
@@ -98,9 +114,10 @@ export class DropshipVendorProvisioningService {
   async getOnboardingState(memberId: string): Promise<DropshipOnboardingState> {
     const entitlement = await this.requireEntitlement(memberId);
     const provisioned = await this.provisionForEntitlement(entitlement);
-    const [storeConnections, catalog] = await Promise.all([
+    const [storeConnections, catalog, wallet] = await Promise.all([
       this.deps.repository.getStoreConnectionSummary(provisioned.vendor.vendorId),
       this.deps.repository.getCatalogSetupSummary(provisioned.vendor.vendorId),
+      this.deps.repository.getWalletSetupSummary(provisioned.vendor.vendorId),
     ]);
 
     return buildOnboardingState({
@@ -108,6 +125,7 @@ export class DropshipVendorProvisioningService {
       entitlement,
       storeConnections,
       catalog,
+      wallet,
     });
   }
 
@@ -160,11 +178,18 @@ export function buildOnboardingState(input: {
   entitlement: DropshipEntitlementSnapshot;
   storeConnections: DropshipStoreConnectionSummary;
   catalog: DropshipCatalogSetupSummary;
+  wallet: DropshipWalletSetupSummary;
 }): DropshipOnboardingState {
   const activeStoreCount = input.storeConnections.activeCount;
   const adminCatalogAvailable = input.catalog.adminExposureRuleCount > 0;
   const hasVendorSelection = input.catalog.vendorSelectionRuleCount > 0;
   const entitlementBlocked = input.vendor.status === "lapsed" || input.vendor.status === "suspended";
+  const hasActiveFundingMethod = input.wallet.activeFundingMethodCount > 0;
+  const autoReloadConfigured = input.wallet.autoReloadEnabled
+    && input.wallet.autoReloadFundingMethodId !== null
+    && input.wallet.autoReloadFundingMethodActive;
+  const hasSpendableBalance = input.wallet.availableBalanceCents > 0;
+  const walletReady = hasActiveFundingMethod && autoReloadConfigured && hasSpendableBalance;
 
   return {
     vendor: input.vendor,
@@ -178,6 +203,13 @@ export function buildOnboardingState(input: {
       ...input.catalog,
       adminCatalogAvailable,
       hasVendorSelection,
+    },
+    wallet: {
+      ...input.wallet,
+      hasActiveFundingMethod,
+      autoReloadConfigured,
+      hasSpendableBalance,
+      walletReady,
     },
     steps: [
       {
@@ -202,6 +234,12 @@ export function buildOnboardingState(input: {
         key: "catalog_selection",
         label: "Catalog selection",
         status: entitlementBlocked ? "blocked" : hasVendorSelection ? "complete" : "incomplete",
+        required: true,
+      },
+      {
+        key: "wallet_payment",
+        label: "Wallet and auto-reload",
+        status: entitlementBlocked ? "blocked" : walletReady ? "complete" : "incomplete",
         required: true,
       },
     ],

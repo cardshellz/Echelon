@@ -171,7 +171,7 @@ export interface DropshipStoreConnectionSummary {
 }
 
 export interface DropshipOnboardingStep {
-  key: "vendor_profile" | "store_connection" | "catalog_available" | "catalog_selection";
+  key: "vendor_profile" | "store_connection" | "catalog_available" | "catalog_selection" | "wallet_payment";
   label: string;
   status: "complete" | "incomplete" | "blocked";
   required: boolean;
@@ -213,6 +213,18 @@ export interface DropshipOnboardingState {
     vendorSelectionRuleCount: number;
     adminCatalogAvailable: boolean;
     hasVendorSelection: boolean;
+  };
+  wallet: {
+    availableBalanceCents: number;
+    pendingBalanceCents: number;
+    activeFundingMethodCount: number;
+    autoReloadEnabled: boolean;
+    autoReloadFundingMethodId: number | null;
+    autoReloadFundingMethodActive: boolean;
+    hasActiveFundingMethod: boolean;
+    autoReloadConfigured: boolean;
+    hasSpendableBalance: boolean;
+    walletReady: boolean;
   };
   steps: DropshipOnboardingStep[];
 }
