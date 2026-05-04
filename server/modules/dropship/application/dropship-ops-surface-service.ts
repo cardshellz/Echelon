@@ -302,6 +302,10 @@ export function buildDropshipSystemReadinessChecks(
   env: NodeJS.ProcessEnv,
 ): DropshipSystemReadinessCheck[] {
   return [
+    buildSchedulerCheck(env),
+    buildListingPushWorkerCheck(env),
+    buildOrderProcessingWorkerCheck(env),
+    buildEbayOrderIntakeWorkerCheck(env),
     buildTokenVaultCheck(env),
     buildOAuthStateCheck(env),
     buildEbayOAuthCheck(env),
@@ -309,6 +313,95 @@ export function buildDropshipSystemReadinessChecks(
     buildShopifyWebhookSubscriptionCheck(env),
     buildStripeFundingCheck(env),
   ];
+}
+
+function buildSchedulerCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  if (env.DISABLE_SCHEDULERS === "true") {
+    return {
+      key: "scheduler_runtime",
+      label: "Scheduler runtime",
+      status: "blocked",
+      message: "DISABLE_SCHEDULERS=true disables dropship background workers.",
+      requiredEnv: ["DISABLE_SCHEDULERS must not be true"],
+    };
+  }
+
+  return {
+    key: "scheduler_runtime",
+    label: "Scheduler runtime",
+    status: "ready",
+    message: "Background scheduler runtime is allowed to start dropship workers.",
+    requiredEnv: ["DISABLE_SCHEDULERS must not be true"],
+  };
+}
+
+function buildListingPushWorkerCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  if (env.DISABLE_SCHEDULERS === "true" || env.DROPSHIP_LISTING_PUSH_WORKER_DISABLED === "true") {
+    return {
+      key: "listing_push_worker",
+      label: "Listing push worker",
+      status: "blocked",
+      message: "Dropship listing pushes will remain queued while the listing push worker is disabled.",
+      requiredEnv: ["DROPSHIP_LISTING_PUSH_WORKER_DISABLED must not be true"],
+    };
+  }
+
+  return {
+    key: "listing_push_worker",
+    label: "Listing push worker",
+    status: "ready",
+    message: "Dropship listing push worker is enabled by default.",
+    requiredEnv: ["DROPSHIP_LISTING_PUSH_WORKER_DISABLED must not be true"],
+  };
+}
+
+function buildOrderProcessingWorkerCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  if (env.DISABLE_SCHEDULERS === "true" || env.DROPSHIP_ORDER_PROCESSING_WORKER_DISABLED === "true") {
+    return {
+      key: "order_processing_worker",
+      label: "Order processing worker",
+      status: "blocked",
+      message: "Dropship order intake will not automatically quote, debit, reserve, or create OMS orders while the order processor is disabled.",
+      requiredEnv: ["DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true"],
+    };
+  }
+  if (env.DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED !== "true") {
+    return {
+      key: "order_processing_worker",
+      label: "Order processing worker",
+      status: "blocked",
+      message: "DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true is required before dropship order intake is processed automatically.",
+      requiredEnv: ["DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true"],
+    };
+  }
+
+  return {
+    key: "order_processing_worker",
+    label: "Order processing worker",
+    status: "ready",
+    message: "Dropship order processing worker is enabled.",
+    requiredEnv: ["DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true"],
+  };
+}
+
+function buildEbayOrderIntakeWorkerCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  if (env.DISABLE_SCHEDULERS === "true" || env.DROPSHIP_EBAY_ORDER_INTAKE_WORKER_DISABLED === "true") {
+    return {
+      key: "ebay_order_intake_worker",
+      label: "eBay order intake worker",
+      status: "blocked",
+      message: "Dropship eBay connected stores will not be polled for new paid orders while the eBay intake worker is disabled.",
+      requiredEnv: ["DROPSHIP_EBAY_ORDER_INTAKE_WORKER_DISABLED must not be true"],
+    };
+  }
+
+  return {
+    key: "ebay_order_intake_worker",
+    label: "eBay order intake worker",
+    status: "ready",
+    message: "Dropship eBay order intake worker is enabled by default.",
+    requiredEnv: ["DROPSHIP_EBAY_ORDER_INTAKE_WORKER_DISABLED must not be true"],
+  };
 }
 
 function buildTokenVaultCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {

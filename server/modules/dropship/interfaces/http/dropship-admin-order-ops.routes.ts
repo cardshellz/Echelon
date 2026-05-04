@@ -33,6 +33,24 @@ export function registerDropshipAdminOrderOpsRoutes(
   );
 
   app.post(
+    "/api/dropship/admin/order-intake/:intakeId/process",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.processIntake({
+          intakeId: parsePositiveInteger(req.params.intakeId, "intakeId"),
+          reason: parseOptionalBodyString(req.body?.reason),
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.json(serializeOrderProcessingResult(result));
+      } catch (error) {
+        return sendDropshipOrderOpsError(res, error);
+      }
+    },
+  );
+
+  app.post(
     "/api/dropship/admin/order-intake/:intakeId/retry",
     requirePermission("dropship", "manage_operations"),
     async (req, res) => {
@@ -94,16 +112,37 @@ function statusForDropshipOrderOpsError(code: string): number {
     case "DROPSHIP_ORDER_OPS_LIST_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_RETRY_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_EXCEPTION_INVALID_INPUT":
+    case "DROPSHIP_ORDER_OPS_PROCESS_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_INVALID_REQUEST":
+    case "DROPSHIP_ORDER_PROCESSING_INVALID_INPUT":
       return 400;
     case "DROPSHIP_ORDER_OPS_INTAKE_NOT_FOUND":
+    case "DROPSHIP_ORDER_PROCESSING_INTAKE_NOT_FOUND":
       return 404;
     case "DROPSHIP_ORDER_OPS_STATUS_NOT_RETRYABLE":
     case "DROPSHIP_ORDER_OPS_STATUS_NOT_ACTIONABLE":
       return 409;
+    case "DROPSHIP_ORDER_OPS_PROCESSOR_NOT_CONFIGURED":
+      return 503;
     default:
       return 500;
   }
+}
+
+function serializeOrderProcessingResult(result: Awaited<ReturnType<DropshipOrderOpsService["processIntake"]>>) {
+  return {
+    outcome: result.outcome,
+    intakeId: result.intakeId,
+    vendorId: result.vendorId,
+    storeConnectionId: result.storeConnectionId,
+    shippingQuoteSnapshotId: result.shippingQuoteSnapshotId,
+    omsOrderId: result.omsOrderId,
+    walletLedgerEntryId: result.walletLedgerEntryId,
+    economicsSnapshotId: result.economicsSnapshotId,
+    failureCode: result.failureCode,
+    failureMessage: result.failureMessage,
+    retryable: result.retryable,
+  };
 }
 
 function resolveIdempotencyKey(req: Request): string {

@@ -63,6 +63,7 @@ describe("DropshipOpsSurfaceService", () => {
       DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL: "https://echelon.cardshellz.io",
       STRIPE_SECRET_KEY: "stripe-secret",
       DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook",
+      DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED: "true",
     });
 
     expect(checks.every((check) => check.status === "ready")).toBe(true);
@@ -78,6 +79,13 @@ describe("DropshipOpsSurfaceService", () => {
     });
 
     expect(checks.find((check) => check.key === "token_vault")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "scheduler_runtime")).toMatchObject({ status: "ready" });
+    expect(checks.find((check) => check.key === "listing_push_worker")).toMatchObject({ status: "ready" });
+    expect(checks.find((check) => check.key === "order_processing_worker")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true"],
+    });
+    expect(checks.find((check) => check.key === "ebay_order_intake_worker")).toMatchObject({ status: "ready" });
     expect(checks.find((check) => check.key === "oauth_state_signing")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "ebay_oauth")).toMatchObject({
       status: "blocked",
@@ -141,6 +149,7 @@ describe("DropshipOpsSurfaceService", () => {
     expect(result.summary).toEqual([{ status: "blocked", count: 1 }]);
     expect(result.systemChecks).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: "token_vault" }),
+      expect.objectContaining({ key: "order_processing_worker" }),
       expect.objectContaining({ key: "ebay_oauth" }),
       expect.objectContaining({ key: "shopify_oauth" }),
       expect.objectContaining({ key: "shopify_webhook_subscriptions" }),
