@@ -30,6 +30,7 @@ import {
   buildShippingZoneRuleInput,
   buildStoreOrderProcessingConfigInput,
   buildCatalogExposureRuleInput,
+  buildDropshipNotificationsUrl,
   buildDropshipOrderAcceptInput,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
@@ -235,6 +236,17 @@ describe("dropship ops surface client helpers", () => {
       channel: "in_app",
       critical: "noncritical",
     })).toBe("/api/dropship/admin/notifications?statuses=pending%2Cdelivered%2Cfailed&channel=in_app&critical=false&page=1&limit=50");
+  });
+
+  it("builds vendor notification URLs with unread filtering", () => {
+    expect(buildDropshipNotificationsUrl({
+      view: "all",
+    })).toBe("/api/dropship/notifications?page=1&limit=50");
+    expect(buildDropshipNotificationsUrl({
+      view: "unread",
+      page: 2,
+      limit: 25,
+    })).toBe("/api/dropship/notifications?unreadOnly=true&page=2&limit=25");
   });
 
   it("builds admin return URLs with optional operational filters", () => {
