@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { requirePermission } from "../../../../routes/middleware";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipWalletService } from "../../application/dropship-wallet-service";
 import { createDropshipWalletServiceFromEnv } from "../../infrastructure/dropship-wallet.factory";
@@ -13,6 +14,30 @@ export function registerDropshipWalletRoutes(
   service: DropshipWalletService = createDropshipWalletServiceFromEnv(),
   stripeFundingProvider: StripeDropshipFundingProvider = createStripeDropshipFundingProviderFromEnv(),
 ): void {
+  app.post(
+    "/api/dropship/admin/wallet/manual-credit",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.creditManualFunding({
+          vendorId: req.body?.vendorId,
+          amountCents: req.body?.amountCents,
+          currency: req.body?.currency ?? "USD",
+          reason: req.body?.reason,
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.json({
+          account: result.account,
+          ledgerEntry: result.ledgerEntry,
+          idempotentReplay: result.idempotentReplay,
+        });
+      } catch (error) {
+        return sendDropshipWalletError(res, error);
+      }
+    },
+  );
+
   for (const path of ["/api/webhooks/dropship/stripe", "/api/webhooks/stripe-dropship"]) {
     app.post(path, async (req, res) => {
       try {
@@ -273,6 +298,27 @@ function sendDropshipWalletError(res: Response, error: unknown) {
       message: "Dropship wallet request failed.",
     },
   });
+}
+
+function resolveIdempotencyKey(req: Request): string {
+  const header = req.header("Idempotency-Key") ?? req.header("X-Idempotency-Key");
+  const bodyKey = typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey : null;
+  const key = bodyKey ?? header;
+  if (!key) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_INVALID_INPUT",
+      "Idempotency-Key header or idempotencyKey body field is required.",
+    );
+  }
+  return key;
+}
+
+function adminActor(req: Request): { actorType: "admin"; actorId?: string } {
+  const user = req.session.user as { id?: unknown } | undefined;
+  return {
+    actorType: "admin",
+    ...(typeof user?.id === "string" && user.id.trim() ? { actorId: user.id.trim() } : {}),
+  };
 }
 
 function statusForDropshipWalletError(code: string): number {

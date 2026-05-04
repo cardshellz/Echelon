@@ -57,6 +57,7 @@ import {
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
   buildAdminTrackingPushRetryInput,
+  buildAdminWalletManualCreditInput,
   buildAdminStoreConnectionsUrl,
   buildAdminStoreWebhookRepairInput,
   buildAdminTrackingPushesUrl,
@@ -110,6 +111,7 @@ import {
   type DropshipAdminTrackingPushListItem,
   type DropshipAdminTrackingPushListResponse,
   type DropshipAdminTrackingPushRetryResponse,
+  type DropshipAdminWalletManualCreditResponse,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
   type DropshipDogfoodReadinessStatus,
@@ -608,6 +610,12 @@ function refreshAll() {
               Order intake
             </TabsTrigger>
             <TabsTrigger
+              value="wallet-ops"
+              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
+            >
+              Wallet ops
+            </TabsTrigger>
+            <TabsTrigger
               value="stores"
               className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
             >
@@ -669,6 +677,10 @@ function refreshAll() {
 
           <TabsContent value="order-intake" className="m-0">
             <OrderIntakeOpsTab />
+          </TabsContent>
+
+          <TabsContent value="wallet-ops" className="m-0">
+            <WalletOpsTab />
           </TabsContent>
 
           <TabsContent value="stores" className="m-0">
@@ -2163,6 +2175,123 @@ function OrderIntakeOpsTab() {
         total={orderIntakeQuery.data?.total ?? 0}
         onRunAction={runOrderAction}
       />
+    </div>
+  );
+}
+
+function WalletOpsTab() {
+  const queryClient = useQueryClient();
+  const [vendorId, setVendorId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function creditWallet() {
+    setPending(true);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminWalletManualCreditInput({
+        vendorId,
+        amount,
+        reason,
+        idempotencyKey: createDropshipIdempotencyKey(`admin-wallet-credit-${vendorId.trim()}`),
+      });
+      const response = await postJson<DropshipAdminWalletManualCreditResponse>(
+        "/api/dropship/admin/wallet/manual-credit",
+        input,
+      );
+      setMessage(`Vendor ${response.account.vendorId} wallet credited ${formatCents(response.ledgerEntry.amountCents)}.`);
+      setAmount("");
+      setReason("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Manual wallet credit failed.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Manual wallet credit</h2>
+            <p className="text-sm text-muted-foreground">Admin-only settled funding credit for dogfood and operational correction.</p>
+          </div>
+          <Wallet className="h-5 w-5 text-muted-foreground" />
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[0.45fr_0.45fr_1.1fr_auto] lg:items-end">
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-vendor">
+              Vendor ID
+            </label>
+            <Input
+              id="dropship-wallet-credit-vendor"
+              className="mt-2"
+              value={vendorId}
+              onChange={(event) => setVendorId(event.target.value)}
+              inputMode="numeric"
+              placeholder="10"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-amount">
+              Amount
+            </label>
+            <Input
+              id="dropship-wallet-credit-amount"
+              className="mt-2"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              inputMode="decimal"
+              placeholder="250.00"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-reason">
+              Reason
+            </label>
+            <Textarea
+              id="dropship-wallet-credit-reason"
+              className="mt-2 min-h-10"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              maxLength={1000}
+              placeholder="Dogfood wallet seed"
+            />
+          </div>
+          <Button
+            className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+            disabled={pending}
+            onClick={creditWallet}
+          >
+            <Wallet className={pending ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
+            Credit
+          </Button>
+        </div>
+      </section>
     </div>
   );
 }

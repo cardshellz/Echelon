@@ -15,6 +15,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminWalletManualCreditInput,
   buildAdminReturnCreateInput,
   buildAdminReturnInspectionInput,
   buildAdminReturnStatusUpdateInput,
@@ -973,6 +974,34 @@ describe("dropship ops surface client helpers", () => {
       minimumBalance: "250",
       maxSingleReload: "50",
       paymentHoldTimeoutMinutes: "2880",
+    })).toThrow();
+  });
+
+  it("builds admin manual wallet credit input with integer cents and audit reason", () => {
+    expect(buildAdminWalletManualCreditInput({
+      vendorId: "10",
+      amount: "$125.50",
+      reason: " Internal dogfood seed ",
+      idempotencyKey: "manual-credit-1",
+    })).toEqual({
+      vendorId: 10,
+      amountCents: 12550,
+      currency: "USD",
+      reason: "Internal dogfood seed",
+      idempotencyKey: "manual-credit-1",
+    });
+
+    expect(() => buildAdminWalletManualCreditInput({
+      vendorId: "10",
+      amount: "0",
+      reason: "seed",
+      idempotencyKey: "manual-credit-1",
+    })).toThrow();
+    expect(() => buildAdminWalletManualCreditInput({
+      vendorId: "10",
+      amount: "125.00",
+      reason: "",
+      idempotencyKey: "manual-credit-1",
     })).toThrow();
   });
 
