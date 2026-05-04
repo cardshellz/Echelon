@@ -20,6 +20,7 @@ export * from "./dropship-notification-ops-service";
 export * from "./dropship-oms-channel-config-service";
 export * from "./dropship-ops-surface-service";
 export * from "./dropship-order-acceptance-service";
+export * from "./dropship-order-acceptance-workflow-service";
 export * from "./dropship-order-cancellation-service";
 export * from "./dropship-order-intake-service";
 export * from "./dropship-order-ops-dtos";

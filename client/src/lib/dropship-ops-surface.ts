@@ -1190,6 +1190,36 @@ export interface DropshipOrderListResponse {
   summary: Array<{ status: string; count: number }>;
 }
 
+export interface DropshipOrderAcceptInput {
+  idempotencyKey: string;
+}
+
+export interface DropshipOrderAcceptResponse {
+  result: {
+    outcome: "accepted" | "payment_hold";
+    intakeId: number;
+    vendorId: number;
+    storeConnectionId: number;
+    shippingQuoteSnapshotId: number;
+    omsOrderId: number | null;
+    walletLedgerEntryId: number | null;
+    economicsSnapshotId: number | null;
+    totalDebitCents: number;
+    currency: string;
+    paymentHoldExpiresAt: string | null;
+    idempotentReplay: boolean;
+    quote: {
+      quoteSnapshotId: number;
+      idempotentReplay: boolean;
+      warehouseId: number;
+      packageCount: number;
+      totalShippingCents: number;
+      currency: string;
+      carrierServices: Array<{ carrier: string; service: string }>;
+    };
+  };
+}
+
 export interface DropshipWalletResponse {
   wallet: {
     account: {
@@ -2006,6 +2036,14 @@ export function createDropshipIdempotencyKey(prefix: string): string {
   crypto.getRandomValues(bytes);
   const suffix = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${prefix}:${suffix}`;
+}
+
+export function buildDropshipOrderAcceptInput(input: {
+  idempotencyKey: string;
+}): DropshipOrderAcceptInput {
+  return {
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
 }
 
 export function buildListingPreviewRequest(input: {

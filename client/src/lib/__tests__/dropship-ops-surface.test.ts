@@ -30,6 +30,7 @@ import {
   buildShippingZoneRuleInput,
   buildStoreOrderProcessingConfigInput,
   buildCatalogExposureRuleInput,
+  buildDropshipOrderAcceptInput,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
   buildStoreConnectionOAuthStartInput,
@@ -101,6 +102,17 @@ describe("dropship ops surface client helpers", () => {
       selectedOnly: false,
       vendorId: undefined,
     })).toBe("/api/dropship/orders?statuses=accepted&page=1&selectedOnly=false");
+  });
+
+  it("builds dropship order acceptance requests with a normalized idempotency key", () => {
+    expect(buildDropshipOrderAcceptInput({
+      idempotencyKey: " accept-order-1 ",
+    })).toEqual({
+      idempotencyKey: "accept-order-1",
+    });
+    expect(() => buildDropshipOrderAcceptInput({
+      idempotencyKey: "short",
+    })).toThrow("idempotencyKey must be between 8 and 200 characters.");
   });
 
   it("builds admin catalog exposure preview URLs with explicit filters", () => {

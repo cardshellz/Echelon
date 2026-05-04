@@ -205,7 +205,10 @@ async function acceptOrderWithClient(
   const productVariantIds = uniquePositiveIntegers(lines.map((line) => line.productVariantId));
   const [pricingPolicies, inventoryLevels, wallet, paymentHoldTimeoutMinutes] = await Promise.all([
     loadPricingPoliciesWithClient(client),
-    lockInventoryLevelsWithClient(client, productVariantIds),
+    lockInventoryLevelsWithClient(client, {
+      productVariantIds,
+      warehouseId: quote.warehouseId,
+    }),
     getOrCreateWalletForUpdate(client, {
       vendorId: input.vendorId,
       currency: quote.currency,
@@ -590,19 +593,25 @@ async function loadPricingPoliciesWithClient(
 
 async function lockInventoryLevelsWithClient(
   client: PoolClient,
-  productVariantIds: readonly number[],
+  input: {
+    productVariantIds: readonly number[];
+    warehouseId: number;
+  },
 ): Promise<InventoryLevelRow[]> {
-  if (productVariantIds.length === 0) return [];
+  if (input.productVariantIds.length === 0) return [];
   const result = await client.query<InventoryLevelRow>(
-    `SELECT id, warehouse_location_id, product_variant_id, variant_qty,
-            reserved_qty, picked_qty, packed_qty
-     FROM inventory.inventory_levels
-     WHERE product_variant_id = ANY($1::int[])
-     ORDER BY product_variant_id ASC,
-              (variant_qty - reserved_qty - picked_qty - packed_qty) DESC,
-              id ASC
+    `SELECT il.id, il.warehouse_location_id, il.product_variant_id, il.variant_qty,
+            il.reserved_qty, il.picked_qty, il.packed_qty
+     FROM inventory.inventory_levels il
+     INNER JOIN warehouse.warehouse_locations wl
+       ON wl.id = il.warehouse_location_id
+     WHERE il.product_variant_id = ANY($1::int[])
+       AND wl.warehouse_id = $2
+     ORDER BY il.product_variant_id ASC,
+              (il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty) DESC,
+              il.id ASC
      FOR UPDATE`,
-    [productVariantIds],
+    [input.productVariantIds, input.warehouseId],
   );
   return result.rows;
 }
