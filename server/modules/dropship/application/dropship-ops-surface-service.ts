@@ -311,6 +311,9 @@ export function buildDropshipSystemReadinessChecks(
     buildEbayOAuthCheck(env),
     buildShopifyOAuthCheck(env),
     buildShopifyWebhookSubscriptionCheck(env),
+    buildShipStationCredentialsCheck(env),
+    buildShipStationWebhookSecurityCheck(env),
+    buildSplitShipmentHandoffCheck(env),
     buildStripeFundingCheck(env),
   ];
 }
@@ -557,6 +560,74 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
     label: "Shopify webhook subscriptions",
     status: "ready",
     message: `Shopify order intake webhooks will be registered against ${configured}.`,
+    requiredEnv,
+  };
+}
+
+function buildShipStationCredentialsCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const missing = missingEnv(env, ["SHIPSTATION_API_KEY", "SHIPSTATION_API_SECRET"]);
+  if (missing.length > 0) {
+    return {
+      key: "shipstation_credentials",
+      label: "ShipStation credentials",
+      status: "blocked",
+      message: `ShipStation fulfillment handoff is missing ${missing.join(", ")}.`,
+      requiredEnv: ["SHIPSTATION_API_KEY", "SHIPSTATION_API_SECRET"],
+    };
+  }
+
+  return {
+    key: "shipstation_credentials",
+    label: "ShipStation credentials",
+    status: "ready",
+    message: "ShipStation API credentials are configured.",
+    requiredEnv: ["SHIPSTATION_API_KEY", "SHIPSTATION_API_SECRET"],
+  };
+}
+
+function buildShipStationWebhookSecurityCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  if (!hasEnv(env, "SHIPSTATION_WEBHOOK_SECRET")) {
+    return {
+      key: "shipstation_webhook_security",
+      label: "ShipStation webhook security",
+      status: "blocked",
+      message: "SHIPSTATION_WEBHOOK_SECRET is required before ShipStation shipment webhooks can be accepted safely.",
+      requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
+    };
+  }
+
+  return {
+    key: "shipstation_webhook_security",
+    label: "ShipStation webhook security",
+    status: "ready",
+    message: "ShipStation webhook verification secret is configured.",
+    requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
+  };
+}
+
+function buildSplitShipmentHandoffCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const requiredEnv = ["WMS_SHIPMENT_AT_SYNC=true", "PUSH_FROM_WMS=true", "SHIP_NOTIFY_V2=true"];
+  const missing = [
+    env.WMS_SHIPMENT_AT_SYNC === "true" ? null : "WMS_SHIPMENT_AT_SYNC=true",
+    env.PUSH_FROM_WMS === "true" ? null : "PUSH_FROM_WMS=true",
+    env.SHIP_NOTIFY_V2 === "true" ? null : "SHIP_NOTIFY_V2=true",
+  ].filter((value): value is string => value !== null);
+
+  if (missing.length > 0) {
+    return {
+      key: "split_shipment_handoff",
+      label: "Split-shipment handoff",
+      status: "blocked",
+      message: `Shipment-aware WMS and ShipStation sync is missing ${missing.join(", ")}.`,
+      requiredEnv,
+    };
+  }
+
+  return {
+    key: "split_shipment_handoff",
+    label: "Split-shipment handoff",
+    status: "ready",
+    message: "WMS shipment creation, WMS-originated ShipStation push, and ShipStation V2 webhook rollups are enabled.",
     requiredEnv,
   };
 }
