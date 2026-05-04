@@ -56,6 +56,48 @@ describe("DropshipOrderOpsService", () => {
     });
   });
 
+  it("loads scoped order detail for vendor dogfooding reads", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const service = new DropshipOrderOpsService({
+      repository,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.getIntakeDetail({
+      intakeId: 1,
+      vendorId: 10,
+    });
+
+    expect(result.lines).toEqual([
+      expect.objectContaining({
+        sku: "SKU-1",
+        quantity: 2,
+        unitRetailPriceCents: 1299,
+        lineRetailTotalCents: 2598,
+      }),
+    ]);
+    expect(repository.lastDetailInput).toMatchObject({
+      intakeId: 1,
+      vendorId: 10,
+    });
+  });
+
+  it("rejects invalid detail input before repository access", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const service = new DropshipOrderOpsService({
+      repository,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    await expect(service.getIntakeDetail({
+      intakeId: 0,
+      vendorId: 10,
+    })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_OPS_DETAIL_INVALID_INPUT" });
+    expect(repository.lastDetailInput).toBeNull();
+  });
+
   it("requests retry with actor, clock, idempotency, and audit log context", async () => {
     const repository = new FakeOrderOpsRepository();
     const logs: DropshipLogEvent[] = [];
@@ -136,6 +178,7 @@ describe("DropshipOrderOpsService", () => {
 
 class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
   lastListInput: Parameters<DropshipOrderOpsRepository["listIntakes"]>[0] | null = null;
+  lastDetailInput: Parameters<DropshipOrderOpsRepository["getIntakeDetail"]>[0] | null = null;
   lastRetryInput: Parameters<DropshipOrderOpsRepository["retryIntake"]>[0] | null = null;
   lastExceptionInput: Parameters<DropshipOrderOpsRepository["markException"]>[0] | null = null;
 
@@ -150,6 +193,42 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
       limit: input.limit,
       statuses: input.statuses,
       summary: [{ status: "failed", count: 1 }],
+    };
+  }
+
+  async getIntakeDetail(
+    input: Parameters<DropshipOrderOpsRepository["getIntakeDetail"]>[0],
+  ): Promise<Awaited<ReturnType<DropshipOrderOpsRepository["getIntakeDetail"]>>> {
+    this.lastDetailInput = input;
+    return {
+      ...makeListItem(),
+      sourceOrderId: "gid://shopify/Order/1",
+      orderedAt: "2026-05-02T11:30:00.000Z",
+      marketplaceStatus: "paid",
+      totals: {
+        retailSubtotalCents: 2598,
+        shippingPaidCents: 599,
+        taxCents: 0,
+        discountCents: 0,
+        grandTotalCents: 3197,
+        currency: "USD",
+      },
+      lines: [{
+        lineIndex: 0,
+        externalLineItemId: "line-1",
+        externalListingId: "listing-1",
+        externalOfferId: null,
+        sku: "SKU-1",
+        productVariantId: 123,
+        quantity: 2,
+        unitRetailPriceCents: 1299,
+        lineRetailTotalCents: 2598,
+        title: "Card Shell",
+      }],
+      economicsSnapshot: null,
+      shippingQuoteSnapshot: null,
+      walletLedgerEntry: null,
+      auditEvents: [],
     };
   }
 

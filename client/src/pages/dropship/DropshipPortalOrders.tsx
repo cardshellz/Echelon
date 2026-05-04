@@ -1,6 +1,20 @@
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, CheckCircle2, ClipboardList, Fingerprint, Mail, Search } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ClipboardList,
+  Eye,
+  Fingerprint,
+  History,
+  Mail,
+  MapPin,
+  Package,
+  ReceiptText,
+  Search,
+  Wallet,
+} from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,6 +23,8 @@ import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -29,6 +45,8 @@ import {
   postJson,
   queryErrorMessage,
   type DropshipOrderAcceptResponse,
+  type DropshipOrderDetail,
+  type DropshipOrderDetailResponse,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
 } from "@/lib/dropship-ops-surface";
@@ -68,6 +86,7 @@ export default function DropshipPortalOrders() {
   const [verificationCode, setVerificationCode] = useState("");
   const [pendingOrderAction, setPendingOrderAction] = useState<PendingOrderAction>(null);
   const [acceptingIntakeId, setAcceptingIntakeId] = useState<number | null>(null);
+  const [selectedIntakeId, setSelectedIntakeId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const ordersUrl = useMemo(() => buildQueryUrl("/api/dropship/orders", {
@@ -79,6 +98,11 @@ export default function DropshipPortalOrders() {
   const ordersQuery = useQuery<DropshipOrderListResponse>({
     queryKey: [ordersUrl],
     queryFn: () => fetchJson<DropshipOrderListResponse>(ordersUrl),
+  });
+  const orderDetailQuery = useQuery<DropshipOrderDetailResponse>({
+    queryKey: ["dropship-order-detail", selectedIntakeId],
+    queryFn: () => fetchJson<DropshipOrderDetailResponse>(`/api/dropship/orders/${selectedIntakeId}`),
+    enabled: selectedIntakeId !== null,
   });
   const hasActiveProof = (action: DropshipSensitiveAction) => {
     const proof = sensitiveProofs[action];
@@ -97,6 +121,7 @@ export default function DropshipPortalOrders() {
       );
       await Promise.all([
         ordersQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["dropship-order-detail", order.intakeId] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/wallet?limit=50"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
@@ -236,6 +261,7 @@ export default function DropshipPortalOrders() {
               total={ordersQuery.data.total}
               verificationCode={verificationCode}
               onAccept={acceptOrder}
+              onView={(order) => setSelectedIntakeId(order.intakeId)}
             />
           ) : (
             <Empty className="p-8">
@@ -247,8 +273,180 @@ export default function DropshipPortalOrders() {
             </Empty>
           )}
         </div>
+        <OrderDetailSheet
+          error={orderDetailQuery.error}
+          isLoading={orderDetailQuery.isLoading}
+          order={orderDetailQuery.data?.order ?? null}
+          open={selectedIntakeId !== null}
+          onOpenChange={(open) => {
+            if (!open) setSelectedIntakeId(null);
+          }}
+        />
       </div>
     </DropshipPortalShell>
+  );
+}
+
+function OrderDetailSheet({
+  error,
+  isLoading,
+  onOpenChange,
+  open,
+  order,
+}: {
+  error: unknown;
+  isLoading: boolean;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+  order: DropshipOrderDetail | null;
+}) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
+        <SheetHeader>
+          <SheetTitle>{order ? order.externalOrderNumber || order.externalOrderId : "Order details"}</SheetTitle>
+          <SheetDescription>
+            {order ? `${formatStatus(order.platform)} intake ${order.intakeId}` : "Marketplace intake detail"}
+          </SheetDescription>
+        </SheetHeader>
+
+        {isLoading ? (
+          <div className="mt-6 space-y-3">
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-28 w-full" />
+          </div>
+        ) : error ? (
+          <Alert variant="destructive" className="mt-6">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{queryErrorMessage(error, "Unable to load order detail.")}</AlertDescription>
+          </Alert>
+        ) : order ? (
+          <div className="mt-6 space-y-6">
+            <section className="grid gap-3 text-sm sm:grid-cols-2">
+              <DetailField label="Status" value={formatStatus(order.status)} />
+              <DetailField label="Store" value={order.storeConnection.externalDisplayName || formatStatus(order.storeConnection.platform)} />
+              <DetailField label="External ID" value={order.externalOrderId} />
+              <DetailField label="OMS order" value={order.omsOrderId ? String(order.omsOrderId) : "Not created"} />
+              <DetailField label="Received" value={formatDateTime(order.receivedAt)} />
+              <DetailField label="Accepted" value={formatDateTime(order.acceptedAt)} />
+              <DetailField label="Marketplace status" value={order.marketplaceStatus || "Not recorded"} />
+              <DetailField label="Payment hold" value={formatDateTime(order.paymentHoldExpiresAt)} />
+            </section>
+
+            <Separator />
+
+            <OrderDetailSection icon={<Package className="h-4 w-4" />} title="Lines">
+              <div className="rounded-md border border-zinc-200">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Item</TableHead>
+                      <TableHead>SKU</TableHead>
+                      <TableHead className="text-right">Qty</TableHead>
+                      <TableHead className="text-right">Retail</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {order.lines.map((line) => (
+                      <TableRow key={`${line.lineIndex}:${line.externalLineItemId ?? line.sku ?? "line"}`}>
+                        <TableCell>
+                          <div className="font-medium">{line.title || "Untitled line"}</div>
+                          <div className="text-xs text-zinc-500">
+                            {line.productVariantId ? `Variant ${line.productVariantId}` : "Variant not linked"}
+                          </div>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{line.sku || "None"}</TableCell>
+                        <TableCell className="text-right font-mono">{line.quantity}</TableCell>
+                        <TableCell className="text-right">
+                          {line.lineRetailTotalCents === null ? "Not recorded" : formatCents(line.lineRetailTotalCents)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </OrderDetailSection>
+
+            <OrderDetailSection icon={<MapPin className="h-4 w-4" />} title="Ship To">
+              <div className="space-y-1 text-sm text-zinc-700">
+                {shipToAddressLines(order).map((line) => <div key={line}>{line}</div>)}
+              </div>
+            </OrderDetailSection>
+
+            <OrderDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Marketplace Totals">
+              <div className="grid gap-2 text-sm sm:grid-cols-2">
+                <DetailField label="Retail subtotal" value={formatNullableCents(order.totals?.retailSubtotalCents)} />
+                <DetailField label="Shipping paid" value={formatNullableCents(order.totals?.shippingPaidCents)} />
+                <DetailField label="Tax" value={formatNullableCents(order.totals?.taxCents)} />
+                <DetailField label="Grand total" value={formatNullableCents(order.totals?.grandTotalCents)} />
+              </div>
+            </OrderDetailSection>
+
+            <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Acceptance Economics">
+              {order.economicsSnapshot ? (
+                <div className="grid gap-2 text-sm sm:grid-cols-2">
+                  <DetailField label="Wholesale" value={formatCents(order.economicsSnapshot.wholesaleSubtotalCents)} />
+                  <DetailField label="Shipping" value={formatCents(order.economicsSnapshot.shippingCents)} />
+                  <DetailField label="Insurance pool" value={formatCents(order.economicsSnapshot.insurancePoolCents)} />
+                  <DetailField label="Total debit" value={formatCents(order.economicsSnapshot.totalDebitCents)} />
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-500">No accepted economics snapshot.</p>
+              )}
+            </OrderDetailSection>
+
+            <OrderDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Shipping Quote">
+              {order.shippingQuoteSnapshot ? (
+                <div className="grid gap-2 text-sm sm:grid-cols-2">
+                  <DetailField label="Quote" value={String(order.shippingQuoteSnapshot.quoteSnapshotId)} />
+                  <DetailField label="Warehouse" value={String(order.shippingQuoteSnapshot.warehouseId)} />
+                  <DetailField label="Packages" value={String(order.shippingQuoteSnapshot.packageCount)} />
+                  <DetailField label="Total shipping" value={formatCents(order.shippingQuoteSnapshot.totalShippingCents)} />
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-500">No accepted shipping quote snapshot.</p>
+              )}
+            </OrderDetailSection>
+
+            <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Wallet Debit">
+              {order.walletLedgerEntry ? (
+                <div className="grid gap-2 text-sm sm:grid-cols-2">
+                  <DetailField label="Ledger entry" value={String(order.walletLedgerEntry.walletLedgerEntryId)} />
+                  <DetailField label="Status" value={formatStatus(order.walletLedgerEntry.status)} />
+                  <DetailField label="Amount" value={formatCents(order.walletLedgerEntry.amountCents)} />
+                  <DetailField label="Balance after" value={formatNullableCents(order.walletLedgerEntry.availableBalanceAfterCents)} />
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-500">No wallet debit recorded.</p>
+              )}
+            </OrderDetailSection>
+
+            <OrderDetailSection icon={<History className="h-4 w-4" />} title="Audit">
+              <div className="space-y-3">
+                {order.auditEvents.length ? order.auditEvents.map((event) => (
+                  <div key={`${event.createdAt}:${event.eventType}`} className="border-l-2 border-zinc-200 pl-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">{formatStatus(event.eventType)}</span>
+                      <Badge variant="outline" className={statusTone(event.severity)}>{formatStatus(event.severity)}</Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-500">
+                      {formatDateTime(event.createdAt)} by {formatStatus(event.actorType)}
+                      {event.actorId ? ` ${event.actorId}` : ""}
+                    </div>
+                    {auditPayloadSummary(event.payload) && (
+                      <div className="mt-1 text-xs text-zinc-600">{auditPayloadSummary(event.payload)}</div>
+                    )}
+                  </div>
+                )) : (
+                  <p className="text-sm text-zinc-500">No audit events recorded.</p>
+                )}
+              </div>
+            </OrderDetailSection>
+          </div>
+        ) : null}
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -256,6 +454,7 @@ function OrdersTable({
   acceptingIntakeId,
   emailCodeSent,
   onAccept,
+  onView,
   orders,
   pendingOrderAction,
   total,
@@ -264,6 +463,7 @@ function OrdersTable({
   acceptingIntakeId: number | null;
   emailCodeSent: boolean;
   onAccept: (order: DropshipOrderListItem) => void;
+  onView: (order: DropshipOrderListItem) => void;
   orders: DropshipOrderListItem[];
   pendingOrderAction: PendingOrderAction;
   total: number;
@@ -283,7 +483,7 @@ function OrdersTable({
             <TableHead>Ship to</TableHead>
             <TableHead>Lines</TableHead>
             <TableHead>Updated</TableHead>
-            <TableHead className="text-right">Action</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -310,21 +510,33 @@ function OrdersTable({
                 <TableCell className="font-mono">{order.lineCount} / {order.totalQuantity}</TableCell>
                 <TableCell className="whitespace-nowrap text-sm text-zinc-500">{formatDateTime(order.updatedAt)}</TableCell>
                 <TableCell className="text-right">
-                  {canAccept ? (
+                  <div className="flex justify-end gap-2">
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="ghost"
                       size="sm"
                       className="h-9 gap-2"
-                      disabled={disabled}
-                      onClick={() => onAccept(order)}
+                      onClick={() => onView(order)}
                     >
-                      {acceptButtonIcon(order, acceptingIntakeId, emailCodeSent, pendingOrderAction)}
-                      {acceptButtonLabel(order, acceptingIntakeId, emailCodeSent, pendingOrderAction)}
+                      <Eye className="h-4 w-4" />
+                      Details
                     </Button>
-                  ) : (
-                    <span className="text-sm text-zinc-500">{acceptanceStateLabel(order)}</span>
-                  )}
+                    {canAccept ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-9 gap-2"
+                        disabled={disabled}
+                        onClick={() => onAccept(order)}
+                      >
+                        {acceptButtonIcon(order, acceptingIntakeId, emailCodeSent, pendingOrderAction)}
+                        {acceptButtonLabel(order, acceptingIntakeId, emailCodeSent, pendingOrderAction)}
+                      </Button>
+                    ) : (
+                      <span className="text-sm text-zinc-500">{acceptanceStateLabel(order)}</span>
+                    )}
+                  </div>
                 </TableCell>
               </TableRow>
             );
@@ -333,6 +545,78 @@ function OrdersTable({
       </Table>
     </>
   );
+}
+
+function OrderDetailSection({
+  children,
+  icon,
+  title,
+}: {
+  children: ReactNode;
+  icon: ReactNode;
+  title: string;
+}) {
+  return (
+    <section className="space-y-3">
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-900">
+        {icon}
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+function DetailField({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-xs font-medium uppercase tracking-normal text-zinc-500">{label}</div>
+      <div className="mt-1 break-words text-zinc-900">{value}</div>
+    </div>
+  );
+}
+
+function shipToAddressLines(order: DropshipOrderDetail): string[] {
+  const shipTo = order.shipTo;
+  if (!shipTo) return ["No ship-to address recorded."];
+  const lines = [
+    shipTo.name,
+    shipTo.company,
+    shipTo.address1,
+    shipTo.address2,
+    [shipTo.city, shipTo.region, shipTo.postalCode].filter(Boolean).join(", "),
+    shipTo.country,
+    shipTo.phone ? `Phone: ${shipTo.phone}` : null,
+    shipTo.email ? `Email: ${shipTo.email}` : null,
+  ].filter((line): line is string => typeof line === "string" && line.trim().length > 0);
+  return lines.length ? lines : ["No ship-to address recorded."];
+}
+
+function formatNullableCents(value: number | null | undefined): string {
+  return typeof value === "number" ? formatCents(value) : "Not recorded";
+}
+
+function auditPayloadSummary(payload: Record<string, unknown>): string {
+  const keys = [
+    "errorCode",
+    "errorMessage",
+    "reason",
+    "shippingQuoteSnapshotId",
+    "omsOrderId",
+    "walletLedgerEntryId",
+    "totalDebitCents",
+    "availableBalanceCents",
+    "paymentHoldExpiresAt",
+  ];
+  const parts = keys.flatMap((key) => {
+    const value = payload[key];
+    if (value === null || value === undefined || value === "") return [];
+    if (key.endsWith("Cents") && typeof value === "number") {
+      return [`${formatStatus(key)}: ${formatCents(value)}`];
+    }
+    return [`${formatStatus(key)}: ${String(value)}`];
+  });
+  return parts.join(" | ");
 }
 
 function SensitiveActionVerificationPanel({
