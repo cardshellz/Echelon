@@ -260,6 +260,11 @@ export default function InboundShipmentDetail() {
   });
   const vendorsForInvoice = vendorsData;
 
+  const { data: invoicesData } = useQuery<any>({
+    queryKey: [`/api/inbound-shipments/${shipmentId}/invoices`],
+    enabled: !!shipmentId,
+  });
+
   const lines = shipment?.lines ?? [];
   const costs = shipment?.costs ?? [];
   const paymentStatus = shipment?.paymentStatus ?? null;
@@ -969,6 +974,7 @@ export default function InboundShipmentDetail() {
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="costs">Costs ({costs.length})</TabsTrigger>
           <TabsTrigger value="allocation">Allocation</TabsTrigger>
+          <TabsTrigger value="invoices">Invoices ({invoicesData?.summary?.invoiceCount ?? 0})</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
         </TabsList>
 
@@ -1178,13 +1184,21 @@ export default function InboundShipmentDetail() {
                             <span className="text-sm font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</span>
                             {cost.vendorName && <span className="text-xs text-muted-foreground">{cost.vendorName}</span>}
                             {(() => {
-                              const costStatus = paymentStatus?.costs?.find((ps: any) => ps.costId === cost.id);
-                              if (!costStatus || costStatus.paymentStatus === "unlinked") return null;
-                              const badge = PAYMENT_STATUS_BADGES[costStatus.paymentStatus];
-                              if (!badge) return null;
+                              const status = cost.derivedStatus as "unbilled" | "invoiced" | "paid";
+                              const badgeMap: Record<string, { label: string; variant: "default" | "secondary" | "outline"; className?: string }> = {
+                                unbilled: { label: "Unbilled", variant: "outline", className: "text-muted-foreground" },
+                                invoiced: { label: "Invoiced", variant: "outline", className: "border-blue-500 text-blue-600" },
+                                paid: { label: "Paid", variant: "outline", className: "border-green-500 text-green-600" },
+                              };
+                              const badge = badgeMap[status] || badgeMap.unbilled;
                               return <Badge variant={badge.variant} className={`text-xs ${badge.className || ""}`}>{badge.label}</Badge>;
                             })()}
                           </div>
+                          {cost.linkedInvoice && (
+                            <a href={`/ap-invoices/${cost.linkedInvoice.id}`} className="text-xs text-blue-600 hover:underline mt-1 block">
+                              {cost.linkedInvoice.invoiceNumber}
+                            </a>
+                          )}
                         </div>
                         {isEditable && (
                           <div className="flex gap-1">
@@ -1245,15 +1259,16 @@ export default function InboundShipmentDetail() {
                   <TableHead>Description</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
                   <TableHead>Provider</TableHead>
+                  <TableHead>Invoice</TableHead>
                   <TableHead>Method</TableHead>
-                  <TableHead>Payment</TableHead>
+                  <TableHead>Status</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {costs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 8 : 7} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 9 : 8} className="text-center text-muted-foreground py-8">
                       No costs recorded yet. Click "Add Cost" to add shipment costs.
                     </TableCell>
                   </TableRow>
@@ -1270,6 +1285,20 @@ export default function InboundShipmentDetail() {
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
                         <TableCell className="text-sm">{cost.vendorName || "—"}</TableCell>
+                        <TableCell>
+                          {cost.linkedInvoice ? (
+                            <a
+                              href={`/ap-invoices/${cost.linkedInvoice.id}`}
+                              className="text-xs text-blue-600 hover:underline font-mono"
+                            >
+                              {cost.linkedInvoice.invoiceNumber}
+                            </a>
+                          ) : cost.vendorId ? (
+                            <span className="text-xs text-muted-foreground">Unbilled</span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">Set vendor first</span>
+                          )}
+                        </TableCell>
                         <TableCell className="text-xs">
                           {cost.allocationMethod
                             ? ALLOCATION_METHOD_LABELS[cost.allocationMethod] || cost.allocationMethod.replace(/_/g, " ")
@@ -1277,21 +1306,14 @@ export default function InboundShipmentDetail() {
                         </TableCell>
                         <TableCell>
                           {(() => {
-                            const costStatus = paymentStatus?.costs?.find((ps: any) => ps.costId === cost.id);
-                            if (!costStatus || costStatus.paymentStatus === "unlinked") return <span className="text-xs text-muted-foreground">—</span>;
-                            const badge = PAYMENT_STATUS_BADGES[costStatus.paymentStatus];
-                            if (!badge) return null;
-                            return costStatus.vendorInvoiceId ? (
-                              <Badge
-                                variant={badge.variant}
-                                className={`text-xs cursor-pointer ${badge.className || ""}`}
-                                onClick={() => navigate(`/ap-invoices/${costStatus.vendorInvoiceId}`)}
-                              >
-                                {badge.label}
-                              </Badge>
-                            ) : (
-                              <Badge variant={badge.variant} className={`text-xs ${badge.className || ""}`}>{badge.label}</Badge>
-                            );
+                            const status = cost.derivedStatus as "unbilled" | "invoiced" | "paid";
+                            const badgeMap: Record<string, { label: string; variant: "default" | "secondary" | "outline"; className?: string }> = {
+                              unbilled: { label: "Unbilled", variant: "outline", className: "text-muted-foreground" },
+                              invoiced: { label: "Invoiced", variant: "outline", className: "border-blue-500 text-blue-600" },
+                              paid: { label: "Paid", variant: "outline", className: "border-green-500 text-green-600" },
+                            };
+                            const badge = badgeMap[status] || badgeMap.unbilled;
+                            return <Badge variant={badge.variant} className={`text-xs ${badge.className || ""}`}>{badge.label}</Badge>;
                           })()}
                         </TableCell>
                         {isEditable && (
@@ -1334,7 +1356,7 @@ export default function InboundShipmentDetail() {
                       <TableCell className="text-right font-mono">
                         {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
                       </TableCell>
-                      <TableCell colSpan={isEditable ? 4 : 3} />
+                      <TableCell colSpan={isEditable ? 5 : 4} />
                     </TableRow>
                   </>
                 )}
@@ -1407,7 +1429,74 @@ export default function InboundShipmentDetail() {
           </Card>
         </TabsContent>
 
-        {/* ══ Tab 4: Timeline ══ */}
+        {/* ══ Tab 4: Invoices ══ */}
+        <TabsContent value="invoices" className="space-y-4">
+          {/* Summary bar */}
+          {invoicesData?.summary && (
+            <div className="flex flex-wrap gap-6 text-sm px-1">
+              <span>Total Invoiced: <strong className="font-mono">{formatCents(invoicesData.summary.totalInvoicedCents)}</strong></span>
+              <span>Total Paid: <strong className="font-mono">{formatCents(invoicesData.summary.totalPaidCents)}</strong></span>
+              <span className={invoicesData.summary.outstandingCents > 0 ? "text-amber-600" : "text-green-600"}>Outstanding: <strong className="font-mono">{formatCents(invoicesData.summary.outstandingCents)}</strong></span>
+            </div>
+          )}
+
+          {!invoicesData?.invoices?.length ? (
+            <Card>
+              <CardContent className="p-8 text-center text-muted-foreground">
+                <FileText className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                <p className="text-sm">No invoices linked to this shipment yet.</p>
+                <p className="text-xs mt-1">Add invoices from the AP Invoices page and link them to this shipment.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Invoice Date</TableHead>
+                      <TableHead>Invoice #</TableHead>
+                      <TableHead>Vendor</TableHead>
+                      <TableHead className="text-right">Total</TableHead>
+                      <TableHead className="text-right">Paid</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {invoicesData.invoices.map((inv: any) => (
+                      <TableRow key={inv.id} className={inv.status === "voided" ? "opacity-40" : ""}>
+                        <TableCell className="text-sm">
+                          {inv.invoiceDate ? format(new Date(inv.invoiceDate), "MMM d, yyyy") : "—"}
+                        </TableCell>
+                        <TableCell className={`font-mono font-medium ${inv.status === "voided" ? "line-through" : ""}`}>{inv.invoiceNumber}</TableCell>
+                        <TableCell className="text-sm">{inv.vendorName || "—"}</TableCell>
+                        <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
+                        <TableCell className="text-right font-mono">
+                          {inv.paidAmountCents > 0 ? formatCents(inv.paidAmountCents) : "—"}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="text-xs">{inv.status?.replace(/_/g, " ")}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => navigate(`/ap-invoices/${inv.id}`)}
+                          >
+                            View
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* ══ Tab 5: Timeline ══ */}
         <TabsContent value="timeline" className="space-y-4">
           {statusHistory.length === 0 ? (
             <Card>

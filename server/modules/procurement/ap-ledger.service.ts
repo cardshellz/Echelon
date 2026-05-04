@@ -403,6 +403,7 @@ export async function getInvoiceById(id: number) {
 
 export async function listInvoices(filters: {
   vendorId?: number;
+  inboundShipmentId?: number;
   status?: string | string[];
   overdue?: boolean;
   dueBefore?: Date;
@@ -412,6 +413,7 @@ export async function listInvoices(filters: {
   const conditions = [];
 
   if (filters.vendorId) conditions.push(eq(vendorInvoices.vendorId, filters.vendorId));
+  if (filters.inboundShipmentId) conditions.push(eq(vendorInvoices.inboundShipmentId, filters.inboundShipmentId));
   if (filters.status) {
     const statuses = Array.isArray(filters.status) ? filters.status : [filters.status];
     conditions.push(inArray(vendorInvoices.status, statuses));
@@ -1408,6 +1410,98 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
       outstandingCents,
     },
   };
+}
+
+/**
+ * Get all invoices linked to a shipment with summary totals.
+ * Uses vendor_invoices.inbound_shipment_id direct FK.
+ */
+export async function getShipmentInvoicesSummary(shipmentId: number) {
+  const rows = await db
+    .select({
+      invoice: vendorInvoices,
+      vendorName: vendors.name,
+      vendorCode: vendors.code,
+    })
+    .from(vendorInvoices)
+    .leftJoin(vendors, eq(vendorInvoices.vendorId, vendors.id))
+    .where(eq(vendorInvoices.inboundShipmentId, shipmentId))
+    .orderBy(desc(vendorInvoices.invoiceDate));
+
+  let totalInvoicedCents = 0;
+  let totalPaidCents = 0;
+
+  const invoices = rows.map((r) => {
+    const invoiced = Number(r.invoice.invoicedAmountCents) || 0;
+    const paid = Number(r.invoice.paidAmountCents) || 0;
+    totalInvoicedCents += invoiced;
+    totalPaidCents += paid;
+    return {
+      ...r.invoice,
+      vendorName: r.vendorName,
+      vendorCode: r.vendorCode,
+    };
+  });
+
+  return {
+    invoices,
+    summary: {
+      totalInvoicedCents,
+      totalPaidCents,
+      outstandingCents: totalInvoicedCents - totalPaidCents,
+      invoiceCount: invoices.length,
+    },
+  };
+}
+
+/**
+ * Enrich shipment cost rows with linked invoice info and derived status.
+ * Returns enriched cost array with linkedInvoice and derivedStatus fields.
+ */
+export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
+  const costs = await db
+    .select({
+      cost: inboundFreightCosts,
+      invoiceId: vendorInvoices.id,
+      invoiceNumber: vendorInvoices.invoiceNumber,
+      invoiceVendorId: vendorInvoices.vendorId,
+      invoiceStatus: vendorInvoices.status,
+      invoiceVendorName: vendors.name,
+      invoicedAmountCents: vendorInvoices.invoicedAmountCents,
+      paidAmountCents: vendorInvoices.paidAmountCents,
+      balanceCents: vendorInvoices.balanceCents,
+    })
+    .from(inboundFreightCosts)
+    .leftJoin(vendorInvoices, eq(inboundFreightCosts.vendorInvoiceId, vendorInvoices.id))
+    .leftJoin(vendors, eq(vendorInvoices.vendorId, vendors.id))
+    .where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
+
+  return costs.map((c) => {
+    const linkedInvoice = c.invoiceId
+      ? {
+          id: c.invoiceId,
+          invoiceNumber: c.invoiceNumber,
+          vendorId: c.invoiceVendorId,
+          vendorName: c.invoiceVendorName,
+        }
+      : null;
+
+    let derivedStatus: "unbilled" | "invoiced" | "paid" = "unbilled";
+    if (c.invoiceId && c.invoiceStatus) {
+      if (c.invoiceStatus === "voided") {
+        derivedStatus = "unbilled";
+      } else {
+        const balance = Number(c.balanceCents) || 0;
+        derivedStatus = balance <= 0 ? "paid" : "invoiced";
+      }
+    }
+
+    return {
+      ...c.cost,
+      linkedInvoice,
+      derivedStatus,
+    };
+  });
 }
 
 /**

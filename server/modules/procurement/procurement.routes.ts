@@ -3359,7 +3359,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/inbound-shipments/:id/costs", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const costs = await shipmentTracking.getCosts(Number(req.params.id));
+      const costs = await apLedger.enrichCostsWithInvoiceInfo(Number(req.params.id));
       res.json(costs);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -3420,6 +3420,15 @@ export function registerPurchasingRoutes(app: Express) {
     try {
       const status = await apLedger.getShipmentCostPaymentStatus(Number(req.params.id));
       res.json(status);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/inbound-shipments/:id/invoices", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const result = await apLedger.getShipmentInvoicesSummary(Number(req.params.id));
+      res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -3494,9 +3503,10 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/vendor-invoices", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const { vendorId, status, overdue, dueBefore, limit, offset } = req.query;
+      const { vendorId, inboundShipmentId, status, overdue, dueBefore, limit, offset } = req.query;
       const invoices = await apLedger.listInvoices({
         vendorId: vendorId ? Number(vendorId) : undefined,
+        inboundShipmentId: inboundShipmentId ? Number(inboundShipmentId) : undefined,
         status: status ? (Array.isArray(status) ? status as string[] : (status as string).split(",")) : undefined,
         overdue: overdue === "true",
         dueBefore: dueBefore ? new Date(dueBefore as string) : undefined,
