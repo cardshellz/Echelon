@@ -1494,23 +1494,29 @@ export interface DropshipAdminReturnStatusUpdateResponse {
   idempotentReplay: boolean;
 }
 
+export interface DropshipNotificationListItem {
+  notificationEventId: number;
+  eventType: string;
+  channel: "email" | "in_app";
+  critical: boolean;
+  title: string;
+  message: string | null;
+  status: string;
+  deliveredAt: string | null;
+  readAt: string | null;
+  createdAt: string;
+}
+
 export interface DropshipNotificationListResponse {
-  items: Array<{
-    notificationEventId: number;
-    eventType: string;
-    channel: "email" | "in_app";
-    critical: boolean;
-    title: string;
-    message: string | null;
-    status: string;
-    deliveredAt: string | null;
-    readAt: string | null;
-    createdAt: string;
-  }>;
+  items: DropshipNotificationListItem[];
   total: number;
   page: number;
   limit: number;
   unreadOnly: boolean;
+}
+
+export interface DropshipNotificationMarkReadResponse {
+  notification: DropshipNotificationListItem;
 }
 
 export function buildQueryUrl(path: string, params: Record<string, string | number | boolean | undefined | null>): string {
@@ -1662,6 +1668,18 @@ export function buildAdminNotificationEventsUrl(input: {
     statuses,
     channel: input.channel === "all" ? undefined : input.channel,
     critical,
+    page: input.page ?? 1,
+    limit: input.limit ?? 50,
+  });
+}
+
+export function buildDropshipNotificationsUrl(input: {
+  view: "all" | "unread";
+  page?: number;
+  limit?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/notifications", {
+    unreadOnly: input.view === "unread" ? true : undefined,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
