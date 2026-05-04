@@ -6,6 +6,7 @@ import type {
 } from "../../application/dropship-ports";
 import {
   DropshipVendorProvisioningService,
+  type DropshipActivateVendorRepositoryInput,
   type DropshipCatalogSetupSummary,
   type DropshipProvisionVendorRepositoryInput,
   type DropshipProvisionVendorRepositoryResult,
@@ -180,6 +181,61 @@ describe("DropshipVendorProvisioningService", () => {
       status: "complete",
     });
   });
+
+  it("activates an onboarding vendor when every required launch gate is complete", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "onboarding",
+    });
+    repository.storeConnectionSummary = {
+      activeCount: 1,
+      connectedCount: 1,
+      needsAttentionCount: 0,
+      totalCount: 1,
+    };
+    repository.catalogSetupSummary = {
+      adminExposureRuleCount: 2,
+      vendorSelectionRuleCount: 1,
+    };
+    repository.walletSetupSummary = {
+      availableBalanceCents: 10000,
+      pendingBalanceCents: 0,
+      activeFundingMethodCount: 1,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+    };
+
+    const state = await service.activateOnboardingForMember("member-1");
+
+    expect(state.vendor.status).toBe("active");
+    expect(repository.lastActivationInput).toMatchObject({
+      vendorId: 1,
+      activatedAt: now,
+    });
+    expect(logs.info[logs.info.length - 1]).toMatchObject({
+      code: "DROPSHIP_VENDOR_ONBOARDING_ACTIVATED",
+      context: { vendorId: 1, memberId: "member-1" },
+    });
+  });
+
+  it("rejects onboarding activation when required launch gates are incomplete", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "onboarding",
+    });
+
+    await expect(service.activateOnboardingForMember("member-1")).rejects.toMatchObject({
+      code: "DROPSHIP_ONBOARDING_INCOMPLETE",
+      context: {
+        incompleteRequiredSteps: [
+          "store_connection",
+          "catalog_available",
+          "catalog_selection",
+          "wallet_payment",
+        ],
+      },
+    });
+    expect(repository.lastActivationInput).toBeNull();
+  });
 });
 
 class FakeEntitlementPort implements DropshipEntitlementPort {
@@ -220,6 +276,7 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
     autoReloadFundingMethodActive: false,
   };
   lastProvisionInput: DropshipProvisionVendorRepositoryInput | null = null;
+  lastActivationInput: DropshipActivateVendorRepositoryInput | null = null;
 
   async provisionVendor(
     input: DropshipProvisionVendorRepositoryInput,
@@ -260,6 +317,21 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
 
   async getWalletSetupSummary(): Promise<DropshipWalletSetupSummary> {
     return this.walletSetupSummary;
+  }
+
+  async activateVendor(
+    input: DropshipActivateVendorRepositoryInput,
+  ): Promise<DropshipProvisionedVendorProfile> {
+    this.lastActivationInput = input;
+    if (!this.vendor) {
+      throw new Error("Missing fake vendor.");
+    }
+    this.vendor = makeVendorProfile({
+      ...this.vendor,
+      status: "active",
+      updatedAt: input.activatedAt,
+    });
+    return this.vendor;
   }
 }
 

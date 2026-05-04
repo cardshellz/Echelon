@@ -11,6 +11,7 @@ export const dropshipSensitiveActionEnum = [
   "change_contact_email",
   "password_reset",
   "register_passkey",
+  "activate_account",
   "add_funding_method",
   "remove_funding_method",
   "wallet_funding_high_value",

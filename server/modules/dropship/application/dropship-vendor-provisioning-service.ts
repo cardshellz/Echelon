@@ -41,6 +41,11 @@ export interface DropshipProvisionVendorRepositoryResult {
   changedFields: string[];
 }
 
+export interface DropshipActivateVendorRepositoryInput {
+  vendorId: number;
+  activatedAt: Date;
+}
+
 export interface DropshipStoreConnectionSummary {
   activeCount: number;
   connectedCount: number;
@@ -67,6 +72,7 @@ export interface DropshipVendorProvisioningRepository {
   getStoreConnectionSummary(vendorId: number): Promise<DropshipStoreConnectionSummary>;
   getCatalogSetupSummary(vendorId: number): Promise<DropshipCatalogSetupSummary>;
   getWalletSetupSummary(vendorId: number): Promise<DropshipWalletSetupSummary>;
+  activateVendor(input: DropshipActivateVendorRepositoryInput): Promise<DropshipProvisionedVendorProfile>;
 }
 
 export interface DropshipVendorProvisioningServiceDependencies {
@@ -122,6 +128,48 @@ export class DropshipVendorProvisioningService {
 
     return buildOnboardingState({
       vendor: provisioned.vendor,
+      entitlement,
+      storeConnections,
+      catalog,
+      wallet,
+    });
+  }
+
+  async activateOnboardingForMember(memberId: string): Promise<DropshipOnboardingState> {
+    const entitlement = await this.requireEntitlement(memberId);
+    const provisioned = await this.provisionForEntitlement(entitlement);
+    const [storeConnections, catalog, wallet] = await Promise.all([
+      this.deps.repository.getStoreConnectionSummary(provisioned.vendor.vendorId),
+      this.deps.repository.getCatalogSetupSummary(provisioned.vendor.vendorId),
+      this.deps.repository.getWalletSetupSummary(provisioned.vendor.vendorId),
+    ]);
+    const state = buildOnboardingState({
+      vendor: provisioned.vendor,
+      entitlement,
+      storeConnections,
+      catalog,
+      wallet,
+    });
+    assertOnboardingStateCanActivate(state);
+
+    if (state.vendor.status === "active") {
+      return state;
+    }
+
+    const activated = await this.deps.repository.activateVendor({
+      vendorId: state.vendor.vendorId,
+      activatedAt: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_VENDOR_ONBOARDING_ACTIVATED",
+      message: "Dropship vendor onboarding was activated for live order intake.",
+      context: {
+        vendorId: activated.vendorId,
+        memberId: activated.memberId,
+      },
+    });
+    return buildOnboardingState({
+      vendor: activated,
       entitlement,
       storeConnections,
       catalog,
@@ -244,6 +292,42 @@ export function buildOnboardingState(input: {
       },
     ],
   };
+}
+
+function assertOnboardingStateCanActivate(state: DropshipOnboardingState): void {
+  if (state.vendor.status === "active") {
+    return;
+  }
+
+  if (state.vendor.status !== "onboarding") {
+    throw new DropshipError(
+      "DROPSHIP_ONBOARDING_ACTIVATION_BLOCKED",
+      "Dropship vendor status does not allow onboarding activation.",
+      { vendorId: state.vendor.vendorId, status: state.vendor.status },
+    );
+  }
+
+  if (state.entitlement.status !== "active") {
+    throw new DropshipError(
+      "DROPSHIP_ONBOARDING_ACTIVATION_BLOCKED",
+      "Active .ops entitlement is required before onboarding activation.",
+      { vendorId: state.vendor.vendorId, entitlementStatus: state.entitlement.status },
+    );
+  }
+
+  const incompleteRequiredSteps = state.steps
+    .filter((step) => step.required && step.status !== "complete")
+    .map((step) => step.key);
+  if (incompleteRequiredSteps.length > 0) {
+    throw new DropshipError(
+      "DROPSHIP_ONBOARDING_INCOMPLETE",
+      "Dropship onboarding cannot be activated until all required steps are complete.",
+      {
+        vendorId: state.vendor.vendorId,
+        incompleteRequiredSteps,
+      },
+    );
+  }
 }
 
 function normalizeDropshipMemberId(memberId: string): string {

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import {
   AlertCircle,
@@ -11,6 +11,7 @@ import {
   Fingerprint,
   Mail,
   Plug,
+  Rocket,
   ShieldCheck,
   Store,
   Wallet,
@@ -23,7 +24,7 @@ import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
+import { dropshipPortalPath, useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
 import {
   buildStoreConnectionOAuthStartInput,
   fetchJson,
@@ -38,6 +39,7 @@ import {
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "oauth-start" | null;
+type PendingActivationAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "activate-account" | null;
 
 const stepIcons: Record<DropshipOnboardingStep["key"], ReactNode> = {
   vendor_profile: <ShieldCheck className="h-4 w-4" />,
@@ -48,6 +50,7 @@ const stepIcons: Record<DropshipOnboardingStep["key"], ReactNode> = {
 };
 
 export default function DropshipPortalOnboarding() {
+  const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
   const { principal } = useDropshipAuth();
   const onboardingQuery = useQuery<DropshipOnboardingState>({
@@ -155,6 +158,13 @@ export default function DropshipPortalOnboarding() {
                   onAction={() => setLocation(dropshipPortalPath("/wallet"))}
                 />
               </div>
+
+              <ActivationPanel
+                onboarding={onboarding}
+                onActivated={(state) => {
+                  queryClient.setQueryData(["/api/dropship/onboarding/state"], state);
+                }}
+              />
             </section>
           </div>
         ) : (
@@ -419,10 +429,46 @@ function connectButtonLabel(input: {
   return `Connect ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
 }
 
+function activateButtonLabel(input: {
+  hasPasskey: boolean;
+  emailCodeSent: boolean;
+  pendingAction: PendingActivationAction;
+}): string {
+  if (input.pendingAction === "send-email-code") return "Sending code";
+  if (input.pendingAction === "verify-email-code") return "Verifying code";
+  if (input.pendingAction === "passkey-proof") return "Waiting for passkey";
+  if (input.pendingAction === "activate-account") return "Activating";
+  if (!input.hasPasskey && !input.emailCodeSent) return "Send verification code";
+  return "Activate .ops";
+}
+
 function connectButtonIcon(hasPasskey: boolean, emailCodeSent: boolean): ReactNode {
   if (hasPasskey) return <Fingerprint className="h-4 w-4" />;
   if (!emailCodeSent) return <Mail className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
+}
+
+function activateButtonIcon(hasPasskey: boolean, emailCodeSent: boolean): ReactNode {
+  if (hasPasskey) return <Fingerprint className="h-4 w-4" />;
+  if (!emailCodeSent) return <Mail className="h-4 w-4" />;
+  return <Rocket className="h-4 w-4" />;
+}
+
+function activationPanelDetail(input: {
+  onboarding: DropshipOnboardingState;
+  requiredStepsComplete: boolean;
+  alreadyActive: boolean;
+}): string {
+  if (input.alreadyActive) return "Live order intake can proceed when marketplace orders arrive.";
+  if (input.onboarding.entitlement.status !== "active") return "Active .ops entitlement is required before activation.";
+  if (!input.requiredStepsComplete) return "Complete every required launch gate before activation.";
+  return "All launch gates are complete.";
+}
+
+function activationBadgeTone(input: { alreadyActive: boolean; activationReady: boolean }): string {
+  if (input.alreadyActive) return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (input.activationReady) return "border-[#C060E0]/30 bg-[#C060E0]/10 text-[#8941a0]";
+  return "border-amber-200 bg-amber-50 text-amber-900";
 }
 
 function stepDescription(step: DropshipOnboardingStep): string {
@@ -431,6 +477,162 @@ function stepDescription(step: DropshipOnboardingStep): string {
   if (step.key === "catalog_available") return "Card Shellz ops controls the catalog available for vendor selection.";
   if (step.key === "wallet_payment") return "A funding method, auto-reload, and spendable wallet balance are required before launch.";
   return "Selected products define what can be pushed to connected marketplace stores.";
+}
+
+function ActivationPanel({
+  onboarding,
+  onActivated,
+}: {
+  onboarding: DropshipOnboardingState;
+  onActivated: (state: DropshipOnboardingState) => void;
+}) {
+  const {
+    principal,
+    sensitiveProofs,
+    startEmailStepUp,
+    verifyEmailStepUp,
+    verifyPasskeyStepUp,
+  } = useDropshipAuth();
+  const [, setLocation] = useLocation();
+  const [emailCodeSent, setEmailCodeSent] = useState(false);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [pendingAction, setPendingAction] = useState<PendingActivationAction>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const activationAction: DropshipSensitiveAction = "activate_account";
+  const requiredStepsComplete = onboarding.steps.every((step) => !step.required || step.status === "complete");
+  const alreadyActive = onboarding.vendor.status === "active";
+  const activationReady = onboarding.vendor.status === "onboarding"
+    && onboarding.entitlement.status === "active"
+    && requiredStepsComplete;
+  const activateProofActive = useMemo(() => {
+    const proof = sensitiveProofs.activate_account;
+    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
+  }, [sensitiveProofs.activate_account]);
+  const activateDisabled = !activationReady
+    || pendingAction !== null
+    || (!principal?.hasPasskey && emailCodeSent && verificationCode.length !== 6);
+
+  async function run(action: PendingActivationAction, task: () => Promise<void>): Promise<boolean> {
+    setPendingAction(action);
+    setError("");
+    setMessage("");
+    try {
+      await task();
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Activation request failed.");
+      return false;
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function activateAccount() {
+    if (!activationReady) return;
+
+    if (!activateProofActive) {
+      if (principal?.hasPasskey) {
+        const verified = await run("passkey-proof", async () => {
+          await verifyPasskeyStepUp(activationAction);
+        });
+        if (!verified) return;
+      } else if (!emailCodeSent) {
+        await run("send-email-code", async () => {
+          await startEmailStepUp(activationAction);
+          setEmailCodeSent(true);
+          setMessage("Verification code sent.");
+        });
+        return;
+      } else {
+        const verified = await run("verify-email-code", async () => {
+          await verifyEmailStepUp({
+            action: activationAction,
+            verificationCode,
+          });
+        });
+        if (!verified) return;
+      }
+    }
+
+    await run("activate-account", async () => {
+      const state = await postJson<DropshipOnboardingState>("/api/dropship/onboarding/activate", {});
+      onActivated(state);
+      setEmailCodeSent(false);
+      setVerificationCode("");
+      setMessage("Dropship account activated.");
+    });
+  }
+
+  return (
+    <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Activate .ops</h2>
+          <p className="mt-1 text-sm text-zinc-500">{activationPanelDetail({ onboarding, requiredStepsComplete, alreadyActive })}</p>
+        </div>
+        <Badge variant="outline" className={activationBadgeTone({ alreadyActive, activationReady })}>
+          {alreadyActive ? "Active" : activationReady ? "Ready" : "Incomplete"}
+        </Badge>
+      </div>
+
+      {error && (
+        <Alert variant="destructive" className="mt-5">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+
+      {!principal?.hasPasskey && emailCodeSent && (
+        <div className="mt-4 space-y-2">
+          <Label>Verification code</Label>
+          <InputOTP
+            maxLength={6}
+            value={verificationCode}
+            onChange={setVerificationCode}
+            containerClassName="justify-between"
+          >
+            <InputOTPGroup>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
+        </div>
+      )}
+
+      {alreadyActive ? (
+        <Button
+          type="button"
+          className="mt-5 h-11 w-full gap-2 bg-zinc-950 hover:bg-zinc-800"
+          onClick={() => setLocation(dropshipPortalPath("/dashboard"))}
+        >
+          Open dashboard
+          <ArrowRight className="h-4 w-4" />
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          disabled={activateDisabled}
+          className="mt-5 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+          onClick={activateAccount}
+        >
+          {activateButtonIcon(principal?.hasPasskey ?? false, emailCodeSent)}
+          {activateButtonLabel({
+            hasPasskey: principal?.hasPasskey ?? false,
+            emailCodeSent,
+            pendingAction,
+          })}
+        </Button>
+      )}
+    </div>
+  );
 }
 
 function walletGateDetail(onboarding: DropshipOnboardingState): string {
