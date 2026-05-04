@@ -933,6 +933,20 @@ export interface DropshipAdminOrderOpsActionResponse {
   updatedAt: string;
 }
 
+export interface DropshipAdminOrderOpsProcessResponse {
+  outcome: "accepted" | "payment_hold" | "failed" | "skipped" | "cancelled";
+  intakeId: number;
+  vendorId: number | null;
+  storeConnectionId: number | null;
+  shippingQuoteSnapshotId: number | null;
+  omsOrderId: number | null;
+  walletLedgerEntryId: number | null;
+  economicsSnapshotId: number | null;
+  failureCode: string | null;
+  failureMessage: string | null;
+  retryable: boolean;
+}
+
 export interface DropshipStoreConnectionProfileResponse {
   storeConnectionId: number;
   vendorId: number;

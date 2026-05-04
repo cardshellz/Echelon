@@ -5,12 +5,15 @@ import {
   getDropshipOrderOpsIntakeDetailInputSchema,
   listDropshipOrderOpsIntakesInputSchema,
   markDropshipOrderOpsExceptionInputSchema,
+  processDropshipOrderOpsIntakeInputSchema,
   retryDropshipOrderOpsIntakeInputSchema,
   type GetDropshipOrderOpsIntakeDetailInput,
   type ListDropshipOrderOpsIntakesInput,
   type MarkDropshipOrderOpsExceptionInput,
+  type ProcessDropshipOrderOpsIntakeInput,
   type RetryDropshipOrderOpsIntakeInput,
 } from "./dropship-order-ops-dtos";
+import type { DropshipOrderProcessingResult } from "./dropship-order-processing-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 
 export const DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES: DropshipOrderIntakeStatus[] = [
@@ -224,10 +227,19 @@ export interface DropshipOrderOpsRepository {
   }): Promise<DropshipOrderOpsActionResult>;
 }
 
+export interface DropshipOrderOpsProcessor {
+  processIntake(input: {
+    intakeId: number;
+    workerId: string;
+    idempotencyKey: string;
+  }): Promise<DropshipOrderProcessingResult>;
+}
+
 export class DropshipOrderOpsService {
   constructor(
     private readonly deps: {
       repository: DropshipOrderOpsRepository;
+      processor?: DropshipOrderOpsProcessor;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -297,6 +309,37 @@ export class DropshipOrderOpsService {
     });
     return result;
   }
+
+  async processIntake(input: unknown): Promise<DropshipOrderProcessingResult> {
+    const parsed = parseProcessInput(input);
+    if (!this.deps.processor) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_PROCESSOR_NOT_CONFIGURED",
+        "Dropship order processor is not configured for ops-triggered processing.",
+      );
+    }
+
+    const result = await this.deps.processor.processIntake({
+      intakeId: parsed.intakeId,
+      workerId: buildOpsProcessorWorkerId(parsed.actor),
+      idempotencyKey: parsed.idempotencyKey,
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_ORDER_OPS_PROCESS_REQUESTED",
+      message: "Dropship order intake processing was requested by ops.",
+      context: {
+        intakeId: result.intakeId,
+        outcome: result.outcome,
+        vendorId: result.vendorId,
+        storeConnectionId: result.storeConnectionId,
+        failureCode: result.failureCode,
+        retryable: result.retryable,
+        idempotencyKey: parsed.idempotencyKey,
+        reason: parsed.reason ?? null,
+      },
+    });
+    return result;
+  }
 }
 
 export function makeDropshipOrderOpsLogger(): DropshipLogger {
@@ -341,6 +384,19 @@ function parseMarkExceptionInput(input: unknown): MarkDropshipOrderOpsExceptionI
     throw validationError("DROPSHIP_ORDER_OPS_EXCEPTION_INVALID_INPUT", result.error.issues);
   }
   return result.data;
+}
+
+function parseProcessInput(input: unknown): ProcessDropshipOrderOpsIntakeInput {
+  const result = processDropshipOrderOpsIntakeInputSchema.safeParse(input);
+  if (!result.success) {
+    throw validationError("DROPSHIP_ORDER_OPS_PROCESS_INVALID_INPUT", result.error.issues);
+  }
+  return result.data;
+}
+
+function buildOpsProcessorWorkerId(actor: DropshipOrderOpsActor): string {
+  const suffix = actor.actorId ? `:${actor.actorId}` : "";
+  return `dropship-admin-process:${actor.actorType}${suffix}`;
 }
 
 function validationError(code: string, issues: Array<{

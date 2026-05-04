@@ -6,6 +6,7 @@ import {
   type DropshipLogEvent,
   type DropshipOrderOpsActionResult,
   type DropshipOrderOpsIntakeListResult,
+  type DropshipOrderOpsProcessor,
   type DropshipOrderOpsRepository,
 } from "../../application";
 
@@ -168,6 +169,59 @@ describe("DropshipOrderOpsService", () => {
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_OPS_EXCEPTION_MARKED" });
   });
 
+  it("processes an intake immediately through the configured processor", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const processor = new FakeOrderOpsProcessor();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderOpsService({
+      repository,
+      processor,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 11,
+      reason: "dogfood smoke test",
+      idempotencyKey: "process-intake-11",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result).toMatchObject({
+      outcome: "accepted",
+      intakeId: 11,
+      omsOrderId: 9001,
+    });
+    expect(processor.lastInput).toEqual({
+      intakeId: 11,
+      workerId: "dropship-admin-process:admin:admin-1",
+      idempotencyKey: "process-intake-11",
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_ORDER_OPS_PROCESS_REQUESTED",
+      context: {
+        intakeId: 11,
+        outcome: "accepted",
+        idempotencyKey: "process-intake-11",
+        reason: "dogfood smoke test",
+      },
+    });
+  });
+
+  it("rejects process requests when the ops processor is not configured", async () => {
+    const service = new DropshipOrderOpsService({
+      repository: new FakeOrderOpsRepository(),
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    await expect(service.processIntake({
+      intakeId: 11,
+      idempotencyKey: "process-intake-11",
+      actor: { actorType: "admin" },
+    })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_OPS_PROCESSOR_NOT_CONFIGURED" });
+  });
+
   it("rejects invalid action input before repository calls", async () => {
     const repository = new FakeOrderOpsRepository();
     const service = new DropshipOrderOpsService({
@@ -281,6 +335,29 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
       status: "exception",
       idempotentReplay: false,
       updatedAt: input.now,
+    };
+  }
+}
+
+class FakeOrderOpsProcessor implements DropshipOrderOpsProcessor {
+  lastInput: Parameters<DropshipOrderOpsProcessor["processIntake"]>[0] | null = null;
+
+  async processIntake(
+    input: Parameters<DropshipOrderOpsProcessor["processIntake"]>[0],
+  ): ReturnType<DropshipOrderOpsProcessor["processIntake"]> {
+    this.lastInput = input;
+    return {
+      outcome: "accepted",
+      intakeId: input.intakeId,
+      vendorId: 10,
+      storeConnectionId: 22,
+      shippingQuoteSnapshotId: 33,
+      omsOrderId: 9001,
+      walletLedgerEntryId: 44,
+      economicsSnapshotId: 55,
+      failureCode: null,
+      failureMessage: null,
+      retryable: false,
     };
   }
 }

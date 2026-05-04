@@ -10,6 +10,7 @@ import {
   FileSearch,
   History,
   MinusCircle,
+  PlayCircle,
   PlusCircle,
   RefreshCw,
   RotateCcw,
@@ -92,6 +93,7 @@ import {
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
+  type DropshipAdminOrderOpsProcessResponse,
   type DropshipAdminOmsChannelConfigResponse,
   type DropshipAdminOmsChannelConfigureResponse,
   type DropshipAdminReturnCreateResponse,
@@ -2029,7 +2031,7 @@ function OrderIntakeOpsTab() {
   const [actionReason, setActionReason] = useState("");
   const [pendingAction, setPendingAction] = useState<{
     intakeId: number;
-    action: "retry" | "exception";
+    action: "retry" | "exception" | "process";
   } | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -2050,7 +2052,7 @@ function OrderIntakeOpsTab() {
 
   async function runOrderAction(
     intake: DropshipAdminOrderOpsIntakeListItem,
-    action: "retry" | "exception",
+    action: "retry" | "exception" | "process",
   ) {
     setPendingAction({ intakeId: intake.intakeId, action });
     setError("");
@@ -2061,15 +2063,16 @@ function OrderIntakeOpsTab() {
         reason: actionReason,
         requireReason: action === "exception",
       });
-      const response = await postJson<DropshipAdminOrderOpsActionResponse>(
+      const response = await postJson<DropshipAdminOrderOpsActionResponse | DropshipAdminOrderOpsProcessResponse>(
         `/api/dropship/admin/order-intake/${intake.intakeId}/${action}`,
         input,
       );
-      setMessage(`Order intake ${response.intakeId} moved from ${formatStatus(response.previousStatus)} to ${formatStatus(response.status)}.`);
+      setMessage(orderActionMessage(response, action));
       setActionReason("");
       await Promise.all([
         orderIntakeQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
     } catch (caught) {
@@ -2146,7 +2149,7 @@ function OrderIntakeOpsTab() {
             />
           </div>
           <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-            Actions are idempotent and audited. Retry moves the row back to the processing queue; exception marks it for manual resolution.
+            Actions are idempotent and audited. Process runs quote, wallet, reservation, and OMS creation now; retry queues failed rows; exception marks manual resolution.
           </div>
         </div>
       </section>
@@ -4559,8 +4562,8 @@ function OrderIntakeOpsTable({
 }: {
   isLoading: boolean;
   items: DropshipAdminOrderOpsIntakeListItem[];
-  onRunAction: (intake: DropshipAdminOrderOpsIntakeListItem, action: "retry" | "exception") => void;
-  pendingAction: { intakeId: number; action: "retry" | "exception" } | null;
+  onRunAction: (intake: DropshipAdminOrderOpsIntakeListItem, action: "retry" | "exception" | "process") => void;
+  pendingAction: { intakeId: number; action: "retry" | "exception" | "process" } | null;
   total: number;
 }) {
   if (isLoading) {
@@ -4599,7 +4602,7 @@ function OrderIntakeOpsTable({
             <TableHead>Ship to</TableHead>
             <TableHead>Latest audit</TableHead>
             <TableHead>Updated</TableHead>
-            <TableHead className="w-[210px]">Actions</TableHead>
+            <TableHead className="w-[280px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -4645,6 +4648,17 @@ function OrderIntakeOpsTable({
               <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{formatDateTime(intake.updatedAt)}</TableCell>
               <TableCell>
                 <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-2"
+                    disabled={pendingAction !== null || !orderIntakeCanProcessNow(intake.status)}
+                    onClick={() => onRunAction(intake, "process")}
+                  >
+                    <PlayCircle className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "process" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    Process
+                  </Button>
                   <Button
                     type="button"
                     variant="outline"
@@ -4953,6 +4967,24 @@ function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
   if (status === "default") return "Needs attention";
   if (status === "all") return "All statuses";
   return formatStatus(status);
+}
+
+function orderActionMessage(
+  response: DropshipAdminOrderOpsActionResponse | DropshipAdminOrderOpsProcessResponse,
+  action: "retry" | "exception" | "process",
+): string {
+  if (action === "process" && "outcome" in response) {
+    const suffix = response.failureCode ? ` (${formatStatus(response.failureCode)})` : "";
+    return `Order intake ${response.intakeId} processing returned ${formatStatus(response.outcome)}${suffix}.`;
+  }
+  if ("previousStatus" in response) {
+    return `Order intake ${response.intakeId} moved from ${formatStatus(response.previousStatus)} to ${formatStatus(response.status)}.`;
+  }
+  return `Order intake ${response.intakeId} action completed.`;
+}
+
+function orderIntakeCanProcessNow(status: DropshipOpsOrderIntakeStatus): boolean {
+  return status === "received" || status === "retrying" || status === "payment_hold";
 }
 
 function readinessSummaryCount(

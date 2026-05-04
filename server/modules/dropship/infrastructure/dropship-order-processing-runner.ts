@@ -4,6 +4,7 @@ import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipOrderCancellationServiceFromEnv } from "./dropship-order-cancellation.factory";
 import { createDropshipOrderProcessingServiceFromEnv } from "./dropship-order-processing.factory";
 import { createDropshipPaymentHoldExpirationServiceFromEnv } from "./dropship-payment-hold-expiration.factory";
+import type { DropshipOrderProcessingResult } from "../application/dropship-order-processing-service";
 
 export interface DropshipOrderProcessingQueueRepository {
   listProcessableIntakeIds(input: {
@@ -47,9 +48,9 @@ export async function runDropshipOrderProcessingIntake(input: {
   intakeId: number;
   workerId?: string;
   idempotencyKey?: string;
-}): Promise<void> {
+}): Promise<DropshipOrderProcessingResult> {
   const workerId = input.workerId ?? defaultWorkerId();
-  await createDropshipOrderProcessingServiceFromEnv().processIntake({
+  return createDropshipOrderProcessingServiceFromEnv().processIntake({
     intakeId: input.intakeId,
     workerId,
     idempotencyKey: input.idempotencyKey ?? `${workerId}:intake:${input.intakeId}`,
