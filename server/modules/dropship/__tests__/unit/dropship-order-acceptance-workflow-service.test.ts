@@ -6,6 +6,7 @@ import {
   type DropshipOrderAcceptanceResult,
   type DropshipOrderAcceptanceWorkflowContext,
   type DropshipOrderAcceptanceWorkflowRepository,
+  type DropshipOmsFulfillmentSync,
   type DropshipShippingQuoteResult,
 } from "../../application";
 import type { NormalizedDropshipOrderPayload } from "../../application/dropship-order-intake-service";
@@ -63,6 +64,38 @@ describe("DropshipOrderAcceptanceWorkflowService", () => {
         quoteSnapshotId: 44,
       },
     });
+  });
+
+  it("syncs vendor-accepted dropship OMS orders into WMS", async () => {
+    const fulfillmentSync = new FakeFulfillmentSync(9901);
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderAcceptanceWorkflowService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository: new FakeWorkflowRepository(),
+      shippingQuoteService: new FakeShippingQuoteService(),
+      acceptanceService: new FakeAcceptanceService(),
+      fulfillmentSync,
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.acceptOrderForMember("member-1", {
+      intakeId: 7,
+      idempotencyKey: "accept-order-007",
+    });
+
+    expect(result.acceptance.outcome).toBe("accepted");
+    expect(fulfillmentSync.calls).toEqual([9001]);
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNCED",
+        context: expect.objectContaining({
+          intakeId: 7,
+          omsOrderId: 9001,
+          wmsOrderId: 9901,
+          source: "vendor_acceptance",
+        }),
+      }),
+    ]));
   });
 
   it("requires a default warehouse before quote or acceptance side effects", async () => {
@@ -229,6 +262,17 @@ class FakeAcceptanceService {
       paymentHoldExpiresAt: null,
       idempotentReplay: false,
     };
+  }
+}
+
+class FakeFulfillmentSync implements DropshipOmsFulfillmentSync {
+  calls: number[] = [];
+
+  constructor(private readonly result: number | null) {}
+
+  async syncOmsOrderToWms(omsOrderId: number): Promise<number | null> {
+    this.calls.push(omsOrderId);
+    return this.result;
   }
 }
 

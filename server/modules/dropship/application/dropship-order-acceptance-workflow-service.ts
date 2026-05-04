@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { syncDropshipAcceptedOrderToWmsSafely } from "./dropship-fulfillment-sync-dispatch";
 import type { NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
 import type {
   DropshipOrderAcceptanceResult,
@@ -10,7 +11,7 @@ import type {
   DropshipShippingQuoteResult,
   DropshipShippingQuoteService,
 } from "./dropship-shipping-quote-service";
-import type { DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipLogEvent, DropshipLogger, DropshipOmsFulfillmentSync } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 
 const positiveIdSchema = z.number().int().positive();
@@ -48,6 +49,7 @@ export interface DropshipOrderAcceptanceWorkflowDependencies {
   repository: DropshipOrderAcceptanceWorkflowRepository;
   shippingQuoteService: Pick<DropshipShippingQuoteService, "quote">;
   acceptanceService: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
+  fulfillmentSync?: DropshipOmsFulfillmentSync;
   logger: DropshipLogger;
 }
 
@@ -94,6 +96,10 @@ export class DropshipOrderAcceptanceWorkflowService {
         actorType: "vendor",
         actorId: memberId,
       },
+    });
+    await syncDropshipAcceptedOrderToWmsSafely(this.deps, {
+      acceptance,
+      source: "vendor_acceptance",
     });
 
     this.deps.logger.info({
