@@ -13,6 +13,7 @@ import {
   Plug,
   ShieldCheck,
   Store,
+  Wallet,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +27,7 @@ import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
 import {
   buildStoreConnectionOAuthStartInput,
   fetchJson,
+  formatCents,
   formatStatus,
   postJson,
   type DropshipOnboardingState,
@@ -42,6 +44,7 @@ const stepIcons: Record<DropshipOnboardingStep["key"], ReactNode> = {
   store_connection: <Store className="h-4 w-4" />,
   catalog_available: <Boxes className="h-4 w-4" />,
   catalog_selection: <CheckCircle2 className="h-4 w-4" />,
+  wallet_payment: <Wallet className="h-4 w-4" />,
 };
 
 export default function DropshipPortalOnboarding() {
@@ -119,7 +122,7 @@ export default function DropshipPortalOnboarding() {
             <section className="space-y-4">
               <StoreConnectPanel onboarding={onboarding} />
 
-              <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid gap-4 md:grid-cols-3">
                 <LaunchGate
                   icon={<Boxes className="h-4 w-4" />}
                   title="Catalog availability"
@@ -141,6 +144,15 @@ export default function DropshipPortalOnboarding() {
                     : "Select products after catalog access is available."}
                   actionLabel="Manage catalog"
                   onAction={() => setLocation(dropshipPortalPath("/catalog"))}
+                />
+                <LaunchGate
+                  icon={<Wallet className="h-4 w-4" />}
+                  title="Wallet and auto-reload"
+                  status={onboarding.wallet.walletReady ? "complete" : "incomplete"}
+                  value={`${formatCents(onboarding.wallet.availableBalanceCents)} available`}
+                  detail={walletGateDetail(onboarding)}
+                  actionLabel="Open wallet"
+                  onAction={() => setLocation(dropshipPortalPath("/wallet"))}
                 />
               </div>
             </section>
@@ -417,7 +429,26 @@ function stepDescription(step: DropshipOnboardingStep): string {
   if (step.key === "vendor_profile") return "Card Shellz .ops entitlement and vendor profile are available.";
   if (step.key === "store_connection") return "One approved marketplace store must be connected before launch.";
   if (step.key === "catalog_available") return "Card Shellz ops controls the catalog available for vendor selection.";
+  if (step.key === "wallet_payment") return "A funding method, auto-reload, and spendable wallet balance are required before launch.";
   return "Selected products define what can be pushed to connected marketplace stores.";
+}
+
+function walletGateDetail(onboarding: DropshipOnboardingState): string {
+  if (onboarding.wallet.walletReady) {
+    return "Funding method, auto-reload, and spendable balance are ready.";
+  }
+  if (!onboarding.wallet.hasActiveFundingMethod) {
+    return "Add a funding method before accepting live dropship orders.";
+  }
+  if (!onboarding.wallet.autoReloadConfigured) {
+    return "Configure auto-reload with an active funding method.";
+  }
+  if (!onboarding.wallet.hasSpendableBalance) {
+    return onboarding.wallet.pendingBalanceCents > 0
+      ? "Pending funds are not spendable yet; add settled funds before launch."
+      : "Add settled wallet funds before launch.";
+  }
+  return "Wallet setup needs attention.";
 }
 
 function stepIconTone(status: DropshipOnboardingStep["status"]): string {

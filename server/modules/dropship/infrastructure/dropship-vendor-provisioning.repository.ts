@@ -7,6 +7,7 @@ import type {
   DropshipProvisionedVendorProfile,
   DropshipStoreConnectionSummary,
   DropshipVendorProvisioningRepository,
+  DropshipWalletSetupSummary,
 } from "../application/dropship-vendor-provisioning-service";
 import { ensureDropshipWalletScaffoldingForVendor } from "./dropship-wallet.repository";
 
@@ -38,6 +39,15 @@ interface StoreConnectionSummaryRow {
 interface CatalogSetupSummaryRow {
   admin_exposure_rule_count: string | number;
   vendor_selection_rule_count: string | number;
+}
+
+interface WalletSetupSummaryRow {
+  available_balance_cents: string | number;
+  pending_balance_cents: string | number;
+  active_funding_method_count: string | number;
+  auto_reload_enabled: boolean;
+  auto_reload_funding_method_id: number | null;
+  auto_reload_funding_method_active: boolean;
 }
 
 export class PgDropshipVendorProvisioningRepository implements DropshipVendorProvisioningRepository {
@@ -169,6 +179,44 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
       return {
         adminExposureRuleCount: Number(row?.admin_exposure_rule_count ?? 0),
         vendorSelectionRuleCount: Number(row?.vendor_selection_rule_count ?? 0),
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  async getWalletSetupSummary(vendorId: number): Promise<DropshipWalletSetupSummary> {
+    const client = await this.dbPool.connect();
+    try {
+      const result = await client.query<WalletSetupSummaryRow>(
+        `SELECT
+           COALESCE(wa.available_balance_cents, 0) AS available_balance_cents,
+           COALESCE(wa.pending_balance_cents, 0) AS pending_balance_cents,
+           COUNT(fm.id) FILTER (WHERE fm.status = 'active') AS active_funding_method_count,
+           COALESCE(ar.enabled, false) AS auto_reload_enabled,
+           ar.funding_method_id AS auto_reload_funding_method_id,
+           COALESCE(ar_fm.status = 'active', false) AS auto_reload_funding_method_active
+         FROM (SELECT $1::integer AS vendor_id) AS v
+         LEFT JOIN dropship.dropship_wallet_accounts wa
+           ON wa.vendor_id = v.vendor_id
+         LEFT JOIN dropship.dropship_auto_reload_settings ar
+           ON ar.vendor_id = v.vendor_id
+         LEFT JOIN dropship.dropship_funding_methods fm
+           ON fm.vendor_id = v.vendor_id
+         LEFT JOIN dropship.dropship_funding_methods ar_fm
+           ON ar_fm.id = ar.funding_method_id
+          AND ar_fm.vendor_id = v.vendor_id
+         GROUP BY wa.available_balance_cents, wa.pending_balance_cents, ar.enabled, ar.funding_method_id, ar_fm.status`,
+        [vendorId],
+      );
+      const row = result.rows[0];
+      return {
+        availableBalanceCents: Number(row?.available_balance_cents ?? 0),
+        pendingBalanceCents: Number(row?.pending_balance_cents ?? 0),
+        activeFundingMethodCount: Number(row?.active_funding_method_count ?? 0),
+        autoReloadEnabled: row?.auto_reload_enabled === true,
+        autoReloadFundingMethodId: row?.auto_reload_funding_method_id ?? null,
+        autoReloadFundingMethodActive: row?.auto_reload_funding_method_active === true,
       };
     } finally {
       client.release();
