@@ -50,6 +50,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnInspectionInput,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
@@ -92,6 +93,7 @@ import {
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOmsChannelConfigResponse,
   type DropshipAdminOmsChannelConfigureResponse,
+  type DropshipAdminReturnInspectionResponse,
   type DropshipAdminReturnStatusUpdateResponse,
   type DropshipAdminShippingConfigResponse,
   type DropshipAdminStoreConnectionListItem,
@@ -116,6 +118,10 @@ import {
   type DropshipNotificationOpsStatus,
   type DropshipReturnListItem,
   type DropshipReturnListResponse,
+  type DropshipReturnDetail,
+  type DropshipReturnDetailResponse,
+  type DropshipReturnFaultCategory,
+  type DropshipRmaInspectionOutcome,
   type DropshipRmaStatus,
   type DropshipTrackingPushStatus,
   type DropshipSeverity,
@@ -164,6 +170,23 @@ interface CatalogRuleFormState {
   category: string;
   priority: string;
   notes: string;
+}
+
+interface ReturnInspectionItemFormState {
+  rmaItemId: number;
+  productVariantId: number | null;
+  quantity: number;
+  status: string;
+  finalCreditAmount: string;
+  feeAmount: string;
+}
+
+interface ReturnInspectionFormState {
+  rmaId: number;
+  outcome: DropshipRmaInspectionOutcome;
+  faultCategory: DropshipReturnFaultCategory;
+  notes: string;
+  items: ReturnInspectionItemFormState[];
 }
 
 interface ShippingBoxFormState {
@@ -400,6 +423,14 @@ const returnOpsUpdateStatuses: DropshipRmaStatus[] = [
   "received",
   "inspecting",
   "closed",
+];
+
+const returnFaultCategories: DropshipReturnFaultCategory[] = [
+  "card_shellz",
+  "vendor",
+  "customer",
+  "marketplace",
+  "carrier",
 ];
 
 const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
@@ -1225,6 +1256,9 @@ function ReturnOpsTab() {
   const [statusInputs, setStatusInputs] = useState<Record<number, DropshipRmaStatus>>({});
   const [statusNotes, setStatusNotes] = useState<Record<number, string>>({});
   const [pendingRmaId, setPendingRmaId] = useState<number | null>(null);
+  const [selectedInspectionRmaId, setSelectedInspectionRmaId] = useState<number | null>(null);
+  const [inspectionForm, setInspectionForm] = useState<ReturnInspectionFormState | null>(null);
+  const [inspectionPendingRmaId, setInspectionPendingRmaId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -1237,8 +1271,25 @@ function ReturnOpsTab() {
     queryKey: [returnsUrl],
     queryFn: () => fetchJson<DropshipReturnListResponse>(returnsUrl),
   });
+  const returnDetailQuery = useQuery<DropshipReturnDetailResponse>({
+    queryKey: ["dropship-admin-return-detail", selectedInspectionRmaId],
+    queryFn: () => {
+      if (selectedInspectionRmaId === null) throw new Error("Missing selected RMA.");
+      return fetchJson<DropshipReturnDetailResponse>(`/api/dropship/admin/returns/${selectedInspectionRmaId}`);
+    },
+    enabled: selectedInspectionRmaId !== null,
+  });
 
   const rmas = returnsQuery.data?.items ?? [];
+
+  useEffect(() => {
+    const rma = returnDetailQuery.data?.rma;
+    if (!rma) return;
+    setInspectionForm((current) => {
+      if (current?.rmaId === rma.rmaId) return current;
+      return buildReturnInspectionFormState(rma);
+    });
+  }, [returnDetailQuery.data?.rma]);
 
   function applyReturnFilters() {
     setAppliedFilters({ search, status });
@@ -1250,6 +1301,35 @@ function ReturnOpsTab() {
 
   function updateStatusNote(rmaId: number, note: string) {
     setStatusNotes((current) => ({ ...current, [rmaId]: note }));
+  }
+
+  function selectInspectionRma(rma: DropshipReturnListItem) {
+    setSelectedInspectionRmaId(rma.rmaId);
+    setInspectionForm(null);
+    setError("");
+    setMessage("");
+  }
+
+  function clearInspectionSelection() {
+    setSelectedInspectionRmaId(null);
+    setInspectionForm(null);
+  }
+
+  function updateInspectionForm(patch: Partial<ReturnInspectionFormState>) {
+    setInspectionForm((current) => current ? { ...current, ...patch } : current);
+  }
+
+  function updateInspectionItem(
+    rmaItemId: number,
+    patch: Partial<Pick<ReturnInspectionItemFormState, "status" | "finalCreditAmount" | "feeAmount">>,
+  ) {
+    setInspectionForm((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        items: current.items.map((item) => item.rmaItemId === rmaItemId ? { ...item, ...patch } : item),
+      };
+    });
   }
 
   async function saveReturnStatus(rma: DropshipReturnListItem) {
@@ -1284,6 +1364,48 @@ function ReturnOpsTab() {
       setError(caught instanceof Error ? caught.message : "Dropship return status update failed.");
     } finally {
       setPendingRmaId(null);
+    }
+  }
+
+  async function saveReturnInspection() {
+    if (!inspectionForm) return;
+    const rma = returnDetailQuery.data?.rma;
+    if (!rma || rma.rmaId !== inspectionForm.rmaId) return;
+    setInspectionPendingRmaId(inspectionForm.rmaId);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminReturnInspectionInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-return-inspection-${inspectionForm.rmaId}`),
+        outcome: inspectionForm.outcome,
+        faultCategory: inspectionForm.faultCategory,
+        notes: inspectionForm.notes,
+        items: inspectionForm.items.map((item) => ({
+          rmaItemId: item.rmaItemId,
+          status: item.status,
+          finalCreditAmount: item.finalCreditAmount,
+          feeAmount: item.feeAmount,
+        })),
+      });
+      const response = await postJson<DropshipAdminReturnInspectionResponse>(
+        `/api/dropship/admin/returns/${inspectionForm.rmaId}/inspection`,
+        input,
+      );
+      setMessage(
+        `RMA ${response.rma.rmaNumber} inspected: ${formatStatus(response.inspection.outcome)} with ${formatCents(response.inspection.creditCents)} credit and ${formatCents(response.inspection.feeCents)} fee.`,
+      );
+      setInspectionForm(buildReturnInspectionFormState(response.rma));
+      await Promise.all([
+        returnsQuery.refetch(),
+        returnDetailQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship return inspection failed.");
+    } finally {
+      setInspectionPendingRmaId(null);
     }
   }
 
@@ -1351,6 +1473,7 @@ function ReturnOpsTab() {
 
       <ReturnOpsTable
         isLoading={returnsQuery.isLoading || returnsQuery.isFetching}
+        onInspect={selectInspectionRma}
         onStatusChange={updatePendingStatus}
         onStatusNoteChange={updateStatusNote}
         onStatusSave={saveReturnStatus}
@@ -1359,6 +1482,19 @@ function ReturnOpsTab() {
         statusInputs={statusInputs}
         statusNotes={statusNotes}
         total={returnsQuery.data?.total ?? 0}
+      />
+
+      <ReturnInspectionPanel
+        error={returnDetailQuery.error}
+        form={inspectionForm}
+        isLoading={returnDetailQuery.isLoading || returnDetailQuery.isFetching}
+        onCancel={clearInspectionSelection}
+        onFormChange={updateInspectionForm}
+        onItemChange={updateInspectionItem}
+        onSave={saveReturnInspection}
+        pendingRmaId={inspectionPendingRmaId}
+        rma={returnDetailQuery.data?.rma ?? null}
+        selectedRmaId={selectedInspectionRmaId}
       />
     </div>
   );
@@ -3454,8 +3590,238 @@ function NotificationEventsTable({
   );
 }
 
+function ReturnInspectionPanel({
+  error,
+  form,
+  isLoading,
+  onCancel,
+  onFormChange,
+  onItemChange,
+  onSave,
+  pendingRmaId,
+  rma,
+  selectedRmaId,
+}: {
+  error: unknown;
+  form: ReturnInspectionFormState | null;
+  isLoading: boolean;
+  onCancel: () => void;
+  onFormChange: (patch: Partial<ReturnInspectionFormState>) => void;
+  onItemChange: (
+    rmaItemId: number,
+    patch: Partial<Pick<ReturnInspectionItemFormState, "status" | "finalCreditAmount" | "feeAmount">>,
+  ) => void;
+  onSave: () => void;
+  pendingRmaId: number | null;
+  rma: DropshipReturnDetail | null;
+  selectedRmaId: number | null;
+}) {
+  if (selectedRmaId === null) return null;
+
+  if (isLoading) {
+    return (
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-8 w-56" />
+        <div className="mt-4 space-y-2">
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+        </div>
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertDescription>{queryErrorMessage(error, "Unable to load RMA inspection detail.")}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (!rma || !form) return null;
+
+  const existingInspection = rma.inspections[0] ?? null;
+  const totals = returnInspectionFormTotals(form);
+  const pending = pendingRmaId === rma.rmaId;
+  const saveDisabled = pending || existingInspection !== null || totals.hasInvalidAmount;
+
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Inspection for {rma.rmaNumber}</h2>
+          <p className="text-sm text-muted-foreground">
+            {rma.vendorName || rma.vendorEmail || `Vendor ${rma.vendorId}`} / {rma.platform ? formatStatus(rma.platform) : "No platform"} / {rma.returnTrackingNumber || "No return tracking"}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="outline" className={returnOpsStatusTone(rma.status)}>{formatStatus(rma.status)}</Badge>
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Close</Button>
+        </div>
+      </div>
+
+      {existingInspection && (
+        <Alert className="mt-4 border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>
+            Inspection {existingInspection.rmaInspectionId} was finalized as {formatStatus(existingInspection.outcome)} with {formatCents(existingInspection.creditCents)} credit and {formatCents(existingInspection.feeCents)} fee.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[280px_1fr]">
+        <div className="space-y-3">
+          <div>
+            <label className="text-sm font-medium">Outcome</label>
+            <Select
+              value={form.outcome}
+              onValueChange={(value) => onFormChange({ outcome: value as DropshipRmaInspectionOutcome })}
+              disabled={existingInspection !== null || pending}
+            >
+              <SelectTrigger className="mt-2">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="approved">Approved</SelectItem>
+                <SelectItem value="rejected">Rejected</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div>
+            <label className="text-sm font-medium">Fault category</label>
+            <Select
+              value={form.faultCategory}
+              onValueChange={(value) => onFormChange({ faultCategory: value as DropshipReturnFaultCategory })}
+              disabled={existingInspection !== null || pending}
+            >
+              <SelectTrigger className="mt-2">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {returnFaultCategories.map((category) => (
+                  <SelectItem key={category} value={category}>{formatStatus(category)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="rounded-md border p-3">
+            <div className="text-sm font-medium">Computed wallet movement</div>
+            <div className="mt-2 grid gap-1 text-sm text-muted-foreground">
+              <div className="flex justify-between gap-3">
+                <span>Credit</span>
+                <span className="font-mono text-foreground">
+                  {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.creditCents)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span>Fee</span>
+                <span className="font-mono text-foreground">
+                  {totals.hasInvalidAmount ? "Invalid" : formatCents(totals.feeCents)}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-return-inspection-notes">Inspection notes</label>
+            <Textarea
+              id="dropship-return-inspection-notes"
+              className="mt-2 min-h-28"
+              maxLength={5000}
+              value={form.notes}
+              onChange={(event) => onFormChange({ notes: event.target.value })}
+              disabled={existingInspection !== null || pending}
+            />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Item</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Credit</TableHead>
+                  <TableHead className="text-right">Fee</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {form.items.map((item) => (
+                  <TableRow key={item.rmaItemId}>
+                    <TableCell>
+                      <div className="font-medium">RMA item {item.rmaItemId}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {item.productVariantId ? `Variant ${item.productVariantId}` : "Variant not linked"}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        value={item.status}
+                        onChange={(event) => onItemChange(item.rmaItemId, { status: event.target.value })}
+                        maxLength={40}
+                        disabled={existingInspection !== null || pending}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right font-mono">{item.quantity}</TableCell>
+                    <TableCell>
+                      <Input
+                        value={item.finalCreditAmount}
+                        onChange={(event) => onItemChange(item.rmaItemId, { finalCreditAmount: event.target.value })}
+                        className="text-right font-mono"
+                        disabled={existingInspection !== null || pending}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        value={item.feeAmount}
+                        onChange={(event) => onItemChange(item.rmaItemId, { feeAmount: event.target.value })}
+                        className="text-right font-mono"
+                        disabled={existingInspection !== null || pending}
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+
+          {rma.items.length === 0 && (
+            <p className="text-sm text-muted-foreground">This RMA has no item rows attached.</p>
+          )}
+
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onCancel}>
+              Close
+            </Button>
+            <Button
+              type="button"
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              disabled={saveDisabled}
+              onClick={onSave}
+            >
+              <CheckCircle2 className={pending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              Finalize inspection
+            </Button>
+          </div>
+
+          {totals.hasInvalidAmount && (
+            <p className="text-right text-sm text-destructive">Credit and fee inputs must be valid dollar amounts.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ReturnOpsTable({
   isLoading,
+  onInspect,
   onStatusChange,
   onStatusNoteChange,
   onStatusSave,
@@ -3466,6 +3832,7 @@ function ReturnOpsTable({
   total,
 }: {
   isLoading: boolean;
+  onInspect: (rma: DropshipReturnListItem) => void;
   onStatusChange: (rmaId: number, status: DropshipRmaStatus) => void;
   onStatusNoteChange: (rmaId: number, note: string) => void;
   onStatusSave: (rma: DropshipReturnListItem) => void;
@@ -3509,6 +3876,7 @@ function ReturnOpsTable({
             <TableHead>Tracking</TableHead>
             <TableHead>Milestones</TableHead>
             <TableHead className="w-[145px]">Updated</TableHead>
+            <TableHead className="w-[120px]">Inspection</TableHead>
             <TableHead className="w-[310px]">Status update</TableHead>
           </TableRow>
         </TableHeader>
@@ -3569,6 +3937,18 @@ function ReturnOpsTable({
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                   {formatDateTime(rma.updatedAt)}
+                </TableCell>
+                <TableCell>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="gap-2"
+                    onClick={() => onInspect(rma)}
+                  >
+                    <FileSearch className="h-4 w-4" />
+                    Inspect
+                  </Button>
                 </TableCell>
                 <TableCell>
                   <div className="grid gap-2">
@@ -4284,6 +4664,63 @@ function orderShipToLabel(intake: DropshipAdminOrderOpsIntakeListItem): string {
   if (!shipTo) return "None";
   const locality = [shipTo.city, shipTo.region, shipTo.postalCode].filter(Boolean).join(", ");
   return locality || shipTo.country || shipTo.name || "Available";
+}
+
+function buildReturnInspectionFormState(rma: DropshipReturnDetail): ReturnInspectionFormState {
+  return {
+    rmaId: rma.rmaId,
+    outcome: rma.status === "rejected" ? "rejected" : "approved",
+    faultCategory: rma.faultCategory ?? "card_shellz",
+    notes: rma.inspections[0]?.notes ?? "",
+    items: rma.items.map((item) => {
+      const finalCreditCents = item.finalCreditCents ?? item.requestedCreditCents ?? 0;
+      const feeCents = item.feeCents ?? 0;
+      return {
+        rmaItemId: item.rmaItemId,
+        productVariantId: item.productVariantId,
+        quantity: item.quantity,
+        status: item.finalCreditCents !== null || item.feeCents !== null ? item.status : "approved",
+        finalCreditAmount: centsToDollarInput(finalCreditCents),
+        feeAmount: centsToDollarInput(feeCents),
+      };
+    }),
+  };
+}
+
+function returnInspectionFormTotals(form: ReturnInspectionFormState): {
+  creditCents: number;
+  feeCents: number;
+  hasInvalidAmount: boolean;
+} {
+  return form.items.reduce<{
+    creditCents: number;
+    feeCents: number;
+    hasInvalidAmount: boolean;
+  }>((totals, item) => {
+    const creditCents = parseDollarInputForDisplay(item.finalCreditAmount);
+    const feeCents = parseDollarInputForDisplay(item.feeAmount);
+    return {
+      creditCents: totals.creditCents + (creditCents ?? 0),
+      feeCents: totals.feeCents + (feeCents ?? 0),
+      hasInvalidAmount: totals.hasInvalidAmount || creditCents === null || feeCents === null,
+    };
+  }, { creditCents: 0, feeCents: 0, hasInvalidAmount: false });
+}
+
+function parseDollarInputForDisplay(value: string): number | null {
+  const normalized = value.trim().replace(/^\$/, "").replace(/,/g, "");
+  if (!normalized) return 0;
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) return null;
+  const [dollars, cents = ""] = normalized.split(".");
+  const result = (Number(dollars) * 100) + Number(cents.padEnd(2, "0"));
+  return Number.isSafeInteger(result) ? result : null;
+}
+
+function centsToDollarInput(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) return "0.00";
+  const dollars = Math.trunc(value / 100);
+  const cents = value % 100;
+  return `${dollars}.${String(cents).padStart(2, "0")}`;
 }
 
 function orderIntakeStatusTone(status: DropshipOpsOrderIntakeStatus): string {

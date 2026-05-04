@@ -15,6 +15,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnInspectionInput,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
@@ -319,6 +320,56 @@ describe("dropship ops surface client helpers", () => {
       status: "closed",
       notes: "",
     })).toThrow();
+  });
+
+  it("builds admin return inspection bodies from item credit and fee rows", () => {
+    expect(buildAdminReturnInspectionInput({
+      idempotencyKey: "return-inspection-1",
+      outcome: "approved",
+      faultCategory: "carrier",
+      notes: " carrier loss approved ",
+      items: [
+        {
+          rmaItemId: 10,
+          status: "approved",
+          finalCreditAmount: "12.50",
+          feeAmount: "",
+        },
+        {
+          rmaItemId: 11,
+          status: "approved",
+          finalCreditAmount: "$3.25",
+          feeAmount: "1.00",
+        },
+      ],
+    })).toEqual({
+      idempotencyKey: "return-inspection-1",
+      outcome: "approved",
+      faultCategory: "carrier",
+      creditCents: 1575,
+      feeCents: 100,
+      notes: "carrier loss approved",
+      photos: [],
+      items: [
+        { rmaItemId: 10, status: "approved", finalCreditCents: 1250, feeCents: 0 },
+        { rmaItemId: 11, status: "approved", finalCreditCents: 325, feeCents: 100 },
+      ],
+    });
+
+    expect(() => buildAdminReturnInspectionInput({
+      idempotencyKey: "short",
+      outcome: "approved",
+      faultCategory: "carrier",
+      notes: "",
+      items: [],
+    })).toThrow("idempotencyKey must be between 8 and 200 characters.");
+    expect(() => buildAdminReturnInspectionInput({
+      idempotencyKey: "return-inspection-2",
+      outcome: "approved",
+      faultCategory: "carrier",
+      notes: "",
+      items: [{ rmaItemId: 12, status: "approved", finalCreditAmount: "1.001", feeAmount: "0" }],
+    })).toThrow("items.0.finalCreditAmount must be a non-negative dollar amount with no more than two decimal places.");
   });
 
   it("builds admin shipping config mutation bodies", () => {

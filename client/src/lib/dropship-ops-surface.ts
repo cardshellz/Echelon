@@ -63,6 +63,7 @@ export type DropshipReturnFaultCategory =
   | "customer"
   | "marketplace"
   | "carrier";
+export type DropshipRmaInspectionOutcome = "approved" | "rejected";
 export type DropshipStoreConnectionLifecycleStatus =
   | "connected"
   | "needs_reauth"
@@ -1503,7 +1504,7 @@ export interface DropshipReturnItem {
 export interface DropshipReturnInspection {
   rmaInspectionId: number;
   rmaId: number;
-  outcome: "approved" | "rejected";
+  outcome: DropshipRmaInspectionOutcome;
   faultCategory: DropshipReturnFaultCategory | null;
   notes: string | null;
   photos: Record<string, unknown>[];
@@ -1557,6 +1558,31 @@ export interface DropshipAdminReturnStatusUpdateInput {
 
 export interface DropshipAdminReturnStatusUpdateResponse {
   rma: DropshipReturnDetail;
+  idempotentReplay: boolean;
+}
+
+export interface DropshipAdminReturnInspectionItemInput {
+  rmaItemId: number;
+  status: string;
+  finalCreditCents: number;
+  feeCents: number;
+}
+
+export interface DropshipAdminReturnInspectionInput {
+  outcome: DropshipRmaInspectionOutcome;
+  faultCategory: DropshipReturnFaultCategory;
+  creditCents: number;
+  feeCents: number;
+  notes?: string;
+  photos: Record<string, unknown>[];
+  items: DropshipAdminReturnInspectionItemInput[];
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminReturnInspectionResponse {
+  rma: DropshipReturnDetail;
+  inspection: DropshipReturnInspection;
+  walletLedger: DropshipReturnWalletLedgerEntry[];
   idempotentReplay: boolean;
 }
 
@@ -1993,6 +2019,52 @@ export function buildAdminReturnStatusUpdateInput(input: {
     : { idempotencyKey, status: input.status };
 }
 
+export function buildAdminReturnInspectionInput(input: {
+  idempotencyKey: string;
+  outcome: DropshipRmaInspectionOutcome;
+  faultCategory: DropshipReturnFaultCategory;
+  notes: string;
+  items: Array<{
+    rmaItemId: number;
+    status: string;
+    finalCreditAmount: string;
+    feeAmount: string;
+  }>;
+}): DropshipAdminReturnInspectionInput {
+  const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+  const notes = input.notes.trim();
+  if (notes.length > 5000) {
+    throw new Error("Notes must be 5000 characters or fewer.");
+  }
+
+  const items = input.items.map((item, index) => {
+    const rmaItemId = assertPositiveInteger(item.rmaItemId, `items.${index}.rmaItemId`);
+    const status = item.status.trim() || "inspected";
+    if (status.length > 40) {
+      throw new Error(`items.${index}.status must be 40 characters or fewer.`);
+    }
+    return {
+      rmaItemId,
+      status,
+      finalCreditCents: parseOptionalDollarInputToCents(item.finalCreditAmount, `items.${index}.finalCreditAmount`),
+      feeCents: parseOptionalDollarInputToCents(item.feeAmount, `items.${index}.feeAmount`),
+    };
+  });
+  const creditCents = items.reduce((sum, item) => sum + item.finalCreditCents, 0);
+  const feeCents = items.reduce((sum, item) => sum + item.feeCents, 0);
+
+  return {
+    outcome: input.outcome,
+    faultCategory: input.faultCategory,
+    creditCents,
+    feeCents,
+    notes: notes || undefined,
+    photos: [],
+    items,
+    idempotencyKey,
+  };
+}
+
 export function buildShippingBoxInput(input: {
   boxId?: string;
   code: string;
@@ -2406,6 +2478,11 @@ export function parseDollarInputToCents(value: string, field: string): number {
     throw new Error(`${field} is outside the supported currency range.`);
   }
   return result;
+}
+
+function parseOptionalDollarInputToCents(value: string, field: string): number {
+  const normalized = value.trim();
+  return parseDollarInputToCents(normalized || "0", field);
 }
 
 export function buildVariantSelectionReplacement(input: {
