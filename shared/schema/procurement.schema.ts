@@ -931,6 +931,7 @@ export const vendorInvoiceLines = procurementSchema.table("vendor_invoice_lines"
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
+  freightCostId: integer("freight_cost_id").references(() => inboundFreightCosts.id, { onDelete: "set null" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
   lineNumber: integer("line_number").notNull(),
   sku: varchar("sku", { length: 100 }),
