@@ -1550,6 +1550,34 @@ export interface DropshipReturnDetailResponse {
   rma: DropshipReturnDetail;
 }
 
+export interface DropshipAdminReturnCreateItemInput {
+  productVariantId: number | null;
+  quantity: number;
+  status: string;
+  requestedCreditCents: number | null;
+}
+
+export interface DropshipAdminReturnCreateInput {
+  vendorId: number;
+  rmaNumber: string;
+  storeConnectionId?: number | null;
+  intakeId?: number | null;
+  omsOrderId?: number | null;
+  reasonCode?: string | null;
+  faultCategory?: DropshipReturnFaultCategory | null;
+  returnWindowDays: number;
+  labelSource?: string | null;
+  returnTrackingNumber?: string | null;
+  vendorNotes?: string | null;
+  items: DropshipAdminReturnCreateItemInput[];
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminReturnCreateResponse {
+  rma: DropshipReturnDetail;
+  idempotentReplay: boolean;
+}
+
 export interface DropshipAdminReturnStatusUpdateInput {
   status: DropshipRmaStatus;
   notes?: string;
@@ -2019,6 +2047,63 @@ export function buildAdminReturnStatusUpdateInput(input: {
     : { idempotencyKey, status: input.status };
 }
 
+export function buildAdminReturnCreateInput(input: {
+  idempotencyKey: string;
+  vendorId: string;
+  rmaNumber: string;
+  storeConnectionId: string;
+  intakeId: string;
+  omsOrderId: string;
+  reasonCode: string;
+  faultCategory: DropshipReturnFaultCategory | "none";
+  returnWindowDays: string;
+  labelSource: string;
+  returnTrackingNumber: string;
+  vendorNotes: string;
+  items: Array<{
+    productVariantId: string;
+    quantity: string;
+    status: string;
+    requestedCreditAmount: string;
+  }>;
+}): DropshipAdminReturnCreateInput {
+  const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+  const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
+  const vendorNotes = input.vendorNotes.trim();
+  if (vendorNotes.length > 5000) {
+    throw new Error("vendorNotes must be 5000 characters or fewer.");
+  }
+
+  const items = input.items.map((item, index) => {
+    const status = item.status.trim() || "requested";
+    if (status.length > 40) {
+      throw new Error(`items.${index}.status must be 40 characters or fewer.`);
+    }
+    return {
+      productVariantId: parseOptionalPositiveInteger(item.productVariantId, `items.${index}.productVariantId`),
+      quantity: parsePositiveInteger(item.quantity, `items.${index}.quantity`),
+      status,
+      requestedCreditCents: parseNullableDollarInputToCents(item.requestedCreditAmount, `items.${index}.requestedCreditAmount`),
+    };
+  });
+
+  return {
+    vendorId: parsePositiveInteger(input.vendorId, "vendorId"),
+    rmaNumber,
+    storeConnectionId: parseOptionalPositiveInteger(input.storeConnectionId, "storeConnectionId"),
+    intakeId: parseOptionalPositiveInteger(input.intakeId, "intakeId"),
+    omsOrderId: parseOptionalPositiveInteger(input.omsOrderId, "omsOrderId"),
+    reasonCode: input.reasonCode.trim() || null,
+    faultCategory: input.faultCategory === "none" ? null : input.faultCategory,
+    returnWindowDays: parsePositiveInteger(input.returnWindowDays, "returnWindowDays"),
+    labelSource: input.labelSource.trim() || null,
+    returnTrackingNumber: input.returnTrackingNumber.trim() || null,
+    vendorNotes: vendorNotes || null,
+    items,
+    idempotencyKey,
+  };
+}
+
 export function buildAdminReturnInspectionInput(input: {
   idempotencyKey: string;
   outcome: DropshipRmaInspectionOutcome;
@@ -2485,6 +2570,11 @@ function parseOptionalDollarInputToCents(value: string, field: string): number {
   return parseDollarInputToCents(normalized || "0", field);
 }
 
+function parseNullableDollarInputToCents(value: string, field: string): number | null {
+  const normalized = value.trim();
+  return normalized ? parseDollarInputToCents(normalized, field) : null;
+}
+
 export function buildVariantSelectionReplacement(input: {
   existingRules: readonly DropshipVendorSelectionRule[];
   rows: readonly DropshipCatalogRow[];
@@ -2560,6 +2650,11 @@ function parsePositiveInteger(value: string, key: string): number {
   }
   const parsed = Number(normalized);
   return assertPositiveInteger(parsed, key);
+}
+
+function parseOptionalPositiveInteger(value: string, key: string): number | null {
+  const normalized = value.trim();
+  return normalized ? parsePositiveInteger(normalized, key) : null;
 }
 
 function parseNonNegativeInteger(value: string, key: string): number {

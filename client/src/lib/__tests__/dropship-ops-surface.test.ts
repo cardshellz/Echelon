@@ -15,6 +15,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnCreateInput,
   buildAdminReturnInspectionInput,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
@@ -320,6 +321,85 @@ describe("dropship ops surface client helpers", () => {
       status: "closed",
       notes: "",
     })).toThrow();
+  });
+
+  it("builds admin return create bodies with explicit RMA fields and item rows", () => {
+    expect(buildAdminReturnCreateInput({
+      idempotencyKey: "return-create-1",
+      vendorId: " 12 ",
+      rmaNumber: " RMA-1001 ",
+      storeConnectionId: "34",
+      intakeId: "",
+      omsOrderId: "56",
+      reasonCode: "damaged",
+      faultCategory: "carrier",
+      returnWindowDays: "30",
+      labelSource: " marketplace ",
+      returnTrackingNumber: " 1Z999 ",
+      vendorNotes: " package lost ",
+      items: [
+        {
+          productVariantId: "789",
+          quantity: "2",
+          status: "requested",
+          requestedCreditAmount: "12.50",
+        },
+        {
+          productVariantId: "",
+          quantity: "1",
+          status: "",
+          requestedCreditAmount: "",
+        },
+      ],
+    })).toEqual({
+      idempotencyKey: "return-create-1",
+      vendorId: 12,
+      rmaNumber: "RMA-1001",
+      storeConnectionId: 34,
+      intakeId: null,
+      omsOrderId: 56,
+      reasonCode: "damaged",
+      faultCategory: "carrier",
+      returnWindowDays: 30,
+      labelSource: "marketplace",
+      returnTrackingNumber: "1Z999",
+      vendorNotes: "package lost",
+      items: [
+        { productVariantId: 789, quantity: 2, status: "requested", requestedCreditCents: 1250 },
+        { productVariantId: null, quantity: 1, status: "requested", requestedCreditCents: null },
+      ],
+    });
+
+    expect(() => buildAdminReturnCreateInput({
+      idempotencyKey: "return-create-2",
+      vendorId: "12",
+      rmaNumber: "",
+      storeConnectionId: "",
+      intakeId: "",
+      omsOrderId: "",
+      reasonCode: "",
+      faultCategory: "none",
+      returnWindowDays: "30",
+      labelSource: "",
+      returnTrackingNumber: "",
+      vendorNotes: "",
+      items: [],
+    })).toThrow("rmaNumber is required.");
+    expect(() => buildAdminReturnCreateInput({
+      idempotencyKey: "return-create-3",
+      vendorId: "12",
+      rmaNumber: "RMA-1002",
+      storeConnectionId: "",
+      intakeId: "",
+      omsOrderId: "",
+      reasonCode: "",
+      faultCategory: "none",
+      returnWindowDays: "30",
+      labelSource: "",
+      returnTrackingNumber: "",
+      vendorNotes: "",
+      items: [{ productVariantId: "", quantity: "0", status: "requested", requestedCreditAmount: "" }],
+    })).toThrow("items.0.quantity must be a positive integer.");
   });
 
   it("builds admin return inspection bodies from item credit and fee rows", () => {

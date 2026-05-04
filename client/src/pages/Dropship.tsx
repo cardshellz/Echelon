@@ -50,6 +50,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminReturnCreateInput,
   buildAdminReturnInspectionInput,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
@@ -93,6 +94,7 @@ import {
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOmsChannelConfigResponse,
   type DropshipAdminOmsChannelConfigureResponse,
+  type DropshipAdminReturnCreateResponse,
   type DropshipAdminReturnInspectionResponse,
   type DropshipAdminReturnStatusUpdateResponse,
   type DropshipAdminShippingConfigResponse,
@@ -189,6 +191,28 @@ interface ReturnInspectionFormState {
   items: ReturnInspectionItemFormState[];
 }
 
+interface ReturnCreateItemFormState {
+  productVariantId: string;
+  quantity: string;
+  status: string;
+  requestedCreditAmount: string;
+}
+
+interface ReturnCreateFormState {
+  vendorId: string;
+  rmaNumber: string;
+  storeConnectionId: string;
+  intakeId: string;
+  omsOrderId: string;
+  reasonCode: string;
+  faultCategory: DropshipReturnFaultCategory | "none";
+  returnWindowDays: string;
+  labelSource: string;
+  returnTrackingNumber: string;
+  vendorNotes: string;
+  items: ReturnCreateItemFormState[];
+}
+
 interface ShippingBoxFormState {
   code: string;
   name: string;
@@ -280,6 +304,35 @@ const emptyShippingBoxForm: ShippingBoxFormState = {
   maxWeightGrams: "",
   isActive: true,
 };
+
+const emptyReturnCreateItemForm: ReturnCreateItemFormState = {
+  productVariantId: "",
+  quantity: "1",
+  status: "requested",
+  requestedCreditAmount: "",
+};
+
+const emptyReturnCreateForm: ReturnCreateFormState = {
+  vendorId: "",
+  rmaNumber: "",
+  storeConnectionId: "",
+  intakeId: "",
+  omsOrderId: "",
+  reasonCode: "",
+  faultCategory: "none",
+  returnWindowDays: "30",
+  labelSource: "",
+  returnTrackingNumber: "",
+  vendorNotes: "",
+  items: [{ ...emptyReturnCreateItemForm }],
+};
+
+function makeEmptyReturnCreateForm(): ReturnCreateFormState {
+  return {
+    ...emptyReturnCreateForm,
+    items: [{ ...emptyReturnCreateItemForm }],
+  };
+}
 
 const emptyShippingPackageProfileForm: ShippingPackageProfileFormState = {
   productVariantId: "",
@@ -1253,6 +1306,8 @@ function ReturnOpsTab() {
     search: "",
     status: "default" as ReturnOpsStatusFilter,
   });
+  const [createForm, setCreateForm] = useState<ReturnCreateFormState>(() => makeEmptyReturnCreateForm());
+  const [creatingRma, setCreatingRma] = useState(false);
   const [statusInputs, setStatusInputs] = useState<Record<number, DropshipRmaStatus>>({});
   const [statusNotes, setStatusNotes] = useState<Record<number, string>>({});
   const [pendingRmaId, setPendingRmaId] = useState<number | null>(null);
@@ -1293,6 +1348,31 @@ function ReturnOpsTab() {
 
   function applyReturnFilters() {
     setAppliedFilters({ search, status });
+  }
+
+  function updateCreateForm(patch: Partial<ReturnCreateFormState>) {
+    setCreateForm((current) => ({ ...current, ...patch }));
+  }
+
+  function updateCreateItem(index: number, patch: Partial<ReturnCreateItemFormState>) {
+    setCreateForm((current) => ({
+      ...current,
+      items: current.items.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item),
+    }));
+  }
+
+  function addCreateItem() {
+    setCreateForm((current) => ({
+      ...current,
+      items: [...current.items, { ...emptyReturnCreateItemForm }],
+    }));
+  }
+
+  function removeCreateItem(index: number) {
+    setCreateForm((current) => ({
+      ...current,
+      items: current.items.filter((_, itemIndex) => itemIndex !== index),
+    }));
   }
 
   function updatePendingStatus(rmaId: number, nextStatus: DropshipRmaStatus) {
@@ -1364,6 +1444,31 @@ function ReturnOpsTab() {
       setError(caught instanceof Error ? caught.message : "Dropship return status update failed.");
     } finally {
       setPendingRmaId(null);
+    }
+  }
+
+  async function createReturn() {
+    setCreatingRma(true);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminReturnCreateInput({
+        ...createForm,
+        idempotencyKey: createDropshipIdempotencyKey(`admin-return-create-${createForm.vendorId || "vendor"}`),
+      });
+      const response = await postJson<DropshipAdminReturnCreateResponse>("/api/dropship/admin/returns", input);
+      setMessage(`RMA ${response.rma.rmaNumber} created for vendor ${response.rma.vendorId}.`);
+      setCreateForm(makeEmptyReturnCreateForm());
+      await Promise.all([
+        returnsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship return creation failed.");
+    } finally {
+      setCreatingRma(false);
     }
   }
 
@@ -1470,6 +1575,16 @@ function ReturnOpsTab() {
         <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Awaiting inspection" value={String(rmas.filter((rma) => rma.status === "received" || rma.status === "inspecting").length)} />
         <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible credited" value={String(rmas.filter((rma) => rma.status === "credited").length)} />
       </section>
+
+      <ReturnCreatePanel
+        form={createForm}
+        isSaving={creatingRma}
+        onAddItem={addCreateItem}
+        onChange={updateCreateForm}
+        onItemChange={updateCreateItem}
+        onRemoveItem={removeCreateItem}
+        onSubmit={createReturn}
+      />
 
       <ReturnOpsTable
         isLoading={returnsQuery.isLoading || returnsQuery.isFetching}
@@ -3587,6 +3702,236 @@ function NotificationEventsTable({
         </TableBody>
       </Table>
     </section>
+  );
+}
+
+function ReturnCreatePanel({
+  form,
+  isSaving,
+  onAddItem,
+  onChange,
+  onItemChange,
+  onRemoveItem,
+  onSubmit,
+}: {
+  form: ReturnCreateFormState;
+  isSaving: boolean;
+  onAddItem: () => void;
+  onChange: (patch: Partial<ReturnCreateFormState>) => void;
+  onItemChange: (index: number, patch: Partial<ReturnCreateItemFormState>) => void;
+  onRemoveItem: (index: number) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Create RMA</h2>
+          <p className="text-sm text-muted-foreground">Open a dropship return against a vendor, store, intake, or OMS order.</p>
+        </div>
+        <Button
+          type="button"
+          className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+          disabled={isSaving}
+          onClick={onSubmit}
+        >
+          <PlusCircle className={isSaving ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+          Create RMA
+        </Button>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1.2fr]">
+        <div className="grid gap-3 md:grid-cols-2">
+          <AdminReturnInput
+            label="Vendor ID"
+            value={form.vendorId}
+            disabled={isSaving}
+            onChange={(value) => onChange({ vendorId: value })}
+          />
+          <AdminReturnInput
+            label="RMA number"
+            value={form.rmaNumber}
+            disabled={isSaving}
+            onChange={(value) => onChange({ rmaNumber: value })}
+          />
+          <AdminReturnInput
+            label="Store connection ID"
+            value={form.storeConnectionId}
+            placeholder="Optional"
+            disabled={isSaving}
+            onChange={(value) => onChange({ storeConnectionId: value })}
+          />
+          <AdminReturnInput
+            label="Intake ID"
+            value={form.intakeId}
+            placeholder="Optional"
+            disabled={isSaving}
+            onChange={(value) => onChange({ intakeId: value })}
+          />
+          <AdminReturnInput
+            label="OMS order ID"
+            value={form.omsOrderId}
+            placeholder="Optional"
+            disabled={isSaving}
+            onChange={(value) => onChange({ omsOrderId: value })}
+          />
+          <AdminReturnInput
+            label="Return window days"
+            value={form.returnWindowDays}
+            disabled={isSaving}
+            onChange={(value) => onChange({ returnWindowDays: value })}
+          />
+          <AdminReturnInput
+            label="Reason code"
+            value={form.reasonCode}
+            placeholder="Optional"
+            disabled={isSaving}
+            onChange={(value) => onChange({ reasonCode: value })}
+          />
+          <div>
+            <label className="text-sm font-medium">Fault category</label>
+            <Select
+              value={form.faultCategory}
+              onValueChange={(value) => onChange({ faultCategory: value as DropshipReturnFaultCategory | "none" })}
+              disabled={isSaving}
+            >
+              <SelectTrigger className="mt-2">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">Pending</SelectItem>
+                {returnFaultCategories.map((category) => (
+                  <SelectItem key={category} value={category}>{formatStatus(category)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <AdminReturnInput
+            label="Label source"
+            value={form.labelSource}
+            placeholder="marketplace, vendor, ops"
+            disabled={isSaving}
+            onChange={(value) => onChange({ labelSource: value })}
+          />
+          <AdminReturnInput
+            label="Tracking number"
+            value={form.returnTrackingNumber}
+            placeholder="Optional"
+            disabled={isSaving}
+            onChange={(value) => onChange({ returnTrackingNumber: value })}
+          />
+          <div className="md:col-span-2">
+            <label className="text-sm font-medium" htmlFor="dropship-return-create-notes">Vendor notes</label>
+            <Textarea
+              id="dropship-return-create-notes"
+              className="mt-2 min-h-24"
+              maxLength={5000}
+              value={form.vendorNotes}
+              onChange={(event) => onChange({ vendorNotes: event.target.value })}
+              disabled={isSaving}
+            />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-medium">Return items</div>
+            <Button type="button" variant="outline" size="sm" className="gap-2" disabled={isSaving} onClick={onAddItem}>
+              <PlusCircle className="h-4 w-4" />
+              Add item
+            </Button>
+          </div>
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Variant</TableHead>
+                  <TableHead className="w-[90px]">Qty</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Requested credit</TableHead>
+                  <TableHead className="w-[84px]">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {form.items.map((item, index) => (
+                  <TableRow key={index}>
+                    <TableCell>
+                      <Input
+                        value={item.productVariantId}
+                        placeholder="Optional"
+                        disabled={isSaving}
+                        onChange={(event) => onItemChange(index, { productVariantId: event.target.value })}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        value={item.quantity}
+                        disabled={isSaving}
+                        onChange={(event) => onItemChange(index, { quantity: event.target.value })}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        value={item.status}
+                        maxLength={40}
+                        disabled={isSaving}
+                        onChange={(event) => onItemChange(index, { status: event.target.value })}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        value={item.requestedCreditAmount}
+                        placeholder="Optional"
+                        disabled={isSaving}
+                        onChange={(event) => onItemChange(index, { requestedCreditAmount: event.target.value })}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={isSaving || form.items.length === 1}
+                        onClick={() => onRemoveItem(index)}
+                      >
+                        Remove
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AdminReturnInput({
+  disabled = false,
+  label,
+  onChange,
+  placeholder,
+  value,
+}: {
+  disabled?: boolean;
+  label: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  value: string;
+}) {
+  return (
+    <div>
+      <label className="text-sm font-medium">{label}</label>
+      <Input
+        className="mt-2"
+        disabled={disabled}
+        placeholder={placeholder}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </div>
   );
 }
 
