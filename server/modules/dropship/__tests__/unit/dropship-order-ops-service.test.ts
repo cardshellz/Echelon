@@ -77,6 +77,15 @@ describe("DropshipOrderOpsService", () => {
         lineRetailTotalCents: 2598,
       }),
     ]);
+    expect(result.trackingPushes).toEqual([
+      expect.objectContaining({
+        pushId: 40,
+        wmsShipmentId: 700,
+        status: "succeeded",
+        carrier: "USPS",
+        trackingNumber: "94001111",
+      }),
+    ]);
     expect(repository.lastDetailInput).toMatchObject({
       intakeId: 1,
       vendorId: 10,
@@ -228,6 +237,23 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
       economicsSnapshot: null,
       shippingQuoteSnapshot: null,
       walletLedgerEntry: null,
+      trackingPushes: [{
+        pushId: 40,
+        wmsShipmentId: 700,
+        platform: "shopify",
+        status: "succeeded",
+        carrier: "USPS",
+        trackingNumber: "94001111",
+        shippedAt: new Date("2026-05-02T13:00:00.000Z"),
+        externalFulfillmentId: "fulfillment-1",
+        attemptCount: 1,
+        retryable: true,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: now,
+      }],
       auditEvents: [],
     };
   }

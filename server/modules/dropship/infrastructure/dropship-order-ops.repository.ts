@@ -13,8 +13,10 @@ import type {
   DropshipOrderOpsRepository,
   DropshipOrderOpsShippingQuoteSnapshot,
   DropshipOrderOpsStatusSummary,
+  DropshipOrderOpsTrackingPushSummary,
   DropshipOrderOpsWalletLedgerEntry,
 } from "../application/dropship-order-ops-service";
+import type { DropshipTrackingPushStatus } from "../application/dropship-tracking-push-ops-dtos";
 
 interface OpsIntakeRow {
   id: number;
@@ -99,6 +101,24 @@ interface AuditEventRow {
   severity: string;
   payload: Record<string, unknown> | null;
   created_at: Date;
+}
+
+interface TrackingPushDetailRow {
+  id: number;
+  wms_shipment_id: string | number | null;
+  platform: string;
+  status: DropshipTrackingPushStatus;
+  carrier: string;
+  tracking_number: string;
+  shipped_at: Date;
+  external_fulfillment_id: string | null;
+  attempt_count: string | number;
+  retryable: boolean | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at: Date;
+  updated_at: Date;
+  completed_at: Date | null;
 }
 
 interface ActionIntakeRow {
@@ -189,7 +209,32 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
          LIMIT 20`,
         [String(input.intakeId)],
       );
-      return mapOpsIntakeDetailRow(row, auditEvents.rows);
+      const trackingPushes = await client.query<TrackingPushDetailRow>(
+        `SELECT
+           id,
+           wms_shipment_id,
+           platform,
+           status,
+           carrier,
+           tracking_number,
+           shipped_at,
+           external_fulfillment_id,
+           attempt_count,
+           COALESCE((raw_result->'lastFailure'->>'retryable')::boolean, true) AS retryable,
+           last_error_code,
+           last_error_message,
+           created_at,
+           updated_at,
+           completed_at
+         FROM dropship.dropship_marketplace_tracking_pushes
+         WHERE intake_id = $1
+           AND vendor_id = $2
+           AND store_connection_id = $3
+         ORDER BY shipped_at DESC, id DESC
+         LIMIT 50`,
+        [row.id, row.vendor_id, row.store_connection_id],
+      );
+      return mapOpsIntakeDetailRow(row, auditEvents.rows, trackingPushes.rows);
     } finally {
       client.release();
     }
@@ -593,6 +638,7 @@ async function recordOpsAuditEvent(
 function mapOpsIntakeDetailRow(
   row: OpsIntakeDetailRow,
   auditEvents: AuditEventRow[],
+  trackingPushes: TrackingPushDetailRow[],
 ): DropshipOrderOpsIntakeDetail {
   const payload = row.normalized_payload ?? { lines: [] };
   return {
@@ -605,6 +651,7 @@ function mapOpsIntakeDetailRow(
     economicsSnapshot: mapEconomicsSnapshot(row),
     shippingQuoteSnapshot: mapShippingQuoteSnapshot(row),
     walletLedgerEntry: mapWalletLedgerEntry(row),
+    trackingPushes: trackingPushes.map(mapTrackingPushDetailRow),
     auditEvents: auditEvents.map(mapAuditEventDetail),
   };
 }
@@ -749,6 +796,26 @@ function mapAuditEventDetail(row: AuditEventRow): DropshipOrderOpsAuditEventDeta
     severity: row.severity,
     payload: row.payload ?? {},
     createdAt: row.created_at,
+  };
+}
+
+function mapTrackingPushDetailRow(row: TrackingPushDetailRow): DropshipOrderOpsTrackingPushSummary {
+  return {
+    pushId: toSafeInteger(row.id, "tracking_push_id"),
+    wmsShipmentId: optionalSafeInteger(row.wms_shipment_id, "wms_shipment_id"),
+    platform: row.platform,
+    status: row.status,
+    carrier: row.carrier,
+    trackingNumber: row.tracking_number,
+    shippedAt: row.shipped_at,
+    externalFulfillmentId: row.external_fulfillment_id,
+    attemptCount: toSafeInteger(row.attempt_count, "tracking_push_attempt_count"),
+    retryable: row.retryable !== false,
+    lastErrorCode: row.last_error_code,
+    lastErrorMessage: row.last_error_message,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
   };
 }
 
