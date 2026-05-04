@@ -3378,7 +3378,20 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.patch("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const cost = await shipmentTracking.updateCost(Number(req.params.costId), req.body);
+      const costId = Number(req.params.costId);
+      // Validate: forbid changing vendor_id on invoiced cost rows
+      if (req.body.vendorId !== undefined) {
+        const existing = await shipmentTracking.getCost(costId);
+        if (existing?.vendorInvoiceId && existing.vendorId !== req.body.vendorId) {
+          return res.status(400).json({ error: "Cannot change vendor on an invoiced cost row" });
+        }
+      }
+      // Map client field name to schema field name
+      if (req.body.vendorName !== undefined && req.body.performedByName === undefined) {
+        req.body.performedByName = req.body.vendorName;
+        delete req.body.vendorName;
+      }
+      const cost = await shipmentTracking.updateCost(costId, req.body);
       res.json(cost);
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
@@ -3400,17 +3413,44 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/create-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const { vendorId, invoiceNumber, invoiceDate } = req.body;
+      const { vendorId, invoiceNumber, invoiceDate, dueDate, costRowIds, lineOverrides, notes } = req.body;
       if (!vendorId) return res.status(400).json({ error: "vendorId is required" });
+      if (!invoiceNumber) return res.status(400).json({ error: "invoiceNumber is required" });
       const invoice = await apLedger.createInvoiceFromShipmentCosts(
         Number(req.params.id),
         {
           vendorId,
           invoiceNumber,
           invoiceDate: invoiceDate ? new Date(invoiceDate) : undefined,
+          dueDate: dueDate ? new Date(dueDate) : undefined,
+          costRowIds,
+          lineOverrides,
+          notes,
         }
       );
       res.json(invoice);
+    } catch (error: any) {
+      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/inbound-shipments/:id/cost-vendors", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const result = await apLedger.getCostVendorsForShipment(Number(req.params.id));
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/inbound-shipments/:id/cost-vendors/:vendorId/costs", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const costs = await apLedger.listCostsForInvoiceCreation(
+        Number(req.params.id),
+        Number(req.params.vendorId),
+      );
+      res.json({ costs });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

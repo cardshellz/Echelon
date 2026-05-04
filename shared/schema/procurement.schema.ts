@@ -787,7 +787,7 @@ export const inboundFreightCosts = procurementSchema.table("inbound_freight_cost
   invoiceDate: timestamp("invoice_date"),
   dueDate: timestamp("due_date"),
   paidDate: timestamp("paid_date"),
-  vendorName: text("vendor_name"),
+  performedByName: text("performed_by_name"),
   vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
   vendorInvoiceId: integer("vendor_invoice_id").references(() => vendorInvoices.id, { onDelete: "set null" }),
   notes: text("notes"),

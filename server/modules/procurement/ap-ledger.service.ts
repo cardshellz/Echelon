@@ -1243,88 +1243,265 @@ export async function removeAttachment(id: number) {
 // ─── Shipment Cost → AP Bridge ──────────────────────────────────────────────
 
 /**
- * Create a single vendor invoice from all unlinked shipment costs.
- * The vendorId is the platform/forwarder who bills for the shipment (e.g. Freightos),
- * NOT the individual service providers on each cost line.
+ * Get vendors with unbilled cost rows on a shipment.
+ * Used by the vendor picker in the Add Invoice flow.
+ */
+export async function getCostVendorsForShipment(shipmentId: number) {
+  const rows = await db
+    .select({
+      vendorId: inboundFreightCosts.vendorId,
+      vendorName: vendors.name,
+      unbilledCostCount: sql<number>`COUNT(*)::int`,
+      unbilledTotalCents: sql<number>`COALESCE(SUM(COALESCE(${inboundFreightCosts.actualCents}, ${inboundFreightCosts.estimatedCents}, 0)), 0)::int`,
+    })
+    .from(inboundFreightCosts)
+    .innerJoin(vendors, eq(inboundFreightCosts.vendorId, vendors.id))
+    .where(
+      and(
+        eq(inboundFreightCosts.inboundShipmentId, shipmentId),
+        sql`${inboundFreightCosts.vendorInvoiceId} IS NULL`,
+        sql`${inboundFreightCosts.vendorId} IS NOT NULL`,
+      ),
+    )
+    .groupBy(inboundFreightCosts.vendorId, vendors.name)
+    .orderBy(vendors.name);
+
+  return {
+    vendors: rows.map((r) => ({
+      vendorId: r.vendorId!,
+      vendorName: r.vendorName,
+      unbilledCostCount: r.unbilledCostCount,
+      unbilledTotalCents: r.unbilledTotalCents,
+    })),
+  };
+}
+
+/**
+ * List unbilled cost rows for a (shipmentId, vendorId) pair.
+ * Used by the Add Invoice modal for line preview.
+ */
+export async function listCostsForInvoiceCreation(shipmentId: number, vendorId: number) {
+  const rows = await db
+    .select({
+      cost: inboundFreightCosts,
+      vendorName: vendors.name,
+    })
+    .from(inboundFreightCosts)
+    .leftJoin(vendors, eq(vendors.id, inboundFreightCosts.vendorId))
+    .where(
+      and(
+        eq(inboundFreightCosts.inboundShipmentId, shipmentId),
+        eq(inboundFreightCosts.vendorId, vendorId),
+        sql`${inboundFreightCosts.vendorInvoiceId} IS NULL`,
+      ),
+    )
+    .orderBy(inboundFreightCosts.costType);
+
+  return rows.map((r) => ({
+    ...r.cost,
+    vendorDisplayName: r.vendorName,
+  }));
+}
+
+/**
+ * Create an invoice from a shipment's unbilled cost rows for a specific vendor.
+ * Race-safe: uses SELECT ... FOR UPDATE on candidate rows inside a transaction.
+ *
+ * Mirrors the addLinesFromPO pattern from shipment-tracking.service.ts.
  */
 export async function createInvoiceFromShipmentCosts(
   shipmentId: number,
   data: {
     vendorId: number;
-    invoiceNumber?: string;
+    invoiceNumber: string;
     invoiceDate?: Date;
-  }
+    dueDate?: Date;
+    costRowIds?: number[];
+    lineOverrides?: Array<{
+      freightCostId: number;
+      qtyInvoiced: number;
+      unitCostCents: number;
+      description?: string;
+    }>;
+    notes?: string;
+  },
 ) {
-  // Fetch shipment for reference number
+  // ── 1. Pre-flight validation (non-locked reads) ──
   const [shipment] = await db
-    .select({ shipmentNumber: inboundShipments.shipmentNumber })
+    .select({ shipmentNumber: inboundShipments.shipmentNumber, status: inboundShipments.status })
     .from(inboundShipments)
     .where(eq(inboundShipments.id, shipmentId));
-  if (!shipment) throw new Error("Shipment not found");
+  if (!shipment) throw new ApLedgerError("Shipment not found", 404);
+  if (shipment.status === "cancelled") throw new ApLedgerError("Cannot create invoice for a cancelled shipment", 400);
 
-  // Fetch unlinked costs
-  const costs = await db
-    .select()
-    .from(inboundFreightCosts)
-    .where(
-      and(
-        eq(inboundFreightCosts.inboundShipmentId, shipmentId),
-        sql`${inboundFreightCosts.vendorInvoiceId} IS NULL`
-      )
-    );
+  const [vendor] = await db
+    .select({ id: vendors.id, name: vendors.name, paymentTermsDays: vendors.paymentTermsDays })
+    .from(vendors)
+    .where(eq(vendors.id, data.vendorId));
+  if (!vendor) throw new ApLedgerError("Vendor not found", 404);
 
-  if (costs.length === 0) throw new Error("No unlinked costs on this shipment");
-
-  // Calculate total from actual (preferred) or estimated cents
-  const totalCents = costs.reduce(
-    (sum, c) => sum + (Number(c.actualCents) || Number(c.estimatedCents) || 0),
-    0
-  );
-
-  const invoiceNumber = data.invoiceNumber || await generateInvoiceNumber();
-
-  // Create one invoice for the whole shipment
-  const invoice = await createInvoice({
-    invoiceNumber,
-    ourReference: `Shipment ${shipment.shipmentNumber}`,
-    vendorId: data.vendorId,
-    invoiceDate: data.invoiceDate ?? new Date(),
-    invoicedAmountCents: totalCents,
-  });
-
-  // Set inboundShipmentId backreference
-  await db
-    .update(vendorInvoices)
-    .set({ inboundShipmentId: shipmentId, updatedAt: new Date() })
-    .where(eq(vendorInvoices.id, invoice.id));
-
-  // Create one invoice line per cost
-  let lineNum = 0;
-  for (const cost of costs) {
-    lineNum++;
-    const costAmount = Number(cost.actualCents) || Number(cost.estimatedCents) || 0;
-    const label = cost.costType.replace(/_/g, " ");
-
-    await db.insert(vendorInvoiceLines).values({
-      vendorInvoiceId: invoice.id,
-      lineNumber: lineNum,
-      description: cost.description || label,
-      productName: label,
-      qtyInvoiced: 1,
-      unitCostCents: costAmount,
-      lineTotalCents: costAmount,
-      matchStatus: "matched",
-    });
-
-    // Link shipment cost back to the invoice
-    await db
-      .update(inboundFreightCosts)
-      .set({ vendorInvoiceId: invoice.id, updatedAt: new Date() })
-      .where(eq(inboundFreightCosts.id, cost.id));
+  if (!data.invoiceNumber || !data.invoiceNumber.trim()) {
+    throw new ApLedgerError("Invoice number is required", 400);
   }
 
-  return { ...invoice, inboundShipmentId: shipmentId };
+  // ── 2. Transaction: lock, validate, insert ──
+  const result = await db.transaction(async (tx: any) => {
+    // Lock candidate cost rows with FOR UPDATE
+    let lockedRows;
+    if (data.costRowIds && data.costRowIds.length > 0) {
+      lockedRows = await tx.execute(sql`
+        SELECT id, cost_type, description, actual_cents, estimated_cents,
+               performed_by_name, vendor_id, vendor_invoice_id, cost_status
+        FROM procurement.inbound_freight_costs
+        WHERE inbound_shipment_id = ${shipmentId}
+          AND vendor_id = ${data.vendorId}
+          AND vendor_invoice_id IS NULL
+          AND id = ANY(ARRAY[${sql.join(data.costRowIds, sql`, `)}]::integer[])
+        FOR UPDATE
+      `);
+    } else {
+      lockedRows = await tx.execute(sql`
+        SELECT id, cost_type, description, actual_cents, estimated_cents,
+               performed_by_name, vendor_id, vendor_invoice_id, cost_status
+        FROM procurement.inbound_freight_costs
+        WHERE inbound_shipment_id = ${shipmentId}
+          AND vendor_id = ${data.vendorId}
+          AND vendor_invoice_id IS NULL
+        FOR UPDATE
+      `);
+    }
+
+    const costs = lockedRows.rows as any[];
+
+    if (costs.length === 0) {
+      throw new ApLedgerError("No unbilled cost rows found for this vendor on this shipment", 400);
+    }
+
+    // Defense-in-depth: re-verify none have been invoiced concurrently
+    const alreadyInvoiced = costs.filter((c: any) => c.vendor_invoice_id != null);
+    if (alreadyInvoiced.length > 0) {
+      throw new ApLedgerError(
+        `Cost rows already invoiced: ${alreadyInvoiced.map((c: any) => c.id).join(", ")}`,
+        409,
+      );
+    }
+
+    // Sanity check: all locked rows must match the requested vendor
+    const wrongVendor = costs.filter((c: any) => c.vendor_id !== data.vendorId);
+    if (wrongVendor.length > 0) {
+      throw new ApLedgerError("Vendor mismatch on cost rows", 422);
+    }
+
+    // ── 3. Build line overrides map ──
+    const overrideMap = new Map<
+      number,
+      { qtyInvoiced: number; unitCostCents: number; description?: string }
+    >();
+    if (data.lineOverrides) {
+      for (const o of data.lineOverrides) {
+        overrideMap.set(o.freightCostId, o);
+      }
+    }
+
+    // ── 4. Compute invoice lines ──
+    let lineNum = 0;
+    const lines: Array<{
+      lineNumber: number;
+      freightCostId: number;
+      description: string;
+      productName: string;
+      qtyInvoiced: number;
+      unitCostCents: number;
+      lineTotalCents: number;
+    }> = [];
+
+    for (const cost of costs) {
+      lineNum++;
+      const costAmount = Number(cost.actual_cents) || Number(cost.estimated_cents) || 0;
+      const label = String(cost.cost_type).replace(/_/g, " ");
+      const defaultDescription = `${label}: ${cost.performed_by_name || vendor.name}`;
+      const override = overrideMap.get(cost.id);
+
+      const qtyInvoiced = override?.qtyInvoiced ?? 1;
+      const unitCostCents = override?.unitCostCents ?? costAmount;
+      const description = override?.description ?? defaultDescription;
+      const lineTotalCents = qtyInvoiced * unitCostCents;
+
+      lines.push({
+        lineNumber: lineNum,
+        freightCostId: cost.id,
+        description,
+        productName: label,
+        qtyInvoiced,
+        unitCostCents,
+        lineTotalCents,
+      });
+    }
+
+    const totalCents = lines.reduce((sum, l) => sum + l.lineTotalCents, 0);
+
+    // ── 5. Insert vendor_invoices row ──
+    const invoiceDate = data.invoiceDate ?? new Date();
+    const dueDate = data.dueDate ?? (vendor.paymentTermsDays
+      ? new Date(invoiceDate.getTime() + vendor.paymentTermsDays * 86400000)
+      : undefined);
+
+    const [invoiceRow] = await tx
+      .insert(vendorInvoices)
+      .values({
+        invoiceNumber: data.invoiceNumber.trim(),
+        vendorId: data.vendorId,
+        inboundShipmentId: shipmentId,
+        status: "received",
+        invoiceDate,
+        receivedDate: new Date(),
+        dueDate: dueDate ?? null,
+        invoicedAmountCents: totalCents,
+        balanceCents: totalCents,
+        paidAmountCents: 0,
+        currency: "USD",
+        notes: data.notes ?? null,
+      })
+      .returning();
+
+    // ── 6. Insert vendor_invoice_lines with freightCostId ──
+    for (const line of lines) {
+      await tx.insert(vendorInvoiceLines).values({
+        vendorInvoiceId: invoiceRow.id,
+        lineNumber: line.lineNumber,
+        freightCostId: line.freightCostId,
+        description: line.description,
+        productName: line.productName,
+        qtyInvoiced: line.qtyInvoiced,
+        unitCostCents: line.unitCostCents,
+        lineTotalCents: line.lineTotalCents,
+        matchStatus: "matched",
+      });
+    }
+
+    // ── 7. Update cost row denorms ──
+    const costIds = costs.map((c: any) => c.id);
+    await tx.execute(sql`
+      UPDATE procurement.inbound_freight_costs
+      SET vendor_invoice_id = ${invoiceRow.id},
+          invoice_number = ${data.invoiceNumber.trim()},
+          invoice_date = ${invoiceDate.toISOString()},
+          due_date = ${dueDate ? dueDate.toISOString() : null},
+          cost_status = 'invoiced',
+          updated_at = NOW()
+      WHERE id = ANY(ARRAY[${sql.join(costIds, sql`, `)}]::integer[])
+    `);
+
+    return {
+      ...invoiceRow,
+      lines,
+      inboundShipmentId: shipmentId,
+    };
+  });
+
+  return result;
 }
+
 
 /**
  * Get payment status for each shipment cost + summary totals.
@@ -1335,7 +1512,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
       costId: inboundFreightCosts.id,
       costType: inboundFreightCosts.costType,
       description: inboundFreightCosts.description,
-      vendorName: inboundFreightCosts.vendorName,
+      performedByName: inboundFreightCosts.performedByName,
       actualCents: inboundFreightCosts.actualCents,
       estimatedCents: inboundFreightCosts.estimatedCents,
       vendorInvoiceId: inboundFreightCosts.vendorInvoiceId,
@@ -1392,7 +1569,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
       costId: c.costId,
       costType: c.costType,
       description: c.description,
-      vendorName: c.vendorName,
+      performedByName: c.performedByName,
       amountCents: amount,
       vendorInvoiceId: c.vendorInvoiceId,
       invoiceNumber: c.invoiceNumber,

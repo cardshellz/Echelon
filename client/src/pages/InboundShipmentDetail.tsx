@@ -18,6 +18,7 @@ import { Separator } from "@/components/ui/separator";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCostsModal";
 import { format } from "date-fns";
 import Papa from "papaparse";
 import {
@@ -205,6 +206,7 @@ export default function InboundShipmentDetail() {
     allocationMethod: "default",
     vendorName: "",
     vendorId: null as number | null,
+    performedByName: "",
     costDate: "",
   });
   const [costVendorOpen, setCostVendorOpen] = useState(false);
@@ -215,13 +217,8 @@ export default function InboundShipmentDetail() {
   const [editCostVendorOpen, setEditCostVendorOpen] = useState(false);
   const [editCostVendorSearch, setEditCostVendorSearch] = useState("");
 
-  // Create invoice from shipment costs
-  const [showCreateInvoicesDialog, setShowCreateInvoicesDialog] = useState(false);
-  const [createInvVendorId, setCreateInvVendorId] = useState<number | null>(null);
-  const [createInvVendorName, setCreateInvVendorName] = useState("");
-  const [createInvVendorOpen, setCreateInvVendorOpen] = useState(false);
-  const [createInvVendorSearch, setCreateInvVendorSearch] = useState("");
-  const [createInvNumber, setCreateInvNumber] = useState("");
+  // Add Invoice modal (multi-step: vendor picker → invoice preview)
+  const [showAddInvoiceModal, setShowAddInvoiceModal] = useState(false);
 
   // Quick-add vendor
   const [showNewVendorDialog, setShowNewVendorDialog] = useState(false);
@@ -256,10 +253,8 @@ export default function InboundShipmentDetail() {
 
   const { data: vendorsData } = useQuery<any[]>({
     queryKey: ["/api/vendors"],
-    enabled: showAddCostDialog || !!editingCost || showCreateInvoicesDialog,
+    enabled: showAddCostDialog || !!editingCost,
   });
-  const vendorsForInvoice = vendorsData;
-
   const { data: invoicesData } = useQuery<any>({
     queryKey: [`/api/inbound-shipments/${shipmentId}/invoices`],
     enabled: !!shipmentId,
@@ -435,7 +430,7 @@ export default function InboundShipmentDetail() {
   // Cost mutations
   const addCostMutation = useMutation({
     mutationFn: async (data: any) => {
-      const { amount, costDate, ...rest } = data;
+      const { amount, costDate, vendorName: _vn, ...rest } = data;
       const cents = dollarsToCents(amount || "0");
       const payload = {
         ...rest,
@@ -450,7 +445,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, costDate: "" });
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
       setCostVendorSearch("");
       toast({ title: "Cost added" });
     },
@@ -461,7 +456,7 @@ export default function InboundShipmentDetail() {
 
   const updateCostMutation = useMutation({
     mutationFn: async ({ costId, data }: { costId: number; data: any }) => {
-      const { amount, costDate, ...rest } = data;
+      const { amount, costDate, vendorName: _vn, ...rest } = data;
       const cents = dollarsToCents(amount || "0");
       const payload = {
         ...rest,
@@ -498,24 +493,6 @@ export default function InboundShipmentDetail() {
     },
   });
 
-  const createInvoiceMutation = useMutation({
-    mutationFn: async (data: { vendorId: number; invoiceNumber?: string }) => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/create-invoice`, data);
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      setShowCreateInvoicesDialog(false);
-      setCreateInvVendorId(null);
-      setCreateInvVendorName("");
-      setCreateInvNumber("");
-      toast({ title: "Invoice created in AP" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
   const createVendorMutation = useMutation({
     mutationFn: async (data: any) => {
       const res = await apiRequest("POST", "/api/vendors", data);
@@ -530,9 +507,6 @@ export default function InboundShipmentDetail() {
         setNewCost((prev) => ({ ...prev, vendorId: vendor.id, vendorName: vendor.name }));
       } else if (editingCost) {
         setEditingCost((prev: any) => ({ ...prev, vendorId: vendor.id, vendorName: vendor.name }));
-      } else if (showCreateInvoicesDialog) {
-        setCreateInvVendorId(vendor.id);
-        setCreateInvVendorName(vendor.name);
       }
       toast({ title: "Vendor created", description: vendor.name });
     },
@@ -1133,19 +1107,10 @@ export default function InboundShipmentDetail() {
                 Add Cost
               </Button>
             )}
-            {costs.length > 0 && costs.some((c: any) => !c.vendorInvoiceId) && (
-              <Button variant="outline" onClick={async () => {
-                try {
-                  const res = await fetch("/api/vendor-invoices/next-number");
-                  if (res.ok) {
-                    const data = await res.json();
-                    setCreateInvNumber(data.invoiceNumber);
-                  }
-                } catch {}
-                setShowCreateInvoicesDialog(true);
-              }} className="min-h-[44px]">
+            {costs.length > 0 && costs.some((c: any) => !c.vendorInvoiceId && c.vendorId) && (
+              <Button variant="outline" onClick={() => setShowAddInvoiceModal(true)} className="min-h-[44px]">
                 <FileText className="h-4 w-4 mr-2" />
-                Create Invoices
+                Add Invoice
               </Button>
             )}
           </div>
@@ -1182,7 +1147,8 @@ export default function InboundShipmentDetail() {
                           {cost.description && <div className="text-sm mt-1 truncate">{cost.description}</div>}
                           <div className="flex items-center gap-2 mt-1">
                             <span className="text-sm font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</span>
-                            {cost.vendorName && <span className="text-xs text-muted-foreground">{cost.vendorName}</span>}
+                            {cost.vendorName && <span className="text-xs text-muted-foreground">Pay to: {cost.vendorName}</span>}
+                            {cost.performedByName && <span className="text-xs text-muted-foreground">By: {cost.performedByName}</span>}
                             {(() => {
                               const status = cost.derivedStatus as "unbilled" | "invoiced" | "paid";
                               const badgeMap: Record<string, { label: string; variant: "default" | "secondary" | "outline"; className?: string }> = {
@@ -1215,6 +1181,7 @@ export default function InboundShipmentDetail() {
                                   allocationMethod: cost.allocationMethod || "default",
                                   vendorId: cost.vendorId || null,
                                   vendorName: cost.vendorName || "",
+                                  performedByName: cost.performedByName || "",
                                   costDate: cost.invoiceDate ? format(new Date(cost.invoiceDate), "yyyy-MM-dd") : "",
                                 });
                                 setShowEditCostDialog(true);
@@ -1258,7 +1225,8 @@ export default function InboundShipmentDetail() {
                   <TableHead>Type</TableHead>
                   <TableHead>Description</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
-                  <TableHead>Provider</TableHead>
+                  <TableHead>Pay To</TableHead>
+                  <TableHead>Performed By</TableHead>
                   <TableHead>Invoice</TableHead>
                   <TableHead>Method</TableHead>
                   <TableHead>Status</TableHead>
@@ -1284,7 +1252,13 @@ export default function InboundShipmentDetail() {
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
-                        <TableCell className="text-sm">{cost.vendorName || "—"}</TableCell>
+                        <TableCell className="text-sm">
+                          {cost.vendorName || "—"}
+                          {cost.linkedInvoice && (
+                            <span className="ml-1 text-muted-foreground" title="Cannot change vendor on invoiced cost row">🔒</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-sm">{cost.performedByName || "—"}</TableCell>
                         <TableCell>
                           {cost.linkedInvoice ? (
                             <a
@@ -1329,9 +1303,11 @@ export default function InboundShipmentDetail() {
                                     description: cost.description || "",
                                     amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                     allocationMethod: cost.allocationMethod || "default",
+                                    vendorId: cost.vendorId || null,
                                     vendorName: cost.vendorName || "",
+                                    performedByName: cost.performedByName || "",
                                     costDate: cost.invoiceDate ? format(new Date(cost.invoiceDate), "yyyy-MM-dd") : "",
-                                      });
+                                  });
                                   setShowEditCostDialog(true);
                                 }}
                               >
@@ -2215,6 +2191,16 @@ export default function InboundShipmentDetail() {
             </div>
 
             <div className="space-y-2">
+              <Label>Performed By</Label>
+              <Input
+                value={newCost.performedByName}
+                onChange={(e) => setNewCost((prev) => ({ ...prev, performedByName: e.target.value }))}
+                placeholder="Service performer (e.g. ExFreight Zeta)"
+                className="h-10"
+              />
+            </div>
+
+            <div className="space-y-2">
               <Label>Description</Label>
               <Input
                 value={newCost.description}
@@ -2351,6 +2337,16 @@ export default function InboundShipmentDetail() {
               </div>
 
               <div className="space-y-2">
+                <Label>Performed By</Label>
+                <Input
+                  value={editingCost.performedByName || ""}
+                  onChange={(e) => setEditingCost((prev: any) => ({ ...prev, performedByName: e.target.value }))}
+                  placeholder="Service performer (e.g. ExFreight Zeta)"
+                  className="h-10"
+                />
+              </div>
+
+              <div className="space-y-2">
                 <Label>Description</Label>
                 <Input
                   value={editingCost.description}
@@ -2407,94 +2403,12 @@ export default function InboundShipmentDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* ═══════ Create Invoice Dialog ═══════ */}
-      <Dialog open={showCreateInvoicesDialog} onOpenChange={setShowCreateInvoicesDialog}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Create AP Invoice</DialogTitle>
-            <DialogDescription>
-              Create a vendor invoice in Accounts Payable for all unlinked shipment costs.
-            </DialogDescription>
-          </DialogHeader>
-          {(() => {
-            const unlinked = costs.filter((c: any) => !c.vendorInvoiceId);
-            const totalCents = unlinked.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0);
-            return (
-              <div className="space-y-4">
-                <div className="flex justify-between items-center p-3 bg-muted/50 rounded">
-                  <span className="text-sm">{unlinked.length} cost line{unlinked.length !== 1 ? "s" : ""}</span>
-                  <span className="font-mono font-medium">{formatCents(totalCents)}</span>
-                </div>
-                <div className="space-y-2">
-                  <Label>Invoice From (Vendor) *</Label>
-                  <Popover open={createInvVendorOpen} onOpenChange={setCreateInvVendorOpen}>
-                    <PopoverTrigger asChild>
-                      <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
-                        {createInvVendorName || "Select vendor..."}
-                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                      <Command shouldFilter={false}>
-                        <CommandInput placeholder="Search vendors..." value={createInvVendorSearch} onValueChange={setCreateInvVendorSearch} />
-                        <CommandList>
-                          <CommandEmpty>No vendors found</CommandEmpty>
-                          <CommandGroup>
-                            {(vendorsForInvoice ?? [])
-                              .filter((v: any) => !createInvVendorSearch || v.name?.toLowerCase().includes(createInvVendorSearch.toLowerCase()))
-                              .slice(0, 50)
-                              .map((v: any) => (
-                                <CommandItem
-                                  key={v.id}
-                                  onSelect={() => {
-                                    setCreateInvVendorId(v.id);
-                                    setCreateInvVendorName(v.name);
-                                    setCreateInvVendorOpen(false);
-                                    setCreateInvVendorSearch("");
-                                  }}
-                                >
-                                  <Check className={`mr-2 h-4 w-4 ${createInvVendorId === v.id ? "opacity-100" : "opacity-0"}`} />
-                                  {v.name}
-                                </CommandItem>
-                              ))}
-                          </CommandGroup>
-                          <CommandGroup>
-                            <CommandItem onSelect={() => { setCreateInvVendorOpen(false); setShowNewVendorDialog(true); }} className="text-primary">
-                              <Plus className="mr-2 h-4 w-4" />
-                              Add New Vendor
-                            </CommandItem>
-                          </CommandGroup>
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
-                </div>
-                <div className="space-y-2">
-                  <Label>Invoice Number</Label>
-                  <Input
-                    value={createInvNumber}
-                    onChange={(e) => setCreateInvNumber(e.target.value)}
-                    placeholder={`Auto: ${shipment?.shipmentNumber || "SHP-XXX"}-${format(new Date(), "yyyyMMdd")}`}
-                    className="h-10"
-                  />
-                </div>
-                <div className="flex gap-2 justify-end">
-                  <Button variant="outline" onClick={() => setShowCreateInvoicesDialog(false)}>Cancel</Button>
-                  <Button
-                    onClick={() => createInvoiceMutation.mutate({
-                      vendorId: createInvVendorId!,
-                      invoiceNumber: createInvNumber || undefined,
-                    })}
-                    disabled={createInvoiceMutation.isPending || !createInvVendorId}
-                  >
-                    {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })()}
-        </DialogContent>
-      </Dialog>
+      {/* ═══════ Add Invoice Modal (vendor picker → invoice preview) ═══════ */}
+      <AddInvoiceFromCostsModal
+        open={showAddInvoiceModal}
+        onOpenChange={setShowAddInvoiceModal}
+        shipmentId={shipmentId!}
+      />
 
       {/* ═══════ Quick Add Vendor Dialog ═══════ */}
       <Dialog open={showNewVendorDialog} onOpenChange={setShowNewVendorDialog}>
