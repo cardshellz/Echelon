@@ -1,7 +1,13 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
 import type {
   DropshipOrderAcceptanceResult,
   DropshipOrderAcceptanceService,
@@ -114,6 +120,7 @@ export interface DropshipOrderProcessingServiceDependencies {
   shippingQuote: Pick<DropshipShippingQuoteService, "quote">;
   orderAcceptance: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
   walletAutoReload?: Pick<DropshipWalletService, "handleAutoReload">;
+  notificationSender?: DropshipNotificationSender;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -202,6 +209,7 @@ export class DropshipOrderProcessingService {
               storeConnectionId: claim.intake.storeConnectionId,
             },
           });
+          await this.notifyPaymentHoldExpired(claim, classified);
           return {
             outcome: "cancelled",
             intakeId: claim.intake.intakeId,
@@ -228,6 +236,7 @@ export class DropshipOrderProcessingService {
         retryable: classified.retryable,
         now: this.deps.clock.now(),
       });
+      await this.notifyProcessingFailure(claim, classified);
       this.deps.logger.warn({
         code: "DROPSHIP_ORDER_PROCESSING_FAILED",
         message: "Dropship order intake processing failed.",
@@ -340,6 +349,78 @@ export class DropshipOrderProcessingService {
       });
       return null;
     }
+  }
+
+  private async notifyPaymentHoldExpired(
+    claim: DropshipOrderProcessingClaim,
+    classified: { code: string; message: string; retryable: boolean },
+  ): Promise<void> {
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: claim.intake.vendorId,
+      eventType: "dropship_order_payment_hold_expired",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship order payment hold expired",
+      message: `Order intake ${claim.intake.intakeId} was cancelled because the wallet payment hold expired.`,
+      payload: {
+        intakeId: claim.intake.intakeId,
+        vendorId: claim.intake.vendorId,
+        storeConnectionId: claim.intake.storeConnectionId,
+        platform: claim.intake.platform,
+        externalOrderId: claim.intake.externalOrderId,
+        paymentHoldExpiresAt: claim.intake.paymentHoldExpiresAt?.toISOString() ?? null,
+        failureCode: classified.code,
+        failureMessage: classified.message,
+      },
+      idempotencyKey: `order-processing:${claim.intake.intakeId}:payment-hold-expired`,
+    }, {
+      code: "DROPSHIP_ORDER_PROCESSING_NOTIFICATION_FAILED",
+      message: "Dropship order processing notification failed after payment hold expiry.",
+      context: {
+        intakeId: claim.intake.intakeId,
+        vendorId: claim.intake.vendorId,
+        storeConnectionId: claim.intake.storeConnectionId,
+        outcome: "cancelled",
+      },
+    });
+  }
+
+  private async notifyProcessingFailure(
+    claim: DropshipOrderProcessingClaim,
+    classified: { code: string; message: string; retryable: boolean },
+  ): Promise<void> {
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: claim.intake.vendorId,
+      eventType: classified.retryable ? "dropship_order_processing_retrying" : "dropship_order_processing_failed",
+      critical: !classified.retryable,
+      channels: ["email", "in_app"],
+      title: classified.retryable ? "Dropship order processing retrying" : "Dropship order processing failed",
+      message: classified.retryable
+        ? `Order intake ${claim.intake.intakeId} processing hit a retryable issue: ${classified.message}.`
+        : `Order intake ${claim.intake.intakeId} could not be processed: ${classified.message}.`,
+      payload: {
+        intakeId: claim.intake.intakeId,
+        vendorId: claim.intake.vendorId,
+        storeConnectionId: claim.intake.storeConnectionId,
+        platform: claim.intake.platform,
+        externalOrderId: claim.intake.externalOrderId,
+        status: claim.intake.status,
+        failureCode: classified.code,
+        failureMessage: classified.message,
+        retryable: classified.retryable,
+      },
+      idempotencyKey: `order-processing:${claim.intake.intakeId}:${classified.code}`,
+    }, {
+      code: "DROPSHIP_ORDER_PROCESSING_NOTIFICATION_FAILED",
+      message: "Dropship order processing notification failed after processing failure.",
+      context: {
+        intakeId: claim.intake.intakeId,
+        vendorId: claim.intake.vendorId,
+        storeConnectionId: claim.intake.storeConnectionId,
+        failureCode: classified.code,
+        retryable: classified.retryable,
+      },
+    });
   }
 }
 

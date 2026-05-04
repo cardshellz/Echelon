@@ -6,7 +6,13 @@ import {
 } from "../../../../shared/validation/currency";
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -136,6 +142,7 @@ export class DropshipOrderIntakeService {
   constructor(
     private readonly deps: {
       repository: DropshipOrderIntakeRepository;
+      notificationSender?: DropshipNotificationSender;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -193,7 +200,51 @@ export class DropshipOrderIntakeService {
         status: result.intake.status,
       },
     });
+    await this.notifyRecordedMarketplaceOrder(result);
     return result;
+  }
+
+  private async notifyRecordedMarketplaceOrder(
+    result: DropshipOrderIntakeRepositoryResult,
+  ): Promise<void> {
+    if (result.action === "replayed") {
+      return;
+    }
+    if (!["received", "rejected"].includes(result.intake.status)) {
+      return;
+    }
+
+    const critical = result.intake.status === "rejected";
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: result.intake.vendorId,
+      eventType: critical ? "dropship_order_intake_rejected" : "dropship_order_received",
+      critical,
+      channels: ["email", "in_app"],
+      title: critical ? "Dropship order rejected" : "New dropship order received",
+      message: critical
+        ? `A ${result.intake.platform} order could not be accepted: ${result.intake.rejectionReason ?? "unknown reason"}.`
+        : `A ${result.intake.platform} order is ready for dropship processing.`,
+      payload: {
+        intakeId: result.intake.intakeId,
+        vendorId: result.intake.vendorId,
+        storeConnectionId: result.intake.storeConnectionId,
+        platform: result.intake.platform,
+        externalOrderId: result.intake.externalOrderId,
+        externalOrderNumber: result.intake.externalOrderNumber,
+        status: result.intake.status,
+        rejectionReason: result.intake.rejectionReason,
+      },
+      idempotencyKey: `order-intake:${result.intake.intakeId}:${result.intake.status}`,
+    }, {
+      code: "DROPSHIP_ORDER_INTAKE_NOTIFICATION_FAILED",
+      message: "Dropship order intake notification failed after intake was recorded.",
+      context: {
+        intakeId: result.intake.intakeId,
+        vendorId: result.intake.vendorId,
+        storeConnectionId: result.intake.storeConnectionId,
+        status: result.intake.status,
+      },
+    });
   }
 }
 
