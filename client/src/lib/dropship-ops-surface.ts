@@ -231,6 +231,42 @@ export interface DropshipStoreConnectionOAuthStartResponse {
   environment: string;
 }
 
+export interface DropshipStoreConnectionSetupCheck {
+  checkKey: string;
+  status: string;
+  severity: string;
+  message: string | null;
+  lastCheckedAt: string | null;
+  resolvedAt: string | null;
+}
+
+export interface DropshipStoreConnectionListResponse {
+  vendor: {
+    vendorId: number;
+    memberId: string;
+    businessName: string | null;
+    contactName: string | null;
+    email: string | null;
+    phone: string | null;
+    status: string;
+    entitlementStatus: string;
+    membershipGraceEndsAt: string | null;
+    includedStoreConnections: number;
+  };
+  connections: DropshipStoreConnectionProfileResponse[];
+  setupChecksByConnectionId: Record<string, DropshipStoreConnectionSetupCheck[]>;
+}
+
+export interface DropshipStoreConnectionDisconnectInput {
+  reason: string;
+  confirmed: true;
+  idempotencyKey: string;
+}
+
+export interface DropshipStoreConnectionDisconnectResponse {
+  connection: DropshipStoreConnectionProfileResponse;
+}
+
 export interface DropshipVendorSettingsOverview {
   vendor: {
     vendorId: number;
@@ -2138,6 +2174,17 @@ export function buildStoreConnectionOAuthStartInput(input: {
     platform: input.platform,
     shopDomain: normalizeShopifyShopDomainInput(input.shopDomain),
     returnTo,
+  };
+}
+
+export function buildStoreConnectionDisconnectInput(input: {
+  reason: string;
+  idempotencyKey: string;
+}): DropshipStoreConnectionDisconnectInput {
+  return {
+    reason: requiredTrimmedString(input.reason, "reason", 500),
+    confirmed: true,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
 }
 
