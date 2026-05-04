@@ -17,6 +17,7 @@ import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyn
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { startDropshipListingPushWorker } from "./modules/dropship/infrastructure/dropship-listing-push-job-runner";
 import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastructure/dropship-order-processing-runner";
+import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startWebhookRetryWorker, enqueueShipStationRetry, enqueueDelayedTrackingPush } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
@@ -485,7 +486,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     log(`eBay order polling not started (config missing): ${err.message}`, "oms");
   }
 
-  // Dropship V2 vendor polling remains disabled until the replacement use-case layer lands.
+  // Dropship V2 vendor eBay intake now polls connected vendor stores into the dropship order intake pipeline.
   // ---- eBay Listing Reconciliation (every 30 minutes) ----
   // Checks synced listings against eBay to detect ended/deleted items
   const RECONCILE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
@@ -660,6 +661,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startFulfillmentSweeper(db);
         startDropshipListingPushWorker();
         startDropshipOrderProcessingWorker();
+        startDropshipEbayOrderIntakeWorker();
       }
     }
   );
