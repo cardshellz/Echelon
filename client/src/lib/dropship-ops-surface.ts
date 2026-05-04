@@ -1555,6 +1555,35 @@ export interface DropshipNotificationMarkReadResponse {
   notification: DropshipNotificationListItem;
 }
 
+export interface DropshipNotificationPreference {
+  notificationPreferenceId: number;
+  vendorId: number;
+  eventType: string;
+  critical: boolean;
+  emailEnabled: boolean;
+  inAppEnabled: boolean;
+  smsEnabled: boolean;
+  webhookEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DropshipNotificationPreferencesResponse {
+  preferences: DropshipNotificationPreference[];
+}
+
+export interface DropshipNotificationPreferenceUpdateInput {
+  critical?: boolean;
+  emailEnabled?: boolean;
+  inAppEnabled?: boolean;
+  smsEnabled?: boolean;
+  webhookEnabled?: boolean;
+}
+
+export interface DropshipNotificationPreferenceUpdateResponse {
+  preference: DropshipNotificationPreference;
+}
+
 export function buildQueryUrl(path: string, params: Record<string, string | number | boolean | undefined | null>): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -1719,6 +1748,24 @@ export function buildDropshipNotificationsUrl(input: {
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
+}
+
+export function buildNotificationPreferenceUpdateInput(input: {
+  critical: boolean;
+  emailEnabled: boolean;
+  inAppEnabled: boolean;
+}): DropshipNotificationPreferenceUpdateInput {
+  if (input.critical && (!input.emailEnabled || !input.inAppEnabled)) {
+    throw new Error("Critical notifications must keep email and in-app delivery enabled.");
+  }
+
+  return {
+    critical: input.critical,
+    emailEnabled: input.emailEnabled,
+    inAppEnabled: input.inAppEnabled,
+    smsEnabled: false,
+    webhookEnabled: false,
+  };
 }
 
 export function buildAdminReturnsUrl(input: {

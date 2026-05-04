@@ -20,7 +20,8 @@ export type DropshipSensitiveAction =
   | "remove_funding_method"
   | "wallet_funding_high_value"
   | "bulk_listing_push"
-  | "high_risk_order_acceptance";
+  | "high_risk_order_acceptance"
+  | "manage_notification_preferences";
 
 export interface DropshipSessionPrincipal {
   authIdentityId: number;

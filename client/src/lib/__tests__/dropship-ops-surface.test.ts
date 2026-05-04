@@ -33,6 +33,7 @@ import {
   buildCatalogExposureRuleInput,
   buildDropshipNotificationsUrl,
   buildDropshipOrderAcceptInput,
+  buildNotificationPreferenceUpdateInput,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
   buildStoreConnectionOAuthStartInput,
@@ -248,6 +249,34 @@ describe("dropship ops surface client helpers", () => {
       page: 2,
       limit: 25,
     })).toBe("/api/dropship/notifications?unreadOnly=true&page=2&limit=25");
+  });
+
+  it("builds notification preference updates with critical delivery guardrails", () => {
+    expect(buildNotificationPreferenceUpdateInput({
+      critical: false,
+      emailEnabled: false,
+      inAppEnabled: true,
+    })).toEqual({
+      critical: false,
+      emailEnabled: false,
+      inAppEnabled: true,
+      smsEnabled: false,
+      webhookEnabled: false,
+    });
+    expect(buildNotificationPreferenceUpdateInput({
+      critical: true,
+      emailEnabled: true,
+      inAppEnabled: true,
+    })).toMatchObject({
+      critical: true,
+      emailEnabled: true,
+      inAppEnabled: true,
+    });
+    expect(() => buildNotificationPreferenceUpdateInput({
+      critical: true,
+      emailEnabled: false,
+      inAppEnabled: true,
+    })).toThrow("Critical notifications must keep email and in-app delivery enabled.");
   });
 
   it("builds admin return URLs with optional operational filters", () => {
