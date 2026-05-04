@@ -405,7 +405,7 @@ function OrderDetailSheet({
                   <DetailField label="Total shipping" value={formatCents(order.shippingQuoteSnapshot.totalShippingCents)} />
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500">No accepted shipping quote snapshot.</p>
+                <p className="text-sm text-zinc-500">No shipping quote snapshot recorded.</p>
               )}
             </OrderDetailSection>
 

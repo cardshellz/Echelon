@@ -431,8 +431,22 @@ function opsIntakeDetailSelectSql(): string {
     ${opsIntakeBaseFromSql()}
     LEFT JOIN dropship.dropship_order_economics_snapshots econ
       ON econ.intake_id = oi.id
+    LEFT JOIN LATERAL (
+      SELECT
+        CASE
+          WHEN ae.payload->>'shippingQuoteSnapshotId' ~ '^[0-9]+$'
+          THEN (ae.payload->>'shippingQuoteSnapshotId')::integer
+          ELSE NULL
+        END AS shipping_quote_snapshot_id
+      FROM dropship.dropship_audit_events ae
+      WHERE ae.entity_type = 'dropship_order_intake'
+        AND ae.entity_id = oi.id::text
+        AND ae.event_type = 'order_acceptance_payment_hold'
+      ORDER BY ae.created_at DESC, ae.id DESC
+      LIMIT 1
+    ) hold_quote ON true
     LEFT JOIN dropship.dropship_shipping_quote_snapshots quote
-      ON quote.id = econ.shipping_quote_snapshot_id
+      ON quote.id = COALESCE(econ.shipping_quote_snapshot_id, hold_quote.shipping_quote_snapshot_id)
     LEFT JOIN LATERAL (
       SELECT wl.id, wl.type, wl.status, wl.amount_cents, wl.currency,
              wl.available_balance_after_cents, wl.pending_balance_after_cents,
