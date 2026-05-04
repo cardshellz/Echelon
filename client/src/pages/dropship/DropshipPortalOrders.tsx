@@ -13,6 +13,7 @@ import {
   Package,
   ReceiptText,
   Search,
+  Truck,
   Wallet,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -409,6 +410,59 @@ function OrderDetailSheet({
               )}
             </OrderDetailSection>
 
+            <OrderDetailSection icon={<Truck className="h-4 w-4" />} title="Marketplace Tracking">
+              {(order.trackingPushes ?? []).length ? (
+                <div className="rounded-md border border-zinc-200">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Shipment</TableHead>
+                        <TableHead>Tracking</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Updated</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(order.trackingPushes ?? []).map((push) => (
+                        <TableRow key={push.pushId}>
+                          <TableCell>
+                            <div className="font-medium">
+                              {push.wmsShipmentId ? `Shipment ${push.wmsShipmentId}` : "Order shipment"}
+                            </div>
+                            <div className="text-xs text-zinc-500">{formatStatus(push.platform)} push {push.pushId}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="font-medium">{push.carrier}</div>
+                            <div className="font-mono text-xs text-zinc-600">{push.trackingNumber}</div>
+                            {push.externalFulfillmentId && (
+                              <div className="mt-1 max-w-60 truncate text-xs text-zinc-500">
+                                Fulfillment {push.externalFulfillmentId}
+                              </div>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className={statusTone(push.status)}>{formatStatus(push.status)}</Badge>
+                            {push.lastErrorMessage && (
+                              <div className="mt-1 max-w-60 text-xs text-rose-700">{push.lastErrorMessage}</div>
+                            )}
+                            {push.status === "failed" && push.retryable === false && (
+                              <div className="mt-1 text-xs text-zinc-500">Manual review required</div>
+                            )}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-sm text-zinc-500">
+                            <div>{formatDateTime(push.updatedAt)}</div>
+                            <div className="text-xs">Shipped {formatDateTime(push.shippedAt)}</div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-500">No marketplace tracking pushes recorded.</p>
+              )}
+            </OrderDetailSection>
+
             <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Wallet Debit">
               {order.walletLedgerEntry ? (
                 <div className="grid gap-2 text-sm sm:grid-cols-2">
@@ -710,8 +764,8 @@ function acceptButtonIcon(
 }
 
 function statusTone(status: string): string {
-  if (status === "accepted" || status === "processing") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (status === "payment_hold" || status === "retrying") return "border-amber-200 bg-amber-50 text-amber-900";
+  if (status === "accepted" || status === "processing" || status === "succeeded") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "payment_hold" || status === "retrying" || status === "queued") return "border-amber-200 bg-amber-50 text-amber-900";
   if (status === "failed" || status === "exception" || status === "rejected") return "border-rose-200 bg-rose-50 text-rose-800";
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }

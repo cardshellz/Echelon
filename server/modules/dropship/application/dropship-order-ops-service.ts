@@ -1,5 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import type { DropshipOrderIntakeStatus, NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
+import type { DropshipTrackingPushStatus } from "./dropship-tracking-push-ops-dtos";
 import {
   getDropshipOrderOpsIntakeDetailInputSchema,
   listDropshipOrderOpsIntakesInputSchema,
@@ -154,6 +155,24 @@ export interface DropshipOrderOpsAuditEventDetail extends DropshipOrderOpsAuditS
   actorId: string | null;
 }
 
+export interface DropshipOrderOpsTrackingPushSummary {
+  pushId: number;
+  wmsShipmentId: number | null;
+  platform: string;
+  status: DropshipTrackingPushStatus;
+  carrier: string;
+  trackingNumber: string;
+  shippedAt: Date;
+  externalFulfillmentId: string | null;
+  attemptCount: number;
+  retryable: boolean;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
+}
+
 export interface DropshipOrderOpsIntakeDetail extends DropshipOrderOpsIntakeListItem {
   sourceOrderId: string | null;
   orderedAt: string | null;
@@ -163,6 +182,7 @@ export interface DropshipOrderOpsIntakeDetail extends DropshipOrderOpsIntakeList
   economicsSnapshot: DropshipOrderOpsEconomicsSnapshot | null;
   shippingQuoteSnapshot: DropshipOrderOpsShippingQuoteSnapshot | null;
   walletLedgerEntry: DropshipOrderOpsWalletLedgerEntry | null;
+  trackingPushes: DropshipOrderOpsTrackingPushSummary[];
   auditEvents: DropshipOrderOpsAuditEventDetail[];
 }
 

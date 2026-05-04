@@ -1259,6 +1259,24 @@ export interface DropshipOrderAuditEventDetail {
   createdAt: string;
 }
 
+export interface DropshipOrderTrackingPushSummary {
+  pushId: number;
+  wmsShipmentId: number | null;
+  platform: string;
+  status: DropshipTrackingPushStatus;
+  carrier: string;
+  trackingNumber: string;
+  shippedAt: string;
+  externalFulfillmentId: string | null;
+  attemptCount: number;
+  retryable: boolean;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
 export interface DropshipOrderDetail extends DropshipOrderListItem {
   sourceOrderId: string | null;
   orderedAt: string | null;
@@ -1268,6 +1286,7 @@ export interface DropshipOrderDetail extends DropshipOrderListItem {
   economicsSnapshot: DropshipOrderEconomicsSnapshot | null;
   shippingQuoteSnapshot: DropshipOrderShippingQuoteSnapshot | null;
   walletLedgerEntry: DropshipOrderWalletLedgerEntry | null;
+  trackingPushes: DropshipOrderTrackingPushSummary[];
   auditEvents: DropshipOrderAuditEventDetail[];
 }
 
