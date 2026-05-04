@@ -93,6 +93,18 @@ export const createDropshipStripeWalletFundingSessionInputSchema = z.object({
   cancelUrl: z.string().trim().url().max(1000),
 }).strict();
 
+export const creditDropshipWalletManualFundingInputSchema = z.object({
+  vendorId: positiveIdSchema,
+  amountCents: PositiveCentsSchema,
+  currency: CurrencyCodeSchema.default("USD"),
+  reason: z.string().trim().min(1).max(1000),
+  idempotencyKey: idempotencyKeySchema,
+  actor: z.object({
+    actorType: z.enum(["admin", "system"]),
+    actorId: z.string().trim().min(1).max(255).optional(),
+  }).strict(),
+}).strict();
+
 export const handleDropshipAutoReloadInputSchema = z.object({
   vendorId: positiveIdSchema,
   reason: z.enum(["minimum_balance", "payment_hold"]),
@@ -141,6 +153,7 @@ export type DebitDropshipWalletForOrderInput = z.infer<typeof debitDropshipWalle
 export type ConfigureDropshipAutoReloadInput = z.infer<typeof configureDropshipAutoReloadInputSchema>;
 export type CreateDropshipStripeFundingSetupSessionInput = z.infer<typeof createDropshipStripeFundingSetupSessionInputSchema>;
 export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof createDropshipStripeWalletFundingSessionInputSchema>;
+export type CreditDropshipWalletManualFundingInput = z.infer<typeof creditDropshipWalletManualFundingInputSchema>;
 export type HandleDropshipAutoReloadInput = z.infer<typeof handleDropshipAutoReloadInputSchema>;
 export type RegisterDropshipFundingMethodInput = z.infer<typeof registerDropshipFundingMethodInputSchema>;
 
@@ -450,6 +463,39 @@ export class DropshipWalletService {
       },
     });
     return setting;
+  }
+
+  async creditManualFunding(input: unknown): Promise<DropshipWalletMutationResult> {
+    const parsed = parseWalletInput(creditDropshipWalletManualFundingInputSchema, input);
+    const result = await this.creditFunding({
+      vendorId: parsed.vendorId,
+      rail: "manual",
+      status: "settled",
+      amountCents: parsed.amountCents,
+      currency: parsed.currency,
+      referenceType: "admin_manual_wallet_credit",
+      referenceId: parsed.idempotencyKey,
+      metadata: {
+        reason: parsed.reason,
+        actorType: parsed.actor.actorType,
+        actorId: parsed.actor.actorId ?? null,
+      },
+      idempotencyKey: parsed.idempotencyKey,
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_WALLET_MANUAL_FUNDING_CREDITED",
+      message: "Dropship wallet was credited by an admin manual funding event.",
+      context: {
+        vendorId: parsed.vendorId,
+        walletAccountId: result.account.walletAccountId,
+        ledgerEntryId: result.ledgerEntry.ledgerEntryId,
+        amountCents: parsed.amountCents,
+        idempotentReplay: result.idempotentReplay,
+        actorType: parsed.actor.actorType,
+        actorId: parsed.actor.actorId ?? null,
+      },
+    });
+    return result;
   }
 
   async createStripeFundingSetupSessionForMember(

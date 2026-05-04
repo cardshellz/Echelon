@@ -182,6 +182,43 @@ describe("DropshipWalletService", () => {
     expect(repository.ledger).toHaveLength(1);
   });
 
+  it("credits admin manual funding without a stored funding method", async () => {
+    const result = await service.creditManualFunding({
+      vendorId: 10,
+      amountCents: 12500,
+      currency: "USD",
+      reason: "Internal dogfood wallet seed",
+      idempotencyKey: "admin-manual-credit-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.account.availableBalanceCents).toBe(12500);
+    expect(result.ledgerEntry).toMatchObject({
+      type: "funding",
+      status: "settled",
+      amountCents: 12500,
+      referenceType: "admin_manual_wallet_credit",
+      referenceId: "admin-manual-credit-1",
+      idempotencyKey: "admin-manual-credit-1",
+      fundingMethodId: null,
+      metadata: expect.objectContaining({
+        rail: "manual",
+        reason: "Internal dogfood wallet seed",
+        actorType: "admin",
+        actorId: "admin-1",
+      }),
+    });
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_WALLET_MANUAL_FUNDING_CREDITED",
+        context: expect.objectContaining({
+          vendorId: 10,
+          amountCents: 12500,
+        }),
+      }),
+    ]));
+  });
+
   it("debits accepted orders as negative settled ledger entries", async () => {
     repository.account = {
       ...repository.account,

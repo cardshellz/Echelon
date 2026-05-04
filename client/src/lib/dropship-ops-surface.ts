@@ -933,6 +933,20 @@ export interface DropshipAdminOrderOpsActionResponse {
   updatedAt: string;
 }
 
+export interface DropshipAdminWalletManualCreditInput {
+  vendorId: number;
+  amountCents: number;
+  currency: string;
+  reason: string;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminWalletManualCreditResponse {
+  account: DropshipWalletResponse["wallet"]["account"];
+  ledgerEntry: DropshipWalletResponse["wallet"]["recentLedger"][number];
+  idempotentReplay: boolean;
+}
+
 export interface DropshipAdminOrderOpsProcessResponse {
   outcome: "accepted" | "payment_hold" | "failed" | "skipped" | "cancelled";
   intakeId: number;
@@ -2022,6 +2036,34 @@ export function buildAdminOrderOpsActionInput(input: {
   }
 
   return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function buildAdminWalletManualCreditInput(input: {
+  vendorId: string;
+  amount: string;
+  reason: string;
+  idempotencyKey: string;
+}): DropshipAdminWalletManualCreditInput {
+  const vendorId = parsePositiveInteger(input.vendorId, "vendorId");
+  const amountCents = parseDollarInputToCents(input.amount, "amount");
+  if (amountCents <= 0) {
+    throw new Error("Amount must be greater than $0.00.");
+  }
+  const reason = input.reason.trim();
+  if (!reason) {
+    throw new Error("Reason is required.");
+  }
+  if (reason.length > 1000) {
+    throw new Error("Reason must be 1000 characters or fewer.");
+  }
+
+  return {
+    vendorId,
+    amountCents,
+    currency: "USD",
+    reason,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
 }
 
 export function buildAdminTrackingPushRetryInput(input: {
