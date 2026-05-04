@@ -3,6 +3,7 @@ import {
   makeDropshipOrderProcessingLogger,
   systemDropshipOrderProcessingClock,
 } from "../application/dropship-order-processing-service";
+import { getDropshipFulfillmentSync } from "./dropship-fulfillment-sync.registry";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
 import { createDropshipOrderAcceptanceServiceFromEnv } from "./dropship-order-acceptance.factory";
 import { PgDropshipOrderProcessingRepository } from "./dropship-order-processing.repository";
@@ -16,6 +17,7 @@ export function createDropshipOrderProcessingServiceFromEnv(): DropshipOrderProc
     orderAcceptance: createDropshipOrderAcceptanceServiceFromEnv(),
     walletAutoReload: createDropshipWalletServiceFromEnv(),
     notificationSender: createDropshipNotificationServiceFromEnv(),
+    fulfillmentSync: getDropshipFulfillmentSync(),
     clock: systemDropshipOrderProcessingClock,
     logger: makeDropshipOrderProcessingLogger(),
   });

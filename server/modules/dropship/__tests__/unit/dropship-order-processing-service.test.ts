@@ -12,6 +12,7 @@ import {
   type DropshipOrderProcessingIntakeRecord,
   type DropshipOrderProcessingQuoteItem,
   type DropshipOrderProcessingRepository,
+  type DropshipOmsFulfillmentSync,
   type DropshipShippingQuoteResult,
   type DropshipAutoReloadResult,
 } from "../../application";
@@ -63,6 +64,101 @@ describe("DropshipOrderProcessingService", () => {
     });
     expect(repository.failure).toBeNull();
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_PROCESSING_COMPLETED" });
+  });
+
+  it("syncs accepted dropship OMS orders into WMS", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const fulfillmentSync = new FakeFulfillmentSync(6001);
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: new FakeAcceptanceService(),
+      fulfillmentSync,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result.outcome).toBe("accepted");
+    expect(fulfillmentSync.calls).toEqual([1001]);
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNCED",
+        context: expect.objectContaining({
+          intakeId: 1,
+          omsOrderId: 1001,
+          wmsOrderId: 6001,
+          source: "order_processing",
+        }),
+      }),
+    ]));
+  });
+
+  it("does not fail accepted processing when WMS sync is unresolved", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const fulfillmentSync = new FakeFulfillmentSync(null);
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: new FakeAcceptanceService(),
+      fulfillmentSync,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result.outcome).toBe("accepted");
+    expect(repository.failure).toBeNull();
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNC_UNRESOLVED",
+        context: expect.objectContaining({ omsOrderId: 1001 }),
+      }),
+    ]));
+  });
+
+  it("does not fail accepted processing when WMS sync throws", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const fulfillmentSync = new FakeFulfillmentSync(null, new Error("connection timeout"));
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: new FakeAcceptanceService(),
+      fulfillmentSync,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result.outcome).toBe("accepted");
+    expect(repository.failure).toBeNull();
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNC_FAILED",
+        context: expect.objectContaining({
+          omsOrderId: 1001,
+          error: "connection timeout",
+        }),
+      }),
+    ]));
   });
 
   it("starts minimum-balance auto-reload after an accepted order when configured", async () => {
@@ -185,12 +281,14 @@ describe("DropshipOrderProcessingService", () => {
       idempotentReplay: false,
     });
     const walletAutoReload = new FakeWalletAutoReloadService();
+    const fulfillmentSync = new FakeFulfillmentSync(6001);
     const logs: DropshipLogEvent[] = [];
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: quoteService,
       orderAcceptance: acceptanceService,
       walletAutoReload,
+      fulfillmentSync,
       clock: { now: () => now },
       logger: captureLogger(logs),
     });
@@ -213,6 +311,7 @@ describe("DropshipOrderProcessingService", () => {
       intakeId: 1,
       idempotencyKey: deriveOrderProcessingIdempotencyKey("auto-reload-payment-hold", input),
     });
+    expect(fulfillmentSync.calls).toEqual([]);
     expect(repository.failure).toBeNull();
   });
 
@@ -444,6 +543,23 @@ class FakeWalletAutoReloadService {
       skipReason: null,
       idempotentReplay: false,
     };
+  }
+}
+
+class FakeFulfillmentSync implements DropshipOmsFulfillmentSync {
+  calls: number[] = [];
+
+  constructor(
+    private readonly result: number | null,
+    private readonly error: Error | null = null,
+  ) {}
+
+  async syncOmsOrderToWms(omsOrderId: number): Promise<number | null> {
+    this.calls.push(omsOrderId);
+    if (this.error) {
+      throw this.error;
+    }
+    return this.result;
   }
 }
 

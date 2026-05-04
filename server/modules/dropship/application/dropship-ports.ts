@@ -41,6 +41,10 @@ export interface DropshipNotificationSender {
   send(input: DropshipNotificationSenderInput): Promise<unknown>;
 }
 
+export interface DropshipOmsFulfillmentSync {
+  syncOmsOrderToWms(omsOrderId: number): Promise<number | null>;
+}
+
 export interface DropshipTransaction {
   readonly id: string;
 }

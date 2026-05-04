@@ -1,12 +1,14 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { syncDropshipAcceptedOrderToWmsSafely } from "./dropship-fulfillment-sync-dispatch";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import type {
   DropshipClock,
   DropshipLogEvent,
   DropshipLogger,
   DropshipNotificationSender,
+  DropshipOmsFulfillmentSync,
 } from "./dropship-ports";
 import type {
   DropshipOrderAcceptanceResult,
@@ -121,6 +123,7 @@ export interface DropshipOrderProcessingServiceDependencies {
   orderAcceptance: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
   walletAutoReload?: Pick<DropshipWalletService, "handleAutoReload">;
   notificationSender?: DropshipNotificationSender;
+  fulfillmentSync?: DropshipOmsFulfillmentSync;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -185,6 +188,10 @@ export class DropshipOrderProcessingService {
         parsed,
         claim,
         acceptance,
+      });
+      await syncDropshipAcceptedOrderToWmsSafely(this.deps, {
+        acceptance,
+        source: "order_processing",
       });
 
       this.logProcessed(parsed, claim, quote, acceptance);

@@ -18,6 +18,7 @@ import { startBillingScheduler } from "./modules/subscriptions/subscription.sche
 import { startDropshipListingPushWorker } from "./modules/dropship/infrastructure/dropship-listing-push-job-runner";
 import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastructure/dropship-order-processing-runner";
 import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
+import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startWebhookRetryWorker, enqueueShipStationRetry, enqueueDelayedTrackingPush } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
@@ -441,6 +442,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     fulfillmentRouter: services.fulfillmentRouter,
     slaMonitor: services.slaMonitor,
   });
+  setDropshipFulfillmentSync(services.wmsSync);
 
   // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
   try {
