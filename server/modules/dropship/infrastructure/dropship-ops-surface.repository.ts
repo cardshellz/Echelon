@@ -778,9 +778,9 @@ function buildDogfoodChecks(input: {
       label: "Dropship OMS channel",
       status: input.dropshipOmsChannelCount === 1 ? "ready" : "blocked",
       message: input.dropshipOmsChannelCount === 1 && input.dropshipOmsChannelId !== null
-        ? `Internal Dropship OMS channel ${input.dropshipOmsChannelId} is configured.`
+        ? `Dropship OMS channel ${input.dropshipOmsChannelId} is configured.`
         : input.dropshipOmsChannelCount === 0
-          ? "No active internal Dropship OMS channel is marked in channel configuration."
+          ? "No active Dropship OMS channel is marked in channel configuration."
           : `${input.dropshipOmsChannelCount} active Dropship OMS channels are marked; exactly one is required.`,
     },
     {

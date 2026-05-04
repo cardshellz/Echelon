@@ -61,6 +61,12 @@ describe("DropshipOpsSurfaceService", () => {
       SHOPIFY_API_SECRET: "shopify-secret",
       DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI: "https://cardshellz.io/api/dropship/store-connections/oauth/callback",
       DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL: "https://echelon.cardshellz.io",
+      SHIPSTATION_API_KEY: "shipstation-key",
+      SHIPSTATION_API_SECRET: "shipstation-secret",
+      SHIPSTATION_WEBHOOK_SECRET: "shipstation-webhook",
+      WMS_SHIPMENT_AT_SYNC: "true",
+      PUSH_FROM_WMS: "true",
+      SHIP_NOTIFY_V2: "true",
       STRIPE_SECRET_KEY: "stripe-secret",
       DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook",
       DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED: "true",
@@ -69,6 +75,7 @@ describe("DropshipOpsSurfaceService", () => {
     expect(checks.every((check) => check.status === "ready")).toBe(true);
     expect(JSON.stringify(checks)).not.toContain("ebay-secret");
     expect(JSON.stringify(checks)).not.toContain("shopify-secret");
+    expect(JSON.stringify(checks)).not.toContain("shipstation-secret");
     expect(JSON.stringify(checks)).not.toContain("stripe-secret");
   });
 
@@ -93,6 +100,18 @@ describe("DropshipOpsSurfaceService", () => {
     });
     expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "shipstation_credentials")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["SHIPSTATION_API_KEY", "SHIPSTATION_API_SECRET"],
+    });
+    expect(checks.find((check) => check.key === "shipstation_webhook_security")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
+    });
+    expect(checks.find((check) => check.key === "split_shipment_handoff")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["WMS_SHIPMENT_AT_SYNC=true", "PUSH_FROM_WMS=true", "SHIP_NOTIFY_V2=true"],
+    });
     expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "warning" });
   });
 
@@ -153,6 +172,9 @@ describe("DropshipOpsSurfaceService", () => {
       expect.objectContaining({ key: "ebay_oauth" }),
       expect.objectContaining({ key: "shopify_oauth" }),
       expect.objectContaining({ key: "shopify_webhook_subscriptions" }),
+      expect.objectContaining({ key: "shipstation_credentials" }),
+      expect.objectContaining({ key: "shipstation_webhook_security" }),
+      expect.objectContaining({ key: "split_shipment_handoff" }),
     ]));
     expect(repository.lastDogfoodInput).toMatchObject({
       status: "blocked",

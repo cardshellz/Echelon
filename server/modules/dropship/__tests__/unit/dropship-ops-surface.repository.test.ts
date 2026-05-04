@@ -49,7 +49,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(result.items[0]?.readinessStatus).toBe("blocked");
     expect(result.items[0]?.checks.find((check) => check.key === "dropship_oms_channel")).toMatchObject({
       status: "ready",
-      message: "Internal Dropship OMS channel 7 is configured.",
+      message: "Dropship OMS channel 7 is configured.",
     });
     expect(result.items[0]?.checks.find((check) => check.key === "package_profiles")).toMatchObject({
       status: "blocked",
@@ -66,7 +66,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     });
   });
 
-  it("blocks dogfood readiness when the internal Dropship OMS channel is missing or ambiguous", async () => {
+  it("blocks dogfood readiness when the Dropship OMS channel is missing or ambiguous", async () => {
     const query = vi.fn(async () => ({
       rows: [
         makeDogfoodReadinessRow({
@@ -92,7 +92,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(result.items).toHaveLength(2);
     expect(result.items[0]?.checks.find((check) => check.key === "dropship_oms_channel")).toMatchObject({
       status: "blocked",
-      message: "No active internal Dropship OMS channel is marked in channel configuration.",
+      message: "No active Dropship OMS channel is marked in channel configuration.",
     });
     expect(result.items[1]?.checks.find((check) => check.key === "dropship_oms_channel")).toMatchObject({
       status: "blocked",
