@@ -24,6 +24,23 @@ export interface DropshipLogEvent {
   context?: Record<string, unknown>;
 }
 
+export type DropshipNotificationDeliveryChannel = "email" | "in_app";
+
+export interface DropshipNotificationSenderInput {
+  vendorId: number;
+  eventType: string;
+  critical: boolean;
+  channels?: DropshipNotificationDeliveryChannel[];
+  title: string;
+  message?: string | null;
+  payload?: Record<string, unknown>;
+  idempotencyKey: string;
+}
+
+export interface DropshipNotificationSender {
+  send(input: DropshipNotificationSenderInput): Promise<unknown>;
+}
+
 export interface DropshipTransaction {
   readonly id: string;
 }

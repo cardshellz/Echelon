@@ -5,6 +5,7 @@ import {
   buildDropshipOrderAcceptancePlan,
   calculateDiscountedWholesaleUnitCostCents,
   hashDropshipOrderAcceptanceRequest,
+  type DropshipNotificationSenderInput,
   type DropshipAcceptancePlanningInput,
   type DropshipLogEvent,
   type DropshipOrderAcceptanceInput,
@@ -17,9 +18,11 @@ const now = new Date("2026-05-01T18:00:00.000Z");
 describe("DropshipOrderAcceptanceService", () => {
   it("sends a deterministic acceptance request to the repository", async () => {
     const repository = new FakeAcceptanceRepository();
+    const notificationSender = new FakeNotificationSender();
     const logs: DropshipLogEvent[] = [];
     const service = new DropshipOrderAcceptanceService({
       repository,
+      notificationSender,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -48,6 +51,17 @@ describe("DropshipOrderAcceptanceService", () => {
       actor: { actorType: "system" },
     }));
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_ACCEPTED" });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_order_accepted",
+      critical: false,
+      idempotencyKey: "order-acceptance:1:accepted",
+      payload: {
+        intakeId: 1,
+        omsOrderId: 1001,
+        totalDebitCents: 2722,
+      },
+    });
   });
 
   it("rejects invalid acceptance input before repository calls", async () => {
@@ -66,6 +80,40 @@ describe("DropshipOrderAcceptanceService", () => {
       actor: { actorType: "system" },
     })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_ACCEPTANCE_INVALID_INPUT" });
     expect(repository.lastInput).toBeNull();
+  });
+
+  it("sends a critical notification when acceptance enters payment hold", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      omsOrderId: null,
+      walletLedgerEntryId: null,
+      economicsSnapshotId: null,
+      totalDebitCents: 7500,
+      paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+    });
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderAcceptanceService({
+      repository,
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.acceptOrder({
+      intakeId: 1,
+      vendorId: 10,
+      storeConnectionId: 22,
+      shippingQuoteSnapshotId: 33,
+      idempotencyKey: "accept-001",
+      actor: { actorType: "system" },
+    });
+
+    expect(result.outcome).toBe("payment_hold");
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_payment_hold",
+      critical: true,
+      idempotencyKey: "order-acceptance:1:payment_hold",
+    });
   });
 });
 
@@ -210,6 +258,8 @@ function expectDropshipError(fn: () => unknown, code: string): void {
 class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
   lastInput: DropshipOrderAcceptanceInput | null = null;
 
+  constructor(private readonly resultOverrides: Partial<DropshipOrderAcceptanceResult> = {}) {}
+
   async acceptOrder(input: DropshipOrderAcceptanceInput): Promise<DropshipOrderAcceptanceResult> {
     this.lastInput = input;
     return {
@@ -225,7 +275,16 @@ class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
       currency: "USD",
       paymentHoldExpiresAt: null,
       idempotentReplay: false,
+      ...this.resultOverrides,
     };
+  }
+}
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
   }
 }
 

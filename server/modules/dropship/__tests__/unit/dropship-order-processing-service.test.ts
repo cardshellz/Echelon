@@ -5,6 +5,7 @@ import {
   aggregateQuoteItems,
   buildQuoteDestination,
   deriveOrderProcessingIdempotencyKey,
+  type DropshipNotificationSenderInput,
   type DropshipLogEvent,
   type DropshipOrderAcceptanceResult,
   type DropshipOrderProcessingClaim,
@@ -100,10 +101,12 @@ describe("DropshipOrderProcessingService", () => {
     }));
     const quoteService = new FakeShippingQuoteService();
     const acceptanceService = new FakeAcceptanceService();
+    const notificationSender = new FakeNotificationSender();
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: quoteService,
       orderAcceptance: acceptanceService,
+      notificationSender,
       clock: { now: () => now },
       logger: noopLogger,
     });
@@ -125,6 +128,11 @@ describe("DropshipOrderProcessingService", () => {
       status: "failed",
       errorCode: "DROPSHIP_ORDER_PROCESSING_WAREHOUSE_CONFIG_REQUIRED",
       retryable: false,
+    });
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_processing_failed",
+      critical: true,
+      idempotencyKey: "order-processing:1:DROPSHIP_ORDER_PROCESSING_WAREHOUSE_CONFIG_REQUIRED",
     });
   });
 
@@ -259,11 +267,13 @@ describe("DropshipOrderProcessingService", () => {
       "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
       "Dropship payment hold expired before order acceptance.",
     ));
+    const notificationSender = new FakeNotificationSender();
     const logs: DropshipLogEvent[] = [];
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: quoteService,
       orderAcceptance: acceptanceService,
+      notificationSender,
       clock: { now: () => now },
       logger: captureLogger(logs),
     });
@@ -285,6 +295,11 @@ describe("DropshipOrderProcessingService", () => {
       now,
     });
     expect(repository.failure).toBeNull();
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_payment_hold_expired",
+      critical: true,
+      idempotencyKey: "order-processing:1:payment-hold-expired",
+    });
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_PROCESSING_PAYMENT_HOLD_EXPIRED" });
   });
 });
@@ -429,6 +444,14 @@ class FakeWalletAutoReloadService {
       skipReason: null,
       idempotentReplay: false,
     };
+  }
+}
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
   }
 }
 

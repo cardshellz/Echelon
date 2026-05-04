@@ -5,7 +5,12 @@ import {
 } from "../../../../shared/validation/currency";
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import {
+  formatNotificationCurrency,
+  sendDropshipNotificationSafely,
+} from "./dropship-notification-dispatch";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipNotificationSender } from "./dropship-ports";
 import type { NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
 import {
   acceptDropshipOrderInputSchema,
@@ -165,6 +170,7 @@ export class DropshipOrderAcceptanceService {
   constructor(
     private readonly deps: {
       repository: DropshipOrderAcceptanceRepository;
+      notificationSender?: DropshipNotificationSender;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -200,7 +206,48 @@ export class DropshipOrderAcceptanceService {
       },
     });
 
+    await this.notifyOrderAcceptanceResult(result);
     return result;
+  }
+
+  private async notifyOrderAcceptanceResult(result: DropshipOrderAcceptanceResult): Promise<void> {
+    if (result.idempotentReplay) {
+      return;
+    }
+
+    const accepted = result.outcome === "accepted";
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: result.vendorId,
+      eventType: accepted ? "dropship_order_accepted" : "dropship_order_payment_hold",
+      critical: !accepted,
+      channels: ["email", "in_app"],
+      title: accepted ? "Dropship order accepted" : "Dropship order needs wallet funding",
+      message: accepted
+        ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
+        : `Order intake ${result.intakeId} is on payment hold and requires ${formatNotificationCurrency(result.totalDebitCents, result.currency)} before ${result.paymentHoldExpiresAt?.toISOString() ?? "the hold expires"}.`,
+      payload: {
+        intakeId: result.intakeId,
+        vendorId: result.vendorId,
+        storeConnectionId: result.storeConnectionId,
+        shippingQuoteSnapshotId: result.shippingQuoteSnapshotId,
+        omsOrderId: result.omsOrderId,
+        walletLedgerEntryId: result.walletLedgerEntryId,
+        economicsSnapshotId: result.economicsSnapshotId,
+        totalDebitCents: result.totalDebitCents,
+        currency: result.currency,
+        paymentHoldExpiresAt: result.paymentHoldExpiresAt?.toISOString() ?? null,
+      },
+      idempotencyKey: `order-acceptance:${result.intakeId}:${result.outcome}`,
+    }, {
+      code: "DROPSHIP_ORDER_ACCEPTANCE_NOTIFICATION_FAILED",
+      message: "Dropship order acceptance notification failed after acceptance transaction completed.",
+      context: {
+        intakeId: result.intakeId,
+        vendorId: result.vendorId,
+        storeConnectionId: result.storeConnectionId,
+        outcome: result.outcome,
+      },
+    });
   }
 }
 

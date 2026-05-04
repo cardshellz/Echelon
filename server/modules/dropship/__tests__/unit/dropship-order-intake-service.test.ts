@@ -5,6 +5,7 @@ import {
   DropshipOrderIntakeService,
   evaluateDropshipOrderIntakeEligibility,
   hashDropshipOrderIntakePayload,
+  type DropshipNotificationSenderInput,
   type DropshipOrderIntakeRecord,
   type DropshipOrderIntakeRepository,
   type DropshipOrderIntakeRepositoryInput,
@@ -17,14 +18,17 @@ const now = new Date("2026-05-01T22:30:00.000Z");
 
 describe("DropshipOrderIntakeService", () => {
   let repository: FakeOrderIntakeRepository;
+  let notificationSender: FakeNotificationSender;
   let logs: DropshipLogEvent[];
   let service: DropshipOrderIntakeService;
 
   beforeEach(() => {
     repository = new FakeOrderIntakeRepository();
+    notificationSender = new FakeNotificationSender();
     logs = [];
     service = new DropshipOrderIntakeService({
       repository,
+      notificationSender,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -47,6 +51,12 @@ describe("DropshipOrderIntakeService", () => {
       rejectionReason: null,
     });
     expect(repository.lastRecordInput?.payloadHash).toHaveLength(64);
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_order_received",
+      critical: false,
+      idempotencyKey: "order-intake:1:received",
+    });
     expect(logs[0]).toMatchObject({
       code: "DROPSHIP_ORDER_INTAKE_RECORDED",
       context: { action: "created", status: "received" },
@@ -76,6 +86,11 @@ describe("DropshipOrderIntakeService", () => {
 
     expect(result.intake.status).toBe("rejected");
     expect(result.intake.rejectionReason).toContain("needs_reauth");
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_intake_rejected",
+      critical: true,
+      idempotencyKey: "order-intake:1:rejected",
+    });
   });
 
   it("rejects platform mismatches before writing intake", async () => {
@@ -98,6 +113,7 @@ describe("DropshipOrderIntakeService", () => {
     expect(replay.action).toBe("replayed");
     expect(replay.intake.intakeId).toBe(first.intake.intakeId);
     expect(repository.records).toHaveLength(1);
+    expect(notificationSender.sent).toHaveLength(1);
   });
 
   it("blocks payload changes after intake is accepted", async () => {
@@ -168,6 +184,14 @@ class FakeOrderIntakeRepository implements DropshipOrderIntakeRepository {
     const record = makeRecord(input, this.records.length + 1);
     this.records.push(record);
     return { intake: record, action: "created" };
+  }
+}
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
   }
 }
 
