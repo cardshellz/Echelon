@@ -28,6 +28,7 @@ import {
   buildShippingPackageProfileInput,
   buildShippingRateTableInput,
   buildShippingZoneRuleInput,
+  buildStoreConnectionDisconnectInput,
   buildStoreOrderProcessingConfigInput,
   buildCatalogExposureRuleInput,
   buildDropshipNotificationsUrl,
@@ -663,6 +664,25 @@ describe("dropship ops surface client helpers", () => {
       shopDomain: "vendor-test.myshopify.com",
       returnTo: "/onboarding",
     });
+  });
+
+  it("builds store disconnect bodies with required confirmation fields", () => {
+    expect(buildStoreConnectionDisconnectInput({
+      reason: " vendor requested disconnect ",
+      idempotencyKey: "disconnect-store-1",
+    })).toEqual({
+      reason: "vendor requested disconnect",
+      confirmed: true,
+      idempotencyKey: "disconnect-store-1",
+    });
+    expect(() => buildStoreConnectionDisconnectInput({
+      reason: " ",
+      idempotencyKey: "disconnect-store-2",
+    })).toThrow("reason is required.");
+    expect(() => buildStoreConnectionDisconnectInput({
+      reason: "valid reason",
+      idempotencyKey: "short",
+    })).toThrow("idempotencyKey must be between 8 and 200 characters.");
   });
 
   it("keeps portal return paths relative", () => {
