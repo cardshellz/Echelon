@@ -21,8 +21,8 @@ import type {
   InboundShipmentStatusHistory,
   InventoryLot,
 } from "@shared/schema";
-import { inboundShipmentLines } from "@shared/schema";
-import { sql as sqlTag } from "drizzle-orm";
+import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
+import { sql as sqlTag, eq } from "drizzle-orm";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -811,7 +811,8 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     invoiceDate?: Date;
     dueDate?: Date;
     paidDate?: Date;
-    vendorName?: string;
+    vendorId?: number | null;
+    performedByName?: string;
     notes?: string;
   }) {
     const shipment = await getShipment(shipmentId);
@@ -1270,7 +1271,18 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     addCost,
     updateCost,
     removeCost,
-    getCosts: (shipmentId: number) => storage.getInboundFreightCosts(shipmentId),
+    getCost: (costId: number) => storage.getInboundFreightCostById(costId),
+    getCosts: async (shipmentId: number) => {
+      const rows = await db
+        .select({
+          cost: inboundFreightCosts,
+          counterpartyName: vendors.name,
+        })
+        .from(inboundFreightCosts)
+        .leftJoin(vendors, eq(vendors.id, inboundFreightCosts.vendorId))
+        .where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
+      return rows.map((r: any) => ({ ...r.cost, vendorName: r.counterpartyName }));
+    },
 
     // Allocation
     runAllocation,
