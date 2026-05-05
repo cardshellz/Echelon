@@ -959,6 +959,40 @@ export interface DropshipAdminWalletManualCreditResponse {
   idempotentReplay: boolean;
 }
 
+export interface DropshipAdminWalletConfirmedUsdcCreditInput {
+  vendorId: number;
+  fundingMethodId?: number;
+  amountCents: number;
+  currency: string;
+  amountAtomicUnits: string;
+  chainId: 8453;
+  transactionHash: string;
+  fromAddress?: string | null;
+  toAddress: string;
+  confirmations: number;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminWalletConfirmedUsdcCreditResponse {
+  account: DropshipWalletResponse["wallet"]["account"];
+  ledgerEntry: DropshipWalletResponse["wallet"]["recentLedger"][number];
+  usdcLedgerEntry: {
+    usdcLedgerEntryId: number;
+    vendorId: number;
+    walletLedgerId: number | null;
+    chainId: number;
+    transactionHash: string;
+    fromAddress: string | null;
+    toAddress: string | null;
+    amountAtomicUnits: string;
+    confirmations: number;
+    status: string;
+    observedAt: string;
+    settledAt: string | null;
+  };
+  idempotentReplay: boolean;
+}
+
 export interface DropshipAdminOrderOpsProcessResponse {
   outcome: "accepted" | "payment_hold" | "failed" | "skipped" | "cancelled";
   intakeId: number;
@@ -2092,6 +2126,51 @@ export function buildAdminWalletManualCreditInput(input: {
   };
 }
 
+export function buildAdminWalletConfirmedUsdcCreditInput(input: {
+  vendorId: string;
+  fundingMethodId: string;
+  amount: string;
+  usdcAmount: string;
+  transactionHash: string;
+  fromAddress: string;
+  toAddress: string;
+  confirmations: string;
+  idempotencyKey: string;
+}): DropshipAdminWalletConfirmedUsdcCreditInput {
+  const vendorId = parsePositiveInteger(input.vendorId, "vendorId");
+  const fundingMethodId = input.fundingMethodId.trim()
+    ? parsePositiveInteger(input.fundingMethodId, "fundingMethodId")
+    : undefined;
+  const amountCents = parseDollarInputToCents(input.amount, "amount");
+  if (amountCents <= 0) {
+    throw new Error("Amount must be greater than $0.00.");
+  }
+  const amountAtomicUnits = parseUsdcAmountToAtomicUnits(input.usdcAmount, "usdcAmount");
+  const transactionHash = normalizeEvmTransactionHash(input.transactionHash, "transactionHash");
+  const fromAddress = input.fromAddress.trim()
+    ? normalizeEvmAddress(input.fromAddress, "fromAddress")
+    : null;
+  const toAddress = normalizeEvmAddress(input.toAddress, "toAddress");
+  const confirmations = parsePositiveInteger(input.confirmations, "confirmations");
+  if (confirmations > 10_000) {
+    throw new Error("confirmations must be 10,000 or fewer.");
+  }
+
+  return {
+    vendorId,
+    ...(fundingMethodId ? { fundingMethodId } : {}),
+    amountCents,
+    currency: "USD",
+    amountAtomicUnits,
+    chainId: 8453,
+    transactionHash,
+    fromAddress,
+    toAddress,
+    confirmations,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
 export function buildAdminTrackingPushRetryInput(input: {
   idempotencyKey: string;
   reason: string;
@@ -2748,6 +2827,31 @@ function normalizeEvmAddress(value: string, field: string): string {
     throw new Error(`${field} must be a valid EVM wallet address.`);
   }
   return trimmed.toLowerCase();
+}
+
+function normalizeEvmTransactionHash(value: string, field: string): string {
+  const trimmed = value.trim();
+  if (!/^0x[a-fA-F0-9]{64}$/.test(trimmed)) {
+    throw new Error(`${field} must be a valid EVM transaction hash.`);
+  }
+  return trimmed.toLowerCase();
+}
+
+function parseUsdcAmountToAtomicUnits(value: string, field: string): string {
+  const normalized = value.trim().replace(/,/g, "");
+  if (!/^\d+(\.\d{1,6})?$/.test(normalized)) {
+    throw new Error(`${field} must be a non-negative USDC amount with no more than six decimal places.`);
+  }
+  const [whole, fractional = ""] = normalized.split(".");
+  const paddedFractional = fractional.padEnd(6, "0");
+  const atomicUnits = `${whole}${paddedFractional}`.replace(/^0+/, "") || "0";
+  if (atomicUnits === "0") {
+    throw new Error(`${field} must be greater than 0 USDC.`);
+  }
+  if (atomicUnits.length > 78) {
+    throw new Error(`${field} is outside the supported USDC range.`);
+  }
+  return atomicUnits;
 }
 
 function parsePositiveInteger(value: string, key: string): number {

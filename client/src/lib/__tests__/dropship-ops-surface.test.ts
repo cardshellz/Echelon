@@ -15,6 +15,7 @@ import {
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
+  buildAdminWalletConfirmedUsdcCreditInput,
   buildAdminWalletManualCreditInput,
   buildAdminReturnCreateInput,
   buildAdminReturnInspectionInput,
@@ -1002,6 +1003,81 @@ describe("dropship ops surface client helpers", () => {
       amount: "125.00",
       reason: "",
       idempotencyKey: "manual-credit-1",
+    })).toThrow();
+  });
+
+  it("builds admin confirmed USDC credit input with exact atomic units", () => {
+    expect(buildAdminWalletConfirmedUsdcCreditInput({
+      vendorId: "10",
+      fundingMethodId: "101",
+      amount: "$125.50",
+      usdcAmount: "125.50",
+      transactionHash: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      fromAddress: "0x2222222222222222222222222222222222222222",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: "12",
+      idempotencyKey: "usdc-credit-1",
+    })).toEqual({
+      vendorId: 10,
+      fundingMethodId: 101,
+      amountCents: 12550,
+      currency: "USD",
+      amountAtomicUnits: "125500000",
+      chainId: 8453,
+      transactionHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      fromAddress: "0x2222222222222222222222222222222222222222",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-1",
+    });
+
+    expect(buildAdminWalletConfirmedUsdcCreditInput({
+      vendorId: "10",
+      fundingMethodId: "",
+      amount: "1",
+      usdcAmount: "0.000001",
+      transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      fromAddress: "",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: "1",
+      idempotencyKey: "usdc-credit-2",
+    })).toMatchObject({
+      amountAtomicUnits: "1",
+      fromAddress: null,
+    });
+
+    expect(() => buildAdminWalletConfirmedUsdcCreditInput({
+      vendorId: "10",
+      fundingMethodId: "",
+      amount: "1",
+      usdcAmount: "1.0000001",
+      transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      fromAddress: "",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: "1",
+      idempotencyKey: "usdc-credit-3",
+    })).toThrow();
+    expect(() => buildAdminWalletConfirmedUsdcCreditInput({
+      vendorId: "10",
+      fundingMethodId: "",
+      amount: "1",
+      usdcAmount: "1",
+      transactionHash: "not-a-hash",
+      fromAddress: "",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: "1",
+      idempotencyKey: "usdc-credit-4",
+    })).toThrow();
+    expect(() => buildAdminWalletConfirmedUsdcCreditInput({
+      vendorId: "10",
+      fundingMethodId: "",
+      amount: "1",
+      usdcAmount: "1",
+      transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      fromAddress: "",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: "10001",
+      idempotencyKey: "usdc-credit-5",
     })).toThrow();
   });
 
