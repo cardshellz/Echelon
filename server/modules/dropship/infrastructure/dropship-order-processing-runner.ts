@@ -4,6 +4,7 @@ import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipOrderCancellationServiceFromEnv } from "./dropship-order-cancellation.factory";
 import { createDropshipOrderProcessingServiceFromEnv } from "./dropship-order-processing.factory";
 import { createDropshipPaymentHoldExpirationServiceFromEnv } from "./dropship-payment-hold-expiration.factory";
+import { DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES } from "../application/dropship-payment-hold-expiration-service";
 import type { DropshipOrderProcessingResult } from "../application/dropship-order-processing-service";
 
 export interface DropshipOrderProcessingQueueRepository {
@@ -67,6 +68,7 @@ export async function runDropshipOrderProcessingSweep(input: {
   failed: number;
   skipped: number;
   expired: number;
+  expiringNotified: number;
   cancellationSucceeded: number;
   cancellationRetrying: number;
   cancellationFailed: number;
@@ -75,9 +77,18 @@ export async function runDropshipOrderProcessingSweep(input: {
   const batchSize = input.batchSize ?? envPositiveInteger("DROPSHIP_ORDER_PROCESSING_WORKER_BATCH_SIZE", DEFAULT_BATCH_SIZE);
   const workerId = input.workerId ?? defaultWorkerId();
   const now = input.now ?? new Date();
-  const expiration = await createDropshipPaymentHoldExpirationServiceFromEnv().expireExpiredPaymentHolds({
+  const paymentHoldExpirationService = createDropshipPaymentHoldExpirationServiceFromEnv();
+  const expiration = await paymentHoldExpirationService.expireExpiredPaymentHolds({
     limit: batchSize,
     workerId,
+  });
+  const expiring = await paymentHoldExpirationService.notifyExpiringPaymentHolds({
+    limit: batchSize,
+    workerId,
+    warningWindowMinutes: envPositiveInteger(
+      "DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES",
+      DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES,
+    ),
   });
   const cancellation = await createDropshipOrderCancellationServiceFromEnv().processPendingCancellations({
     limit: batchSize,
@@ -124,6 +135,7 @@ export async function runDropshipOrderProcessingSweep(input: {
     failed,
     skipped,
     expired,
+    expiringNotified: expiring.notifiedCount,
     cancellationSucceeded: cancellation.succeeded,
     cancellationRetrying: cancellation.retrying,
     cancellationFailed: cancellation.failed,
@@ -149,6 +161,7 @@ export function startDropshipOrderProcessingWorker(): void {
           || result.failed > 0
           || result.skipped > 0
           || result.expired > 0
+          || result.expiringNotified > 0
           || result.cancellationSucceeded > 0
           || result.cancellationRetrying > 0
           || result.cancellationFailed > 0

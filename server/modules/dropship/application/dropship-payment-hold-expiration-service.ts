@@ -9,11 +9,26 @@ import type {
 } from "./dropship-ports";
 
 const DEFAULT_PAYMENT_HOLD_EXPIRATION_LIMIT = 100;
+export const DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES = 120;
 
 const expireDropshipPaymentHoldsInputSchema = z.object({
   workerId: z.string().trim().min(1).max(255),
   limit: z.number().int().positive().max(500).optional(),
 }).strict();
+
+const notifyExpiringDropshipPaymentHoldsInputSchema = z.object({
+  workerId: z.string().trim().min(1).max(255),
+  limit: z.number().int().positive().max(500).optional(),
+  warningWindowMinutes: z.number().int().positive().max(60 * 24 * 7).optional(),
+}).strict();
+
+export interface DropshipExpiringPaymentHoldRecord {
+  intakeId: number;
+  vendorId: number;
+  storeConnectionId: number;
+  externalOrderId: string;
+  paymentHoldExpiresAt: Date;
+}
 
 export interface DropshipExpiredPaymentHoldRecord {
   intakeId: number;
@@ -29,7 +44,18 @@ export interface DropshipPaymentHoldExpirationResult {
   expired: DropshipExpiredPaymentHoldRecord[];
 }
 
+export interface DropshipPaymentHoldExpiringNotificationResult {
+  notifiedCount: number;
+  notified: DropshipExpiringPaymentHoldRecord[];
+}
+
 export interface DropshipPaymentHoldExpirationRepository {
+  listExpiringPaymentHolds(input: {
+    now: Date;
+    warningWindowMinutes: number;
+    limit: number;
+  }): Promise<DropshipExpiringPaymentHoldRecord[]>;
+
   expirePaymentHolds(input: {
     now: Date;
     limit: number;
@@ -102,6 +128,69 @@ export class DropshipPaymentHoldExpirationService {
       expired,
     };
   }
+
+  async notifyExpiringPaymentHolds(input: unknown): Promise<DropshipPaymentHoldExpiringNotificationResult> {
+    const parsed = parseNotifyExpiringPaymentHoldsInput(input);
+    const now = this.deps.clock.now();
+    const warningWindowMinutes = parsed.warningWindowMinutes ?? DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES;
+    const expiring = await this.deps.repository.listExpiringPaymentHolds({
+      now,
+      warningWindowMinutes,
+      limit: parsed.limit ?? DEFAULT_PAYMENT_HOLD_EXPIRATION_LIMIT,
+    });
+
+    for (const hold of expiring) {
+      const minutesUntilExpiration = Math.max(
+        0,
+        Math.ceil((hold.paymentHoldExpiresAt.getTime() - now.getTime()) / 60_000),
+      );
+      await sendDropshipNotificationSafely(this.deps, {
+        vendorId: hold.vendorId,
+        eventType: "dropship_order_payment_hold_expiring",
+        critical: true,
+        channels: ["email", "in_app"],
+        title: "Dropship order payment hold expiring",
+        message: `Order ${hold.externalOrderId} payment hold expires in ${minutesUntilExpiration} minute${minutesUntilExpiration === 1 ? "" : "s"}.`,
+        payload: {
+          intakeId: hold.intakeId,
+          vendorId: hold.vendorId,
+          storeConnectionId: hold.storeConnectionId,
+          externalOrderId: hold.externalOrderId,
+          paymentHoldExpiresAt: hold.paymentHoldExpiresAt.toISOString(),
+          minutesUntilExpiration,
+          warningWindowMinutes,
+        },
+        idempotencyKey: `payment-hold-expiring:${hold.intakeId}:${hold.paymentHoldExpiresAt.toISOString()}`,
+      }, {
+        code: "DROPSHIP_PAYMENT_HOLD_EXPIRING_NOTIFICATION_FAILED",
+        message: "Dropship payment hold expiring notification failed.",
+        context: {
+          intakeId: hold.intakeId,
+          vendorId: hold.vendorId,
+          storeConnectionId: hold.storeConnectionId,
+          externalOrderId: hold.externalOrderId,
+        },
+      });
+    }
+
+    if (expiring.length > 0) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_PAYMENT_HOLDS_EXPIRING",
+        message: "Dropship payment holds are approaching expiration.",
+        context: {
+          notifiedCount: expiring.length,
+          warningWindowMinutes,
+          workerId: parsed.workerId,
+          intakeIds: expiring.map((hold) => hold.intakeId),
+        },
+      });
+    }
+
+    return {
+      notifiedCount: expiring.length,
+      notified: expiring,
+    };
+  }
 }
 
 export function makeDropshipPaymentHoldExpirationLogger(): DropshipLogger {
@@ -122,6 +211,24 @@ function parseExpirePaymentHoldsInput(input: unknown): z.infer<typeof expireDrop
     throw new DropshipError(
       "DROPSHIP_PAYMENT_HOLD_EXPIRATION_INVALID_INPUT",
       "Dropship payment hold expiration input failed validation.",
+      {
+        issues: result.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          code: issue.code,
+          message: issue.message,
+        })),
+      },
+    );
+  }
+  return result.data;
+}
+
+function parseNotifyExpiringPaymentHoldsInput(input: unknown): z.infer<typeof notifyExpiringDropshipPaymentHoldsInputSchema> {
+  const result = notifyExpiringDropshipPaymentHoldsInputSchema.safeParse(input);
+  if (!result.success) {
+    throw new DropshipError(
+      "DROPSHIP_PAYMENT_HOLD_EXPIRING_NOTIFICATION_INVALID_INPUT",
+      "Dropship payment hold expiring notification input failed validation.",
       {
         issues: result.error.issues.map((issue) => ({
           path: issue.path.join("."),
