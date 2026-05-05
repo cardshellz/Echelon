@@ -30,6 +30,8 @@ interface VendorSettingsRow {
   pending_balance_cents: string | number | null;
   auto_reload_enabled: boolean | null;
   funding_method_count: string | number;
+  active_stripe_funding_method_count: string | number;
+  auto_reload_funding_method_ready: boolean | null;
   notification_preference_count: string | number;
 }
 
@@ -124,16 +126,36 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
                 wa.available_balance_cents, wa.pending_balance_cents,
                 ars.enabled AS auto_reload_enabled,
                 COALESCE(fm.funding_method_count, 0) AS funding_method_count,
+                COALESCE(fm.active_stripe_funding_method_count, 0) AS active_stripe_funding_method_count,
+                COALESCE(auto_reload_funding.ready, false) AS auto_reload_funding_method_ready,
                 COALESCE(np.notification_preference_count, 0) AS notification_preference_count
          FROM dropship.dropship_vendors v
          LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = v.id
          LEFT JOIN dropship.dropship_auto_reload_settings ars ON ars.vendor_id = v.id
          LEFT JOIN LATERAL (
-           SELECT COUNT(*) AS funding_method_count
+           SELECT
+             COUNT(*) AS funding_method_count,
+             COUNT(*) FILTER (
+               WHERE rail IN ('stripe_card', 'stripe_ach')
+                 AND provider_customer_id IS NOT NULL
+                 AND provider_payment_method_id IS NOT NULL
+             ) AS active_stripe_funding_method_count
            FROM dropship.dropship_funding_methods
            WHERE vendor_id = v.id
              AND status = 'active'
          ) fm ON true
+         LEFT JOIN LATERAL (
+           SELECT EXISTS (
+             SELECT 1
+             FROM dropship.dropship_funding_methods ar_fm
+             WHERE ar_fm.id = ars.funding_method_id
+               AND ar_fm.vendor_id = v.id
+               AND ar_fm.status = 'active'
+               AND ar_fm.rail IN ('stripe_card', 'stripe_ach')
+               AND ar_fm.provider_customer_id IS NOT NULL
+               AND ar_fm.provider_payment_method_id IS NOT NULL
+           ) AS ready
+         ) auto_reload_funding ON true
          LEFT JOIN LATERAL (
            SELECT COUNT(*) AS notification_preference_count
            FROM dropship.dropship_notification_preferences
@@ -172,6 +194,8 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       pendingBalanceCents: toNumber(vendor.pending_balance_cents ?? 0),
       autoReloadEnabled: vendor.auto_reload_enabled === true,
       fundingMethodCount: toNumber(vendor.funding_method_count),
+      activeStripeFundingMethodCount: toNumber(vendor.active_stripe_funding_method_count),
+      autoReloadFundingMethodReady: vendor.auto_reload_funding_method_ready === true,
     };
     const account = {
       hasContactEmail: Boolean(vendor.email?.trim()),
