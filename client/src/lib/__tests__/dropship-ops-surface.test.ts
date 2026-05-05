@@ -927,6 +927,21 @@ describe("dropship ops surface client helpers", () => {
     });
   });
 
+  it("rejects listing push requests when the preview belongs to another store connection", () => {
+    const preview = makeListingPreview({
+      storeConnectionId: 12,
+      rows: [
+        makeListingPreviewRow({ productVariantId: 42, previewStatus: "ready" }),
+      ],
+    });
+
+    expect(() => buildListingPushRequest({
+      storeConnectionId: 13,
+      preview,
+      idempotencyKey: "push-1",
+    })).toThrow("Listing preview store connection must match the selected store connection.");
+  });
+
   it("parses dollar input to integer cents without floating point math", () => {
     expect(parseDollarInputToCents("$1,234.56", "amount")).toBe(123456);
     expect(parseDollarInputToCents("25", "amount")).toBe(2500);
