@@ -3,11 +3,14 @@ import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type {
   ConfigureDropshipAutoReloadRepositoryInput,
+  CreateDropshipConfirmedUsdcFundingRepositoryInput,
   CreateDropshipWalletFundingLedgerInput,
   CreateDropshipWalletOrderDebitInput,
   DropshipAutoReloadSettingRecord,
+  DropshipConfirmedUsdcFundingResult,
   DropshipFundingMethodMutationResult,
   DropshipFundingMethodRecord,
+  DropshipUsdcLedgerEntryRecord,
   DropshipWalletAccountRecord,
   DropshipWalletLedgerRecord,
   DropshipWalletMutationResult,
@@ -75,6 +78,21 @@ interface WalletLedgerRow {
   external_transaction_id: string | null;
   metadata: Record<string, unknown> | null;
   created_at: Date;
+  settled_at: Date | null;
+}
+
+interface UsdcLedgerRow {
+  id: number;
+  vendor_id: number;
+  wallet_ledger_id: number | null;
+  chain_id: number;
+  transaction_hash: string;
+  from_address: string | null;
+  to_address: string | null;
+  amount_atomic_units: string | number;
+  confirmations: number;
+  status: string;
+  observed_at: Date;
   settled_at: Date | null;
 }
 
@@ -285,6 +303,178 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       await rollbackQuietly(client);
       if (isUniqueViolation(error)) {
         const replay = await this.findLedgerReplayAfterUniqueConflict(input);
+        if (replay) return replay;
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async creditConfirmedUsdcFunding(
+    input: CreateDropshipConfirmedUsdcFundingRepositoryInput,
+  ): Promise<DropshipConfirmedUsdcFundingResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existingUsdc = await findUsdcLedgerByTransactionWithClient(client, {
+        chainId: input.chainId,
+        transactionHash: input.transactionHash,
+      });
+      if (existingUsdc) {
+        const replay = await replayConfirmedUsdcFundingWithClient(client, input, existingUsdc);
+        await client.query("COMMIT");
+        return replay;
+      }
+
+      const account = await loadWalletAccountForMutation(client, {
+        vendorId: input.vendorId,
+        walletAccountId: null,
+        currency: input.currency,
+        occurredAt: input.occurredAt,
+      });
+      const fundingMethod = await assertFundingMethodCanBeUsed(client, {
+        vendorId: input.vendorId,
+        fundingMethodId: input.fundingMethodId,
+      });
+      if (fundingMethod && fundingMethod.rail !== "usdc_base") {
+        throw new DropshipError(
+          "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH",
+          "Dropship funding method rail does not match the USDC funding event rail.",
+          {
+            vendorId: input.vendorId,
+            fundingMethodId: input.fundingMethodId,
+            fundingMethodRail: fundingMethod.rail,
+            eventRail: "usdc_base",
+          },
+        );
+      }
+
+      const referenceType = "usdc_base_transaction";
+      const referenceId = `${input.chainId}:${input.transactionHash}`;
+      const replay = await findReplayLedgerWithClient(client, {
+        vendorId: input.vendorId,
+        idempotencyKey: input.idempotencyKey,
+        referenceType,
+        referenceId,
+      });
+      if (replay) {
+        assertLedgerReplayMatches(replay, {
+          type: "funding",
+          amountCents: input.amountCents,
+          currency: input.currency,
+          status: "settled",
+          referenceType,
+          referenceId,
+          requestHash: input.requestHash,
+        });
+        const usdcLedgerEntry = await insertUsdcLedgerEntryWithClient(client, {
+          vendorId: input.vendorId,
+          walletLedgerId: replay.ledgerEntryId,
+          chainId: input.chainId,
+          transactionHash: input.transactionHash,
+          fromAddress: input.fromAddress ?? null,
+          toAddress: input.toAddress,
+          amountAtomicUnits: input.amountAtomicUnits,
+          confirmations: input.confirmations,
+          status: "settled",
+          observedAt: input.observedAt,
+          settledAt: input.occurredAt,
+        });
+        await recordWalletAuditEvent(client, {
+          vendorId: input.vendorId,
+          entityType: "dropship_usdc_ledger_entries",
+          entityId: String(usdcLedgerEntry.usdcLedgerEntryId),
+          eventType: "wallet_usdc_funding_observed",
+          payload: serializeUsdcLedgerForAudit(usdcLedgerEntry),
+          createdAt: input.occurredAt,
+        });
+        await client.query("COMMIT");
+        return {
+          account,
+          ledgerEntry: replay,
+          usdcLedgerEntry,
+          idempotentReplay: true,
+        };
+      }
+
+      const nextAvailable = account.availableBalanceCents + input.amountCents;
+      const updatedAccount = await updateWalletBalancesWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: input.vendorId,
+        availableBalanceCents: nextAvailable,
+        pendingBalanceCents: account.pendingBalanceCents,
+        updatedAt: input.occurredAt,
+      });
+      const ledgerEntry = await insertLedgerEntryWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: input.vendorId,
+        type: "funding",
+        status: "settled",
+        amountCents: input.amountCents,
+        currency: input.currency,
+        availableBalanceAfterCents: nextAvailable,
+        pendingBalanceAfterCents: account.pendingBalanceCents,
+        referenceType,
+        referenceId,
+        idempotencyKey: input.idempotencyKey,
+        fundingMethodId: input.fundingMethodId,
+        externalTransactionId: input.transactionHash,
+        metadata: {
+          amountAtomicUnits: input.amountAtomicUnits,
+          chainId: input.chainId,
+          transactionHash: input.transactionHash,
+          fromAddress: input.fromAddress ?? null,
+          toAddress: input.toAddress,
+          confirmations: input.confirmations,
+          actorType: input.actor.actorType,
+          actorId: input.actor.actorId ?? null,
+          rail: "usdc_base",
+          requestHash: input.requestHash,
+        },
+        createdAt: input.occurredAt,
+        settledAt: input.occurredAt,
+      });
+      const usdcLedgerEntry = await insertUsdcLedgerEntryWithClient(client, {
+        vendorId: input.vendorId,
+        walletLedgerId: ledgerEntry.ledgerEntryId,
+        chainId: input.chainId,
+        transactionHash: input.transactionHash,
+        fromAddress: input.fromAddress ?? null,
+        toAddress: input.toAddress,
+        amountAtomicUnits: input.amountAtomicUnits,
+        confirmations: input.confirmations,
+        status: "settled",
+        observedAt: input.observedAt,
+        settledAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_wallet_ledger",
+        entityId: String(ledgerEntry.ledgerEntryId),
+        eventType: "wallet_funding_settled",
+        payload: serializeLedgerForAudit(ledgerEntry),
+        createdAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_usdc_ledger_entries",
+        entityId: String(usdcLedgerEntry.usdcLedgerEntryId),
+        eventType: "wallet_usdc_funding_observed",
+        payload: serializeUsdcLedgerForAudit(usdcLedgerEntry),
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return {
+        account: updatedAccount,
+        ledgerEntry,
+        usdcLedgerEntry,
+        idempotentReplay: false,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      if (isUniqueViolation(error)) {
+        const replay = await this.findConfirmedUsdcFundingReplayAfterUniqueConflict(input);
         if (replay) return replay;
       }
       throw error;
@@ -507,39 +697,75 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
           [input.vendorId, input.updatedAt],
         );
       }
+      if (input.rail === "usdc_base" && !input.usdcWalletAddress) {
+        throw new DropshipError(
+          "DROPSHIP_USDC_WALLET_ADDRESS_REQUIRED",
+          "USDC Base funding methods require a wallet address.",
+          { vendorId: input.vendorId },
+        );
+      }
 
-      const result = await client.query<FundingMethodMutationRow>(
-        `INSERT INTO dropship.dropship_funding_methods AS fm
-          (vendor_id, rail, status, provider_customer_id, provider_payment_method_id,
-           usdc_wallet_address, display_label, is_default, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $10)
-         ON CONFLICT (vendor_id, rail, provider_payment_method_id)
-           WHERE provider_payment_method_id IS NOT NULL
-         DO UPDATE
-           SET status = EXCLUDED.status,
-               provider_customer_id = EXCLUDED.provider_customer_id,
-               usdc_wallet_address = EXCLUDED.usdc_wallet_address,
-               display_label = EXCLUDED.display_label,
-               is_default = fm.is_default OR EXCLUDED.is_default,
-               metadata = EXCLUDED.metadata,
-               updated_at = EXCLUDED.updated_at
-         RETURNING id, vendor_id, rail, status, provider_customer_id,
-                   provider_payment_method_id, usdc_wallet_address, display_label,
-                   is_default, metadata, created_at, updated_at,
-                   (xmax = 0) AS inserted`,
-        [
-          input.vendorId,
-          input.rail,
-          input.status,
-          input.providerCustomerId,
-          input.providerPaymentMethodId,
-          input.usdcWalletAddress,
-          input.displayLabel,
-          shouldBeDefault,
-          JSON.stringify(input.metadata ?? {}),
-          input.updatedAt,
-        ],
-      );
+      const result = input.rail === "usdc_base"
+        ? await client.query<FundingMethodMutationRow>(
+            `INSERT INTO dropship.dropship_funding_methods AS fm
+              (vendor_id, rail, status, provider_customer_id, provider_payment_method_id,
+               usdc_wallet_address, display_label, is_default, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7::jsonb, $8, $8)
+             ON CONFLICT (vendor_id, rail, usdc_wallet_address)
+               WHERE usdc_wallet_address IS NOT NULL
+             DO UPDATE
+               SET status = EXCLUDED.status,
+                   display_label = EXCLUDED.display_label,
+                   is_default = fm.is_default OR EXCLUDED.is_default,
+                   metadata = EXCLUDED.metadata,
+                   updated_at = EXCLUDED.updated_at
+             RETURNING id, vendor_id, rail, status, provider_customer_id,
+                       provider_payment_method_id, usdc_wallet_address, display_label,
+                       is_default, metadata, created_at, updated_at,
+                       (xmax = 0) AS inserted`,
+            [
+              input.vendorId,
+              input.rail,
+              input.status,
+              input.usdcWalletAddress,
+              input.displayLabel,
+              shouldBeDefault,
+              JSON.stringify(input.metadata ?? {}),
+              input.updatedAt,
+            ],
+          )
+        : await client.query<FundingMethodMutationRow>(
+            `INSERT INTO dropship.dropship_funding_methods AS fm
+              (vendor_id, rail, status, provider_customer_id, provider_payment_method_id,
+               usdc_wallet_address, display_label, is_default, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $10)
+             ON CONFLICT (vendor_id, rail, provider_payment_method_id)
+               WHERE provider_payment_method_id IS NOT NULL
+             DO UPDATE
+               SET status = EXCLUDED.status,
+                   provider_customer_id = EXCLUDED.provider_customer_id,
+                   usdc_wallet_address = EXCLUDED.usdc_wallet_address,
+                   display_label = EXCLUDED.display_label,
+                   is_default = fm.is_default OR EXCLUDED.is_default,
+                   metadata = EXCLUDED.metadata,
+                   updated_at = EXCLUDED.updated_at
+             RETURNING id, vendor_id, rail, status, provider_customer_id,
+                       provider_payment_method_id, usdc_wallet_address, display_label,
+                       is_default, metadata, created_at, updated_at,
+                       (xmax = 0) AS inserted`,
+            [
+              input.vendorId,
+              input.rail,
+              input.status,
+              input.providerCustomerId,
+              input.providerPaymentMethodId,
+              input.usdcWalletAddress,
+              input.displayLabel,
+              shouldBeDefault,
+              JSON.stringify(input.metadata ?? {}),
+              input.updatedAt,
+            ],
+          );
       const row = requiredRow(result.rows[0], "Dropship funding method upsert did not return a row.");
       const fundingMethod = mapFundingMethodRow(row);
       await recordWalletAuditEvent(client, {
@@ -673,6 +899,82 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       client.release();
     }
   }
+
+  private async findConfirmedUsdcFundingReplayAfterUniqueConflict(
+    input: CreateDropshipConfirmedUsdcFundingRepositoryInput,
+  ): Promise<DropshipConfirmedUsdcFundingResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const usdcLedgerEntry = await findUsdcLedgerByTransactionWithClient(client, {
+        chainId: input.chainId,
+        transactionHash: input.transactionHash,
+      });
+      if (usdcLedgerEntry) {
+        const replay = await replayConfirmedUsdcFundingWithClient(client, input, usdcLedgerEntry);
+        await client.query("COMMIT");
+        return replay;
+      }
+
+      const ledgerEntry = await findReplayLedgerWithClient(client, {
+        vendorId: input.vendorId,
+        idempotencyKey: input.idempotencyKey,
+        referenceType: "usdc_base_transaction",
+        referenceId: `${input.chainId}:${input.transactionHash}`,
+      });
+      if (!ledgerEntry) {
+        await client.query("COMMIT");
+        return null;
+      }
+      assertLedgerReplayMatches(ledgerEntry, {
+        type: "funding",
+        amountCents: input.amountCents,
+        currency: input.currency,
+        status: "settled",
+        referenceType: "usdc_base_transaction",
+        referenceId: `${input.chainId}:${input.transactionHash}`,
+        requestHash: input.requestHash,
+      });
+      const account = await getOrCreateWalletAccountWithClient(client, {
+        vendorId: input.vendorId,
+        currency: input.currency,
+        now: input.occurredAt,
+      });
+      const insertedUsdcLedgerEntry = await insertUsdcLedgerEntryWithClient(client, {
+        vendorId: input.vendorId,
+        walletLedgerId: ledgerEntry.ledgerEntryId,
+        chainId: input.chainId,
+        transactionHash: input.transactionHash,
+        fromAddress: input.fromAddress ?? null,
+        toAddress: input.toAddress,
+        amountAtomicUnits: input.amountAtomicUnits,
+        confirmations: input.confirmations,
+        status: "settled",
+        observedAt: input.observedAt,
+        settledAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_usdc_ledger_entries",
+        entityId: String(insertedUsdcLedgerEntry.usdcLedgerEntryId),
+        eventType: "wallet_usdc_funding_observed",
+        payload: serializeUsdcLedgerForAudit(insertedUsdcLedgerEntry),
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return {
+        account,
+        ledgerEntry,
+        usdcLedgerEntry: insertedUsdcLedgerEntry,
+        idempotentReplay: true,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 export async function ensureDropshipWalletScaffoldingForVendor(
@@ -694,6 +996,75 @@ export async function ensureDropshipWalletScaffoldingForVendor(
      ON CONFLICT (vendor_id) DO NOTHING`,
     [input.vendorId, input.now],
   );
+}
+
+async function replayConfirmedUsdcFundingWithClient(
+  client: PoolClient,
+  input: CreateDropshipConfirmedUsdcFundingRepositoryInput,
+  usdcLedgerEntry: DropshipUsdcLedgerEntryRecord,
+): Promise<DropshipConfirmedUsdcFundingResult> {
+  if (usdcLedgerEntry.vendorId !== input.vendorId) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_TRANSACTION_CONFLICT",
+      "USDC transaction hash is already recorded for a different dropship vendor.",
+      {
+        vendorId: input.vendorId,
+        recordedVendorId: usdcLedgerEntry.vendorId,
+        chainId: input.chainId,
+        transactionHash: input.transactionHash,
+      },
+    );
+  }
+  if (!usdcLedgerEntry.walletLedgerId) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_WALLET_LEDGER_MISSING",
+      "USDC transaction is not linked to a wallet ledger entry.",
+      {
+        vendorId: input.vendorId,
+        usdcLedgerEntryId: usdcLedgerEntry.usdcLedgerEntryId,
+      },
+    );
+  }
+  const ledgerEntry = await loadWalletLedgerByIdWithClient(client, {
+    vendorId: input.vendorId,
+    ledgerEntryId: usdcLedgerEntry.walletLedgerId,
+  });
+  assertLedgerReplayMatches(ledgerEntry, {
+    type: "funding",
+    amountCents: input.amountCents,
+    currency: input.currency,
+    status: "settled",
+    referenceType: "usdc_base_transaction",
+    referenceId: `${input.chainId}:${input.transactionHash}`,
+    requestHash: input.requestHash,
+  });
+  if (
+    usdcLedgerEntry.amountAtomicUnits !== input.amountAtomicUnits
+    || usdcLedgerEntry.fromAddress !== (input.fromAddress ?? null)
+    || usdcLedgerEntry.toAddress !== input.toAddress
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_TRANSACTION_CONFLICT",
+      "USDC transaction hash was reused with different transfer details.",
+      {
+        vendorId: input.vendorId,
+        usdcLedgerEntryId: usdcLedgerEntry.usdcLedgerEntryId,
+        chainId: input.chainId,
+        transactionHash: input.transactionHash,
+      },
+    );
+  }
+  const account = await getOrCreateWalletAccountWithClient(client, {
+    vendorId: input.vendorId,
+    currency: input.currency,
+    now: input.occurredAt,
+  });
+  return {
+    account,
+    ledgerEntry,
+    usdcLedgerEntry,
+    idempotentReplay: true,
+  };
 }
 
 async function settlePendingFundingWithClient(
@@ -1056,6 +1427,90 @@ async function insertLedgerEntryWithClient(
   ));
 }
 
+async function loadWalletLedgerByIdWithClient(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    ledgerEntryId: number;
+  },
+): Promise<DropshipWalletLedgerRecord> {
+  const result = await client.query<WalletLedgerRow>(
+    `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
+            available_balance_after_cents, pending_balance_after_cents,
+            reference_type, reference_id, idempotency_key, funding_method_id,
+            external_transaction_id, metadata, created_at, settled_at
+     FROM dropship.dropship_wallet_ledger
+     WHERE id = $1
+       AND vendor_id = $2
+     LIMIT 1
+     FOR UPDATE`,
+    [input.ledgerEntryId, input.vendorId],
+  );
+  return mapLedgerRow(requiredRow(result.rows[0], "Dropship wallet ledger replay did not return a row."));
+}
+
+async function findUsdcLedgerByTransactionWithClient(
+  client: PoolClient,
+  input: {
+    chainId: number;
+    transactionHash: string;
+  },
+): Promise<DropshipUsdcLedgerEntryRecord | null> {
+  const result = await client.query<UsdcLedgerRow>(
+    `SELECT id, vendor_id, wallet_ledger_id, chain_id, transaction_hash,
+            from_address, to_address, amount_atomic_units, confirmations,
+            status, observed_at, settled_at
+     FROM dropship.dropship_usdc_ledger_entries
+     WHERE chain_id = $1
+       AND transaction_hash = $2
+     LIMIT 1
+     FOR UPDATE`,
+    [input.chainId, input.transactionHash],
+  );
+  return result.rows[0] ? mapUsdcLedgerRow(result.rows[0]) : null;
+}
+
+async function insertUsdcLedgerEntryWithClient(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    walletLedgerId: number;
+    chainId: number;
+    transactionHash: string;
+    fromAddress: string | null;
+    toAddress: string;
+    amountAtomicUnits: string;
+    confirmations: number;
+    status: string;
+    observedAt: Date;
+    settledAt: Date;
+  },
+): Promise<DropshipUsdcLedgerEntryRecord> {
+  const result = await client.query<UsdcLedgerRow>(
+    `INSERT INTO dropship.dropship_usdc_ledger_entries
+      (vendor_id, wallet_ledger_id, chain_id, transaction_hash, from_address,
+       to_address, amount_atomic_units, confirmations, status, observed_at, settled_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING id, vendor_id, wallet_ledger_id, chain_id, transaction_hash,
+               from_address, to_address, amount_atomic_units, confirmations,
+               status, observed_at, settled_at`,
+    [
+      input.vendorId,
+      input.walletLedgerId,
+      input.chainId,
+      input.transactionHash,
+      input.fromAddress,
+      input.toAddress,
+      input.amountAtomicUnits,
+      input.confirmations,
+      input.status,
+      input.observedAt,
+      input.settledAt,
+    ],
+  );
+  return mapUsdcLedgerRow(requiredRow(result.rows[0], "Dropship USDC ledger insert did not return a row."));
+}
+
 async function listFundingMethodsWithClient(
   client: PoolClient,
   vendorId: number,
@@ -1203,6 +1658,21 @@ function serializeLedgerForAudit(ledgerEntry: DropshipWalletLedgerRecord): Recor
   };
 }
 
+function serializeUsdcLedgerForAudit(usdcLedgerEntry: DropshipUsdcLedgerEntryRecord): Record<string, unknown> {
+  return {
+    usdcLedgerEntryId: usdcLedgerEntry.usdcLedgerEntryId,
+    vendorId: usdcLedgerEntry.vendorId,
+    walletLedgerId: usdcLedgerEntry.walletLedgerId,
+    chainId: usdcLedgerEntry.chainId,
+    transactionHash: usdcLedgerEntry.transactionHash,
+    fromAddress: usdcLedgerEntry.fromAddress,
+    toAddress: usdcLedgerEntry.toAddress,
+    amountAtomicUnits: usdcLedgerEntry.amountAtomicUnits,
+    confirmations: usdcLedgerEntry.confirmations,
+    status: usdcLedgerEntry.status,
+  };
+}
+
 function mapWalletAccountRow(row: WalletAccountRow): DropshipWalletAccountRecord {
   return {
     walletAccountId: row.id,
@@ -1271,6 +1741,23 @@ function mapLedgerRow(row: WalletLedgerRow): DropshipWalletLedgerRecord {
     externalTransactionId: row.external_transaction_id,
     metadata: row.metadata ?? {},
     createdAt: row.created_at,
+    settledAt: row.settled_at,
+  };
+}
+
+function mapUsdcLedgerRow(row: UsdcLedgerRow): DropshipUsdcLedgerEntryRecord {
+  return {
+    usdcLedgerEntryId: row.id,
+    vendorId: row.vendor_id,
+    walletLedgerId: row.wallet_ledger_id,
+    chainId: row.chain_id,
+    transactionHash: row.transaction_hash,
+    fromAddress: row.from_address,
+    toAddress: row.to_address,
+    amountAtomicUnits: String(row.amount_atomic_units),
+    confirmations: row.confirmations,
+    status: row.status,
+    observedAt: row.observed_at,
     settledAt: row.settled_at,
   };
 }

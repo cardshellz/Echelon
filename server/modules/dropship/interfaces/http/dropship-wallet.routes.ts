@@ -38,6 +38,38 @@ export function registerDropshipWalletRoutes(
     },
   );
 
+  app.post(
+    "/api/dropship/admin/wallet/usdc/confirmed-credit",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.creditConfirmedUsdcFunding({
+          vendorId: req.body?.vendorId,
+          fundingMethodId: req.body?.fundingMethodId,
+          amountCents: req.body?.amountCents,
+          currency: req.body?.currency ?? "USD",
+          amountAtomicUnits: req.body?.amountAtomicUnits,
+          chainId: req.body?.chainId ?? 8453,
+          transactionHash: req.body?.transactionHash,
+          fromAddress: req.body?.fromAddress ?? null,
+          toAddress: req.body?.toAddress,
+          confirmations: req.body?.confirmations,
+          observedAt: req.body?.observedAt,
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.json({
+          account: result.account,
+          ledgerEntry: result.ledgerEntry,
+          usdcLedgerEntry: result.usdcLedgerEntry,
+          idempotentReplay: result.idempotentReplay,
+        });
+      } catch (error) {
+        return sendDropshipWalletError(res, error);
+      }
+    },
+  );
+
   for (const path of ["/api/webhooks/dropship/stripe", "/api/webhooks/stripe-dropship"]) {
     app.post(path, async (req, res) => {
       try {
@@ -146,6 +178,30 @@ export function registerDropshipWalletRoutes(
   );
 
   app.post(
+    "/api/dropship/wallet/funding-methods/usdc-base",
+    requireDropshipAuth,
+    requireDropshipSensitiveActionProof("add_funding_method"),
+    async (req, res) => {
+      try {
+        const result = await service.registerUsdcBaseFundingMethodForMember(
+          req.session.dropship!.memberId,
+          {
+            walletAddress: req.body?.walletAddress,
+            displayLabel: req.body?.displayLabel ?? null,
+            isDefault: req.body?.isDefault ?? false,
+          },
+        );
+        return res.status(result.idempotentReplay ? 200 : 201).json({
+          fundingMethod: serializeFundingMethod(result.fundingMethod),
+          idempotentReplay: result.idempotentReplay,
+        });
+      } catch (error) {
+        return sendDropshipWalletError(res, error);
+      }
+    },
+  );
+
+  app.post(
     "/api/dropship/wallet/funding/stripe/checkout-session",
     requireDropshipAuth,
     requireDropshipSensitiveActionProof("wallet_funding_high_value"),
@@ -189,16 +245,23 @@ function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletServic
   return {
     account: wallet.account,
     autoReload: wallet.autoReload,
-    fundingMethods: wallet.fundingMethods.map((method) => ({
-      fundingMethodId: method.fundingMethodId,
-      rail: method.rail,
-      status: method.status,
-      displayLabel: method.displayLabel,
-      isDefault: method.isDefault,
-      createdAt: method.createdAt,
-      updatedAt: method.updatedAt,
-    })),
+    fundingMethods: wallet.fundingMethods.map(serializeFundingMethod),
     recentLedger: wallet.recentLedger,
+  };
+}
+
+function serializeFundingMethod(
+  method: Awaited<ReturnType<DropshipWalletService["getWalletForVendor"]>>["fundingMethods"][number],
+) {
+  return {
+    fundingMethodId: method.fundingMethodId,
+    rail: method.rail,
+    status: method.status,
+    displayLabel: method.displayLabel,
+    isDefault: method.isDefault,
+    usdcWalletAddress: method.rail === "usdc_base" ? method.usdcWalletAddress : null,
+    createdAt: method.createdAt,
+    updatedAt: method.updatedAt,
   };
 }
 
@@ -335,6 +398,8 @@ function statusForDropshipWalletError(code: string): number {
     code === "DROPSHIP_WALLET_ACCOUNT_NOT_ACTIVE"
     || code === "DROPSHIP_FUNDING_METHOD_NOT_ACTIVE"
     || code === "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_REQUIRED"
+    || code === "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH"
+    || code === "DROPSHIP_USDC_TRANSACTION_CONFLICT"
   ) {
     return 409;
   }
