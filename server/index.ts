@@ -20,6 +20,7 @@ import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastru
 import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
 import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
+import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
 import { startWebhookRetryWorker, enqueueShipStationRetry, enqueueDelayedTrackingPush } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
@@ -661,6 +662,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       if (process.env.DISABLE_SCHEDULERS !== 'true') {
         startWebhookRetryWorker();
         startFulfillmentSweeper(db);
+        startOmsFlowReconciliationScheduler(db);
         startDropshipListingPushWorker();
         startDropshipOrderProcessingWorker();
         startDropshipEbayOrderIntakeWorker();

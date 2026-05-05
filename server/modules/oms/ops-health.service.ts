@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { collectOmsFlowReconciliationIssues } from "./oms-flow-reconciliation.service";
 
 export interface OmsOpsIssue {
   code: string;
@@ -49,6 +50,7 @@ async function countAndSample(
 
 export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   const [
+    flowReconciliationIssues,
     failedInbox,
     staleProcessingInbox,
     deadRetries,
@@ -59,6 +61,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     reviewShipments,
     shippedTrackingNotPushed,
   ] = await Promise.all([
+    collectOmsFlowReconciliationIssues(db),
     countAndSample(
       db,
       sql`
@@ -261,6 +264,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   ]);
 
   const issues: OmsOpsIssue[] = [
+    ...flowReconciliationIssues,
     issue({
       code: "WEBHOOK_INBOX_FAILED",
       severity: "critical",
