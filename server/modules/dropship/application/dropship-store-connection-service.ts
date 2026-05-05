@@ -11,7 +11,13 @@ import {
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipSupportedStorePlatform,
 } from "../domain/store-connection";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
+import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import type {
   DropshipListingInventoryMode,
   DropshipListingMode,
@@ -230,6 +236,7 @@ export interface DropshipStoreConnectionServiceDependencies {
   stateSigner: DropshipOAuthStateSigner;
   tokenCipher: DropshipStoreTokenCipher;
   postConnectProvider?: DropshipStoreConnectionPostConnectProvider;
+  notificationSender?: DropshipNotificationSender;
   clock: DropshipClock;
   logger: DropshipLogger;
   disconnectGraceHours?: number;
@@ -424,6 +431,14 @@ export class DropshipStoreConnectionService {
       },
     });
 
+    if (isFreshDisconnect(connection, disconnectedAt)) {
+      await this.notifyStoreDisconnectStarted({
+        connection,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+    }
+
     return connection;
   }
 
@@ -487,6 +502,43 @@ export class DropshipStoreConnectionService {
       });
     }
   }
+
+  private async notifyStoreDisconnectStarted(input: {
+    connection: DropshipStoreConnectionProfile;
+    reason: string;
+    idempotencyKey: string;
+  }): Promise<void> {
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: input.connection.vendorId,
+      eventType: "dropship_store_disconnected",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship store disconnected",
+      message: `Your ${input.connection.platform} dropship store was disconnected. Order intake and listing pushes are paused during the disconnect grace period.`,
+      payload: {
+        vendorId: input.connection.vendorId,
+        storeConnectionId: input.connection.storeConnectionId,
+        platform: input.connection.platform,
+        externalAccountId: input.connection.externalAccountId,
+        externalDisplayName: input.connection.externalDisplayName,
+        shopDomain: input.connection.shopDomain,
+        status: input.connection.status,
+        setupStatus: input.connection.setupStatus,
+        reason: input.reason,
+        disconnectedAt: input.connection.disconnectedAt?.toISOString() ?? null,
+        graceEndsAt: input.connection.graceEndsAt?.toISOString() ?? null,
+      },
+      idempotencyKey: `store-disconnect:${input.connection.storeConnectionId}:${input.idempotencyKey}`,
+    }, {
+      code: "DROPSHIP_STORE_DISCONNECT_NOTIFICATION_FAILED",
+      message: "Dropship store disconnect notification failed after the store was disconnected.",
+      context: {
+        vendorId: input.connection.vendorId,
+        storeConnectionId: input.connection.storeConnectionId,
+        platform: input.connection.platform,
+      },
+    });
+  }
 }
 
 export function makeDropshipStoreConnectionLogger(): DropshipLogger {
@@ -531,6 +583,11 @@ function formatDropshipStoreConnectionSetupError(error: unknown): Record<string,
   return {
     message: String(error),
   };
+}
+
+function isFreshDisconnect(connection: DropshipStoreConnectionProfile, disconnectedAt: Date): boolean {
+  return connection.status === "grace_period"
+    && connection.disconnectedAt?.getTime() === disconnectedAt.getTime();
 }
 
 function parseListForAdminInput(input: unknown): ListDropshipAdminStoreConnectionsInput {

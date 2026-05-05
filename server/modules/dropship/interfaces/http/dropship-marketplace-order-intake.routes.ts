@@ -1,9 +1,15 @@
 import type { Express, Request, Response } from "express";
 import { DropshipError } from "../../domain/errors";
 import { normalizeShopifyShopDomain } from "../../domain/store-connection";
-import type { DropshipClock } from "../../application/dropship-ports";
+import { sendDropshipNotificationSafely } from "../../application/dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "../../application/dropship-ports";
 import type { DropshipOrderIntakeService } from "../../application/dropship-order-intake-service";
 import { createDropshipOrderIntakeServiceFromEnv } from "../../infrastructure/dropship-order-intake.factory";
+import { createDropshipNotificationServiceFromEnv } from "../../infrastructure/dropship-notification.factory";
 import {
   PgDropshipOrderIntakeSourceRepository,
   type DropshipOrderIntakeSourceRepository,
@@ -24,12 +30,14 @@ export function registerDropshipMarketplaceOrderIntakeRoutes(
   deps: {
     orderIntakeService?: DropshipOrderIntakeService;
     sourceRepository?: DropshipOrderIntakeSourceRepository;
+    notificationSender?: DropshipNotificationSender;
     shopifyWebhookSecrets?: readonly string[];
     clock?: DropshipClock;
   } = {},
 ): void {
   const orderIntakeService = deps.orderIntakeService ?? createDropshipOrderIntakeServiceFromEnv();
   const sourceRepository = deps.sourceRepository ?? new PgDropshipOrderIntakeSourceRepository();
+  const notificationSender = deps.notificationSender ?? createDropshipNotificationServiceFromEnv();
   const clock = deps.clock ?? { now: () => new Date() };
 
   app.post("/api/dropship/webhooks/shopify/orders/paid", async (req, res) => {
@@ -55,6 +63,7 @@ export function registerDropshipMarketplaceOrderIntakeRoutes(
   app.post("/api/dropship/webhooks/shopify/app/uninstalled", async (req, res) => {
     return handleShopifyAppUninstalledWebhook(req, res, {
       sourceRepository,
+      notificationSender,
       secrets: deps.shopifyWebhookSecrets,
       clock,
     });
@@ -146,6 +155,7 @@ async function handleShopifyAppUninstalledWebhook(
   res: Response,
   input: {
     sourceRepository: DropshipOrderIntakeSourceRepository;
+    notificationSender?: DropshipNotificationSender;
     secrets?: readonly string[];
     clock: DropshipClock;
   },
@@ -178,9 +188,10 @@ async function handleShopifyAppUninstalledWebhook(
         ?? readString(payload.myshopify_domain)
         ?? "",
     );
+    const occurredAt = input.clock.now();
     const result = await input.sourceRepository.markShopifyStoreUninstalled({
       shopDomain,
-      occurredAt: input.clock.now(),
+      occurredAt,
       webhookId: req.get("x-shopify-webhook-id") ?? null,
     });
     if (!result.matched) {
@@ -192,6 +203,18 @@ async function handleShopifyAppUninstalledWebhook(
       return res.status(202).json({ status: "ignored", reason: "store_connection_not_found" });
     }
 
+    if (result.changed && result.vendorId && result.storeConnectionId) {
+      await notifyShopifyStoreUninstalled({
+        notificationSender: input.notificationSender,
+        vendorId: result.vendorId,
+        storeConnectionId: result.storeConnectionId,
+        shopDomain,
+        webhookId: req.get("x-shopify-webhook-id") ?? null,
+        previousStatus: result.previousStatus,
+        occurredAt,
+      });
+    }
+
     return res.status(200).json({
       status: "disconnected",
       changed: result.changed,
@@ -201,6 +224,49 @@ async function handleShopifyAppUninstalledWebhook(
   } catch (error) {
     return sendDropshipMarketplaceOrderIntakeError(res, error);
   }
+}
+
+async function notifyShopifyStoreUninstalled(input: {
+  notificationSender?: DropshipNotificationSender;
+  vendorId: number;
+  storeConnectionId: number;
+  shopDomain: string;
+  webhookId: string | null;
+  previousStatus: string | null;
+  occurredAt: Date;
+}): Promise<void> {
+  await sendDropshipNotificationSafely({
+    notificationSender: input.notificationSender,
+    logger: dropshipMarketplaceOrderIntakeRouteLogger,
+  }, {
+    vendorId: input.vendorId,
+    eventType: "dropship_store_disconnected",
+    critical: true,
+    channels: ["email", "in_app"],
+    title: "Dropship store disconnected",
+    message: `Your Shopify dropship store ${input.shopDomain} was disconnected because the Shopify app was uninstalled. Order intake and listing pushes are paused.`,
+    payload: {
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: "shopify",
+      shopDomain: input.shopDomain,
+      previousStatus: input.previousStatus,
+      status: "disconnected",
+      disconnectReason: "Shopify app uninstalled.",
+      webhookId: input.webhookId,
+      occurredAt: input.occurredAt.toISOString(),
+    },
+    idempotencyKey: `shopify-uninstall:${input.storeConnectionId}:${input.webhookId ?? input.shopDomain}`,
+  }, {
+    code: "DROPSHIP_SHOPIFY_UNINSTALL_NOTIFICATION_FAILED",
+    message: "Dropship Shopify app uninstall notification failed after the store was disconnected.",
+    context: {
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      shopDomain: input.shopDomain,
+      webhookId: input.webhookId,
+    },
+  });
 }
 
 function sendDropshipMarketplaceOrderIntakeError(res: Response, error: unknown): Response {
@@ -284,4 +350,28 @@ function logShopifyWebhookIgnored(input: {
     message: "Shopify dropship order webhook was ignored.",
     context: input,
   }));
+}
+
+const dropshipMarketplaceOrderIntakeRouteLogger: DropshipLogger = {
+  info: (event) => logDropshipMarketplaceOrderIntakeRouteEvent("info", event),
+  warn: (event) => logDropshipMarketplaceOrderIntakeRouteEvent("warn", event),
+  error: (event) => logDropshipMarketplaceOrderIntakeRouteEvent("error", event),
+};
+
+function logDropshipMarketplaceOrderIntakeRouteEvent(
+  level: "info" | "warn" | "error",
+  event: { code: string; message: string; context?: Record<string, unknown> },
+): void {
+  const payload = JSON.stringify({
+    code: event.code,
+    message: event.message,
+    context: event.context ?? {},
+  });
+  if (level === "error") {
+    console.error(payload);
+  } else if (level === "warn") {
+    console.warn(payload);
+  } else {
+    console.info(payload);
+  }
 }

@@ -4,6 +4,7 @@ import { AddressInfo } from "net";
 import express, { type Express } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "../../interfaces/http/dropship-marketplace-order-intake.routes";
+import type { DropshipNotificationSenderInput } from "../../application/dropship-ports";
 import type {
   DropshipOrderIntakeSourceRepository,
   DropshipShopifyStoreUninstallResult,
@@ -20,10 +21,12 @@ const secret = "shopify-webhook-secret";
 describe("Shopify dropship app uninstall webhook route", () => {
   let server: { url: string; close: () => Promise<void> };
   let sourceRepository: FakeDropshipOrderIntakeSourceRepository;
+  let notificationSender: FakeNotificationSender;
 
   beforeEach(async () => {
     sourceRepository = new FakeDropshipOrderIntakeSourceRepository();
-    server = await startServer(buildApp(sourceRepository));
+    notificationSender = new FakeNotificationSender();
+    server = await startServer(buildApp(sourceRepository, notificationSender));
   });
 
   afterEach(async () => {
@@ -59,6 +62,25 @@ describe("Shopify dropship app uninstall webhook route", () => {
       occurredAt: now,
       webhookId: "webhook-1",
     });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_store_disconnected",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship store disconnected",
+      idempotencyKey: "shopify-uninstall:22:webhook-1",
+      payload: {
+        vendorId: 10,
+        storeConnectionId: 22,
+        platform: "shopify",
+        shopDomain: "vendor-shop.myshopify.com",
+        previousStatus: "connected",
+        status: "disconnected",
+        disconnectReason: "Shopify app uninstalled.",
+        webhookId: "webhook-1",
+        occurredAt: "2026-05-03T22:00:00.000Z",
+      },
+    });
   });
 
   it("rejects app uninstall webhooks with an invalid HMAC", async () => {
@@ -74,6 +96,7 @@ describe("Shopify dropship app uninstall webhook route", () => {
 
     expect(response.status).toBe(401);
     expect(sourceRepository.lastUninstallInput).toBeNull();
+    expect(notificationSender.sent).toHaveLength(0);
   });
 
   it("acknowledges app uninstall webhooks for stores that are not connected", async () => {
@@ -99,6 +122,29 @@ describe("Shopify dropship app uninstall webhook route", () => {
       status: "ignored",
       reason: "store_connection_not_found",
     });
+    expect(notificationSender.sent).toHaveLength(0);
+  });
+
+  it("does not fail the Shopify uninstall webhook when notification delivery fails", async () => {
+    notificationSender.error = new Error("email unavailable");
+
+    const response = await signedShopifyWebhookRequest(
+      server.url,
+      "/api/dropship/webhooks/shopify/app/uninstalled",
+      { id: 548380009 },
+      {
+        "x-shopify-shop-domain": "vendor-shop.myshopify.com",
+        "x-shopify-webhook-id": "webhook-2",
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      status: "disconnected",
+      changed: true,
+      storeConnectionId: 22,
+    });
+    expect(notificationSender.sent).toHaveLength(1);
   });
 });
 
@@ -124,7 +170,22 @@ class FakeDropshipOrderIntakeSourceRepository implements DropshipOrderIntakeSour
   }
 }
 
-function buildApp(sourceRepository: DropshipOrderIntakeSourceRepository): Express {
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+  error: Error | null = null;
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
+    if (this.error) {
+      throw this.error;
+    }
+  }
+}
+
+function buildApp(
+  sourceRepository: DropshipOrderIntakeSourceRepository,
+  notificationSender: FakeNotificationSender,
+): Express {
   const app = express();
   app.use(express.json({
     verify: (req, _res, buf) => {
@@ -134,6 +195,7 @@ function buildApp(sourceRepository: DropshipOrderIntakeSourceRepository): Expres
   registerDropshipMarketplaceOrderIntakeRoutes(app, {
     orderIntakeService: { recordMarketplaceOrder: vi.fn() } as any,
     sourceRepository,
+    notificationSender,
     shopifyWebhookSecrets: [secret],
     clock: { now: () => now },
   });

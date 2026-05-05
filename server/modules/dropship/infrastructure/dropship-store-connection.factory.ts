@@ -18,6 +18,7 @@ import {
 } from "./dropship-marketplace-oauth.providers";
 import { ShopifyDropshipWebhookSubscriptionProvider } from "./dropship-shopify-webhook-subscription.provider";
 import { AesGcmDropshipStoreTokenCipher } from "./dropship-token-cipher";
+import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
 
 export function createDropshipStoreConnectionServiceFromEnv(): DropshipStoreConnectionService {
   return new DropshipStoreConnectionService({
@@ -35,6 +36,7 @@ export function createDropshipStoreConnectionServiceFromEnv(): DropshipStoreConn
     ),
     tokenCipher: new LazyEnvDropshipStoreTokenCipher(),
     postConnectProvider: ShopifyDropshipWebhookSubscriptionProvider.fromEnv(),
+    notificationSender: createDropshipNotificationServiceFromEnv(),
     clock: systemDropshipStoreConnectionClock,
     logger: makeDropshipStoreConnectionLogger(),
     disconnectGraceHours: Number(process.env.DROPSHIP_STORE_DISCONNECT_GRACE_HOURS || 72),

@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type {
+  DropshipLogEvent,
+  DropshipNotificationSenderInput,
+} from "../../application/dropship-ports";
 import {
   DropshipStoreConnectionService,
   type CompleteOAuthQuery,
@@ -46,6 +49,7 @@ describe("DropshipStoreConnectionService", () => {
   let vendorProvisioning: FakeVendorProvisioningService;
   let stateSigner: FakeStateSigner;
   let postConnectProvider: FakePostConnectProvider;
+  let notificationSender: FakeNotificationSender;
   let logs: DropshipLogEvent[];
   let service: DropshipStoreConnectionService;
 
@@ -54,6 +58,7 @@ describe("DropshipStoreConnectionService", () => {
     vendorProvisioning = new FakeVendorProvisioningService();
     stateSigner = new FakeStateSigner();
     postConnectProvider = new FakePostConnectProvider();
+    notificationSender = new FakeNotificationSender();
     logs = [];
     service = new DropshipStoreConnectionService({
       vendorProvisioning: vendorProvisioning as unknown as DropshipVendorProvisioningService,
@@ -65,6 +70,7 @@ describe("DropshipStoreConnectionService", () => {
       stateSigner,
       tokenCipher: new FakeTokenCipher(),
       postConnectProvider,
+      notificationSender,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -226,6 +232,47 @@ describe("DropshipStoreConnectionService", () => {
     expect(result.hasAccessToken).toBe(false);
     expect(result.graceEndsAt?.toISOString()).toBe("2026-05-04T15:00:00.000Z");
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_STORE_DISCONNECT_STARTED" });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_store_disconnected",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship store disconnected",
+      idempotencyKey: "store-disconnect:21:disconnect-1",
+      payload: {
+        vendorId: 10,
+        storeConnectionId: 21,
+        platform: "ebay",
+        status: "grace_period",
+        reason: "Vendor requested disconnect",
+        disconnectedAt: "2026-05-01T15:00:00.000Z",
+        graceEndsAt: "2026-05-04T15:00:00.000Z",
+      },
+    });
+  });
+
+  it("does not fail disconnect when the disconnect notification fails", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "connected" })];
+    notificationSender.error = new Error("email unavailable");
+
+    const result = await service.disconnect("member-1", 21, {
+      reason: "Vendor requested disconnect",
+      idempotencyKey: "disconnect-1",
+    });
+
+    expect(result.status).toBe("grace_period");
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_STORE_DISCONNECT_NOTIFICATION_FAILED",
+        context: expect.objectContaining({
+          vendorId: 10,
+          storeConnectionId: 21,
+          platform: "ebay",
+          error: "email unavailable",
+        }),
+      }),
+    ]));
   });
 
   it("updates admin order processing warehouse config", async () => {
@@ -357,6 +404,18 @@ class FakePostConnectProvider implements DropshipStoreConnectionPostConnectProvi
     input: Parameters<DropshipStoreConnectionPostConnectProvider["afterStoreConnected"]>[0],
   ): Promise<void> {
     this.calls.push(input);
+    if (this.error) {
+      throw this.error;
+    }
+  }
+}
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+  error: Error | null = null;
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
     if (this.error) {
       throw this.error;
     }
