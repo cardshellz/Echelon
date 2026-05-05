@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
-import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type {
+  DropshipLogEvent,
+  DropshipNotificationSenderInput,
+} from "../../application/dropship-ports";
 import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipProvisionedVendorProfile,
@@ -34,16 +37,19 @@ const now = new Date("2026-05-01T20:00:00.000Z");
 
 describe("DropshipWalletService", () => {
   let repository: FakeWalletRepository;
+  let notificationSender: FakeNotificationSender;
   let logs: DropshipLogEvent[];
   let service: DropshipWalletService;
 
   beforeEach(() => {
     repository = new FakeWalletRepository();
+    notificationSender = new FakeNotificationSender();
     logs = [];
     service = new DropshipWalletService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
       fundingProvider: new FakeFundingProvider(),
+      notificationSender,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -88,6 +94,93 @@ describe("DropshipWalletService", () => {
     expect(replay.idempotentReplay).toBe(true);
     expect(repository.ledger).toHaveLength(1);
     expect(logs).toHaveLength(1);
+  });
+
+  it("notifies vendors when Stripe wallet funding fails", async () => {
+    await service.notifyWalletFundingFailed({
+      vendorId: 10,
+      fundingMethodId: 99,
+      rail: "stripe_card",
+      amountCents: 25000,
+      currency: "USD",
+      provider: "stripe",
+      providerEventId: "evt_failed_1",
+      providerPaymentIntentId: "pi_failed_1",
+      providerStatus: "requires_payment_method",
+      failureCode: "card_declined",
+      failureMessage: "Your card was declined.",
+      autoReload: false,
+      idempotencyKey: "stripe-funding-failed:pi_failed_1",
+    });
+
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_WALLET_FUNDING_FAILED",
+      context: expect.objectContaining({
+        vendorId: 10,
+        fundingMethodId: 99,
+        amountCents: 25000,
+        providerPaymentIntentId: "pi_failed_1",
+        failureCode: "card_declined",
+      }),
+    });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_wallet_funding_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship wallet funding failed",
+      idempotencyKey: "stripe-funding-failed:pi_failed_1",
+      payload: {
+        vendorId: 10,
+        fundingMethodId: 99,
+        rail: "stripe_card",
+        amountCents: 25000,
+        currency: "USD",
+        provider: "stripe",
+        providerEventId: "evt_failed_1",
+        providerPaymentIntentId: "pi_failed_1",
+        providerStatus: "requires_payment_method",
+        failureCode: "card_declined",
+        failureMessage: "Your card was declined.",
+        autoReload: false,
+        autoReloadReason: null,
+        intakeId: null,
+      },
+    });
+  });
+
+  it("does not fail funding failure handling when notification delivery fails", async () => {
+    notificationSender.error = new Error("email unavailable");
+
+    await service.notifyWalletFundingFailed({
+      vendorId: 10,
+      fundingMethodId: 99,
+      rail: "stripe_card",
+      amountCents: 25000,
+      currency: "USD",
+      provider: "stripe",
+      providerEventId: "evt_failed_1",
+      providerPaymentIntentId: "pi_failed_1",
+      providerStatus: "requires_payment_method",
+      failureCode: "card_declined",
+      failureMessage: "Your card was declined.",
+      autoReload: false,
+      idempotencyKey: "stripe-funding-failed:pi_failed_1",
+    });
+
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_WALLET_FUNDING_FAILURE_NOTIFICATION_FAILED",
+        context: expect.objectContaining({
+          vendorId: 10,
+          fundingMethodId: 99,
+          provider: "stripe",
+          providerPaymentIntentId: "pi_failed_1",
+          error: "email unavailable",
+        }),
+      }),
+    ]));
   });
 
   it("keeps pending ACH funding out of spendable balance", async () => {
@@ -658,6 +751,18 @@ describe("DropshipWalletService", () => {
     })).rejects.toMatchObject({ code: "DROPSHIP_WALLET_INVALID_INPUT" });
   });
 });
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+  error: Error | null = null;
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
+    if (this.error) {
+      throw this.error;
+    }
+  }
+}
 
 class FakeFundingProvider implements DropshipWalletFundingProvider {
   async createStripeSetupSession(input: Parameters<DropshipWalletFundingProvider["createStripeSetupSession"]>[0]): Promise<DropshipStripeFundingSetupSession> {

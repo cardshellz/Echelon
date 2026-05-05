@@ -6,7 +6,16 @@ import {
   PositiveCentsSchema,
 } from "../../../../shared/validation/currency";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import {
+  formatNotificationCurrency,
+  sendDropshipNotificationSafely,
+} from "./dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
 import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipVendorProvisioningService,
@@ -163,6 +172,24 @@ export const handleDropshipAutoReloadInputSchema = z.object({
   }
 });
 
+export const notifyDropshipWalletFundingFailedInputSchema = z.object({
+  vendorId: positiveIdSchema,
+  fundingMethodId: positiveIdSchema.nullable().optional(),
+  rail: dropshipWalletFundingRailSchema.nullable().optional(),
+  amountCents: PositiveCentsSchema,
+  currency: CurrencyCodeSchema.default("USD"),
+  provider: z.string().trim().min(1).max(80),
+  providerEventId: z.string().trim().min(1).max(255),
+  providerPaymentIntentId: z.string().trim().min(1).max(255),
+  providerStatus: z.string().trim().min(1).max(120).nullable().optional(),
+  failureCode: z.string().trim().min(1).max(255).nullable().optional(),
+  failureMessage: z.string().trim().min(1).max(1000).nullable().optional(),
+  autoReload: z.boolean().default(false),
+  autoReloadReason: z.enum(["minimum_balance", "payment_hold"]).nullable().optional(),
+  intakeId: positiveIdSchema.nullable().optional(),
+  idempotencyKey: idempotencyKeySchema,
+}).strict();
+
 export const registerDropshipFundingMethodInputSchema = z.object({
   vendorId: positiveIdSchema,
   rail: dropshipWalletFundingRailSchema,
@@ -204,6 +231,7 @@ export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof creat
 export type CreditDropshipWalletManualFundingInput = z.infer<typeof creditDropshipWalletManualFundingInputSchema>;
 export type CreditDropshipWalletConfirmedUsdcFundingInput = z.infer<typeof creditDropshipWalletConfirmedUsdcFundingInputSchema>;
 export type HandleDropshipAutoReloadInput = z.infer<typeof handleDropshipAutoReloadInputSchema>;
+export type NotifyDropshipWalletFundingFailedInput = z.infer<typeof notifyDropshipWalletFundingFailedInputSchema>;
 export type RegisterDropshipFundingMethodInput = z.infer<typeof registerDropshipFundingMethodInputSchema>;
 export type RegisterDropshipUsdcBaseFundingMethodForMemberInput = z.infer<typeof registerDropshipUsdcBaseFundingMethodForMemberInputSchema>;
 
@@ -440,6 +468,7 @@ export class DropshipWalletService {
       vendorProvisioning: DropshipVendorProvisioningService;
       repository: DropshipWalletRepository;
       fundingProvider?: DropshipWalletFundingProvider;
+      notificationSender?: DropshipNotificationSender;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -848,6 +877,63 @@ export class DropshipWalletService {
       skipReason: null,
       idempotentReplay: funding.idempotentReplay,
     };
+  }
+
+  async notifyWalletFundingFailed(input: unknown): Promise<void> {
+    const parsed = parseWalletInput(notifyDropshipWalletFundingFailedInputSchema, input);
+    this.deps.logger.warn({
+      code: "DROPSHIP_WALLET_FUNDING_FAILED",
+      message: "Dropship wallet funding failed.",
+      context: {
+        vendorId: parsed.vendorId,
+        fundingMethodId: parsed.fundingMethodId ?? null,
+        rail: parsed.rail ?? null,
+        amountCents: parsed.amountCents,
+        currency: parsed.currency,
+        provider: parsed.provider,
+        providerEventId: parsed.providerEventId,
+        providerPaymentIntentId: parsed.providerPaymentIntentId,
+        providerStatus: parsed.providerStatus ?? null,
+        failureCode: parsed.failureCode ?? null,
+        autoReload: parsed.autoReload,
+        intakeId: parsed.intakeId ?? null,
+      },
+    });
+
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: parsed.vendorId,
+      eventType: "dropship_wallet_funding_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship wallet funding failed",
+      message: `Wallet funding for ${formatNotificationCurrency(parsed.amountCents, parsed.currency)} failed${parsed.failureMessage ? `: ${parsed.failureMessage}` : "."}`,
+      payload: {
+        vendorId: parsed.vendorId,
+        fundingMethodId: parsed.fundingMethodId ?? null,
+        rail: parsed.rail ?? null,
+        amountCents: parsed.amountCents,
+        currency: parsed.currency,
+        provider: parsed.provider,
+        providerEventId: parsed.providerEventId,
+        providerPaymentIntentId: parsed.providerPaymentIntentId,
+        providerStatus: parsed.providerStatus ?? null,
+        failureCode: parsed.failureCode ?? null,
+        failureMessage: parsed.failureMessage ?? null,
+        autoReload: parsed.autoReload,
+        autoReloadReason: parsed.autoReloadReason ?? null,
+        intakeId: parsed.intakeId ?? null,
+      },
+      idempotencyKey: parsed.idempotencyKey,
+    }, {
+      code: "DROPSHIP_WALLET_FUNDING_FAILURE_NOTIFICATION_FAILED",
+      message: "Dropship wallet funding failure notification failed.",
+      context: {
+        vendorId: parsed.vendorId,
+        fundingMethodId: parsed.fundingMethodId ?? null,
+        provider: parsed.provider,
+        providerPaymentIntentId: parsed.providerPaymentIntentId,
+      },
+    });
   }
 
   async registerFundingMethod(input: unknown): Promise<DropshipFundingMethodMutationResult> {

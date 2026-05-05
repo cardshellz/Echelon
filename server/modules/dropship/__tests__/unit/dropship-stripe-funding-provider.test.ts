@@ -363,6 +363,68 @@ describe("StripeDropshipFundingProvider", () => {
       },
     });
   });
+
+  it("parses wallet funding failed webhooks into vendor failure notifications", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({
+      stripeClient: stripe,
+      webhookSecret: "whsec_test",
+    });
+
+    stripe.webhooks.constructEvent.mockReturnValueOnce({
+      id: "evt_pi_failed",
+      type: "payment_intent.payment_failed",
+      data: {
+        object: {
+          id: "pi_failed",
+          amount: 25000,
+          currency: "usd",
+          status: "requires_payment_method",
+          metadata: {
+            type: "dropship_wallet_funding",
+            dropship_vendor_id: "10",
+            funding_method_id: "99",
+            requested_rail: "stripe_card",
+            auto_reload: "true",
+            auto_reload_reason: "payment_hold",
+            intake_id: "456",
+          },
+          last_payment_error: {
+            code: "card_declined",
+            message: "Your card was declined.",
+          },
+        },
+      },
+    });
+
+    const event = await provider.parseWebhookEvent({
+      rawBody: Buffer.from("{}"),
+      signature: "stripe-signature",
+    });
+
+    expect(event).toMatchObject({
+      kind: "wallet_funding_failed",
+      providerEventId: "evt_pi_failed",
+      eventType: "payment_intent.payment_failed",
+      failure: {
+        vendorId: 10,
+        fundingMethodId: 99,
+        rail: "stripe_card",
+        amountCents: 25000,
+        currency: "USD",
+        provider: "stripe",
+        providerEventId: "evt_pi_failed",
+        providerPaymentIntentId: "pi_failed",
+        providerStatus: "requires_payment_method",
+        failureCode: "card_declined",
+        failureMessage: "Your card was declined.",
+        autoReload: true,
+        autoReloadReason: "payment_hold",
+        intakeId: 456,
+        idempotencyKey: "stripe-funding-failed:pi_failed",
+      },
+    });
+  });
 });
 
 function makeStripeDouble() {
