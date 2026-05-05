@@ -182,6 +182,25 @@ describe("DropshipVendorProvisioningService", () => {
     });
   });
 
+  it("keeps store onboarding incomplete when a store exists but is not connected", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "onboarding",
+    });
+    repository.storeConnectionSummary = {
+      activeCount: 1,
+      connectedCount: 0,
+      needsAttentionCount: 1,
+      totalCount: 1,
+    };
+
+    const state = await service.getOnboardingState("member-1");
+
+    expect(state.storeConnections.canConnectStore).toBe(false);
+    expect(state.steps.find((step) => step.key === "store_connection")).toMatchObject({
+      status: "incomplete",
+    });
+  });
+
   it("activates an onboarding vendor when every required launch gate is complete", async () => {
     repository.vendor = makeVendorProfile({
       status: "onboarding",
