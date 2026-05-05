@@ -15,6 +15,22 @@ import type {
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
 const jsonObjectSchema = z.record(z.unknown());
+const usdcBaseTransactionHashSchema = z.string().trim().regex(/^0x[a-fA-F0-9]{64}$/, {
+  message: "USDC Base transaction hash must be a 32-byte EVM transaction hash.",
+});
+const usdcBaseWalletAddressSchema = z.string().trim().regex(/^0x[a-fA-F0-9]{40}$/, {
+  message: "USDC Base wallet address must be a 20-byte EVM address.",
+});
+const usdcAtomicUnitsSchema = z.string().trim().regex(/^[1-9][0-9]{0,77}$/, {
+  message: "USDC amount must be a positive integer atomic-unit string.",
+});
+const usdcBaseChainIdSchema = z.literal(8453);
+const optionalObservedAtSchema = z.preprocess((value) => {
+  if (value === undefined) return undefined;
+  if (value instanceof Date) return value;
+  if (typeof value === "string" && value.trim()) return new Date(value);
+  return value;
+}, z.date().optional());
 
 export const dropshipWalletFundingRailSchema = z.enum([
   "stripe_ach",
@@ -105,6 +121,25 @@ export const creditDropshipWalletManualFundingInputSchema = z.object({
   }).strict(),
 }).strict();
 
+export const creditDropshipWalletConfirmedUsdcFundingInputSchema = z.object({
+  vendorId: positiveIdSchema,
+  fundingMethodId: positiveIdSchema.optional(),
+  amountCents: PositiveCentsSchema,
+  currency: CurrencyCodeSchema.default("USD"),
+  amountAtomicUnits: usdcAtomicUnitsSchema,
+  chainId: usdcBaseChainIdSchema.default(8453),
+  transactionHash: usdcBaseTransactionHashSchema,
+  fromAddress: usdcBaseWalletAddressSchema.nullable().optional(),
+  toAddress: usdcBaseWalletAddressSchema,
+  confirmations: z.number().int().positive().max(10_000),
+  observedAt: optionalObservedAtSchema,
+  idempotencyKey: idempotencyKeySchema,
+  actor: z.object({
+    actorType: z.enum(["admin", "system"]),
+    actorId: z.string().trim().min(1).max(255).optional(),
+  }).strict(),
+}).strict();
+
 export const handleDropshipAutoReloadInputSchema = z.object({
   vendorId: positiveIdSchema,
   reason: z.enum(["minimum_balance", "payment_hold"]),
@@ -146,7 +181,20 @@ export const registerDropshipFundingMethodInputSchema = z.object({
       message: "Stripe funding methods require a provider payment method id.",
     });
   }
+  if (input.rail === "usdc_base" && !input.usdcWalletAddress) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["usdcWalletAddress"],
+      message: "USDC Base funding methods require a wallet address.",
+    });
+  }
 });
+
+export const registerDropshipUsdcBaseFundingMethodForMemberInputSchema = z.object({
+  walletAddress: usdcBaseWalletAddressSchema,
+  displayLabel: z.string().trim().min(1).max(200).nullable().optional(),
+  isDefault: z.boolean().default(false),
+}).strict();
 
 export type CreditDropshipWalletFundingInput = z.infer<typeof creditDropshipWalletFundingInputSchema>;
 export type DebitDropshipWalletForOrderInput = z.infer<typeof debitDropshipWalletForOrderInputSchema>;
@@ -154,8 +202,10 @@ export type ConfigureDropshipAutoReloadInput = z.infer<typeof configureDropshipA
 export type CreateDropshipStripeFundingSetupSessionInput = z.infer<typeof createDropshipStripeFundingSetupSessionInputSchema>;
 export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof createDropshipStripeWalletFundingSessionInputSchema>;
 export type CreditDropshipWalletManualFundingInput = z.infer<typeof creditDropshipWalletManualFundingInputSchema>;
+export type CreditDropshipWalletConfirmedUsdcFundingInput = z.infer<typeof creditDropshipWalletConfirmedUsdcFundingInputSchema>;
 export type HandleDropshipAutoReloadInput = z.infer<typeof handleDropshipAutoReloadInputSchema>;
 export type RegisterDropshipFundingMethodInput = z.infer<typeof registerDropshipFundingMethodInputSchema>;
+export type RegisterDropshipUsdcBaseFundingMethodForMemberInput = z.infer<typeof registerDropshipUsdcBaseFundingMethodForMemberInputSchema>;
 
 export interface DropshipWalletAccountRecord {
   walletAccountId: number;
@@ -215,6 +265,21 @@ export interface DropshipWalletLedgerRecord {
   settledAt: Date | null;
 }
 
+export interface DropshipUsdcLedgerEntryRecord {
+  usdcLedgerEntryId: number;
+  vendorId: number;
+  walletLedgerId: number | null;
+  chainId: number;
+  transactionHash: string;
+  fromAddress: string | null;
+  toAddress: string | null;
+  amountAtomicUnits: string;
+  confirmations: number;
+  status: string;
+  observedAt: Date;
+  settledAt: Date | null;
+}
+
 export interface DropshipWalletOverview {
   account: DropshipWalletAccountRecord;
   autoReload: DropshipAutoReloadSettingRecord | null;
@@ -226,6 +291,10 @@ export interface DropshipWalletMutationResult {
   account: DropshipWalletAccountRecord;
   ledgerEntry: DropshipWalletLedgerRecord;
   idempotentReplay: boolean;
+}
+
+export interface DropshipConfirmedUsdcFundingResult extends DropshipWalletMutationResult {
+  usdcLedgerEntry: DropshipUsdcLedgerEntryRecord;
 }
 
 export interface DropshipFundingMethodMutationResult {
@@ -334,6 +403,7 @@ export interface DropshipWalletRepository {
     provider: "stripe";
   }): Promise<string | null>;
   upsertFundingMethod(input: UpsertDropshipFundingMethodRepositoryInput): Promise<DropshipFundingMethodMutationResult>;
+  creditConfirmedUsdcFunding(input: CreateDropshipConfirmedUsdcFundingRepositoryInput): Promise<DropshipConfirmedUsdcFundingResult>;
 }
 
 export type CreateDropshipWalletFundingLedgerInput = Omit<CreditDropshipWalletFundingInput, "walletAccountId"> & {
@@ -355,6 +425,14 @@ export interface ConfigureDropshipAutoReloadRepositoryInput extends ConfigureDro
 export interface UpsertDropshipFundingMethodRepositoryInput extends RegisterDropshipFundingMethodInput {
   updatedAt: Date;
 }
+
+export type CreateDropshipConfirmedUsdcFundingRepositoryInput =
+  Omit<CreditDropshipWalletConfirmedUsdcFundingInput, "fundingMethodId" | "observedAt"> & {
+    fundingMethodId: number | null;
+    observedAt: Date;
+    requestHash: string;
+    occurredAt: Date;
+  };
 
 export class DropshipWalletService {
   constructor(
@@ -495,6 +573,43 @@ export class DropshipWalletService {
         actorId: parsed.actor.actorId ?? null,
       },
     });
+    return result;
+  }
+
+  async creditConfirmedUsdcFunding(input: unknown): Promise<DropshipConfirmedUsdcFundingResult> {
+    const parsed = normalizeConfirmedUsdcFundingInput(parseWalletInput(
+      creditDropshipWalletConfirmedUsdcFundingInputSchema,
+      input,
+    ));
+    const occurredAt = this.deps.clock.now();
+    const requestHash = hashWalletConfirmedUsdcFundingRequest(parsed);
+    const result = await this.deps.repository.creditConfirmedUsdcFunding({
+      ...parsed,
+      fundingMethodId: parsed.fundingMethodId ?? null,
+      observedAt: parsed.observedAt ?? occurredAt,
+      requestHash,
+      occurredAt,
+    });
+    if (!result.idempotentReplay) {
+      this.deps.logger.info({
+        code: "DROPSHIP_WALLET_USDC_FUNDING_CREDITED",
+        message: "Dropship wallet was credited by a confirmed USDC Base transfer.",
+        context: {
+          vendorId: parsed.vendorId,
+          walletAccountId: result.account.walletAccountId,
+          ledgerEntryId: result.ledgerEntry.ledgerEntryId,
+          usdcLedgerEntryId: result.usdcLedgerEntry.usdcLedgerEntryId,
+          fundingMethodId: parsed.fundingMethodId ?? null,
+          amountCents: parsed.amountCents,
+          amountAtomicUnits: parsed.amountAtomicUnits,
+          transactionHash: parsed.transactionHash,
+          chainId: parsed.chainId,
+          confirmations: parsed.confirmations,
+          actorType: parsed.actor.actorType,
+          actorId: parsed.actor.actorId ?? null,
+        },
+      });
+    }
     return result;
   }
 
@@ -735,7 +850,7 @@ export class DropshipWalletService {
   }
 
   async registerFundingMethod(input: unknown): Promise<DropshipFundingMethodMutationResult> {
-    const parsed = parseWalletInput(registerDropshipFundingMethodInputSchema, input);
+    const parsed = normalizeFundingMethodInput(parseWalletInput(registerDropshipFundingMethodInputSchema, input));
     const updatedAt = this.deps.clock.now();
     const result = await this.deps.repository.upsertFundingMethod({
       ...parsed,
@@ -756,9 +871,56 @@ export class DropshipWalletService {
     return result;
   }
 
+  async registerUsdcBaseFundingMethodForMember(
+    memberId: string,
+    input: unknown,
+  ): Promise<DropshipFundingMethodMutationResult> {
+    const parsed = parseWalletInput(registerDropshipUsdcBaseFundingMethodForMemberInputSchema, input);
+    const provisioned = await this.provisionVendor(memberId);
+    return this.registerFundingMethod({
+      vendorId: provisioned.vendor.vendorId,
+      rail: "usdc_base",
+      status: "active",
+      providerCustomerId: null,
+      providerPaymentMethodId: null,
+      usdcWalletAddress: normalizeUsdcBaseAddress(parsed.walletAddress),
+      displayLabel: parsed.displayLabel ?? "USDC on Base",
+      isDefault: parsed.isDefault,
+      metadata: {
+        provider: "usdc_base",
+        registeredByMemberId: memberId,
+      },
+    });
+  }
+
   private async provisionVendor(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
     return this.deps.vendorProvisioning.provisionForMember(memberId);
   }
+}
+
+function normalizeFundingMethodInput(
+  input: RegisterDropshipFundingMethodInput,
+): RegisterDropshipFundingMethodInput {
+  if (input.rail !== "usdc_base") {
+    return input;
+  }
+  return {
+    ...input,
+    providerCustomerId: null,
+    providerPaymentMethodId: null,
+    usdcWalletAddress: normalizeUsdcBaseAddress(input.usdcWalletAddress),
+  };
+}
+
+function normalizeConfirmedUsdcFundingInput(
+  input: CreditDropshipWalletConfirmedUsdcFundingInput,
+): CreditDropshipWalletConfirmedUsdcFundingInput {
+  return {
+    ...input,
+    transactionHash: normalizeUsdcBaseHash(input.transactionHash),
+    fromAddress: input.fromAddress ? normalizeUsdcBaseAddress(input.fromAddress) : null,
+    toAddress: normalizeUsdcBaseAddress(input.toAddress),
+  };
 }
 
 function calculateAutoReloadAmount(input: {
@@ -893,6 +1055,24 @@ export function hashWalletFundingCreditRequest(input: CreditDropshipWalletFundin
   });
 }
 
+export function hashWalletConfirmedUsdcFundingRequest(
+  input: CreditDropshipWalletConfirmedUsdcFundingInput,
+): string {
+  return hashWalletRequest({
+    vendorId: input.vendorId,
+    fundingMethodId: input.fundingMethodId ?? null,
+    amountCents: input.amountCents,
+    currency: input.currency,
+    amountAtomicUnits: input.amountAtomicUnits,
+    chainId: input.chainId,
+    transactionHash: input.transactionHash,
+    fromAddress: input.fromAddress ?? null,
+    toAddress: input.toAddress,
+    referenceType: "usdc_base_transaction",
+    referenceId: `${input.chainId}:${input.transactionHash}`,
+  });
+}
+
 export function hashWalletOrderDebitRequest(input: DebitDropshipWalletForOrderInput): string {
   return hashWalletRequest({
     vendorId: input.vendorId,
@@ -916,6 +1096,20 @@ export function makeDropshipWalletLogger(): DropshipLogger {
 export const systemDropshipWalletClock: DropshipClock = {
   now: () => new Date(),
 };
+
+function normalizeUsdcBaseHash(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeUsdcBaseAddress(value: string | null): string {
+  if (!value) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_WALLET_ADDRESS_REQUIRED",
+      "USDC Base funding requires a wallet address.",
+    );
+  }
+  return value.trim().toLowerCase();
+}
 
 function parseWalletInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unknown): T {
   const result = schema.safeParse(input);

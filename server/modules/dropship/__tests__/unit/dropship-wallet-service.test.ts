@@ -9,15 +9,18 @@ import type {
 import {
   DropshipWalletService,
   type ConfigureDropshipAutoReloadRepositoryInput,
+  type CreateDropshipConfirmedUsdcFundingRepositoryInput,
   type CreateDropshipWalletFundingLedgerInput,
   type CreateDropshipWalletOrderDebitInput,
   type DropshipAutoReloadSettingRecord,
   type DropshipAutoReloadResult,
+  type DropshipConfirmedUsdcFundingResult,
   type DropshipFundingMethodMutationResult,
   type DropshipFundingMethodRecord,
   type DropshipStripeAutoReloadPaymentIntent,
   type DropshipStripeFundingSetupSession,
   type DropshipStripeWalletFundingSession,
+  type DropshipUsdcLedgerEntryRecord,
   type DropshipWalletAccountRecord,
   type DropshipWalletFundingProvider,
   type DropshipWalletLedgerRecord,
@@ -217,6 +220,89 @@ describe("DropshipWalletService", () => {
         }),
       }),
     ]));
+  });
+
+  it("credits confirmed USDC Base funding atomically with a USDC ledger entry", async () => {
+    repository.fundingMethods.push(makeFundingMethod({
+      fundingMethodId: 101,
+      rail: "usdc_base",
+      providerCustomerId: null,
+      providerPaymentMethodId: null,
+      usdcWalletAddress: "0x1111111111111111111111111111111111111111",
+      displayLabel: "USDC on Base",
+      isDefault: false,
+    }));
+
+    const result = await service.creditConfirmedUsdcFunding({
+      vendorId: 10,
+      fundingMethodId: 101,
+      amountCents: 2500,
+      currency: "USD",
+      amountAtomicUnits: "25000000",
+      chainId: 8453,
+      transactionHash: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      fromAddress: "0x2222222222222222222222222222222222222222",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+    const replay = await service.creditConfirmedUsdcFunding({
+      vendorId: 10,
+      fundingMethodId: 101,
+      amountCents: 2500,
+      currency: "USD",
+      amountAtomicUnits: "25000000",
+      chainId: 8453,
+      transactionHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      fromAddress: "0x2222222222222222222222222222222222222222",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.account.availableBalanceCents).toBe(2500);
+    expect(result.ledgerEntry).toMatchObject({
+      type: "funding",
+      status: "settled",
+      amountCents: 2500,
+      referenceType: "usdc_base_transaction",
+      referenceId: "8453:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      fundingMethodId: 101,
+      externalTransactionId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      metadata: expect.objectContaining({
+        rail: "usdc_base",
+        amountAtomicUnits: "25000000",
+        actorType: "admin",
+      }),
+    });
+    expect(result.usdcLedgerEntry).toMatchObject({
+      walletLedgerId: result.ledgerEntry.ledgerEntryId,
+      chainId: 8453,
+      transactionHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      amountAtomicUnits: "25000000",
+      status: "settled",
+    });
+    expect(replay.idempotentReplay).toBe(true);
+    expect(repository.ledger).toHaveLength(1);
+    expect(repository.usdcLedger).toHaveLength(1);
+  });
+
+  it("rejects USDC funding when the selected funding method is not a USDC rail", async () => {
+    await expect(service.creditConfirmedUsdcFunding({
+      vendorId: 10,
+      fundingMethodId: 99,
+      amountCents: 2500,
+      currency: "USD",
+      amountAtomicUnits: "25000000",
+      chainId: 8453,
+      transactionHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-wrong-rail",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    })).rejects.toMatchObject({ code: "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH" });
   });
 
   it("debits accepted orders as negative settled ledger entries", async () => {
@@ -514,6 +600,42 @@ describe("DropshipWalletService", () => {
     expect(repository.fundingMethods).toHaveLength(1);
     expect(logs.filter((event) => event.code === "DROPSHIP_FUNDING_METHOD_REGISTERED")).toHaveLength(1);
   });
+
+  it("registers USDC Base funding methods for the provisioned member", async () => {
+    repository.fundingMethods = [];
+
+    const first = await service.registerUsdcBaseFundingMethodForMember("member-1", {
+      walletAddress: "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD",
+      displayLabel: "Treasury wallet",
+    });
+    const replay = await service.registerUsdcBaseFundingMethodForMember("member-1", {
+      walletAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      displayLabel: "Treasury wallet",
+    });
+
+    expect(first.fundingMethod).toMatchObject({
+      rail: "usdc_base",
+      usdcWalletAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      providerCustomerId: null,
+      providerPaymentMethodId: null,
+      isDefault: true,
+    });
+    expect(replay.idempotentReplay).toBe(true);
+    expect(repository.fundingMethods).toHaveLength(1);
+  });
+
+  it("requires a valid USDC wallet address for USDC Base funding methods", async () => {
+    await expect(service.registerFundingMethod({
+      vendorId: 10,
+      rail: "usdc_base",
+      status: "active",
+      providerCustomerId: null,
+      providerPaymentMethodId: null,
+      usdcWalletAddress: null,
+      displayLabel: "USDC",
+      isDefault: false,
+    })).rejects.toMatchObject({ code: "DROPSHIP_WALLET_INVALID_INPUT" });
+  });
 });
 
 class FakeFundingProvider implements DropshipWalletFundingProvider {
@@ -580,6 +702,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
   ];
   autoReload: DropshipAutoReloadSettingRecord | null = null;
   ledger: DropshipWalletLedgerRecord[] = [];
+  usdcLedger: DropshipUsdcLedgerEntryRecord[] = [];
 
   async getOrCreateWalletAccount(): Promise<DropshipWalletAccountRecord> {
     return this.account;
@@ -673,6 +796,81 @@ class FakeWalletRepository implements DropshipWalletRepository {
     return { account: this.account, ledgerEntry, idempotentReplay: false };
   }
 
+  async creditConfirmedUsdcFunding(
+    input: CreateDropshipConfirmedUsdcFundingRepositoryInput,
+  ): Promise<DropshipConfirmedUsdcFundingResult> {
+    const fundingMethod = this.assertFundingMethod(input.fundingMethodId);
+    if (fundingMethod && fundingMethod.rail !== "usdc_base") {
+      throw new DropshipError("DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH", "Funding method rail mismatch.");
+    }
+    const referenceType = "usdc_base_transaction";
+    const referenceId = `${input.chainId}:${input.transactionHash}`;
+    const existingUsdc = this.usdcLedger.find((entry) =>
+      entry.chainId === input.chainId && entry.transactionHash === input.transactionHash
+    );
+    if (existingUsdc) {
+      const replay = this.ledger.find((entry) => entry.ledgerEntryId === existingUsdc.walletLedgerId);
+      if (!replay) throw new DropshipError("DROPSHIP_USDC_WALLET_LEDGER_MISSING", "Missing wallet ledger.");
+      this.assertReplay(replay, input.requestHash);
+      return {
+        account: this.account,
+        ledgerEntry: replay,
+        usdcLedgerEntry: existingUsdc,
+        idempotentReplay: true,
+      };
+    }
+
+    const replay = this.findReplay(input.idempotencyKey, referenceType, referenceId);
+    if (replay) {
+      this.assertReplay(replay, input.requestHash);
+      const usdcLedgerEntry = this.insertUsdcLedger({ ...input, walletLedgerId: replay.ledgerEntryId });
+      return {
+        account: this.account,
+        ledgerEntry: replay,
+        usdcLedgerEntry,
+        idempotentReplay: true,
+      };
+    }
+
+    const availableBalanceCents = this.account.availableBalanceCents + input.amountCents;
+    this.account = {
+      ...this.account,
+      availableBalanceCents,
+      updatedAt: input.occurredAt,
+    };
+    const ledgerEntry = this.insertLedger({
+      type: "funding",
+      status: "settled",
+      amountCents: input.amountCents,
+      currency: input.currency,
+      availableBalanceAfterCents: availableBalanceCents,
+      pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      referenceType,
+      referenceId,
+      idempotencyKey: input.idempotencyKey,
+      fundingMethodId: input.fundingMethodId,
+      externalTransactionId: input.transactionHash,
+      metadata: {
+        requestHash: input.requestHash,
+        rail: "usdc_base",
+        amountAtomicUnits: input.amountAtomicUnits,
+        actorType: input.actor.actorType,
+      },
+      createdAt: input.occurredAt,
+      settledAt: input.occurredAt,
+    });
+    const usdcLedgerEntry = this.insertUsdcLedger({
+      ...input,
+      walletLedgerId: ledgerEntry.ledgerEntryId,
+    });
+    return {
+      account: this.account,
+      ledgerEntry,
+      usdcLedgerEntry,
+      idempotentReplay: false,
+    };
+  }
+
   async debitOrder(input: CreateDropshipWalletOrderDebitInput): Promise<DropshipWalletMutationResult> {
     const referenceType = "order_intake";
     const referenceId = String(input.intakeId);
@@ -739,7 +937,11 @@ class FakeWalletRepository implements DropshipWalletRepository {
     const existing = this.fundingMethods.find((method) =>
       method.vendorId === input.vendorId
       && method.rail === input.rail
-      && method.providerPaymentMethodId === input.providerPaymentMethodId
+      && (
+        input.rail === "usdc_base"
+          ? method.usdcWalletAddress === input.usdcWalletAddress
+          : method.providerPaymentMethodId === input.providerPaymentMethodId
+      )
     );
     const isDefault = input.isDefault || this.fundingMethods.every((method) => method.status !== "active");
     if (isDefault) {
@@ -814,7 +1016,8 @@ class FakeWalletRepository implements DropshipWalletRepository {
   }
 
   private insertLedger(
-    input: Omit<DropshipWalletLedgerRecord, "ledgerEntryId" | "walletAccountId" | "vendorId" | "externalTransactionId">,
+    input: Omit<DropshipWalletLedgerRecord, "ledgerEntryId" | "walletAccountId" | "vendorId" | "externalTransactionId">
+      & { externalTransactionId?: string | null },
   ): DropshipWalletLedgerRecord {
     const ledgerEntry: DropshipWalletLedgerRecord = {
       ledgerEntryId: this.ledger.length + 1,
@@ -825,6 +1028,27 @@ class FakeWalletRepository implements DropshipWalletRepository {
     };
     this.ledger.push(ledgerEntry);
     return ledgerEntry;
+  }
+
+  private insertUsdcLedger(
+    input: CreateDropshipConfirmedUsdcFundingRepositoryInput & { walletLedgerId: number },
+  ): DropshipUsdcLedgerEntryRecord {
+    const usdcLedgerEntry: DropshipUsdcLedgerEntryRecord = {
+      usdcLedgerEntryId: this.usdcLedger.length + 1,
+      vendorId: input.vendorId,
+      walletLedgerId: input.walletLedgerId,
+      chainId: input.chainId,
+      transactionHash: input.transactionHash,
+      fromAddress: input.fromAddress ?? null,
+      toAddress: input.toAddress,
+      amountAtomicUnits: input.amountAtomicUnits,
+      confirmations: input.confirmations,
+      status: "settled",
+      observedAt: input.observedAt,
+      settledAt: input.occurredAt,
+    };
+    this.usdcLedger.push(usdcLedgerEntry);
+    return usdcLedgerEntry;
   }
 }
 

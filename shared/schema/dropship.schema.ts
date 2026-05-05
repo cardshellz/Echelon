@@ -730,6 +730,9 @@ export const dropshipFundingMethods = dropshipSchema.table("dropship_funding_met
   uniqueIndex("dropship_funding_provider_method_idx")
     .on(table.vendorId, table.rail, table.providerPaymentMethodId)
     .where(sql`${table.providerPaymentMethodId} IS NOT NULL`),
+  uniqueIndex("dropship_funding_usdc_wallet_idx")
+    .on(table.vendorId, table.rail, table.usdcWalletAddress)
+    .where(sql`${table.usdcWalletAddress} IS NOT NULL`),
   index("dropship_funding_vendor_idx").on(table.vendorId),
   index("dropship_funding_provider_customer_idx")
     .on(table.vendorId, table.providerCustomerId)
