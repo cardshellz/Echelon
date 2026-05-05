@@ -108,6 +108,19 @@ describe("DropshipStoreConnectionService", () => {
     });
   });
 
+  it("allows OAuth to repair an unhealthy existing store connection", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
+
+    const start = await service.startOAuth("member-1", { platform: "ebay" });
+
+    expect(start.platform).toBe("ebay");
+    expect(stateSigner.lastPayload).toMatchObject({
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+    });
+  });
+
   it("rejects external OAuth return targets before signing state", async () => {
     await expect(service.startOAuth("member-1", {
       platform: "ebay",
@@ -148,6 +161,34 @@ describe("DropshipStoreConnectionService", () => {
     });
     expect(repository.lastConnectInput?.tokenRecords.map((record) => record.tokenKind)).toEqual(["access", "refresh"]);
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_STORE_CONNECTED" });
+  });
+
+  it("completes OAuth by reconnecting the existing unhealthy store slot", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+    };
+
+    const result = await service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    });
+
+    expect(result.connection).toMatchObject({
+      storeConnectionId: 21,
+      status: "connected",
+      hasAccessToken: true,
+      hasRefreshToken: true,
+    });
   });
 
   it("runs post-connect setup with the live access token after the store is persisted", async () => {
@@ -481,13 +522,19 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
 
   async countActiveByVendorId(): Promise<number> {
     return this.connections.filter((connection) => (
-      ["connected", "needs_reauth", "refresh_failed", "grace_period", "paused"].includes(connection.status)
+      ["connected", "grace_period", "paused"].includes(connection.status)
     )).length;
   }
 
   async connectStore(input: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0]): Promise<DropshipStoreConnectionProfile> {
     this.lastConnectInput = input;
+    const existing = this.connections.find((connection) => (
+      connection.vendorId === input.vendorId
+      && connection.platform === input.platform
+      && ["needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
+    ));
     const connection = makeConnection({
+      storeConnectionId: existing?.storeConnectionId ?? 20,
       vendorId: input.vendorId,
       platform: input.platform,
       externalAccountId: input.externalAccountId,

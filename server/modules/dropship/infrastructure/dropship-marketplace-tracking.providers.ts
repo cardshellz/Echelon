@@ -6,7 +6,7 @@ import type {
 } from "../application/dropship-marketplace-tracking-provider";
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import { EbayDropshipMarketplaceTrackingProvider } from "./dropship-ebay-tracking.provider";
-import { PgDropshipMarketplaceCredentialRepository } from "./dropship-marketplace-credentials";
+import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
 import { ShopifyDropshipMarketplaceTrackingProvider } from "./dropship-shopify-tracking.provider";
 
 export class DropshipMarketplaceTrackingProviderRouter implements DropshipMarketplaceTrackingProvider {
@@ -30,7 +30,7 @@ export class DropshipMarketplaceTrackingProviderRouter implements DropshipMarket
 }
 
 export function createDropshipMarketplaceTrackingProviderFromEnv(): DropshipMarketplaceTrackingProvider {
-  const credentials = new PgDropshipMarketplaceCredentialRepository();
+  const credentials = createDropshipMarketplaceCredentialRepositoryFromEnv();
   return new DropshipMarketplaceTrackingProviderRouter({
     ebay: new EbayDropshipMarketplaceTrackingProvider(credentials),
     shopify: new ShopifyDropshipMarketplaceTrackingProvider(credentials),

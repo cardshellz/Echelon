@@ -87,7 +87,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
     };
     const response = await this.requestEbay({
       environment,
-      accessToken: credential.accessToken,
+      credential,
       path,
       body: payload,
     });
@@ -114,6 +114,10 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
       return credential;
     }
     if (!credential.refreshToken) {
+      await this.recordNeedsReauth(credential, {
+        failureCode: "DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED",
+        message: "eBay refresh token is missing for dropship tracking push.",
+      });
       throw new DropshipError("DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED", "eBay refresh token is required.", {
         storeConnectionId: credential.storeConnectionId,
         retryable: false,
@@ -141,6 +145,13 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
     });
     const text = await response.text();
     if (!response.ok) {
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.recordNeedsReauth(credential, {
+          failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+          message: `eBay token refresh failed with HTTP ${response.status}.`,
+          statusCode: response.status,
+        });
+      }
       throw new DropshipError(
         "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
         `eBay token refresh failed with HTTP ${response.status}.`,
@@ -175,7 +186,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
 
   private async requestEbay(input: {
     environment: EbayEnvironment;
-    accessToken: string;
+    credential: DropshipMarketplaceStoreCredentials;
     path: string;
     body: unknown;
   }): Promise<{ fulfillmentId: string | null }> {
@@ -185,7 +196,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
         response = await this.fetchImpl(`${EBAY_BASE_URLS[input.environment]}${input.path}`, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${input.accessToken}`,
+            Authorization: `Bearer ${input.credential.accessToken}`,
             "Content-Type": "application/json",
             Accept: "application/json",
             "Content-Language": "en-US",
@@ -216,6 +227,19 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
         };
       }
       const retryable = response.status === 429 || response.status >= 500;
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.credentials.recordAuthFailure?.({
+          vendorId: input.credential.vendorId,
+          storeConnectionId: input.credential.storeConnectionId,
+          platform: "ebay",
+          status: "needs_reauth",
+          failureCode: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+          message: `eBay tracking push failed with HTTP ${response.status}.`,
+          retryable: false,
+          statusCode: response.status,
+          now: this.clock.now(),
+        });
+      }
       if (retryable && attempt < EBAY_MAX_ATTEMPTS) {
         await delay(resolveRetryDelayMs(response, attempt));
         continue;
@@ -234,10 +258,35 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
       retryable: true,
     });
   }
+
+  private async recordNeedsReauth(
+    credential: DropshipMarketplaceStoreCredentials,
+    input: {
+      failureCode: string;
+      message: string;
+      statusCode?: number;
+    },
+  ): Promise<void> {
+    await this.credentials.recordAuthFailure?.({
+      vendorId: credential.vendorId,
+      storeConnectionId: credential.storeConnectionId,
+      platform: "ebay",
+      status: "needs_reauth",
+      failureCode: input.failureCode,
+      message: input.message,
+      retryable: false,
+      statusCode: input.statusCode,
+      now: this.clock.now(),
+    });
+  }
 }
 
 function resolveEbayEnvironment(config: Record<string, unknown>): EbayEnvironment {
   return config.environment === "sandbox" ? "sandbox" : "production";
+}
+
+function isPermanentAuthFailureStatus(status: number): boolean {
+  return status === 400 || status === 401 || status === 403;
 }
 
 function parseEbayJson<T>(input: { text: string; code: string; message: string }): T {

@@ -5,6 +5,15 @@ import type { DropshipStoreConnectionTokenRecord } from "../application/dropship
 import type { DropshipSupportedStorePlatform } from "../domain/store-connection";
 import { DropshipError } from "../domain/errors";
 import { AesGcmDropshipStoreTokenCipher } from "./dropship-token-cipher";
+import type {
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "../application/dropship-ports";
+import { sendDropshipNotificationSafely } from "../application/dropship-notification-dispatch";
+import {
+  makeDropshipStoreConnectionLogger,
+} from "../application/dropship-store-connection-service";
+import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
 
 export interface DropshipMarketplaceStoreCredentials {
   vendorId: number;
@@ -23,6 +32,27 @@ export interface DropshipMarketplaceStoreCredentials {
   refreshTokenExpiresAt: Date | null;
 }
 
+export interface DropshipMarketplaceStoreAuthFailureInput {
+  vendorId: number;
+  storeConnectionId: number;
+  platform: DropshipSourcePlatform;
+  status: "needs_reauth" | "refresh_failed";
+  failureCode: string;
+  message: string;
+  retryable: boolean;
+  statusCode?: number;
+  now: Date;
+}
+
+export interface DropshipMarketplaceStoreAuthFailureRecord {
+  vendorId: number;
+  storeConnectionId: number;
+  platform: DropshipSourcePlatform;
+  previousStatus: string;
+  status: "needs_reauth" | "refresh_failed";
+  transitioned: boolean;
+}
+
 export interface DropshipMarketplaceCredentialRepository {
   loadForStoreConnection(input: {
     vendorId: number;
@@ -38,6 +68,7 @@ export interface DropshipMarketplaceCredentialRepository {
     accessTokenExpiresAt: Date | null;
     now: Date;
   }): Promise<DropshipMarketplaceStoreCredentials>;
+  recordAuthFailure?(input: DropshipMarketplaceStoreAuthFailureInput): Promise<DropshipMarketplaceStoreAuthFailureRecord>;
 }
 
 interface DropshipMarketplaceTokenCipher {
@@ -69,11 +100,25 @@ interface TokenRow {
   expires_at: Date | null;
 }
 
+interface DropshipMarketplaceCredentialRepositoryOptions {
+  tokenCipher?: DropshipMarketplaceTokenCipher;
+  notificationSender?: DropshipNotificationSender;
+  logger?: DropshipLogger;
+}
+
 export class PgDropshipMarketplaceCredentialRepository implements DropshipMarketplaceCredentialRepository {
+  private readonly tokenCipher: DropshipMarketplaceTokenCipher;
+  private readonly notificationSender?: DropshipNotificationSender;
+  private readonly logger: DropshipLogger;
+
   constructor(
     private readonly dbPool: Pool = defaultPool,
-    private readonly tokenCipher: DropshipMarketplaceTokenCipher = new LazyEnvDropshipMarketplaceTokenCipher(),
-  ) {}
+    options: DropshipMarketplaceCredentialRepositoryOptions = {},
+  ) {
+    this.tokenCipher = options.tokenCipher ?? new LazyEnvDropshipMarketplaceTokenCipher();
+    this.notificationSender = options.notificationSender;
+    this.logger = options.logger ?? makeDropshipStoreConnectionLogger();
+  }
 
   async loadForStoreConnection(input: {
     vendorId: number;
@@ -160,6 +205,7 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         refresh_token_ref: refreshRecord?.tokenRef ?? connection.refresh_token_ref,
         token_expires_at: input.accessTokenExpiresAt,
       };
+      await resolveStoreAuthHealthCheck(client, input.storeConnectionId, input.now);
       const tokens = await loadTokenRows(client, input.storeConnectionId);
       await client.query("COMMIT");
       return mapCredentials({
@@ -174,6 +220,122 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
       client.release();
     }
   }
+
+  async recordAuthFailure(input: DropshipMarketplaceStoreAuthFailureInput): Promise<DropshipMarketplaceStoreAuthFailureRecord> {
+    const client = await this.dbPool.connect();
+    let record: DropshipMarketplaceStoreAuthFailureRecord;
+    try {
+      await client.query("BEGIN");
+      const connection = await loadConnectionForHealthUpdate(client, input);
+      const previousStatus = connection.status;
+      const transitioned = previousStatus !== input.status
+        && previousStatus !== "disconnected"
+        && previousStatus !== "grace_period"
+        && previousStatus !== "paused";
+
+      if (transitioned) {
+        await client.query(
+          `UPDATE dropship.dropship_store_connections
+           SET status = $4,
+               setup_status = 'attention_required',
+               access_token_ref = NULL,
+               refresh_token_ref = NULL,
+               token_expires_at = NULL,
+               updated_at = $5
+           WHERE id = $1
+             AND vendor_id = $2
+             AND platform = $3`,
+          [
+            input.storeConnectionId,
+            input.vendorId,
+            input.platform,
+            input.status,
+            input.now,
+          ],
+        );
+        await client.query(
+          `DELETE FROM dropship.dropship_store_connection_tokens
+           WHERE store_connection_id = $1`,
+          [input.storeConnectionId],
+        );
+      }
+
+      await upsertStoreAuthHealthCheck(client, {
+        ...input,
+        previousStatus,
+      });
+      await recordStoreAuthHealthAuditEvent(client, {
+        ...input,
+        previousStatus,
+        transitioned,
+      });
+
+      record = {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        platform: input.platform,
+        previousStatus,
+        status: input.status,
+        transitioned,
+      };
+      await client.query("COMMIT");
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    if (record.transitioned) {
+      await this.notifyStoreAuthFailure(input, record);
+    }
+    return record;
+  }
+
+  private async notifyStoreAuthFailure(
+    input: DropshipMarketplaceStoreAuthFailureInput,
+    record: DropshipMarketplaceStoreAuthFailureRecord,
+  ): Promise<void> {
+    await sendDropshipNotificationSafely({
+      notificationSender: this.notificationSender,
+      logger: this.logger,
+    }, {
+      vendorId: input.vendorId,
+      eventType: "dropship_store_needs_reauth",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship store needs reauthorization",
+      message: `Your ${input.platform} dropship store needs to be reauthorized before order intake, listing pushes, and tracking updates can continue.`,
+      payload: {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        platform: input.platform,
+        previousStatus: record.previousStatus,
+        status: input.status,
+        failureCode: input.failureCode,
+        retryable: input.retryable,
+        statusCode: input.statusCode ?? null,
+      },
+      idempotencyKey: `store-auth-health:${input.storeConnectionId}:${input.status}:${input.now.toISOString()}`,
+    }, {
+      code: "DROPSHIP_STORE_AUTH_FAILURE_NOTIFICATION_FAILED",
+      message: "Dropship store auth failure notification failed after the store was marked unhealthy.",
+      context: {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        platform: input.platform,
+        status: input.status,
+        failureCode: input.failureCode,
+      },
+    });
+  }
+}
+
+export function createDropshipMarketplaceCredentialRepositoryFromEnv(): DropshipMarketplaceCredentialRepository {
+  return new PgDropshipMarketplaceCredentialRepository(defaultPool, {
+    notificationSender: createDropshipNotificationServiceFromEnv(),
+    logger: makeDropshipStoreConnectionLogger(),
+  });
 }
 
 class LazyEnvDropshipMarketplaceTokenCipher implements DropshipMarketplaceTokenCipher {
@@ -226,6 +388,37 @@ async function loadConnection(
   return connection;
 }
 
+async function loadConnectionForHealthUpdate(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipSourcePlatform;
+  },
+): Promise<StoreConnectionCredentialRow> {
+  const result = await client.query<StoreConnectionCredentialRow>(
+    `SELECT id, vendor_id, platform, external_account_id, external_display_name,
+            shop_domain, access_token_ref, refresh_token_ref, token_expires_at,
+            status, config
+     FROM dropship.dropship_store_connections
+     WHERE id = $1
+       AND vendor_id = $2
+       AND platform = $3
+     FOR UPDATE`,
+    [input.storeConnectionId, input.vendorId, input.platform],
+  );
+  const connection = result.rows[0];
+  if (!connection) {
+    throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_FOUND", "Dropship store connection was not found.", {
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: input.platform,
+      retryable: false,
+    });
+  }
+  return connection;
+}
+
 async function loadTokenRows(client: PoolClient, storeConnectionId: number): Promise<TokenRow[]> {
   const result = await client.query<TokenRow>(
     `SELECT token_kind, token_ref, key_id, ciphertext, iv, auth_tag, expires_at
@@ -254,6 +447,90 @@ async function insertTokenRecord(
       record.iv,
       record.authTag,
       record.expiresAt,
+    ],
+  );
+}
+
+async function upsertStoreAuthHealthCheck(
+  client: PoolClient,
+  input: DropshipMarketplaceStoreAuthFailureInput & { previousStatus: string },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_store_setup_checks
+      (vendor_id, store_connection_id, check_key, status, severity, message, details,
+       last_checked_at, resolved_at, created_at, updated_at)
+     VALUES ($1, $2, 'store_auth_health', 'failed', 'blocker', $3, $4::jsonb, $5, NULL, $5, $5)
+     ON CONFLICT (store_connection_id, check_key) WHERE store_connection_id IS NOT NULL
+     DO UPDATE SET status = 'failed',
+                   severity = 'blocker',
+                   message = EXCLUDED.message,
+                   details = EXCLUDED.details,
+                   last_checked_at = EXCLUDED.last_checked_at,
+                   resolved_at = NULL,
+                   updated_at = EXCLUDED.updated_at`,
+    [
+      input.vendorId,
+      input.storeConnectionId,
+      input.message,
+      JSON.stringify({
+        platform: input.platform,
+        previousStatus: input.previousStatus,
+        nextStatus: input.status,
+        failureCode: input.failureCode,
+        retryable: input.retryable,
+        statusCode: input.statusCode ?? null,
+      }),
+      input.now,
+    ],
+  );
+}
+
+async function resolveStoreAuthHealthCheck(
+  client: PoolClient,
+  storeConnectionId: number,
+  now: Date,
+): Promise<void> {
+  await client.query(
+    `UPDATE dropship.dropship_store_setup_checks
+     SET status = 'passed',
+         severity = 'info',
+         message = 'Store authorization is healthy.',
+         resolved_at = $2,
+         last_checked_at = $2,
+         updated_at = $2
+     WHERE store_connection_id = $1
+       AND check_key = 'store_auth_health'
+       AND resolved_at IS NULL`,
+    [storeConnectionId, now],
+  );
+}
+
+async function recordStoreAuthHealthAuditEvent(
+  client: PoolClient,
+  input: DropshipMarketplaceStoreAuthFailureInput & {
+    previousStatus: string;
+    transitioned: boolean;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, $2, 'dropship_store_connection', $3, 'store_auth_failure_recorded',
+             'system', 'dropship_marketplace_credentials', 'warning', $4::jsonb, $5)`,
+    [
+      input.vendorId,
+      input.storeConnectionId,
+      String(input.storeConnectionId),
+      JSON.stringify({
+        platform: input.platform,
+        previousStatus: input.previousStatus,
+        nextStatus: input.status,
+        transitioned: input.transitioned,
+        failureCode: input.failureCode,
+        retryable: input.retryable,
+        statusCode: input.statusCode ?? null,
+      }),
+      input.now,
     ],
   );
 }

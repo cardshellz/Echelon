@@ -10,6 +10,9 @@ import type {
 } from "./dropship-marketplace-credentials";
 
 type FetchLike = typeof fetch;
+interface Clock {
+  now(): Date;
+}
 
 interface ShopifyCancellationConfig {
   apiVersion: string;
@@ -59,6 +62,7 @@ export class ShopifyDropshipOrderCancellationProvider implements DropshipMarketp
   constructor(
     private readonly credentials: DropshipMarketplaceCredentialRepository,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly clock: Clock = { now: () => new Date() },
   ) {}
 
   async cancelOrder(
@@ -131,6 +135,19 @@ export class ShopifyDropshipOrderCancellationProvider implements DropshipMarketp
     );
     const text = await response.text();
     if (!response.ok) {
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.credentials.recordAuthFailure?.({
+          vendorId: credential.vendorId,
+          storeConnectionId: credential.storeConnectionId,
+          platform: "shopify",
+          status: "needs_reauth",
+          failureCode: "DROPSHIP_SHOPIFY_ORDER_CANCELLATION_HTTP_ERROR",
+          message: `Shopify order cancellation failed with HTTP ${response.status}.`,
+          retryable: false,
+          statusCode: response.status,
+          now: this.clock.now(),
+        });
+      }
       throw new DropshipError(
         "DROPSHIP_SHOPIFY_ORDER_CANCELLATION_HTTP_ERROR",
         `Shopify order cancellation failed with HTTP ${response.status}.`,
@@ -192,6 +209,10 @@ function resolveShopifyApiVersion(config: Record<string, unknown>): string {
     });
   }
   return configured;
+}
+
+function isPermanentAuthFailureStatus(status: number): boolean {
+  return status === 401 || status === 403;
 }
 
 function resolveShopifyCancelReason(config: Record<string, unknown>): ShopifyOrderCancelReason {

@@ -136,7 +136,7 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     });
     return this.requestEbay<EbayOrdersResponse>({
       environment: input.environment,
-      accessToken: input.credential.accessToken,
+      credential: input.credential,
       marketplaceId: input.marketplaceId,
       path: `/sell/fulfillment/v1/order?${params.toString()}`,
     });
@@ -153,6 +153,10 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
       return credential;
     }
     if (!credential.refreshToken) {
+      await this.recordNeedsReauth(credential, {
+        failureCode: "DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED",
+        message: "eBay refresh token is missing for dropship order intake.",
+      });
       throw new DropshipError("DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED", "eBay refresh token is required.", {
         storeConnectionId: credential.storeConnectionId,
         retryable: false,
@@ -180,6 +184,13 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     });
     const text = await response.text();
     if (!response.ok) {
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.recordNeedsReauth(credential, {
+          failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+          message: `eBay token refresh failed with HTTP ${response.status}.`,
+          statusCode: response.status,
+        });
+      }
       throw new DropshipError(
         "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
         `eBay token refresh failed with HTTP ${response.status}.`,
@@ -214,7 +225,7 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
 
   private async requestEbay<T>(input: {
     environment: EbayEnvironment;
-    accessToken: string;
+    credential: DropshipMarketplaceStoreCredentials;
     marketplaceId: string;
     path: string;
   }): Promise<T> {
@@ -224,7 +235,7 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
         response = await this.fetchImpl(`${EBAY_BASE_URLS[input.environment]}${input.path}`, {
           method: "GET",
           headers: {
-            Authorization: `Bearer ${input.accessToken}`,
+            Authorization: `Bearer ${input.credential.accessToken}`,
             Accept: "application/json",
             "X-EBAY-C-MARKETPLACE-ID": input.marketplaceId,
           },
@@ -252,6 +263,19 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
           message: "eBay order intake returned invalid JSON.",
         });
       }
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.credentials.recordAuthFailure?.({
+          vendorId: input.credential.vendorId,
+          storeConnectionId: input.credential.storeConnectionId,
+          platform: "ebay",
+          status: "needs_reauth",
+          failureCode: "DROPSHIP_EBAY_ORDER_INTAKE_HTTP_ERROR",
+          message: `eBay order intake failed with HTTP ${response.status}.`,
+          retryable: false,
+          statusCode: response.status,
+          now: this.clock.now(),
+        });
+      }
       const retryable = response.status === 429 || response.status >= 500;
       if (retryable && attempt < EBAY_MAX_ATTEMPTS) {
         await delay(resolveRetryDelayMs(response, attempt));
@@ -273,6 +297,27 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
       { retryable: true },
     );
   }
+
+  private async recordNeedsReauth(
+    credential: DropshipMarketplaceStoreCredentials,
+    input: {
+      failureCode: string;
+      message: string;
+      statusCode?: number;
+    },
+  ): Promise<void> {
+    await this.credentials.recordAuthFailure?.({
+      vendorId: credential.vendorId,
+      storeConnectionId: credential.storeConnectionId,
+      platform: "ebay",
+      status: "needs_reauth",
+      failureCode: input.failureCode,
+      message: input.message,
+      retryable: false,
+      statusCode: input.statusCode,
+      now: this.clock.now(),
+    });
+  }
 }
 
 function resolveEbayEnvironment(config: Record<string, unknown>): EbayEnvironment {
@@ -283,6 +328,10 @@ function resolveMarketplaceId(config: Record<string, unknown>): string {
   return typeof config.marketplaceId === "string" && config.marketplaceId.trim()
     ? config.marketplaceId.trim()
     : "EBAY_US";
+}
+
+function isPermanentAuthFailureStatus(status: number): boolean {
+  return status === 400 || status === 401 || status === 403;
 }
 
 function parseEbayJson<T>(input: { text: string; code: string; message: string }): T {
