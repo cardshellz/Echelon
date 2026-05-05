@@ -1077,9 +1077,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               `[ShipStation Reconcile V2] Failed to reconcile order ${row.order_id} / ssOrder ${ssOrderId}:`,
               err?.message,
             );
+            const errMsg = String(err?.message || err).slice(0, 255);
             await db.execute(sql`
               UPDATE wms.outbound_shipments
-              SET last_reconciled_at = NOW()
+              SET last_reconciled_at = NOW(),
+                  requires_review = true,
+                  review_reason = ${errMsg}
               WHERE id = ${shipmentId}
             `);
           }
