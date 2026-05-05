@@ -42,6 +42,8 @@ import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | "stripe-card" | "stripe-ach" | "usdc-base" | "fund-wallet" | null;
 type WalletSensitiveAction = Extract<DropshipSensitiveAction, "add_funding_method" | "wallet_funding_high_value">;
+type DropshipWalletState = DropshipWalletResponse["wallet"];
+type DropshipWalletFundingMethod = DropshipWalletState["fundingMethods"][number];
 
 export default function DropshipPortalWallet() {
   const queryClient = useQueryClient();
@@ -72,9 +74,7 @@ export default function DropshipPortalWallet() {
   });
   const wallet = walletQuery.data?.wallet;
   const activeFundingMethods = wallet?.fundingMethods.filter((method) => method.status === "active") ?? [];
-  const stripeFundingMethods = activeFundingMethods.filter((method) =>
-    method.rail === "stripe_card" || method.rail === "stripe_ach"
-  );
+  const stripeFundingMethods = activeFundingMethods.filter(isStripeFundingMethod);
   const hasActiveProof = (action: DropshipSensitiveAction) => {
     const proof = sensitiveProofs[action];
     return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
@@ -265,8 +265,8 @@ export default function DropshipPortalWallet() {
               <Metric title="Pending" value={formatCents(wallet.account.pendingBalanceCents)} />
               <Metric
                 title="Auto-reload"
-                value={wallet.autoReload?.enabled ? "Enabled" : "Needs setup"}
-                detail={wallet.autoReload ? `Minimum ${formatCents(wallet.autoReload.minimumBalanceCents)}` : "No configuration"}
+                value={autoReloadMetricValue(wallet, stripeFundingMethods)}
+                detail={autoReloadMetricDetail(wallet, stripeFundingMethods)}
               />
             </section>
 
@@ -533,7 +533,7 @@ function AutoReloadPanel({
             disabled={activeFundingMethods.length === 0}
           >
             <SelectTrigger className="h-10">
-              <SelectValue placeholder="Select active funding method" />
+              <SelectValue placeholder="Select active Stripe method" />
             </SelectTrigger>
             <SelectContent>
               {activeFundingMethods.map((method) => (
@@ -667,7 +667,7 @@ function FundWalletPanel({
             disabled={activeFundingMethods.length === 0}
           >
             <SelectTrigger className="h-10">
-              <SelectValue placeholder="Select active funding method" />
+              <SelectValue placeholder="Select active Stripe method" />
             </SelectTrigger>
             <SelectContent>
               {activeFundingMethods.map((method) => (
@@ -777,6 +777,42 @@ function Metric({ detail, title, value }: { detail?: string; title: string; valu
       {detail && <div className="mt-1 text-sm text-zinc-500">{detail}</div>}
     </div>
   );
+}
+
+function isStripeFundingMethod(method: DropshipWalletFundingMethod): boolean {
+  return method.rail === "stripe_card" || method.rail === "stripe_ach";
+}
+
+function autoReloadMetricValue(
+  wallet: DropshipWalletState,
+  stripeFundingMethods: readonly DropshipWalletFundingMethod[],
+): string {
+  if (!wallet.autoReload) return "Needs setup";
+  if (!wallet.autoReload.enabled) return "Disabled";
+  return findConfiguredAutoReloadFundingMethod(wallet, stripeFundingMethods) ? "Ready" : "Funding method needed";
+}
+
+function autoReloadMetricDetail(
+  wallet: DropshipWalletState,
+  stripeFundingMethods: readonly DropshipWalletFundingMethod[],
+): string {
+  if (!wallet.autoReload) return "No auto-reload configuration";
+  if (!wallet.autoReload.enabled) return "Enable with a Stripe card or ACH method before launch.";
+
+  const fundingMethod = findConfiguredAutoReloadFundingMethod(wallet, stripeFundingMethods);
+  if (!fundingMethod) return "Select an active Stripe card or ACH method.";
+
+  const label = fundingMethod.displayLabel || formatStatus(fundingMethod.rail);
+  return `Minimum ${formatCents(wallet.autoReload.minimumBalanceCents)} with ${label}`;
+}
+
+function findConfiguredAutoReloadFundingMethod(
+  wallet: DropshipWalletState,
+  stripeFundingMethods: readonly DropshipWalletFundingMethod[],
+): DropshipWalletFundingMethod | null {
+  const fundingMethodId = wallet.autoReload?.fundingMethodId;
+  if (!fundingMethodId) return null;
+  return stripeFundingMethods.find((method) => method.fundingMethodId === fundingMethodId) ?? null;
 }
 
 function centsToDollarInput(cents: number): string {
