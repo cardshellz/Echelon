@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type {
+  DropshipLogEvent,
+  DropshipNotificationSenderInput,
+} from "../../application/dropship-ports";
 import {
   DropshipReturnService,
   type CreateDropshipRmaInput,
@@ -37,7 +40,8 @@ describe("DropshipReturnService", () => {
   it("creates RMAs with idempotency, request hash, actor, and clock context", async () => {
     const repository = new FakeReturnRepository();
     const logs: DropshipLogEvent[] = [];
-    const service = makeService(repository, logs);
+    const notificationSender = new FakeNotificationSender();
+    const service = makeService(repository, logs, notificationSender);
 
     const result = await service.createRma({
       vendorId: 10,
@@ -57,6 +61,19 @@ describe("DropshipReturnService", () => {
     });
     expect(repository.lastCreateInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_RMA_CREATED" });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_rma_opened",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship RMA opened",
+      idempotencyKey: "rma-opened:1",
+      payload: {
+        rmaId: 1,
+        rmaNumber: "RMA-100",
+        status: "requested",
+      },
+    });
   });
 
   it("updates status with idempotency, request hash, actor, and clock context", async () => {
@@ -122,7 +139,8 @@ describe("DropshipReturnService", () => {
   it("finalizes inspection with wallet ledger context and logs financial amounts", async () => {
     const repository = new FakeReturnRepository();
     const logs: DropshipLogEvent[] = [];
-    const service = makeService(repository, logs);
+    const notificationSender = new FakeNotificationSender();
+    const service = makeService(repository, logs, notificationSender);
 
     const result = await service.processInspection({
       rmaId: 1,
@@ -149,6 +167,62 @@ describe("DropshipReturnService", () => {
       code: "DROPSHIP_RMA_INSPECTED",
       context: { creditCents: 2000, feeCents: 0 },
     });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_return_credit_posted",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship return credit posted",
+      idempotencyKey: "rma-credit-posted:1:7",
+      payload: {
+        rmaId: 1,
+        inspectionId: 7,
+        creditCents: 2000,
+        walletLedgerIds: [99],
+      },
+    });
+  });
+
+  it("does not notify return credit when inspection posts no wallet credit", async () => {
+    const repository = new FakeReturnRepository();
+    const notificationSender = new FakeNotificationSender();
+    const service = makeService(repository, [], notificationSender);
+
+    await service.processInspection({
+      rmaId: 1,
+      outcome: "rejected",
+      faultCategory: "customer",
+      creditCents: 0,
+      feeCents: 0,
+      items: [],
+      idempotencyKey: "inspect-rma-no-credit",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(notificationSender.sent).toHaveLength(0);
+  });
+
+  it("logs notification failures without undoing RMA creation", async () => {
+    const repository = new FakeReturnRepository();
+    const logs: DropshipLogEvent[] = [];
+    const notificationSender = new FakeNotificationSender(new Error("email unavailable"));
+    const service = makeService(repository, logs, notificationSender);
+
+    const result = await service.createRma({
+      vendorId: 10,
+      rmaNumber: "RMA-FAIL-NOTIFY",
+      returnWindowDays: 30,
+      items: [],
+      idempotencyKey: "create-rma-notify-fail",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.rma.rmaNumber).toBe("RMA-FAIL-NOTIFY");
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(logs.some((event) => (
+      event.code === "DROPSHIP_RMA_OPENED_NOTIFICATION_FAILED"
+        && event.context?.rmaId === 1
+    ))).toBe(true);
   });
 });
 
@@ -242,10 +316,28 @@ class FakeVendorProvisioningService {
   }
 }
 
-function makeService(repository: DropshipReturnRepository, logs: DropshipLogEvent[]): DropshipReturnService {
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+
+  constructor(private readonly error: Error | null = null) {}
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
+    if (this.error) {
+      throw this.error;
+    }
+  }
+}
+
+function makeService(
+  repository: DropshipReturnRepository,
+  logs: DropshipLogEvent[],
+  notificationSender?: FakeNotificationSender,
+): DropshipReturnService {
   return new DropshipReturnService({
     vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
     repository,
+    notificationSender,
     clock: { now: () => now },
     logger: {
       info: (event) => logs.push(event),
