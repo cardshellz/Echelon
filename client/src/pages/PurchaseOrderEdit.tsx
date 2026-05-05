@@ -75,6 +75,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   AddToCatalogDialog,
   type AddToCatalogDecision,
   type CatalogCandidate,
@@ -410,6 +416,38 @@ function formatCents(cents: number | null | undefined): string {
 // shared money helpers reject negatives (they were designed for per-unit
 // cost which is always >= 0). These wrappers handle the sign and delegate
 // to the authoritative shared helpers for the magnitude.
+
+// Compute per-unit mills from total cents and qty. Returns null when qty
+// is 0 or not yet entered (prevents divide-by-zero). Pure integer math.
+function perUnitMillsFromCents(totalCents: number, qty: number): number | null {
+  if (!qty || qty <= 0) return null;
+  const c = Number(totalCents) || 0;
+  // totalCents * 100 = mills for the total; divide by qty = per-unit mills.
+  // Use round-half-up at the mills level.
+  const totalMills = c * 100;
+  if (totalMills === 0) return 0;
+  const q = Math.floor(totalMills / qty);
+  const r = totalMills - q * qty;
+  return r * 2 >= qty ? q + 1 : q;
+}
+
+// Full-precision per-unit dollar string (up to 6 decimal places).
+// Used for tooltip display. Pure integer math, no floats.
+function perUnitFullPrecisionDollars(millsValue: number | null): string {
+  if (millsValue === null) return "—";
+  const m = Math.max(0, Math.round(millsValue));
+  // We want up to 6 decimals. mills is 4-decimal precision.
+  // For the tooltip, show the exact mills value as a dollar string.
+  const whole = Math.floor(m / 10000);
+  const frac = m - whole * 10000;
+  return `$${whole}.${String(frac).padStart(4, "0")}`;
+}
+
+// Per-unit display helper: returns "—" for null, "$X.XXXX" otherwise.
+function formatPerUnit(millsValue: number | null): string {
+  if (millsValue === null) return "—";
+  return formatMills(Math.max(0, Math.round(millsValue)));
+}
 
 function signedMillsToDollarString(mills: number): string {
   if (mills < 0) return `-${millsToDollarString(-mills)}`;
@@ -2025,173 +2063,206 @@ function LineRow(props: LineRowProps) {
           )
         : 0;
 
+  // Per-unit values (mills) for header microcopy.
+  const qty = Number(line.orderQty) || 0;
+  const productPerUnit = perUnitMillsFromCents(totalProduct, qty);
+  const packagingPerUnit = perUnitMillsFromCents(packaging, qty);
+  const totalPerUnit = perUnitMillsFromCents(totalProduct + packaging, qty);
+
   return (
-    <div className="grid grid-cols-12 gap-2 items-start">
-      {/* Product typeahead */}
-      <div className="col-span-12 md:col-span-6">
-        <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-          <PopoverTrigger asChild>
-            <Button
-              variant="outline"
-              className="w-full justify-between h-10 font-normal"
-            >
-              <span className="truncate text-left">
-                {line.productId
-                  ? `${line.sku ? `${line.sku} · ` : ""}${line.productName || "(unnamed)"}`
-                  : "Search product..."}
-              </span>
-              <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-            <Command shouldFilter={false}>
-              <CommandInput
-                placeholder="Search name or SKU..."
-                value={productSearch}
-                onValueChange={setProductSearch}
-              />
-              <CommandList>
-                <CommandEmpty>No products found.</CommandEmpty>
-                {vendorId && inCatalog.length > 0 && (
-                  <CommandGroup heading={`In ${vendorName ?? "vendor"}'s catalog`}>
-                    {inCatalog.slice(0, 30).map((row) => {
-                      const key = `cat-${row.vendorProductId}`;
-                      const hints: string[] = [];
-                      if (row.packSize && row.packSize > 1) hints.push(`pack ${row.packSize}`);
-                      if (row.moq && row.moq > 1) hints.push(`MOQ ${row.moq}`);
-                      return (
-                        <CommandItem
-                          key={key}
-                          value={key}
-                          onSelect={() => {
-                            onChange({
-                              productId: row.productId,
-                              productVariantId: row.productVariantId ?? null,
-                              productName: row.productName,
-                              sku: row.sku ?? null,
-                              // From catalog: authoritative cost. Prefer
-                              // mills; fall back to cents × 100 for legacy
-                              // rows where unit_cost_mills is still NULL.
-                              unitCostMills:
+    <TooltipProvider delayDuration={200}>
+      <div className="grid grid-cols-12 gap-2 items-start">
+        {/* Product typeahead — ~30% on desktop */}
+        <div className="col-span-12 md:col-span-4">
+          <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className="w-full justify-between h-10 font-normal"
+              >
+                <span className="truncate text-left">
+                  {line.productId
+                    ? `${line.sku ? `${line.sku} · ` : ""}${line.productName || "(unnamed)"}`
+                    : "Search product..."}
+                </span>
+                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+              <Command shouldFilter={false}>
+                <CommandInput
+                  placeholder="Search name or SKU..."
+                  value={productSearch}
+                  onValueChange={setProductSearch}
+                />
+                <CommandList>
+                  <CommandEmpty>No products found.</CommandEmpty>
+                  {vendorId && inCatalog.length > 0 && (
+                    <CommandGroup heading={`In ${vendorName ?? "vendor"}'s catalog`}>
+                      {inCatalog.slice(0, 30).map((row) => {
+                        const key = `cat-${row.vendorProductId}`;
+                        const hints: string[] = [];
+                        if (row.packSize && row.packSize > 1) hints.push(`pack ${row.packSize}`);
+                        if (row.moq && row.moq > 1) hints.push(`MOQ ${row.moq}`);
+                        return (
+                          <CommandItem
+                            key={key}
+                            value={key}
+                            onSelect={() => {
+                              onChange({
+                                productId: row.productId,
+                                productVariantId: row.productVariantId ?? null,
+                                productName: row.productName,
+                                sku: row.sku ?? null,
+                                // From catalog: authoritative cost. Prefer
+                                // mills; fall back to cents × 100 for legacy
+                                // rows where unit_cost_mills is still NULL.
+                                unitCostMills:
+                                  typeof row.unitCostMills === "number"
+                                    ? row.unitCostMills
+                                    : centsToMills(row.unitCostCents),
+                                vendorProductId: row.vendorProductId,
+                                catalogOriginallyAbsent: false,
+                              });
+                              setPopoverOpen(false);
+                              setProductSearch("");
+                            }}
+                          >
+                            <span
+                              className="mr-2 text-amber-500"
+                              aria-label="In vendor catalog"
+                              title="In vendor catalog"
+                            >
+                              ★
+                            </span>
+                            <span className="font-mono text-xs mr-2 text-muted-foreground">
+                              {row.sku ?? "—"}
+                            </span>
+                            <span className="truncate flex-1">
+                              {row.productName}
+                              {row.variantName ? ` · ${row.variantName}` : ""}
+                            </span>
+                            <span className="ml-2 text-xs tabular-nums">
+                              {formatMills(
                                 typeof row.unitCostMills === "number"
                                   ? row.unitCostMills
                                   : centsToMills(row.unitCostCents),
-                              vendorProductId: row.vendorProductId,
-                              catalogOriginallyAbsent: false,
-                            });
-                            setPopoverOpen(false);
-                            setProductSearch("");
-                          }}
-                        >
-                          <span
-                            className="mr-2 text-amber-500"
-                            aria-label="In vendor catalog"
-                            title="In vendor catalog"
-                          >
-                            ★
-                          </span>
-                          <span className="font-mono text-xs mr-2 text-muted-foreground">
-                            {row.sku ?? "—"}
-                          </span>
-                          <span className="truncate flex-1">
-                            {row.productName}
-                            {row.variantName ? ` · ${row.variantName}` : ""}
-                          </span>
-                          <span className="ml-2 text-xs tabular-nums">
-                            {formatMills(
-                              typeof row.unitCostMills === "number"
-                                ? row.unitCostMills
-                                : centsToMills(row.unitCostCents),
-                            )}
-                            {hints.length > 0 && (
-                              <span className="text-muted-foreground"> · {hints.join(", ")}</span>
-                            )}
-                          </span>
-                        </CommandItem>
-                      );
-                    })}
-                  </CommandGroup>
-                )}
-                {outOfCatalog.length > 0 && (
-                  <CommandGroup
-                    heading={
-                      vendorId
-                        ? "All products (not in catalog)"
-                        : "All products"
-                    }
-                  >
-                    {outOfCatalog.slice(0, 30).map((row) => {
-                      const key = `pv-${row.productId}-${row.productVariantId ?? "null"}`;
-                      return (
-                        <CommandItem
-                          key={key}
-                          value={key}
-                          onSelect={() => {
-                            onChange({
-                              productId: row.productId,
-                              productVariantId: row.productVariantId ?? null,
-                              productName: row.productName,
-                              sku: row.sku ?? null,
-                              // Not in catalog. Leave the existing unit cost
-                              // (blank/zero) — the user will type it, and it
-                              // becomes the "suggest-at-save" candidate cost.
-                              vendorProductId: null,
-                              catalogOriginallyAbsent: vendorId ? true : null,
-                            });
-                            setPopoverOpen(false);
-                            setProductSearch("");
-                          }}
-                        >
-                          <span className="font-mono text-xs mr-2 text-muted-foreground">
-                            {row.sku ?? "—"}
-                          </span>
-                          <span className="truncate flex-1">
-                            {row.productName}
-                            {row.variantName ? ` · ${row.variantName}` : ""}
-                          </span>
-                          {vendorId && (
-                            <span className="ml-2 text-[10px] text-muted-foreground italic">
-                              not in catalog
+                              )}
+                              {hints.length > 0 && (
+                                <span className="text-muted-foreground"> · {hints.join(", ")}</span>
+                              )}
                             </span>
-                          )}
-                        </CommandItem>
-                      );
-                    })}
-                  </CommandGroup>
-                )}
-              </CommandList>
-            </Command>
-          </PopoverContent>
-        </Popover>
-      </div>
+                          </CommandItem>
+                        );
+                      })}
+                    </CommandGroup>
+                  )}
+                  {outOfCatalog.length > 0 && (
+                    <CommandGroup
+                      heading={
+                        vendorId
+                          ? "All products (not in catalog)"
+                          : "All products"
+                      }
+                    >
+                      {outOfCatalog.slice(0, 30).map((row) => {
+                        const key = `pv-${row.productId}-${row.productVariantId ?? "null"}`;
+                        return (
+                          <CommandItem
+                            key={key}
+                            value={key}
+                            onSelect={() => {
+                              onChange({
+                                productId: row.productId,
+                                productVariantId: row.productVariantId ?? null,
+                                productName: row.productName,
+                                sku: row.sku ?? null,
+                                // Not in catalog. Leave the existing unit cost
+                                // (blank/zero) — the user will type it, and it
+                                // becomes the "suggest-at-save" candidate cost.
+                                vendorProductId: null,
+                                catalogOriginallyAbsent: vendorId ? true : null,
+                              });
+                              setPopoverOpen(false);
+                              setProductSearch("");
+                            }}
+                          >
+                            <span className="font-mono text-xs mr-2 text-muted-foreground">
+                              {row.sku ?? "—"}
+                            </span>
+                            <span className="truncate flex-1">
+                              {row.productName}
+                              {row.variantName ? ` · ${row.variantName}` : ""}
+                            </span>
+                            {vendorId && (
+                              <span className="ml-2 text-[10px] text-muted-foreground italic">
+                                not in catalog
+                              </span>
+                            )}
+                          </CommandItem>
+                        );
+                      })}
+                    </CommandGroup>
+                  )}
+                </CommandList>
+              </Command>
+            </PopoverContent>
+          </Popover>
+        </div>
 
-      {/* Qty */}
-      <div className="col-span-4 md:col-span-2">
-        <QuantityInput
-          qty={line.orderQty}
-          onChangeQty={(q) => onChange({ orderQty: q })}
-          ariaLabel={`Line ${idx + 1} quantity`}
-        />
-      </div>
+        {/* Qty */}
+        <div className="col-span-4 md:col-span-1" style={{ minWidth: 80 }}>
+          <QuantityInput
+            qty={line.orderQty}
+            onChangeQty={(q) => onChange({ orderQty: q })}
+            ariaLabel={`Line ${idx + 1} quantity`}
+          />
+        </div>
 
-      {/* Total product cost + packaging (Spec F Phase 1) */}
-      <div className="col-span-4 md:col-span-2 space-y-1">
-        <div>
+        {/* Product Cost input — header with per-unit microcopy */}
+        <div className="col-span-4 md:col-span-2" style={{ minWidth: 110 }}>
+          <div className="text-[10px] text-muted-foreground mb-0.5 truncate">
+            Product Cost{' '}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="cursor-help">
+                  ({formatPerUnit(productPerUnit)}/unit)
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="top" sideOffset={4} className="text-xs">
+                Full precision: {perUnitFullPrecisionDollars(productPerUnit)}/unit
+              </TooltipContent>
+            </Tooltip>
+          </div>
           <DollarInput
             cents={line.totalProductCostCents ?? 0}
             onChangeCents={(c) => {
               const totalProductCostCents = Math.max(0, c);
-              const qty = line.orderQty || 1;
+              const q = line.orderQty || 1;
               // Derive unitCostMills from total / qty for display + back-compat.
               const unitCostMills =
-                qty > 0 ? Math.round((totalProductCostCents * 100) / qty) : 0;
+                q > 0 ? Math.round((totalProductCostCents * 100) / q) : 0;
               onChange({ totalProductCostCents, unitCostMills });
             }}
             ariaLabel={`Line ${idx + 1} total product cost`}
           />
-          <span className="text-[10px] text-muted-foreground">Total cost</span>
         </div>
-        <div>
+
+        {/* Packaging Cost input — header with per-unit microcopy */}
+        <div className="col-span-4 md:col-span-2" style={{ minWidth: 110 }}>
+          <div className="text-[10px] text-muted-foreground mb-0.5 truncate">
+            Packaging{' '}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="cursor-help">
+                  ({formatPerUnit(packagingPerUnit)}/unit)
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="top" sideOffset={4} className="text-xs">
+                Full precision: {perUnitFullPrecisionDollars(packagingPerUnit)}/unit
+              </TooltipContent>
+            </Tooltip>
+          </div>
           <DollarInput
             cents={line.packagingCostCents ?? 0}
             onChangeCents={(c) => {
@@ -2200,34 +2271,40 @@ function LineRow(props: LineRowProps) {
             }}
             ariaLabel={`Line ${idx + 1} packaging cost`}
           />
-          <span className="text-[10px] text-muted-foreground">Packaging</span>
         </div>
-      </div>
 
-      {/* Computed unit cost + line total */}
-      <div className="col-span-3 md:col-span-1 text-right text-sm pt-2 space-y-1">
-        <div className="font-mono" title="Computed from total ÷ qty">
-          {(line.orderQty > 0 && (line.totalProductCostCents ?? 0) > 0)
-            ? formatMills(Math.round(((line.totalProductCostCents ?? 0) * 100) / line.orderQty))
-            : "$0.0000"}
+        {/* Total Cost display — read-only, header with blended per-unit */}
+        <div className="col-span-3 md:col-span-2 text-right" style={{ minWidth: 110 }}>
+          <div className="text-[10px] text-muted-foreground mb-0.5 truncate text-right">
+            Total Cost{' '}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="cursor-help">
+                  ({formatPerUnit(totalPerUnit)}/unit)
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="top" sideOffset={4} className="text-xs">
+                Full precision: {perUnitFullPrecisionDollars(totalPerUnit)}/unit
+              </TooltipContent>
+            </Tooltip>
+          </div>
+          <div className="font-mono font-medium text-sm pt-1.5" data-testid={`line-total-${idx}`}>
+            {formatCents(lineTotalCents)}
+          </div>
         </div>
-        <div className="text-[10px] text-muted-foreground">unit (est.)</div>
-        <div className="font-mono font-medium pt-1">
-          {formatCents(lineTotalCents)}
-        </div>
-      </div>
 
-      {/* Remove */}
-      <div className="col-span-1 text-right">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onRemove}
-          aria-label={`Remove line ${idx + 1}`}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
+        {/* Remove */}
+        <div className="col-span-1 text-right">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onRemove}
+            aria-label={`Remove line ${idx + 1}`}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
