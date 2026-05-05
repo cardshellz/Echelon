@@ -47,9 +47,11 @@ interface WalletSetupSummaryRow {
   available_balance_cents: string | number;
   pending_balance_cents: string | number;
   active_funding_method_count: string | number;
+  active_stripe_funding_method_count: string | number;
   auto_reload_enabled: boolean;
   auto_reload_funding_method_id: number | null;
   auto_reload_funding_method_active: boolean;
+  auto_reload_funding_method_ready: boolean;
 }
 
 export class PgDropshipVendorProvisioningRepository implements DropshipVendorProvisioningRepository {
@@ -195,9 +197,22 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
            COALESCE(wa.available_balance_cents, 0) AS available_balance_cents,
            COALESCE(wa.pending_balance_cents, 0) AS pending_balance_cents,
            COUNT(fm.id) FILTER (WHERE fm.status = 'active') AS active_funding_method_count,
+           COUNT(fm.id) FILTER (
+             WHERE fm.status = 'active'
+               AND fm.rail IN ('stripe_card', 'stripe_ach')
+               AND fm.provider_customer_id IS NOT NULL
+               AND fm.provider_payment_method_id IS NOT NULL
+           ) AS active_stripe_funding_method_count,
            COALESCE(ar.enabled, false) AS auto_reload_enabled,
            ar.funding_method_id AS auto_reload_funding_method_id,
-           COALESCE(ar_fm.status = 'active', false) AS auto_reload_funding_method_active
+           COALESCE(ar_fm.status = 'active', false) AS auto_reload_funding_method_active,
+           COALESCE(
+             ar_fm.status = 'active'
+               AND ar_fm.rail IN ('stripe_card', 'stripe_ach')
+               AND ar_fm.provider_customer_id IS NOT NULL
+               AND ar_fm.provider_payment_method_id IS NOT NULL,
+             false
+           ) AS auto_reload_funding_method_ready
          FROM (SELECT $1::integer AS vendor_id) AS v
          LEFT JOIN dropship.dropship_wallet_accounts wa
            ON wa.vendor_id = v.vendor_id
@@ -208,7 +223,15 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
          LEFT JOIN dropship.dropship_funding_methods ar_fm
            ON ar_fm.id = ar.funding_method_id
           AND ar_fm.vendor_id = v.vendor_id
-         GROUP BY wa.available_balance_cents, wa.pending_balance_cents, ar.enabled, ar.funding_method_id, ar_fm.status`,
+         GROUP BY
+           wa.available_balance_cents,
+           wa.pending_balance_cents,
+           ar.enabled,
+           ar.funding_method_id,
+           ar_fm.status,
+           ar_fm.rail,
+           ar_fm.provider_customer_id,
+           ar_fm.provider_payment_method_id`,
         [vendorId],
       );
       const row = result.rows[0];
@@ -216,9 +239,11 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
         availableBalanceCents: Number(row?.available_balance_cents ?? 0),
         pendingBalanceCents: Number(row?.pending_balance_cents ?? 0),
         activeFundingMethodCount: Number(row?.active_funding_method_count ?? 0),
+        activeStripeFundingMethodCount: Number(row?.active_stripe_funding_method_count ?? 0),
         autoReloadEnabled: row?.auto_reload_enabled === true,
         autoReloadFundingMethodId: row?.auto_reload_funding_method_id ?? null,
         autoReloadFundingMethodActive: row?.auto_reload_funding_method_active === true,
+        autoReloadFundingMethodReady: row?.auto_reload_funding_method_ready === true,
       };
     } finally {
       client.release();

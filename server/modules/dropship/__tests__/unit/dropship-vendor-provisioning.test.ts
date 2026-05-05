@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Pool } from "pg";
 import type {
   DropshipEntitlementPort,
   DropshipEntitlementSnapshot,
@@ -17,6 +18,11 @@ import {
   type DropshipWalletSetupSummary,
 } from "../../application/dropship-vendor-provisioning-service";
 import { resolveDropshipVendorProvisioningStatus } from "../../domain/vendor-provisioning";
+import { PgDropshipVendorProvisioningRepository } from "../../infrastructure/dropship-vendor-provisioning.repository";
+
+vi.hoisted(() => {
+  process.env.DATABASE_URL = process.env.DATABASE_URL ?? "postgres://test:test@localhost:5432/test";
+});
 
 const now = new Date("2026-05-01T12:00:00.000Z");
 
@@ -56,6 +62,43 @@ describe("dropship vendor provisioning status policy", () => {
       currentStatus: "paused",
       entitlementStatus: "active",
     })).toBe("paused");
+  });
+});
+
+describe("PgDropshipVendorProvisioningRepository", () => {
+  it("maps Stripe-ready wallet funding and auto-reload readiness", async () => {
+    const release = vi.fn();
+    const query = vi.fn(async () => ({
+      rows: [{
+        available_balance_cents: "0",
+        pending_balance_cents: "2500",
+        active_funding_method_count: "2",
+        active_stripe_funding_method_count: "1",
+        auto_reload_enabled: true,
+        auto_reload_funding_method_id: 8,
+        auto_reload_funding_method_active: true,
+        auto_reload_funding_method_ready: true,
+      }],
+    }));
+    const connect = vi.fn(async () => ({ query, release }));
+    const repository = new PgDropshipVendorProvisioningRepository({ connect } as unknown as Pool);
+
+    const result = await repository.getWalletSetupSummary(10);
+
+    expect(String(query.mock.calls[0]?.[0])).toContain("active_stripe_funding_method_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("auto_reload_funding_method_ready");
+    expect(query.mock.calls[0]?.[1]).toEqual([10]);
+    expect(result).toMatchObject({
+      availableBalanceCents: 0,
+      pendingBalanceCents: 2500,
+      activeFundingMethodCount: 2,
+      activeStripeFundingMethodCount: 1,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: true,
+    });
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -213,9 +256,11 @@ describe("DropshipVendorProvisioningService", () => {
       availableBalanceCents: 0,
       pendingBalanceCents: 2500,
       activeFundingMethodCount: 1,
+      activeStripeFundingMethodCount: 0,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: false,
     };
 
     const state = await service.getOnboardingState("member-1");
@@ -225,7 +270,9 @@ describe("DropshipVendorProvisioningService", () => {
     expect(state.catalog.hasVendorSelection).toBe(false);
     expect(state.wallet).toMatchObject({
       activeFundingMethodCount: 1,
-      autoReloadConfigured: true,
+      activeStripeFundingMethodCount: 0,
+      hasStripeReadyFundingMethod: false,
+      autoReloadConfigured: false,
       hasSpendableBalance: false,
       walletReady: false,
     });
@@ -238,24 +285,60 @@ describe("DropshipVendorProvisioningService", () => {
     ]);
   });
 
-  it("marks wallet onboarding complete only when funding, auto-reload, and spendable balance are present", async () => {
+  it("marks wallet onboarding complete when Stripe-ready funding and auto-reload are present", async () => {
     repository.vendor = makeVendorProfile({
       status: "active",
     });
     repository.walletSetupSummary = {
-      availableBalanceCents: 10000,
+      availableBalanceCents: 0,
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
+      activeStripeFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: true,
     };
 
     const state = await service.getOnboardingState("member-1");
 
+    expect(state.wallet).toMatchObject({
+      hasSpendableBalance: false,
+      hasStripeReadyFundingMethod: true,
+      autoReloadConfigured: true,
+      walletReady: true,
+    });
     expect(state.wallet.walletReady).toBe(true);
     expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({
       status: "complete",
+    });
+  });
+
+  it("keeps wallet onboarding incomplete when only non-Stripe funding is active", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "active",
+    });
+    repository.walletSetupSummary = {
+      availableBalanceCents: 0,
+      pendingBalanceCents: 0,
+      activeFundingMethodCount: 1,
+      activeStripeFundingMethodCount: 0,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: false,
+    };
+
+    const state = await service.getOnboardingState("member-1");
+
+    expect(state.wallet).toMatchObject({
+      hasActiveFundingMethod: true,
+      hasStripeReadyFundingMethod: false,
+      autoReloadConfigured: false,
+      walletReady: false,
+    });
+    expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({
+      status: "incomplete",
     });
   });
 
@@ -296,9 +379,11 @@ describe("DropshipVendorProvisioningService", () => {
       availableBalanceCents: 10000,
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
+      activeStripeFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: true,
     };
 
     const state = await service.activateOnboardingForMember("member-1");
@@ -379,9 +464,11 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
     availableBalanceCents: 0,
     pendingBalanceCents: 0,
     activeFundingMethodCount: 0,
+    activeStripeFundingMethodCount: 0,
     autoReloadEnabled: true,
     autoReloadFundingMethodId: null,
     autoReloadFundingMethodActive: false,
+    autoReloadFundingMethodReady: false,
   };
   lastProvisionInput: DropshipProvisionVendorRepositoryInput | null = null;
   lastActivationInput: DropshipActivateVendorRepositoryInput | null = null;
