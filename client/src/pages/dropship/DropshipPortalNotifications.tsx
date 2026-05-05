@@ -146,7 +146,11 @@ export default function DropshipPortalNotifications() {
   }
 
   async function ensurePreferenceProof(): Promise<boolean> {
-    if (hasActivePreferenceProof()) return true;
+    if (hasActivePreferenceProof()) {
+      setEmailCodeSent(false);
+      setVerificationCode("");
+      return true;
+    }
     if (principal?.hasPasskey) {
       return runPreferenceAction("passkey-proof", async () => {
         await verifyPasskeyStepUp("manage_notification_preferences");
@@ -157,6 +161,7 @@ export default function DropshipPortalNotifications() {
       await runPreferenceAction("send-code", async () => {
         await startEmailStepUp("manage_notification_preferences");
         setEmailCodeSent(true);
+        setVerificationCode("");
         setMessage("Verification code sent. Enter it below, then retry the preference change.");
       });
       return false;
@@ -167,12 +172,17 @@ export default function DropshipPortalNotifications() {
       return false;
     }
 
-    return runPreferenceAction("verify-code", async () => {
+    const verified = await runPreferenceAction("verify-code", async () => {
       await verifyEmailStepUp({
         action: "manage_notification_preferences",
         verificationCode,
       });
     });
+    if (verified) {
+      setEmailCodeSent(false);
+      setVerificationCode("");
+    }
+    return verified;
   }
 
   async function runMarkRead(
