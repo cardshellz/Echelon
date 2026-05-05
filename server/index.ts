@@ -1073,12 +1073,15 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             // Rate limit — ShipStation allows ~40 req/min
             await new Promise(r => setTimeout(r, 1000));
           } catch (err: any) {
-            // Per spec: log + skip + DON'T stamp last_reconciled_at so it
-            // gets retried next sweep.
             console.warn(
-              `[ShipStation Reconcile V2] Failed for shipment ${shipmentId} (SS ${ssOrderId}):`,
+              `[ShipStation Reconcile V2] Failed to reconcile order ${row.order_id} / ssOrder ${ssOrderId}:`,
               err?.message,
             );
+            await db.execute(sql`
+              UPDATE wms.outbound_shipments
+              SET last_reconciled_at = NOW()
+              WHERE id = ${shipmentId}
+            `);
           }
         }
 

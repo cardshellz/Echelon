@@ -1116,6 +1116,7 @@ export function createFulfillmentPushService(
     const ourLocationIds = await getOurShopifyLocationIds(
       db,
       order.channel_id ?? null,
+      shipmentId,
     );
 
     if (ourLocationIds.length === 0) {
@@ -2009,14 +2010,18 @@ async function tryReadPathA(
 async function getOurShopifyLocationIds(
   db: any,
   channelId: number | null,
+  shipmentId: number,
 ): Promise<string[]> {
   const ids: string[] = [];
 
   try {
     const whResult: any = await db.execute(sql`
-      SELECT shopify_location_id
-      FROM warehouse.warehouses
-      WHERE shopify_location_id IS NOT NULL
+      SELECT w.shopify_location_id
+      FROM wms.outbound_shipments os
+      JOIN wms.orders ord ON ord.id = os.order_id
+      JOIN warehouse.warehouses w ON w.id = ord.warehouse_id
+      WHERE os.id = ${shipmentId}
+        AND w.shopify_location_id IS NOT NULL
     `);
     for (const r of whResult?.rows ?? []) {
       const id = r?.shopify_location_id;
@@ -2032,8 +2037,8 @@ async function getOurShopifyLocationIds(
     try {
       const chResult: any = await db.execute(sql`
         SELECT shopify_location_id
-        FROM channels.channels
-        WHERE id = ${channelId}
+        FROM channels.channel_connections
+        WHERE channel_id = ${channelId}
         LIMIT 1
       `);
       const chId = chResult?.rows?.[0]?.shopify_location_id;
