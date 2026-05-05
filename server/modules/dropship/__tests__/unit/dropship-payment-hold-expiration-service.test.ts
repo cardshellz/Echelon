@@ -3,6 +3,7 @@ import {
   DropshipPaymentHoldExpirationService,
   type DropshipExpiredPaymentHoldRecord,
   type DropshipLogEvent,
+  type DropshipNotificationSenderInput,
   type DropshipPaymentHoldExpirationRepository,
 } from "../../application";
 
@@ -12,9 +13,11 @@ const expiredAt = new Date("2026-05-01T17:59:00.000Z");
 describe("DropshipPaymentHoldExpirationService", () => {
   it("expires due payment holds with deterministic worker context", async () => {
     const repository = new FakePaymentHoldExpirationRepository([makeExpiredHold()]);
+    const notificationSender = new FakeNotificationSender();
     const logs: DropshipLogEvent[] = [];
     const service = new DropshipPaymentHoldExpirationService({
       repository,
+      notificationSender,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -46,6 +49,49 @@ describe("DropshipPaymentHoldExpirationService", () => {
         intakeIds: [1],
       },
     });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_order_payment_hold_expired",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship order payment hold expired",
+      idempotencyKey: "payment-hold-expiration:1:expired",
+      payload: {
+        intakeId: 1,
+        storeConnectionId: 22,
+        externalOrderId: "EXT-1",
+        paymentHoldExpiresAt: expiredAt.toISOString(),
+        cancellationStatus: "payment_hold_expired",
+      },
+    });
+  });
+
+  it("logs notification failures without undoing expired payment holds", async () => {
+    const repository = new FakePaymentHoldExpirationRepository([makeExpiredHold()]);
+    const notificationSender = new FakeNotificationSender(new Error("email unavailable"));
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipPaymentHoldExpirationService({
+      repository,
+      notificationSender,
+      clock: { now: () => now },
+      logger: {
+        info: (event) => logs.push(event),
+        warn: (event) => logs.push(event),
+        error: (event) => logs.push(event),
+      },
+    });
+
+    const result = await service.expireExpiredPaymentHolds({
+      workerId: "worker-1",
+      limit: 25,
+    });
+
+    expect(result.expiredCount).toBe(1);
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(logs.some((event) => (
+      event.code === "DROPSHIP_PAYMENT_HOLD_EXPIRATION_NOTIFICATION_FAILED"
+        && event.context?.intakeId === 1
+    ))).toBe(true);
   });
 
   it("uses the default batch limit when none is supplied", async () => {
@@ -87,6 +133,19 @@ class FakePaymentHoldExpirationRepository implements DropshipPaymentHoldExpirati
   ): Promise<DropshipExpiredPaymentHoldRecord[]> {
     this.lastInput = input;
     return this.expired;
+  }
+}
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+
+  constructor(private readonly error: Error | null = null) {}
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
+    if (this.error) {
+      throw this.error;
+    }
   }
 }
 

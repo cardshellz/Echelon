@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
 
 const DEFAULT_PAYMENT_HOLD_EXPIRATION_LIMIT = 100;
 
@@ -35,6 +41,7 @@ export class DropshipPaymentHoldExpirationService {
   constructor(
     private readonly deps: {
       repository: DropshipPaymentHoldExpirationRepository;
+      notificationSender?: DropshipNotificationSender;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -57,6 +64,35 @@ export class DropshipPaymentHoldExpirationService {
           expiredCount: expired.length,
           workerId: parsed.workerId,
           intakeIds: expired.map((hold) => hold.intakeId),
+        },
+      });
+    }
+
+    for (const hold of expired) {
+      await sendDropshipNotificationSafely(this.deps, {
+        vendorId: hold.vendorId,
+        eventType: "dropship_order_payment_hold_expired",
+        critical: true,
+        channels: ["email", "in_app"],
+        title: "Dropship order payment hold expired",
+        message: `Order ${hold.externalOrderId} payment hold expired and marketplace cancellation is being processed.`,
+        payload: {
+          intakeId: hold.intakeId,
+          vendorId: hold.vendorId,
+          storeConnectionId: hold.storeConnectionId,
+          externalOrderId: hold.externalOrderId,
+          paymentHoldExpiresAt: hold.paymentHoldExpiresAt.toISOString(),
+          cancellationStatus: hold.cancellationStatus,
+        },
+        idempotencyKey: `payment-hold-expiration:${hold.intakeId}:expired`,
+      }, {
+        code: "DROPSHIP_PAYMENT_HOLD_EXPIRATION_NOTIFICATION_FAILED",
+        message: "Dropship payment hold expiration notification failed after the hold was cancelled.",
+        context: {
+          intakeId: hold.intakeId,
+          vendorId: hold.vendorId,
+          storeConnectionId: hold.storeConnectionId,
+          externalOrderId: hold.externalOrderId,
         },
       });
     }
