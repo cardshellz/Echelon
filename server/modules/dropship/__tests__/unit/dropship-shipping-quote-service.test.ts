@@ -120,7 +120,7 @@ describe("DropshipShippingQuoteService", () => {
     expect(repository.snapshots[0]?.quotePayload).toMatchObject({
       policies: {
         shippingMarkup: { source: "config", markupBps: 1000 },
-        insurancePool: { source: "default", feeBps: 200 },
+        insurancePool: { source: "config", feeBps: 200 },
       },
       providers: {
         cartonization: { name: "fake_cartonization" },
@@ -166,6 +166,32 @@ describe("DropshipShippingQuoteService", () => {
       idempotencyKey: "quote-003",
     })).rejects.toMatchObject({ code: "DROPSHIP_SHIPPING_STORE_BLOCKED" });
   });
+
+  it("blocks quotes when the active shipping markup policy is missing", async () => {
+    repository.markupPolicy = null;
+
+    await expect(service.quoteForMember("member-1", {
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", postalCode: "10001" },
+      items: [{ productVariantId: 101, quantity: 1 }],
+      idempotencyKey: "quote-004",
+    })).rejects.toMatchObject({ code: "DROPSHIP_SHIPPING_MARKUP_POLICY_REQUIRED" });
+    expect(repository.snapshots).toHaveLength(0);
+  });
+
+  it("blocks quotes when the active insurance pool policy is missing", async () => {
+    repository.insurancePolicy = null;
+
+    await expect(service.quoteForMember("member-1", {
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", postalCode: "10001" },
+      items: [{ productVariantId: 101, quantity: 1 }],
+      idempotencyKey: "quote-005",
+    })).rejects.toMatchObject({ code: "DROPSHIP_SHIPPING_INSURANCE_POLICY_REQUIRED" });
+    expect(repository.snapshots).toHaveLength(0);
+  });
 });
 
 class FakeVendorProvisioningService {
@@ -195,7 +221,13 @@ class FakeShippingQuoteRepository implements DropshipShippingQuoteRepository {
     minMarkupCents: null,
     maxMarkupCents: null,
   };
-  insurancePolicy: DropshipInsurancePoolPolicy | null = null;
+  insurancePolicy: DropshipInsurancePoolPolicy | null = {
+    id: 8,
+    source: "config",
+    feeBps: 200,
+    minFeeCents: null,
+    maxFeeCents: null,
+  };
   snapshots: DropshipShippingQuoteSnapshotRecord[] = [];
   lastCreateInput: CreateDropshipShippingQuoteSnapshotInput | null = null;
 

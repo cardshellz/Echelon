@@ -1,13 +1,11 @@
 import { createHash } from "crypto";
-import {
-  DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS,
-  type DropshipStoreConnectionStatus,
-  type DropshipVendorStatus,
+import type {
+  DropshipStoreConnectionStatus,
+  DropshipVendorStatus,
 } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
 import {
   DROPSHIP_DEFAULT_SHIPPING_CURRENCY,
-  DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS,
   calculateBasisPointsFeeCents,
   normalizeDropshipQuoteItems,
   normalizeDropshipShippingDestination,
@@ -224,8 +222,16 @@ export class DropshipShippingQuoteService {
       this.deps.repository.getActiveShippingMarkupPolicy(quotedAt),
       this.deps.repository.getActiveInsurancePoolPolicy(quotedAt),
     ]);
-    const resolvedMarkupPolicy = markupPolicy ?? defaultShippingMarkupPolicy();
-    const resolvedInsurancePolicy = insurancePolicy ?? defaultInsurancePoolPolicy();
+    const resolvedMarkupPolicy = requireActiveShippingMarkupPolicy(markupPolicy, {
+      vendorId: parsed.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      warehouseId: parsed.warehouseId,
+    });
+    const resolvedInsurancePolicy = requireActiveInsurancePoolPolicy(insurancePolicy, {
+      vendorId: parsed.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      warehouseId: parsed.warehouseId,
+    });
     const markupCents = calculateBasisPointsFeeCents(baseRateCents, {
       bps: resolvedMarkupPolicy.markupBps,
       fixedCents: resolvedMarkupPolicy.fixedMarkupCents,
@@ -398,30 +404,33 @@ function sumCents(values: readonly number[]): number {
   return values.reduce((sum, value) => sum + value, 0);
 }
 
-function defaultShippingMarkupPolicy(): DropshipShippingMarkupPolicy {
-  return {
-    id: null,
-    source: "default",
-    markupBps: DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS,
-    fixedMarkupCents: 0,
-    minMarkupCents: null,
-    maxMarkupCents: null,
-  };
-}
-
-function defaultInsurancePoolPolicy(): DropshipInsurancePoolPolicy {
-  return {
-    id: null,
-    source: "default",
-    feeBps: DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS,
-    minFeeCents: null,
-    maxFeeCents: null,
-  };
-}
-
 function resolveSnapshotRateTableId(rateMatches: readonly DropshipShippingRateMatch[]): number | null {
   const uniqueRateTableIds = new Set(rateMatches.map((rate) => rate.rateTableId));
   return uniqueRateTableIds.size === 1 ? rateMatches[0]?.rateTableId ?? null : null;
+}
+
+function requireActiveShippingMarkupPolicy(
+  policy: DropshipShippingMarkupPolicy | null,
+  context: { vendorId: number; storeConnectionId: number; warehouseId: number },
+): DropshipShippingMarkupPolicy {
+  if (policy) return policy;
+  throw new DropshipError(
+    "DROPSHIP_SHIPPING_MARKUP_POLICY_REQUIRED",
+    "Active dropship shipping markup policy is required before quoting shipping.",
+    context,
+  );
+}
+
+function requireActiveInsurancePoolPolicy(
+  policy: DropshipInsurancePoolPolicy | null,
+  context: { vendorId: number; storeConnectionId: number; warehouseId: number },
+): DropshipInsurancePoolPolicy {
+  if (policy) return policy;
+  throw new DropshipError(
+    "DROPSHIP_SHIPPING_INSURANCE_POLICY_REQUIRED",
+    "Active dropship shipping insurance pool policy is required before quoting shipping.",
+    context,
+  );
 }
 
 function buildQuotePayload(input: {

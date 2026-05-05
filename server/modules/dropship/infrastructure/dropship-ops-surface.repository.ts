@@ -864,18 +864,18 @@ function buildDogfoodChecks(input: {
     {
       key: "shipping_markup_policy",
       label: "Shipping markup policy",
-      status: input.activeShippingMarkupPolicyCount > 0 ? "ready" : "warning",
+      status: input.activeShippingMarkupPolicyCount > 0 ? "ready" : "blocked",
       message: input.activeShippingMarkupPolicyCount > 0
         ? `${input.activeShippingMarkupPolicyCount} active shipping markup policy record(s).`
-        : "No active shipping markup policy is configured; quote defaults will be used.",
+        : "No active shipping markup policy is configured; quotes cannot use implicit fee defaults.",
     },
     {
       key: "shipping_insurance_policy",
       label: "Shipping insurance policy",
-      status: input.activeShippingInsurancePolicyCount > 0 ? "ready" : "warning",
+      status: input.activeShippingInsurancePolicyCount > 0 ? "ready" : "blocked",
       message: input.activeShippingInsurancePolicyCount > 0
         ? `${input.activeShippingInsurancePolicyCount} active insurance policy record(s).`
-        : "No active insurance policy is configured; quote defaults will be used.",
+        : "No active insurance policy is configured; quotes cannot use implicit insurance-pool defaults.",
     },
     {
       key: "listing_config",
