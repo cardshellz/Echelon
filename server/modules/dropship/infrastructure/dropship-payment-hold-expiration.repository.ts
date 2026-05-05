@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type {
+  DropshipExpiringPaymentHoldRecord,
   DropshipExpiredPaymentHoldRecord,
   DropshipPaymentHoldExpirationRepository,
 } from "../application/dropship-payment-hold-expiration-service";
@@ -19,6 +20,26 @@ interface ExpiredPaymentHoldRow {
 
 export class PgDropshipPaymentHoldExpirationRepository implements DropshipPaymentHoldExpirationRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  async listExpiringPaymentHolds(input: {
+    now: Date;
+    warningWindowMinutes: number;
+    limit: number;
+  }): Promise<DropshipExpiringPaymentHoldRecord[]> {
+    const result = await this.dbPool.query<ExpiredPaymentHoldRow>(
+      `SELECT id, vendor_id, store_connection_id, external_order_id,
+              payment_hold_expires_at, cancellation_status
+       FROM dropship.dropship_order_intake
+       WHERE status = 'payment_hold'
+         AND payment_hold_expires_at IS NOT NULL
+         AND payment_hold_expires_at > $1
+         AND payment_hold_expires_at <= $1 + ($2::text)::interval
+       ORDER BY payment_hold_expires_at ASC, id ASC
+       LIMIT $3`,
+      [input.now, `${input.warningWindowMinutes} minutes`, input.limit],
+    );
+    return result.rows.map(mapExpiringPaymentHoldRow);
+  }
 
   async expirePaymentHolds(input: {
     now: Date;
@@ -109,6 +130,16 @@ function mapExpiredPaymentHoldRow(row: ExpiredPaymentHoldRow): DropshipExpiredPa
     externalOrderId: row.external_order_id,
     paymentHoldExpiresAt: row.payment_hold_expires_at,
     cancellationStatus: PAYMENT_HOLD_EXPIRED_STATUS,
+  };
+}
+
+function mapExpiringPaymentHoldRow(row: ExpiredPaymentHoldRow): DropshipExpiringPaymentHoldRecord {
+  return {
+    intakeId: row.id,
+    vendorId: row.vendor_id,
+    storeConnectionId: row.store_connection_id,
+    externalOrderId: row.external_order_id,
+    paymentHoldExpiresAt: row.payment_hold_expires_at,
   };
 }
 
