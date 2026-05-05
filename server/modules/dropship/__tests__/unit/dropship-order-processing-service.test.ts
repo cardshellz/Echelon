@@ -4,6 +4,7 @@ import {
   DropshipOrderProcessingService,
   aggregateQuoteItems,
   buildQuoteDestination,
+  deriveAutoReloadIssueNotificationKey,
   deriveOrderProcessingIdempotencyKey,
   type DropshipNotificationSenderInput,
   type DropshipLogEvent,
@@ -333,11 +334,13 @@ describe("DropshipOrderProcessingService", () => {
       idempotentReplay: false,
     });
     const logs: DropshipLogEvent[] = [];
+    const notificationSender = new FakeNotificationSender();
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: quoteService,
       orderAcceptance: acceptanceService,
       walletAutoReload: new FakeWalletAutoReloadService(new Error("Stripe declined")),
+      notificationSender,
       clock: { now: () => now },
       logger: captureLogger(logs),
     });
@@ -351,6 +354,93 @@ describe("DropshipOrderProcessingService", () => {
     expect(result.outcome).toBe("payment_hold");
     expect(repository.failure).toBeNull();
     expect(logs.some((event) => event.code === "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_FAILED")).toBe(true);
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_auto_reload_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship auto-reload failed",
+      idempotencyKey: deriveAutoReloadIssueNotificationKey({
+        intakeId: 1,
+        reason: "payment_hold",
+        issueType: "failed",
+        issueCode: "auto_reload_provider_error",
+        issueMessage: "Stripe declined",
+      }),
+      payload: {
+        intakeId: 1,
+        autoReloadReason: "payment_hold",
+        issueType: "failed",
+        issueCode: "auto_reload_provider_error",
+        issueMessage: "Stripe declined",
+      },
+    });
+  });
+
+  it("notifies when payment-hold auto-reload is skipped", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const quoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService(null, {
+      outcome: "payment_hold",
+      intakeId: 1,
+      vendorId: 10,
+      storeConnectionId: 22,
+      shippingQuoteSnapshotId: 33,
+      omsOrderId: null,
+      walletLedgerEntryId: null,
+      economicsSnapshotId: null,
+      totalDebitCents: 7500,
+      currency: "USD",
+      paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      idempotentReplay: false,
+    });
+    const notificationSender = new FakeNotificationSender();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: quoteService,
+      orderAcceptance: acceptanceService,
+      walletAutoReload: new FakeWalletAutoReloadService({
+        outcome: "skipped",
+        vendorId: 10,
+        fundingMethodId: null,
+        amountCents: 0,
+        currency: "USD",
+        providerPaymentIntentId: null,
+        fundingLedgerEntryId: null,
+        fundingStatus: null,
+        skipReason: "funding_method_required",
+        idempotentReplay: false,
+      }),
+      notificationSender,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result.outcome).toBe("payment_hold");
+    expect(logs.some((event) => event.code === "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_SKIPPED")).toBe(true);
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_auto_reload_failed",
+      critical: true,
+      idempotencyKey: deriveAutoReloadIssueNotificationKey({
+        intakeId: 1,
+        reason: "payment_hold",
+        issueType: "skipped",
+        issueCode: "funding_method_required",
+        issueMessage: "Auto-reload was skipped: funding_method_required.",
+      }),
+      payload: {
+        autoReloadReason: "payment_hold",
+        issueType: "skipped",
+        issueCode: "funding_method_required",
+      },
+    });
   });
 
   it("cancels a payment hold that expires during processing", async () => {
@@ -524,12 +614,15 @@ class FakeAcceptanceService {
 class FakeWalletAutoReloadService {
   lastInput: unknown = null;
 
-  constructor(private readonly error: Error | null = null) {}
+  constructor(private readonly result: DropshipAutoReloadResult | Error | null = null) {}
 
   async handleAutoReload(input: unknown): Promise<DropshipAutoReloadResult> {
     this.lastInput = input;
-    if (this.error) {
-      throw this.error;
+    if (this.result instanceof Error) {
+      throw this.result;
+    }
+    if (this.result) {
+      return this.result;
     }
     return {
       outcome: "funding_created",
