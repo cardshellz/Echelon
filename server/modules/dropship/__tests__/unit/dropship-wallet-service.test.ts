@@ -421,6 +421,27 @@ describe("DropshipWalletService", () => {
     expect(logs.at(-1)).toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_CONFIGURED" });
   });
 
+  it("rejects non-Stripe funding methods for enabled auto-reload", async () => {
+    repository.fundingMethods.push(makeFundingMethod({
+      fundingMethodId: 101,
+      rail: "usdc_base",
+      providerCustomerId: null,
+      providerPaymentMethodId: null,
+      usdcWalletAddress: "0x1111111111111111111111111111111111111111",
+      displayLabel: "USDC on Base",
+      isDefault: false,
+    }));
+
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 101,
+      enabled: true,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED" });
+  });
+
   it("creates an off-session card auto-reload and credits the wallet ledger", async () => {
     repository.autoReload = makeAutoReloadSetting({
       fundingMethodId: 99,

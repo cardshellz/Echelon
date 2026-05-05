@@ -525,6 +525,7 @@ export class DropshipWalletService {
     const parsed = parseWalletInput(configureDropshipAutoReloadInputSchema, input);
     assertAutoReloadConfigIsUsable(parsed);
     const updatedAt = this.deps.clock.now();
+    await this.assertAutoReloadFundingMethodIsUsable(parsed, updatedAt);
     const setting = await this.deps.repository.configureAutoReload({
       ...parsed,
       updatedAt,
@@ -895,6 +896,52 @@ export class DropshipWalletService {
 
   private async provisionVendor(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
     return this.deps.vendorProvisioning.provisionForMember(memberId);
+  }
+
+  private async assertAutoReloadFundingMethodIsUsable(
+    input: ConfigureDropshipAutoReloadInput,
+    now: Date,
+  ): Promise<void> {
+    if (!input.enabled || !input.fundingMethodId) {
+      return;
+    }
+    const wallet = await this.deps.repository.getOverview({
+      vendorId: input.vendorId,
+      ledgerLimit: 1,
+      now,
+    });
+    const fundingMethod = wallet.fundingMethods.find((method) =>
+      method.fundingMethodId === input.fundingMethodId
+    );
+    if (!fundingMethod) {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_METHOD_NOT_FOUND",
+        "Dropship funding method was not found.",
+        { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId },
+      );
+    }
+    if (fundingMethod.status !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_METHOD_NOT_ACTIVE",
+        "Dropship funding method is not active.",
+        {
+          vendorId: input.vendorId,
+          fundingMethodId: input.fundingMethodId,
+          status: fundingMethod.status,
+        },
+      );
+    }
+    if (fundingMethod.rail !== "stripe_card" && fundingMethod.rail !== "stripe_ach") {
+      throw new DropshipError(
+        "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED",
+        "Auto-reload requires a Stripe card or ACH funding method.",
+        {
+          vendorId: input.vendorId,
+          fundingMethodId: input.fundingMethodId,
+          rail: fundingMethod.rail,
+        },
+      );
+    }
   }
 }
 
