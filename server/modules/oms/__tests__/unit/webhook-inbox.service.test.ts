@@ -6,6 +6,7 @@ import {
   markWebhookFailed,
   markWebhookProcessing,
   markWebhookSucceeded,
+  enqueueWebhookInboxReplay,
   recordWebhookReceived,
 } from "../../webhook-inbox.service";
 
@@ -97,5 +98,70 @@ describe("webhook-inbox.service", () => {
     await markWebhookFailed(db, 10, new Error("boom"));
 
     expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("queues an immediate retry for a failed Shopify OMS inbox row", async () => {
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [{
+            id: 10,
+            provider: "shopify",
+            topic: "orders/paid",
+            payload: { id: 99 },
+            status: "failed",
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ id: 77 }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    };
+
+    const result = await enqueueWebhookInboxReplay(db, 10, "ops@example.com");
+
+    expect(result).toEqual({
+      inboxId: 10,
+      retryQueueId: 77,
+      provider: "shopify",
+      topic: "orders/paid",
+      previousStatus: "failed",
+    });
+    expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects succeeded inbox rows so operators do not replay completed events", async () => {
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          id: 10,
+          provider: "shopify",
+          topic: "orders/paid",
+          payload: { id: 99 },
+          status: "succeeded",
+        }],
+      })),
+    };
+
+    await expect(enqueueWebhookInboxReplay(db, 10, "ops@example.com"))
+      .rejects.toThrow(/already succeeded/);
+    expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects unsupported topics instead of inserting malformed retry rows", async () => {
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          id: 10,
+          provider: "shopify",
+          topic: "fulfillments/create",
+          payload: { id: 99 },
+          status: "failed",
+        }],
+      })),
+    };
+
+    await expect(enqueueWebhookInboxReplay(db, 10, "ops@example.com"))
+      .rejects.toThrow(/not a replayable Shopify OMS topic/);
+    expect(db.execute).toHaveBeenCalledTimes(1);
   });
 });

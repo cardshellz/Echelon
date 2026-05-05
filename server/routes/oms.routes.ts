@@ -11,6 +11,7 @@ import type { FulfillmentPushService } from "../modules/oms/fulfillment-push.ser
 import type { ShipStationService } from "../modules/oms/shipstation.service";
 import { db } from "../db";
 import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
+import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service";
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
@@ -41,6 +42,29 @@ export function registerOmsRoutes(app: Express) {
     } catch (err: any) {
       console.error("[OMS Routes] Ops health error:", err);
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/oms/ops/webhook-inbox/:id/replay", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      const operator =
+        req.session.user?.username ||
+        req.session.user?.displayName ||
+        String(req.session.user?.id || "unknown");
+      const result = await enqueueWebhookInboxReplay(db, id, operator);
+      res.json(result);
+    } catch (err: any) {
+      console.error("[OMS Routes] Webhook inbox replay error:", err);
+      const message = err?.message || "Failed to queue webhook replay";
+      const status = /positive integer/i.test(message)
+        ? 400
+        : /not found/i.test(message)
+          ? 404
+          : /already succeeded|not a replayable/i.test(message)
+            ? 409
+            : 500;
+      res.status(status).json({ error: message });
     }
   });
 

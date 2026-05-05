@@ -17,6 +17,7 @@ import {
   Filter,
   Ship,
   ExternalLink,
+  RotateCcw,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -292,6 +293,30 @@ export default function OmsOrders() {
     },
   });
 
+  const replayWebhookMutation = useMutation({
+    mutationFn: async (inboxId: number) => {
+      const res = await fetch(`/api/oms/ops/webhook-inbox/${inboxId}/replay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to queue replay" }));
+        throw new Error(err.error || "Failed to queue replay");
+      }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      toast({
+        title: "Webhook replay queued",
+        description: `${result.topic} retry #${result.retryQueueId}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/ops/health"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Replay failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const orders = ordersData?.orders || [];
   const total = ordersData?.total || 0;
   const totalPages = Math.ceil(total / limit);
@@ -382,7 +407,32 @@ export default function OmsOrders() {
                         {issue.count}
                       </Badge>
                     </div>
-                    {issue.sample.length > 0 && (
+                    {issue.sample.length > 0 && issue.code.startsWith("WEBHOOK_INBOX_") ? (
+                      <div className="mt-3 space-y-2">
+                        {issue.sample.slice(0, 3).map((row: any) => (
+                          <div key={row.id} className="flex items-center justify-between gap-3 rounded bg-muted p-2 text-xs">
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">
+                                #{row.id} {row.provider}/{row.topic}
+                              </div>
+                              <div className="truncate text-muted-foreground">
+                                {row.status || "processing"} | attempts {row.attempts ?? 0} | {row.source_domain || "unknown shop"}
+                              </div>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 shrink-0 gap-1 px-2"
+                              disabled={replayWebhookMutation.isPending}
+                              onClick={() => replayWebhookMutation.mutate(Number(row.id))}
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              Replay
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : issue.sample.length > 0 && (
                       <pre className="mt-3 max-h-28 overflow-auto rounded bg-muted p-2 text-xs">
                         {JSON.stringify(issue.sample.slice(0, 3), null, 2)}
                       </pre>
