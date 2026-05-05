@@ -20,6 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  allDropshipRmaStatuses,
   buildQueryUrl,
   fetchJson,
   formatCents,
@@ -33,7 +34,7 @@ import {
 } from "@/lib/dropship-ops-surface";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
-const statuses = ["all", "requested", "in_transit", "received", "inspecting", "approved", "rejected", "credited", "closed"];
+const statuses = ["all", ...allDropshipRmaStatuses];
 
 export default function DropshipPortalReturns() {
   const [search, setSearch] = useState("");

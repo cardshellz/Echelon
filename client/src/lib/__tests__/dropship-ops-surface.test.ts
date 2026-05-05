@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  allDropshipOpsOrderIntakeStatuses,
+  allDropshipRmaStatuses,
   buildQueryUrl,
   buildListingPreviewRequest,
   buildListingPushRequest,
@@ -90,6 +92,30 @@ describe("dropship ops surface client helpers", () => {
     expect(formatStatus("attention_required")).toBe("Attention Required");
     expect(formatStatus("payment_hold")).toBe("Payment Hold");
     expect(formatStatus(null)).toBe("Unknown");
+  });
+
+  it("exports launch status filters shared by admin and portal surfaces", () => {
+    expect(allDropshipOpsOrderIntakeStatuses).toEqual([
+      "received",
+      "processing",
+      "accepted",
+      "rejected",
+      "retrying",
+      "failed",
+      "payment_hold",
+      "cancelled",
+      "exception",
+    ]);
+    expect(allDropshipRmaStatuses).toEqual([
+      "requested",
+      "in_transit",
+      "received",
+      "inspecting",
+      "approved",
+      "rejected",
+      "credited",
+      "closed",
+    ]);
   });
 
   it("keeps status and severity tones explicit", () => {

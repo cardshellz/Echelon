@@ -72,7 +72,7 @@ export type DropshipStoreConnectionLifecycleStatus =
   | "paused"
   | "disconnected";
 
-const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
+export const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
   "received",
   "processing",
   "accepted",
@@ -105,7 +105,7 @@ const allDropshipNotificationOpsStatuses: DropshipNotificationOpsStatus[] = [
   "failed",
 ];
 
-const allDropshipRmaStatuses: DropshipRmaStatus[] = [
+export const allDropshipRmaStatuses: DropshipRmaStatus[] = [
   "requested",
   "in_transit",
   "received",
