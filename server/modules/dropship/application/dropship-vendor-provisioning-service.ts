@@ -9,7 +9,9 @@ import type {
   DropshipEntitlementSnapshot,
   DropshipLogEvent,
   DropshipLogger,
+  DropshipNotificationSender,
 } from "./dropship-ports";
+import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 
 export interface DropshipProvisionedVendorProfile {
   vendorId: number;
@@ -78,6 +80,7 @@ export interface DropshipVendorProvisioningRepository {
 export interface DropshipVendorProvisioningServiceDependencies {
   entitlement: DropshipEntitlementPort;
   repository: DropshipVendorProvisioningRepository;
+  notificationSender?: DropshipNotificationSender;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -203,6 +206,7 @@ export class DropshipVendorProvisioningService {
       });
     }
 
+    await this.notifyEntitlementBlockedIfNeeded(result, entitlement);
     return result;
   }
 
@@ -218,6 +222,54 @@ export class DropshipVendorProvisioningService {
     }
 
     return entitlement;
+  }
+
+  private async notifyEntitlementBlockedIfNeeded(
+    result: DropshipProvisionVendorRepositoryResult,
+    entitlement: DropshipEntitlementSnapshot,
+  ): Promise<void> {
+    if (result.created) {
+      return;
+    }
+    if (!result.changedFields.some((field) => field === "status" || field === "entitlementStatus")) {
+      return;
+    }
+    if (!isBlockedEntitlementStatus(entitlement.status) && !isBlockedVendorStatus(result.vendor.status)) {
+      return;
+    }
+
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: result.vendor.vendorId,
+      eventType: "dropship_entitlement_blocked",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: entitlement.status === "suspended"
+        ? "Dropship entitlement suspended"
+        : "Dropship entitlement lapsed",
+      message: "Your .ops dropship entitlement needs attention. New order acceptance and restricted dropship actions may be blocked until the membership is restored.",
+      payload: {
+        vendorId: result.vendor.vendorId,
+        memberId: entitlement.memberId,
+        planId: entitlement.planId,
+        planName: entitlement.planName,
+        subscriptionId: entitlement.subscriptionId,
+        entitlementStatus: entitlement.status,
+        reasonCode: entitlement.reasonCode,
+        vendorStatus: result.vendor.status,
+        changedFields: result.changedFields,
+        membershipGraceEndsAt: result.vendor.membershipGraceEndsAt?.toISOString() ?? null,
+      },
+      idempotencyKey: `entitlement-blocked:${result.vendor.vendorId}:${entitlement.status}:${entitlement.subscriptionId ?? entitlement.planId ?? "none"}`,
+    }, {
+      code: "DROPSHIP_ENTITLEMENT_BLOCKED_NOTIFICATION_FAILED",
+      message: "Dropship entitlement blocked notification failed after vendor profile sync.",
+      context: {
+        vendorId: result.vendor.vendorId,
+        memberId: entitlement.memberId,
+        entitlementStatus: entitlement.status,
+        vendorStatus: result.vendor.status,
+      },
+    });
   }
 }
 
@@ -342,6 +394,14 @@ function normalizeDropshipMemberId(memberId: string): string {
   }
 
   return normalized;
+}
+
+function isBlockedEntitlementStatus(status: string): boolean {
+  return status === "lapsed" || status === "not_entitled" || status === "suspended";
+}
+
+function isBlockedVendorStatus(status: string): boolean {
+  return status === "lapsed" || status === "suspended";
 }
 
 export function makeDropshipVendorProvisioningLogger(): DropshipLogger {
