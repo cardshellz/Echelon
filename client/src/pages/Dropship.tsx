@@ -6,6 +6,7 @@ import {
   Bell,
   Boxes,
   CheckCircle2,
+  CircleDollarSign,
   ClipboardList,
   FileSearch,
   History,
@@ -56,6 +57,7 @@ import {
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
+  buildAdminWalletConfirmedUsdcCreditInput,
   buildAdminTrackingPushRetryInput,
   buildAdminWalletManualCreditInput,
   buildAdminStoreConnectionsUrl,
@@ -111,6 +113,7 @@ import {
   type DropshipAdminTrackingPushListItem,
   type DropshipAdminTrackingPushListResponse,
   type DropshipAdminTrackingPushRetryResponse,
+  type DropshipAdminWalletConfirmedUsdcCreditResponse,
   type DropshipAdminWalletManualCreditResponse,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
@@ -2184,12 +2187,21 @@ function WalletOpsTab() {
   const [vendorId, setVendorId] = useState("");
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
-  const [pending, setPending] = useState(false);
+  const [usdcVendorId, setUsdcVendorId] = useState("");
+  const [usdcFundingMethodId, setUsdcFundingMethodId] = useState("");
+  const [usdcDollarAmount, setUsdcDollarAmount] = useState("");
+  const [usdcAmount, setUsdcAmount] = useState("");
+  const [usdcTransactionHash, setUsdcTransactionHash] = useState("");
+  const [usdcFromAddress, setUsdcFromAddress] = useState("");
+  const [usdcToAddress, setUsdcToAddress] = useState("");
+  const [usdcConfirmations, setUsdcConfirmations] = useState("12");
+  const [pendingAction, setPendingAction] = useState<"manual" | "usdc" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const pending = pendingAction !== null;
 
   async function creditWallet() {
-    setPending(true);
+    setPendingAction("manual");
     setError("");
     setMessage("");
     try {
@@ -2214,7 +2226,46 @@ function WalletOpsTab() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Manual wallet credit failed.");
     } finally {
-      setPending(false);
+      setPendingAction(null);
+    }
+  }
+
+  async function creditConfirmedUsdc() {
+    setPendingAction("usdc");
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminWalletConfirmedUsdcCreditInput({
+        vendorId: usdcVendorId,
+        fundingMethodId: usdcFundingMethodId,
+        amount: usdcDollarAmount,
+        usdcAmount,
+        transactionHash: usdcTransactionHash,
+        fromAddress: usdcFromAddress,
+        toAddress: usdcToAddress,
+        confirmations: usdcConfirmations,
+        idempotencyKey: createDropshipIdempotencyKey(`admin-usdc-credit-${usdcVendorId.trim()}`),
+      });
+      const response = await postJson<DropshipAdminWalletConfirmedUsdcCreditResponse>(
+        "/api/dropship/admin/wallet/usdc/confirmed-credit",
+        input,
+      );
+      setMessage(`Vendor ${response.account.vendorId} USDC transfer credited ${formatCents(response.ledgerEntry.amountCents)}.`);
+      setUsdcDollarAmount("");
+      setUsdcAmount("");
+      setUsdcTransactionHash("");
+      setUsdcFromAddress("");
+      setUsdcToAddress("");
+      setUsdcConfirmations("12");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "USDC wallet credit failed.");
+    } finally {
+      setPendingAction(null);
     }
   }
 
@@ -2287,10 +2338,136 @@ function WalletOpsTab() {
             disabled={pending}
             onClick={creditWallet}
           >
-            <Wallet className={pending ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
+            <Wallet className={pendingAction === "manual" ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
             Credit
           </Button>
         </div>
+      </section>
+
+      <section className="rounded-md border bg-card p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Confirmed USDC transfer</h2>
+            <p className="text-sm text-muted-foreground">Admin-only settled credit for a verified Base transaction. Wallet ledger and USDC ledger are recorded atomically.</p>
+          </div>
+          <CircleDollarSign className="h-5 w-5 text-muted-foreground" />
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-4">
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-credit-vendor">
+              Vendor ID
+            </label>
+            <Input
+              id="dropship-usdc-credit-vendor"
+              className="mt-2"
+              value={usdcVendorId}
+              onChange={(event) => setUsdcVendorId(event.target.value)}
+              inputMode="numeric"
+              placeholder="10"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-funding-method">
+              Funding method ID
+            </label>
+            <Input
+              id="dropship-usdc-funding-method"
+              className="mt-2"
+              value={usdcFundingMethodId}
+              onChange={(event) => setUsdcFundingMethodId(event.target.value)}
+              inputMode="numeric"
+              placeholder="Optional"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-dollar-amount">
+              Wallet credit
+            </label>
+            <Input
+              id="dropship-usdc-dollar-amount"
+              className="mt-2"
+              value={usdcDollarAmount}
+              onChange={(event) => setUsdcDollarAmount(event.target.value)}
+              inputMode="decimal"
+              placeholder="125.50"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-amount">
+              USDC amount
+            </label>
+            <Input
+              id="dropship-usdc-amount"
+              className="mt-2"
+              value={usdcAmount}
+              onChange={(event) => setUsdcAmount(event.target.value)}
+              inputMode="decimal"
+              placeholder="125.50"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_1fr_1fr_0.4fr]">
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-transaction">
+              Transaction hash
+            </label>
+            <Input
+              id="dropship-usdc-transaction"
+              className="mt-2 font-mono text-xs"
+              value={usdcTransactionHash}
+              onChange={(event) => setUsdcTransactionHash(event.target.value)}
+              placeholder="0x..."
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-from">
+              From address
+            </label>
+            <Input
+              id="dropship-usdc-from"
+              className="mt-2 font-mono text-xs"
+              value={usdcFromAddress}
+              onChange={(event) => setUsdcFromAddress(event.target.value)}
+              placeholder="Optional"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-to">
+              To address
+            </label>
+            <Input
+              id="dropship-usdc-to"
+              className="mt-2 font-mono text-xs"
+              value={usdcToAddress}
+              onChange={(event) => setUsdcToAddress(event.target.value)}
+              placeholder="0x..."
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium" htmlFor="dropship-usdc-confirmations">
+              Confirmations
+            </label>
+            <Input
+              id="dropship-usdc-confirmations"
+              className="mt-2"
+              value={usdcConfirmations}
+              onChange={(event) => setUsdcConfirmations(event.target.value)}
+              inputMode="numeric"
+              placeholder="12"
+            />
+          </div>
+        </div>
+
+        <Button
+          className="mt-4 h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+          disabled={pending}
+          onClick={creditConfirmedUsdc}
+        >
+          <CircleDollarSign className={pendingAction === "usdc" ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
+          Credit USDC
+        </Button>
       </section>
     </div>
   );
