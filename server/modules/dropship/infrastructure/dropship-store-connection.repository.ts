@@ -194,6 +194,7 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
         actor: { actorType: "vendor", actorId: String(input.vendorId) },
         now: input.connectedAt,
       });
+      await resolveStoreAuthHealthCheck(client, connection.storeConnectionId, input.connectedAt);
       await recordAuditEvent(client, {
         vendorId: input.vendorId,
         storeConnectionId: connection.storeConnectionId,
@@ -399,7 +400,7 @@ async function countActiveByVendorIdWithClient(client: PoolClient, vendorId: num
     `SELECT COUNT(*) AS count
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
-       AND status IN ('connected','needs_reauth','refresh_failed','grace_period','paused')`,
+       AND status IN ('connected','grace_period','paused')`,
     [vendorId],
   );
   return Number(result.rows[0]?.count ?? 0);
@@ -456,9 +457,18 @@ async function findReusableConnection(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND COALESCE(shop_domain, '') = COALESCE($3, '')
-       AND status = 'disconnected'
-     ORDER BY updated_at DESC, id DESC
+       AND status IN ('needs_reauth','refresh_failed','disconnected')
+       AND (
+         status IN ('needs_reauth','refresh_failed')
+         OR COALESCE(shop_domain, '') = COALESCE($3, '')
+       )
+     ORDER BY CASE status
+                WHEN 'needs_reauth' THEN 0
+                WHEN 'refresh_failed' THEN 1
+                ELSE 2
+              END,
+              updated_at DESC,
+              id DESC
      LIMIT 1
      FOR UPDATE`,
     [vendorId, platform, shopDomain],
@@ -541,16 +551,17 @@ async function updateConnection(
     `UPDATE dropship.dropship_store_connections
      SET external_account_id = $3,
          external_display_name = $4,
-         access_token_ref = $5,
-         refresh_token_ref = $6,
-         token_expires_at = $7,
+         shop_domain = $5,
+         access_token_ref = $6,
+         refresh_token_ref = $7,
+         token_expires_at = $8,
          status = 'connected',
          setup_status = 'pending',
          disconnect_reason = NULL,
          disconnected_at = NULL,
          grace_ends_at = NULL,
-         config = $8::jsonb,
-         updated_at = $9
+         config = $9::jsonb,
+         updated_at = $10
      WHERE id = $1 AND vendor_id = $2
      RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
                access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
@@ -561,6 +572,7 @@ async function updateConnection(
       input.vendorId,
       input.externalAccountId,
       input.externalDisplayName,
+      input.shopDomain,
       input.accessTokenRef,
       input.refreshTokenRef,
       input.tokenExpiresAt,
@@ -628,6 +640,26 @@ async function recordAuditEvent(
       JSON.stringify(input.payload),
       input.occurredAt,
     ],
+  );
+}
+
+async function resolveStoreAuthHealthCheck(
+  client: PoolClient,
+  storeConnectionId: number,
+  now: Date,
+): Promise<void> {
+  await client.query(
+    `UPDATE dropship.dropship_store_setup_checks
+     SET status = 'passed',
+         severity = 'info',
+         message = 'Store authorization is healthy.',
+         resolved_at = $2,
+         last_checked_at = $2,
+         updated_at = $2
+     WHERE store_connection_id = $1
+       AND check_key = 'store_auth_health'
+       AND resolved_at IS NULL`,
+    [storeConnectionId, now],
   );
 }
 

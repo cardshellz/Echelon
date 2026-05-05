@@ -6,7 +6,7 @@ import type {
 } from "../application/dropship-marketplace-listing-push-provider";
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import { EbayDropshipListingPushProvider } from "./dropship-ebay-listing-push.provider";
-import { PgDropshipMarketplaceCredentialRepository } from "./dropship-marketplace-credentials";
+import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
 import { ShopifyDropshipListingPushProvider } from "./dropship-shopify-listing-push.provider";
 
 export class DropshipMarketplaceListingPushProviderRouter implements DropshipMarketplaceListingPushProvider {
@@ -28,7 +28,7 @@ export class DropshipMarketplaceListingPushProviderRouter implements DropshipMar
 }
 
 export function createDropshipMarketplaceListingPushProviderFromEnv(): DropshipMarketplaceListingPushProvider {
-  const credentials = new PgDropshipMarketplaceCredentialRepository();
+  const credentials = createDropshipMarketplaceCredentialRepositoryFromEnv();
   return new DropshipMarketplaceListingPushProviderRouter({
     ebay: new EbayDropshipListingPushProvider(credentials),
     shopify: new ShopifyDropshipListingPushProvider(credentials),

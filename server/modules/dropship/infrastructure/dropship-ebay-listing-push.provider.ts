@@ -207,6 +207,10 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       return credential;
     }
     if (!credential.refreshToken) {
+      await this.recordNeedsReauth(credential, {
+        failureCode: "DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED",
+        message: "eBay refresh token is missing for dropship listing push.",
+      });
       throw new DropshipError("DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED", "eBay refresh token is required.", {
         storeConnectionId: credential.storeConnectionId,
         retryable: false,
@@ -234,6 +238,13 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     });
     const text = await response.text();
     if (!response.ok) {
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.recordNeedsReauth(credential, {
+          failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
+          message: `eBay token refresh failed with HTTP ${response.status}.`,
+          statusCode: response.status,
+        });
+      }
       throw new DropshipError(
         "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
         `eBay token refresh failed with HTTP ${response.status}.`,
@@ -291,6 +302,19 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       if (response.ok) return undefined as T;
     }
     if (!response.ok) {
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.credentials.recordAuthFailure?.({
+          vendorId: input.credential.vendorId,
+          storeConnectionId: input.credential.storeConnectionId,
+          platform: "ebay",
+          status: "needs_reauth",
+          failureCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+          message: `eBay listing push failed with HTTP ${response.status}.`,
+          retryable: false,
+          statusCode: response.status,
+          now: this.clock.now(),
+        });
+      }
       throw new DropshipError(
         "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
         `eBay listing push failed with HTTP ${response.status}.`,
@@ -305,6 +329,27 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       text,
       code: "DROPSHIP_EBAY_LISTING_PUSH_INVALID_RESPONSE",
       message: "eBay listing push returned invalid JSON.",
+    });
+  }
+
+  private async recordNeedsReauth(
+    credential: DropshipMarketplaceStoreCredentials,
+    input: {
+      failureCode: string;
+      message: string;
+      statusCode?: number;
+    },
+  ): Promise<void> {
+    await this.credentials.recordAuthFailure?.({
+      vendorId: credential.vendorId,
+      storeConnectionId: credential.storeConnectionId,
+      platform: "ebay",
+      status: "needs_reauth",
+      failureCode: input.failureCode,
+      message: input.message,
+      retryable: false,
+      statusCode: input.statusCode,
+      now: this.clock.now(),
     });
   }
 }
@@ -330,6 +375,10 @@ function parseEbayListingConfig(
     environment: config.environment === "sandbox" ? "sandbox" as const : "production" as const,
   };
   return parsed;
+}
+
+function isPermanentAuthFailureStatus(status: number): boolean {
+  return status === 400 || status === 401 || status === 403;
 }
 
 function assertEbayReady(input: DropshipMarketplaceListingPushRequest, config: EbayListingConfig): void {

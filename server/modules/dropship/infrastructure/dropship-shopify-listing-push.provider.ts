@@ -10,6 +10,9 @@ import type {
 } from "./dropship-marketplace-credentials";
 
 type FetchLike = typeof fetch;
+interface Clock {
+  now(): Date;
+}
 
 interface ShopifyGraphqlResponse {
   data?: {
@@ -43,6 +46,7 @@ export class ShopifyDropshipListingPushProvider implements DropshipMarketplaceLi
   constructor(
     private readonly credentials: DropshipMarketplaceCredentialRepository,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly clock: Clock = { now: () => new Date() },
   ) {}
 
   async pushListing(input: DropshipMarketplaceListingPushRequest): Promise<DropshipMarketplaceListingPushResult> {
@@ -125,6 +129,19 @@ export class ShopifyDropshipListingPushProvider implements DropshipMarketplaceLi
     );
     const text = await response.text();
     if (!response.ok) {
+      if (isPermanentAuthFailureStatus(response.status)) {
+        await this.credentials.recordAuthFailure?.({
+          vendorId: credential.vendorId,
+          storeConnectionId: credential.storeConnectionId,
+          platform: "shopify",
+          status: "needs_reauth",
+          failureCode: "DROPSHIP_SHOPIFY_LISTING_PUSH_HTTP_ERROR",
+          message: `Shopify listing push failed with HTTP ${response.status}.`,
+          retryable: false,
+          statusCode: response.status,
+          now: this.clock.now(),
+        });
+      }
       throw new DropshipError(
         "DROPSHIP_SHOPIFY_LISTING_PUSH_HTTP_ERROR",
         `Shopify listing push failed with HTTP ${response.status}.`,
@@ -177,6 +194,10 @@ function resolveShopifyApiVersion(credential: DropshipMarketplaceStoreCredential
     });
   }
   return configured;
+}
+
+function isPermanentAuthFailureStatus(status: number): boolean {
+  return status === 401 || status === 403;
 }
 
 function buildShopifyProductSetInput(input: DropshipMarketplaceListingPushRequest): Record<string, unknown> {

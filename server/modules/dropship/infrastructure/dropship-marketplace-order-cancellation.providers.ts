@@ -6,7 +6,7 @@ import type {
 } from "../application/dropship-marketplace-order-cancellation-provider";
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import { EbayDropshipOrderCancellationProvider } from "./dropship-ebay-order-cancellation.provider";
-import { PgDropshipMarketplaceCredentialRepository } from "./dropship-marketplace-credentials";
+import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
 import { ShopifyDropshipOrderCancellationProvider } from "./dropship-shopify-order-cancellation.provider";
 
 export class DropshipMarketplaceOrderCancellationProviderRouter implements DropshipMarketplaceOrderCancellationProvider {
@@ -30,7 +30,7 @@ export class DropshipMarketplaceOrderCancellationProviderRouter implements Drops
 }
 
 export function createDropshipMarketplaceOrderCancellationProviderFromEnv(): DropshipMarketplaceOrderCancellationProvider {
-  const credentials = new PgDropshipMarketplaceCredentialRepository();
+  const credentials = createDropshipMarketplaceCredentialRepositoryFromEnv();
   return new DropshipMarketplaceOrderCancellationProviderRouter({
     ebay: new EbayDropshipOrderCancellationProvider(credentials),
     shopify: new ShopifyDropshipOrderCancellationProvider(credentials),
