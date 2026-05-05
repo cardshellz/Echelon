@@ -59,10 +59,12 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       status: "ready",
     });
     expect(result.items[0]?.checks.find((check) => check.key === "shipping_markup_policy")).toMatchObject({
-      status: "warning",
+      status: "blocked",
+      message: "No active shipping markup policy is configured; quotes cannot use implicit fee defaults.",
     });
     expect(result.items[0]?.checks.find((check) => check.key === "shipping_insurance_policy")).toMatchObject({
-      status: "warning",
+      status: "blocked",
+      message: "No active insurance policy is configured; quotes cannot use implicit insurance-pool defaults.",
     });
   });
 
