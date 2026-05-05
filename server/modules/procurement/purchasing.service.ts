@@ -229,35 +229,87 @@ export function createPurchasingService(db: any, storage: Storage) {
 
   // calculateLineCosts
   //
-  // Unit cost source-of-truth resolution:
-  //   * If `unitCostMills` is provided and > 0, it is authoritative and the
-  //     line subtotal is computed via computeLineTotalCentsFromMills (integer
-  //     half-up at the sub-cent boundary). `unitCostCents` (if also passed)
-  //     is IGNORED here — the caller is responsible for cross-checking
-  //     mills vs. cents agreement at the input boundary (e.g.
-  //     validateCreateWithLinesInput rejects disagreeing pairs with 400).
-  //   * Otherwise (legacy callers, or mills = 0), we fall back to the
-  //     cents-based Decimal path. Preserves back-compat with every existing
-  //     caller that still passes unit_cost_cents only.
+  // Unit cost source-of-truth resolution (Spec F Phase 1 — totals-based):
   //
-  // Discount and tax continue to apply at the cent-subtotal level — those
-  // fields stay in cents per spec ("Everything else stays in CENTS").
+  //   NEW SHAPE (preferred for product lines):
+  //     If totalProductCostCents is provided (non-null), it is the source of
+  //     truth. Derived fields are computed from it:
+  //       lineTotalCents = totalProductCostCents + packagingCostCents
+  //       unitCostMills  = round_half_up(totalProductCostCents * 100 / qty)
+  //       unitCostCents  = round_half_up(unitCostMills / 100)
+  //
+  //   OLD SHAPE (backward compat):
+  //     If totalProductCostCents is NOT provided, falls back to
+  //     unitCostMills (authoritative) or unitCostCents (legacy).
+  //     totalProductCostCents is derived: round(unitCostMills * qty / 100).
+  //
+  //   If BOTH are sent, the new shape (totals) wins.
+  //
+  // Discount and tax continue to apply at the cent-subtotal level.
   function calculateLineCosts(line: {
     orderQty: number;
     unitCostCents: number;
     unitCostMills?: number | null;
+    totalProductCostCents?: number | null;
+    packagingCostCents?: number | null;
     discountPercent?: string | number;
     taxRatePercent?: string | number;
   }) {
     const qty = Number(line.orderQty) || 0;
-    const millsAuthoritative =
-      typeof line.unitCostMills === "number" &&
-      Number.isInteger(line.unitCostMills) &&
-      line.unitCostMills > 0;
+    const hasTotals =
+      typeof line.totalProductCostCents === "number" &&
+      line.totalProductCostCents !== null;
 
-    const subtotalCents = millsAuthoritative
-      ? computeLineTotalCentsFromMills(line.unitCostMills as number, qty)
-      : qty * (Number(line.unitCostCents) || 0);
+    let subtotalCents: number;
+    let resolvedTotalProductCostCents: number;
+    let resolvedPackagingCostCents: number;
+    let resolvedUnitCostMills: number;
+    let resolvedUnitCostCents: number;
+
+    if (hasTotals) {
+      // NEW SHAPE: totals are source of truth.
+      resolvedTotalProductCostCents = line.totalProductCostCents as number;
+      resolvedPackagingCostCents = Number(line.packagingCostCents) || 0;
+      subtotalCents = resolvedTotalProductCostCents + resolvedPackagingCostCents;
+      // Derive per-unit from total / qty (integer math, half-up).
+      resolvedUnitCostMills =
+        qty > 0
+          ? Number(
+              signedRoundHalfUpDiv(
+                BigInt(resolvedTotalProductCostCents) * BigInt(100),
+                BigInt(qty),
+              ),
+            )
+          : 0;
+      resolvedUnitCostCents =
+        qty > 0
+          ? Number(
+              signedRoundHalfUpDiv(
+                BigInt(resolvedTotalProductCostCents),
+                BigInt(qty),
+              ),
+            )
+          : 0;
+    } else {
+      // OLD SHAPE: mills or cents as source (backward compat).
+      const millsAuthoritative =
+        typeof line.unitCostMills === "number" &&
+        Number.isInteger(line.unitCostMills) &&
+        line.unitCostMills > 0;
+
+      subtotalCents = millsAuthoritative
+        ? computeLineTotalCentsFromMills(line.unitCostMills as number, qty)
+        : qty * (Number(line.unitCostCents) || 0);
+
+      resolvedTotalProductCostCents = subtotalCents;
+      resolvedPackagingCostCents = 0;
+      resolvedUnitCostMills = millsAuthoritative
+        ? (line.unitCostMills as number)
+        : signedCentsToMills(Number(line.unitCostCents) || 0);
+      resolvedUnitCostCents = millsAuthoritative
+        ? signedMillsToCents(line.unitCostMills as number)
+        : Number(line.unitCostCents) || 0;
+    }
 
     const subtotal = new Decimal(subtotalCents);
     const discountPct = new Decimal(line.discountPercent || 0);
@@ -271,6 +323,11 @@ export function createPurchasingService(db: any, storage: Storage) {
       discountCents: discount.toNumber(),
       taxCents: tax.toNumber(),
       lineTotalCents: taxable.plus(tax).toNumber(),
+      // Totals-based fields (Spec F Phase 1)
+      totalProductCostCents: resolvedTotalProductCostCents,
+      packagingCostCents: resolvedPackagingCostCents,
+      unitCostMills: resolvedUnitCostMills,
+      unitCostCents: resolvedUnitCostCents,
     };
   }
 
@@ -2111,13 +2168,20 @@ export function createPurchasingService(db: any, storage: Storage) {
       // Product lines: qty > 0. Fee: qty >= 1. All other types: qty == 1.
       orderQty: number;
 
-      // Per-unit cost. Either or both may be provided:
+      // Per-unit cost (OLD SHAPE — backward compat). Either or both may be provided:
       //   * unitCostMills is authoritative (4-decimal precision).
       //   * unitCostCents is accepted for legacy/back-compat callers.
       //   * If both are provided, they MUST agree (cents == round(mills/100)).
       // Sign constraints vary by lineType (see validateCreateWithLinesInput).
       unitCostCents?: number;
       unitCostMills?: number;
+
+      // Totals-based cost (NEW SHAPE — Spec F Phase 1, preferred for product lines).
+      // If totalProductCostCents is provided, it is the source of truth.
+      // unitCostMills/unitCostCents become derived. If BOTH shapes are sent,
+      // totals win and per-unit is recomputed.
+      totalProductCostCents?: number;
+      packagingCostCents?: number;
 
       vendorProductId?: number | null;
     }>;
@@ -2237,14 +2301,19 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
 
       // Cost rule — integer; sign varies by type.
+      // Spec F Phase 1: accept totalProductCostCents (new shape) OR
+      // unitCostMills/unitCostCents (old shape). At least one must be provided.
       const hasCents =
         line.unitCostCents !== undefined && line.unitCostCents !== null;
       const hasMills =
         line.unitCostMills !== undefined && line.unitCostMills !== null;
+      const hasTotals =
+        line.totalProductCostCents !== undefined &&
+        line.totalProductCostCents !== null;
 
-      if (!hasCents && !hasMills) {
+      if (!hasCents && !hasMills && !hasTotals) {
         throw new PurchasingError(
-          `${label}.unit_cost_cents or unit_cost_mills is required`,
+          `${label}.unit_cost_cents, unit_cost_mills, or total_product_cost_cents is required`,
           400,
         );
       }
@@ -2260,11 +2329,29 @@ export function createPurchasingService(db: any, storage: Storage) {
           400,
         );
       }
+      if (hasTotals && !Number.isInteger(line.totalProductCostCents)) {
+        throw new PurchasingError(
+          `${label}.total_product_cost_cents must be an integer`,
+          400,
+        );
+      }
+      if (
+        line.packagingCostCents !== undefined &&
+        line.packagingCostCents !== null &&
+        !Number.isInteger(line.packagingCostCents)
+      ) {
+        throw new PurchasingError(
+          `${label}.packaging_cost_cents must be an integer`,
+          400,
+        );
+      }
 
-      // Sign check (type-specific). Use mills if present, else cents.
-      const primaryCost = hasMills
-        ? (line.unitCostMills as number)
-        : (line.unitCostCents as number);
+      // Sign check (type-specific). Use totals if present, else mills, else cents.
+      const primaryCost = hasTotals
+        ? (line.totalProductCostCents as number)
+        : hasMills
+          ? (line.unitCostMills as number)
+          : (line.unitCostCents as number);
       switch (lineType) {
         case "product":
         case "fee":
@@ -2291,8 +2378,9 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
 
       // Cents/mills agreement check (authoritative source is mills).
+      // Only applies when old shape is used (no totals provided).
       // Signed-aware so discount/rebate/adjustment pairs validate too.
-      if (hasMills && hasCents) {
+      if (hasMills && hasCents && !hasTotals) {
         const expectedCents = signedMillsToCents(line.unitCostMills as number);
         if (expectedCents !== (line.unitCostCents as number)) {
           throw new PurchasingError(
@@ -2390,21 +2478,17 @@ export function createPurchasingService(db: any, storage: Storage) {
           }
         }
 
-        // Normalize to BOTH mills and cents. Whichever the caller sent
-        // becomes the anchor; the other is derived. Signed-aware: discount,
-        // rebate, and some adjustment lines carry negative values.
-        const hasMills =
-          typeof line.unitCostMills === "number";
-        const unitCostMills = hasMills
-          ? (line.unitCostMills as number)
-          : signedCentsToMills(Number(line.unitCostCents) || 0);
-        const unitCostCents = hasMills
-          ? signedMillsToCents(unitCostMills)
-          : Number(line.unitCostCents) || 0;
+        // Spec F Phase 1: pass through totals if provided (new shape),
+        // else fall back to mills/cents (old shape). calculateLineCosts
+        // handles both; if both are sent, totals win.
         const costs = calculateLineCosts({
           orderQty: line.orderQty,
-          unitCostCents,
-          unitCostMills,
+          unitCostCents: Number(line.unitCostCents) || 0,
+          unitCostMills: typeof line.unitCostMills === "number" ? line.unitCostMills : null,
+          totalProductCostCents:
+            typeof line.totalProductCostCents === "number" ? line.totalProductCostCents : null,
+          packagingCostCents:
+            typeof line.packagingCostCents === "number" ? line.packagingCostCents : null,
         });
         return {
           line,
@@ -2412,8 +2496,8 @@ export function createPurchasingService(db: any, storage: Storage) {
           variant,
           product,
           costs,
-          unitCostMills,
-          unitCostCents,
+          unitCostMills: costs.unitCostMills,
+          unitCostCents: costs.unitCostCents,
         };
       }),
     );
@@ -2471,10 +2555,13 @@ export function createPurchasingService(db: any, storage: Storage) {
             : null,
           unitsPerUom: isProduct ? (r.variant?.unitsPerVariant || 1) : 1,
           orderQty: r.line.orderQty,
-          // Write BOTH mills and cents on INSERT (spec): mills is authoritative,
-          // cents is the rounded back-compat mirror. Signed for non-product.
-          unitCostCents: r.unitCostCents,
-          unitCostMills: r.unitCostMills,
+          // Write BOTH mills/cents and totals on INSERT (Spec F Phase 1).
+          // Mills/cents are computed-derived for back-compat; totals are source of truth.
+          // Non-product lines always have 0 for totals fields.
+          unitCostCents: r.costs.unitCostCents,
+          unitCostMills: r.costs.unitCostMills,
+          totalProductCostCents: isProduct ? r.costs.totalProductCostCents : 0,
+          packagingCostCents: isProduct ? r.costs.packagingCostCents : 0,
           discountCents: r.costs.discountCents,
           taxCents: r.costs.taxCents,
           lineTotalCents: r.costs.lineTotalCents,

@@ -469,6 +469,11 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   taxCents: bigint("tax_cents", { mode: "number" }).default(0),
   lineTotalCents: bigint("line_total_cents", { mode: "number" }), // (order_qty * unit_cost_cents) - discount + tax
 
+  // Totals-based cost (Spec F Phase 1) — new source of truth.
+  // Per-unit values (unit_cost_mills, unit_cost_cents) are now computed-derived.
+  totalProductCostCents: bigint("total_product_cost_cents", { mode: "number" }).notNull().default(0),
+  packagingCostCents: bigint("packaging_cost_cents", { mode: "number" }).notNull().default(0),
+
   // Dates
   expectedDeliveryDate: timestamp("expected_delivery_date"), // Per-line override
   promisedDate: timestamp("promised_date"), // Vendor's per-line promise

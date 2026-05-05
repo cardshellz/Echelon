@@ -2106,6 +2106,15 @@ export function registerPurchasingRoutes(app: Express) {
           if (rawMills !== undefined && rawMills !== null) {
             out.unitCostMills = Number(rawMills);
           }
+          // Spec F Phase 1: totals-based cost (new shape).
+          const rawTotalProduct = l.total_product_cost_cents ?? l.totalProductCostCents;
+          const rawPackaging = l.packaging_cost_cents ?? l.packagingCostCents;
+          if (rawTotalProduct !== undefined && rawTotalProduct !== null) {
+            out.totalProductCostCents = Number(rawTotalProduct);
+          }
+          if (rawPackaging !== undefined && rawPackaging !== null) {
+            out.packagingCostCents = Number(rawPackaging);
+          }
           return out;
         });
         const created = await purchasing.createPurchaseOrderWithLines(

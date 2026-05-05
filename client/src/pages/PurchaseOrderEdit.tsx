@@ -24,6 +24,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  dollarsToCents,
   dollarsToMills,
   millsToDollarString,
   formatMills,
@@ -124,11 +125,15 @@ type LineDraft = {
   productName: string;
   sku: string | null;
   orderQty: number;
-  // Per-unit cost in mills (1/10000 of a dollar). Authoritative on this
-  // draft. Cents is derived (rounded half-up) for display totals and for
-  // the back-compat unit_cost_cents field on the wire.
+  // Per-unit cost in mills (1/10000 of a dollar). Computed-derived for
+  // product lines (from totalProductCostCents / qty). Still source of
+  // truth for non-product lines (fee, discount, etc.).
   // Signed: discount/rebate/adjustment lines may carry a negative value.
   unitCostMills: number;
+  // Totals-based cost (Spec F Phase 1). Source of truth for product lines.
+  // 0 or undefined for non-product lines.
+  totalProductCostCents?: number;
+  packagingCostCents?: number;
   vendorProductId?: number | null;
   // Spec A follow-up: tracks whether the selected product was NOT in the
   // vendor's catalog at the time of selection. Drives the "Add to catalog?"
@@ -337,6 +342,61 @@ function UnitCostInput({
   );
 }
 
+// Dollar input for total product cost (Spec F Phase 1).
+// Works with integer cents (not mills). Accepts dollar strings like
+// "11600.00" and converts to cents. 2 decimal places max.
+function DollarInput({
+  cents,
+  onChangeCents,
+  ariaLabel,
+}: {
+  cents: number;
+  onChangeCents: (cents: number) => void;
+  ariaLabel: string;
+}) {
+  const [buffer, setBuffer] = useState<string>(() =>
+    cents > 0 ? (cents / 100).toFixed(2) : "",
+  );
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) {
+      setBuffer(cents > 0 ? (cents / 100).toFixed(2) : "");
+    }
+  }, [cents, focused]);
+
+  return (
+    <Input
+      inputMode="decimal"
+      value={buffer}
+      onFocus={() => setFocused(true)}
+      onChange={(e) => {
+        const raw = e.target.value;
+        // Allow digits, single dot, up to 2 fractional digits.
+        if (/^\d*\.?\d{0,2}$/.test(raw) || raw === "") {
+          setBuffer(raw);
+        }
+      }}
+      onBlur={() => {
+        setFocused(false);
+        try {
+          const nextCents = dollarsToCents(buffer);
+          setBuffer(nextCents > 0 ? (nextCents / 100).toFixed(2) : "");
+          if (nextCents !== cents) onChangeCents(nextCents);
+        } catch {
+          setBuffer(cents > 0 ? (cents / 100).toFixed(2) : "");
+        }
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+      aria-label={ariaLabel}
+    />
+  );
+}
+
 function formatCents(cents: number | null | undefined): string {
   const n = Number(cents) || 0;
   return `$${(n / 100).toLocaleString("en-US", {
@@ -403,6 +463,8 @@ function emptyLine(lineType: PoLineType = "product"): LineDraft {
     sku: null,
     orderQty: 1,
     unitCostMills: 0,
+    totalProductCostCents: 0,
+    packagingCostCents: 0,
   };
 }
 
@@ -636,6 +698,8 @@ export default function PurchaseOrderEdit() {
             typeof l.unitCostMills === "number"
               ? l.unitCostMills
               : centsToMills(Number(l.unitCostCents) || 0),
+          totalProductCostCents: 0, // User enters total from invoice
+          packagingCostCents: 0,
         })),
       );
     }
@@ -692,19 +756,30 @@ export default function PurchaseOrderEdit() {
             // Fall back to cents→mills. Non-negative only (legacy rows).
             unitCostMills = centsToMills(Number(l.unitCostCents) || 0);
           }
+          // Spec F Phase 1: populate totals from server data.
+          // For old lines (totalProductCostCents = 0), back-compute from mills.
+          const qty = Number(l.orderQty) || 0;
+          const serverTotalProduct = Number(l.totalProductCostCents) || 0;
+          const serverPackaging = Number(l.packagingCostCents) || 0;
+          const totalProductCostCents =
+            serverTotalProduct > 0
+              ? serverTotalProduct
+              : unitCostMills > 0 && qty > 0
+                ? Math.round((unitCostMills * qty) / 100)
+                : 0;
           return {
             clientId: newClientId(),
             lineType,
             description: typeof l.description === "string" ? l.description : "",
-            parentClientId: null, // parent_line_id is a DB id; we don't
-            // resolve it back to a clientId on edit load. Rendered as
-            // "All product lines" for existing discount/rebate rows.
+            parentClientId: null,
             productVariantId: l.productVariantId ?? null,
             productId: l.productId ?? null,
             productName: l.productName ?? "",
             sku: l.sku ?? null,
             orderQty: l.orderQty,
             unitCostMills,
+            totalProductCostCents,
+            packagingCostCents: serverPackaging,
           };
         }),
       );
@@ -727,8 +802,16 @@ export default function PurchaseOrderEdit() {
     for (const l of lines) {
       const qty = Number(l.orderQty) || 0;
       const mills = Number(l.unitCostMills) || 0;
-      if (qty === 0 || mills === 0) continue;
-      const lineTotal = signedComputeLineTotalCents(mills, qty);
+      // Spec F Phase 1: product lines use totals as source of truth.
+      const totalProduct = Number(l.totalProductCostCents) || 0;
+      const packaging = Number(l.packagingCostCents) || 0;
+      let lineTotal: number;
+      if (l.lineType === "product" && totalProduct > 0) {
+        lineTotal = totalProduct + packaging;
+      } else {
+        if (qty === 0 || mills === 0) continue;
+        lineTotal = signedComputeLineTotalCents(mills, qty);
+      }
       switch (l.lineType) {
         case "product":
           productSubtotal += lineTotal;
@@ -876,8 +959,10 @@ export default function PurchaseOrderEdit() {
         if (!l.productId) return `${label}: pick a product.`;
         if (!Number.isInteger(l.orderQty) || l.orderQty <= 0)
           return `${label}: quantity must be a positive integer.`;
-        if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0)
-          return `${label}: unit cost must be zero or more.`;
+        // Spec F Phase 1: validate total product cost instead of unit cost.
+        const totalCost = l.totalProductCostCents ?? 0;
+        if (!Number.isInteger(totalCost) || totalCost < 0)
+          return `${label}: total product cost must be zero or more.`;
         continue;
       }
 
@@ -1076,11 +1161,17 @@ export default function PurchaseOrderEdit() {
             ? { product_id: l.productId, product_variant_id: l.productVariantId }
             : { product_id: null, product_variant_id: null }),
           quantity_ordered: l.orderQty,
-          // Mills is authoritative (4-decimal). Cents is sent for back-compat
-          // — derived via half-up rounding (sign-aware for discount/rebate/
-          // adjustment). Server validator rejects a disagreeing pair with 400.
-          unit_cost_mills: l.unitCostMills,
-          unit_cost_cents: signedMillsToCents(l.unitCostMills),
+          // Spec F Phase 1: product lines send totals (new shape).
+          // Non-product lines continue sending unit_cost_mills (old shape).
+          ...(l.lineType === "product"
+            ? {
+                total_product_cost_cents: l.totalProductCostCents ?? 0,
+                packaging_cost_cents: l.packagingCostCents ?? 0,
+              }
+            : {
+                unit_cost_mills: l.unitCostMills,
+                unit_cost_cents: signedMillsToCents(l.unitCostMills),
+              }),
           vendor_product_id: l.vendorProductId ?? null,
         })),
         advance_to_sent: advanceToSent,
@@ -1919,15 +2010,20 @@ function LineRow(props: LineRowProps) {
   const inCatalog = catalogQuery.data?.inCatalog ?? [];
   const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
 
-  // Line total in cents is derived from mills (authoritative), half-up at
-  // the sub-cent boundary so the displayed total matches what we'll store.
+  // Line total in cents. For product lines (Spec F Phase 1), source of
+  // truth is totalProductCostCents + packagingCostCents (exact in cents).
+  // Falls back to mills computation for backward compat.
+  const totalProduct = Number(line.totalProductCostCents) || 0;
+  const packaging = Number(line.packagingCostCents) || 0;
   const lineTotalCents =
-    Number(line.orderQty) > 0 && Number(line.unitCostMills) > 0
-      ? computeLineTotalCentsFromMills(
-          Number(line.unitCostMills),
-          Number(line.orderQty),
-        )
-      : 0;
+    totalProduct > 0
+      ? totalProduct + packaging
+      : Number(line.orderQty) > 0 && Number(line.unitCostMills) > 0
+        ? computeLineTotalCentsFromMills(
+            Number(line.unitCostMills),
+            Number(line.orderQty),
+          )
+        : 0;
 
   return (
     <div className="grid grid-cols-12 gap-2 items-start">
@@ -2078,18 +2174,47 @@ function LineRow(props: LineRowProps) {
         />
       </div>
 
-      {/* Unit cost */}
-      <div className="col-span-4 md:col-span-2">
-        <UnitCostInput
-          mills={line.unitCostMills}
-          onChangeMills={(mills) => onChange({ unitCostMills: Math.max(0, mills) })}
-          ariaLabel={`Line ${idx + 1} unit cost`}
-        />
+      {/* Total product cost + packaging (Spec F Phase 1) */}
+      <div className="col-span-4 md:col-span-2 space-y-1">
+        <div>
+          <DollarInput
+            cents={line.totalProductCostCents ?? 0}
+            onChangeCents={(c) => {
+              const totalProductCostCents = Math.max(0, c);
+              const qty = line.orderQty || 1;
+              // Derive unitCostMills from total / qty for display + back-compat.
+              const unitCostMills =
+                qty > 0 ? Math.round((totalProductCostCents * 100) / qty) : 0;
+              onChange({ totalProductCostCents, unitCostMills });
+            }}
+            ariaLabel={`Line ${idx + 1} total product cost`}
+          />
+          <span className="text-[10px] text-muted-foreground">Total cost</span>
+        </div>
+        <div>
+          <DollarInput
+            cents={line.packagingCostCents ?? 0}
+            onChangeCents={(c) => {
+              const packagingCostCents = Math.max(0, c);
+              onChange({ packagingCostCents });
+            }}
+            ariaLabel={`Line ${idx + 1} packaging cost`}
+          />
+          <span className="text-[10px] text-muted-foreground">Packaging</span>
+        </div>
       </div>
 
-      {/* Line total */}
-      <div className="col-span-3 md:col-span-1 text-right text-sm pt-2 font-mono">
-        {formatCents(lineTotalCents)}
+      {/* Computed unit cost + line total */}
+      <div className="col-span-3 md:col-span-1 text-right text-sm pt-2 space-y-1">
+        <div className="font-mono" title="Computed from total ÷ qty">
+          {(line.orderQty > 0 && (line.totalProductCostCents ?? 0) > 0)
+            ? formatMills(Math.round(((line.totalProductCostCents ?? 0) * 100) / line.orderQty))
+            : "$0.0000"}
+        </div>
+        <div className="text-[10px] text-muted-foreground">unit (est.)</div>
+        <div className="font-mono font-medium pt-1">
+          {formatCents(lineTotalCents)}
+        </div>
       </div>
 
       {/* Remove */}
