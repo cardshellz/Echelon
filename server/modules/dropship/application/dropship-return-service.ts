@@ -2,7 +2,16 @@ import { createHash } from "crypto";
 import { z } from "zod";
 import { DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import {
+  formatNotificationCurrency,
+  sendDropshipNotificationSafely,
+} from "./dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import type { DropshipWalletLedgerRecord } from "./dropship-wallet-service";
 
@@ -226,6 +235,7 @@ export class DropshipReturnService {
     private readonly deps: {
       vendorProvisioning: DropshipVendorProvisioningService;
       repository: DropshipReturnRepository;
+      notificationSender?: DropshipNotificationSender;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -278,6 +288,9 @@ export class DropshipReturnService {
         },
       });
     }
+    if (!result.idempotentReplay) {
+      await this.notifyRmaCreated(result.rma);
+    }
     return result;
   }
 
@@ -327,6 +340,7 @@ export class DropshipReturnService {
           idempotencyKey: parsed.idempotencyKey,
         },
       });
+      await this.notifyReturnCreditPosted(result);
     }
     return result;
   }
@@ -337,6 +351,75 @@ export class DropshipReturnService {
       throw new DropshipError("DROPSHIP_RMA_NOT_FOUND", "Dropship RMA was not found.", input);
     }
     return rma;
+  }
+
+  private async notifyRmaCreated(rma: DropshipRmaDetail): Promise<void> {
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: rma.vendorId,
+      eventType: "dropship_rma_opened",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship RMA opened",
+      message: `RMA ${rma.rmaNumber} was opened for review.`,
+      payload: {
+        rmaId: rma.rmaId,
+        rmaNumber: rma.rmaNumber,
+        vendorId: rma.vendorId,
+        storeConnectionId: rma.storeConnectionId,
+        intakeId: rma.intakeId,
+        omsOrderId: rma.omsOrderId,
+        status: rma.status,
+        reasonCode: rma.reasonCode,
+      },
+      idempotencyKey: `rma-opened:${rma.rmaId}`,
+    }, {
+      code: "DROPSHIP_RMA_OPENED_NOTIFICATION_FAILED",
+      message: "Dropship RMA opened notification failed after RMA creation.",
+      context: {
+        rmaId: rma.rmaId,
+        rmaNumber: rma.rmaNumber,
+        vendorId: rma.vendorId,
+      },
+    });
+  }
+
+  private async notifyReturnCreditPosted(result: DropshipRmaInspectionResult): Promise<void> {
+    if (result.inspection.creditCents <= 0 || result.walletLedger.length === 0) {
+      return;
+    }
+    const creditCurrency = result.walletLedger[0]?.currency ?? "USD";
+
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: result.rma.vendorId,
+      eventType: "dropship_return_credit_posted",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship return credit posted",
+      message: `RMA ${result.rma.rmaNumber} credit posted for ${formatNotificationCurrency(result.inspection.creditCents, creditCurrency)}.`,
+      payload: {
+        rmaId: result.rma.rmaId,
+        rmaNumber: result.rma.rmaNumber,
+        vendorId: result.rma.vendorId,
+        inspectionId: result.inspection.rmaInspectionId,
+        outcome: result.inspection.outcome,
+        faultCategory: result.inspection.faultCategory,
+        creditCents: result.inspection.creditCents,
+        currency: creditCurrency,
+        feeCents: result.inspection.feeCents,
+        walletLedgerIds: result.walletLedger.map((entry) => entry.ledgerEntryId),
+      },
+      idempotencyKey: `rma-credit-posted:${result.rma.rmaId}:${result.inspection.rmaInspectionId}`,
+    }, {
+      code: "DROPSHIP_RETURN_CREDIT_NOTIFICATION_FAILED",
+      message: "Dropship return credit notification failed after inspection finalization.",
+      context: {
+        rmaId: result.rma.rmaId,
+        rmaNumber: result.rma.rmaNumber,
+        vendorId: result.rma.vendorId,
+        inspectionId: result.inspection.rmaInspectionId,
+        creditCents: result.inspection.creditCents,
+      },
+    });
   }
 }
 

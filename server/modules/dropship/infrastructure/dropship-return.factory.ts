@@ -3,6 +3,7 @@ import {
   makeDropshipReturnLogger,
   systemDropshipReturnClock,
 } from "../application/dropship-return-service";
+import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
 import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendor-provisioning.factory";
 import { PgDropshipReturnRepository } from "./dropship-return.repository";
 
@@ -10,6 +11,7 @@ export function createDropshipReturnServiceFromEnv(): DropshipReturnService {
   return new DropshipReturnService({
     vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
     repository: new PgDropshipReturnRepository(),
+    notificationSender: createDropshipNotificationServiceFromEnv(),
     clock: systemDropshipReturnClock,
     logger: makeDropshipReturnLogger(),
   });
