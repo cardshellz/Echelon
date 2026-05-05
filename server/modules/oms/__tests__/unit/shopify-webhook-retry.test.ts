@@ -212,6 +212,19 @@ describe("oms-webhooks.ts :: internal retry loopback semantics", () => {
     expect(OMS_WEBHOOKS_SRC).toContain("function acknowledgeProcessed");
     expect(OMS_WEBHOOKS_SRC).toMatch(/acknowledgeProcessed\(req, res\)/);
   });
+
+  it("persists Shopify OMS webhooks to an inbox before acknowledging", () => {
+    expect(OMS_WEBHOOKS_SRC).toContain("receiveShopifyWebhook");
+    expect(OMS_WEBHOOKS_SRC).toContain("recordWebhookReceived");
+    expect(OMS_WEBHOOKS_SRC).toMatch(
+      /receiveShopifyWebhook\(req, res, "orders\/paid", shopifyOrder\)[\s\S]*acknowledgeAccepted\(req, res\)/,
+    );
+  });
+
+  it("marks inbox rows succeeded or failed around processing", () => {
+    expect(OMS_WEBHOOKS_SRC).toContain("markInboxSucceeded");
+    expect(OMS_WEBHOOKS_SRC).toContain("markInboxFailed");
+  });
 });
 
 // ─── Source regression: shopify.routes.ts enqueue + bypass ───────────

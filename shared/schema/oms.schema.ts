@@ -305,3 +305,45 @@ export const insertWebhookRetryQueueSchema = createInsertSchema(webhookRetryQueu
 
 export type InsertWebhookRetryQueue = z.infer<typeof insertWebhookRetryQueueSchema>;
 export type WebhookRetryQueue = typeof webhookRetryQueue.$inferSelect;
+
+// ============================================================================
+// WEBHOOK INBOX
+// ============================================================================
+
+export const webhookInbox = omsSchema.table("webhook_inbox", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  provider: varchar("provider", { length: 50 }).notNull(),
+  topic: varchar("topic", { length: 100 }).notNull(),
+  eventId: varchar("event_id", { length: 200 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 300 }).notNull(),
+  sourceDomain: varchar("source_domain", { length: 255 }),
+  payload: jsonb("payload").notNull(),
+  headers: jsonb("headers"),
+  status: varchar("status", { length: 20 }).notNull().default("received"),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  firstReceivedAt: timestamp("first_received_at", { withTimezone: true }).defaultNow(),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+  processedAt: timestamp("processed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+}, (table) => {
+  return {
+    idempotencyKeyIdx: uniqueIndex("webhook_inbox_idempotency_key_uidx").on(table.idempotencyKey),
+    statusUpdatedIdx: index("idx_webhook_inbox_status_updated").on(table.status, table.updatedAt),
+    providerTopicEventIdx: index("idx_webhook_inbox_provider_topic_event").on(table.provider, table.topic, table.eventId),
+  };
+});
+
+export const insertWebhookInboxSchema = createInsertSchema(webhookInbox).omit({
+  id: true,
+  attempts: true,
+  firstReceivedAt: true,
+  lastAttemptAt: true,
+  processedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertWebhookInbox = z.infer<typeof insertWebhookInboxSchema>;
+export type WebhookInbox = typeof webhookInbox.$inferSelect;

@@ -49,6 +49,8 @@ async function countAndSample(
 
 export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   const [
+    failedInbox,
+    staleProcessingInbox,
     deadRetries,
     pendingRetries,
     omsWithoutWms,
@@ -57,6 +59,40 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     reviewShipments,
     shippedTrackingNotPushed,
   ] = await Promise.all([
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.webhook_inbox
+        WHERE status IN ('failed', 'dead')
+      `,
+      sql`
+        SELECT id, provider, topic, event_id, source_domain, status, attempts,
+               last_error, updated_at
+        FROM oms.webhook_inbox
+        WHERE status IN ('failed', 'dead')
+        ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.webhook_inbox
+        WHERE status = 'processing'
+          AND updated_at < NOW() - INTERVAL '10 minutes'
+      `,
+      sql`
+        SELECT id, provider, topic, event_id, source_domain, attempts,
+               last_attempt_at, updated_at
+        FROM oms.webhook_inbox
+        WHERE status = 'processing'
+          AND updated_at < NOW() - INTERVAL '10 minutes'
+        ORDER BY updated_at ASC, id ASC
+        LIMIT 10
+      `,
+    ),
     countAndSample(
       db,
       sql`
@@ -225,6 +261,20 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   ]);
 
   const issues: OmsOpsIssue[] = [
+    issue({
+      code: "WEBHOOK_INBOX_FAILED",
+      severity: "critical",
+      count: failedInbox.count,
+      message: "Webhook inbox rows failed or dead-lettered after receipt.",
+      sample: failedInbox.sample,
+    }),
+    issue({
+      code: "WEBHOOK_INBOX_STALE_PROCESSING",
+      severity: "critical",
+      count: staleProcessingInbox.count,
+      message: "Webhook inbox rows are stuck in processing and need replay or operator action.",
+      sample: staleProcessingInbox.sample,
+    }),
     issue({
       code: "WEBHOOK_RETRY_DEAD",
       severity: "critical",
