@@ -337,9 +337,17 @@ export class DropshipOrderProcessingService {
             skipReason: result.skipReason,
           },
         });
+        await this.notifyAutoReloadIssue({
+          claim: input.claim,
+          reason: autoReloadInput.reason,
+          issueType: "skipped",
+          issueCode: result.skipReason ?? "unknown",
+          issueMessage: `Auto-reload was skipped: ${result.skipReason ?? "unknown"}.`,
+        });
       }
       return result;
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       this.deps.logger.warn({
         code: autoReloadInput.reason === "payment_hold"
           ? "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_FAILED"
@@ -351,11 +359,64 @@ export class DropshipOrderProcessingService {
           intakeId: input.claim.intake.intakeId,
           vendorId: input.claim.intake.vendorId,
           storeConnectionId: input.claim.intake.storeConnectionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
         },
+      });
+      await this.notifyAutoReloadIssue({
+        claim: input.claim,
+        reason: autoReloadInput.reason,
+        issueType: "failed",
+        issueCode: "auto_reload_provider_error",
+        issueMessage: errorMessage,
       });
       return null;
     }
+  }
+
+  private async notifyAutoReloadIssue(input: {
+    claim: DropshipOrderProcessingClaim;
+    reason: "minimum_balance" | "payment_hold";
+    issueType: "skipped" | "failed";
+    issueCode: string;
+    issueMessage: string;
+  }): Promise<void> {
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: input.claim.intake.vendorId,
+      eventType: "dropship_auto_reload_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship auto-reload failed",
+      message: `Auto-reload for order intake ${input.claim.intake.intakeId} did not complete: ${input.issueMessage}`,
+      payload: {
+        intakeId: input.claim.intake.intakeId,
+        vendorId: input.claim.intake.vendorId,
+        storeConnectionId: input.claim.intake.storeConnectionId,
+        platform: input.claim.intake.platform,
+        externalOrderId: input.claim.intake.externalOrderId,
+        autoReloadReason: input.reason,
+        issueType: input.issueType,
+        issueCode: input.issueCode,
+        issueMessage: input.issueMessage,
+      },
+      idempotencyKey: deriveAutoReloadIssueNotificationKey({
+        intakeId: input.claim.intake.intakeId,
+        reason: input.reason,
+        issueType: input.issueType,
+        issueCode: input.issueCode,
+        issueMessage: input.issueMessage,
+      }),
+    }, {
+      code: "DROPSHIP_AUTO_RELOAD_NOTIFICATION_FAILED",
+      message: "Dropship auto-reload failure notification failed.",
+      context: {
+        intakeId: input.claim.intake.intakeId,
+        vendorId: input.claim.intake.vendorId,
+        storeConnectionId: input.claim.intake.storeConnectionId,
+        autoReloadReason: input.reason,
+        issueType: input.issueType,
+        issueCode: input.issueCode,
+      },
+    });
   }
 
   private async notifyPaymentHoldExpired(
@@ -489,6 +550,20 @@ export function deriveOrderProcessingIdempotencyKey(
 ): string {
   const digest = createHash("sha256").update(input.idempotencyKey).digest("hex").slice(0, 32);
   return `order:${input.intakeId}:${stage}:${digest}`;
+}
+
+export function deriveAutoReloadIssueNotificationKey(input: {
+  intakeId: number;
+  reason: "minimum_balance" | "payment_hold";
+  issueType: "skipped" | "failed";
+  issueCode: string;
+  issueMessage: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(`${input.reason}:${input.issueType}:${input.issueCode}:${input.issueMessage}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `order:${input.intakeId}:auto-reload-alert:${digest}`;
 }
 
 export function makeDropshipOrderProcessingLogger(): DropshipLogger {
