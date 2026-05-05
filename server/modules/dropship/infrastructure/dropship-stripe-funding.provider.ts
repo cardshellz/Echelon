@@ -7,6 +7,7 @@ import type {
   DropshipStripeWalletFundingSession,
   DropshipWalletFundingProvider,
   HandleDropshipAutoReloadInput,
+  NotifyDropshipWalletFundingFailedInput,
   RegisterDropshipFundingMethodInput,
 } from "../application/dropship-wallet-service";
 
@@ -27,6 +28,12 @@ export type DropshipStripeFundingWebhookEvent =
       eventType: string;
       fundingMethod: RegisterDropshipFundingMethodInput;
       fundingCredit: Omit<CreditDropshipWalletFundingInput, "fundingMethodId">;
+    }
+  | {
+      kind: "wallet_funding_failed";
+      providerEventId: string;
+      eventType: string;
+      failure: NotifyDropshipWalletFundingFailedInput;
     }
   | {
       kind: "ignored";
@@ -263,12 +270,54 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     if (event.type === "payment_intent.processing" || event.type === "payment_intent.succeeded") {
       return this.parsePaymentIntentFundingEvent(event);
     }
+    if (event.type === "payment_intent.payment_failed") {
+      return this.parsePaymentIntentFundingFailureEvent(event);
+    }
 
     return {
       kind: "ignored",
       providerEventId: event.id,
       eventType: event.type,
       reason: "unsupported_event_type",
+    };
+  }
+
+  private parsePaymentIntentFundingFailureEvent(event: Stripe.Event): DropshipStripeFundingWebhookEvent {
+    const paymentIntent = event.data.object as Stripe.PaymentIntent;
+    if (paymentIntent.metadata?.type !== STRIPE_WALLET_FUNDING_TYPE) {
+      return {
+        kind: "ignored",
+        providerEventId: event.id,
+        eventType: event.type,
+        reason: "not_dropship_wallet_funding",
+      };
+    }
+
+    const metadata = paymentIntent.metadata ?? {};
+    const vendorId = parsePositiveInteger(metadata.dropship_vendor_id ?? metadata.vendor_id, "dropship_vendor_id");
+    const fundingMethodId = parseOptionalPositiveInteger(metadata.funding_method_id, "funding_method_id");
+    const rail = railFromMetadata(metadata.requested_rail);
+    return {
+      kind: "wallet_funding_failed",
+      providerEventId: event.id,
+      eventType: event.type,
+      failure: {
+        vendorId,
+        fundingMethodId,
+        rail,
+        amountCents: amountCentsForPaymentIntentFailure(paymentIntent),
+        currency: paymentIntent.currency.toUpperCase(),
+        provider: "stripe",
+        providerEventId: event.id,
+        providerPaymentIntentId: paymentIntent.id,
+        providerStatus: paymentIntent.status,
+        failureCode: paymentIntent.last_payment_error?.code ?? null,
+        failureMessage: paymentIntent.last_payment_error?.message ?? null,
+        autoReload: metadata.auto_reload === "true",
+        autoReloadReason: autoReloadReasonFromMetadata(metadata.auto_reload_reason),
+        intakeId: parseOptionalPositiveInteger(metadata.intake_id, "intake_id"),
+        idempotencyKey: `stripe-funding-failed:${paymentIntent.id}`,
+      },
     };
   }
 
@@ -556,6 +605,31 @@ function walletFundingStatusForPaymentIntent(
 ): CreditDropshipWalletFundingInput["status"] | null {
   if (paymentIntent.status === "succeeded") return "settled";
   if (paymentIntent.status === "processing") return "pending";
+  return null;
+}
+
+function amountCentsForPaymentIntentFailure(paymentIntent: Stripe.PaymentIntent): number {
+  if (Number.isSafeInteger(paymentIntent.amount) && paymentIntent.amount > 0) {
+    return paymentIntent.amount;
+  }
+  throw new DropshipError(
+    "DROPSHIP_STRIPE_WALLET_FUNDING_AMOUNT_INVALID",
+    "Stripe wallet funding failure event is missing a valid amount.",
+    { providerPaymentIntentId: paymentIntent.id, amount: paymentIntent.amount },
+  );
+}
+
+function railFromMetadata(value: unknown): RegisterDropshipFundingMethodInput["rail"] | null {
+  if (value === "stripe_card" || value === "stripe_ach" || value === "usdc_base") {
+    return value;
+  }
+  return null;
+}
+
+function autoReloadReasonFromMetadata(value: unknown): HandleDropshipAutoReloadInput["reason"] | null {
+  if (value === "minimum_balance" || value === "payment_hold") {
+    return value;
+  }
   return null;
 }
 
