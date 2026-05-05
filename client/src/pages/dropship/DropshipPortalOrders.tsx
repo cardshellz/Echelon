@@ -134,7 +134,11 @@ export default function DropshipPortalOrders() {
   }
 
   async function ensureOrderSensitiveProof(intakeId: number): Promise<boolean> {
-    if (hasActiveProof(orderAcceptanceAction)) return true;
+    if (hasActiveProof(orderAcceptanceAction)) {
+      setEmailCodeSent(false);
+      setVerificationCode("");
+      return true;
+    }
     if (principal?.hasPasskey) {
       return runOrderAction("passkey-proof", intakeId, async () => {
         await verifyPasskeyStepUp(orderAcceptanceAction);
@@ -144,16 +148,27 @@ export default function DropshipPortalOrders() {
       await runOrderAction("send-code", intakeId, async () => {
         await startEmailStepUp(orderAcceptanceAction);
         setEmailCodeSent(true);
+        setVerificationCode("");
         setMessage("Verification code sent. Enter it below, then retry Accept.");
       });
       return false;
     }
-    return runOrderAction("verify-code", intakeId, async () => {
+    if (verificationCode.length !== 6) {
+      setError("Enter the 6-digit verification code before accepting the order.");
+      return false;
+    }
+
+    const verified = await runOrderAction("verify-code", intakeId, async () => {
       await verifyEmailStepUp({
         action: orderAcceptanceAction,
         verificationCode,
       });
     });
+    if (verified) {
+      setEmailCodeSent(false);
+      setVerificationCode("");
+    }
+    return verified;
   }
 
   async function runOrderAction(
