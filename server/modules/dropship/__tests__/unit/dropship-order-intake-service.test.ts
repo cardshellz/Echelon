@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
+  cancellationStatusForOrderIntakeEligibility,
   DropshipOrderIntakeService,
   evaluateDropshipOrderIntakeEligibility,
   hashDropshipOrderIntakePayload,
@@ -86,6 +87,11 @@ describe("DropshipOrderIntakeService", () => {
 
     expect(result.intake.status).toBe("rejected");
     expect(result.intake.rejectionReason).toContain("needs_reauth");
+    expect(result.intake.cancellationStatus).toBe("order_intake_rejected");
+    expect(repository.lastRecordInput).toMatchObject({
+      status: "rejected",
+      cancellationStatus: "order_intake_rejected",
+    });
     expect(notificationSender.sent[0]).toMatchObject({
       eventType: "dropship_order_intake_rejected",
       critical: true,
@@ -146,6 +152,11 @@ describe("dropship order intake eligibility", () => {
       ...makeContext(),
       storeStatus: "grace_period",
     })).toMatchObject({ status: "rejected" });
+  });
+
+  it("marks only rejected intake for marketplace cancellation", () => {
+    expect(cancellationStatusForOrderIntakeEligibility("received")).toBeNull();
+    expect(cancellationStatusForOrderIntakeEligibility("rejected")).toBe("order_intake_rejected");
   });
 });
 
@@ -268,7 +279,7 @@ function makeRecord(
     status: input.status,
     paymentHoldExpiresAt: null,
     rejectionReason: input.rejectionReason,
-    cancellationStatus: null,
+    cancellationStatus: input.cancellationStatus,
     rawPayload: input.rawPayload,
     normalizedPayload: input.normalizedPayload,
     payloadHash: input.payloadHash,

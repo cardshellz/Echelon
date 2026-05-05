@@ -10,6 +10,8 @@ import type {
 } from "./dropship-marketplace-order-cancellation-provider";
 
 const DEFAULT_CANCELLATION_BATCH_LIMIT = 100;
+const PAYMENT_HOLD_EXPIRED_REASON = "Payment hold expired before wallet funds were available.";
+const MARKETPLACE_CANCELLATION_FAILED_REASON_PREFIX = "Marketplace cancellation failed:";
 
 const processDropshipOrderCancellationsInputSchema = z.object({
   workerId: z.string().trim().min(1).max(255),
@@ -25,7 +27,12 @@ export interface DropshipOrderCancellationCandidate {
   externalOrderNumber: string | null;
   sourceOrderId: string | null;
   orderedAt: string | null;
-  cancellationStatus: "payment_hold_expired" | "marketplace_cancellation_retrying" | "marketplace_cancellation_processing";
+  rejectionReason: string | null;
+  cancellationStatus:
+    | "payment_hold_expired"
+    | "order_intake_rejected"
+    | "marketplace_cancellation_retrying"
+    | "marketplace_cancellation_processing";
 }
 
 export interface DropshipOrderCancellationRepository {
@@ -161,7 +168,7 @@ export function buildCancellationRequest(
     externalOrderNumber: candidate.externalOrderNumber,
     sourceOrderId: candidate.sourceOrderId,
     orderedAt: candidate.orderedAt,
-    reason: cancellationReasonFromStatus(candidate.cancellationStatus),
+    reason: cancellationReasonFromCandidate(candidate),
     idempotencyKey: deriveOrderCancellationIdempotencyKey(candidate),
   };
 }
@@ -188,21 +195,25 @@ export const systemDropshipOrderCancellationClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function cancellationReasonFromStatus(
-  status: DropshipOrderCancellationCandidate["cancellationStatus"],
+function cancellationReasonFromCandidate(
+  candidate: DropshipOrderCancellationCandidate,
 ): DropshipMarketplaceOrderCancellationReason {
-  if (
-    status === "payment_hold_expired"
-    || status === "marketplace_cancellation_retrying"
-    || status === "marketplace_cancellation_processing"
-  ) {
+  if (candidate.cancellationStatus === "payment_hold_expired") {
     return "payment_hold_expired";
   }
-  throw new DropshipError(
-    "DROPSHIP_ORDER_CANCELLATION_STATUS_UNSUPPORTED",
-    "Dropship order cancellation status is not supported.",
-    { status, retryable: false },
-  );
+  if (candidate.cancellationStatus === "order_intake_rejected") {
+    return "order_intake_rejected";
+  }
+  if (candidate.rejectionReason?.startsWith(PAYMENT_HOLD_EXPIRED_REASON)) {
+    return "payment_hold_expired";
+  }
+  if (candidate.rejectionReason?.startsWith(MARKETPLACE_CANCELLATION_FAILED_REASON_PREFIX)) {
+    return "payment_hold_expired";
+  }
+  if (candidate.rejectionReason) {
+    return "order_intake_rejected";
+  }
+  return "payment_hold_expired";
 }
 
 function parseProcessCancellationsInput(

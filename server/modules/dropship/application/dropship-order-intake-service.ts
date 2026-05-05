@@ -119,6 +119,7 @@ export interface DropshipOrderIntakeRepositoryInput extends RecordDropshipOrderI
   payloadHash: string;
   status: "received" | "rejected";
   rejectionReason: string | null;
+  cancellationStatus: string | null;
   receivedAt: Date;
 }
 
@@ -184,6 +185,7 @@ export class DropshipOrderIntakeService {
       payloadHash,
       status: eligibility.status,
       rejectionReason: eligibility.rejectionReason,
+      cancellationStatus: cancellationStatusForOrderIntakeEligibility(eligibility.status),
       receivedAt: this.deps.clock.now(),
     });
 
@@ -270,6 +272,12 @@ export function evaluateDropshipOrderIntakeEligibility(
     };
   }
   return { status: "received", rejectionReason: null };
+}
+
+export function cancellationStatusForOrderIntakeEligibility(
+  status: "received" | "rejected",
+): string | null {
+  return status === "rejected" ? "order_intake_rejected" : null;
 }
 
 export function hashDropshipOrderIntakePayload(input: {

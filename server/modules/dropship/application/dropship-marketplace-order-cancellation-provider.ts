@@ -1,6 +1,6 @@
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 
-export type DropshipMarketplaceOrderCancellationReason = "payment_hold_expired";
+export type DropshipMarketplaceOrderCancellationReason = "payment_hold_expired" | "order_intake_rejected";
 
 export interface DropshipMarketplaceOrderCancellationRequest {
   intakeId: number;
