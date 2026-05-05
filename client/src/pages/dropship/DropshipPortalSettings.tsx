@@ -256,7 +256,7 @@ export default function DropshipPortalSettings() {
           <>
             <section className="mt-5 grid gap-4 lg:grid-cols-3">
               <Metric title="Vendor" value={settings.vendor.businessName || settings.vendor.email || "Card Shellz member"} detail={formatStatus(settings.vendor.status)} />
-              <Metric title="Wallet" value={formatCents(settings.wallet.availableBalanceCents)} detail={settings.wallet.autoReloadEnabled ? "Auto-reload enabled" : "Auto-reload needs setup"} />
+              <Metric title="Wallet" value={formatCents(settings.wallet.availableBalanceCents)} detail={walletMetricDetail(settings)} />
               <Metric
                 title="Generated"
                 value={formatDateTime(settings.generatedAt)}
@@ -661,4 +661,10 @@ function sensitiveActionVerificationLabel(action: DropshipSensitiveAction): stri
   if (action === "connect_store") return "Store authorization verification code";
   if (action === "disconnect_store") return "Disconnect verification code";
   return "Verification code";
+}
+
+function walletMetricDetail(settings: DropshipSettingsResponse["settings"]): string {
+  if (!settings.wallet.autoReloadEnabled) return "Auto-reload needs setup";
+  if (!settings.wallet.autoReloadFundingMethodReady) return "Auto-reload funding method needs setup";
+  return `${settings.wallet.activeStripeFundingMethodCount} Stripe-ready funding method${settings.wallet.activeStripeFundingMethodCount === 1 ? "" : "s"}`;
 }

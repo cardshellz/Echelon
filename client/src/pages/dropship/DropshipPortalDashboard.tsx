@@ -136,7 +136,7 @@ export default function DropshipPortalDashboard() {
               <StatusTile
                 icon={<Wallet className="h-4 w-4" />}
                 label="Auto-reload"
-                value={settings ? (settings.wallet.autoReloadEnabled ? "Enabled" : "Needs setup") : "Loading"}
+                value={walletAutoReloadStatus(settings)}
               />
               <StatusTile
                 icon={<Clock className="h-4 w-4" />}
@@ -412,6 +412,14 @@ function StatusTile({
       <div className="mt-2 text-base font-semibold text-zinc-950">{value}</div>
     </div>
   );
+}
+
+function walletAutoReloadStatus(settings: DropshipSettingsResponse["settings"] | undefined): string {
+  if (!settings) return "Loading";
+  if (!settings.wallet.autoReloadEnabled) return "Needs setup";
+  if (!settings.wallet.autoReloadFundingMethodReady) return "Funding method needed";
+  if (settings.wallet.availableBalanceCents > 0 || settings.wallet.activeStripeFundingMethodCount > 0) return "Ready";
+  return "Needs funding";
 }
 
 function SettingsSectionCard({ section }: { section: DropshipSettingsSection }) {
