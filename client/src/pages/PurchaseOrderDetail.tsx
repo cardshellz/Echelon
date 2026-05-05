@@ -2726,8 +2726,8 @@ export default function PurchaseOrderDetail() {
           <CardContent className="px-4 pb-4 space-y-2">
             {/* Physical actions */}
 
-            {/* Send to vendor (draft only) */}
-            {po.physicalStatus === "draft" && isSoloMode && (
+            {/* Send to vendor (draft or approved only — matches server state machine) */}
+            {(po.status === "draft" || po.status === "approved") && isSoloMode && (
               <Button
                 className="w-full justify-start"
                 size="sm"
