@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type {
+  DropshipActivateVendorRepositoryInput,
   DropshipCatalogSetupSummary,
   DropshipProvisionVendorRepositoryInput,
   DropshipProvisionVendorRepositoryResult,
@@ -10,6 +11,7 @@ import type {
   DropshipWalletSetupSummary,
 } from "../application/dropship-vendor-provisioning-service";
 import { ensureDropshipWalletScaffoldingForVendor } from "./dropship-wallet.repository";
+import { DropshipError } from "../domain/errors";
 
 interface VendorProfileRow {
   id: number;
@@ -222,6 +224,63 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
       client.release();
     }
   }
+
+  async activateVendor(input: DropshipActivateVendorRepositoryInput): Promise<DropshipProvisionedVendorProfile> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await findVendorByIdWithClient(client, input.vendorId, true);
+      if (!existing) {
+        throw new DropshipError(
+          "DROPSHIP_VENDOR_NOT_FOUND",
+          "Dropship vendor was not found for onboarding activation.",
+          { vendorId: input.vendorId },
+        );
+      }
+      if (existing.status === "active") {
+        await client.query("COMMIT");
+        return existing;
+      }
+      if (existing.status !== "onboarding") {
+        throw new DropshipError(
+          "DROPSHIP_ONBOARDING_ACTIVATION_BLOCKED",
+          "Dropship vendor status does not allow onboarding activation.",
+          { vendorId: input.vendorId, status: existing.status },
+        );
+      }
+
+      const result = await client.query<VendorProfileRow>(
+        `UPDATE dropship.dropship_vendors
+         SET status = 'active',
+             updated_at = $2
+         WHERE id = $1
+           AND status = 'onboarding'
+         RETURNING id, member_id, current_subscription_id, current_plan_id, business_name,
+                   contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
+                   membership_grace_ends_at, included_store_connections, created_at, updated_at`,
+        [input.vendorId, input.activatedAt],
+      );
+      const vendor = mapVendorProfileRow(result.rows[0]);
+      if (!vendor) {
+        throw new Error("Dropship vendor activation did not return a vendor row.");
+      }
+      await recordVendorProvisioningAuditEvent(client, {
+        vendor,
+        eventType: "vendor_onboarding_activated",
+        changedFields: ["status"],
+        before: serializeVendorProfileForAudit(existing),
+        after: serializeVendorProfileForAudit(vendor),
+        occurredAt: input.activatedAt,
+      });
+      await client.query("COMMIT");
+      return vendor;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 async function findVendorByMemberIdWithClient(
@@ -238,6 +297,24 @@ async function findVendorByMemberIdWithClient(
      LIMIT 1
      ${forUpdate ? "FOR UPDATE" : ""}`,
     [memberId],
+  );
+  return mapVendorProfileRow(result.rows[0]);
+}
+
+async function findVendorByIdWithClient(
+  client: PoolClient,
+  vendorId: number,
+  forUpdate: boolean,
+): Promise<DropshipProvisionedVendorProfile | null> {
+  const result = await client.query<VendorProfileRow>(
+    `SELECT id, member_id, current_subscription_id, current_plan_id, business_name,
+            contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
+            membership_grace_ends_at, included_store_connections, created_at, updated_at
+     FROM dropship.dropship_vendors
+     WHERE id = $1
+     LIMIT 1
+     ${forUpdate ? "FOR UPDATE" : ""}`,
+    [vendorId],
   );
   return mapVendorProfileRow(result.rows[0]);
 }
@@ -332,7 +409,7 @@ async function recordVendorProvisioningAuditEvent(
   client: PoolClient,
   input: {
     vendor: DropshipProvisionedVendorProfile;
-    eventType: "vendor_profile_provisioned" | "vendor_profile_synced";
+    eventType: "vendor_profile_provisioned" | "vendor_profile_synced" | "vendor_onboarding_activated";
     changedFields: string[];
     before: Record<string, unknown> | null;
     after: Record<string, unknown>;

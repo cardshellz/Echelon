@@ -2,7 +2,7 @@ import type { Express, Response } from "express";
 import { DropshipVendorProvisioningService } from "../../application/dropship-vendor-provisioning-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipVendorProvisioningServiceFromEnv } from "../../infrastructure/dropship-vendor-provisioning.factory";
-import { requireDropshipAuth } from "./dropship-auth.routes";
+import { requireDropshipAuth, requireDropshipSensitiveActionProof } from "./dropship-auth.routes";
 
 export function registerDropshipOnboardingRoutes(
   app: Express,
@@ -16,6 +16,20 @@ export function registerDropshipOnboardingRoutes(
       return sendDropshipOnboardingError(res, error);
     }
   });
+
+  app.post(
+    "/api/dropship/onboarding/activate",
+    requireDropshipAuth,
+    requireDropshipSensitiveActionProof("activate_account"),
+    async (req, res) => {
+      try {
+        const state = await service.activateOnboardingForMember(req.session.dropship!.memberId);
+        return res.json(state);
+      } catch (error) {
+        return sendDropshipOnboardingError(res, error);
+      }
+    },
+  );
 }
 
 function sendDropshipOnboardingError(res: Response, error: unknown): Response {
@@ -41,6 +55,12 @@ function sendDropshipOnboardingError(res: Response, error: unknown): Response {
 function statusForDropshipOnboardingError(code: string): number {
   if (code === "DROPSHIP_ENTITLEMENT_REQUIRED") {
     return 403;
+  }
+  if (code === "DROPSHIP_ONBOARDING_INCOMPLETE") {
+    return 409;
+  }
+  if (code === "DROPSHIP_ONBOARDING_ACTIVATION_BLOCKED") {
+    return 409;
   }
   return 500;
 }

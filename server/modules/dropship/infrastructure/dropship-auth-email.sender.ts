@@ -36,6 +36,8 @@ function getActionLabel(action: DropshipSensitiveAction): string {
       return "reset your dropship portal password";
     case "register_passkey":
       return "register a passkey";
+    case "activate_account":
+      return "activate your dropship account";
     case "connect_store":
       return "connect a store";
     case "disconnect_store":
