@@ -303,6 +303,8 @@ export interface DropshipVendorSettingsOverview {
     pendingBalanceCents: number;
     autoReloadEnabled: boolean;
     fundingMethodCount: number;
+    activeStripeFundingMethodCount: number;
+    autoReloadFundingMethodReady: boolean;
   };
   notificationPreferences: {
     configuredCount: number;

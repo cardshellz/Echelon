@@ -79,6 +79,8 @@ export interface DropshipVendorSettingsOverview {
     pendingBalanceCents: number;
     autoReloadEnabled: boolean;
     fundingMethodCount: number;
+    activeStripeFundingMethodCount: number;
+    autoReloadFundingMethodReady: boolean;
   };
   notificationPreferences: {
     configuredCount: number;
@@ -710,8 +712,14 @@ export function buildDropshipSettingsSections(input: {
     });
   const walletBlockers = [
     input.wallet.autoReloadEnabled ? null : "auto_reload_required",
-    input.wallet.fundingMethodCount > 0 ? null : "funding_method_required",
+    input.wallet.autoReloadEnabled && !input.wallet.autoReloadFundingMethodReady
+      ? "auto_reload_funding_method_required"
+      : null,
+    input.wallet.availableBalanceCents > 0 || input.wallet.activeStripeFundingMethodCount > 0
+      ? null
+      : "stripe_funding_method_required",
   ].filter((value): value is string => value !== null);
+  const walletReady = walletBlockers.length === 0;
 
   return [
     {
@@ -735,9 +743,13 @@ export function buildDropshipSettingsSections(input: {
     {
       key: "wallet_payment",
       label: "Wallet and payment",
-      status: walletBlockers.length === 0 ? "ready" : "attention_required",
+      status: walletReady ? "ready" : "attention_required",
       comingSoon: false,
-      summary: input.wallet.autoReloadEnabled ? "Auto-reload enabled." : "Auto-reload needs setup.",
+      summary: walletReady
+        ? "Wallet funding and auto-reload ready."
+        : input.wallet.autoReloadEnabled
+          ? "Auto-reload needs usable Stripe funding."
+          : "Auto-reload needs setup.",
       blockers: walletBlockers,
     },
     {

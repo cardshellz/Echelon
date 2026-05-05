@@ -9,6 +9,49 @@ vi.hoisted(() => {
 const now = new Date("2026-05-03T15:00:00.000Z");
 
 describe("PgDropshipOpsSurfaceRepository", () => {
+  it("surfaces Stripe-ready wallet settings readiness", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (String(sql).includes("dropship.dropship_store_connections")) {
+        return { rows: [] };
+      }
+      return {
+        rows: [{
+          id: 10,
+          member_id: "member-1",
+          business_name: "Vendor Test",
+          email: "vendor@cardshellz.test",
+          status: "active",
+          entitlement_status: "active",
+          included_store_connections: 1,
+          available_balance_cents: "0",
+          pending_balance_cents: "0",
+          auto_reload_enabled: true,
+          funding_method_count: "2",
+          active_stripe_funding_method_count: "1",
+          auto_reload_funding_method_ready: true,
+          notification_preference_count: "0",
+        }],
+      };
+    });
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.getVendorSettingsOverview(10, now);
+
+    expect(String(query.mock.calls[0]?.[0])).toContain("active_stripe_funding_method_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("auto_reload_funding_method_ready");
+    expect(result.wallet).toMatchObject({
+      availableBalanceCents: 0,
+      fundingMethodCount: 2,
+      activeStripeFundingMethodCount: 1,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodReady: true,
+    });
+    expect(result.sections.find((section) => section.key === "wallet_payment")).toMatchObject({
+      status: "ready",
+      blockers: [],
+    });
+  });
+
   it("surfaces shipping setup gaps in dogfood readiness", async () => {
     const query = vi.fn(async () => ({
       rows: [makeDogfoodReadinessRow({

@@ -29,6 +29,8 @@ describe("DropshipOpsSurfaceService", () => {
         pendingBalanceCents: 0,
         autoReloadEnabled: false,
         fundingMethodCount: 0,
+        activeStripeFundingMethodCount: 0,
+        autoReloadFundingMethodReady: false,
       },
       notificationPreferenceCount: 0,
       hasContactEmail: false,
@@ -45,8 +47,59 @@ describe("DropshipOpsSurfaceService", () => {
     expect(sections.find((section) => section.key === "store_connection")?.blockers).toContain("store_connection_required");
     expect(sections.find((section) => section.key === "wallet_payment")?.blockers).toEqual([
       "auto_reload_required",
-      "funding_method_required",
+      "stripe_funding_method_required",
     ]);
+  });
+
+  it("requires Stripe-ready funding for the launch wallet settings section", () => {
+    const sections = buildDropshipSettingsSections({
+      vendorStatus: "active",
+      entitlementStatus: "active",
+      storeConnections: [],
+      wallet: {
+        availableBalanceCents: 0,
+        pendingBalanceCents: 0,
+        autoReloadEnabled: true,
+        fundingMethodCount: 1,
+        activeStripeFundingMethodCount: 0,
+        autoReloadFundingMethodReady: false,
+      },
+      notificationPreferenceCount: 0,
+      hasContactEmail: true,
+    });
+
+    expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
+      status: "attention_required",
+      summary: "Auto-reload needs usable Stripe funding.",
+      blockers: [
+        "auto_reload_funding_method_required",
+        "stripe_funding_method_required",
+      ],
+    });
+  });
+
+  it("marks launch wallet settings ready with Stripe-ready auto-reload even when balance is zero", () => {
+    const sections = buildDropshipSettingsSections({
+      vendorStatus: "active",
+      entitlementStatus: "active",
+      storeConnections: [],
+      wallet: {
+        availableBalanceCents: 0,
+        pendingBalanceCents: 0,
+        autoReloadEnabled: true,
+        fundingMethodCount: 1,
+        activeStripeFundingMethodCount: 1,
+        autoReloadFundingMethodReady: true,
+      },
+      notificationPreferenceCount: 0,
+      hasContactEmail: true,
+    });
+
+    expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
+      status: "ready",
+      summary: "Wallet funding and auto-reload ready.",
+      blockers: [],
+    });
   });
 
   it("surfaces launch-critical system configuration without exposing secret values", () => {
@@ -297,6 +350,8 @@ function makeSettingsOverview(overrides: Partial<DropshipVendorSettingsOverview>
       pendingBalanceCents: 0,
       autoReloadEnabled: true,
       fundingMethodCount: 1,
+      activeStripeFundingMethodCount: 1,
+      autoReloadFundingMethodReady: true,
     },
     notificationPreferences: {
       configuredCount: 0,
