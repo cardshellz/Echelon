@@ -229,6 +229,7 @@ export function buildOnboardingState(input: {
   wallet: DropshipWalletSetupSummary;
 }): DropshipOnboardingState {
   const activeStoreCount = input.storeConnections.activeCount;
+  const connectedStoreCount = input.storeConnections.connectedCount;
   const adminCatalogAvailable = input.catalog.adminExposureRuleCount > 0;
   const hasVendorSelection = input.catalog.vendorSelectionRuleCount > 0;
   const entitlementBlocked = input.vendor.status === "lapsed" || input.vendor.status === "suspended";
@@ -269,7 +270,7 @@ export function buildOnboardingState(input: {
       {
         key: "store_connection",
         label: "Store connection",
-        status: entitlementBlocked ? "blocked" : activeStoreCount > 0 ? "complete" : "incomplete",
+        status: entitlementBlocked ? "blocked" : connectedStoreCount > 0 ? "complete" : "incomplete",
         required: true,
       },
       {
