@@ -1259,7 +1259,7 @@ export default function PurchaseOrderEdit() {
       }
       const result = await saveMutation.mutateAsync(false);
       const po = result?.po ?? result;
-      toast({ title: "Saved as draft", description: po?.poNumber ?? "" });
+      toast({ title: "PO saved as draft", description: po?.poNumber ?? "" });
       snapshotRef.current = JSON.stringify({
         vendorId: selectedVendor?.id ?? null,
         lines,
@@ -1293,15 +1293,21 @@ export default function PurchaseOrderEdit() {
       }
       const result = await saveMutation.mutateAsync(true);
       const po = result?.po ?? result;
-      if (result?.pending_approval) {
+      if (result?.sendError) {
+        toast({
+          title: "PO created, but send to vendor failed",
+          description: result.sendError,
+          variant: "destructive",
+        });
+      } else if (result?.pending_approval) {
         toast({
           title: "Submitted for approval",
           description: `${po?.poNumber ?? ""} is awaiting approval.`,
         });
       } else {
         toast({
-          title: "PDF placeholder — real PDF coming soon",
-          description: `${po?.poNumber ?? ""} sent to vendor.`,
+          title: "PO created and sent to vendor",
+          description: po?.poNumber ?? "",
         });
       }
       setDirty(false);
@@ -2279,13 +2285,13 @@ function ProductLineTableRow({
             qty={line.orderQty}
             onChangeQty={(q) => onChange({ orderQty: q })}
             ariaLabel={`Line ${idx + 1} quantity`}
-            className="text-right font-mono tabular-nums"
+            className="w-full text-right font-mono tabular-nums"
           />
         </TableCell>
 
         {/* Product Cost cell */}
         <TableCell className="px-3 py-3">
-          <div className="relative">
+          <div className="relative w-full">
             <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
             <DollarInput
               cents={line.totalProductCostCents ?? 0}
@@ -2297,7 +2303,7 @@ function ProductLineTableRow({
                 onChange({ totalProductCostCents, unitCostMills });
               }}
               ariaLabel={`Line ${idx + 1} total product cost`}
-              className="pl-6 pr-2"
+              className="w-full pl-6 pr-2"
             />
           </div>
           <Tooltip>
@@ -2314,7 +2320,7 @@ function ProductLineTableRow({
 
         {/* Packaging cell */}
         <TableCell className="px-3 py-3">
-          <div className="relative">
+          <div className="relative w-full">
             <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
             <DollarInput
               cents={line.packagingCostCents ?? 0}
@@ -2323,7 +2329,7 @@ function ProductLineTableRow({
                 onChange({ packagingCostCents });
               }}
               ariaLabel={`Line ${idx + 1} packaging cost`}
-              className="pl-6 pr-2"
+              className="w-full pl-6 pr-2"
             />
           </div>
           <Tooltip>
