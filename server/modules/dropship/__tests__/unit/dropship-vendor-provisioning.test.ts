@@ -3,6 +3,7 @@ import type {
   DropshipEntitlementPort,
   DropshipEntitlementSnapshot,
   DropshipLogEvent,
+  DropshipNotificationSenderInput,
 } from "../../application/dropship-ports";
 import {
   DropshipVendorProvisioningService,
@@ -61,16 +62,19 @@ describe("dropship vendor provisioning status policy", () => {
 describe("DropshipVendorProvisioningService", () => {
   let repository: FakeVendorProvisioningRepository;
   let entitlement: FakeEntitlementPort;
+  let notificationSender: FakeNotificationSender;
   let logs: Record<"info" | "warn" | "error", DropshipLogEvent[]>;
   let service: DropshipVendorProvisioningService;
 
   beforeEach(() => {
     repository = new FakeVendorProvisioningRepository();
     entitlement = new FakeEntitlementPort();
+    notificationSender = new FakeNotificationSender();
     logs = { info: [], warn: [], error: [] };
     service = new DropshipVendorProvisioningService({
       entitlement,
       repository,
+      notificationSender,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.info.push(event),
@@ -115,6 +119,79 @@ describe("DropshipVendorProvisioningService", () => {
     expect(logs.info[0]).toMatchObject({
       code: "DROPSHIP_VENDOR_PROFILE_SYNCED",
     });
+    expect(notificationSender.sent).toHaveLength(0);
+  });
+
+  it("notifies an existing vendor when membership entitlement lapses", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "active",
+      entitlementStatus: "active",
+    });
+    entitlement.entitlement = {
+      ...entitlement.entitlement,
+      status: "lapsed",
+      reasonCode: "SUBSCRIPTION_NOT_ACTIVE",
+    };
+
+    const result = await service.provisionForMember("member-1");
+
+    expect(result.vendor).toMatchObject({
+      status: "lapsed",
+      entitlementStatus: "lapsed",
+    });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 1,
+      eventType: "dropship_entitlement_blocked",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship entitlement lapsed",
+      idempotencyKey: "entitlement-blocked:1:lapsed:sub-1",
+      payload: {
+        vendorId: 1,
+        memberId: "member-1",
+        planId: "ops-plan",
+        planName: ".ops",
+        subscriptionId: "sub-1",
+        entitlementStatus: "lapsed",
+        reasonCode: "SUBSCRIPTION_NOT_ACTIVE",
+        vendorStatus: "lapsed",
+        changedFields: ["status", "entitlementStatus"],
+        membershipGraceEndsAt: null,
+      },
+    });
+  });
+
+  it("keeps entitlement sync successful when the blocked entitlement notification fails", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "active",
+      entitlementStatus: "active",
+    });
+    entitlement.entitlement = {
+      ...entitlement.entitlement,
+      status: "suspended",
+      reasonCode: "SUBSCRIPTION_PAUSED",
+    };
+    notificationSender.error = new Error("email unavailable");
+
+    const result = await service.provisionForMember("member-1");
+
+    expect(result.vendor).toMatchObject({
+      status: "suspended",
+      entitlementStatus: "suspended",
+    });
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(logs.warn).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_ENTITLEMENT_BLOCKED_NOTIFICATION_FAILED",
+        context: expect.objectContaining({
+          vendorId: 1,
+          memberId: "member-1",
+          entitlementStatus: "suspended",
+          vendorStatus: "suspended",
+          error: "email unavailable",
+        }),
+      }),
+    ]));
   });
 
   it("returns onboarding state with store and catalog setup gates", async () => {
@@ -256,6 +333,18 @@ describe("DropshipVendorProvisioningService", () => {
     expect(repository.lastActivationInput).toBeNull();
   });
 });
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+  error: Error | null = null;
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
+    if (this.error) {
+      throw this.error;
+    }
+  }
+}
 
 class FakeEntitlementPort implements DropshipEntitlementPort {
   entitlement: DropshipEntitlementSnapshot = {
