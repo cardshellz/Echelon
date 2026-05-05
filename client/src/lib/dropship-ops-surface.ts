@@ -1433,10 +1433,11 @@ export interface DropshipWalletResponse {
     } | null;
     fundingMethods: Array<{
       fundingMethodId: number;
-      rail: string;
+      rail: DropshipWalletFundingRail;
       status: string;
       displayLabel: string | null;
       isDefault: boolean;
+      usdcWalletAddress: string | null;
       createdAt: string;
       updatedAt: string;
     }>;
@@ -1455,6 +1456,8 @@ export interface DropshipWalletResponse {
     }>;
   };
 }
+
+export type DropshipWalletFundingRail = "stripe_card" | "stripe_ach" | "usdc_base" | "manual";
 
 export interface DropshipAutoReloadConfigInput {
   fundingMethodId: number | null;
@@ -1497,6 +1500,17 @@ export interface DropshipStripeWalletFundingSessionResponse {
     currency: string;
     expiresAt: string | null;
   };
+}
+
+export interface DropshipUsdcBaseFundingMethodInput {
+  walletAddress: string;
+  displayLabel: string | null;
+  isDefault: boolean;
+}
+
+export interface DropshipUsdcBaseFundingMethodResponse {
+  fundingMethod: DropshipWalletResponse["wallet"]["fundingMethods"][number];
+  idempotentReplay: boolean;
 }
 
 export interface DropshipReturnListItem {
@@ -2617,6 +2631,23 @@ export function buildStripeWalletFundingSessionInput(input: {
   };
 }
 
+export function buildUsdcBaseFundingMethodInput(input: {
+  walletAddress: string;
+  displayLabel: string;
+  isDefault: boolean;
+}): DropshipUsdcBaseFundingMethodInput {
+  const walletAddress = normalizeEvmAddress(input.walletAddress, "walletAddress");
+  const displayLabel = input.displayLabel.trim();
+  if (displayLabel.length > 200) {
+    throw new Error("displayLabel must be 200 characters or fewer.");
+  }
+  return {
+    walletAddress,
+    displayLabel: displayLabel || null,
+    isDefault: input.isDefault,
+  };
+}
+
 export function parseDollarInputToCents(value: string, field: string): number {
   const normalized = value.trim().replace(/^\$/, "").replace(/,/g, "");
   if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
@@ -2709,6 +2740,14 @@ function assertPositiveInteger(value: number, key: string): number {
     throw new Error(`${key} must be a positive integer.`);
   }
   return value;
+}
+
+function normalizeEvmAddress(value: string, field: string): string {
+  const trimmed = value.trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(trimmed)) {
+    throw new Error(`${field} must be a valid EVM wallet address.`);
+  }
+  return trimmed.toLowerCase();
 }
 
 function parsePositiveInteger(value: string, key: string): number {

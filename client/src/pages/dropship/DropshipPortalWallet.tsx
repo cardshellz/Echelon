@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, CheckCircle2, CreditCard, Fingerprint, History, Landmark, Mail, Save, Wallet } from "lucide-react";
+import { AlertCircle, CheckCircle2, CircleDollarSign, CreditCard, Fingerprint, History, Landmark, Mail, Save, Wallet } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import {
   buildAutoReloadConfigInput,
   buildStripeFundingSetupSessionInput,
   buildStripeWalletFundingSessionInput,
+  buildUsdcBaseFundingMethodInput,
   fetchJson,
   formatCents,
   formatDateTime,
@@ -33,12 +34,13 @@ import {
   type DropshipStripeFundingRail,
   type DropshipStripeFundingSetupSessionResponse,
   type DropshipStripeWalletFundingSessionResponse,
+  type DropshipUsdcBaseFundingMethodResponse,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
 import { dropshipPortalPath, useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
-type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | "stripe-card" | "stripe-ach" | "fund-wallet" | null;
+type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | "stripe-card" | "stripe-ach" | "usdc-base" | "fund-wallet" | null;
 
 export default function DropshipPortalWallet() {
   const queryClient = useQueryClient();
@@ -56,6 +58,8 @@ export default function DropshipPortalWallet() {
   const [paymentHoldTimeoutMinutes, setPaymentHoldTimeoutMinutes] = useState("2880");
   const [fundingLoadMethodId, setFundingLoadMethodId] = useState("");
   const [fundingAmount, setFundingAmount] = useState("250.00");
+  const [usdcWalletAddress, setUsdcWalletAddress] = useState("");
+  const [usdcDisplayLabel, setUsdcDisplayLabel] = useState("USDC on Base");
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [emailStepUpAction, setEmailStepUpAction] = useState<DropshipSensitiveAction | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
@@ -68,6 +72,9 @@ export default function DropshipPortalWallet() {
   });
   const wallet = walletQuery.data?.wallet;
   const activeFundingMethods = wallet?.fundingMethods.filter((method) => method.status === "active") ?? [];
+  const stripeFundingMethods = activeFundingMethods.filter((method) =>
+    method.rail === "stripe_card" || method.rail === "stripe_ach"
+  );
   const hasActiveProof = (action: DropshipSensitiveAction) => {
     const proof = sensitiveProofs[action];
     return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
@@ -75,9 +82,15 @@ export default function DropshipPortalWallet() {
 
   useEffect(() => {
     if (!wallet) return;
-    const defaultFundingMethodId = wallet.autoReload?.fundingMethodId
-      ?? activeFundingMethods.find((method) => method.isDefault)?.fundingMethodId
-      ?? activeFundingMethods[0]?.fundingMethodId
+    const configuredAutoReloadMethodId = wallet.autoReload?.fundingMethodId ?? null;
+    const usableAutoReloadMethodId = configuredAutoReloadMethodId && stripeFundingMethods.some((method) =>
+      method.fundingMethodId === configuredAutoReloadMethodId
+    )
+      ? configuredAutoReloadMethodId
+      : null;
+    const defaultFundingMethodId = usableAutoReloadMethodId
+      ?? stripeFundingMethods.find((method) => method.isDefault)?.fundingMethodId
+      ?? stripeFundingMethods[0]?.fundingMethodId
       ?? null;
     setAutoReloadEnabled(wallet.autoReload?.enabled ?? true);
     setFundingMethodId(defaultFundingMethodId ? String(defaultFundingMethodId) : "");
@@ -124,6 +137,33 @@ export default function DropshipPortalWallet() {
         input,
       );
       window.location.assign(response.setupSession.checkoutUrl);
+    });
+  }
+
+  async function saveUsdcFundingMethod() {
+    if (!await ensureWalletSensitiveProof("add_funding_method")) return;
+
+    await runWalletAction("usdc-base", async () => {
+      const input = buildUsdcBaseFundingMethodInput({
+        walletAddress: usdcWalletAddress,
+        displayLabel: usdcDisplayLabel,
+        isDefault: activeFundingMethods.length === 0,
+      });
+      await postJson<DropshipUsdcBaseFundingMethodResponse>(
+        "/api/dropship/wallet/funding-methods/usdc-base",
+        input,
+      );
+      await Promise.all([
+        walletQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+      ]);
+      setUsdcWalletAddress("");
+      setUsdcDisplayLabel("USDC on Base");
+      setEmailCodeSent(false);
+      setEmailStepUpAction(null);
+      setVerificationCode("");
+      setMessage("USDC funding method saved.");
     });
   }
 
@@ -244,7 +284,7 @@ export default function DropshipPortalWallet() {
             )}
 
             <AutoReloadPanel
-              activeFundingMethods={activeFundingMethods}
+              activeFundingMethods={stripeFundingMethods}
               autoReloadEnabled={autoReloadEnabled}
               emailCodeSent={emailCodeSent}
               fundingMethodId={fundingMethodId}
@@ -262,7 +302,7 @@ export default function DropshipPortalWallet() {
             />
 
             <FundWalletPanel
-              activeFundingMethods={activeFundingMethods}
+              activeFundingMethods={stripeFundingMethods}
               emailCodeSent={emailCodeSent}
               fundingAmount={fundingAmount}
               fundingLoadMethodId={fundingLoadMethodId}
@@ -271,6 +311,17 @@ export default function DropshipPortalWallet() {
               onFundingAmountChange={setFundingAmount}
               onFundingLoadMethodIdChange={setFundingLoadMethodId}
               onFund={startWalletFunding}
+            />
+
+            <UsdcFundingMethodPanel
+              emailCodeSent={emailCodeSent}
+              pendingWalletAction={pendingWalletAction}
+              usdcDisplayLabel={usdcDisplayLabel}
+              usdcWalletAddress={usdcWalletAddress}
+              verificationCode={verificationCode}
+              onDisplayLabelChange={setUsdcDisplayLabel}
+              onSave={saveUsdcFundingMethod}
+              onWalletAddressChange={setUsdcWalletAddress}
             />
 
             <section className="mt-5 grid gap-5 xl:grid-cols-[0.8fr_1.2fr]">
@@ -312,7 +363,11 @@ export default function DropshipPortalWallet() {
                         <div className="flex items-center justify-between gap-3">
                           <div>
                             <div className="font-medium">{method.displayLabel || formatStatus(method.rail)}</div>
-                            <div className="text-sm text-zinc-500">{formatStatus(method.rail)}</div>
+                            <div className="text-sm text-zinc-500">
+                              {method.rail === "usdc_base" && method.usdcWalletAddress
+                                ? maskAddress(method.usdcWalletAddress)
+                                : formatStatus(method.rail)}
+                            </div>
                           </div>
                           <Badge variant="outline">{method.isDefault ? "Default" : formatStatus(method.status)}</Badge>
                         </div>
@@ -616,6 +671,73 @@ function FundWalletPanel({
   );
 }
 
+function UsdcFundingMethodPanel({
+  emailCodeSent,
+  onDisplayLabelChange,
+  onSave,
+  onWalletAddressChange,
+  pendingWalletAction,
+  usdcDisplayLabel,
+  usdcWalletAddress,
+  verificationCode,
+}: {
+  emailCodeSent: boolean;
+  onDisplayLabelChange: (value: string) => void;
+  onSave: () => void;
+  onWalletAddressChange: (value: string) => void;
+  pendingWalletAction: PendingWalletAction;
+  usdcDisplayLabel: string;
+  usdcWalletAddress: string;
+  verificationCode: string;
+}) {
+  const saveDisabled = pendingWalletAction !== null
+    || !usdcWalletAddress.trim()
+    || (emailCodeSent && verificationCode.length !== 6);
+
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">USDC on Base</h2>
+          <p className="mt-1 text-sm text-zinc-500">Register the wallet address used for confirmed-transfer funding.</p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-10 gap-2"
+          disabled={saveDisabled}
+          onClick={onSave}
+        >
+          <CircleDollarSign className="h-4 w-4" />
+          {pendingWalletAction === "usdc-base" ? "Saving USDC" : emailCodeSent ? "Verify and save USDC" : "Save USDC"}
+        </Button>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[2fr_1fr]">
+        <div className="space-y-2">
+          <Label htmlFor="usdc-wallet-address">Wallet address</Label>
+          <Input
+            id="usdc-wallet-address"
+            value={usdcWalletAddress}
+            onChange={(event) => onWalletAddressChange(event.target.value)}
+            placeholder="0x..."
+            className="h-10 font-mono text-sm"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="usdc-display-label">Label</Label>
+          <Input
+            id="usdc-display-label"
+            value={usdcDisplayLabel}
+            onChange={(event) => onDisplayLabelChange(event.target.value)}
+            className="h-10"
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function Metric({ detail, title, value }: { detail?: string; title: string; value: string }) {
   return (
     <div className="rounded-md border border-zinc-200 bg-white p-4">
@@ -633,12 +755,19 @@ function centsToDollarInput(cents: number): string {
   return `${dollars}.${String(remainder).padStart(2, "0")}`;
 }
 
+function maskAddress(address: string): string {
+  const trimmed = address.trim();
+  if (trimmed.length <= 12) return trimmed;
+  return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
+}
+
 function walletButtonLabel(pendingWalletAction: PendingWalletAction, emailCodeSent: boolean): string {
   if (pendingWalletAction === "send-code") return "Sending code";
   if (pendingWalletAction === "verify-code") return "Verifying code";
   if (pendingWalletAction === "passkey-proof") return "Waiting for passkey";
   if (pendingWalletAction === "stripe-card") return "Starting card setup";
   if (pendingWalletAction === "stripe-ach") return "Starting ACH setup";
+  if (pendingWalletAction === "usdc-base") return "Saving USDC";
   if (pendingWalletAction === "fund-wallet") return "Starting wallet funding";
   if (pendingWalletAction === "save") return "Saving";
   if (emailCodeSent) return "Verify and save";
@@ -649,6 +778,7 @@ function walletButtonIcon(pendingWalletAction: PendingWalletAction, emailCodeSen
   if (pendingWalletAction === "passkey-proof") return <Fingerprint className="h-4 w-4" />;
   if (pendingWalletAction === "stripe-ach") return <Landmark className="h-4 w-4" />;
   if (pendingWalletAction === "stripe-card") return <CreditCard className="h-4 w-4" />;
+  if (pendingWalletAction === "usdc-base") return <CircleDollarSign className="h-4 w-4" />;
   if (pendingWalletAction === "fund-wallet") return <Wallet className="h-4 w-4" />;
   if (pendingWalletAction === "send-code" || (emailCodeSent && pendingWalletAction !== "save")) return <Mail className="h-4 w-4" />;
   return <Save className="h-4 w-4" />;
