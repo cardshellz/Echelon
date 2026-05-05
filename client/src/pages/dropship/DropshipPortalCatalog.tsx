@@ -193,10 +193,15 @@ export default function DropshipPortalCatalog() {
         await runListingAction("send-code", async () => {
           await startEmailStepUp("bulk_listing_push");
           setEmailCodeSent(true);
+          setVerificationCode("");
           setMessage("Verification code sent.");
         });
         return;
       } else {
+        if (verificationCode.length !== 6) {
+          setError("Enter the 6-digit verification code before queueing a listing push.");
+          return;
+        }
         const verified = await runListingAction("verify-code", async () => {
           await verifyEmailStepUp({
             action: "bulk_listing_push",
@@ -204,6 +209,8 @@ export default function DropshipPortalCatalog() {
           });
         });
         if (!verified) return;
+        setEmailCodeSent(false);
+        setVerificationCode("");
       }
     }
 
@@ -219,6 +226,8 @@ export default function DropshipPortalCatalog() {
       }
       const response = await postJson<DropshipListingPushResponse>("/api/dropship/listing-push-jobs", request);
       setListingPushResult(response);
+      setEmailCodeSent(false);
+      setVerificationCode("");
       setMessage(`Listing push job ${response.job.jobId} queued with ${response.items.length} item(s).`);
       await Promise.all([
         catalogQuery.refetch(),
