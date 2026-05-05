@@ -104,7 +104,9 @@ interface DogfoodReadinessRow {
   wallet_status: string | null;
   available_balance_cents: string | number | null;
   active_funding_method_count: string | number;
+  active_stripe_funding_method_count: string | number;
   auto_reload_enabled: boolean | null;
+  auto_reload_funding_method_ready: boolean | null;
   notification_preference_count: string | number;
 }
 
@@ -367,7 +369,9 @@ function dogfoodReadinessSql(): string {
       wa.status AS wallet_status,
       wa.available_balance_cents,
       COALESCE(funding.active_funding_method_count, 0) AS active_funding_method_count,
+      COALESCE(funding.active_stripe_funding_method_count, 0) AS active_stripe_funding_method_count,
       ars.enabled AS auto_reload_enabled,
+      COALESCE(auto_reload_funding.ready, false) AS auto_reload_funding_method_ready,
       COALESCE(notification_prefs.preference_count, 0) AS notification_preference_count
     FROM dropship.dropship_vendors v
     LEFT JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
@@ -540,11 +544,29 @@ function dogfoodReadinessSql(): string {
         AND ssc.severity IN ('blocker', 'error')
     ) setup_checks ON true
     LEFT JOIN LATERAL (
-      SELECT COUNT(*) AS active_funding_method_count
+      SELECT
+        COUNT(*) AS active_funding_method_count,
+        COUNT(*) FILTER (
+          WHERE fm.rail IN ('stripe_card', 'stripe_ach')
+            AND fm.provider_customer_id IS NOT NULL
+            AND fm.provider_payment_method_id IS NOT NULL
+        ) AS active_stripe_funding_method_count
       FROM dropship.dropship_funding_methods fm
       WHERE fm.vendor_id = v.id
         AND fm.status = 'active'
     ) funding ON true
+    LEFT JOIN LATERAL (
+      SELECT EXISTS (
+        SELECT 1
+        FROM dropship.dropship_funding_methods fm
+        WHERE fm.id = ars.funding_method_id
+          AND fm.vendor_id = v.id
+          AND fm.status = 'active'
+          AND fm.rail IN ('stripe_card', 'stripe_ach')
+          AND fm.provider_customer_id IS NOT NULL
+          AND fm.provider_payment_method_id IS NOT NULL
+      ) AS ready
+    ) auto_reload_funding ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS preference_count
       FROM dropship.dropship_notification_preferences np
@@ -673,6 +695,8 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
   const setupOpenBlockerCount = toNumber(row.setup_open_blocker_count) + toNumber(row.setup_check_open_blocker_count);
   const walletAvailableBalanceCents = toNumber(row.available_balance_cents ?? 0);
   const activeFundingMethodCount = toNumber(row.active_funding_method_count);
+  const activeStripeFundingMethodCount = toNumber(row.active_stripe_funding_method_count);
+  const autoReloadFundingMethodReady = row.auto_reload_funding_method_ready === true;
   const notificationPreferenceCount = toNumber(row.notification_preference_count);
   const defaultWarehouseId = parsePositiveIntegerOrNull(row.default_warehouse_id_text);
   const listingConfigActive = row.listing_config_id !== null
@@ -698,6 +722,8 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     setupOpenBlockerCount,
     walletAvailableBalanceCents,
     activeFundingMethodCount,
+    activeStripeFundingMethodCount,
+    autoReloadFundingMethodReady,
     notificationPreferenceCount,
   });
   const blockerCount = checks.filter((check) => check.status === "blocked").length;
@@ -744,7 +770,9 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
       setupOpenBlockerCount,
       walletAvailableBalanceCents,
       activeFundingMethodCount,
+      activeStripeFundingMethodCount,
       autoReloadEnabled: row.auto_reload_enabled === true,
+      autoReloadFundingMethodReady,
       notificationPreferenceCount,
     },
   };
@@ -770,6 +798,8 @@ function buildDogfoodChecks(input: {
   setupOpenBlockerCount: number;
   walletAvailableBalanceCents: number;
   activeFundingMethodCount: number;
+  activeStripeFundingMethodCount: number;
+  autoReloadFundingMethodReady: boolean;
   notificationPreferenceCount: number;
 }): DropshipDogfoodReadinessCheck[] {
   return [
@@ -904,20 +934,26 @@ function buildDogfoodChecks(input: {
     {
       key: "wallet",
       label: "Wallet",
-      status: input.walletAvailableBalanceCents > 0 || input.activeFundingMethodCount > 0 ? "ready" : "warning",
+      status: input.walletAvailableBalanceCents > 0 || input.activeStripeFundingMethodCount > 0 ? "ready" : "blocked",
       message: input.walletAvailableBalanceCents > 0
         ? `Wallet has ${input.walletAvailableBalanceCents} available cent(s).`
-        : input.activeFundingMethodCount > 0
-          ? `${input.activeFundingMethodCount} active funding method(s) exist.`
-          : "Wallet has no available balance or active funding method.",
+        : input.activeStripeFundingMethodCount > 0
+          ? `${input.activeStripeFundingMethodCount} active Stripe funding method(s) can fund the wallet.`
+          : input.activeFundingMethodCount > 0
+            ? "Wallet has active funding method(s), but none are Stripe card/ACH methods ready for wallet funding."
+            : "Wallet has no available balance or active funding method.",
     },
     {
       key: "auto_reload",
       label: "Auto reload",
-      status: input.row.auto_reload_enabled === true ? "ready" : "warning",
-      message: input.row.auto_reload_enabled === true
-        ? "Auto reload is enabled."
-        : "Auto reload is disabled or not configured.",
+      status: input.row.auto_reload_enabled === true && input.autoReloadFundingMethodReady ? "ready" : "blocked",
+      message: input.row.auto_reload_enabled !== true
+        ? "Auto reload is disabled or not configured."
+        : input.autoReloadFundingMethodReady
+          ? "Auto reload is enabled with a usable Stripe card/ACH funding method."
+          : input.activeStripeFundingMethodCount === 0
+            ? "Auto reload is enabled, but no active Stripe card/ACH funding method with provider identity exists."
+            : "Auto reload is enabled, but its selected funding method is missing, inactive, unsupported, or missing provider identity.",
     },
     {
       key: "notifications",

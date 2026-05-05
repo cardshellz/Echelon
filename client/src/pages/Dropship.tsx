@@ -3642,7 +3642,10 @@ function DogfoodReadinessTable({
                 <TableCell>
                   <div className="text-sm">{formatCents(item.metrics.walletAvailableBalanceCents)}</div>
                   <div className="text-xs text-muted-foreground">
-                    {item.metrics.activeFundingMethodCount} funding method{item.metrics.activeFundingMethodCount === 1 ? "" : "s"} / Auto reload {item.metrics.autoReloadEnabled ? "on" : "off"}
+                    {item.metrics.activeFundingMethodCount} funding method{item.metrics.activeFundingMethodCount === 1 ? "" : "s"} / {item.metrics.activeStripeFundingMethodCount} Stripe-ready
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Auto reload {item.metrics.autoReloadEnabled ? "on" : "off"} / funding {item.metrics.autoReloadFundingMethodReady ? "ready" : "not ready"}
                   </div>
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
