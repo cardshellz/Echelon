@@ -259,6 +259,8 @@ function SecurityPanel({
   verifyPasskeyStepUp: (action: "register_passkey") => Promise<unknown>;
   onVerificationCodeChange: (value: string) => void;
 }) {
+  const proofReady = emailProofReady || registerPasskeyProofActive;
+
   return (
     <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between gap-3">
@@ -289,7 +291,7 @@ function SecurityPanel({
 
       {!hasPasskey ? (
         <div className="mt-5 space-y-4">
-          {!emailProofReady && (
+          {!proofReady && (
             <Button
               type="button"
               disabled={pendingAction === "send-code"}
@@ -297,6 +299,7 @@ function SecurityPanel({
               className="h-10 w-full gap-2"
               onClick={() => run("send-code", async () => {
                 await startEmailStepUp("register_passkey");
+                onVerificationCodeChange("");
                 setMessage("Verification code sent.");
               })}
             >
@@ -305,7 +308,7 @@ function SecurityPanel({
             </Button>
           )}
 
-          {!emailProofReady && (
+          {!proofReady && (
             <div className="space-y-3">
               <Label>Verification code</Label>
               <InputOTP
@@ -313,6 +316,7 @@ function SecurityPanel({
                 value={verificationCode}
                 onChange={onVerificationCodeChange}
                 containerClassName="justify-between"
+                disabled={pendingAction !== null}
               >
                 <InputOTPGroup>
                   {Array.from({ length: 6 }).map((_, index) => (
@@ -330,6 +334,7 @@ function SecurityPanel({
                     verificationCode,
                   });
                   setEmailProofReady(true);
+                  onVerificationCodeChange("");
                   setMessage("Verification confirmed.");
                 })}
               >
@@ -341,10 +346,12 @@ function SecurityPanel({
 
           <Button
             type="button"
-            disabled={!registerPasskeyProofActive || !passkeysSupported || pendingAction === "register-passkey"}
+            disabled={!proofReady || !passkeysSupported || pendingAction === "register-passkey"}
             className="h-10 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
             onClick={() => run("register-passkey", async () => {
               await registerPasskey();
+              setEmailProofReady(false);
+              onVerificationCodeChange("");
               setMessage("Passkey added.");
             })}
           >
@@ -373,6 +380,8 @@ function SecurityPanel({
             className="h-10 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
             onClick={() => run("register-passkey", async () => {
               await registerPasskey();
+              setEmailProofReady(false);
+              onVerificationCodeChange("");
               setMessage("Passkey added.");
             })}
           >

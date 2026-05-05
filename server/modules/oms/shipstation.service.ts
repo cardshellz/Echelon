@@ -432,23 +432,20 @@ export function validateShipmentForPush(
     0,
   );
   
-  const expectedTotalCents = linesSumCents + order.tax_cents + order.shipping_cents;
+  const expectedTotalExclusive = linesSumCents + order.tax_cents + order.shipping_cents;
+  const expectedTotalInclusive = linesSumCents + order.shipping_cents;
 
-  if (
-    !isLineSumWithinTolerance(
-      order.total_cents,
-      expectedTotalCents,
-      items.length,
-      5,
-    )
-  ) {
+  const matchesExclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, items.length, 5);
+  const matchesInclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, items.length, 5);
+
+  if (!matchesExclusive && !matchesInclusive) {
     throw new ShipStationPushError(
-      "expected total_cents (lines + tax + shipping) does not match actual order.total_cents within tolerance",
+      "expected total_cents (lines + shipping + optional tax) does not match actual order.total_cents within tolerance",
       {
         code: SS_PUSH_INVALID_SHIPMENT,
         shipmentId,
         field: "order.total_cents",
-        value: { linesSumCents, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalCents, actualTotalCents: order.total_cents },
+        value: { linesSumCents, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalExclusive, expectedTotalInclusive, actualTotalCents: order.total_cents },
       },
     );
   }
@@ -1181,9 +1178,11 @@ export function createShipStationService(db: any, inventoryCore?: any) {
             updated_at = NOW()
         WHERE id = ${shipmentId}
       `);
-      throw new Error(
-        `Inventory deduction blocked for shipment ${shipmentId}: ${invalidItems.length} item(s) missing product_variant_id, from_location_id, or positive qty`,
+      console.error(
+        `[ShipStation Webhook V2] Inventory deduction skipped for shipment ${shipmentId}: ${invalidItems.length} item(s) missing product_variant_id, from_location_id, or positive qty. Fulfillment will continue.`,
       );
+      // Return empty array to skip inventory deduction, but allow the rest of the process to continue.
+      return [];
     }
     return rows;
   }
