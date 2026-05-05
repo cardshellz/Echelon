@@ -36,6 +36,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  allDropshipOpsOrderIntakeStatuses,
   buildDropshipOrderAcceptInput,
   buildQueryUrl,
   createDropshipIdempotencyKey,
@@ -56,17 +57,7 @@ import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingOrderAction = "send-code" | "verify-code" | "passkey-proof" | "accept" | null;
 
-const statusOptions = [
-  "all",
-  "received",
-  "processing",
-  "accepted",
-  "payment_hold",
-  "failed",
-  "exception",
-  "rejected",
-  "cancelled",
-];
+const statusOptions = ["all", ...allDropshipOpsOrderIntakeStatuses];
 
 const orderAcceptanceAction: DropshipSensitiveAction = "high_risk_order_acceptance";
 const acceptanceStatuses = new Set(["received", "retrying", "failed", "payment_hold", "processing"]);
