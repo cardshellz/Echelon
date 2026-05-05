@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
-import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type {
+  DropshipLogEvent,
+  DropshipNotificationSenderInput,
+} from "../../application/dropship-ports";
 import type { DropshipMarketplaceListingPushProvider } from "../../application/dropship-marketplace-listing-push-provider";
 import {
   DropshipListingPushWorkerService,
@@ -16,16 +19,19 @@ const now = new Date("2026-05-01T19:00:00.000Z");
 describe("DropshipListingPushWorkerService", () => {
   let repository: FakeListingPushWorkerRepository;
   let marketplacePush: FakeMarketplacePushProvider;
+  let notificationSender: FakeNotificationSender;
   let logs: DropshipLogEvent[];
   let service: DropshipListingPushWorkerService;
 
   beforeEach(() => {
     repository = new FakeListingPushWorkerRepository();
     marketplacePush = new FakeMarketplacePushProvider();
+    notificationSender = new FakeNotificationSender();
     logs = [];
     service = new DropshipListingPushWorkerService({
       repository,
       marketplacePush,
+      notificationSender,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -65,6 +71,7 @@ describe("DropshipListingPushWorkerService", () => {
       status: "completed",
       externalListingId: "external-listing-101",
     });
+    expect(notificationSender.sent).toHaveLength(0);
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_LISTING_PUSH_JOB_PROCESSED" });
   });
 
@@ -89,6 +96,38 @@ describe("DropshipListingPushWorkerService", () => {
       status: "blocked",
       errorCode: "DROPSHIP_LISTING_PREVIEW_DRIFT",
     });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_listing_push_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship listing push failed",
+      idempotencyKey: "listing-push:30:failed",
+      payload: {
+        jobId: 30,
+        vendorId: 10,
+        storeConnectionId: 22,
+        platform: "shopify",
+        status: "failed",
+        summary: {
+          total: 1,
+          completed: 0,
+          failed: 0,
+          blocked: 1,
+          skipped: 0,
+        },
+        failedItems: [{
+          itemId: 1,
+          listingId: 100,
+          productVariantId: 101,
+          status: "blocked",
+          errorCode: "DROPSHIP_LISTING_PREVIEW_DRIFT",
+          errorMessage: "Listing preview hash no longer matches the vendor listing.",
+          externalListingId: null,
+        }],
+        omittedFailureItemCount: 0,
+      },
+    });
   });
 
   it("marks provider failures without completing the job", async () => {
@@ -110,6 +149,64 @@ describe("DropshipListingPushWorkerService", () => {
       errorCode: "DROPSHIP_LISTING_PUSH_PROVIDER_NOT_CONFIGURED",
       errorMessage: "Provider missing.",
     });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_listing_push_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      idempotencyKey: "listing-push:30:failed",
+      payload: {
+        jobId: 30,
+        vendorId: 10,
+        storeConnectionId: 22,
+        platform: "shopify",
+        status: "failed",
+        summary: {
+          total: 1,
+          completed: 0,
+          failed: 1,
+          blocked: 0,
+          skipped: 0,
+        },
+        failedItems: [{
+          itemId: 1,
+          listingId: 100,
+          productVariantId: 101,
+          status: "failed",
+          errorCode: "DROPSHIP_LISTING_PUSH_PROVIDER_NOT_CONFIGURED",
+          errorMessage: "Provider missing.",
+          externalListingId: null,
+        }],
+        omittedFailureItemCount: 0,
+      },
+    });
+  });
+
+  it("does not fail the push worker when listing failure notification delivery fails", async () => {
+    marketplacePush.error = new Error("marketplace unavailable");
+    notificationSender.error = new Error("email unavailable");
+
+    const result = await service.processJob({
+      jobId: 30,
+      workerId: "worker-1",
+      idempotencyKey: "process-004",
+    });
+
+    expect(result.job.status).toBe("failed");
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_LISTING_PUSH_NOTIFICATION_FAILED",
+        context: expect.objectContaining({
+          jobId: 30,
+          vendorId: 10,
+          storeConnectionId: 22,
+          failed: 1,
+          blocked: 0,
+          error: "email unavailable",
+        }),
+      }),
+    ]));
   });
 });
 
@@ -128,6 +225,18 @@ class FakeMarketplacePushProvider implements DropshipMarketplaceListingPushProvi
       externalOfferId: `external-offer-${input.productVariantId}`,
       rawResult: { accepted: true },
     };
+  }
+}
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+  error: Error | null = null;
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
+    if (this.error) {
+      throw this.error;
+    }
   }
 }
 

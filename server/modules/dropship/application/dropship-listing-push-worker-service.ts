@@ -1,5 +1,11 @@
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
 import type {
   DropshipMarketplaceListingIntent,
   DropshipStoreListingConfig,
@@ -12,6 +18,8 @@ import {
   processListingPushJobInputSchema,
   type ProcessListingPushJobInput,
 } from "./dropship-use-case-dtos";
+
+const MAX_LISTING_PUSH_NOTIFICATION_ITEMS = 25;
 
 export interface DropshipListingPushWorkerJobRecord {
   jobId: number;
@@ -115,6 +123,7 @@ export interface DropshipListingPushWorkerRepository {
 export interface DropshipListingPushWorkerServiceDependencies {
   repository: DropshipListingPushWorkerRepository;
   marketplacePush: DropshipMarketplaceListingPushProvider;
+  notificationSender?: DropshipNotificationSender;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -164,6 +173,8 @@ export class DropshipListingPushWorkerService {
         summary: finalized.summary,
       },
     });
+
+    await this.notifyFailedListingPushJob(finalized);
 
     return finalized;
   }
@@ -231,6 +242,58 @@ export class DropshipListingPushWorkerService {
         now: this.deps.clock.now(),
       });
     }
+  }
+
+  private async notifyFailedListingPushJob(result: DropshipListingPushWorkerResult): Promise<void> {
+    if (result.summary.failed === 0 && result.summary.blocked === 0) {
+      return;
+    }
+
+    const failedItems = result.items
+      .filter((item) => item.status === "failed" || item.status === "blocked")
+      .slice(0, MAX_LISTING_PUSH_NOTIFICATION_ITEMS)
+      .map((item) => ({
+        itemId: item.itemId,
+        listingId: item.listingId,
+        productVariantId: item.productVariantId,
+        status: item.status,
+        errorCode: item.errorCode,
+        errorMessage: item.errorMessage,
+        externalListingId: item.externalListingId,
+      }));
+
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: result.job.vendorId,
+      eventType: "dropship_listing_push_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship listing push failed",
+      message: `Listing push job ${result.job.jobId} finished with ${result.summary.failed} failed item(s) and ${result.summary.blocked} blocked item(s).`,
+      payload: {
+        jobId: result.job.jobId,
+        vendorId: result.job.vendorId,
+        storeConnectionId: result.job.storeConnectionId,
+        platform: result.job.platform,
+        status: result.job.status,
+        summary: result.summary,
+        failedItems,
+        omittedFailureItemCount: Math.max(
+          0,
+          result.summary.failed + result.summary.blocked - failedItems.length,
+        ),
+      },
+      idempotencyKey: `listing-push:${result.job.jobId}:failed`,
+    }, {
+      code: "DROPSHIP_LISTING_PUSH_NOTIFICATION_FAILED",
+      message: "Dropship listing push failure notification failed after the job was finalized.",
+      context: {
+        jobId: result.job.jobId,
+        vendorId: result.job.vendorId,
+        storeConnectionId: result.job.storeConnectionId,
+        failed: result.summary.failed,
+        blocked: result.summary.blocked,
+      },
+    });
   }
 }
 
