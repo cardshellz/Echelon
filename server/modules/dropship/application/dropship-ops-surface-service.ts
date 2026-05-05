@@ -319,6 +319,7 @@ export function buildDropshipSystemReadinessChecks(
     buildShipStationWebhookSecurityCheck(env),
     buildSplitShipmentHandoffCheck(env),
     buildStripeFundingCheck(env),
+    buildUsdcBaseFundingCheck(),
   ];
 }
 
@@ -648,7 +649,7 @@ function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadines
     return {
       key: "stripe_funding",
       label: "Stripe funding",
-      status: "warning",
+      status: "blocked",
       message: `Stripe wallet funding is missing ${missing.join(", ")}.`,
       requiredEnv: ["STRIPE_SECRET_KEY", "DROPSHIP_STRIPE_WEBHOOK_SECRET or STRIPE_DROPSHIP_WEBHOOK_SECRET or STRIPE_WEBHOOK_SECRET"],
     };
@@ -660,6 +661,16 @@ function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadines
     status: "ready",
     message: "Stripe wallet funding and webhook verification are configured.",
     requiredEnv: ["STRIPE_SECRET_KEY", "DROPSHIP_STRIPE_WEBHOOK_SECRET or STRIPE_DROPSHIP_WEBHOOK_SECRET or STRIPE_WEBHOOK_SECRET"],
+  };
+}
+
+function buildUsdcBaseFundingCheck(): DropshipSystemReadinessCheck {
+  return {
+    key: "usdc_base_funding",
+    label: "USDC Base funding",
+    status: "ready",
+    message: "USDC Base confirmed-transfer funding method registration, ledger capture, and admin confirmed-credit flow are available.",
+    requiredEnv: [],
   };
 }
 

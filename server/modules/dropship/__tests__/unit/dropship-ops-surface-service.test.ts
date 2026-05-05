@@ -165,7 +165,11 @@ describe("DropshipOpsSurfaceService", () => {
       status: "blocked",
       requiredEnv: ["WMS_SHIPMENT_AT_SYNC=true", "PUSH_FROM_WMS=true", "SHIP_NOTIFY_V2=true"],
     });
-    expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "warning" });
+    expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
+      status: "ready",
+      requiredEnv: [],
+    });
   });
 
   it("scopes vendor settings through Shellz Club member provisioning", async () => {
@@ -228,6 +232,7 @@ describe("DropshipOpsSurfaceService", () => {
       expect.objectContaining({ key: "shipstation_credentials" }),
       expect.objectContaining({ key: "shipstation_webhook_security" }),
       expect.objectContaining({ key: "split_shipment_handoff" }),
+      expect.objectContaining({ key: "usdc_base_funding" }),
     ]));
     expect(repository.lastDogfoodInput).toMatchObject({
       status: "blocked",
