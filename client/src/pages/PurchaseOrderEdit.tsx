@@ -37,6 +37,15 @@ import { useLocation, useParams } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableFooter,
+  TableHead,
+  TableRow,
+  TableCell,
+} from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -216,10 +225,12 @@ function QuantityInput({
   qty,
   onChangeQty,
   ariaLabel,
+  className,
 }: {
   qty: number;
   onChangeQty: (q: number) => void;
   ariaLabel: string;
+  className?: string;
 }) {
   const [buffer, setBuffer] = useState<string>(() => (qty > 0 ? String(qty) : ""));
   const [focused, setFocused] = useState(false);
@@ -236,6 +247,7 @@ function QuantityInput({
       type="text"
       inputMode="numeric"
       value={buffer}
+      className={className}
       onFocus={() => setFocused(true)}
       onChange={(e) => {
         const raw = e.target.value;
@@ -355,10 +367,12 @@ function DollarInput({
   cents,
   onChangeCents,
   ariaLabel,
+  className,
 }: {
   cents: number;
   onChangeCents: (cents: number) => void;
   ariaLabel: string;
+  className?: string;
 }) {
   const [buffer, setBuffer] = useState<string>(() =>
     cents > 0 ? (cents / 100).toFixed(2) : "",
@@ -375,6 +389,7 @@ function DollarInput({
     <Input
       inputMode="decimal"
       value={buffer}
+      className={className}
       onFocus={() => setFocused(true)}
       onChange={(e) => {
         const raw = e.target.value;
@@ -1466,10 +1481,14 @@ export default function PurchaseOrderEdit() {
       </Card>
 
       {/* Lines editor */}
-      <Card>
-        <CardContent className="p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <Label className="text-base">Lines</Label>
+      <Card className="overflow-hidden">
+        <CardContent className="p-0">
+          {/* Section header — matches Variant A mockup */}
+          <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+            <div>
+              <h3 className="font-semibold">Lines</h3>
+              <p className="text-xs text-slate-500 mt-0.5">Enter totals from the vendor invoice. Per-unit costs are computed.</p>
+            </div>
             <div className="inline-flex items-stretch">
               <Button
                 size="sm"
@@ -1518,6 +1537,8 @@ export default function PurchaseOrderEdit() {
               </DropdownMenu>
             </div>
           </div>
+
+          <div className="p-4 space-y-3">
           {lines.length === 0 ? (
             <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
               {selectedVendor
@@ -1527,58 +1548,118 @@ export default function PurchaseOrderEdit() {
           ) : (
             <div className="space-y-2">
               {(() => {
-                // Compute the set of product lines exactly once per render,
-                // so each non-product LineRow has a stable list to populate
-                // its "Applies to" dropdown.
-                const productLineOptions = lines
-                  .filter((l) => l.lineType === "product")
-                  .map((l, productIdx) => ({
-                    clientId: l.clientId,
-                    label:
-                      l.sku || l.productName
-                        ? `${l.sku ? `${l.sku} · ` : ""}${l.productName || "(unnamed)"}`
-                        : `Line ${productIdx + 1}`,
-                  }));
-                return lines.map((line, idx) => {
-                  const err = lineErrors[line.clientId];
-                  return (
-                    <div key={line.clientId} className="space-y-1">
-                      <LineRow
-                        line={line}
-                        idx={idx}
-                        onChange={(patch) => updateLine(line.clientId, patch)}
-                        onRemove={() => removeLine(line.clientId)}
-                        productSearch={productSearch[line.clientId] || ""}
-                        setProductSearch={(q) =>
-                          setProductSearch((prev) => ({
-                            ...prev,
-                            [line.clientId]: q,
-                          }))
-                        }
-                        popoverOpen={!!productPopoverOpen[line.clientId]}
-                        setPopoverOpen={(b) =>
-                          setProductPopoverOpen((prev) => ({
-                            ...prev,
-                            [line.clientId]: b,
-                          }))
-                        }
-                        useVendorCatalogSearch={useVendorCatalogSearch}
-                        vendorId={selectedVendor?.id ?? null}
-                        vendorName={selectedVendor?.name ?? null}
-                        productLineOptions={productLineOptions}
-                      />
-                      {err && (
-                        <div
-                          className="text-xs text-destructive pl-1"
-                          data-testid={`error-line-${idx}`}
-                          role="alert"
-                        >
-                          {err}
-                        </div>
-                      )}
-                    </div>
-                  );
-                });
+                const productLines = lines.filter((l) => l.lineType === "product");
+                const nonProductLines = lines.filter((l) => l.lineType !== "product");
+                const productLineOptions = productLines.map((l, productIdx) => ({
+                  clientId: l.clientId,
+                  label:
+                    l.sku || l.productName
+                      ? `${l.sku ? `${l.sku} · ` : ""}${l.productName || "(unnamed)"}`
+                      : `Line ${productIdx + 1}`,
+                }));
+
+                return (
+                  <>
+                    {productLines.length > 0 && (
+                      <div className="border border-slate-200 rounded-lg shadow-sm overflow-hidden">
+                        <Table>
+                          <TableHeader>
+                            <TableRow className="bg-slate-50 border-b border-slate-200 hover:bg-slate-50">
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium px-5 py-2.5">
+                                SKU
+                              </TableHead>
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-24 px-3 py-2.5">
+                                Qty
+                              </TableHead>
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
+                                <div>Product Cost</div>
+                                <div className="text-[10px] font-normal text-slate-400 normal-case">$ per unit shown below</div>
+                              </TableHead>
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
+                                <div>Packaging</div>
+                                <div className="text-[10px] font-normal text-slate-400 normal-case">$ per unit shown below</div>
+                              </TableHead>
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
+                                <div>Total Cost</div>
+                                <div className="text-[10px] font-normal text-slate-400 normal-case">$ per unit shown below</div>
+                              </TableHead>
+                              <TableHead className="w-10 px-2 py-2.5"></TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody className="divide-y divide-slate-100">
+                            {productLines.map((line) => {
+                              const lineIdx = lines.indexOf(line);
+                              return (
+                                <ProductLineTableRow
+                                  key={line.clientId}
+                                  line={line}
+                                  idx={lineIdx}
+                                  error={lineErrors[line.clientId]}
+                                  onChange={(patch) => updateLine(line.clientId, patch)}
+                                  onRemove={() => removeLine(line.clientId)}
+                                  useVendorCatalogSearch={useVendorCatalogSearch}
+                                  vendorId={selectedVendor?.id ?? null}
+                                  vendorName={selectedVendor?.name ?? null}
+                                  productSearch={productSearch[line.clientId] || ""}
+                                  setProductSearch={(q) => setProductSearch((prev) => ({ ...prev, [line.clientId]: q }))}
+                                  popoverOpen={!!productPopoverOpen[line.clientId]}
+                                  setPopoverOpen={(b) => setProductPopoverOpen((prev) => ({ ...prev, [line.clientId]: b }))}
+                                />
+                              );
+                            })}
+                          </TableBody>
+                          <TableFooter className="bg-slate-50/50 border-t border-slate-200">
+                            <TableRow className="hover:bg-slate-50/50">
+                              <TableCell colSpan={4} className="px-5 py-3">
+                                <button
+                                  className="text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 text-sm font-medium"
+                                  onClick={() => addLine("product")}
+                                  disabled={!selectedVendor}
+                                  type="button"
+                                >
+                                  <span>+</span> Add product
+                                </button>
+                              </TableCell>
+                              <TableCell className="px-3 py-3 text-right font-mono font-semibold text-slate-900 tabular-nums">
+                                {formatCents(totals.productSubtotalCents)}
+                              </TableCell>
+                              <TableCell></TableCell>
+                            </TableRow>
+                          </TableFooter>
+                        </Table>
+                      </div>
+                    )}
+
+                    {nonProductLines.length > 0 && (
+                      <div className="space-y-2">
+                        {nonProductLines.map((line) => {
+                          const lineIdx = lines.indexOf(line);
+                          const err = lineErrors[line.clientId];
+                          return (
+                            <div key={line.clientId} className="space-y-1">
+                              <NonProductLineRow
+                                line={line}
+                                idx={lineIdx}
+                                onChange={(patch) => updateLine(line.clientId, patch)}
+                                onRemove={() => removeLine(line.clientId)}
+                                productLineOptions={productLineOptions}
+                              />
+                              {err && (
+                                <div
+                                  className="text-xs text-destructive pl-1"
+                                  data-testid={`error-line-${lineIdx}`}
+                                  role="alert"
+                                >
+                                  {err}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                );
               })()}
             </div>
           )}
@@ -1668,6 +1749,7 @@ export default function PurchaseOrderEdit() {
             <div className="text-xs text-muted-foreground">
               Shipping &amp; tax are added at receive time.
             </div>
+          </div>
           </div>
         </CardContent>
       </Card>
@@ -1820,26 +1902,7 @@ export default function PurchaseOrderEdit() {
 
 // ─── LineRow ───────────────────────────────────────────────────────────────
 
-type LineRowProps = {
-  line: LineDraft;
-  idx: number;
-  onChange: (patch: Partial<LineDraft>) => void;
-  onRemove: () => void;
-  productSearch: string;
-  setProductSearch: (q: string) => void;
-  popoverOpen: boolean;
-  setPopoverOpen: (b: boolean) => void;
-  useVendorCatalogSearch: (
-    vendorId: number | null,
-    q: string,
-  ) => ReturnType<typeof useQuery<CatalogSearchResponse>>;
-  vendorId: number | null;
-  vendorName: string | null;
-  // Product lines on this PO that a discount/rebate line can target via
-  // its parent_line_id. Sent from the parent because it depends on sibling
-  // lines, which the LineRow does not have access to on its own.
-  productLineOptions?: Array<{ clientId: string; label: string }>;
-};
+
 
 // Rendered above non-product line rows so the user can tell at a glance
 // what type of line they're editing. Reuses existing tailwind classes.
@@ -2014,37 +2077,39 @@ function NonProductLineRow({
 }
 
 
-function LineRow(props: LineRowProps) {
-  // Dispatch on line_type. Product lines keep the existing typeahead-driven
-  // layout; non-product types render the simpler description + amount form.
-  if (props.line.lineType !== "product") {
-    return (
-      <NonProductLineRow
-        line={props.line}
-        idx={props.idx}
-        onChange={props.onChange}
-        onRemove={props.onRemove}
-        productLineOptions={props.productLineOptions ?? []}
-      />
-    );
-  }
-  const {
-    line,
-    idx,
-    onChange,
-    onRemove,
-    productSearch,
-    setProductSearch,
-    popoverOpen,
-    setPopoverOpen,
-    useVendorCatalogSearch,
-    vendorId,
-    vendorName,
-  } = props;
+type ProductLineTableRowProps = {
+  line: LineDraft;
+  idx: number;
+  error?: string;
+  onChange: (patch: Partial<LineDraft>) => void;
+  onRemove: () => void;
+  useVendorCatalogSearch: (
+    vendorId: number | null,
+    q: string,
+  ) => ReturnType<typeof useQuery<CatalogSearchResponse>>;
+  vendorId: number | null;
+  vendorName: string | null;
+  productSearch: string;
+  setProductSearch: (q: string) => void;
+  popoverOpen: boolean;
+  setPopoverOpen: (b: boolean) => void;
+};
 
+function ProductLineTableRow({
+  line,
+  idx,
+  error,
+  onChange,
+  onRemove,
+  useVendorCatalogSearch,
+  vendorId,
+  vendorName,
+  productSearch,
+  setProductSearch,
+  popoverOpen,
+  setPopoverOpen,
+}: ProductLineTableRowProps) {
   const catalogQuery = useVendorCatalogSearch(vendorId, productSearch);
-  // We previously restricted PO creation to base pieces only. However, some vendors
-  // have their catalog explicitly mapped to case variants.
   const inCatalog = catalogQuery.data?.inCatalog ?? [];
   const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
 
@@ -2063,30 +2128,32 @@ function LineRow(props: LineRowProps) {
           )
         : 0;
 
-  // Per-unit values (mills) for header microcopy.
+  // Per-unit values (mills) for below-input microcopy.
   const qty = Number(line.orderQty) || 0;
   const productPerUnit = perUnitMillsFromCents(totalProduct, qty);
   const packagingPerUnit = perUnitMillsFromCents(packaging, qty);
   const totalPerUnit = perUnitMillsFromCents(totalProduct + packaging, qty);
 
+  const hasError = Boolean(error);
+  const hasProduct = Boolean(line.productId);
+
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="grid grid-cols-12 gap-2 items-start">
-        {/* Product typeahead — ~30% on desktop */}
-        <div className="col-span-12 md:col-span-4">
+      <TableRow className={`align-top ${hasError ? "bg-amber-50/40" : ""}`}>
+        {/* SKU cell */}
+        <TableCell className="px-5 py-3">
           <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
             <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                className="w-full justify-between h-10 font-normal"
+              <button
+                className={`w-full text-left rounded-md border ${hasError ? "border-amber-300 hover:bg-amber-50/60" : "border-slate-200 hover:bg-slate-50"} px-3 py-2 flex items-center justify-between gap-2 text-sm ${hasProduct ? "font-mono" : "text-slate-500"}`}
               >
-                <span className="truncate text-left">
-                  {line.productId
-                    ? `${line.sku ? `${line.sku} · ` : ""}${line.productName || "(unnamed)"}`
-                    : "Search product..."}
+                <span className="truncate">
+                  {hasProduct
+                    ? `${line.sku ? `${line.sku}` : line.productName || "(unnamed)"}`
+                    : "Search product…"}
                 </span>
-                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-              </Button>
+                <ChevronsUpDown className="size-3.5 text-slate-400 shrink-0" />
+              </button>
             </PopoverTrigger>
             <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
               <Command shouldFilter={false}>
@@ -2114,9 +2181,6 @@ function LineRow(props: LineRowProps) {
                                 productVariantId: row.productVariantId ?? null,
                                 productName: row.productName,
                                 sku: row.sku ?? null,
-                                // From catalog: authoritative cost. Prefer
-                                // mills; fall back to cents × 100 for legacy
-                                // rows where unit_cost_mills is still NULL.
                                 unitCostMills:
                                   typeof row.unitCostMills === "number"
                                     ? row.unitCostMills
@@ -2128,11 +2192,7 @@ function LineRow(props: LineRowProps) {
                               setProductSearch("");
                             }}
                           >
-                            <span
-                              className="mr-2 text-amber-500"
-                              aria-label="In vendor catalog"
-                              title="In vendor catalog"
-                            >
+                            <span className="mr-2 text-amber-500" aria-label="In vendor catalog" title="In vendor catalog">
                               ★
                             </span>
                             <span className="font-mono text-xs mr-2 text-muted-foreground">
@@ -2158,12 +2218,7 @@ function LineRow(props: LineRowProps) {
                     </CommandGroup>
                   )}
                   {outOfCatalog.length > 0 && (
-                    <CommandGroup
-                      heading={
-                        vendorId
-                          ? "All products (not in catalog)"
-                          : "All products"
-                      }
+                    <CommandGroup heading={vendorId ? "All products (not in catalog)" : "All products"}
                     >
                       {outOfCatalog.slice(0, 30).map((row) => {
                         const key = `pv-${row.productId}-${row.productVariantId ?? "null"}`;
@@ -2177,9 +2232,6 @@ function LineRow(props: LineRowProps) {
                                 productVariantId: row.productVariantId ?? null,
                                 productName: row.productName,
                                 sku: row.sku ?? null,
-                                // Not in catalog. Leave the existing unit cost
-                                // (blank/zero) — the user will type it, and it
-                                // becomes the "suggest-at-save" candidate cost.
                                 vendorProductId: null,
                                 catalogOriginallyAbsent: vendorId ? true : null,
                               });
@@ -2208,103 +2260,114 @@ function LineRow(props: LineRowProps) {
               </Command>
             </PopoverContent>
           </Popover>
-        </div>
+          {/* Product description or validation error */}
+          {hasError ? (
+            <p className="text-xs text-amber-700 mt-1" role="alert" data-testid={`error-line-${idx}`}
+            >
+              {error}
+            </p>
+          ) : hasProduct ? (
+            <p className="text-xs text-slate-500 mt-1 truncate">
+              {line.productName || line.sku || ""}
+            </p>
+          ) : null}
+        </TableCell>
 
-        {/* Qty */}
-        <div className="col-span-4 md:col-span-1" style={{ minWidth: 80 }}>
+        {/* Qty cell */}
+        <TableCell className="px-3 py-3">
           <QuantityInput
             qty={line.orderQty}
             onChangeQty={(q) => onChange({ orderQty: q })}
             ariaLabel={`Line ${idx + 1} quantity`}
+            className="text-right font-mono tabular-nums"
           />
-        </div>
+        </TableCell>
 
-        {/* Product Cost input — header with per-unit microcopy */}
-        <div className="col-span-4 md:col-span-2" style={{ minWidth: 110 }}>
-          <div className="text-[10px] text-muted-foreground mb-0.5 truncate">
-            Product Cost{' '}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="cursor-help">
-                  ({formatPerUnit(productPerUnit)}/unit)
-                </span>
-              </TooltipTrigger>
-              <TooltipContent side="top" sideOffset={4} className="text-xs">
-                Full precision: {perUnitFullPrecisionDollars(productPerUnit)}/unit
-              </TooltipContent>
-            </Tooltip>
+        {/* Product Cost cell */}
+        <TableCell className="px-3 py-3">
+          <div className="relative">
+            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+            <DollarInput
+              cents={line.totalProductCostCents ?? 0}
+              onChangeCents={(c) => {
+                const totalProductCostCents = Math.max(0, c);
+                const q = line.orderQty || 1;
+                const unitCostMills =
+                  q > 0 ? Math.round((totalProductCostCents * 100) / q) : 0;
+                onChange({ totalProductCostCents, unitCostMills });
+              }}
+              ariaLabel={`Line ${idx + 1} total product cost`}
+              className="pl-6 pr-2"
+            />
           </div>
-          <DollarInput
-            cents={line.totalProductCostCents ?? 0}
-            onChangeCents={(c) => {
-              const totalProductCostCents = Math.max(0, c);
-              const q = line.orderQty || 1;
-              // Derive unitCostMills from total / qty for display + back-compat.
-              const unitCostMills =
-                q > 0 ? Math.round((totalProductCostCents * 100) / q) : 0;
-              onChange({ totalProductCostCents, unitCostMills });
-            }}
-            ariaLabel={`Line ${idx + 1} total product cost`}
-          />
-        </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="text-xs text-slate-400 text-right mt-1 tabular-nums cursor-help">
+                {formatPerUnit(productPerUnit)}/unit
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="top" sideOffset={4} className="text-xs">
+              Full precision: {perUnitFullPrecisionDollars(productPerUnit)}/unit
+            </TooltipContent>
+          </Tooltip>
+        </TableCell>
 
-        {/* Packaging Cost input — header with per-unit microcopy */}
-        <div className="col-span-4 md:col-span-2" style={{ minWidth: 110 }}>
-          <div className="text-[10px] text-muted-foreground mb-0.5 truncate">
-            Packaging{' '}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="cursor-help">
-                  ({formatPerUnit(packagingPerUnit)}/unit)
-                </span>
-              </TooltipTrigger>
-              <TooltipContent side="top" sideOffset={4} className="text-xs">
-                Full precision: {perUnitFullPrecisionDollars(packagingPerUnit)}/unit
-              </TooltipContent>
-            </Tooltip>
+        {/* Packaging cell */}
+        <TableCell className="px-3 py-3">
+          <div className="relative">
+            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+            <DollarInput
+              cents={line.packagingCostCents ?? 0}
+              onChangeCents={(c) => {
+                const packagingCostCents = Math.max(0, c);
+                onChange({ packagingCostCents });
+              }}
+              ariaLabel={`Line ${idx + 1} packaging cost`}
+              className="pl-6 pr-2"
+            />
           </div>
-          <DollarInput
-            cents={line.packagingCostCents ?? 0}
-            onChangeCents={(c) => {
-              const packagingCostCents = Math.max(0, c);
-              onChange({ packagingCostCents });
-            }}
-            ariaLabel={`Line ${idx + 1} packaging cost`}
-          />
-        </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="text-xs text-slate-400 text-right mt-1 tabular-nums cursor-help">
+                {formatPerUnit(packagingPerUnit)}/unit
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="top" sideOffset={4} className="text-xs">
+              Full precision: {perUnitFullPrecisionDollars(packagingPerUnit)}/unit
+            </TooltipContent>
+          </Tooltip>
+        </TableCell>
 
-        {/* Total Cost display — read-only, header with blended per-unit */}
-        <div className="col-span-3 md:col-span-2 text-right" style={{ minWidth: 110 }}>
-          <div className="text-[10px] text-muted-foreground mb-0.5 truncate text-right">
-            Total Cost{' '}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="cursor-help">
-                  ({formatPerUnit(totalPerUnit)}/unit)
-                </span>
-              </TooltipTrigger>
-              <TooltipContent side="top" sideOffset={4} className="text-xs">
-                Full precision: {perUnitFullPrecisionDollars(totalPerUnit)}/unit
-              </TooltipContent>
-            </Tooltip>
-          </div>
-          <div className="font-mono font-medium text-sm pt-1.5" data-testid={`line-total-${idx}`}>
+        {/* Total Cost cell — read-only */}
+        <TableCell className="px-3 py-3">
+          <div className="text-right font-mono font-semibold text-sm py-2" data-testid={`line-total-${idx}`}>
             {formatCents(lineTotalCents)}
           </div>
-        </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="text-xs text-slate-400 text-right mt-1 tabular-nums cursor-help">
+                {formatPerUnit(totalPerUnit)}/unit
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="top" sideOffset={4} className="text-xs">
+              Full precision: {perUnitFullPrecisionDollars(totalPerUnit)}/unit
+            </TooltipContent>
+          </Tooltip>
+        </TableCell>
 
-        {/* Remove */}
-        <div className="col-span-1 text-right">
+        {/* Trash cell */}
+        <TableCell className="px-2 py-3 text-center">
           <Button
             variant="ghost"
             size="icon"
             onClick={onRemove}
             aria-label={`Remove line ${idx + 1}`}
+            className="text-slate-400 hover:text-red-600 hover:bg-transparent"
           >
-            <Trash2 className="h-4 w-4" />
+            <Trash2 className="size-4" />
           </Button>
-        </div>
-      </div>
+        </TableCell>
+      </TableRow>
     </TooltipProvider>
   );
 }
