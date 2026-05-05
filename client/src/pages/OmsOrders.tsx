@@ -108,6 +108,25 @@ interface OmsStats {
   todayCount: number;
 }
 
+interface OmsOpsIssue {
+  code: string;
+  severity: "critical" | "warning" | "info";
+  count: number;
+  message: string;
+  sample: any[];
+}
+
+interface OmsOpsHealth {
+  generatedAt: string;
+  status: "healthy" | "degraded" | "critical";
+  counts: {
+    critical: number;
+    warning: number;
+    info: number;
+  };
+  issues: OmsOpsIssue[];
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -174,6 +193,16 @@ export default function OmsOrders() {
     queryFn: async () => {
       const res = await fetch("/api/oms/orders/stats");
       if (!res.ok) throw new Error("Failed to fetch stats");
+      return res.json();
+    },
+    refetchInterval: 30_000,
+  });
+
+  const { data: opsHealth } = useQuery<OmsOpsHealth>({
+    queryKey: ["/api/oms/ops/health"],
+    queryFn: async () => {
+      const res = await fetch("/api/oms/ops/health");
+      if (!res.ok) throw new Error("Failed to fetch OMS health");
       return res.json();
     },
     refetchInterval: 30_000,
@@ -315,6 +344,56 @@ export default function OmsOrders() {
           </CardContent>
         </Card>
       </div>
+
+      {opsHealth && (
+        <Card className={opsHealth.status === "critical" ? "border-red-300" : opsHealth.status === "degraded" ? "border-amber-300" : "border-emerald-300"}>
+          <CardHeader className="pb-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <AlertCircle className={opsHealth.status === "healthy" ? "h-4 w-4 text-emerald-600" : opsHealth.status === "degraded" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-red-600"} />
+                OMS/WMS Flow Health
+              </CardTitle>
+              <div className="flex gap-2">
+                <Badge variant={opsHealth.status === "healthy" ? "outline" : "destructive"}>
+                  {opsHealth.status}
+                </Badge>
+                <Badge variant="outline">
+                  {opsHealth.counts.critical} critical
+                </Badge>
+                <Badge variant="outline">
+                  {opsHealth.counts.warning} warnings
+                </Badge>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            {opsHealth.issues.length === 0 ? (
+              <div className="text-sm text-muted-foreground">No stuck webhook, WMS, or shipping handoff issues detected.</div>
+            ) : (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {opsHealth.issues.map((issue) => (
+                  <div key={issue.code} className="rounded-md border p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-medium">{issue.message}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">{issue.code}</div>
+                      </div>
+                      <Badge variant={issue.severity === "critical" ? "destructive" : "outline"}>
+                        {issue.count}
+                      </Badge>
+                    </div>
+                    {issue.sample.length > 0 && (
+                      <pre className="mt-3 max-h-28 overflow-auto rounded bg-muted p-2 text-xs">
+                        {JSON.stringify(issue.sample.slice(0, 3), null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3">

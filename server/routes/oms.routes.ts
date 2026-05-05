@@ -9,6 +9,8 @@ import type { Express, Request, Response } from "express";
 import type { OmsService } from "../modules/oms/oms.service";
 import type { FulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import type { ShipStationService } from "../modules/oms/shipstation.service";
+import { db } from "../db";
+import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
@@ -26,6 +28,18 @@ export function registerOmsRoutes(app: Express) {
       res.json(stats);
     } catch (err: any) {
       console.error("[OMS Routes] Stats error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/oms/ops/health — OMS/WMS/Shipping exception visibility
+  // -----------------------------------------------------------------------
+  app.get("/api/oms/ops/health", requireAuth, async (_req: Request, res: Response) => {
+    try {
+      res.json(await getOmsOpsHealth(db));
+    } catch (err: any) {
+      console.error("[OMS Routes] Ops health error:", err);
       res.status(500).json({ error: err.message });
     }
   });

@@ -74,6 +74,10 @@ const SHOPIFY_ROUTES_SRC = readFileSync(
   resolve(__dirname, "../../../../routes/shopify.routes.ts"),
   "utf-8",
 );
+const OMS_WEBHOOKS_SRC = readFileSync(
+  resolve(__dirname, "../../oms-webhooks.ts"),
+  "utf-8",
+);
 
 // ─── recordRetryFailure: shopify dead-letter formatting ──────────────
 
@@ -190,6 +194,23 @@ describe("webhook-retry.worker.ts :: shopify provider branch", () => {
     expect(WORKER_SRC).toContain("CRITICAL: Shopify Webhook Dead-Lettered");
     expect(WORKER_SRC).toMatch(/Topic:.*\$\{item\.topic\}/);
     expect(WORKER_SRC).toMatch(/Order:.*orderId/);
+  });
+});
+
+describe("oms-webhooks.ts :: internal retry loopback semantics", () => {
+  it("does not early-ack x-internal-retry loopbacks", () => {
+    expect(OMS_WEBHOOKS_SRC).toContain("function acknowledgeAccepted");
+    expect(OMS_WEBHOOKS_SRC).toMatch(/if \(!isInternalRetry\(req\)\)/);
+  });
+
+  it("returns 500 on internal retry processing failure", () => {
+    expect(OMS_WEBHOOKS_SRC).toContain("function handleProcessingFailure");
+    expect(OMS_WEBHOOKS_SRC).toMatch(/isInternalRetry\(req\)[\s\S]*res\.status\(500\)/);
+  });
+
+  it("acks internal retries only after successful processing or idempotent no-op", () => {
+    expect(OMS_WEBHOOKS_SRC).toContain("function acknowledgeProcessed");
+    expect(OMS_WEBHOOKS_SRC).toMatch(/acknowledgeProcessed\(req, res\)/);
   });
 });
 
