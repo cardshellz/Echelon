@@ -2634,8 +2634,13 @@ export function buildListingPushRequest(input: {
   preview: DropshipListingPreviewResult;
   idempotencyKey: string;
 }): { storeConnectionId: number; productVariantIds: number[]; idempotencyKey: string } {
+  const storeConnectionId = assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
+  if (input.preview.storeConnectionId !== storeConnectionId) {
+    throw new Error("Listing preview store connection must match the selected store connection.");
+  }
+
   return {
-    storeConnectionId: assertPositiveInteger(input.storeConnectionId, "storeConnectionId"),
+    storeConnectionId,
     productVariantIds: input.preview.rows
       .filter((row) => row.previewStatus !== "blocked")
       .map((row) => row.productVariantId),
