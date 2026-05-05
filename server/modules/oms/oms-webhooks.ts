@@ -750,6 +750,43 @@ export function registerOmsWebhooks(
   }
 
 
+  function isInternalRetry(req: Request): boolean {
+    return req.headers["x-internal-retry"] === process.env.SESSION_SECRET;
+  }
+
+  function acknowledgeAccepted(req: Request, res: Response): void {
+    if (!isInternalRetry(req)) {
+      res.status(200).send("ok");
+    }
+  }
+
+  function acknowledgeProcessed(req: Request, res: Response): void {
+    if (isInternalRetry(req) && !res.headersSent) {
+      res.status(200).send("ok");
+    }
+  }
+
+  async function handleProcessingFailure(
+    req: Request,
+    res: Response,
+    args: { provider: string; topic: string; payload: any; error: any },
+  ): Promise<void> {
+    if (isInternalRetry(req)) {
+      if (!res.headersSent) {
+        res.status(500).send(args.error?.message || "webhook retry failed");
+      }
+      return;
+    }
+
+    await db.insert(webhookRetryQueue).values({
+      provider: args.provider,
+      topic: args.topic,
+      payload: args.payload,
+      lastError: args.error?.message || String(args.error),
+    });
+  }
+
+
 
   // Helper: Get dynamic Channel ID
   async function getChannelId(req: Request, shopifyOrder?: any): Promise<number | null> {
@@ -773,7 +810,7 @@ export function registerOmsWebhooks(
     if (!shopifyOrder) return;
 
     // Return 200 immediately — process async
-    res.status(200).send("ok");
+    acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
     console.log(`${LOG_PREFIX} orders/paid → ${shopifyOrder.name || externalOrderId}`);
@@ -790,6 +827,7 @@ export function registerOmsWebhooks(
       const isNew = omsOrder.createdAt && (Date.now() - new Date(omsOrder.createdAt).getTime()) < 5000;
       if (!isNew) {
         console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already exists in OMS (id=${omsOrder.id}), skipping`);
+        acknowledgeProcessed(req, res);
         return;
       }
 
@@ -850,13 +888,14 @@ export function registerOmsWebhooks(
       
       // M18: Trigger real-time backfill bridge
       await db.execute(sql`NOTIFY shopify_order_ingested`);
+      acknowledgeProcessed(req, res);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/paid error for ${shopifyOrder.name}: ${err.message}`);
-      await db.insert(webhookRetryQueue).values({
+      await handleProcessingFailure(req, res, {
         provider: "shopify",
         topic: "orders/paid",
         payload: shopifyOrder,
-        lastError: err.message || String(err)
+        error: err,
       });
     }
   });
@@ -868,7 +907,7 @@ export function registerOmsWebhooks(
     const shopifyOrder = verifyAndParse(req, res);
     if (!shopifyOrder) return;
 
-    res.status(200).send("ok");
+    acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
     console.log(`${LOG_PREFIX} orders/updated → ${shopifyOrder.name || externalOrderId}`);
@@ -1006,13 +1045,14 @@ export function registerOmsWebhooks(
 
       // M18: Trigger real-time backfill bridge
       await db.execute(sql`NOTIFY shopify_order_ingested`);
+      acknowledgeProcessed(req, res);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/updated error for ${shopifyOrder.name}: ${err.message}`);
-      await db.insert(webhookRetryQueue).values({
+      await handleProcessingFailure(req, res, {
         provider: "shopify",
         topic: "orders/updated",
         payload: shopifyOrder,
-        lastError: err.message || String(err)
+        error: err,
       });
     }
   });
@@ -1024,7 +1064,7 @@ export function registerOmsWebhooks(
     const shopifyOrder = verifyAndParse(req, res);
     if (!shopifyOrder) return;
 
-    res.status(200).send("ok");
+    acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
     console.log(`${LOG_PREFIX} orders/cancelled → ${shopifyOrder.name || externalOrderId}`);
@@ -1039,6 +1079,7 @@ export function registerOmsWebhooks(
 
       if (existing.status === "cancelled") {
         console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already cancelled`);
+        acknowledgeProcessed(req, res);
         return;
       }
 
@@ -1142,13 +1183,14 @@ export function registerOmsWebhooks(
 
       // M18: Trigger real-time backfill bridge
       await db.execute(sql`NOTIFY shopify_order_ingested`);
+      acknowledgeProcessed(req, res);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/cancelled error for ${shopifyOrder.name}: ${err.message}`);
-      await db.insert(webhookRetryQueue).values({
+      await handleProcessingFailure(req, res, {
         provider: "shopify",
         topic: "orders/cancelled",
         payload: shopifyOrder,
-        lastError: err.message || String(err)
+        error: err,
       });
     }
   });
@@ -1160,7 +1202,7 @@ export function registerOmsWebhooks(
     const shopifyOrder = verifyAndParse(req, res);
     if (!shopifyOrder) return;
 
-    res.status(200).send("ok");
+    acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
     console.log(`${LOG_PREFIX} orders/fulfilled → ${shopifyOrder.name || externalOrderId}`);
@@ -1175,6 +1217,7 @@ export function registerOmsWebhooks(
 
       if (existing.status === "shipped") {
         console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already shipped`);
+        acknowledgeProcessed(req, res);
         return;
       }
 
@@ -1286,13 +1329,14 @@ export function registerOmsWebhooks(
 
       // M18: Trigger real-time backfill bridge
       await db.execute(sql`NOTIFY shopify_order_ingested`);
+      acknowledgeProcessed(req, res);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/fulfilled error for ${shopifyOrder.name}: ${err.message}`);
-      await db.insert(webhookRetryQueue).values({
+      await handleProcessingFailure(req, res, {
         provider: "shopify",
         topic: "orders/fulfilled",
         payload: shopifyOrder,
-        lastError: err.message || String(err)
+        error: err,
       });
     }
   });
@@ -1304,7 +1348,7 @@ export function registerOmsWebhooks(
     const refundPayload = verifyAndParse(req, res);
     if (!refundPayload) return;
 
-    res.status(200).send("ok");
+    acknowledgeAccepted(req, res);
 
     // Shopify refund payload has order_id at top level
     const shopifyOrderId = refundPayload.order_id;
@@ -1344,6 +1388,7 @@ export function registerOmsWebhooks(
 
       if (!existing) {
         console.log(`${LOG_PREFIX} Order ${shopifyOrderId} not in OMS, skipping refund`);
+        acknowledgeProcessed(req, res);
         return;
       }
 
@@ -1431,13 +1476,14 @@ export function registerOmsWebhooks(
 
       console.log(`${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ${financialStatus}`);
       pushToMissionControl(existing.id, "order.refunded");
+      acknowledgeProcessed(req, res);
     } catch (err: any) {
       console.error(`${LOG_PREFIX} refunds/create error for order ${shopifyOrderId}: ${err.message}`);
-      await db.insert(webhookRetryQueue).values({
+      await handleProcessingFailure(req, res, {
         provider: "shopify",
         topic: "refunds/create",
         payload: refundPayload,
-        lastError: err.message || String(err)
+        error: err,
       });
     }
   });

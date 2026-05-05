@@ -228,7 +228,12 @@ export async function pollEbayOrders(
               `);
               // Release WMS reservation
               try {
-                const wmsOrder = await db.execute(sql`SELECT id FROM wms.orders WHERE source_table_id = ${String(result.id)} LIMIT 1`);
+                const wmsOrder = await db.execute(sql`
+                  SELECT id FROM wms.orders
+                  WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(result.id)})
+                     OR source_table_id = ${String(result.id)}
+                  LIMIT 1
+                `);
                 if (wmsOrder.rows.length > 0) {
                   await db.execute(sql`
                     UPDATE wms.orders SET warehouse_status = 'cancelled', cancelled_at = NOW()
