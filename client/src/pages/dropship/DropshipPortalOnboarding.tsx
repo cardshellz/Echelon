@@ -230,10 +230,15 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         await run("send-email-code", async () => {
           await startEmailStepUp("connect_store");
           setEmailCodeSent(true);
+          setVerificationCode("");
           setMessage("Verification code sent.");
         });
         return;
       } else {
+        if (verificationCode.length !== 6) {
+          setError("Enter the 6-digit verification code before connecting a store.");
+          return;
+        }
         const verified = await run("verify-email-code", async () => {
           await verifyEmailStepUp({
             action: "connect_store",
@@ -241,6 +246,8 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           });
         });
         if (!verified) return;
+        setEmailCodeSent(false);
+        setVerificationCode("");
       }
     }
 
@@ -326,6 +333,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
             value={verificationCode}
             onChange={setVerificationCode}
             containerClassName="justify-between"
+            disabled={pendingAction !== null}
           >
             <InputOTPGroup>
               {Array.from({ length: 6 }).map((_, index) => (
@@ -541,10 +549,15 @@ function ActivationPanel({
         await run("send-email-code", async () => {
           await startEmailStepUp(activationAction);
           setEmailCodeSent(true);
+          setVerificationCode("");
           setMessage("Verification code sent.");
         });
         return;
       } else {
+        if (verificationCode.length !== 6) {
+          setError("Enter the 6-digit verification code before activating .ops.");
+          return;
+        }
         const verified = await run("verify-email-code", async () => {
           await verifyEmailStepUp({
             action: activationAction,
@@ -552,6 +565,8 @@ function ActivationPanel({
           });
         });
         if (!verified) return;
+        setEmailCodeSent(false);
+        setVerificationCode("");
       }
     }
 
@@ -597,6 +612,7 @@ function ActivationPanel({
             value={verificationCode}
             onChange={setVerificationCode}
             containerClassName="justify-between"
+            disabled={pendingAction !== null}
           >
             <InputOTPGroup>
               {Array.from({ length: 6 }).map((_, index) => (
