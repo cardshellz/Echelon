@@ -220,10 +220,10 @@ async function insertOrderIntakeWithClient(
     `INSERT INTO dropship.dropship_order_intake
       (channel_id, vendor_id, store_connection_id, platform,
        external_order_id, external_order_number, source_order_id, status,
-       rejection_reason, raw_payload, normalized_payload, payload_hash,
+       rejection_reason, cancellation_status, raw_payload, normalized_payload, payload_hash,
        received_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-             $9, $10::jsonb, $11::jsonb, $12, $13, $13)
+             $9, $10, $11::jsonb, $12::jsonb, $13, $14, $14)
      RETURNING id, channel_id, vendor_id, store_connection_id, platform,
                external_order_id, external_order_number, source_order_id, status,
                payment_hold_expires_at, rejection_reason, cancellation_status,
@@ -239,6 +239,7 @@ async function insertOrderIntakeWithClient(
       input.input.sourceOrderId ?? null,
       input.input.status,
       input.input.rejectionReason,
+      input.input.cancellationStatus,
       JSON.stringify(input.input.rawPayload),
       JSON.stringify(input.input.normalizedPayload),
       input.input.payloadHash,
@@ -267,10 +268,11 @@ async function updateExistingIntakeWithClient(
          source_order_id = $5,
          status = $6,
          rejection_reason = $7,
-         raw_payload = $8::jsonb,
-         normalized_payload = $9::jsonb,
-         payload_hash = $10,
-         updated_at = $11
+         cancellation_status = $8,
+         raw_payload = $9::jsonb,
+         normalized_payload = $10::jsonb,
+         payload_hash = $11,
+         updated_at = $12
      WHERE id = $1
      RETURNING id, channel_id, vendor_id, store_connection_id, platform,
                external_order_id, external_order_number, source_order_id, status,
@@ -285,6 +287,7 @@ async function updateExistingIntakeWithClient(
       input.input.sourceOrderId ?? input.existing.sourceOrderId,
       input.input.status,
       input.input.rejectionReason,
+      input.input.cancellationStatus,
       JSON.stringify(input.input.rawPayload),
       JSON.stringify(input.input.normalizedPayload),
       input.input.payloadHash,

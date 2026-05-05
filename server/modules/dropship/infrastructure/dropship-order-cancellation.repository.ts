@@ -9,8 +9,10 @@ const CANCELLATION_PROCESSING_STATUS = "marketplace_cancellation_processing" as 
 const CANCELLATION_RETRYING_STATUS = "marketplace_cancellation_retrying" as const;
 const CANCELLATION_FAILED_STATUS = "marketplace_cancellation_failed" as const;
 const CANCELLATION_SUCCEEDED_STATUS = "marketplace_cancelled" as const;
+const ORDER_INTAKE_REJECTED_CANCELLATION_STATUS = "order_intake_rejected" as const;
 const CLAIMABLE_CANCELLATION_STATUSES = [
   "payment_hold_expired",
+  ORDER_INTAKE_REJECTED_CANCELLATION_STATUS,
   CANCELLATION_RETRYING_STATUS,
 ] as const;
 const STALE_CANCELLATION_PROCESSING_MINUTES = 15;
@@ -24,12 +26,12 @@ interface CancellationCandidateRow {
   external_order_number: string | null;
   source_order_id: string | null;
   ordered_at: string | null;
+  rejection_reason: string | null;
   cancellation_status: DropshipOrderCancellationCandidate["cancellationStatus"];
 }
 
 interface CancellationActionRow extends CancellationCandidateRow {
   status: string;
-  rejection_reason: string | null;
 }
 
 export class PgDropshipOrderCancellationRepository implements DropshipOrderCancellationRepository {
@@ -47,12 +49,15 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
         `WITH candidates AS (
            SELECT id
            FROM dropship.dropship_order_intake
-           WHERE status = 'cancelled'
-             AND oms_order_id IS NULL
+           WHERE oms_order_id IS NULL
              AND (
-               cancellation_status = ANY($2::varchar[])
+               (
+                 status IN ('cancelled', 'rejected')
+                 AND cancellation_status = ANY($2::varchar[])
+               )
                OR (
-                 cancellation_status = $3
+                 status IN ('cancelled', 'rejected')
+                 AND cancellation_status = $3
                  AND updated_at <= $1 - ($4::text)::interval
                )
              )
@@ -68,6 +73,7 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
          RETURNING oi.id, oi.vendor_id, oi.store_connection_id, oi.platform,
                    oi.external_order_id, oi.external_order_number, oi.source_order_id,
                    oi.normalized_payload->>'orderedAt' AS ordered_at,
+                   oi.rejection_reason,
                    oi.cancellation_status`,
         [
           input.now,
@@ -97,7 +103,7 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
         intakeId: input.candidate.intakeId,
         cancellationStatus: CANCELLATION_SUCCEEDED_STATUS,
         status: "cancelled",
-        rejectionReason: null,
+        rejectionReason: input.candidate.rejectionReason,
         now: input.now,
       });
       await recordCancellationAuditEvent(client, {
@@ -129,7 +135,9 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
     const client = await this.dbPool.connect();
     const cancellationStatus = input.retryable ? CANCELLATION_RETRYING_STATUS : CANCELLATION_FAILED_STATUS;
     const status = input.retryable ? "cancelled" : "exception";
-    const rejectionReason = buildCancellationFailureReason(input.errorCode, input.errorMessage);
+    const rejectionReason = input.retryable
+      ? input.candidate.rejectionReason
+      : buildCancellationFailureReason(input.errorCode, input.errorMessage);
     try {
       await client.query("BEGIN");
       const row = await updateCancellationOutcome(client, {
@@ -179,14 +187,15 @@ async function updateCancellationOutcome(
     `UPDATE dropship.dropship_order_intake AS oi
      SET status = $2,
          cancellation_status = $3,
-        rejection_reason = $4,
+         rejection_reason = $4,
          updated_at = $5
      WHERE oi.id = $1
        AND oi.cancellation_status = $6
      RETURNING oi.id, oi.vendor_id, oi.store_connection_id, oi.platform,
                oi.external_order_id, oi.external_order_number, oi.source_order_id,
                oi.normalized_payload->>'orderedAt' AS ordered_at,
-               oi.status, oi.rejection_reason, oi.cancellation_status`,
+               oi.rejection_reason,
+               oi.status, oi.cancellation_status`,
     [
       input.intakeId,
       input.status,
@@ -250,6 +259,7 @@ function mapCancellationCandidateRow(row: CancellationCandidateRow): DropshipOrd
     externalOrderNumber: row.external_order_number,
     sourceOrderId: row.source_order_id,
     orderedAt: row.ordered_at,
+    rejectionReason: row.rejection_reason,
     cancellationStatus: row.cancellation_status,
   };
 }

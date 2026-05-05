@@ -90,6 +90,34 @@ describe("DropshipOrderCancellationService", () => {
     });
   });
 
+  it("cancels rejected marketplace intake with the rejected-intake reason", async () => {
+    const candidate = makeCandidate({
+      cancellationStatus: "order_intake_rejected",
+      rejectionReason: "Store connection status needs_reauth does not allow new dropship order intake.",
+    });
+    const repository = new FakeOrderCancellationRepository([candidate]);
+    const marketplaceCancellation = new FakeMarketplaceCancellationProvider({
+      status: "cancelled",
+      externalCancellationId: "cancel-2",
+      rawResult: { provider: "ebay" },
+    });
+    const service = new DropshipOrderCancellationService({
+      repository,
+      marketplaceCancellation,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processPendingCancellations({ workerId: "worker-1" });
+
+    expect(result).toMatchObject({ attempted: 1, succeeded: 1 });
+    expect(marketplaceCancellation.lastInput).toMatchObject({
+      reason: "order_intake_rejected",
+      idempotencyKey: deriveOrderCancellationIdempotencyKey(candidate),
+    });
+    expect(repository.successes[0]).toMatchObject({ candidate });
+  });
+
   it("records non-retryable provider failures for ops exception handling", async () => {
     const repository = new FakeOrderCancellationRepository([makeCandidate({ platform: "ebay" })]);
     const marketplaceCancellation = new FakeMarketplaceCancellationProvider(new DropshipError(
@@ -141,6 +169,17 @@ describe("dropship order cancellation helpers", () => {
       reason: "payment_hold_expired",
       idempotencyKey: deriveOrderCancellationIdempotencyKey(makeCandidate()),
     });
+  });
+
+  it("keeps retry cancellation reasons tied to the original intake reason", () => {
+    expect(buildCancellationRequest(makeCandidate({
+      cancellationStatus: "marketplace_cancellation_retrying",
+      rejectionReason: "Payment hold expired before wallet funds were available.",
+    }))).toMatchObject({ reason: "payment_hold_expired" });
+    expect(buildCancellationRequest(makeCandidate({
+      cancellationStatus: "marketplace_cancellation_retrying",
+      rejectionReason: "Store connection status needs_reauth does not allow new dropship order intake.",
+    }))).toMatchObject({ reason: "order_intake_rejected" });
   });
 });
 
@@ -199,6 +238,7 @@ function makeCandidate(
     externalOrderNumber: "1001",
     sourceOrderId: null,
     orderedAt: "2026-05-02T17:55:00.000Z",
+    rejectionReason: "Payment hold expired before wallet funds were available.",
     cancellationStatus: "payment_hold_expired",
     ...overrides,
   };
