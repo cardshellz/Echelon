@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DropshipOrderRejectionService,
   type DropshipLogEvent,
+  type DropshipNotificationSenderInput,
   type DropshipOrderRejectionRepository,
   type DropshipOrderRejectionResult,
 } from "../../application";
@@ -54,6 +55,108 @@ describe("DropshipOrderRejectionService", () => {
     });
   });
 
+  it("sends one critical rejection notification for new vendor rejections", async () => {
+    const repository = new FakeOrderRejectionRepository(makeResult());
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderRejectionService({
+      repository,
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    await service.rejectOrder({
+      intakeId: 42,
+      vendorId: 10,
+      reason: "Cannot fulfill selected SKU.",
+      idempotencyKey: "reject-order-42",
+      actor: {
+        actorType: "vendor",
+        actorId: "member-1",
+      },
+    });
+
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_order_rejected",
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "Dropship order rejected",
+      idempotencyKey: "order-rejected:42:reject-order-42",
+      payload: {
+        intakeId: 42,
+        vendorId: 10,
+        storeConnectionId: 22,
+        externalOrderId: "external-1",
+        externalOrderNumber: "1001",
+        previousStatus: "received",
+        status: "rejected",
+        cancellationStatus: "order_intake_rejected",
+        rejectionReason: "Cannot fulfill selected SKU.",
+        rejectedAt: now.toISOString(),
+        actorType: "vendor",
+        actorId: "member-1",
+      },
+    });
+  });
+
+  it("does not resend rejection notifications for idempotent replays", async () => {
+    const repository = new FakeOrderRejectionRepository(makeResult({ idempotentReplay: true }));
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderRejectionService({
+      repository,
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    await service.rejectOrder({
+      intakeId: 42,
+      vendorId: 10,
+      reason: "Cannot fulfill selected SKU.",
+      idempotencyKey: "reject-order-42",
+      actor: {
+        actorType: "vendor",
+        actorId: "member-1",
+      },
+    });
+
+    expect(notificationSender.sent).toHaveLength(0);
+  });
+
+  it("does not fail rejection when notification delivery fails", async () => {
+    const repository = new FakeOrderRejectionRepository(makeResult());
+    const notificationSender = new FakeNotificationSender(new Error("email unavailable"));
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderRejectionService({
+      repository,
+      notificationSender,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.rejectOrder({
+      intakeId: 42,
+      vendorId: 10,
+      reason: "Cannot fulfill selected SKU.",
+      idempotencyKey: "reject-order-42",
+      actor: {
+        actorType: "vendor",
+        actorId: "member-1",
+      },
+    });
+
+    expect(result.status).toBe("rejected");
+    expect(logs).toContainEqual(expect.objectContaining({
+      code: "DROPSHIP_ORDER_REJECTION_NOTIFICATION_FAILED",
+      context: expect.objectContaining({
+        intakeId: 42,
+        error: "email unavailable",
+      }),
+    }));
+  });
+
   it("rejects invalid input before repository access", async () => {
     const repository = new FakeOrderRejectionRepository(makeResult());
     const service = new DropshipOrderRejectionService({
@@ -86,6 +189,19 @@ class FakeOrderRejectionRepository implements DropshipOrderRejectionRepository {
   ): Promise<DropshipOrderRejectionResult> {
     this.lastInput = input;
     return this.result;
+  }
+}
+
+class FakeNotificationSender {
+  sent: DropshipNotificationSenderInput[] = [];
+
+  constructor(private readonly error: Error | null = null) {}
+
+  async send(input: DropshipNotificationSenderInput): Promise<void> {
+    this.sent.push(input);
+    if (this.error) {
+      throw this.error;
+    }
   }
 }
 
