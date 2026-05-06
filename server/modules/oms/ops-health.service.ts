@@ -160,22 +160,6 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       db,
       sql`
         SELECT COUNT(*)::int AS count
-        FROM wms.outbound_shipments
-        WHERE status = 'on_hold'
-      `,
-      sql`
-        SELECT id AS shipment_id, order_id, status, on_hold_reason, review_reason,
-               requires_review, updated_at
-        FROM wms.outbound_shipments
-        WHERE status = 'on_hold'
-        ORDER BY updated_at DESC NULLS LAST, id DESC
-        LIMIT 10
-      `,
-    ),
-    countAndSample(
-      db,
-      sql`
-        SELECT COUNT(*)::int AS count
         FROM oms.webhook_retry_queue
         WHERE status = 'pending'
           AND next_retry_at <= NOW() - INTERVAL '15 minutes'
@@ -301,6 +285,22 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         FROM wms.outbound_shipments
         WHERE requires_review = true
           AND status NOT IN ('cancelled', 'voided', 'shipped')
+        ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments
+        WHERE status = 'on_hold'
+      `,
+      sql`
+        SELECT id AS shipment_id, order_id, status, on_hold_reason, review_reason,
+               requires_review, updated_at
+        FROM wms.outbound_shipments
+        WHERE status = 'on_hold'
         ORDER BY updated_at DESC NULLS LAST, id DESC
         LIMIT 10
       `,

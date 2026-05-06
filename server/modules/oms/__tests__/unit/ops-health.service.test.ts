@@ -49,22 +49,29 @@ describe("ops-health.service :: issue mapping", () => {
   it("maps stale inbox and on-hold shipment query results to the correct issue codes", async () => {
     const previousDisableSchedulers = process.env.DISABLE_SCHEDULERS;
     process.env.DISABLE_SCHEDULERS = "true";
-    let callIndex = 0;
     const execute = vi.fn(async (query: any) => {
-      void query;
-      const index = callIndex++;
-      if (index === 10) return { rows: [{ count: 1 }] };
-      if (index === 11) {
+      const queryText = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+
+      if (queryText.includes("FROM oms.webhook_inbox") && queryText.includes("status = 'processing'")) {
+        if (queryText.includes("COUNT(*)")) return { rows: [{ count: 1 }] };
         return { rows: [{ id: 11, provider: "shopify", topic: "orders/paid", attempts: 1 }] };
       }
-      if (index === 14) return { rows: [{ count: 1 }] };
-      if (index === 15) {
+
+      if (
+        queryText.includes("FROM oms.webhook_retry_queue") &&
+        queryText.includes("next_retry_at <= NOW() - INTERVAL '15 minutes'")
+      ) {
+        if (queryText.includes("COUNT(*)")) return { rows: [{ count: 1 }] };
         return { rows: [{ id: 44, provider: "internal", topic: "oms_wms_sync", attempts: 2 }] };
       }
-      if (index === 26) return { rows: [{ count: 1 }] };
-      if (index === 27) {
+
+      if (queryText.includes("FROM wms.outbound_shipments") && queryText.includes("WHERE status = 'on_hold'")) {
+        if (queryText.includes("COUNT(*)")) return { rows: [{ count: 1 }] };
         return { rows: [{ shipment_id: 22, order_id: 33, status: "on_hold", on_hold_reason: "address review" }] };
       }
+
       return { rows: [{ count: 0 }] };
     });
 
