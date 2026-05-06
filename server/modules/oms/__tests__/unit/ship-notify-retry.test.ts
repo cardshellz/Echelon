@@ -59,6 +59,7 @@ import {
   enqueueShipStationRetry,
   enqueueOmsWmsSyncRetry,
   enqueueWmsShipmentCreateRetry,
+  requeueDeadWebhookRetry,
   dispatchShipStationRetry,
   dispatchOmsWmsSyncRetry,
   dispatchWmsShipmentCreateRetry,
@@ -294,6 +295,48 @@ describe("enqueueWmsShipmentCreateRetry", () => {
     );
 
     expect(inserts).toHaveLength(0);
+  });
+});
+
+describe("requeueDeadWebhookRetry", () => {
+  it("resets a dead retry row to pending", async () => {
+    const { db } = makeDb();
+    db.execute.mockResolvedValueOnce({
+      rows: [{
+        id: 99,
+        provider: "internal",
+        topic: "delayed_tracking_push",
+        previous_status: "dead",
+      }],
+    });
+
+    const result = await requeueDeadWebhookRetry(db, 99, "ops");
+
+    expect(result).toEqual({
+      retryQueueId: 99,
+      provider: "internal",
+      topic: "delayed_tracking_push",
+      previousStatus: "dead",
+    });
+    expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns not found when no retry row exists", async () => {
+    const { db } = makeDb();
+    db.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(requeueDeadWebhookRetry(db, 100, "ops")).rejects.toThrow(/not found/);
+  });
+
+  it("rejects rows that are not dead-lettered", async () => {
+    const { db } = makeDb();
+    db.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: 101, provider: "shopify", topic: "orders/paid", status: "pending" }] });
+
+    await expect(requeueDeadWebhookRetry(db, 101, "ops")).rejects.toThrow(/not dead-lettered/);
   });
 });
 

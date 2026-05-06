@@ -276,6 +276,57 @@ export async function enqueueWmsShipmentCreateRetry(
   });
 }
 
+export interface WebhookRetryRequeueResult {
+  retryQueueId: number;
+  provider: string;
+  topic: string;
+  previousStatus: string;
+}
+
+export async function requeueDeadWebhookRetry(
+  dbArg: any,
+  retryQueueId: number,
+  operator: string,
+): Promise<WebhookRetryRequeueResult> {
+  if (!Number.isInteger(retryQueueId) || retryQueueId <= 0) {
+    throw new Error(`webhook retry id must be a positive integer (got ${retryQueueId})`);
+  }
+
+  const result = await dbArg.execute(sql`
+    UPDATE oms.webhook_retry_queue
+    SET status = 'pending',
+        attempts = 0,
+        next_retry_at = NOW(),
+        last_error = ${`manual requeue by ${operator || "unknown"}`},
+        updated_at = NOW()
+    WHERE id = ${retryQueueId}
+      AND status = 'dead'
+    RETURNING id, provider, topic, 'dead'::text AS previous_status
+  `);
+
+  const row = Array.isArray(result?.rows) ? result.rows[0] : null;
+  if (!row) {
+    const existing = await dbArg.execute(sql`
+      SELECT id, provider, topic, status
+      FROM oms.webhook_retry_queue
+      WHERE id = ${retryQueueId}
+      LIMIT 1
+    `);
+    const existingRow = Array.isArray(existing?.rows) ? existing.rows[0] : null;
+    if (!existingRow) {
+      throw new Error(`webhook retry row ${retryQueueId} not found`);
+    }
+    throw new Error(`webhook retry row ${retryQueueId} is not dead-lettered (status=${existingRow.status})`);
+  }
+
+  return {
+    retryQueueId: Number(row.id),
+    provider: String(row.provider),
+    topic: String(row.topic),
+    previousStatus: String(row.previous_status),
+  };
+}
+
 /**
  * Resolve the ShipStation service the worker should invoke.
  *
