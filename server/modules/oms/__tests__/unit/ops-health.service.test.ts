@@ -31,10 +31,17 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     );
     expect(OPS_HEALTH_SRC).toMatch(/next_retry_at <= NOW\(\) - INTERVAL '15 minutes'/);
   });
+
+  it("surfaces webhook retry worker heartbeat issues", () => {
+    expect(OPS_HEALTH_SRC).toMatch(/code: "WEBHOOK_RETRY_WORKER_NOT_STARTED"/);
+    expect(OPS_HEALTH_SRC).toMatch(/code: "WEBHOOK_RETRY_WORKER_STALE"/);
+  });
 });
 
 describe("ops-health.service :: issue mapping", () => {
   it("maps stale inbox and on-hold shipment query results to the correct issue codes", async () => {
+    const previousDisableSchedulers = process.env.DISABLE_SCHEDULERS;
+    process.env.DISABLE_SCHEDULERS = "true";
     let callIndex = 0;
     const execute = vi.fn(async (query: any) => {
       void query;
@@ -54,20 +61,29 @@ describe("ops-health.service :: issue mapping", () => {
       return { rows: [{ count: 0 }] };
     });
 
-    const health = await getOmsOpsHealth({ execute });
+    try {
+      const health = await getOmsOpsHealth({ execute });
 
-    const staleProcessing = health.issues.find((issue) => issue.code === "WEBHOOK_INBOX_STALE_PROCESSING");
-    const staleDueRetry = health.issues.find((issue) => issue.code === "WEBHOOK_RETRY_STALE_DUE");
-    const onHold = health.issues.find((issue) => issue.code === "SHIPMENT_ON_HOLD");
+      const staleProcessing = health.issues.find((issue) => issue.code === "WEBHOOK_INBOX_STALE_PROCESSING");
+      const staleDueRetry = health.issues.find((issue) => issue.code === "WEBHOOK_RETRY_STALE_DUE");
+      const onHold = health.issues.find((issue) => issue.code === "SHIPMENT_ON_HOLD");
 
-    expect(staleProcessing?.sample).toEqual([
-      expect.objectContaining({ id: 11, topic: "orders/paid" }),
-    ]);
-    expect(staleDueRetry?.sample).toEqual([
-      expect.objectContaining({ id: 44, topic: "oms_wms_sync" }),
-    ]);
-    expect(onHold?.sample).toEqual([
-      expect.objectContaining({ shipment_id: 22, status: "on_hold" }),
-    ]);
+      expect(staleProcessing?.sample).toEqual([
+        expect.objectContaining({ id: 11, topic: "orders/paid" }),
+      ]);
+      expect(staleDueRetry?.sample).toEqual([
+        expect.objectContaining({ id: 44, topic: "oms_wms_sync" }),
+      ]);
+      expect(onHold?.sample).toEqual([
+        expect.objectContaining({ shipment_id: 22, status: "on_hold" }),
+      ]);
+      expect(health.workers.webhookRetry).toHaveProperty("startedAt");
+    } finally {
+      if (previousDisableSchedulers === undefined) {
+        delete process.env.DISABLE_SCHEDULERS;
+      } else {
+        process.env.DISABLE_SCHEDULERS = previousDisableSchedulers;
+      }
+    }
   });
 });
