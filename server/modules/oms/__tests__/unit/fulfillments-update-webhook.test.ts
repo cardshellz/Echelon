@@ -448,9 +448,58 @@ describe("handleShopifyFulfillmentUpdate — no tracking", () => {
 // ─── Shipment not tracked ───────────────────────────────────────────
 
 describe("handleShopifyFulfillmentUpdate — shipment not found", () => {
+  it("creates an external shipped shipment when update arrives after a lost create webhook", async () => {
+    const db = makeDb([
+      { rows: [] }, // shipment lookup miss
+      { rows: [{ id: 8000, channel_id: 36 }] }, // wms.orders lookup
+      { rows: [] }, // INSERT external shipment
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+
+    const result = await handleShopifyFulfillmentUpdate(
+      { db, omsSvc, now: FIXED_NOW },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    expect(db.execute).toHaveBeenCalledTimes(6);
+
+    const insertCall = db.calls[2];
+    expect(insertCall.sqlText).toContain("INSERT INTO wms.outbound_shipments");
+    expect(insertCall.sqlText).toContain("'shopify_external_fulfillment'");
+    expect(insertCall.sqlText).toContain("'shipped'");
+    expect(omsSvc.markShippedByExternalId).toHaveBeenCalledWith(
+      SHOPIFY_ORDER_ID,
+      NEW_TRACKING,
+      "UPS",
+    );
+  });
+
   it("acks 200 when no shipment matches the fulfillment id", async () => {
     // 3PL fulfillment that bypassed C26 path B (we don't sync this order).
     // Don't 500 — Shopify retries forever for orders we never tracked.
+    const db = makeDb([
+      { rows: [] }, // shipment lookup → none
+      { rows: [] }, // WMS order lookup → none
+    ]);
+    const omsSvc = makeOmsSvc();
+
+    const result = await handleShopifyFulfillmentUpdate(
+      { db, omsSvc, now: FIXED_NOW },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("shipment_not_tracked");
+    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(omsSvc.markShippedByExternalId).not.toHaveBeenCalled();
+  });
+
+  it("acks shipment_not_tracked when no shipment matches and order_id is missing", async () => {
     const db = makeDb([
       { rows: [] }, // shipment lookup → none
     ]);
@@ -458,7 +507,7 @@ describe("handleShopifyFulfillmentUpdate — shipment not found", () => {
 
     const result = await handleShopifyFulfillmentUpdate(
       { db, omsSvc, now: FIXED_NOW },
-      basePayload(),
+      basePayload({ order_id: undefined }),
     );
 
     expect(result.status).toBe(200);

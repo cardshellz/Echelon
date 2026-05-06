@@ -831,6 +831,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       { rows: [{ provider: "ebay" }] },
+      { rows: [] },
       { rows: [{ provider: "ebay" }] },
     ]);
     (mock.db as any).__fulfillmentPush = {
@@ -884,6 +885,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       { rows: [] },
       { rows: [{ provider: "ebay" }] },
+      { rows: [] },
       { rows: [{ provider: "ebay" }] },
     ]);
     (mock.db as any).__fulfillmentPush = {

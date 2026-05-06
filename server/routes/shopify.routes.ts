@@ -351,10 +351,9 @@ export interface ShopifyFulfillmentUpdatePayload {
 //      failure, ...) are 200-acked with no DB action — Shopify retries on
 //      non-2xx so we must not 500 over a non-actionable status.
 //   2. Match an existing WMS shipment by `shopify_fulfillment_id`. Not found
-//      → 200 with outcome='shipment_not_tracked' (don't 500 over orders we
-//      didn't create — only fulfillments WE pushed via C22d, or fulfillments
-//      C26's path B materialized as `shopify_external_fulfillment`, will
-//      have a row to update).
+//      → recover like fulfillments/create Path B when `order_id` is present.
+//      This covers lost create webhooks where Shopify later sends an update
+//      with tracking for the same external/manual fulfillment.
 //   3. Cascade through `markShipmentShipped`. The re-tracking branch (added
 //      in C18) writes a `shipment_tracking_history` row when tracking
 //      changes and UPDATEs the shipment. If tracking matches, returns
@@ -381,6 +380,7 @@ export interface FulfillmentsUpdateResult {
       | "idempotent"
       | "no_tracking"
       | "shipment_not_tracked"
+      | "external_shipment_created"
       | "cancel_handled_by_other_webhook"
       | "status_ignored"
       | "invalid_payload";
@@ -487,9 +487,57 @@ export async function handleShopifyFulfillmentUpdate(
   const existingShipmentRow: any = existingShipmentResult?.rows?.[0];
 
   if (!existingShipmentRow) {
-    // No shipment with this fulfillment id — either we never tracked this
-    // order (3PL fulfillment that bypassed C26 path B because we don't
-    // sync the order) or the shipment was hard-deleted. Either way, 200.
+    if (shopifyOrderId !== null) {
+      const wmsOrderResult: any = await db.execute(sql`
+        SELECT id, channel_id
+        FROM wms.orders
+        WHERE oms_fulfillment_order_id = ${shopifyOrderId}
+           OR source_table_id = ${shopifyOrderId}
+           OR shopify_order_id = ${shopifyOrderId}
+        LIMIT 1
+      `);
+      const wmsOrderRow: any = wmsOrderResult?.rows?.[0];
+
+      if (wmsOrderRow) {
+        const wmsOrderId = wmsOrderRow.id as number;
+        const channelId = wmsOrderRow.channel_id ?? null;
+
+        await db.execute(sql`
+          INSERT INTO wms.outbound_shipments
+            (order_id, channel_id, status, source,
+             shopify_fulfillment_id, tracking_number, carrier, tracking_url,
+             shipped_at, created_at, updated_at)
+          VALUES
+            (${wmsOrderId}, ${channelId}, 'shipped', 'shopify_external_fulfillment',
+             ${fulfillmentGid}, ${trackingNumberRaw}, ${carrier}, ${trackingUrl},
+             ${safeShipDate}, ${now}, ${now})
+        `);
+
+        await recomputeOrderStatusFromShipments(db, wmsOrderId, { now });
+
+        if (deps.omsSvc?.markShippedByExternalId) {
+          try {
+            await deps.omsSvc.markShippedByExternalId(
+              shopifyOrderId,
+              trackingNumberRaw,
+              carrier,
+            );
+          } catch (omsErr: any) {
+            console.warn(
+              `[fulfillments/update] OMS markShippedByExternalId failed for shopify order ${shopifyOrderId}: ${omsErr?.message ?? omsErr}`,
+            );
+          }
+        }
+
+        return {
+          status: 200,
+          body: { received: true, outcome: "external_shipment_created" },
+        };
+      }
+    }
+
+    // No shipment with this fulfillment id and no known WMS order. Don't
+    // 500 — Shopify would retry forever for orders Echelon does not track.
     console.warn(
       `[fulfillments/update] no shipment found for fulfillment ${fulfillmentGid} — skipping`,
     );
