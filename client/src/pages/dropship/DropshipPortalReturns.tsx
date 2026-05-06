@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
-import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, Eye, History, Package, ReceiptText, RotateCcw, Search, Truck, Wallet } from "lucide-react";
+import type { FormEvent, ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, Eye, History, Package, Plus, ReceiptText, RotateCcw, Search, Truck, Wallet } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -22,25 +23,73 @@ import {
 import {
   allDropshipRmaStatuses,
   buildQueryUrl,
+  buildPortalReturnCreateInput,
+  createDropshipIdempotencyKey,
   fetchJson,
   formatCents,
   formatDateTime,
   formatStatus,
+  postJson,
   queryErrorMessage,
+  type DropshipPortalReturnCreateResponse,
   type DropshipReturnDetail,
   type DropshipReturnDetailResponse,
+  type DropshipReturnFaultCategory,
   type DropshipReturnListItem,
   type DropshipReturnListResponse,
 } from "@/lib/dropship-ops-surface";
+import { Textarea } from "@/components/ui/textarea";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 const statuses = ["all", ...allDropshipRmaStatuses];
+const returnFaultOptions: Array<DropshipReturnFaultCategory | "none"> = [
+  "none",
+  "card_shellz",
+  "vendor",
+  "customer",
+  "marketplace",
+  "carrier",
+];
+
+const initialReturnCreateForm: PortalReturnCreateFormState = {
+  rmaNumber: "",
+  intakeId: "",
+  omsOrderId: "",
+  reasonCode: "",
+  faultCategory: "none",
+  labelSource: "",
+  returnTrackingNumber: "",
+  vendorNotes: "",
+  productVariantId: "",
+  quantity: "",
+  requestedCreditAmount: "",
+};
+
+interface PortalReturnCreateFormState {
+  rmaNumber: string;
+  intakeId: string;
+  omsOrderId: string;
+  reasonCode: string;
+  faultCategory: DropshipReturnFaultCategory | "none";
+  labelSource: string;
+  returnTrackingNumber: string;
+  vendorNotes: string;
+  productVariantId: string;
+  quantity: string;
+  requestedCreditAmount: string;
+}
 
 export default function DropshipPortalReturns() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [applied, setApplied] = useState({ search: "", status: "all" });
   const [selectedRmaId, setSelectedRmaId] = useState<number | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createForm, setCreateForm] = useState<PortalReturnCreateFormState>(initialReturnCreateForm);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const returnsUrl = useMemo(() => buildQueryUrl("/api/dropship/returns", {
     search: applied.search,
     statuses: applied.status === "all" ? undefined : applied.status,
@@ -60,6 +109,56 @@ export default function DropshipPortalReturns() {
     enabled: selectedRmaId !== null,
   });
 
+  async function submitReturn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setMessage("");
+    setError("");
+    try {
+      const hasItem = !returnItemFormIsBlank(createForm);
+      const input = buildPortalReturnCreateInput({
+        idempotencyKey: createDropshipIdempotencyKey("portal-rma-create"),
+        rmaNumber: createForm.rmaNumber,
+        storeConnectionId: "",
+        intakeId: createForm.intakeId,
+        omsOrderId: createForm.omsOrderId,
+        reasonCode: createForm.reasonCode,
+        faultCategory: createForm.faultCategory,
+        labelSource: createForm.labelSource,
+        returnTrackingNumber: createForm.returnTrackingNumber,
+        vendorNotes: createForm.vendorNotes,
+        items: hasItem
+          ? [{
+              productVariantId: createForm.productVariantId,
+              quantity: createForm.quantity,
+              status: "requested",
+              requestedCreditAmount: createForm.requestedCreditAmount,
+            }]
+          : [],
+      });
+      const response = await postJson<DropshipPortalReturnCreateResponse>("/api/dropship/returns", input);
+      setCreateForm(initialReturnCreateForm);
+      setCreateOpen(false);
+      setMessage(`RMA ${response.rma.rmaNumber} submitted.`);
+      setSelectedRmaId(response.rma.rmaId);
+      await Promise.all([
+        returnsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["dropship-return-detail", response.rma.rmaId] }),
+      ]);
+    } catch (submitError) {
+      setError(queryErrorMessage(submitError, "Unable to submit return."));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  function updateCreateForm<K extends keyof PortalReturnCreateFormState>(
+    key: K,
+    value: PortalReturnCreateFormState[K],
+  ) {
+    setCreateForm((current) => ({ ...current, [key]: value }));
+  }
+
   return (
     <DropshipPortalShell>
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
@@ -72,6 +171,18 @@ export default function DropshipPortalReturns() {
             <p className="mt-1 text-sm text-zinc-500">RMA status, inspection progress, and final credit outcomes.</p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              type="button"
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              onClick={() => {
+                setCreateOpen(true);
+                setError("");
+                setMessage("");
+              }}
+            >
+              <Plus className="h-4 w-4" />
+              Submit RMA
+            </Button>
             <div className="relative min-w-0 sm:w-80">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
               <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9" placeholder="Search RMAs" />
@@ -91,6 +202,20 @@ export default function DropshipPortalReturns() {
             </Button>
           </div>
         </div>
+
+        {message && (
+          <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900">
+            <ReceiptText className="h-4 w-4" />
+            <AlertDescription>{message}</AlertDescription>
+          </Alert>
+        )}
+
+        {error && (
+          <Alert variant="destructive" className="mt-5">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
 
         {returnsQuery.error && (
           <Alert variant="destructive" className="mt-5">
@@ -132,6 +257,19 @@ export default function DropshipPortalReturns() {
             </Empty>
           )}
         </div>
+        <CreateReturnSheet
+          form={createForm}
+          isSubmitting={isSubmitting}
+          onChange={updateCreateForm}
+          onOpenChange={(open) => {
+            setCreateOpen(open);
+            if (!open && !isSubmitting) {
+              setError("");
+            }
+          }}
+          onSubmit={submitReturn}
+          open={createOpen}
+        />
         <ReturnDetailSheet
           error={returnDetailQuery.error}
           isLoading={returnDetailQuery.isLoading}
@@ -143,6 +281,145 @@ export default function DropshipPortalReturns() {
         />
       </div>
     </DropshipPortalShell>
+  );
+}
+
+function CreateReturnSheet({
+  form,
+  isSubmitting,
+  onChange,
+  onOpenChange,
+  onSubmit,
+  open,
+}: {
+  form: PortalReturnCreateFormState;
+  isSubmitting: boolean;
+  onChange: <K extends keyof PortalReturnCreateFormState>(key: K, value: PortalReturnCreateFormState[K]) => void;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  open: boolean;
+}) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
+        <SheetHeader>
+          <SheetTitle>Submit RMA</SheetTitle>
+          <SheetDescription>Vendor RMA submission</SheetDescription>
+        </SheetHeader>
+
+        <form className="mt-6 space-y-5" onSubmit={onSubmit}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="portal-rma-number">RMA number</Label>
+              <Input
+                id="portal-rma-number"
+                value={form.rmaNumber}
+                onChange={(event) => onChange("rmaNumber", event.target.value)}
+                maxLength={80}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="portal-return-tracking">Return tracking</Label>
+              <Input
+                id="portal-return-tracking"
+                value={form.returnTrackingNumber}
+                onChange={(event) => onChange("returnTrackingNumber", event.target.value)}
+                maxLength={255}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="portal-rma-reason">Reason code</Label>
+              <Input
+                id="portal-rma-reason"
+                value={form.reasonCode}
+                onChange={(event) => onChange("reasonCode", event.target.value)}
+                maxLength={255}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="portal-rma-fault">Fault</Label>
+              <Select
+                value={form.faultCategory}
+                onValueChange={(value) => onChange("faultCategory", value as DropshipReturnFaultCategory | "none")}
+              >
+                <SelectTrigger id="portal-rma-fault">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {returnFaultOptions.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {option === "none" ? "Pending" : formatStatus(option)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label htmlFor="portal-rma-label-source">Label source</Label>
+              <Input
+                id="portal-rma-label-source"
+                value={form.labelSource}
+                onChange={(event) => onChange("labelSource", event.target.value)}
+                maxLength={255}
+              />
+            </div>
+          </div>
+
+          <Separator />
+
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="portal-rma-variant">Variant ID</Label>
+              <Input
+                id="portal-rma-variant"
+                inputMode="numeric"
+                value={form.productVariantId}
+                onChange={(event) => onChange("productVariantId", event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="portal-rma-quantity">Qty</Label>
+              <Input
+                id="portal-rma-quantity"
+                inputMode="numeric"
+                value={form.quantity}
+                onChange={(event) => onChange("quantity", event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="portal-rma-credit">Requested credit</Label>
+              <Input
+                id="portal-rma-credit"
+                inputMode="decimal"
+                value={form.requestedCreditAmount}
+                onChange={(event) => onChange("requestedCreditAmount", event.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="portal-rma-notes">Notes</Label>
+            <Textarea
+              id="portal-rma-notes"
+              value={form.vendorNotes}
+              onChange={(event) => onChange("vendorNotes", event.target.value)}
+              maxLength={5000}
+              rows={5}
+            />
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
+              Cancel
+            </Button>
+            <Button type="submit" className="bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSubmitting}>
+              {isSubmitting ? "Submitting..." : "Submit RMA"}
+            </Button>
+          </div>
+        </form>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -418,6 +695,12 @@ function DetailField({ label, value }: { label: string; value: string }) {
 
 function formatNullableCents(value: number | null | undefined): string {
   return typeof value === "number" ? formatCents(value) : "Not recorded";
+}
+
+function returnItemFormIsBlank(form: PortalReturnCreateFormState): boolean {
+  return !form.productVariantId.trim()
+    && !form.quantity.trim()
+    && !form.requestedCreditAmount.trim();
 }
 
 function statusTone(status: string): string {

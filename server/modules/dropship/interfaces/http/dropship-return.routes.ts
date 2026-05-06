@@ -27,6 +27,18 @@ export function registerDropshipReturnRoutes(
     }
   });
 
+  app.post("/api/dropship/returns", requireDropshipAuth, async (req, res) => {
+    try {
+      const result = await service.createRmaForMember(req.session.dropship!.memberId, {
+        ...req.body,
+        idempotencyKey: resolveIdempotencyKey(req),
+      });
+      return res.status(result.idempotentReplay ? 200 : 201).json(result);
+    } catch (error) {
+      return sendDropshipReturnError(res, error);
+    }
+  });
+
   app.get("/api/dropship/returns/:rmaId", requireDropshipAuth, async (req, res) => {
     try {
       const rma = await service.getForMember(

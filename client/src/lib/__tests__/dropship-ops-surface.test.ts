@@ -39,6 +39,7 @@ import {
   buildCatalogExposureRuleInput,
   buildDropshipNotificationsUrl,
   buildDropshipOrderAcceptInput,
+  buildPortalReturnCreateInput,
   buildNotificationPreferenceUpdateInput,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
@@ -428,6 +429,56 @@ describe("dropship ops surface client helpers", () => {
       vendorNotes: "",
       items: [{ productVariantId: "", quantity: "0", status: "requested", requestedCreditAmount: "" }],
     })).toThrow("items.0.quantity must be a positive integer.");
+  });
+
+  it("builds portal return create bodies without vendor-controlled financial policy", () => {
+    expect(buildPortalReturnCreateInput({
+      idempotencyKey: "portal-return-create-1",
+      rmaNumber: " RMA-VENDOR-1 ",
+      storeConnectionId: "",
+      intakeId: "44",
+      omsOrderId: "",
+      reasonCode: " wrong_item ",
+      faultCategory: "marketplace",
+      labelSource: " vendor ",
+      returnTrackingNumber: " 9400 ",
+      vendorNotes: " buyer opened return ",
+      items: [
+        {
+          productVariantId: "123",
+          quantity: "1",
+          status: "",
+          requestedCreditAmount: "15.00",
+        },
+      ],
+    })).toEqual({
+      idempotencyKey: "portal-return-create-1",
+      rmaNumber: "RMA-VENDOR-1",
+      storeConnectionId: null,
+      intakeId: 44,
+      omsOrderId: null,
+      reasonCode: "wrong_item",
+      faultCategory: "marketplace",
+      labelSource: "vendor",
+      returnTrackingNumber: "9400",
+      vendorNotes: "buyer opened return",
+      items: [
+        { productVariantId: 123, quantity: 1, status: "requested", requestedCreditCents: 1500 },
+      ],
+    });
+    expect(buildPortalReturnCreateInput({
+      idempotencyKey: "portal-return-create-2",
+      rmaNumber: "RMA-VENDOR-2",
+      storeConnectionId: "",
+      intakeId: "",
+      omsOrderId: "",
+      reasonCode: "",
+      faultCategory: "none",
+      labelSource: "",
+      returnTrackingNumber: "",
+      vendorNotes: "",
+      items: [],
+    })).not.toHaveProperty("returnWindowDays");
   });
 
   it("builds admin return inspection bodies from item credit and fee rows", () => {

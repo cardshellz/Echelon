@@ -1106,7 +1106,7 @@ async function recordReturnAuditEvent(
     vendorId: number;
     entityId: string;
     eventType: string;
-    actor: { actorType: "admin" | "system"; actorId?: string };
+    actor: { actorType: "vendor" | "admin" | "system"; actorId?: string };
     severity: "info" | "warning" | "error";
     payload: Record<string, unknown>;
     createdAt: Date;

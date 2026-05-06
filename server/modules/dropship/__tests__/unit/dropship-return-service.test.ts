@@ -37,6 +37,43 @@ describe("DropshipReturnService", () => {
     });
   });
 
+  it("creates member-scoped RMAs without trusting vendor or policy fields from the portal", async () => {
+    const repository = new FakeReturnRepository();
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs);
+
+    const result = await service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-VENDOR-100",
+      intakeId: 44,
+      reasonCode: "buyer_return",
+      faultCategory: "marketplace",
+      labelSource: "vendor",
+      returnTrackingNumber: "9400",
+      vendorNotes: "Buyer return opened in marketplace.",
+      items: [{ productVariantId: 20, quantity: 1, requestedCreditCents: 1500 }],
+      idempotencyKey: "vendor-rma-100",
+    });
+
+    expect(result.rma.rmaNumber).toBe("RMA-VENDOR-100");
+    expect(repository.lastCreateInput).toMatchObject({
+      vendorId: 10,
+      rmaNumber: "RMA-VENDOR-100",
+      returnWindowDays: 30,
+      idempotencyKey: "vendor-rma-100",
+      actor: { actorType: "vendor", actorId: "member-1" },
+    });
+    expect(repository.lastCreateInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(logs[0]).toMatchObject({ code: "DROPSHIP_RMA_CREATED" });
+
+    await expect(service.createRmaForMember("member-1", {
+      vendorId: 99,
+      rmaNumber: "RMA-SPOOFED",
+      returnWindowDays: 365,
+      items: [],
+      idempotencyKey: "vendor-rma-spoof",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+  });
+
   it("creates RMAs with idempotency, request hash, actor, and clock context", async () => {
     const repository = new FakeReturnRepository();
     const logs: DropshipLogEvent[] = [];

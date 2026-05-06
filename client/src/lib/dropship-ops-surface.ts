@@ -1673,6 +1673,32 @@ export interface DropshipAdminReturnCreateResponse {
   idempotentReplay: boolean;
 }
 
+export interface DropshipPortalReturnCreateItemInput {
+  productVariantId: number | null;
+  quantity: number;
+  status: string;
+  requestedCreditCents: number | null;
+}
+
+export interface DropshipPortalReturnCreateInput {
+  rmaNumber: string;
+  storeConnectionId?: number | null;
+  intakeId?: number | null;
+  omsOrderId?: number | null;
+  reasonCode?: string | null;
+  faultCategory?: DropshipReturnFaultCategory | null;
+  labelSource?: string | null;
+  returnTrackingNumber?: string | null;
+  vendorNotes?: string | null;
+  items: DropshipPortalReturnCreateItemInput[];
+  idempotencyKey: string;
+}
+
+export interface DropshipPortalReturnCreateResponse {
+  rma: DropshipReturnDetail;
+  idempotentReplay: boolean;
+}
+
 export interface DropshipAdminReturnStatusUpdateInput {
   status: DropshipRmaStatus;
   notes?: string;
@@ -2267,6 +2293,55 @@ export function buildAdminReturnCreateInput(input: {
     labelSource: input.labelSource.trim() || null,
     returnTrackingNumber: input.returnTrackingNumber.trim() || null,
     vendorNotes: vendorNotes || null,
+    items,
+    idempotencyKey,
+  };
+}
+
+export function buildPortalReturnCreateInput(input: {
+  idempotencyKey: string;
+  rmaNumber: string;
+  storeConnectionId: string;
+  intakeId: string;
+  omsOrderId: string;
+  reasonCode: string;
+  faultCategory: DropshipReturnFaultCategory | "none";
+  labelSource: string;
+  returnTrackingNumber: string;
+  vendorNotes: string;
+  items: Array<{
+    productVariantId: string;
+    quantity: string;
+    status: string;
+    requestedCreditAmount: string;
+  }>;
+}): DropshipPortalReturnCreateInput {
+  const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+  const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
+  const vendorNotes = optionalTrimmedString(input.vendorNotes, "vendorNotes", 5000);
+  const items = input.items.map((item, index) => {
+    const status = item.status.trim() || "requested";
+    if (status.length > 40) {
+      throw new Error(`items.${index}.status must be 40 characters or fewer.`);
+    }
+    return {
+      productVariantId: parseOptionalPositiveInteger(item.productVariantId, `items.${index}.productVariantId`),
+      quantity: parsePositiveInteger(item.quantity, `items.${index}.quantity`),
+      status,
+      requestedCreditCents: parseNullableDollarInputToCents(item.requestedCreditAmount, `items.${index}.requestedCreditAmount`),
+    };
+  });
+
+  return {
+    rmaNumber,
+    storeConnectionId: parseOptionalPositiveInteger(input.storeConnectionId, "storeConnectionId"),
+    intakeId: parseOptionalPositiveInteger(input.intakeId, "intakeId"),
+    omsOrderId: parseOptionalPositiveInteger(input.omsOrderId, "omsOrderId"),
+    reasonCode: optionalTrimmedString(input.reasonCode, "reasonCode", 255),
+    faultCategory: input.faultCategory === "none" ? null : input.faultCategory,
+    labelSource: optionalTrimmedString(input.labelSource, "labelSource", 255),
+    returnTrackingNumber: optionalTrimmedString(input.returnTrackingNumber, "returnTrackingNumber", 255),
+    vendorNotes,
     items,
     idempotencyKey,
   };
@@ -2913,6 +2988,15 @@ function requiredTrimmedString(value: string, key: string, maxLength: number): s
   if (!trimmed) {
     throw new Error(`${key} is required.`);
   }
+  if (trimmed.length > maxLength) {
+    throw new Error(`${key} must be ${maxLength} characters or fewer.`);
+  }
+  return trimmed;
+}
+
+function optionalTrimmedString(value: string, key: string, maxLength: number): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
   if (trimmed.length > maxLength) {
     throw new Error(`${key} must be ${maxLength} characters or fewer.`);
   }
