@@ -1215,7 +1215,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
-  async function shouldEnqueueDelayedTrackingPush(omsOrderId: number): Promise<boolean> {
+  async function getOmsOrderProvider(omsOrderId: number): Promise<string | null> {
     const result: any = await db.execute(sql`
       SELECT c.provider
       FROM oms.oms_orders o
@@ -1224,14 +1224,30 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       LIMIT 1
     `);
     const provider = String(result?.rows?.[0]?.provider ?? "").toLowerCase();
-    return provider.length > 0 && provider !== "shopify";
+    return provider.length > 0 ? provider : null;
+  }
+
+  async function shouldEnqueueDelayedTrackingPush(omsOrderId: number): Promise<boolean> {
+    const provider = await getOmsOrderProvider(omsOrderId);
+    return provider !== null && provider !== "shopify";
   }
 
   async function pushShopifyFulfillmentFromShipNotify(
     shipmentId: number,
+    omsOrderId: number | null,
   ): Promise<void> {
     if (!isShopifyFulfillmentPushEnabled()) {
       return;
+    }
+
+    if (omsOrderId !== null) {
+      const provider = await getOmsOrderProvider(omsOrderId);
+      if (provider !== null && provider !== "shopify") {
+        console.log(
+          `[ShipStation Webhook V2] shipment ${shipmentId} Shopify push skipped for provider ${provider}`,
+        );
+        return;
+      }
     }
 
     const fulfillmentPush = (db as any).__fulfillmentPush;
@@ -1424,7 +1440,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
             wmsShipmentRow.id,
           );
         }
-        await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id);
+        await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id, omsOrderId);
       }
       return { processed: false, fallback: false };
     }
@@ -1475,7 +1491,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // helper is also used for already-shipped replays so a missed Shopify
     // push can be repaired without changing WMS shipment state again.
     if (event.kind === "shipped" && changed) {
-      await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id);
+      await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id, omsOrderId);
     }
 
     console.log(
