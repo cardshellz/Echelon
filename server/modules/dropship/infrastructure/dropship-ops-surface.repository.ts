@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { pool as defaultPool } from "../../../db";
+import { DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES } from "../application/dropship-notification-service";
 import {
   buildDropshipSettingsSections,
   type DropshipAdminOpsOverview,
@@ -1007,10 +1008,8 @@ function buildDogfoodChecks(input: {
     {
       key: "notifications",
       label: "Notifications",
-      status: input.notificationPreferenceCount > 0 ? "ready" : "warning",
-      message: input.notificationPreferenceCount > 0
-        ? `${input.notificationPreferenceCount} notification preference override(s) configured.`
-        : "No notification preferences are configured.",
+      status: "ready",
+      message: `${DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.length} launch default notification preference(s) available; ${input.notificationPreferenceCount} vendor override(s) configured.`,
     },
   ];
 }

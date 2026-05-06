@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES } from "./dropship-notification-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 
@@ -811,7 +812,7 @@ export function buildDropshipSettingsSections(input: {
       label: "Notifications",
       status: "ready",
       comingSoon: false,
-      summary: `${input.notificationPreferenceCount} notification preference override(s) configured.`,
+      summary: `${DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.length} launch default notification preference(s) available; ${input.notificationPreferenceCount} vendor override(s) configured.`,
       blockers: [],
     },
     {

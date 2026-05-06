@@ -219,6 +219,27 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       message: "No active USDC Base funding method with a wallet address is registered.",
     });
   });
+
+  it("marks dogfood notification readiness ready with launch defaults and no vendor overrides", async () => {
+    const query = vi.fn(async () => ({
+      rows: [makeDogfoodReadinessRow({
+        notification_preference_count: "0",
+      })],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodReadiness({
+      generatedAt: now,
+      page: 1,
+      limit: 50,
+    });
+
+    expect(result.items[0]?.readinessStatus).toBe("ready");
+    expect(result.items[0]?.checks.find((check) => check.key === "notifications")).toMatchObject({
+      status: "ready",
+      message: expect.stringContaining("launch default notification preference(s) available; 0 vendor override(s) configured."),
+    });
+  });
 });
 
 function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
