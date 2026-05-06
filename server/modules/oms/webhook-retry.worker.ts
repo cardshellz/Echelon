@@ -112,6 +112,10 @@ export interface RetryEbayWebhookReplayService {
   ): Promise<{ status: string; omsOrderId: number }>;
 }
 
+export interface RetryWmsSyncService {
+  syncOmsOrderToWms(omsOrderId: number): Promise<number | null>;
+}
+
 /**
  * Enqueue a failed Shopify fulfillment push for retry.
  *
@@ -201,6 +205,41 @@ export async function enqueueDelayedTrackingPush(
   });
 }
 
+export async function enqueueOmsWmsSyncRetry(
+  dbArg: any,
+  omsOrderId: number,
+  cause?: unknown,
+): Promise<void> {
+  if (
+    typeof omsOrderId !== "number" ||
+    !Number.isInteger(omsOrderId) ||
+    omsOrderId <= 0
+  ) {
+    throw new Error(
+      `enqueueOmsWmsSyncRetry: omsOrderId must be a positive integer (got ${omsOrderId})`,
+    );
+  }
+
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  await dbArg.insert(webhookRetryQueue).values({
+    provider: "internal",
+    topic: "oms_wms_sync",
+    payload: { omsOrderId },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
 /**
  * Resolve the ShipStation service the worker should invoke.
  *
@@ -247,6 +286,14 @@ function resolveEbayWebhookReplayService(
   return null;
 }
 
+function resolveWmsSyncService(dbArg: any): RetryWmsSyncService | null {
+  const svc = dbArg?.__wmsSyncService;
+  if (svc && typeof svc.syncOmsOrderToWms === "function") {
+    return svc as RetryWmsSyncService;
+  }
+  return null;
+}
+
 function isShopifyClientNotReadyError(err: any): boolean {
   const code =
     err?.context?.code ??
@@ -259,6 +306,72 @@ function isShopifyClientNotReadyError(err: any): boolean {
 
   const message = String(err?.message ?? err ?? "").toLowerCase();
   return message.includes("shopify client not initialized");
+}
+
+export async function dispatchOmsWmsSyncRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as { omsOrderId?: number } | null;
+  const omsOrderId = payload?.omsOrderId;
+
+  if (
+    typeof omsOrderId !== "number" ||
+    !Number.isInteger(omsOrderId) ||
+    omsOrderId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item,
+      "malformed payload: omsOrderId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed oms_wms_sync payload)`,
+    );
+    return "malformed";
+  }
+
+  const wmsSync = resolveWmsSyncService(dbArg);
+  if (!wmsSync) {
+    await keepPending(
+      dbArg,
+      item.id,
+      "WMS sync service not available on db.__wmsSyncService",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) deferred - WMS sync service unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    const wmsOrderId = await wmsSync.syncOmsOrderToWms(omsOrderId);
+    if (!wmsOrderId) {
+      throw new Error(`syncOmsOrderToWms returned no WMS order for OMS order ${omsOrderId}`);
+    }
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}, wms=${wmsOrderId}) succeeded`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "oms_wms_sync", orderId: omsOrderId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
 }
 
 /**
@@ -762,6 +875,20 @@ async function processPendingWebhooks() {
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} ebay dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === "oms_wms_sync"
+    ) {
+      try {
+        await dispatchOmsWmsSyncRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} oms_wms_sync dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
