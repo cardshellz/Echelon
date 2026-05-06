@@ -2842,10 +2842,21 @@ export function buildDropshipOrderRejectInput(input: {
 export function buildListingPreviewRequest(input: {
   storeConnectionId: number;
   rows: readonly DropshipCatalogRow[];
-}): { storeConnectionId: number; productVariantIds: number[] } {
+  retailPriceByVariantId?: Readonly<Record<string, string>>;
+}): {
+  storeConnectionId: number;
+  productVariantIds: number[];
+  requestedRetailPricesByVariantId?: Record<string, number>;
+} {
+  const productVariantIds = uniqueSelectedVariantIds(input.rows);
+  const requestedRetailPricesByVariantId = buildRequestedRetailPricesByVariantId({
+    productVariantIds,
+    retailPriceByVariantId: input.retailPriceByVariantId,
+  });
   return {
     storeConnectionId: assertPositiveInteger(input.storeConnectionId, "storeConnectionId"),
-    productVariantIds: uniqueSelectedVariantIds(input.rows),
+    productVariantIds,
+    ...(Object.keys(requestedRetailPricesByVariantId).length > 0 ? { requestedRetailPricesByVariantId } : {}),
   };
 }
 
@@ -2853,18 +2864,30 @@ export function buildListingPushRequest(input: {
   storeConnectionId: number;
   preview: DropshipListingPreviewResult;
   idempotencyKey: string;
-}): { storeConnectionId: number; productVariantIds: number[]; idempotencyKey: string } {
+  retailPriceByVariantId?: Readonly<Record<string, string>>;
+}): {
+  storeConnectionId: number;
+  productVariantIds: number[];
+  idempotencyKey: string;
+  requestedRetailPricesByVariantId?: Record<string, number>;
+} {
   const storeConnectionId = assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
   if (input.preview.storeConnectionId !== storeConnectionId) {
     throw new Error("Listing preview store connection must match the selected store connection.");
   }
+  const productVariantIds = input.preview.rows
+    .filter((row) => row.previewStatus !== "blocked")
+    .map((row) => row.productVariantId);
+  const requestedRetailPricesByVariantId = buildRequestedRetailPricesByVariantId({
+    productVariantIds,
+    retailPriceByVariantId: input.retailPriceByVariantId,
+  });
 
   return {
     storeConnectionId,
-    productVariantIds: input.preview.rows
-      .filter((row) => row.previewStatus !== "blocked")
-      .map((row) => row.productVariantId),
+    productVariantIds,
     idempotencyKey: input.idempotencyKey,
+    ...(Object.keys(requestedRetailPricesByVariantId).length > 0 ? { requestedRetailPricesByVariantId } : {}),
   };
 }
 
@@ -3118,6 +3141,21 @@ function uniquePositiveVariantIds(rows: readonly DropshipCatalogRow[]): Set<numb
 
 function uniqueSelectedVariantIds(rows: readonly DropshipCatalogRow[]): number[] {
   return Array.from(uniquePositiveVariantIds(rows.filter((row) => row.selectionDecision.selected)));
+}
+
+function buildRequestedRetailPricesByVariantId(input: {
+  productVariantIds: readonly number[];
+  retailPriceByVariantId?: Readonly<Record<string, string>>;
+}): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const productVariantId of input.productVariantIds) {
+    const rawValue = input.retailPriceByVariantId?.[String(productVariantId)]?.trim();
+    if (!rawValue) {
+      continue;
+    }
+    result[String(productVariantId)] = parseDollarInputToCents(rawValue, `retailPrice:${productVariantId}`);
+  }
+  return result;
 }
 
 function assertPositiveInteger(value: number, key: string): number {

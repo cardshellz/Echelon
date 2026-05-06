@@ -18,6 +18,7 @@ export function registerDropshipListingRoutes(
         storeConnectionId: req.body?.storeConnectionId,
         productVariantIds: req.body?.productVariantIds,
         requestedRetailPriceCents: req.body?.requestedRetailPriceCents,
+        requestedRetailPricesByVariantId: req.body?.requestedRetailPricesByVariantId,
       });
       return res.json({ preview });
     } catch (error) {
@@ -35,6 +36,7 @@ export function registerDropshipListingRoutes(
           storeConnectionId: req.body?.storeConnectionId,
           productVariantIds: req.body?.productVariantIds,
           requestedRetailPriceCents: req.body?.requestedRetailPriceCents,
+          requestedRetailPricesByVariantId: req.body?.requestedRetailPricesByVariantId,
           idempotencyKey: resolveIdempotencyKey(req),
         });
         return res.status(result.idempotentReplay ? 200 : 201).json({
@@ -96,6 +98,7 @@ function sendDropshipListingError(res: Response, error: unknown): Response {
 function statusForDropshipListingError(code: string): number {
   switch (code) {
     case "DROPSHIP_LISTING_INVALID_INPUT":
+    case "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID":
     case "DROPSHIP_IDEMPOTENCY_KEY_REQUIRED":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":

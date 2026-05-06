@@ -9,6 +9,7 @@ const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
 const platformSchema = z.enum(["ebay", "shopify"]);
 const jsonObjectSchema = z.record(z.unknown());
+const requestedRetailPricesByVariantIdSchema = z.record(z.string(), CentsSchema).optional();
 const actorSchema = z.object({
   actorType: z.enum(["vendor", "admin", "system", "job"]),
   actorId: z.string().trim().min(1).max(255).optional(),
@@ -30,6 +31,7 @@ export const generateVendorListingPreviewInputSchema = z.object({
   storeConnectionId: positiveIdSchema,
   productVariantIds: z.array(positiveIdSchema).min(1).max(500),
   requestedRetailPriceCents: CentsSchema.optional(),
+  requestedRetailPricesByVariantId: requestedRetailPricesByVariantIdSchema,
   actor: actorSchema,
 }).strict();
 
@@ -37,6 +39,8 @@ export const createListingPushJobInputSchema = z.object({
   vendorId: positiveIdSchema,
   storeConnectionId: positiveIdSchema,
   productVariantIds: z.array(positiveIdSchema).min(1).max(500),
+  requestedRetailPriceCents: CentsSchema.optional(),
+  requestedRetailPricesByVariantId: requestedRetailPricesByVariantIdSchema,
   idempotencyKey: idempotencyKeySchema,
   requestedBy: actorSchema,
 }).strict();

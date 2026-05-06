@@ -1149,9 +1149,16 @@ describe("dropship ops surface client helpers", () => {
         makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
         makeCatalogRow({ productVariantId: 99, selectionDecision: makeSelectionDecision(false) }),
       ],
+      retailPriceByVariantId: {
+        "42": "19.99",
+        "99": "9.00",
+      },
     })).toEqual({
       storeConnectionId: 12,
       productVariantIds: [42],
+      requestedRetailPricesByVariantId: {
+        "42": 1999,
+      },
     });
   });
 
@@ -1169,10 +1176,19 @@ describe("dropship ops surface client helpers", () => {
       storeConnectionId: 12,
       preview,
       idempotencyKey: "push-1",
+      retailPriceByVariantId: {
+        "42": "10.00",
+        "99": "11.50",
+        "100": "9.00",
+      },
     })).toEqual({
       storeConnectionId: 12,
       productVariantIds: [42, 99],
       idempotencyKey: "push-1",
+      requestedRetailPricesByVariantId: {
+        "42": 1000,
+        "99": 1150,
+      },
     });
   });
 
