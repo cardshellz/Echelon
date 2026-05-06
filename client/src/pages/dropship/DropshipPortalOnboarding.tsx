@@ -483,7 +483,7 @@ function stepDescription(step: DropshipOnboardingStep): string {
   if (step.key === "vendor_profile") return "Card Shellz .ops entitlement and vendor profile are available.";
   if (step.key === "store_connection") return "One approved marketplace store must be connected before launch.";
   if (step.key === "catalog_available") return "Card Shellz ops controls the catalog available for vendor selection.";
-  if (step.key === "wallet_payment") return "Stripe-ready funding and auto-reload are required before launch; a current balance is optional when auto-reload is ready.";
+  if (step.key === "wallet_payment") return "Stripe-ready funding, USDC Base funding, and auto-reload are required before launch; a current balance is optional when auto-reload is ready.";
   return "Selected products define what can be pushed to connected marketplace stores.";
 }
 
@@ -654,13 +654,16 @@ function ActivationPanel({
 function walletGateDetail(onboarding: DropshipOnboardingState): string {
   if (onboarding.wallet.walletReady) {
     return onboarding.wallet.hasSpendableBalance
-      ? "Spendable wallet balance is available and auto-reload is ready."
-      : "Stripe-ready auto-reload is configured; wallet can fund accepted orders.";
+      ? "Spendable wallet balance, USDC Base funding, and auto-reload are ready."
+      : "Stripe-ready auto-reload and USDC Base funding are configured; wallet can fund accepted orders.";
   }
   if (!onboarding.wallet.hasStripeReadyFundingMethod) {
     return onboarding.wallet.hasActiveFundingMethod
       ? "Active funding method exists, but Stripe card or ACH setup is not ready."
       : "Add a Stripe card or ACH funding method before accepting live dropship orders.";
+  }
+  if (!onboarding.wallet.hasUsdcBaseFundingMethod) {
+    return "Register a USDC Base funding wallet before accepting live dropship orders.";
   }
   if (!onboarding.wallet.autoReloadConfigured) {
     return onboarding.wallet.autoReloadEnabled

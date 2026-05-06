@@ -30,6 +30,7 @@ describe("DropshipOpsSurfaceService", () => {
         autoReloadEnabled: false,
         fundingMethodCount: 0,
         activeStripeFundingMethodCount: 0,
+        activeUsdcBaseFundingMethodCount: 0,
         autoReloadFundingMethodReady: false,
       },
       notificationPreferenceCount: 0,
@@ -48,6 +49,7 @@ describe("DropshipOpsSurfaceService", () => {
     expect(sections.find((section) => section.key === "wallet_payment")?.blockers).toEqual([
       "auto_reload_required",
       "stripe_funding_method_required",
+      "usdc_base_funding_method_required",
     ]);
   });
 
@@ -62,6 +64,7 @@ describe("DropshipOpsSurfaceService", () => {
         autoReloadEnabled: true,
         fundingMethodCount: 1,
         activeStripeFundingMethodCount: 0,
+        activeUsdcBaseFundingMethodCount: 1,
         autoReloadFundingMethodReady: false,
       },
       notificationPreferenceCount: 0,
@@ -78,7 +81,7 @@ describe("DropshipOpsSurfaceService", () => {
     });
   });
 
-  it("marks launch wallet settings ready with Stripe-ready auto-reload even when balance is zero", () => {
+  it("requires USDC Base funding for the launch wallet settings section", () => {
     const sections = buildDropshipSettingsSections({
       vendorStatus: "active",
       entitlementStatus: "active",
@@ -89,6 +92,32 @@ describe("DropshipOpsSurfaceService", () => {
         autoReloadEnabled: true,
         fundingMethodCount: 1,
         activeStripeFundingMethodCount: 1,
+        activeUsdcBaseFundingMethodCount: 0,
+        autoReloadFundingMethodReady: true,
+      },
+      notificationPreferenceCount: 0,
+      hasContactEmail: true,
+    });
+
+    expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
+      status: "attention_required",
+      summary: "USDC Base funding needs setup.",
+      blockers: ["usdc_base_funding_method_required"],
+    });
+  });
+
+  it("marks launch wallet settings ready with Stripe-ready auto-reload and USDC Base funding even when balance is zero", () => {
+    const sections = buildDropshipSettingsSections({
+      vendorStatus: "active",
+      entitlementStatus: "active",
+      storeConnections: [],
+      wallet: {
+        availableBalanceCents: 0,
+        pendingBalanceCents: 0,
+        autoReloadEnabled: true,
+        fundingMethodCount: 1,
+        activeStripeFundingMethodCount: 1,
+        activeUsdcBaseFundingMethodCount: 1,
         autoReloadFundingMethodReady: true,
       },
       notificationPreferenceCount: 0,
@@ -97,7 +126,7 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
       status: "ready",
-      summary: "Wallet funding and auto-reload ready.",
+      summary: "Wallet funding, USDC Base, and auto-reload ready.",
       blockers: [],
     });
   });
@@ -356,6 +385,7 @@ function makeSettingsOverview(overrides: Partial<DropshipVendorSettingsOverview>
       autoReloadEnabled: true,
       fundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadFundingMethodReady: true,
     },
     notificationPreferences: {

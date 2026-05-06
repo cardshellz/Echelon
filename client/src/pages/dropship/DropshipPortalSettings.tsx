@@ -666,5 +666,6 @@ function sensitiveActionVerificationLabel(action: DropshipSensitiveAction): stri
 function walletMetricDetail(settings: DropshipSettingsResponse["settings"]): string {
   if (!settings.wallet.autoReloadEnabled) return "Auto-reload needs setup";
   if (!settings.wallet.autoReloadFundingMethodReady) return "Auto-reload funding method needs setup";
-  return `${settings.wallet.activeStripeFundingMethodCount} Stripe-ready funding method${settings.wallet.activeStripeFundingMethodCount === 1 ? "" : "s"}`;
+  if (settings.wallet.activeUsdcBaseFundingMethodCount <= 0) return "USDC Base funding method needs setup";
+  return `${settings.wallet.activeStripeFundingMethodCount} Stripe-ready / ${settings.wallet.activeUsdcBaseFundingMethodCount} USDC Base funding method${settings.wallet.activeUsdcBaseFundingMethodCount === 1 ? "" : "s"}`;
 }

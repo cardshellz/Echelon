@@ -74,6 +74,7 @@ describe("PgDropshipVendorProvisioningRepository", () => {
         pending_balance_cents: "2500",
         active_funding_method_count: "2",
         active_stripe_funding_method_count: "1",
+        active_usdc_base_funding_method_count: "1",
         auto_reload_enabled: true,
         auto_reload_funding_method_id: 8,
         auto_reload_funding_method_active: true,
@@ -86,6 +87,7 @@ describe("PgDropshipVendorProvisioningRepository", () => {
     const result = await repository.getWalletSetupSummary(10);
 
     expect(String(query.mock.calls[0]?.[0])).toContain("active_stripe_funding_method_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");
     expect(String(query.mock.calls[0]?.[0])).toContain("auto_reload_funding_method_ready");
     expect(query.mock.calls[0]?.[1]).toEqual([10]);
     expect(result).toMatchObject({
@@ -93,6 +95,7 @@ describe("PgDropshipVendorProvisioningRepository", () => {
       pendingBalanceCents: 2500,
       activeFundingMethodCount: 2,
       activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
@@ -257,6 +260,7 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 2500,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 0,
+      activeUsdcBaseFundingMethodCount: 0,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
@@ -271,6 +275,8 @@ describe("DropshipVendorProvisioningService", () => {
     expect(state.wallet).toMatchObject({
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 0,
+      activeUsdcBaseFundingMethodCount: 0,
+      hasUsdcBaseFundingMethod: false,
       hasStripeReadyFundingMethod: false,
       autoReloadConfigured: false,
       hasSpendableBalance: false,
@@ -285,7 +291,7 @@ describe("DropshipVendorProvisioningService", () => {
     ]);
   });
 
-  it("marks wallet onboarding complete when Stripe-ready funding and auto-reload are present", async () => {
+  it("marks wallet onboarding complete when Stripe-ready funding, USDC Base funding, and auto-reload are present", async () => {
     repository.vendor = makeVendorProfile({
       status: "active",
     });
@@ -294,6 +300,7 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
@@ -305,6 +312,7 @@ describe("DropshipVendorProvisioningService", () => {
     expect(state.wallet).toMatchObject({
       hasSpendableBalance: false,
       hasStripeReadyFundingMethod: true,
+      hasUsdcBaseFundingMethod: true,
       autoReloadConfigured: true,
       walletReady: true,
     });
@@ -323,6 +331,7 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 0,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
@@ -334,7 +343,38 @@ describe("DropshipVendorProvisioningService", () => {
     expect(state.wallet).toMatchObject({
       hasActiveFundingMethod: true,
       hasStripeReadyFundingMethod: false,
+      hasUsdcBaseFundingMethod: true,
       autoReloadConfigured: false,
+      walletReady: false,
+    });
+    expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({
+      status: "incomplete",
+    });
+  });
+
+  it("keeps wallet onboarding incomplete when USDC Base funding is missing", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "active",
+    });
+    repository.walletSetupSummary = {
+      availableBalanceCents: 10000,
+      pendingBalanceCents: 0,
+      activeFundingMethodCount: 1,
+      activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 0,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: true,
+    };
+
+    const state = await service.getOnboardingState("member-1");
+
+    expect(state.wallet).toMatchObject({
+      hasSpendableBalance: true,
+      hasStripeReadyFundingMethod: true,
+      hasUsdcBaseFundingMethod: false,
+      autoReloadConfigured: true,
       walletReady: false,
     });
     expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({
@@ -380,6 +420,7 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
@@ -465,6 +506,7 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
     pendingBalanceCents: 0,
     activeFundingMethodCount: 0,
     activeStripeFundingMethodCount: 0,
+    activeUsdcBaseFundingMethodCount: 0,
     autoReloadEnabled: true,
     autoReloadFundingMethodId: null,
     autoReloadFundingMethodActive: false,

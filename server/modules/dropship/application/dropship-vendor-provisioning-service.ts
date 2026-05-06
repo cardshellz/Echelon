@@ -65,6 +65,7 @@ export interface DropshipWalletSetupSummary {
   pendingBalanceCents: number;
   activeFundingMethodCount: number;
   activeStripeFundingMethodCount: number;
+  activeUsdcBaseFundingMethodCount: number;
   autoReloadEnabled: boolean;
   autoReloadFundingMethodId: number | null;
   autoReloadFundingMethodActive: boolean;
@@ -108,6 +109,7 @@ export interface DropshipOnboardingState {
   wallet: DropshipWalletSetupSummary & {
     hasActiveFundingMethod: boolean;
     hasStripeReadyFundingMethod: boolean;
+    hasUsdcBaseFundingMethod: boolean;
     autoReloadConfigured: boolean;
     hasSpendableBalance: boolean;
     walletReady: boolean;
@@ -290,11 +292,14 @@ export function buildOnboardingState(input: {
   const entitlementBlocked = input.vendor.status === "lapsed" || input.vendor.status === "suspended";
   const hasActiveFundingMethod = input.wallet.activeFundingMethodCount > 0;
   const hasStripeReadyFundingMethod = input.wallet.activeStripeFundingMethodCount > 0;
+  const hasUsdcBaseFundingMethod = input.wallet.activeUsdcBaseFundingMethodCount > 0;
   const autoReloadConfigured = input.wallet.autoReloadEnabled
     && input.wallet.autoReloadFundingMethodId !== null
     && input.wallet.autoReloadFundingMethodReady;
   const hasSpendableBalance = input.wallet.availableBalanceCents > 0;
-  const walletReady = (hasSpendableBalance || hasStripeReadyFundingMethod) && autoReloadConfigured;
+  const walletReady = (hasSpendableBalance || hasStripeReadyFundingMethod)
+    && autoReloadConfigured
+    && hasUsdcBaseFundingMethod;
 
   return {
     vendor: input.vendor,
@@ -313,6 +318,7 @@ export function buildOnboardingState(input: {
       ...input.wallet,
       hasActiveFundingMethod,
       hasStripeReadyFundingMethod,
+      hasUsdcBaseFundingMethod,
       autoReloadConfigured,
       hasSpendableBalance,
       walletReady,

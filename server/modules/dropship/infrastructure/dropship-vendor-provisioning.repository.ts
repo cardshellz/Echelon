@@ -48,6 +48,7 @@ interface WalletSetupSummaryRow {
   pending_balance_cents: string | number;
   active_funding_method_count: string | number;
   active_stripe_funding_method_count: string | number;
+  active_usdc_base_funding_method_count: string | number;
   auto_reload_enabled: boolean;
   auto_reload_funding_method_id: number | null;
   auto_reload_funding_method_active: boolean;
@@ -203,6 +204,11 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
                AND fm.provider_customer_id IS NOT NULL
                AND fm.provider_payment_method_id IS NOT NULL
            ) AS active_stripe_funding_method_count,
+           COUNT(fm.id) FILTER (
+             WHERE fm.status = 'active'
+               AND fm.rail = 'usdc_base'
+               AND fm.usdc_wallet_address IS NOT NULL
+           ) AS active_usdc_base_funding_method_count,
            COALESCE(ar.enabled, false) AS auto_reload_enabled,
            ar.funding_method_id AS auto_reload_funding_method_id,
            COALESCE(ar_fm.status = 'active', false) AS auto_reload_funding_method_active,
@@ -240,6 +246,7 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
         pendingBalanceCents: Number(row?.pending_balance_cents ?? 0),
         activeFundingMethodCount: Number(row?.active_funding_method_count ?? 0),
         activeStripeFundingMethodCount: Number(row?.active_stripe_funding_method_count ?? 0),
+        activeUsdcBaseFundingMethodCount: Number(row?.active_usdc_base_funding_method_count ?? 0),
         autoReloadEnabled: row?.auto_reload_enabled === true,
         autoReloadFundingMethodId: row?.auto_reload_funding_method_id ?? null,
         autoReloadFundingMethodActive: row?.auto_reload_funding_method_active === true,

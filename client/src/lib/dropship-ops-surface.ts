@@ -219,12 +219,14 @@ export interface DropshipOnboardingState {
     pendingBalanceCents: number;
     activeFundingMethodCount: number;
     activeStripeFundingMethodCount: number;
+    activeUsdcBaseFundingMethodCount: number;
     autoReloadEnabled: boolean;
     autoReloadFundingMethodId: number | null;
     autoReloadFundingMethodActive: boolean;
     autoReloadFundingMethodReady: boolean;
     hasActiveFundingMethod: boolean;
     hasStripeReadyFundingMethod: boolean;
+    hasUsdcBaseFundingMethod: boolean;
     autoReloadConfigured: boolean;
     hasSpendableBalance: boolean;
     walletReady: boolean;
@@ -304,6 +306,7 @@ export interface DropshipVendorSettingsOverview {
     autoReloadEnabled: boolean;
     fundingMethodCount: number;
     activeStripeFundingMethodCount: number;
+    activeUsdcBaseFundingMethodCount: number;
     autoReloadFundingMethodReady: boolean;
   };
   notificationPreferences: {
