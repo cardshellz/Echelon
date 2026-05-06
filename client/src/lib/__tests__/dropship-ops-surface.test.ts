@@ -37,6 +37,7 @@ import {
   buildShippingZoneRuleInput,
   buildStoreConnectionDisconnectInput,
   buildStoreOrderProcessingConfigInput,
+  buildCatalogExposureRuleFromPreviewRow,
   buildCatalogExposureRuleInput,
   buildDropshipNotificationsUrl,
   buildDropshipOrderAcceptInput,
@@ -879,6 +880,85 @@ describe("dropship ops surface client helpers", () => {
       action: "include",
       productLineId: "",
     })).toThrow();
+  });
+
+  it("builds catalog exposure draft rules from preview rows", () => {
+    const row = {
+      productId: 14,
+      productVariantId: 42,
+      productLineIds: [7, 8],
+      productLineNames: ["Supplies", "Display"],
+      category: "Cases",
+      productSku: "PROD-14",
+      productName: "Acrylic Case",
+      variantSku: "CASE-42",
+      variantName: "Clear",
+    };
+
+    expect(buildCatalogExposureRuleFromPreviewRow({
+      row,
+      scopeType: "product_line",
+      productLineId: 8,
+      action: "include",
+    })).toEqual(expect.objectContaining({
+      scopeType: "product_line",
+      action: "include",
+      productLineId: 8,
+      productId: null,
+      productVariantId: null,
+      category: null,
+      priority: 100,
+      notes: "Include Display",
+      metadata: { source: "admin_catalog_preview" },
+    }));
+
+    expect(buildCatalogExposureRuleFromPreviewRow({
+      row,
+      scopeType: "category",
+      action: "exclude",
+    })).toEqual(expect.objectContaining({
+      scopeType: "category",
+      action: "exclude",
+      category: "Cases",
+      priority: 200,
+      notes: "Exclude category Cases",
+    }));
+
+    expect(buildCatalogExposureRuleFromPreviewRow({
+      row,
+      scopeType: "product",
+      action: "include",
+    })).toEqual(expect.objectContaining({
+      scopeType: "product",
+      productId: 14,
+      notes: "Include PROD-14",
+    }));
+  });
+
+  it("requires a concrete preview row target for scoped catalog exposure rules", () => {
+    const row = {
+      productId: 14,
+      productVariantId: 42,
+      productLineIds: [],
+      productLineNames: [],
+      category: null,
+      productSku: null,
+      productName: "Acrylic Case",
+      variantSku: null,
+      variantName: "Clear",
+    };
+
+    expect(() => buildCatalogExposureRuleFromPreviewRow({
+      row,
+      scopeType: "category",
+      action: "include",
+    })).toThrow("category is required");
+
+    expect(() => buildCatalogExposureRuleFromPreviewRow({
+      row,
+      scopeType: "product_line",
+      action: "include",
+    })).toThrow("productLineId is required");
   });
 
   it("dedupes catalog exposure rules by scope, action, and normalized target", () => {

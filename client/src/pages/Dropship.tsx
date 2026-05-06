@@ -63,6 +63,7 @@ import {
   buildAdminStoreConnectionsUrl,
   buildAdminStoreWebhookRepairInput,
   buildAdminTrackingPushesUrl,
+  buildCatalogExposureRuleFromPreviewRow,
   buildCatalogExposureRuleInput,
   buildShippingBoxInput,
   buildShippingInsurancePolicyInput,
@@ -89,6 +90,7 @@ import {
   type DropshipAdminCatalogExposureRulesReplaceResponse,
   type DropshipAdminCatalogExposureRulesResponse,
   type DropshipAdminCatalogExposureRuleInput,
+  type DropshipCatalogExposurePreviewRuleScope,
   type DropshipAdminListingPushJobListItem,
   type DropshipAdminListingPushJobListResponse,
   type DropshipAdminNotificationOpsListItem,
@@ -2527,6 +2529,7 @@ function WalletOpsTab() {
 }
 
 function CatalogExposureTab() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [exposedOnly, setExposedOnly] = useState("false");
   const [includeInactiveCatalog, setIncludeInactiveCatalog] = useState("false");
@@ -2590,17 +2593,46 @@ function CatalogExposureTab() {
     }
   }
 
-  function addVariantRule(row: DropshipAdminCatalogExposurePreviewRow, action: CatalogExposureActionFilter) {
-    const rule = buildCatalogExposureRuleInput({
-      scopeType: "variant",
+  function addCatalogWideRule(action: CatalogExposureActionFilter) {
+    upsertDraftRule(buildCatalogExposureRuleInput({
+      scopeType: "catalog",
       action,
-      productVariantId: row.productVariantId,
-      priority: action === "include" ? 100 : 200,
-      notes: `${action === "include" ? "Include" : "Exclude"} ${row.variantSku || `variant ${row.productVariantId}`}`,
-    });
-    upsertDraftRule(rule);
-    setMessage(`${action === "include" ? "Include" : "Exclude"} variant rule added to draft.`);
+      priority: action === "include" ? 0 : 300,
+      notes: `${action === "include" ? "Include" : "Exclude"} entire active catalog`,
+      metadata: {
+        source: "admin_catalog_quick_action",
+      },
+    }));
+    setMessage(`${action === "include" ? "Include" : "Exclude"} entire catalog rule added to draft.`);
     setError("");
+  }
+
+  function clearDraftRules() {
+    setDraftRules([]);
+    setMessage("Catalog exposure draft cleared.");
+    setError("");
+  }
+
+  function addPreviewRule(
+    row: DropshipAdminCatalogExposurePreviewRow,
+    scopeType: DropshipCatalogExposurePreviewRuleScope,
+    action: CatalogExposureActionFilter,
+    productLineId?: number,
+  ) {
+    try {
+      const rule = buildCatalogExposureRuleFromPreviewRow({
+        row,
+        scopeType,
+        action,
+        productLineId,
+      });
+      upsertDraftRule(rule);
+      setMessage(`${action === "include" ? "Include" : "Exclude"} ${formatStatus(scopeType)} rule added to draft.`);
+      setError("");
+    } catch (caught) {
+      setMessage("");
+      setError(caught instanceof Error ? caught.message : "Catalog exposure rule is invalid.");
+    }
   }
 
   function upsertDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
@@ -2629,7 +2661,12 @@ function CatalogExposureTab() {
         },
       );
       setMessage(`Catalog exposure rules saved as revision ${result.revisionId}.`);
-      await Promise.all([rulesQuery.refetch(), previewQuery.refetch()]);
+      await Promise.all([
+        rulesQuery.refetch(),
+        previewQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Catalog exposure save failed.");
     } finally {
@@ -2734,12 +2771,20 @@ function CatalogExposureTab() {
           </div>
 
           <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+            <Button type="button" variant="outline" className="gap-2" onClick={() => addCatalogWideRule("include")}>
+              <PlusCircle className="h-4 w-4" />
+              Include active catalog
+            </Button>
             <Button type="button" variant="outline" className="gap-2" onClick={addRuleFromForm}>
               <PlusCircle className="h-4 w-4" />
               Add draft rule
             </Button>
             <Button type="button" variant="outline" onClick={() => setRuleForm(emptyCatalogRuleForm)}>
               Reset form
+            </Button>
+            <Button type="button" variant="outline" className="gap-2" onClick={clearDraftRules}>
+              <MinusCircle className="h-4 w-4" />
+              Clear draft
             </Button>
             <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={saving} onClick={saveDraftRules}>
               <Save className="h-4 w-4" />
@@ -2800,7 +2845,7 @@ function CatalogExposureTab() {
           isLoading={previewQuery.isLoading || previewQuery.isFetching}
           rows={previewRows}
           total={previewQuery.data?.total ?? 0}
-          onAddVariantRule={addVariantRule}
+          onAddPreviewRule={addPreviewRule}
         />
       </section>
     </div>
@@ -5162,12 +5207,17 @@ function CatalogDraftRulesTable({
 
 function CatalogPreviewTable({
   isLoading,
-  onAddVariantRule,
+  onAddPreviewRule,
   rows,
   total,
 }: {
   isLoading: boolean;
-  onAddVariantRule: (row: DropshipAdminCatalogExposurePreviewRow, action: CatalogExposureActionFilter) => void;
+  onAddPreviewRule: (
+    row: DropshipAdminCatalogExposurePreviewRow,
+    scopeType: DropshipCatalogExposurePreviewRuleScope,
+    action: CatalogExposureActionFilter,
+    productLineId?: number,
+  ) => void;
   rows: DropshipAdminCatalogExposurePreviewRow[];
   total: number;
 }) {
@@ -5205,7 +5255,7 @@ function CatalogPreviewTable({
             <TableHead>Category</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Decision</TableHead>
-            <TableHead className="w-[220px]">Draft variant rule</TableHead>
+            <TableHead className="w-[320px]">Quick draft rules</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -5241,28 +5291,7 @@ function CatalogPreviewTable({
                 <div className="mt-1 text-xs text-muted-foreground">{formatStatus(row.decision.reason)}</div>
               </TableCell>
               <TableCell>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-2"
-                    onClick={() => onAddVariantRule(row, "include")}
-                  >
-                    <PlusCircle className="h-4 w-4" />
-                    Include
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-2"
-                    onClick={() => onAddVariantRule(row, "exclude")}
-                  >
-                    <MinusCircle className="h-4 w-4" />
-                    Exclude
-                  </Button>
-                </div>
+                <CatalogPreviewQuickRules row={row} onAddPreviewRule={onAddPreviewRule} />
               </TableCell>
             </TableRow>
           ))}
@@ -5270,6 +5299,100 @@ function CatalogPreviewTable({
       </Table>
     </div>
   );
+}
+
+function CatalogPreviewQuickRules({
+  onAddPreviewRule,
+  row,
+}: {
+  onAddPreviewRule: (
+    row: DropshipAdminCatalogExposurePreviewRow,
+    scopeType: DropshipCatalogExposurePreviewRuleScope,
+    action: CatalogExposureActionFilter,
+    productLineId?: number,
+  ) => void;
+  row: DropshipAdminCatalogExposurePreviewRow;
+}) {
+  const productLineTargets = previewProductLineTargets(row);
+  return (
+    <div className="space-y-2">
+      <CatalogPreviewQuickRuleRow
+        label="Variant"
+        onInclude={() => onAddPreviewRule(row, "variant", "include")}
+        onExclude={() => onAddPreviewRule(row, "variant", "exclude")}
+      />
+      <CatalogPreviewQuickRuleRow
+        label="Product"
+        onInclude={() => onAddPreviewRule(row, "product", "include")}
+        onExclude={() => onAddPreviewRule(row, "product", "exclude")}
+      />
+      {row.category && (
+        <CatalogPreviewQuickRuleRow
+          label={`Category: ${formatStatus(row.category)}`}
+          onInclude={() => onAddPreviewRule(row, "category", "include")}
+          onExclude={() => onAddPreviewRule(row, "category", "exclude")}
+        />
+      )}
+      {productLineTargets.map((target) => (
+        <CatalogPreviewQuickRuleRow
+          key={target.productLineId}
+          label={`Line: ${target.label}`}
+          onInclude={() => onAddPreviewRule(row, "product_line", "include", target.productLineId)}
+          onExclude={() => onAddPreviewRule(row, "product_line", "exclude", target.productLineId)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function CatalogPreviewQuickRuleRow({
+  label,
+  onExclude,
+  onInclude,
+}: {
+  label: string;
+  onExclude: () => void;
+  onInclude: () => void;
+}) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center">
+      <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">{label}</span>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-8 gap-2"
+        onClick={onInclude}
+      >
+        <PlusCircle className="h-4 w-4" />
+        Include
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-8 gap-2"
+        onClick={onExclude}
+      >
+        <MinusCircle className="h-4 w-4" />
+        Exclude
+      </Button>
+    </div>
+  );
+}
+
+function previewProductLineTargets(row: DropshipAdminCatalogExposurePreviewRow): Array<{
+  productLineId: number;
+  label: string;
+}> {
+  return row.productLineIds
+    .map((productLineId, index) => ({
+      productLineId,
+      label: row.productLineNames[index] || `Product line ${productLineId}`,
+    }))
+    .filter((target, index, targets) => Number.isInteger(target.productLineId)
+      && target.productLineId > 0
+      && targets.findIndex((candidate) => candidate.productLineId === target.productLineId) === index);
 }
 
 function CatalogMetric({
