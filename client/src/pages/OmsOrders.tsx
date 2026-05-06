@@ -487,6 +487,7 @@ export default function OmsOrders() {
                       issue.code === "OMS_FINAL_WMS_ACTIVE" ||
                       issue.code === "WMS_FINAL_OMS_OPEN" ||
                       issue.code === "SHIPMENT_SHIPPED_OMS_OPEN" ||
+                      issue.code === "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION" ||
                       issue.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"
                     ) ? (
                       <div className="mt-3 space-y-2">

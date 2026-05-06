@@ -195,6 +195,43 @@ describe("oms-flow-reconciliation.service", () => {
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
+  it("queues ShipStation shipment push remediation through the retry queue", async () => {
+    const inserts: unknown[] = [];
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(sampleRows([{
+          shipment_id: 30,
+          wms_order_id: 20,
+          oms_order_id: 10,
+        }]))
+        .mockResolvedValueOnce(sampleRows([])),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (row: unknown) => {
+          inserts.push(row);
+          return undefined;
+        }),
+      })),
+    };
+
+    const result = await remediateOmsFlowIssue(db, {
+      code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
+      shipmentId: 30,
+      operator: "ops",
+    });
+
+    expect(result).toMatchObject({
+      action: "queued_shipstation_shipment_push",
+      changed: true,
+      omsOrderId: 10,
+      wmsOrderId: 20,
+      shipmentId: 30,
+    });
+    expect(inserts).toHaveLength(1);
+    expect((inserts[0] as any).topic).toBe("shipstation_shipment_push");
+    expect(db.execute).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects unsupported remediation codes", async () => {
     await expect(remediateOmsFlowIssue({ execute: vi.fn() }, {
       code: "NOPE",

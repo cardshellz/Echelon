@@ -1,6 +1,9 @@
 import { sql } from "drizzle-orm";
 import type { OmsOpsIssue } from "./ops-health.service";
-import { enqueueDelayedTrackingPush } from "./webhook-retry.worker";
+import {
+  enqueueDelayedTrackingPush,
+  enqueueShipStationShipmentPushRetry,
+} from "./webhook-retry.worker";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
@@ -8,6 +11,7 @@ const REMEDIABLE_CODES = new Set([
   "OMS_FINAL_WMS_ACTIVE",
   "WMS_FINAL_OMS_OPEN",
   "SHIPMENT_SHIPPED_OMS_OPEN",
+  "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
   "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
@@ -501,6 +505,72 @@ export async function remediateOmsFlowIssue(
       omsOrderId,
       wmsOrderId: updated ? Number(updated.wms_order_id) : null,
       shipmentId,
+    };
+  }
+
+  if (input.code === "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION") {
+    const shipmentId = positiveInt(input.shipmentId, "shipmentId");
+    const result = await db.execute(sql`
+      SELECT os.id AS shipment_id,
+             os.order_id AS wms_order_id,
+             oo.id AS oms_order_id
+      FROM wms.outbound_shipments os
+      JOIN wms.orders wo ON wo.id = os.order_id
+      LEFT JOIN oms.oms_orders oo ON (
+           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+        OR (wo.source_table_id = oo.id::text)
+      )
+      WHERE os.id = ${shipmentId}
+        AND os.status IN ('planned', 'queued', 'voided')
+        AND os.shipstation_order_id IS NULL
+      LIMIT 1
+    `);
+
+    const row = firstRow<{
+      shipment_id: number;
+      wms_order_id: number;
+      oms_order_id: number | null;
+    }>(result);
+
+    if (!row) {
+      return {
+        code: input.code,
+        action: "shipstation_push_not_queued",
+        changed: false,
+        omsOrderId: null,
+        wmsOrderId: input.wmsOrderId ? Number(input.wmsOrderId) : null,
+        shipmentId,
+        retryQueueId: null,
+      };
+    }
+
+    await enqueueShipStationShipmentPushRetry(
+      db,
+      shipmentId,
+      new Error(`manual remediation by ${input.operator || "unknown"}`),
+    );
+
+    const omsOrderId = row.oms_order_id ? Number(row.oms_order_id) : null;
+    if (omsOrderId) {
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
+          NOW()
+        )
+      `);
+    }
+
+    return {
+      code: input.code,
+      action: "queued_shipstation_shipment_push",
+      changed: true,
+      omsOrderId,
+      wmsOrderId: Number(row.wms_order_id),
+      shipmentId,
+      retryQueueId: null,
     };
   }
 
