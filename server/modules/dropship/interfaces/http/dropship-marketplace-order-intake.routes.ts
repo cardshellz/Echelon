@@ -44,7 +44,7 @@ export function registerDropshipMarketplaceOrderIntakeRoutes(
     return handleShopifyOrderWebhook(req, res, {
       orderIntakeService,
       sourceRepository,
-      requirePaid: false,
+      requirePaid: true,
       secrets: deps.shopifyWebhookSecrets,
       topic: "orders/paid",
     });
