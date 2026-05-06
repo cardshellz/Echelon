@@ -1682,9 +1682,7 @@ export interface DropshipPortalReturnCreateItemInput {
 
 export interface DropshipPortalReturnCreateInput {
   rmaNumber: string;
-  storeConnectionId?: number | null;
   intakeId?: number | null;
-  omsOrderId?: number | null;
   reasonCode?: string | null;
   faultCategory?: DropshipReturnFaultCategory | null;
   labelSource?: string | null;
@@ -2301,9 +2299,7 @@ export function buildAdminReturnCreateInput(input: {
 export function buildPortalReturnCreateInput(input: {
   idempotencyKey: string;
   rmaNumber: string;
-  storeConnectionId: string;
   intakeId: string;
-  omsOrderId: string;
   reasonCode: string;
   faultCategory: DropshipReturnFaultCategory | "none";
   labelSource: string;
@@ -2318,6 +2314,7 @@ export function buildPortalReturnCreateInput(input: {
 }): DropshipPortalReturnCreateInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
   const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
+  const intakeId = parseOptionalPositiveInteger(input.intakeId, "intakeId");
   const vendorNotes = optionalTrimmedString(input.vendorNotes, "vendorNotes", 5000);
   const items = input.items.map((item, index) => {
     const status = item.status.trim() || "requested";
@@ -2331,12 +2328,13 @@ export function buildPortalReturnCreateInput(input: {
       requestedCreditCents: parseNullableDollarInputToCents(item.requestedCreditAmount, `items.${index}.requestedCreditAmount`),
     };
   });
+  if (!intakeId && items.some((item) => item.productVariantId !== null)) {
+    throw new Error("intakeId is required when linking RMA items to product variants.");
+  }
 
   return {
     rmaNumber,
-    storeConnectionId: parseOptionalPositiveInteger(input.storeConnectionId, "storeConnectionId"),
-    intakeId: parseOptionalPositiveInteger(input.intakeId, "intakeId"),
-    omsOrderId: parseOptionalPositiveInteger(input.omsOrderId, "omsOrderId"),
+    intakeId,
     reasonCode: optionalTrimmedString(input.reasonCode, "reasonCode", 255),
     faultCategory: input.faultCategory === "none" ? null : input.faultCategory,
     labelSource: optionalTrimmedString(input.labelSource, "labelSource", 255),

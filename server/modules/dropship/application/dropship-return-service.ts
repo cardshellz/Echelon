@@ -76,7 +76,11 @@ const createDropshipRmaInputSchema = createDropshipRmaRequestSchema.extend({
   }).strict(),
 }).strict();
 
-const createDropshipMemberRmaInputSchema = createDropshipRmaRequestSchema.omit({ returnWindowDays: true }).strict();
+const createDropshipMemberRmaInputSchema = createDropshipRmaRequestSchema.omit({
+  omsOrderId: true,
+  returnWindowDays: true,
+  storeConnectionId: true,
+}).strict();
 
 const listDropshipRmasInputSchema = z.object({
   vendorId: positiveIdSchema.optional(),
@@ -225,9 +229,23 @@ export interface DropshipRmaStatusUpdateResult {
   idempotentReplay: boolean;
 }
 
+export interface DropshipRmaOrderLineReference {
+  lineIndex: number;
+  productVariantId: number | null;
+  quantity: number;
+}
+
+export interface DropshipRmaOrderReference {
+  intakeId: number;
+  storeConnectionId: number;
+  omsOrderId: number | null;
+  lines: DropshipRmaOrderLineReference[];
+}
+
 export interface DropshipReturnRepository {
   listRmas(input: ListDropshipRmasInput): Promise<DropshipRmaListResult>;
   getRma(input: { rmaId: number; vendorId?: number }): Promise<DropshipRmaDetail | null>;
+  getOrderReference(input: { vendorId: number; intakeId: number }): Promise<DropshipRmaOrderReference | null>;
   createRma(input: CreateDropshipRmaInput & { requestHash: string; now: Date }): Promise<{
     rma: DropshipRmaDetail;
     idempotentReplay: boolean;
@@ -277,8 +295,23 @@ export class DropshipReturnService {
   async createRmaForMember(memberId: string, input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
     const parsed = parseReturnInput(createDropshipMemberRmaInputSchema, input, "DROPSHIP_RETURN_CREATE_INVALID_INPUT");
     const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
+    const orderReference = parsed.intakeId
+      ? await this.deps.repository.getOrderReference({
+          vendorId: vendor.vendor.vendorId,
+          intakeId: parsed.intakeId,
+        })
+      : null;
+    if (parsed.intakeId && !orderReference) {
+      throw new DropshipError("DROPSHIP_ORDER_INTAKE_NOT_FOUND", "Dropship order intake was not found for the vendor.", {
+        vendorId: vendor.vendor.vendorId,
+        intakeId: parsed.intakeId,
+      });
+    }
+    assertMemberRmaItemsMatchOrder(parsed, orderReference);
     return this.createRma({
       ...parsed,
+      storeConnectionId: orderReference?.storeConnectionId ?? null,
+      omsOrderId: orderReference?.omsOrderId ?? null,
       vendorId: vendor.vendor.vendorId,
       actor: { actorType: "vendor", actorId: memberId },
     });
@@ -503,6 +536,62 @@ function parseReturnInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input:
     });
   }
   return result.data;
+}
+
+function assertMemberRmaItemsMatchOrder(
+  input: CreateDropshipMemberRmaInput,
+  orderReference: DropshipRmaOrderReference | null,
+): void {
+  const linkedItems = input.items.filter((item) => item.productVariantId !== null && item.productVariantId !== undefined);
+  if (linkedItems.length === 0) {
+    return;
+  }
+  if (!orderReference) {
+    throw new DropshipError(
+      "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+      "Linked RMA item variants require a dropship order intake.",
+      { linkedItemCount: linkedItems.length },
+    );
+  }
+
+  const orderedQuantityByVariant = new Map<number, number>();
+  for (const line of orderReference.lines) {
+    if (!line.productVariantId) continue;
+    orderedQuantityByVariant.set(
+      line.productVariantId,
+      (orderedQuantityByVariant.get(line.productVariantId) ?? 0) + line.quantity,
+    );
+  }
+
+  const requestedQuantityByVariant = new Map<number, number>();
+  for (const item of linkedItems) {
+    const productVariantId = item.productVariantId;
+    if (!productVariantId || !orderedQuantityByVariant.has(productVariantId)) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "RMA item product variant does not belong to the linked dropship order.",
+        {
+          intakeId: orderReference.intakeId,
+          productVariantId,
+        },
+      );
+    }
+    const nextQuantity = (requestedQuantityByVariant.get(productVariantId) ?? 0) + item.quantity;
+    const orderedQuantity = orderedQuantityByVariant.get(productVariantId) ?? 0;
+    if (nextQuantity > orderedQuantity) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+        "RMA item quantity exceeds the linked dropship order quantity.",
+        {
+          intakeId: orderReference.intakeId,
+          productVariantId,
+          requestedQuantity: nextQuantity,
+          orderedQuantity,
+        },
+      );
+    }
+    requestedQuantityByVariant.set(productVariantId, nextQuantity);
+  }
 }
 
 function hashReturnRequest(value: Record<string, unknown>): string {

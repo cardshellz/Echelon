@@ -54,7 +54,6 @@ const returnFaultOptions: Array<DropshipReturnFaultCategory | "none"> = [
 const initialReturnCreateForm: PortalReturnCreateFormState = {
   rmaNumber: "",
   intakeId: "",
-  omsOrderId: "",
   reasonCode: "",
   faultCategory: "none",
   labelSource: "",
@@ -68,7 +67,6 @@ const initialReturnCreateForm: PortalReturnCreateFormState = {
 interface PortalReturnCreateFormState {
   rmaNumber: string;
   intakeId: string;
-  omsOrderId: string;
   reasonCode: string;
   faultCategory: DropshipReturnFaultCategory | "none";
   labelSource: string;
@@ -119,9 +117,7 @@ export default function DropshipPortalReturns() {
       const input = buildPortalReturnCreateInput({
         idempotencyKey: createDropshipIdempotencyKey("portal-rma-create"),
         rmaNumber: createForm.rmaNumber,
-        storeConnectionId: "",
         intakeId: createForm.intakeId,
-        omsOrderId: createForm.omsOrderId,
         reasonCode: createForm.reasonCode,
         faultCategory: createForm.faultCategory,
         labelSource: createForm.labelSource,
@@ -326,6 +322,15 @@ function CreateReturnSheet({
                 value={form.returnTrackingNumber}
                 onChange={(event) => onChange("returnTrackingNumber", event.target.value)}
                 maxLength={255}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="portal-rma-intake">Order intake ID</Label>
+              <Input
+                id="portal-rma-intake"
+                inputMode="numeric"
+                value={form.intakeId}
+                onChange={(event) => onChange("intakeId", event.target.value)}
               />
             </div>
             <div className="space-y-2">

@@ -12,6 +12,7 @@ import type {
   DropshipRmaItemRecord,
   DropshipRmaListItem,
   DropshipRmaListResult,
+  DropshipRmaOrderReference,
   DropshipRmaStatus,
   DropshipRmaStatusUpdateResult,
   ListDropshipRmasInput,
@@ -91,6 +92,13 @@ interface RmaStatusUpdateRow {
   idempotency_key: string;
   request_hash: string;
   created_at: Date;
+}
+
+interface RmaOrderReferenceRow {
+  id: number;
+  store_connection_id: number;
+  oms_order_id: string | number | null;
+  normalized_payload: Record<string, unknown> | null;
 }
 
 interface WalletAccountRow {
@@ -193,6 +201,19 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
     } finally {
       client.release();
     }
+  }
+
+  async getOrderReference(input: { vendorId: number; intakeId: number }): Promise<DropshipRmaOrderReference | null> {
+    const result = await this.dbPool.query<RmaOrderReferenceRow>(
+      `SELECT id, store_connection_id, oms_order_id, normalized_payload
+       FROM dropship.dropship_order_intake
+       WHERE id = $1
+         AND vendor_id = $2
+       LIMIT 1`,
+      [input.intakeId, input.vendorId],
+    );
+    const row = result.rows[0];
+    return row ? mapRmaOrderReferenceRow(row) : null;
   }
 
   async createRma(input: CreateRepositoryInput): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
@@ -1174,6 +1195,27 @@ function assertRequestHash(actual: string | null, expected: string, code: string
   }
 }
 
+function mapRmaOrderReferenceRow(row: RmaOrderReferenceRow): DropshipRmaOrderReference {
+  return {
+    intakeId: row.id,
+    storeConnectionId: row.store_connection_id,
+    omsOrderId: row.oms_order_id === null ? null : safeInteger(row.oms_order_id, "oms_order_id"),
+    lines: mapRmaOrderReferenceLines(row.normalized_payload),
+  };
+}
+
+function mapRmaOrderReferenceLines(payload: Record<string, unknown> | null): DropshipRmaOrderReference["lines"] {
+  const lines = Array.isArray(payload?.lines) ? payload.lines : [];
+  return lines.map((line, index) => {
+    const candidate = line && typeof line === "object" ? line as Record<string, unknown> : {};
+    return {
+      lineIndex: index,
+      productVariantId: nullablePositiveInteger(candidate.productVariantId),
+      quantity: nullablePositiveInteger(candidate.quantity) ?? 0,
+    };
+  });
+}
+
 function mapRmaListRow(row: RmaListRow): DropshipRmaListItem {
   return {
     rmaId: row.id,
@@ -1267,6 +1309,28 @@ function requiredRow<T>(row: T | null | undefined, message: string): T {
     throw new Error(message);
   }
   return row;
+}
+
+function nullablePositiveInteger(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function safeInteger(value: string | number, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new DropshipError("DROPSHIP_RETURN_INVALID_NUMERIC_VALUE", "Dropship return numeric value is unsafe.", {
+      field,
+      value,
+    });
+  }
+  return parsed;
 }
 
 function isUniqueViolation(error: unknown): boolean {
