@@ -240,6 +240,53 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       message: expect.stringContaining("launch default notification preference(s) available; 0 vendor override(s) configured."),
     });
   });
+
+  it("blocks eBay dogfood readiness when the store refresh token reference is missing", async () => {
+    const query = vi.fn(async () => ({
+      rows: [makeDogfoodReadinessRow({
+        platform: "ebay",
+        refresh_token_ref: null,
+      })],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodReadiness({
+      generatedAt: now,
+      page: 1,
+      limit: 50,
+    });
+
+    expect(String(query.mock.calls[0]?.[0])).toContain("sc.refresh_token_ref");
+    expect(result.items[0]?.readinessStatus).toBe("blocked");
+    expect(result.items[0]?.checks.find((check) => check.key === "store_connection")).toMatchObject({
+      status: "blocked",
+      message: "Store is connected; access token reference present; eBay refresh token reference missing.",
+    });
+  });
+
+  it("keeps Shopify dogfood readiness ready without a refresh token reference", async () => {
+    const query = vi.fn(async () => ({
+      rows: [makeDogfoodReadinessRow({
+        platform: "shopify",
+        listing_config_platform: "shopify",
+        refresh_token_ref: null,
+        token_expires_at: null,
+      })],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodReadiness({
+      generatedAt: now,
+      page: 1,
+      limit: 50,
+    });
+
+    expect(result.items[0]?.readinessStatus).toBe("ready");
+    expect(result.items[0]?.checks.find((check) => check.key === "store_connection")).toMatchObject({
+      status: "ready",
+      message: "Store connection is connected with an access token reference.",
+    });
+  });
 });
 
 function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
@@ -257,6 +304,8 @@ function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
     external_display_name: "Vendor eBay",
     shop_domain: null,
     access_token_ref: "secret-ref",
+    refresh_token_ref: "refresh-ref",
+    token_expires_at: now,
     updated_at: now,
     dropship_oms_channel_id_text: "7",
     dropship_oms_channel_count: "1",
