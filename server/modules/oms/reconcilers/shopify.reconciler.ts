@@ -5,6 +5,7 @@ import {
   createDefaultShopifyAdminClient,
   type ShopifyAdminGraphQLClient,
 } from "../../shopify/admin-gql-client";
+import { enqueueShopifyFulfillmentRetry } from "../webhook-retry.worker";
 
 interface ShopifyFulfillmentStatusResponse {
   order?: {
@@ -122,6 +123,11 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
           await fulfillmentPush.pushShopifyFulfillment(shipmentId);
         } catch (err: any) {
           failures++;
+          await enqueueShopifyFulfillmentRetry(
+            this.db,
+            shipmentId,
+            err?.message || err,
+          );
           console.error(
             `[ShopifyFulfillmentReconciler] Error repushing fulfillment for shipment ${shipmentId}: ${err.message}`,
           );

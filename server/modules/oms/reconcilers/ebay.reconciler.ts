@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import type { FulfillmentReconciler, ReconciliationStatus } from "./reconciler.interface";
 import { createEbayApiClient } from "../../channels/adapters/ebay/ebay-api.client";
 import { EbayAuthService } from "../../channels/adapters/ebay/ebay-auth.service";
+import { enqueueDelayedTrackingPush } from "../webhook-retry.worker";
 
 export class EbayFulfillmentReconciler implements FulfillmentReconciler {
   constructor(private db: any) {}
@@ -63,9 +64,11 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
               const pushed = await fulfillmentPush.pushTrackingForShipment(shipmentId);
               if (!pushed) {
                 failures++;
+                await enqueueDelayedTrackingPush(this.db, orderId, shipmentId);
               }
             } catch (err: any) {
               failures++;
+              await enqueueDelayedTrackingPush(this.db, orderId, shipmentId);
               console.error(
                 `[EbayFulfillmentReconciler] Error repushing tracking for shipment ${shipmentId}: ${err.message}`,
               );
@@ -81,7 +84,13 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
         return false;
       }
 
-      return await fulfillmentPush.pushTracking(orderId);
+      const pushed = await fulfillmentPush.pushTracking(orderId);
+      if (!pushed) {
+        await enqueueDelayedTrackingPush(this.db, orderId);
+        return false;
+      }
+
+      return true;
     } catch (err: any) {
       console.error(`[EbayFulfillmentReconciler] Error repushing tracking for order ${order.id}: ${err.message}`);
       return false;
