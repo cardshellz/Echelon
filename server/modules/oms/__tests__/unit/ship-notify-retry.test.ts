@@ -161,6 +161,18 @@ function makeDb(opts: {
   return { db, inserts, updates, executes };
 }
 
+function postgresUniqueViolation(
+  constraint: string,
+  field: "constraint" | "constraint_name" = "constraint",
+): Error {
+  const error = new Error(
+    `duplicate key value violates unique constraint "${constraint}"`,
+  ) as Error & Record<string, unknown>;
+  error.code = "23505";
+  error[field] = constraint;
+  return error;
+}
+
 // ─── enqueueShipStationRetry tests ───────────────────────────────────
 
 describe("enqueueShipStationRetry :: happy path", () => {
@@ -317,6 +329,79 @@ describe("enqueueShipStationRetry :: DB failure", () => {
 });
 
 // ─── dispatchShipStationRetry tests ──────────────────────────────────
+
+describe("webhook retry enqueue unique constraint races", () => {
+  const retryScopeCases: Array<[string, string, (db: any) => Promise<void>]> = [
+    [
+      "ShipStation resource URL",
+      "uq_webhook_retry_pending_shipstation_resource_url",
+      (db) => enqueueShipStationRetry(db, { resource_url: "https://ss.example/x" }),
+    ],
+    [
+      "Shopify fulfillment shipment",
+      "uq_webhook_retry_pending_shopify_fulfillment_shipment",
+      (db) => enqueueShopifyFulfillmentRetry(db, 501, new Error("shopify 500")),
+    ],
+    [
+      "delayed tracking shipment",
+      "uq_webhook_retry_pending_delayed_tracking_shipment",
+      (db) => enqueueDelayedTrackingPush(db, 77, 501),
+    ],
+    [
+      "delayed tracking order",
+      "uq_webhook_retry_pending_delayed_tracking_order",
+      (db) => enqueueDelayedTrackingPush(db, 77),
+    ],
+    [
+      "OMS/WMS sync order",
+      "uq_webhook_retry_pending_oms_wms_sync_order",
+      (db) => enqueueOmsWmsSyncRetry(db, 10, "manual fix"),
+    ],
+    [
+      "WMS shipment create order",
+      "uq_webhook_retry_pending_wms_shipment_create_order",
+      (db) => enqueueWmsShipmentCreateRetry(db, 15, "shipstation unavailable"),
+    ],
+  ];
+
+  it.each(retryScopeCases)(
+    "treats a %s duplicate insert race as already enqueued",
+    async (_label, constraint, enqueue) => {
+      const { db, inserts } = makeDb({
+        insertThrows: postgresUniqueViolation(constraint),
+      });
+
+      await expect(enqueue(db)).resolves.toBeUndefined();
+
+      expect(db.insert).toHaveBeenCalledTimes(1);
+      expect(inserts).toHaveLength(0);
+    },
+  );
+
+  it("recognizes wrapped pg errors and constraint_name fields", async () => {
+    const cause = postgresUniqueViolation(
+      "uq_webhook_retry_pending_delayed_tracking_shipment",
+      "constraint_name",
+    );
+    const wrapped = Object.assign(new Error("query failed"), { cause });
+    const { db, inserts } = makeDb({ insertThrows: wrapped });
+
+    await expect(enqueueDelayedTrackingPush(db, 77, 501)).resolves.toBeUndefined();
+
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("propagates unrelated unique violations", async () => {
+    const { db } = makeDb({
+      insertThrows: postgresUniqueViolation("users_email_key"),
+    });
+
+    await expect(enqueueDelayedTrackingPush(db, 77, 501)).rejects.toThrow(
+      /users_email_key/,
+    );
+  });
+});
 
 describe("enqueueOmsWmsSyncRetry", () => {
   it("inserts an immediately due internal OMS/WMS sync row", async () => {
