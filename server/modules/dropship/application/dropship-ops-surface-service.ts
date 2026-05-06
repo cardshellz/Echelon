@@ -73,6 +73,9 @@ export interface DropshipVendorSettingsOverview {
     setupStatus: string;
     externalDisplayName: string | null;
     shopDomain: string | null;
+    hasAccessToken: boolean;
+    hasRefreshToken: boolean;
+    launchReady: boolean;
     updatedAt: Date;
   }>;
   wallet: {
@@ -755,8 +758,14 @@ export function buildDropshipSettingsSections(input: {
       const blockers: string[] = [];
       if (connection.status !== "connected") blockers.push(`store_${connection.status}`);
       if (connection.setupStatus !== "ready") blockers.push(`setup_${connection.setupStatus}`);
+      if (!isLaunchSupportedStorePlatform(connection.platform)) blockers.push(`store_platform_${connection.platform}`);
+      if (!connection.hasAccessToken) blockers.push("store_access_token_required");
+      if (requiresStoreRefreshTokenForLaunch(connection.platform) && !connection.hasRefreshToken) {
+        blockers.push("store_refresh_token_required");
+      }
       return blockers;
     });
+  const launchReadyStoreCount = input.storeConnections.filter((connection) => connection.launchReady).length;
   const walletBlockers = [
     input.wallet.autoReloadEnabled ? null : "auto_reload_required",
     input.wallet.autoReloadEnabled && !input.wallet.autoReloadFundingMethodReady
@@ -790,11 +799,9 @@ export function buildDropshipSettingsSections(input: {
     {
       key: "store_connection",
       label: "Store connection",
-      status: storeBlockers.length === 0 ? "ready" : "attention_required",
+      status: storeBlockers.length === 0 && launchReadyStoreCount > 0 ? "ready" : "attention_required",
       comingSoon: false,
-      summary: input.storeConnections.length > 0
-        ? `${input.storeConnections.length} store connection configured.`
-        : "No store connection configured.",
+      summary: buildStoreConnectionSettingsSummary(input.storeConnections, launchReadyStoreCount),
       blockers: storeBlockers,
     },
     {
@@ -840,6 +847,27 @@ export function buildDropshipSettingsSections(input: {
       blockers: input.hasContactEmail ? [] : ["contact_email_required"],
     },
   ];
+}
+
+function buildStoreConnectionSettingsSummary(
+  storeConnections: DropshipVendorSettingsOverview["storeConnections"],
+  launchReadyStoreCount: number,
+): string {
+  if (storeConnections.length === 0) {
+    return "No store connection configured.";
+  }
+  if (launchReadyStoreCount > 0) {
+    return `${launchReadyStoreCount} launch-ready store connection configured.`;
+  }
+  return "Store connection needs launch-ready credentials.";
+}
+
+function requiresStoreRefreshTokenForLaunch(platform: string): boolean {
+  return platform === "ebay";
+}
+
+function isLaunchSupportedStorePlatform(platform: string): boolean {
+  return platform === "ebay" || platform === "shopify";
 }
 
 export function makeDropshipOpsSurfaceLogger(): DropshipLogger {

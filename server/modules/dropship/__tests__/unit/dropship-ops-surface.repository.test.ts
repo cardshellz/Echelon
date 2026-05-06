@@ -55,6 +55,48 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     });
   });
 
+  it("maps vendor settings store credential readiness", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (String(sql).includes("dropship.dropship_store_connections")) {
+        return {
+          rows: [{
+            id: 20,
+            platform: "ebay",
+            status: "connected",
+            setup_status: "ready",
+            external_display_name: "Vendor eBay",
+            shop_domain: null,
+            access_token_ref: "access-ref",
+            refresh_token_ref: null,
+            updated_at: now,
+          }],
+        };
+      }
+      return {
+        rows: [makeVendorSettingsRow()],
+      };
+    });
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.getVendorSettingsOverview(10, now);
+
+    const storeQuery = query.mock.calls
+      .map((call) => String(call[0]))
+      .find((sql) => sql.includes("dropship.dropship_store_connections"));
+    expect(storeQuery).toContain("access_token_ref");
+    expect(storeQuery).toContain("refresh_token_ref");
+    expect(result.storeConnections[0]).toMatchObject({
+      platform: "ebay",
+      hasAccessToken: true,
+      hasRefreshToken: false,
+      launchReady: false,
+    });
+    expect(result.sections.find((section) => section.key === "store_connection")).toMatchObject({
+      status: "attention_required",
+      blockers: ["store_refresh_token_required"],
+    });
+  });
+
   it("surfaces shipping setup gaps in dogfood readiness", async () => {
     const query = vi.fn(async () => ({
       rows: [makeDogfoodReadinessRow({
@@ -288,6 +330,27 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     });
   });
 });
+
+function makeVendorSettingsRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 10,
+    member_id: "member-1",
+    business_name: "Vendor Test",
+    email: "vendor@cardshellz.test",
+    status: "active",
+    entitlement_status: "active",
+    included_store_connections: 1,
+    available_balance_cents: "0",
+    pending_balance_cents: "0",
+    auto_reload_enabled: true,
+    funding_method_count: "2",
+    active_stripe_funding_method_count: "1",
+    active_usdc_base_funding_method_count: "1",
+    auto_reload_funding_method_ready: true,
+    notification_preference_count: "0",
+    ...overrides,
+  };
+}
 
 function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
   return {

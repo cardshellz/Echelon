@@ -44,6 +44,8 @@ interface StoreConnectionRow {
   setup_status: string;
   external_display_name: string | null;
   shop_domain: string | null;
+  access_token_ref: string | null;
+  refresh_token_ref: string | null;
   updated_at: Date;
 }
 
@@ -177,7 +179,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       ),
       this.dbPool.query<StoreConnectionRow>(
         `SELECT id, platform, status, setup_status, external_display_name,
-                shop_domain, updated_at
+                shop_domain, access_token_ref, refresh_token_ref, updated_at
          FROM dropship.dropship_store_connections
          WHERE vendor_id = $1
          ORDER BY updated_at DESC, id DESC`,
@@ -197,6 +199,9 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       setupStatus: row.setup_status,
       externalDisplayName: row.external_display_name,
       shopDomain: row.shop_domain,
+      hasAccessToken: row.access_token_ref !== null,
+      hasRefreshToken: row.refresh_token_ref !== null,
+      launchReady: isStoreConnectionLaunchReady(row),
       updatedAt: row.updated_at,
     }));
     const wallet = {
@@ -1168,6 +1173,16 @@ function mapAuditEventRow(row: AuditEventRow): DropshipAuditEventRecord {
     payload: row.payload ?? {},
     createdAt: row.created_at,
   };
+}
+
+function isStoreConnectionLaunchReady(row: StoreConnectionRow): boolean {
+  if (row.status !== "connected" || row.setup_status !== "ready" || !row.access_token_ref) {
+    return false;
+  }
+  if (row.platform === "ebay" && !row.refresh_token_ref) {
+    return false;
+  }
+  return row.platform === "ebay" || row.platform === "shopify";
 }
 
 function sumCounts(counts: DropshipOpsCount[], keys: string[]): number {

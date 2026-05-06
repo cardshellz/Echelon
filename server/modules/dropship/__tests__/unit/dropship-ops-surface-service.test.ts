@@ -57,6 +57,78 @@ describe("DropshipOpsSurfaceService", () => {
     ]);
   });
 
+  it("requires launch-ready store credentials for the settings store section", () => {
+    const sections = buildDropshipSettingsSections({
+      vendorStatus: "active",
+      entitlementStatus: "active",
+      storeConnections: [{
+        storeConnectionId: 20,
+        platform: "ebay",
+        status: "connected",
+        setupStatus: "ready",
+        externalDisplayName: "Vendor eBay",
+        shopDomain: null,
+        hasAccessToken: true,
+        hasRefreshToken: false,
+        launchReady: false,
+        updatedAt: now,
+      }],
+      wallet: {
+        availableBalanceCents: 0,
+        pendingBalanceCents: 0,
+        autoReloadEnabled: true,
+        fundingMethodCount: 1,
+        activeStripeFundingMethodCount: 1,
+        activeUsdcBaseFundingMethodCount: 1,
+        autoReloadFundingMethodReady: true,
+      },
+      notificationPreferenceCount: 0,
+      hasContactEmail: true,
+    });
+
+    expect(sections.find((section) => section.key === "store_connection")).toMatchObject({
+      status: "attention_required",
+      summary: "Store connection needs launch-ready credentials.",
+      blockers: ["store_refresh_token_required"],
+    });
+  });
+
+  it("marks Shopify settings store section ready with access-token credentials", () => {
+    const sections = buildDropshipSettingsSections({
+      vendorStatus: "active",
+      entitlementStatus: "active",
+      storeConnections: [{
+        storeConnectionId: 21,
+        platform: "shopify",
+        status: "connected",
+        setupStatus: "ready",
+        externalDisplayName: "Vendor Shopify",
+        shopDomain: "vendor.myshopify.com",
+        hasAccessToken: true,
+        hasRefreshToken: false,
+        launchReady: true,
+        updatedAt: now,
+      }],
+      wallet: {
+        availableBalanceCents: 0,
+        pendingBalanceCents: 0,
+        autoReloadEnabled: true,
+        fundingMethodCount: 1,
+        activeStripeFundingMethodCount: 1,
+        activeUsdcBaseFundingMethodCount: 1,
+        autoReloadFundingMethodReady: true,
+      },
+      notificationPreferenceCount: 0,
+      hasContactEmail: true,
+    });
+
+    expect(sections.find((section) => section.key === "store_connection")).toMatchObject({
+      status: "ready",
+      summary: "1 launch-ready store connection configured.",
+      blockers: [],
+    });
+  });
+
   it("requires Stripe-ready funding for the launch wallet settings section", () => {
     const sections = buildDropshipSettingsSections({
       vendorStatus: "active",
