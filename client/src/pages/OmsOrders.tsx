@@ -317,6 +317,37 @@ export default function OmsOrders() {
     },
   });
 
+  const remediateFlowMutation = useMutation({
+    mutationFn: async ({ code, row }: { code: string; row: any }) => {
+      const res = await fetch("/api/oms/ops/reconciliation/remediate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code,
+          omsOrderId: row.oms_order_id,
+          wmsOrderId: row.wms_order_id,
+          shipmentId: row.shipment_id,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to remediate issue" }));
+        throw new Error(err.error || "Failed to remediate issue");
+      }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      toast({
+        title: result.changed ? "Remediation applied" : "No change needed",
+        description: result.action,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/ops/health"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Remediation failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const orders = ordersData?.orders || [];
   const total = ordersData?.total || 0;
   const totalPages = Math.ceil(total / limit);
@@ -428,6 +459,39 @@ export default function OmsOrders() {
                             >
                               <RotateCcw className="h-3.5 w-3.5" />
                               Replay
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : issue.sample.length > 0 && (
+                      issue.code === "OMS_FINAL_WMS_ACTIVE" ||
+                      issue.code === "WMS_FINAL_OMS_OPEN" ||
+                      issue.code === "SHIPMENT_SHIPPED_OMS_OPEN" ||
+                      issue.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"
+                    ) ? (
+                      <div className="mt-3 space-y-2">
+                        {issue.sample.slice(0, 3).map((row: any) => (
+                          <div
+                            key={`${issue.code}-${row.oms_order_id || row.wms_order_id || row.shipment_id}`}
+                            className="flex items-center justify-between gap-3 rounded bg-muted p-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">
+                                {row.external_order_number || row.order_number || `OMS #${row.oms_order_id}`}
+                              </div>
+                              <div className="truncate text-muted-foreground">
+                                OMS {row.oms_order_id || "-"} | WMS {row.wms_order_id || row.order_id || "-"} | Ship {row.shipment_id || "-"}
+                              </div>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 shrink-0 gap-1 px-2"
+                              disabled={remediateFlowMutation.isPending}
+                              onClick={() => remediateFlowMutation.mutate({ code: issue.code, row })}
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              Fix
                             </Button>
                           </div>
                         ))}

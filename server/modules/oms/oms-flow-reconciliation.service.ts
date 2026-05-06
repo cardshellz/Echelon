@@ -1,8 +1,33 @@
 import { sql } from "drizzle-orm";
 import type { OmsOpsIssue } from "./ops-health.service";
+import { enqueueDelayedTrackingPush } from "./webhook-retry.worker";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
+const REMEDIABLE_CODES = new Set([
+  "OMS_FINAL_WMS_ACTIVE",
+  "WMS_FINAL_OMS_OPEN",
+  "SHIPMENT_SHIPPED_OMS_OPEN",
+  "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+]);
+
+export interface OmsFlowRemediationInput {
+  code: string;
+  omsOrderId?: number;
+  wmsOrderId?: number;
+  shipmentId?: number;
+  operator: string;
+}
+
+export interface OmsFlowRemediationResult {
+  code: string;
+  action: string;
+  changed: boolean;
+  omsOrderId: number | null;
+  wmsOrderId: number | null;
+  shipmentId: number | null;
+  retryQueueId?: number | null;
+}
 
 function getDefaultDb(): any {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -20,6 +45,25 @@ function rows(result: any): any[] {
 
 function countFrom(result: any): number {
   return Number(rows(result)[0]?.count ?? 0) || 0;
+}
+
+function firstRow<T>(result: any): T | undefined {
+  return rows(result)[0] as T | undefined;
+}
+
+function positiveInt(value: unknown, field: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+  return parsed;
+}
+
+async function withOptionalTransaction<T>(db: any, fn: (tx: any) => Promise<T>): Promise<T> {
+  if (typeof db.transaction === "function") {
+    return db.transaction(fn);
+  }
+  return fn(db);
 }
 
 async function countAndSample(
@@ -222,6 +266,206 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
   return issues;
+}
+
+export async function remediateOmsFlowIssue(
+  db: any,
+  input: OmsFlowRemediationInput,
+): Promise<OmsFlowRemediationResult> {
+  if (!REMEDIABLE_CODES.has(input.code)) {
+    throw new Error(`Unsupported OMS flow remediation code: ${input.code}`);
+  }
+
+  if (input.code === "OMS_FINAL_WMS_ACTIVE") {
+    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+    const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    const updated = await withOptionalTransaction(db, async (tx) => {
+      const result = await tx.execute(sql`
+        UPDATE wms.orders wo
+        SET warehouse_status = CASE
+              WHEN oo.status = 'cancelled' THEN 'cancelled'
+              WHEN oo.status = 'shipped' THEN 'shipped'
+              WHEN oo.status = 'refunded' THEN 'cancelled'
+              ELSE wo.warehouse_status
+            END,
+            assigned_picker_id = CASE
+              WHEN oo.status IN ('cancelled', 'refunded') THEN NULL
+              ELSE wo.assigned_picker_id
+            END,
+            cancelled_at = CASE
+              WHEN oo.status IN ('cancelled', 'refunded') THEN COALESCE(wo.cancelled_at, NOW())
+              ELSE wo.cancelled_at
+            END,
+            updated_at = NOW()
+        FROM oms.oms_orders oo
+        WHERE wo.id = ${wmsOrderId}
+          AND oo.id = ${omsOrderId}
+          AND (
+               (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+            OR (wo.source_table_id = oo.id::text)
+          )
+          AND oo.status IN ('cancelled', 'shipped', 'refunded')
+          AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
+        RETURNING wo.id
+      `);
+
+      if (rows(result).length > 0) {
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'flow_reconciliation_remediated',
+            ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return rows(result).length > 0;
+    });
+
+    return {
+      code: input.code,
+      action: "aligned_wms_from_oms",
+      changed: updated,
+      omsOrderId,
+      wmsOrderId,
+      shipmentId: null,
+    };
+  }
+
+  if (input.code === "WMS_FINAL_OMS_OPEN") {
+    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+    const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    const updated = await withOptionalTransaction(db, async (tx) => {
+      const result = await tx.execute(sql`
+        WITH latest_shipment AS (
+          SELECT tracking_number, carrier, shipped_at
+          FROM wms.outbound_shipments
+          WHERE order_id = ${wmsOrderId}
+            AND status = 'shipped'
+          ORDER BY shipped_at DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC
+          LIMIT 1
+        )
+        UPDATE oms.oms_orders oo
+        SET status = CASE
+              WHEN wo.warehouse_status = 'cancelled' THEN 'cancelled'
+              WHEN wo.warehouse_status = 'shipped' THEN 'shipped'
+              ELSE oo.status
+            END,
+            fulfillment_status = CASE
+              WHEN wo.warehouse_status = 'shipped' THEN 'fulfilled'
+              ELSE oo.fulfillment_status
+            END,
+            tracking_number = COALESCE((SELECT tracking_number FROM latest_shipment), oo.tracking_number),
+            tracking_carrier = COALESCE((SELECT carrier FROM latest_shipment), oo.tracking_carrier),
+            shipped_at = CASE
+              WHEN wo.warehouse_status = 'shipped' THEN COALESCE((SELECT shipped_at FROM latest_shipment), oo.shipped_at, NOW())
+              ELSE oo.shipped_at
+            END,
+            cancelled_at = CASE
+              WHEN wo.warehouse_status = 'cancelled' THEN COALESCE(oo.cancelled_at, NOW())
+              ELSE oo.cancelled_at
+            END,
+            updated_at = NOW()
+        FROM wms.orders wo
+        WHERE oo.id = ${omsOrderId}
+          AND wo.id = ${wmsOrderId}
+          AND (
+               (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+            OR (wo.source_table_id = oo.id::text)
+          )
+          AND wo.warehouse_status IN ('cancelled', 'shipped')
+          AND oo.status NOT IN ('cancelled', 'shipped', 'partially_shipped', 'refunded')
+        RETURNING oo.id
+      `);
+
+      if (rows(result).length > 0) {
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'flow_reconciliation_remediated',
+            ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return rows(result).length > 0;
+    });
+
+    return {
+      code: input.code,
+      action: "aligned_oms_from_wms",
+      changed: updated,
+      omsOrderId,
+      wmsOrderId,
+      shipmentId: null,
+    };
+  }
+
+  if (input.code === "SHIPMENT_SHIPPED_OMS_OPEN") {
+    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+    const shipmentId = positiveInt(input.shipmentId, "shipmentId");
+    const updated = await withOptionalTransaction(db, async (tx) => {
+      const result = await tx.execute(sql`
+        UPDATE oms.oms_orders oo
+        SET status = 'shipped',
+            fulfillment_status = 'fulfilled',
+            tracking_number = COALESCE(os.tracking_number, oo.tracking_number),
+            tracking_carrier = COALESCE(os.carrier, oo.tracking_carrier),
+            shipped_at = COALESCE(os.shipped_at, oo.shipped_at, NOW()),
+            updated_at = NOW()
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE oo.id = ${omsOrderId}
+          AND os.id = ${shipmentId}
+          AND os.status = 'shipped'
+          AND (
+               (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+            OR (wo.source_table_id = oo.id::text)
+          )
+          AND oo.status NOT IN ('shipped', 'partially_shipped')
+        RETURNING oo.id, os.order_id AS wms_order_id
+      `);
+
+      const row = firstRow<{ wms_order_id: number }>(result);
+      if (row) {
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'flow_reconciliation_remediated',
+            ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return row ?? null;
+    });
+
+    return {
+      code: input.code,
+      action: "marked_oms_shipped_from_wms_shipment",
+      changed: Boolean(updated),
+      omsOrderId,
+      wmsOrderId: updated ? Number(updated.wms_order_id) : null,
+      shipmentId,
+    };
+  }
+
+  const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+  const shipmentId = positiveInt(input.shipmentId, "shipmentId");
+  await enqueueDelayedTrackingPush(db, omsOrderId, shipmentId);
+
+  return {
+    code: input.code,
+    action: "queued_tracking_push",
+    changed: true,
+    omsOrderId,
+    wmsOrderId: input.wmsOrderId ? Number(input.wmsOrderId) : null,
+    shipmentId,
+    retryQueueId: null,
+  };
 }
 
 export function startOmsFlowReconciliationScheduler(dbArg: any = getDefaultDb()): void {

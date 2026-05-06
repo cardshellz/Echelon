@@ -11,6 +11,7 @@ import type { FulfillmentPushService } from "../modules/oms/fulfillment-push.ser
 import type { ShipStationService } from "../modules/oms/shipstation.service";
 import { db } from "../db";
 import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
+import { remediateOmsFlowIssue } from "../modules/oms/oms-flow-reconciliation.service";
 import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service";
 
 export function registerOmsRoutes(app: Express) {
@@ -64,6 +65,32 @@ export function registerOmsRoutes(app: Express) {
           : /already succeeded|not a replayable/i.test(message)
             ? 409
             : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post("/api/oms/ops/reconciliation/remediate", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const operator =
+        req.session.user?.username ||
+        req.session.user?.displayName ||
+        String(req.session.user?.id || "unknown");
+      const result = await remediateOmsFlowIssue(db, {
+        code: String(req.body?.code || ""),
+        omsOrderId: req.body?.omsOrderId,
+        wmsOrderId: req.body?.wmsOrderId,
+        shipmentId: req.body?.shipmentId,
+        operator,
+      });
+      res.json(result);
+    } catch (err: any) {
+      console.error("[OMS Routes] Reconciliation remediation error:", err);
+      const message = err?.message || "Failed to remediate OMS flow issue";
+      const status = /positive integer/i.test(message)
+        ? 400
+        : /unsupported/i.test(message)
+          ? 409
+          : 500;
       res.status(status).json({ error: message });
     }
   });
