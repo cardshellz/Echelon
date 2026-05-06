@@ -100,7 +100,7 @@ describe("EbayDropshipOrderIntakeProvider", () => {
     const credentials = new FakeCredentialRepository();
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       expect(String(url)).toContain("/sell/fulfillment/v1/order?");
-      expect(String(url)).toContain("creationdate%3A%5B2026-05-03T14%3A00%3A00.000Z");
+      expect(String(url)).toContain("lastmodifieddate%3A%5B2026-05-03T14%3A00%3A00.000Z");
       return new Response(JSON.stringify({
         href: "https://api.ebay.com/sell/fulfillment/v1/order",
         total: 2,
@@ -129,6 +129,42 @@ describe("EbayDropshipOrderIntakeProvider", () => {
       Authorization: "Bearer access-token",
       "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
     });
+  });
+
+  it("uses the modified-date cursor so newly paid existing orders are fetched", async () => {
+    const credentials = new FakeCredentialRepository();
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const urlText = String(url);
+      expect(urlText).toContain("lastmodifieddate%3A%5B2026-05-03T15%3A15%3A00.000Z..2026-05-03T15%3A30%3A00.000Z%5D");
+      expect(urlText).not.toContain("creationdate");
+      return new Response(JSON.stringify({
+        href: "https://api.ebay.com/sell/fulfillment/v1/order",
+        total: 1,
+        limit: 50,
+        offset: 0,
+        orders: [
+          {
+            ...makeEbayOrder(),
+            creationDate: "2026-05-02T10:00:00.000Z",
+            lastModifiedDate: "2026-05-03T15:20:00.000Z",
+            orderPaymentStatus: "PAID",
+          },
+        ],
+      }), { status: 200 });
+    });
+    const provider = new EbayDropshipOrderIntakeProvider(credentials, fetchImpl as any, {
+      now: () => new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    const result = await provider.fetchOrders({
+      connection: { vendorId: 10, storeConnectionId: 22, lastOrderSyncAt: new Date("2026-05-03T15:30:00.000Z") },
+      since: new Date("2026-05-03T15:15:00.000Z"),
+      until: new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    expect(result.ignored).toBe(0);
+    expect(result.orders).toHaveLength(1);
+    expect(result.orders[0].input.externalOrderId).toBe("11-11111-11111");
   });
 });
 
