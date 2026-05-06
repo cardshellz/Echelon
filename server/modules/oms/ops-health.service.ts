@@ -1,5 +1,9 @@
 import { sql } from "drizzle-orm";
-import { collectOmsFlowReconciliationIssues } from "./oms-flow-reconciliation.service";
+import {
+  collectOmsFlowReconciliationIssues,
+  getOmsFlowReconciliationSchedulerHeartbeat,
+} from "./oms-flow-reconciliation.service";
+import { getOmsOpsAlertSchedulerHeartbeat } from "./oms-ops-alert-heartbeat";
 import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
 
 export interface OmsOpsIssue {
@@ -15,6 +19,8 @@ export interface OmsOpsHealthSummary {
   status: "healthy" | "degraded" | "critical";
   workers: {
     webhookRetry: ReturnType<typeof getWebhookRetryWorkerHeartbeat>;
+    omsFlowReconciliation: ReturnType<typeof getOmsFlowReconciliationSchedulerHeartbeat>;
+    omsOpsAlert: ReturnType<typeof getOmsOpsAlertSchedulerHeartbeat>;
   };
   counts: {
     critical: number;
@@ -54,6 +60,8 @@ async function countAndSample(
 
 export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   const webhookRetryHeartbeat = getWebhookRetryWorkerHeartbeat();
+  const reconciliationHeartbeat = getOmsFlowReconciliationSchedulerHeartbeat();
+  const alertHeartbeat = getOmsOpsAlertSchedulerHeartbeat();
   const nowMs = Date.now();
   const webhookRetryWorkerStartedMs = webhookRetryHeartbeat.startedAt
     ? new Date(webhookRetryHeartbeat.startedAt).getTime()
@@ -65,6 +73,25 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     webhookRetryWorkerStartedMs !== null &&
     nowMs - webhookRetryWorkerStartedMs > 5 * 60_000 &&
     (webhookRetryWorkerLastRunMs === null || nowMs - webhookRetryWorkerLastRunMs > 5 * 60_000);
+  const schedulerIsStale = (
+    heartbeat: { startedAt: string | null; lastRunAt: string | null },
+    graceMs: number,
+    staleMs: number,
+  ): boolean => {
+    const startedMs = heartbeat.startedAt ? new Date(heartbeat.startedAt).getTime() : null;
+    const lastRunMs = heartbeat.lastRunAt ? new Date(heartbeat.lastRunAt).getTime() : null;
+    return (
+      startedMs !== null &&
+      nowMs - startedMs > graceMs &&
+      (lastRunMs === null || nowMs - lastRunMs > staleMs)
+    );
+  };
+  const reconciliationSchedulerIsStale = schedulerIsStale(
+    reconciliationHeartbeat,
+    20 * 60_000,
+    30 * 60_000,
+  );
+  const alertSchedulerIsStale = schedulerIsStale(alertHeartbeat, 10 * 60_000, 15 * 60_000);
   const [
     flowReconciliationIssues,
     failedInbox,
@@ -335,6 +362,34 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
             message: "Webhook retry worker has not run in more than 5 minutes.",
             sample: [webhookRetryHeartbeat],
           }),
+          issue({
+            code: "OMS_FLOW_RECONCILIATION_SCHEDULER_NOT_STARTED",
+            severity: "critical",
+            count: reconciliationHeartbeat.startedAt ? 0 : 1,
+            message: "OMS flow reconciliation scheduler has not started in this process.",
+            sample: [reconciliationHeartbeat],
+          }),
+          issue({
+            code: "OMS_FLOW_RECONCILIATION_SCHEDULER_STALE",
+            severity: "critical",
+            count: reconciliationSchedulerIsStale ? 1 : 0,
+            message: "OMS flow reconciliation scheduler has not run in more than 30 minutes.",
+            sample: [reconciliationHeartbeat],
+          }),
+          issue({
+            code: "OMS_OPS_ALERT_SCHEDULER_NOT_STARTED",
+            severity: "critical",
+            count: alertHeartbeat.startedAt ? 0 : 1,
+            message: "OMS ops alert scheduler has not started in this process.",
+            sample: [alertHeartbeat],
+          }),
+          issue({
+            code: "OMS_OPS_ALERT_SCHEDULER_STALE",
+            severity: "critical",
+            count: alertSchedulerIsStale ? 1 : 0,
+            message: "OMS ops alert scheduler has not run in more than 15 minutes.",
+            sample: [alertHeartbeat],
+          }),
         ]),
     issue({
       code: "WEBHOOK_INBOX_FAILED",
@@ -428,6 +483,8 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     status: counts.critical > 0 ? "critical" : counts.warning > 0 ? "degraded" : "healthy",
     workers: {
       webhookRetry: webhookRetryHeartbeat,
+      omsFlowReconciliation: reconciliationHeartbeat,
+      omsOpsAlert: alertHeartbeat,
     },
     counts,
     issues,

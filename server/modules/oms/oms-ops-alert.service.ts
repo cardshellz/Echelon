@@ -1,4 +1,12 @@
 import { getOmsOpsHealth, type OmsOpsHealthSummary, type OmsOpsIssue } from "./ops-health.service";
+import {
+  getOmsOpsAlertSchedulerHeartbeat,
+  markOmsOpsAlertSchedulerRunFailed,
+  markOmsOpsAlertSchedulerRunStarted,
+  markOmsOpsAlertSchedulerRunSucceeded,
+  markOmsOpsAlertSchedulerStarted,
+  resetOmsOpsAlertSchedulerHeartbeatForTests,
+} from "./oms-ops-alert-heartbeat";
 
 const LOG_PREFIX = "[OMS Ops Alert]";
 const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
@@ -130,17 +138,25 @@ export async function runOmsOpsAlertCheck(dbArg: any = getDefaultDb()): Promise<
 export function resetOmsOpsAlertStateForTests(): void {
   lastAlertSignature = null;
   lastAlertAt = 0;
+  resetOmsOpsAlertSchedulerHeartbeatForTests();
 }
 
 export function startOmsOpsAlertScheduler(dbArg: any = getDefaultDb()): void {
   if (process.env.DISABLE_SCHEDULERS === "true") return;
   const withAdvisoryLock = getWithAdvisoryLock();
   const lockId = 918406;
+  markOmsOpsAlertSchedulerStarted();
 
-  const runLocked = () =>
-    withAdvisoryLock(lockId, async () => {
+  const runLocked = () => {
+    markOmsOpsAlertSchedulerRunStarted();
+    return withAdvisoryLock(lockId, async () => {
       await runOmsOpsAlertCheck(dbArg);
-    }).catch((err) => console.error(`${LOG_PREFIX} scheduled run error: ${err.message}`));
+      markOmsOpsAlertSchedulerRunSucceeded();
+    }).catch((err) => {
+      markOmsOpsAlertSchedulerRunFailed(err);
+      console.error(`${LOG_PREFIX} scheduled run error: ${getOmsOpsAlertSchedulerHeartbeat().lastError}`);
+    });
+  };
 
   console.log(`${LOG_PREFIX} Scheduler started (every 5 minutes, dyno-safe lock)`);
   setTimeout(runLocked, 45_000);

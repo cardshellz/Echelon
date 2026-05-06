@@ -18,6 +18,33 @@ const REMEDIABLE_CODES = new Set([
   "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
+let reconciliationSchedulerStartedAt: Date | null = null;
+let reconciliationSchedulerLastRunAt: Date | null = null;
+let reconciliationSchedulerLastSuccessAt: Date | null = null;
+let reconciliationSchedulerLastError: string | null = null;
+
+export interface OmsFlowReconciliationSchedulerHeartbeat {
+  startedAt: string | null;
+  lastRunAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+}
+
+export function getOmsFlowReconciliationSchedulerHeartbeat(): OmsFlowReconciliationSchedulerHeartbeat {
+  return {
+    startedAt: reconciliationSchedulerStartedAt?.toISOString() ?? null,
+    lastRunAt: reconciliationSchedulerLastRunAt?.toISOString() ?? null,
+    lastSuccessAt: reconciliationSchedulerLastSuccessAt?.toISOString() ?? null,
+    lastError: reconciliationSchedulerLastError,
+  };
+}
+
+export function resetOmsFlowReconciliationSchedulerHeartbeatForTests(): void {
+  reconciliationSchedulerStartedAt = null;
+  reconciliationSchedulerLastRunAt = null;
+  reconciliationSchedulerLastSuccessAt = null;
+  reconciliationSchedulerLastError = null;
+}
 
 export interface OmsFlowRemediationInput {
   code: string;
@@ -644,11 +671,19 @@ export async function remediateOmsFlowIssue(
 export function startOmsFlowReconciliationScheduler(dbArg: any = getDefaultDb()): void {
   if (process.env.DISABLE_SCHEDULERS === "true") return;
   const withAdvisoryLock = getWithAdvisoryLock();
+  reconciliationSchedulerStartedAt = new Date();
 
-  const runLocked = () =>
-    withAdvisoryLock(LOCK_ID, async () => {
+  const runLocked = () => {
+    reconciliationSchedulerLastRunAt = new Date();
+    return withAdvisoryLock(LOCK_ID, async () => {
       await runOmsFlowReconciliation(dbArg);
-    }).catch((err) => console.error(`${LOG_PREFIX} scheduled run error: ${err.message}`));
+      reconciliationSchedulerLastSuccessAt = new Date();
+      reconciliationSchedulerLastError = null;
+    }).catch((err) => {
+      reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
+      console.error(`${LOG_PREFIX} scheduled run error: ${reconciliationSchedulerLastError}`);
+    });
+  };
 
   console.log(`${LOG_PREFIX} Scheduler started (every 15 minutes, dyno-safe lock)`);
   setTimeout(runLocked, 20_000);
