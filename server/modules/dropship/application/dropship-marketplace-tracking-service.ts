@@ -1,5 +1,10 @@
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import type {
+  DropshipClock,
+  DropshipLogger,
+  DropshipNotificationSender,
+} from "./dropship-ports";
 import type {
   DropshipMarketplaceTrackingProvider,
   DropshipMarketplaceTrackingRequest,
@@ -58,6 +63,7 @@ export interface DropshipMarketplaceTrackingRepository {
 export interface DropshipMarketplaceTrackingServiceDependencies {
   repository: DropshipMarketplaceTrackingRepository;
   provider: DropshipMarketplaceTrackingProvider;
+  notificationSender?: DropshipNotificationSender;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -128,6 +134,7 @@ export class DropshipMarketplaceTrackingService {
           externalFulfillmentId: push.externalFulfillmentId,
         },
       });
+      await this.notifyTrackingPushed(push);
       return { status: "succeeded", push };
     } catch (error: any) {
       const code = error instanceof DropshipError
@@ -136,16 +143,102 @@ export class DropshipMarketplaceTrackingService {
       const retryable = error instanceof DropshipError
         ? error.context?.retryable !== false
         : true;
-      await this.deps.repository.failPush({
+      const failedPush = await this.deps.repository.failPush({
         pushId: claim.push.pushId,
         code,
         message: error?.message ?? String(error),
         retryable,
         now: this.deps.clock.now(),
       });
+      await this.notifyTrackingFailed(failedPush, {
+        code,
+        message: error?.message ?? String(error),
+        retryable,
+      });
       throw error;
     }
   }
+
+  private async notifyTrackingPushed(
+    push: DropshipMarketplaceTrackingPushRecord,
+  ): Promise<void> {
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: push.vendorId,
+      eventType: "dropship_tracking_pushed",
+      critical: false,
+      channels: ["email", "in_app"],
+      title: "Dropship tracking pushed",
+      message: `Tracking ${push.trackingNumber} was pushed to ${push.platform} for order ${push.externalOrderId}.`,
+      payload: buildTrackingNotificationPayload(push),
+      idempotencyKey: `tracking-pushed:${push.pushId}`,
+    }, {
+      code: "DROPSHIP_TRACKING_PUSH_NOTIFICATION_FAILED",
+      message: "Dropship tracking success notification failed after marketplace push.",
+      context: {
+        pushId: push.pushId,
+        intakeId: push.intakeId,
+        omsOrderId: push.omsOrderId,
+        vendorId: push.vendorId,
+        storeConnectionId: push.storeConnectionId,
+      },
+    });
+  }
+
+  private async notifyTrackingFailed(
+    push: DropshipMarketplaceTrackingPushRecord,
+    failure: {
+      code: string;
+      message: string;
+      retryable: boolean;
+    },
+  ): Promise<void> {
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: push.vendorId,
+      eventType: "dropship_tracking_push_failed",
+      critical: !failure.retryable,
+      channels: ["email", "in_app"],
+      title: failure.retryable ? "Dropship tracking push retrying" : "Dropship tracking push failed",
+      message: `Tracking ${push.trackingNumber} could not be pushed to ${push.platform} for order ${push.externalOrderId}: ${failure.message}`,
+      payload: {
+        ...buildTrackingNotificationPayload(push),
+        failureCode: failure.code,
+        failureMessage: failure.message,
+        retryable: failure.retryable,
+      },
+      idempotencyKey: `tracking-push-failed:${push.pushId}:${push.attemptCount}:${failure.code}`,
+    }, {
+      code: "DROPSHIP_TRACKING_PUSH_FAILURE_NOTIFICATION_FAILED",
+      message: "Dropship tracking failure notification failed after marketplace push failure.",
+      context: {
+        pushId: push.pushId,
+        intakeId: push.intakeId,
+        omsOrderId: push.omsOrderId,
+        vendorId: push.vendorId,
+        storeConnectionId: push.storeConnectionId,
+        failureCode: failure.code,
+      },
+    });
+  }
+}
+
+function buildTrackingNotificationPayload(
+  push: DropshipMarketplaceTrackingPushRecord,
+): Record<string, unknown> {
+  return {
+    pushId: push.pushId,
+    intakeId: push.intakeId,
+    omsOrderId: push.omsOrderId,
+    wmsShipmentId: push.wmsShipmentId,
+    vendorId: push.vendorId,
+    storeConnectionId: push.storeConnectionId,
+    platform: push.platform,
+    status: push.status,
+    externalOrderId: push.externalOrderId,
+    trackingNumber: push.trackingNumber,
+    carrier: push.carrier,
+    attemptCount: push.attemptCount,
+    externalFulfillmentId: push.externalFulfillmentId,
+  };
 }
 
 export const systemDropshipMarketplaceTrackingClock: DropshipClock = {
