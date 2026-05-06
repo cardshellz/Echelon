@@ -309,7 +309,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     }),
     issue({
       code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
-      severity: "warning",
+      severity: "critical",
       count: unpushedShipments.count,
       message: "Outbound shipments are old enough to have been pushed but have no ShipStation id.",
       sample: unpushedShipments.sample,
@@ -323,7 +323,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     }),
     issue({
       code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
-      severity: "warning",
+      severity: "critical",
       count: shippedTrackingNotPushed.count,
       message: "Shipped OMS orders do not have a tracking/fulfillment push success event.",
       sample: shippedTrackingNotPushed.sample,
