@@ -18,6 +18,13 @@ import type { EbayOrder, EbayNotificationPayload } from "../channels/adapters/eb
 import type { ReservationResult } from "../../services";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
+import {
+  buildEbayWebhookInboxInput,
+  markWebhookFailed,
+  markWebhookProcessing,
+  markWebhookSucceeded,
+  recordWebhookReceived,
+} from "./webhook-inbox.service";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -393,6 +400,26 @@ export function createEbayOrderWebhookHandler(
       const topic = payload.metadata?.topic;
       console.log(`[eBay Webhook] Received notification: ${topic}`);
 
+      let inbox: { id: number } | null = null;
+      try {
+        const receipt = await recordWebhookReceived(db, buildEbayWebhookInboxInput(req, payload));
+        inbox = { id: receipt.id };
+
+        if (!receipt.inserted && receipt.status === "succeeded") {
+          console.log(`[eBay Webhook] Duplicate already succeeded (inbox=${receipt.id}), skipping`);
+          return res.status(200).json({ status: "ok", duplicate: true });
+        }
+        if (!receipt.inserted && receipt.status === "processing") {
+          console.log(`[eBay Webhook] Duplicate already processing (inbox=${receipt.id}), skipping`);
+          return res.status(200).json({ status: "ok", duplicate: true });
+        }
+
+        await markWebhookProcessing(db, receipt.id);
+      } catch (err: any) {
+        console.error(`[eBay Webhook] Inbox write failed: ${err.message}`);
+        return res.status(500).json({ error: "webhook inbox unavailable" });
+      }
+
       // Only process order-related topics
       if (topic?.includes("ORDER") || topic?.includes("order")) {
         const orderId = (payload.notification.data as any)?.orderId;
@@ -431,8 +458,18 @@ export function createEbayOrderWebhookHandler(
             console.log(`[eBay Webhook] Processed order ${orderId}`);
           } catch (err: any) {
             console.error(`[eBay Webhook] Failed to process order ${orderId}: ${err.message}`);
+            if (inbox) {
+              await markWebhookFailed(db, inbox.id, err).catch((markErr: any) => {
+                console.error(`[eBay Webhook] Failed to mark inbox ${inbox?.id} failed: ${markErr.message}`);
+              });
+            }
+            return res.status(200).json({ status: "ok", processing: "failed" });
           }
         }
+      }
+
+      if (inbox) {
+        await markWebhookSucceeded(db, inbox.id);
       }
 
       // Always acknowledge the webhook
