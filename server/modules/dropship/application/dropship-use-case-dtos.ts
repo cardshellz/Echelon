@@ -67,6 +67,14 @@ export const acceptDropshipOrderInputSchema = z.object({
   actor: actorSchema,
 }).strict();
 
+export const rejectDropshipOrderInputSchema = z.object({
+  intakeId: positiveIdSchema,
+  vendorId: positiveIdSchema,
+  reason: z.string().trim().min(3).max(1000),
+  idempotencyKey: idempotencyKeySchema,
+  actor: actorSchema,
+}).strict();
+
 export const quoteDropshipShippingInputSchema = z.object({
   vendorId: positiveIdSchema,
   storeConnectionId: positiveIdSchema,
@@ -146,6 +154,7 @@ export type CreateListingPushJobInput = z.infer<typeof createListingPushJobInput
 export type ProcessListingPushJobInput = z.infer<typeof processListingPushJobInputSchema>;
 export type RecordMarketplaceOrderIntakeInput = z.infer<typeof recordMarketplaceOrderIntakeInputSchema>;
 export type AcceptDropshipOrderInput = z.infer<typeof acceptDropshipOrderInputSchema>;
+export type RejectDropshipOrderInput = z.infer<typeof rejectDropshipOrderInputSchema>;
 export type QuoteDropshipShippingInput = z.infer<typeof quoteDropshipShippingInputSchema>;
 export type CreditWalletFundingInput = z.infer<typeof creditWalletFundingInputSchema>;
 export type DebitWalletForOrderInput = z.infer<typeof debitWalletForOrderInputSchema>;

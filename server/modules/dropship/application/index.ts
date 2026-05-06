@@ -28,6 +28,7 @@ export * from "./dropship-order-intake-service";
 export * from "./dropship-order-ops-dtos";
 export * from "./dropship-order-ops-service";
 export * from "./dropship-order-processing-service";
+export * from "./dropship-order-rejection-service";
 export * from "./dropship-payment-hold-expiration-service";
 export * from "./dropship-passkey-service";
 export * from "./dropship-return-service";

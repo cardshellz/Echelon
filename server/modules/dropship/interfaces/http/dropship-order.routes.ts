@@ -4,10 +4,12 @@ import {
   type DropshipOrderOpsService,
 } from "../../application/dropship-order-ops-service";
 import type { DropshipOrderAcceptanceWorkflowService } from "../../application/dropship-order-acceptance-workflow-service";
+import type { DropshipOrderRejectionService } from "../../application/dropship-order-rejection-service";
 import type { DropshipVendorProvisioningService } from "../../application/dropship-vendor-provisioning-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipOrderAcceptanceWorkflowServiceFromEnv } from "../../infrastructure/dropship-order-acceptance-workflow.factory";
 import { createDropshipOrderOpsServiceFromEnv } from "../../infrastructure/dropship-order-ops.factory";
+import { createDropshipOrderRejectionServiceFromEnv } from "../../infrastructure/dropship-order-rejection.factory";
 import { createDropshipVendorProvisioningServiceFromEnv } from "../../infrastructure/dropship-vendor-provisioning.factory";
 import {
   requireDropshipAuth,
@@ -19,12 +21,14 @@ export function registerDropshipOrderRoutes(
   deps: {
     orderOpsService?: DropshipOrderOpsService;
     orderAcceptanceWorkflowService?: DropshipOrderAcceptanceWorkflowService;
+    orderRejectionService?: DropshipOrderRejectionService;
     vendorProvisioningService?: DropshipVendorProvisioningService;
   } = {},
 ): void {
   const orderOpsService = deps.orderOpsService ?? createDropshipOrderOpsServiceFromEnv();
   const orderAcceptanceWorkflowService = deps.orderAcceptanceWorkflowService
     ?? createDropshipOrderAcceptanceWorkflowServiceFromEnv();
+  const orderRejectionService = deps.orderRejectionService ?? createDropshipOrderRejectionServiceFromEnv();
   const vendorProvisioningService = deps.vendorProvisioningService ?? createDropshipVendorProvisioningServiceFromEnv();
 
   app.get("/api/dropship/orders", requireDropshipAuth, async (req, res) => {
@@ -77,6 +81,32 @@ export function registerDropshipOrderRoutes(
       }
     },
   );
+
+  app.post(
+    "/api/dropship/orders/:intakeId/reject",
+    requireDropshipAuth,
+    requireDropshipSensitiveActionProof("high_risk_order_acceptance"),
+    async (req, res) => {
+      try {
+        const provisioned = await vendorProvisioningService.provisionForMember(req.session.dropship!.memberId);
+        const result = await orderRejectionService.rejectOrder({
+          intakeId: parsePositiveIntegerPath(req.params.intakeId, "intakeId"),
+          vendorId: provisioned.vendor.vendorId,
+          reason: parseRequiredStringBody(req.body?.reason, "reason"),
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: {
+            actorType: "vendor",
+            actorId: req.session.dropship!.memberId,
+          },
+        });
+        return res.status(result.idempotentReplay ? 200 : 201).json({
+          result: serializeOrderRejectionResult(result),
+        });
+      } catch (error) {
+        return sendDropshipOrderError(res, error);
+      }
+    },
+  );
 }
 
 function serializeOrderAcceptanceWorkflowResult(
@@ -104,6 +134,24 @@ function serializeOrderAcceptanceWorkflowResult(
       currency: result.quote.currency,
       carrierServices: result.quote.carrierServices,
     },
+  };
+}
+
+function serializeOrderRejectionResult(
+  result: Awaited<ReturnType<DropshipOrderRejectionService["rejectOrder"]>>,
+) {
+  return {
+    intakeId: result.intakeId,
+    vendorId: result.vendorId,
+    storeConnectionId: result.storeConnectionId,
+    externalOrderId: result.externalOrderId,
+    externalOrderNumber: result.externalOrderNumber,
+    previousStatus: result.previousStatus,
+    status: result.status,
+    cancellationStatus: result.cancellationStatus,
+    rejectionReason: result.rejectionReason,
+    idempotentReplay: result.idempotentReplay,
+    rejectedAt: result.rejectedAt.toISOString(),
   };
 }
 
@@ -143,6 +191,7 @@ function statusForDropshipOrderError(code: string): number {
     case "DROPSHIP_ORDER_OPS_DETAIL_INVALID_INPUT":
     case "DROPSHIP_ORDER_INVALID_REQUEST":
     case "DROPSHIP_ORDER_ACCEPTANCE_WORKFLOW_INVALID_INPUT":
+    case "DROPSHIP_ORDER_REJECTION_INVALID_INPUT":
     case "DROPSHIP_ORDER_DEFAULT_WAREHOUSE_REQUIRED":
     case "DROPSHIP_ORDER_SHIP_TO_REQUIRED":
     case "DROPSHIP_ORDER_SHIP_TO_INVALID":
@@ -164,6 +213,7 @@ function statusForDropshipOrderError(code: string): number {
       return 403;
     case "DROPSHIP_ORDER_INTAKE_NOT_FOUND":
     case "DROPSHIP_ORDER_OPS_INTAKE_NOT_FOUND":
+    case "DROPSHIP_ORDER_REJECTION_INTAKE_NOT_FOUND":
     case "DROPSHIP_STORE_CONNECTION_REQUIRED":
       return 404;
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":
@@ -182,6 +232,7 @@ function statusForDropshipOrderError(code: string): number {
     case "DROPSHIP_ORDER_INVENTORY_SHORTFALL":
     case "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED":
     case "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED":
+    case "DROPSHIP_ORDER_REJECTION_NOT_ALLOWED":
     case "DROPSHIP_ORDER_WALLET_CURRENCY_MISMATCH":
     case "DROPSHIP_PACKAGE_PROFILE_REQUIRED":
     case "DROPSHIP_BOX_CATALOG_REQUIRED":
@@ -196,6 +247,17 @@ function statusForDropshipOrderError(code: string): number {
     default:
       return 500;
   }
+}
+
+function parseRequiredStringBody(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_INVALID_REQUEST",
+      "Request body field is required.",
+      { field },
+    );
+  }
+  return value;
 }
 
 function resolveIdempotencyKey(req: Request): string {
