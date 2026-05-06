@@ -3,6 +3,7 @@ import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueDelayedTrackingPush,
   enqueueOmsWmsSyncRetry,
+  enqueueShipStationShipmentPushRetry,
   enqueueWmsShipmentCreateRetry,
 } from "./webhook-retry.worker";
 
@@ -11,6 +12,7 @@ const LOCK_ID = 918405;
 const REMEDIABLE_CODES = new Set([
   "OMS_PAID_WITHOUT_WMS",
   "WMS_READY_WITHOUT_SHIPMENT",
+  "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
   "OMS_FINAL_WMS_ACTIVE",
   "WMS_FINAL_OMS_OPEN",
   "SHIPMENT_SHIPPED_OMS_OPEN",
@@ -470,6 +472,64 @@ export async function remediateOmsFlowIssue(
       omsOrderId: Number.isInteger(omsOrderId) && omsOrderId > 0 ? omsOrderId : null,
       wmsOrderId,
       shipmentId: null,
+      retryQueueId: null,
+    };
+  }
+
+  if (input.code === "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION") {
+    const shipmentId = positiveInt(input.shipmentId, "shipmentId");
+    const result = await db.execute(sql`
+      SELECT os.id, os.order_id AS wms_order_id,
+             NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+      FROM wms.outbound_shipments os
+      JOIN wms.orders wo ON wo.id = os.order_id
+      WHERE os.id = ${shipmentId}
+        AND os.status IN ('planned', 'queued')
+        AND os.shipstation_order_id IS NULL
+        AND os.created_at < NOW() - INTERVAL '15 minutes'
+        AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+      LIMIT 1
+    `);
+
+    const row = firstRow<{ wms_order_id: number; oms_order_id: string | null }>(result);
+    if (!row) {
+      return {
+        code: input.code,
+        action: "shipstation_push_not_queued",
+        changed: false,
+        omsOrderId: null,
+        wmsOrderId: input.wmsOrderId ? Number(input.wmsOrderId) : null,
+        shipmentId,
+        retryQueueId: null,
+      };
+    }
+
+    await enqueueShipStationShipmentPushRetry(
+      db,
+      shipmentId,
+      new Error(`manual remediation by ${input.operator || "unknown"}`),
+    );
+
+    const omsOrderId = Number(row.oms_order_id);
+    if (Number.isInteger(omsOrderId) && omsOrderId > 0) {
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
+          NOW()
+        )
+      `);
+    }
+
+    return {
+      code: input.code,
+      action: "queued_shipstation_shipment_push",
+      changed: true,
+      omsOrderId: Number.isInteger(omsOrderId) && omsOrderId > 0 ? omsOrderId : null,
+      wmsOrderId: Number(row.wms_order_id),
+      shipmentId,
       retryQueueId: null,
     };
   }

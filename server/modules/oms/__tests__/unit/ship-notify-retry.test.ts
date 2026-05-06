@@ -57,10 +57,12 @@ vi.mock("../../../wms/create-shipment", () => ({
 
 import {
   enqueueShipStationRetry,
+  enqueueShipStationShipmentPushRetry,
   enqueueOmsWmsSyncRetry,
   enqueueWmsShipmentCreateRetry,
   requeueDeadWebhookRetry,
   dispatchShipStationRetry,
+  dispatchShipStationShipmentPushRetry,
   dispatchOmsWmsSyncRetry,
   dispatchWmsShipmentCreateRetry,
   recordRetryFailure,
@@ -87,7 +89,10 @@ interface RecordedUpdate {
 }
 
 function makeDb(opts: {
-  shipStationService?: { processShipNotify: (url: string) => Promise<number> } | null;
+  shipStationService?: {
+    processShipNotify: (url: string) => Promise<number>;
+    pushShipment?: (shipmentId: number) => Promise<unknown>;
+  } | null;
   fulfillmentPush?:
     | {
         pushShopifyFulfillment?: (
@@ -362,6 +367,11 @@ describe("webhook retry enqueue unique constraint races", () => {
       "uq_webhook_retry_pending_wms_shipment_create_order",
       (db) => enqueueWmsShipmentCreateRetry(db, 15, "shipstation unavailable"),
     ],
+    [
+      "ShipStation shipment push",
+      "uq_webhook_retry_pending_shipstation_shipment_push",
+      (db) => enqueueShipStationShipmentPushRetry(db, 45, "shipstation unavailable"),
+    ],
   ];
 
   it.each(retryScopeCases)(
@@ -482,6 +492,43 @@ describe("enqueueWmsShipmentCreateRetry", () => {
     const { db, inserts } = makeDb();
 
     await expect(enqueueWmsShipmentCreateRetry(db, 0, "bad")).rejects.toThrow(
+      /positive integer/,
+    );
+
+    expect(inserts).toHaveLength(0);
+  });
+});
+
+describe("enqueueShipStationShipmentPushRetry", () => {
+  it("inserts an immediately due internal ShipStation shipment push row", async () => {
+    const { db, inserts } = makeDb();
+
+    await enqueueShipStationShipmentPushRetry(db, 300, "manual fix");
+
+    expect(inserts).toHaveLength(1);
+    const row = inserts[0]!.values;
+    expect(row.provider).toBe("internal");
+    expect(row.topic).toBe("shipstation_shipment_push");
+    expect(row.payload).toEqual({ shipmentId: 300 });
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBe("manual fix");
+  });
+
+  it("does not enqueue duplicate pending ShipStation shipment push rows", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 42 }] }],
+    });
+
+    await enqueueShipStationShipmentPushRetry(db, 300, "manual fix");
+
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("rejects invalid shipment ids", async () => {
+    const { db, inserts } = makeDb();
+
+    await expect(enqueueShipStationShipmentPushRetry(db, 0, "bad")).rejects.toThrow(
       /positive integer/,
     );
 
@@ -818,6 +865,85 @@ describe("dispatchWmsShipmentCreateRetry", () => {
     expect(createShipmentForOrderMock).not.toHaveBeenCalled();
     expect(updates[0]!.set.status).toBe("dead");
     expect(updates[0]!.set.lastError).toMatch(/wmsOrderId missing or invalid/);
+  });
+});
+
+describe("dispatchShipStationShipmentPushRetry", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("pushes the WMS shipment to ShipStation and marks success", async () => {
+    const pushShipment = vi.fn().mockResolvedValue({ shipstationOrderId: 123 });
+    const { db, updates } = makeDb({
+      shipStationService: {
+        processShipNotify: vi.fn(),
+        pushShipment,
+      },
+    });
+
+    const outcome = await dispatchShipStationShipmentPushRetry(db, {
+      id: 950,
+      provider: "internal",
+      topic: "shipstation_shipment_push",
+      payload: { shipmentId: 300 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(pushShipment).toHaveBeenCalledWith(300);
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("keeps the row pending when ShipStation push service is not wired", async () => {
+    const { db, updates } = makeDb({
+      shipStationService: {
+        processShipNotify: vi.fn(),
+      },
+    });
+
+    const outcome = await dispatchShipStationShipmentPushRetry(db, {
+      id: 951,
+      provider: "internal",
+      topic: "shipstation_shipment_push",
+      payload: { shipmentId: 300 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.lastError).toMatch(/ShipStation shipment push service not available/);
+    expect(updates[0]!.set.status).toBeUndefined();
+  });
+
+  it("records retry failure when ShipStation push throws", async () => {
+    const pushShipment = vi.fn().mockRejectedValue(new Error("ShipStation 500"));
+    const { db, updates } = makeDb({
+      shipStationService: {
+        processShipNotify: vi.fn(),
+        pushShipment,
+      },
+    });
+
+    const outcome = await dispatchShipStationShipmentPushRetry(db, {
+      id: 952,
+      provider: "internal",
+      topic: "shipstation_shipment_push",
+      payload: { shipmentId: 300 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(pushShipment).toHaveBeenCalledWith(300);
+    expect(updates[0]!.set).toMatchObject({
+      attempts: 1,
+      status: "pending",
+      lastError: "ShipStation 500",
+    });
   });
 });
 
