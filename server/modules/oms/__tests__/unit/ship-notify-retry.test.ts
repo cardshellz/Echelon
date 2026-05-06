@@ -200,6 +200,16 @@ describe("enqueueShipStationRetry :: happy path", () => {
     expect(inserts[0]!.values.payload).toEqual({ resource_url: "https://ss.example/a" });
     expect((inserts[0]!.values.payload as any).shouldNotSurvive).toBeUndefined();
   });
+
+  it("does not enqueue duplicate pending ShipStation retry rows for the same resource URL", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 22 }] }],
+    });
+
+    await enqueueShipStationRetry(db, { resource_url: "https://ss.example/shipments?batch=42" });
+
+    expect(inserts).toHaveLength(0);
+  });
 });
 
 describe("webhook retry worker heartbeat", () => {
@@ -330,6 +340,16 @@ describe("enqueueOmsWmsSyncRetry", () => {
     expect(nextMs).toBeLessThanOrEqual(after + 50);
   });
 
+  it("does not enqueue duplicate pending OMS/WMS sync rows for the same OMS order", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 41 }] }],
+    });
+
+    await enqueueOmsWmsSyncRetry(db, 10, "manual fix");
+
+    expect(inserts).toHaveLength(0);
+  });
+
   it("rejects invalid OMS order ids", async () => {
     const { db, inserts } = makeDb();
 
@@ -361,6 +381,16 @@ describe("enqueueWmsShipmentCreateRetry", () => {
     const nextMs = (row.nextRetryAt as Date).getTime();
     expect(nextMs).toBeGreaterThanOrEqual(before - 50);
     expect(nextMs).toBeLessThanOrEqual(after + 50);
+  });
+
+  it("does not enqueue duplicate pending shipment-create rows for the same WMS order", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 42 }] }],
+    });
+
+    await enqueueWmsShipmentCreateRetry(db, 200, "manual fix");
+
+    expect(inserts).toHaveLength(0);
   });
 
   it("rejects invalid WMS order ids", async () => {
@@ -949,6 +979,16 @@ describe("enqueueShopifyFulfillmentRetry :: happy path", () => {
     const { db, inserts } = makeDb();
     await enqueueShopifyFulfillmentRetry(db, 7, null);
     expect(inserts[0]!.values.lastError).toBeNull();
+  });
+
+  it("does not enqueue duplicate pending Shopify fulfillment retry rows for the same shipment", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 88 }] }],
+    });
+
+    await enqueueShopifyFulfillmentRetry(db, 501, new Error("shopify 500"));
+
+    expect(inserts).toHaveLength(0);
   });
 });
 

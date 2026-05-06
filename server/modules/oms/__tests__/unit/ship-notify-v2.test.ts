@@ -365,11 +365,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     expect(processed).toBe(0); // no-op counts as not processed
 
-    // Exactly 3 execute calls: the V2 lookup, the mark-* load-current,
-    // and the WMS->OMS pointer lookup used by replay side-effect repair.
+    // Exactly 4 execute calls: the V2 lookup, the mark-* load-current,
+    // the WMS->OMS pointer lookup used by replay side-effect repair,
+    // and the pending retry lookup before enqueueing Shopify repair.
     // No UPDATE, no rollup, no OMS writes.
     const executeSqls = mock.calls.filter((c) => c.tag === "execute");
-    expect(executeSqls.length).toBe(3);
+    expect(executeSqls.length).toBe(4);
 
     expect(mock.calls.filter((c) => c.tag === "update").length).toBe(0);
     expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
