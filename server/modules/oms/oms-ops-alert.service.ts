@@ -95,9 +95,10 @@ export async function sendOmsOpsAlert(
     null;
 
   if (!webhookUrl) {
-    console.warn(`${LOG_PREFIX} critical health detected but OMS_OPS_ALERT_WEBHOOK_URL is not configured`);
-    lastAlertSignature = decision.signature;
-    lastAlertAt = nowMs;
+    const payload = buildOmsOpsAlertPayload(health, decision.criticalIssues);
+    console.warn(
+      `${LOG_PREFIX} critical health detected but OMS_OPS_ALERT_WEBHOOK_URL is not configured\n${payload.content}`,
+    );
     return { sent: false, reason: "webhook_not_configured", signature: decision.signature };
   }
 
