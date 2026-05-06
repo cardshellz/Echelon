@@ -85,6 +85,8 @@ interface DogfoodReadinessRow {
   external_display_name: string | null;
   shop_domain: string | null;
   access_token_ref: string | null;
+  refresh_token_ref: string | null;
+  token_expires_at: Date | null;
   updated_at: Date | null;
   dropship_oms_channel_id_text: string | null;
   dropship_oms_channel_count: string | number;
@@ -379,6 +381,8 @@ function dogfoodReadinessSql(): string {
       sc.external_display_name,
       sc.shop_domain,
       sc.access_token_ref,
+      sc.refresh_token_ref,
+      sc.token_expires_at,
       sc.updated_at,
       dropship_oms.channel_id::text AS dropship_oms_channel_id_text,
       COALESCE(dropship_oms.channel_count, 0) AS dropship_oms_channel_count,
@@ -866,16 +870,8 @@ function buildDogfoodChecks(input: {
     {
       key: "store_connection",
       label: "Store connection",
-      status: input.row.store_connection_id !== null
-        && input.row.store_status === "connected"
-        && Boolean(input.row.access_token_ref)
-        ? "ready"
-        : "blocked",
-      message: input.row.store_connection_id === null
-        ? "No store connection exists."
-        : input.row.store_status === "connected" && Boolean(input.row.access_token_ref)
-          ? "Store connection is connected with an access token."
-          : `Store is ${input.row.store_status ?? "missing"}; token ${input.row.access_token_ref ? "present" : "missing"}.`,
+      status: isDogfoodStoreConnectionReady(input.row) ? "ready" : "blocked",
+      message: buildDogfoodStoreConnectionMessage(input.row),
     },
     {
       key: "setup_checks",
@@ -1012,6 +1008,51 @@ function buildDogfoodChecks(input: {
       message: `${DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.length} launch default notification preference(s) available; ${input.notificationPreferenceCount} vendor override(s) configured.`,
     },
   ];
+}
+
+function isDogfoodStoreConnectionReady(row: DogfoodReadinessRow): boolean {
+  if (row.store_connection_id === null || row.store_status !== "connected" || !row.access_token_ref) {
+    return false;
+  }
+
+  if (requiresDogfoodRefreshToken(row.platform) && !row.refresh_token_ref) {
+    return false;
+  }
+
+  return true;
+}
+
+function requiresDogfoodRefreshToken(platform: string | null): boolean {
+  return platform === "ebay";
+}
+
+function buildDogfoodStoreConnectionMessage(row: DogfoodReadinessRow): string {
+  if (row.store_connection_id === null) {
+    return "No store connection exists.";
+  }
+
+  if (isDogfoodStoreConnectionReady(row)) {
+    return requiresDogfoodRefreshToken(row.platform)
+      ? "Store connection is connected with access and refresh token references."
+      : "Store connection is connected with an access token reference.";
+  }
+
+  const status = row.store_status ?? "missing";
+  return `Store is ${status}; ${describeDogfoodTokenReferences(row)}.`;
+}
+
+function describeDogfoodTokenReferences(row: DogfoodReadinessRow): string {
+  const accessStatus = row.access_token_ref
+    ? "access token reference present"
+    : "access token reference missing";
+  if (requiresDogfoodRefreshToken(row.platform)) {
+    const refreshStatus = row.refresh_token_ref
+      ? "eBay refresh token reference present"
+      : "eBay refresh token reference missing";
+    return `${accessStatus}; ${refreshStatus}`;
+  }
+
+  return accessStatus;
 }
 
 function summarizeDogfoodReadiness(
