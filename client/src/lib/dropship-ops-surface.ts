@@ -2636,6 +2636,99 @@ export function buildCatalogExposureRuleInput(input: {
   return rule;
 }
 
+export type DropshipCatalogExposurePreviewRuleScope = Exclude<DropshipCatalogExposureScope, "catalog">;
+
+export function buildCatalogExposureRuleFromPreviewRow(input: {
+  row: Pick<
+    DropshipAdminCatalogExposurePreviewRow,
+    | "category"
+    | "productId"
+    | "productLineIds"
+    | "productLineNames"
+    | "productName"
+    | "productSku"
+    | "productVariantId"
+    | "variantName"
+    | "variantSku"
+  >;
+  scopeType: DropshipCatalogExposurePreviewRuleScope;
+  action: DropshipCatalogExposureAction;
+  productLineId?: number;
+}): DropshipAdminCatalogExposureRuleInput {
+  const target = catalogExposurePreviewRuleTarget(input);
+  return buildCatalogExposureRuleInput({
+    scopeType: input.scopeType,
+    action: input.action,
+    productLineId: target.productLineId,
+    productId: target.productId,
+    productVariantId: target.productVariantId,
+    category: target.category,
+    priority: input.action === "include" ? 100 : 200,
+    notes: `${input.action === "include" ? "Include" : "Exclude"} ${target.label}`,
+    metadata: {
+      source: "admin_catalog_preview",
+    },
+  });
+}
+
+function catalogExposurePreviewRuleTarget(input: {
+  row: Pick<
+    DropshipAdminCatalogExposurePreviewRow,
+    | "category"
+    | "productId"
+    | "productLineIds"
+    | "productLineNames"
+    | "productName"
+    | "productSku"
+    | "productVariantId"
+    | "variantName"
+    | "variantSku"
+  >;
+  scopeType: DropshipCatalogExposurePreviewRuleScope;
+  productLineId?: number;
+}): {
+  productLineId?: number;
+  productId?: number;
+  productVariantId?: number;
+  category?: string;
+  label: string;
+} {
+  if (input.scopeType === "category") {
+    const category = input.row.category?.trim();
+    if (!category) {
+      throw new Error("category is required to build a category exposure rule from preview.");
+    }
+    return {
+      category,
+      label: `category ${category}`,
+    };
+  }
+
+  if (input.scopeType === "product_line") {
+    const productLineId = input.productLineId ?? input.row.productLineIds[0];
+    if (!Number.isInteger(productLineId) || productLineId <= 0) {
+      throw new Error("productLineId is required to build a product line exposure rule from preview.");
+    }
+    const index = input.row.productLineIds.indexOf(productLineId);
+    return {
+      productLineId,
+      label: input.row.productLineNames[index] || `product line ${productLineId}`,
+    };
+  }
+
+  if (input.scopeType === "product") {
+    return {
+      productId: assertPositiveInteger(input.row.productId, "productId"),
+      label: input.row.productSku || input.row.productName || `product ${input.row.productId}`,
+    };
+  }
+
+  return {
+    productVariantId: assertPositiveInteger(input.row.productVariantId, "productVariantId"),
+    label: input.row.variantSku || input.row.variantName || `variant ${input.row.productVariantId}`,
+  };
+}
+
 export function catalogExposureRecordToInput(
   rule: DropshipAdminCatalogExposureRule,
 ): DropshipAdminCatalogExposureRuleInput {
