@@ -317,6 +317,7 @@ export function buildDropshipSystemReadinessChecks(
     buildEbayOAuthCheck(env),
     buildShopifyOAuthCheck(env),
     buildShopifyWebhookSubscriptionCheck(env),
+    buildEmailNotificationCheck(env),
     buildShipStationCredentialsCheck(env),
     buildShipStationWebhookSecurityCheck(env),
     buildSplitShipmentHandoffCheck(env),
@@ -568,6 +569,38 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
     status: "ready",
     message: `Shopify order intake webhooks will be registered against ${configured}.`,
     requiredEnv,
+  };
+}
+
+function buildEmailNotificationCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const requiredEnv = ["SMTP_HOST", "SMTP_USER", "SMTP_PASS"];
+  const missing = missingEnv(env, requiredEnv);
+  if (missing.length > 0) {
+    return {
+      key: "email_notifications",
+      label: "Email notifications",
+      status: "blocked",
+      message: `Dropship email notifications are missing ${missing.join(", ")}.`,
+      requiredEnv,
+    };
+  }
+
+  if (!hasEnv(env, "SMTP_FROM")) {
+    return {
+      key: "email_notifications",
+      label: "Email notifications",
+      status: "warning",
+      message: "SMTP_FROM is not configured; dropship email notifications will use SMTP_USER as the sender.",
+      requiredEnv: [...requiredEnv, "SMTP_FROM recommended"],
+    };
+  }
+
+  return {
+    key: "email_notifications",
+    label: "Email notifications",
+    status: "ready",
+    message: "SMTP email notifications are configured for dropship notifications.",
+    requiredEnv: [...requiredEnv, "SMTP_FROM"],
   };
 }
 

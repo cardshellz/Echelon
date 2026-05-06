@@ -152,6 +152,10 @@ describe("DropshipOpsSurfaceService", () => {
       STRIPE_SECRET_KEY: "stripe-secret",
       DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook",
       DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED: "true",
+      SMTP_HOST: "smtp.example.test",
+      SMTP_USER: "dropship@example.test",
+      SMTP_PASS: "smtp-secret",
+      SMTP_FROM: "Dropship Ops <dropship@example.test>",
     });
 
     expect(checks.every((check) => check.status === "ready")).toBe(true);
@@ -159,6 +163,7 @@ describe("DropshipOpsSurfaceService", () => {
     expect(JSON.stringify(checks)).not.toContain("shopify-secret");
     expect(JSON.stringify(checks)).not.toContain("shipstation-secret");
     expect(JSON.stringify(checks)).not.toContain("stripe-secret");
+    expect(JSON.stringify(checks)).not.toContain("smtp-secret");
   });
 
   it("blocks dogfood system readiness when OAuth prerequisites are missing", () => {
@@ -182,6 +187,10 @@ describe("DropshipOpsSurfaceService", () => {
     });
     expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({ status: "blocked" });
+    expect(checks.find((check) => check.key === "email_notifications")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["SMTP_HOST", "SMTP_USER", "SMTP_PASS"],
+    });
     expect(checks.find((check) => check.key === "shipstation_credentials")).toMatchObject({
       status: "blocked",
       requiredEnv: ["SHIPSTATION_API_KEY", "SHIPSTATION_API_SECRET"],
@@ -199,6 +208,20 @@ describe("DropshipOpsSurfaceService", () => {
       status: "ready",
       requiredEnv: [],
     });
+  });
+
+  it("warns when dropship email notifications would fall back to SMTP_USER", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      SMTP_HOST: "smtp.example.test",
+      SMTP_USER: "dropship@example.test",
+      SMTP_PASS: "smtp-secret",
+    });
+
+    expect(checks.find((check) => check.key === "email_notifications")).toMatchObject({
+      status: "warning",
+      requiredEnv: ["SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM recommended"],
+    });
+    expect(JSON.stringify(checks)).not.toContain("smtp-secret");
   });
 
   it("scopes vendor settings through Shellz Club member provisioning", async () => {
@@ -258,6 +281,7 @@ describe("DropshipOpsSurfaceService", () => {
       expect.objectContaining({ key: "ebay_oauth" }),
       expect.objectContaining({ key: "shopify_oauth" }),
       expect.objectContaining({ key: "shopify_webhook_subscriptions" }),
+      expect.objectContaining({ key: "email_notifications" }),
       expect.objectContaining({ key: "shipstation_credentials" }),
       expect.objectContaining({ key: "shipstation_webhook_security" }),
       expect.objectContaining({ key: "split_shipment_handoff" }),
