@@ -45,6 +45,10 @@ describe("DropshipOpsSurfaceService", () => {
       status: "coming_soon",
       comingSoon: true,
     });
+    expect(sections.find((section) => section.key === "notifications")).toMatchObject({
+      status: "ready",
+      summary: expect.stringContaining("launch default notification preference(s) available; 0 vendor override(s) configured."),
+    });
     expect(sections.find((section) => section.key === "store_connection")?.blockers).toContain("store_connection_required");
     expect(sections.find((section) => section.key === "wallet_payment")?.blockers).toEqual([
       "auto_reload_required",
