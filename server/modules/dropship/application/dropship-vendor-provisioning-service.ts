@@ -51,6 +51,8 @@ export interface DropshipActivateVendorRepositoryInput {
 export interface DropshipStoreConnectionSummary {
   activeCount: number;
   connectedCount: number;
+  launchReadyConnectedCount: number;
+  credentialAttentionCount: number;
   needsAttentionCount: number;
   totalCount: number;
 }
@@ -286,7 +288,7 @@ export function buildOnboardingState(input: {
   wallet: DropshipWalletSetupSummary;
 }): DropshipOnboardingState {
   const activeStoreCount = input.storeConnections.activeCount;
-  const connectedStoreCount = input.storeConnections.connectedCount;
+  const launchReadyConnectedStoreCount = input.storeConnections.launchReadyConnectedCount;
   const adminCatalogAvailable = input.catalog.adminExposureRuleCount > 0;
   const hasVendorSelection = input.catalog.vendorSelectionRuleCount > 0;
   const entitlementBlocked = input.vendor.status === "lapsed" || input.vendor.status === "suspended";
@@ -333,7 +335,7 @@ export function buildOnboardingState(input: {
       {
         key: "store_connection",
         label: "Store connection",
-        status: entitlementBlocked ? "blocked" : connectedStoreCount > 0 ? "complete" : "incomplete",
+        status: entitlementBlocked ? "blocked" : launchReadyConnectedStoreCount > 0 ? "complete" : "incomplete",
         required: true,
       },
       {

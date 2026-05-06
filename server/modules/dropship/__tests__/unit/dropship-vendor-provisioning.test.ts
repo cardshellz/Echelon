@@ -66,6 +66,38 @@ describe("dropship vendor provisioning status policy", () => {
 });
 
 describe("PgDropshipVendorProvisioningRepository", () => {
+  it("maps launch-ready store connection credential counts", async () => {
+    const release = vi.fn();
+    const query = vi.fn(async () => ({
+      rows: [{
+        active_count: "2",
+        connected_count: "2",
+        launch_ready_connected_count: "1",
+        credential_attention_count: "1",
+        needs_attention_count: "0",
+        total_count: "2",
+      }],
+    }));
+    const connect = vi.fn(async () => ({ query, release }));
+    const repository = new PgDropshipVendorProvisioningRepository({ connect } as unknown as Pool);
+
+    const result = await repository.getStoreConnectionSummary(10);
+
+    expect(String(query.mock.calls[0]?.[0])).toContain("launch_ready_connected_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("access_token_ref");
+    expect(String(query.mock.calls[0]?.[0])).toContain("refresh_token_ref");
+    expect(query.mock.calls[0]?.[1]).toEqual([10]);
+    expect(result).toMatchObject({
+      activeCount: 2,
+      connectedCount: 2,
+      launchReadyConnectedCount: 1,
+      credentialAttentionCount: 1,
+      needsAttentionCount: 0,
+      totalCount: 2,
+    });
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
   it("maps Stripe-ready wallet funding and auto-reload readiness", async () => {
     const release = vi.fn();
     const query = vi.fn(async () => ({
@@ -248,6 +280,8 @@ describe("DropshipVendorProvisioningService", () => {
     repository.storeConnectionSummary = {
       activeCount: 0,
       connectedCount: 0,
+      launchReadyConnectedCount: 0,
+      credentialAttentionCount: 0,
       needsAttentionCount: 0,
       totalCount: 0,
     };
@@ -389,6 +423,8 @@ describe("DropshipVendorProvisioningService", () => {
     repository.storeConnectionSummary = {
       activeCount: 1,
       connectedCount: 0,
+      launchReadyConnectedCount: 0,
+      credentialAttentionCount: 0,
       needsAttentionCount: 1,
       totalCount: 1,
     };
@@ -401,6 +437,53 @@ describe("DropshipVendorProvisioningService", () => {
     });
   });
 
+  it("keeps store onboarding incomplete when a connected store is missing launch credentials", async () => {
+    repository.vendor = makeVendorProfile({
+      status: "onboarding",
+    });
+    repository.storeConnectionSummary = {
+      activeCount: 1,
+      connectedCount: 1,
+      launchReadyConnectedCount: 0,
+      credentialAttentionCount: 1,
+      needsAttentionCount: 0,
+      totalCount: 1,
+    };
+    repository.catalogSetupSummary = {
+      adminExposureRuleCount: 2,
+      vendorSelectionRuleCount: 1,
+    };
+    repository.walletSetupSummary = {
+      availableBalanceCents: 10000,
+      pendingBalanceCents: 0,
+      activeFundingMethodCount: 1,
+      activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: true,
+    };
+
+    const state = await service.getOnboardingState("member-1");
+
+    expect(state.storeConnections).toMatchObject({
+      connectedCount: 1,
+      launchReadyConnectedCount: 0,
+      credentialAttentionCount: 1,
+    });
+    expect(state.steps.find((step) => step.key === "store_connection")).toMatchObject({
+      status: "incomplete",
+    });
+    await expect(service.activateOnboardingForMember("member-1")).rejects.toMatchObject({
+      code: "DROPSHIP_ONBOARDING_INCOMPLETE",
+      context: {
+        incompleteRequiredSteps: ["store_connection"],
+      },
+    });
+    expect(repository.lastActivationInput).toBeNull();
+  });
+
   it("activates an onboarding vendor when every required launch gate is complete", async () => {
     repository.vendor = makeVendorProfile({
       status: "onboarding",
@@ -408,6 +491,8 @@ describe("DropshipVendorProvisioningService", () => {
     repository.storeConnectionSummary = {
       activeCount: 1,
       connectedCount: 1,
+      launchReadyConnectedCount: 1,
+      credentialAttentionCount: 0,
       needsAttentionCount: 0,
       totalCount: 1,
     };
@@ -494,6 +579,8 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
   storeConnectionSummary: DropshipStoreConnectionSummary = {
     activeCount: 0,
     connectedCount: 0,
+    launchReadyConnectedCount: 0,
+    credentialAttentionCount: 0,
     needsAttentionCount: 0,
     totalCount: 0,
   };

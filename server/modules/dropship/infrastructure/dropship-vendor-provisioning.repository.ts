@@ -34,6 +34,8 @@ interface VendorProfileRow {
 interface StoreConnectionSummaryRow {
   active_count: string | number;
   connected_count: string | number;
+  launch_ready_connected_count: string | number;
+  credential_attention_count: string | number;
   needs_attention_count: string | number;
   total_count: string | number;
 }
@@ -147,6 +149,29 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
            ) AS active_count,
            COUNT(*) FILTER (WHERE status = 'connected') AS connected_count,
            COUNT(*) FILTER (
+             WHERE status = 'connected'
+               AND access_token_ref IS NOT NULL
+               AND (
+                 platform = 'shopify'
+                 OR (
+                   platform = 'ebay'
+                   AND refresh_token_ref IS NOT NULL
+                 )
+               )
+           ) AS launch_ready_connected_count,
+           COUNT(*) FILTER (
+             WHERE status = 'connected'
+               AND (
+                 access_token_ref IS NULL
+                 OR platform IS NULL
+                 OR platform NOT IN ('ebay', 'shopify')
+                 OR (
+                   platform = 'ebay'
+                   AND refresh_token_ref IS NULL
+                 )
+               )
+           ) AS credential_attention_count,
+           COUNT(*) FILTER (
              WHERE status IN ('needs_reauth','refresh_failed','grace_period','paused')
            ) AS needs_attention_count,
            COUNT(*) AS total_count
@@ -158,6 +183,8 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
       return {
         activeCount: Number(row?.active_count ?? 0),
         connectedCount: Number(row?.connected_count ?? 0),
+        launchReadyConnectedCount: Number(row?.launch_ready_connected_count ?? 0),
+        credentialAttentionCount: Number(row?.credential_attention_count ?? 0),
         needsAttentionCount: Number(row?.needs_attention_count ?? 0),
         totalCount: Number(row?.total_count ?? 0),
       };
