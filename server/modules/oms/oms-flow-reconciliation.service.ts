@@ -10,6 +10,7 @@ const REMEDIABLE_CODES = new Set([
   "SHIPMENT_SHIPPED_OMS_OPEN",
   "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
 ]);
+const AUTO_TRACKING_RETRY_LIMIT = 10;
 
 export interface OmsFlowRemediationInput {
   code: string;
@@ -265,7 +266,57 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
+  await autoQueueStaleTrackingPushRetries(dbArg, issues);
   return issues;
+}
+
+async function autoQueueStaleTrackingPushRetries(
+  db: any,
+  issues: OmsOpsIssue[],
+): Promise<void> {
+  const issue = issues.find((entry) => entry.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED");
+  if (!issue) return;
+
+  let queued = 0;
+  for (const sample of issue.sample.slice(0, AUTO_TRACKING_RETRY_LIMIT)) {
+    const row = sample as any;
+    const omsOrderId = Number(row.oms_order_id);
+    const shipmentId = Number(row.shipment_id);
+    if (
+      !Number.isInteger(omsOrderId) ||
+      omsOrderId <= 0 ||
+      !Number.isInteger(shipmentId) ||
+      shipmentId <= 0
+    ) {
+      continue;
+    }
+
+    const existing = await db.execute(sql`
+      SELECT id
+      FROM oms.webhook_retry_queue
+      WHERE provider = 'internal'
+        AND topic = 'delayed_tracking_push'
+        AND status = 'pending'
+        AND (
+             (payload->>'shipmentId') = ${String(shipmentId)}
+          OR (
+               (payload->>'orderId') = ${String(omsOrderId)}
+           AND payload->>'shipmentId' IS NULL
+          )
+        )
+      LIMIT 1
+    `);
+    if (rows(existing).length > 0) {
+      continue;
+    }
+
+    await enqueueDelayedTrackingPush(db, omsOrderId, shipmentId);
+    queued++;
+  }
+
+  if (queued > 0) {
+    console.warn(`${LOG_PREFIX} auto-queued ${queued} delayed tracking push retry row(s)`);
+  }
 }
 
 export async function remediateOmsFlowIssue(

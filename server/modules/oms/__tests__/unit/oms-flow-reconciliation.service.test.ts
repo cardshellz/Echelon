@@ -74,6 +74,44 @@ describe("oms-flow-reconciliation.service", () => {
     warn.mockRestore();
   });
 
+  it("auto-queues stale tracking push retries when scheduled reconciliation finds shipped unpushed shipments", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const inserts: unknown[] = [];
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(2))
+        .mockResolvedValueOnce(sampleRows([
+          { oms_order_id: 10, shipment_id: 30 },
+          { oms_order_id: 11, shipment_id: 31 },
+        ]))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([{ id: 99 }])),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (row: unknown) => {
+          inserts.push(row);
+          return undefined;
+        }),
+      })),
+    };
+
+    const issues = await runOmsFlowReconciliation(db);
+
+    expect(issues).toHaveLength(1);
+    expect(db.execute).toHaveBeenCalledTimes(10);
+    expect(inserts).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("auto-queued 1 delayed tracking push retry"),
+    );
+    warn.mockRestore();
+  });
+
   it("remediates OMS-final/WMS-active drift and writes an audit event", async () => {
     const tx = {
       execute: vi
