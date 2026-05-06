@@ -94,6 +94,16 @@ export interface RetryFulfillmentPushService {
   pushTrackingForShipment?(shipmentId: number): Promise<boolean>;
 }
 
+export interface RetryEbayWebhookReplayService {
+  omsService: unknown;
+  ebayApiClient: unknown;
+  reingestEbayOrder(
+    orderId: string,
+    omsService: unknown,
+    ebayApiClient: unknown,
+  ): Promise<{ status: string; omsOrderId: number }>;
+}
+
 /**
  * Enqueue a failed Shopify fulfillment push for retry.
  *
@@ -210,6 +220,21 @@ function resolveFulfillmentPushService(
   const svc = dbArg?.__fulfillmentPush;
   if (svc) {
     return svc;
+  }
+  return null;
+}
+
+function resolveEbayWebhookReplayService(
+  dbArg: any,
+): RetryEbayWebhookReplayService | null {
+  const svc = dbArg?.__ebayWebhookReplay;
+  if (
+    svc &&
+    svc.omsService &&
+    svc.ebayApiClient &&
+    typeof svc.reingestEbayOrder === "function"
+  ) {
+    return svc as RetryEbayWebhookReplayService;
   }
   return null;
 }
@@ -407,6 +432,79 @@ export async function dispatchDelayedTrackingPush(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+export async function dispatchEbayWebhookRetry(
+  dbArg: any,
+  item: { id: number; provider: string; topic: string; payload: any; attempts: number },
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  if (!item.topic?.toLowerCase().includes("order")) {
+    await markRowDead(
+      dbArg,
+      item.id,
+      `unsupported eBay webhook replay topic: ${item.topic || "unknown"}`,
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (unsupported ebay webhook topic ${item.topic || "unknown"})`,
+    );
+    return "malformed";
+  }
+
+  const orderId = (item.payload as any)?.notification?.data?.orderId;
+  if (typeof orderId !== "string" || orderId.trim().length === 0) {
+    await markRowDead(
+      dbArg,
+      item.id,
+      "malformed payload: notification.data.orderId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed ebay webhook payload)`,
+    );
+    return "malformed";
+  }
+
+  const ebayReplay = resolveEbayWebhookReplayService(dbArg);
+  if (!ebayReplay) {
+    await keepPending(
+      dbArg,
+      item.id,
+      "eBay replay service not available on db.__ebayWebhookReplay",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) deferred - eBay replay service unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    const result = await ebayReplay.reingestEbayOrder(
+      orderId.trim(),
+      ebayReplay.omsService,
+      ebayReplay.ebayApiClient,
+    );
+    await markRowSuccess(dbArg, item.id);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) succeeded via eBay reingest (${result.status}, oms=${result.omsOrderId})`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "eBay Webhook" },
+    );
+    if (status === "dead") {
+      console.error(
+        `CRITICAL: eBay Webhook Dead-Lettered\nTopic: ${item.topic}\nOrder: ${orderId}\nLast Error: ${err?.message || String(err)}\nAttempts: ${attempts}\nQueue Row ID: ${item.id}`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -615,6 +713,17 @@ async function processPendingWebhooks() {
         // fires if the bookkeeping itself throws. Log + move on.
         console.error(
           `${LOG_PREFIX} Item ${item.id} shipstation dispatch threw: ${branchErr?.message || branchErr}`
+        );
+      }
+      continue;
+    }
+
+    if (item.provider === "ebay") {
+      try {
+        await dispatchEbayWebhookRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} ebay dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;

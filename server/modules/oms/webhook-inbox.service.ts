@@ -37,6 +37,16 @@ const REPLAYABLE_SHOPIFY_OMS_TOPICS = new Set([
   "refunds/create",
 ]);
 
+function isReplayableWebhookInboxTopic(provider: string, topic: string): boolean {
+  if (provider === "shopify") {
+    return REPLAYABLE_SHOPIFY_OMS_TOPICS.has(topic);
+  }
+  if (provider === "ebay") {
+    return topic.toLowerCase().includes("order");
+  }
+  return false;
+}
+
 function stableJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -231,8 +241,8 @@ export async function enqueueWebhookInboxReplay(
   if (!inbox) {
     throw new Error(`webhook inbox row ${inboxId} not found`);
   }
-  if (inbox.provider !== "shopify" || !REPLAYABLE_SHOPIFY_OMS_TOPICS.has(inbox.topic)) {
-    throw new Error(`webhook inbox row ${inboxId} is not a replayable Shopify OMS topic`);
+  if (!isReplayableWebhookInboxTopic(inbox.provider, inbox.topic)) {
+    throw new Error(`webhook inbox row ${inboxId} is not a replayable OMS webhook topic`);
   }
   if (inbox.status === "succeeded") {
     throw new Error(`webhook inbox row ${inboxId} already succeeded`);

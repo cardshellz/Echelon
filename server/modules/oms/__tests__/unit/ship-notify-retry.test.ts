@@ -57,6 +57,7 @@ import {
   enqueueDelayedTrackingPush,
   dispatchShopifyFulfillmentRetry,
   dispatchDelayedTrackingPush,
+  dispatchEbayWebhookRetry,
 } from "../../webhook-retry.worker";
 
 // ─── DB mock helpers ─────────────────────────────────────────────────
@@ -80,6 +81,17 @@ function makeDb(opts: {
         ) => Promise<{ shopifyFulfillmentId: string | null; alreadyPushed: boolean }>;
         pushTracking?: (orderId: number) => Promise<boolean>;
         pushTrackingForShipment?: (shipmentId: number) => Promise<boolean>;
+      }
+    | null;
+  ebayReplay?:
+    | {
+        omsService: unknown;
+        ebayApiClient: unknown;
+        reingestEbayOrder: (
+          orderId: string,
+          omsService: unknown,
+          ebayApiClient: unknown,
+        ) => Promise<{ status: string; omsOrderId: number }>;
       }
     | null;
   insertThrows?: Error;
@@ -112,6 +124,9 @@ function makeDb(opts: {
   }
   if (opts.fulfillmentPush !== undefined) {
     db.__fulfillmentPush = opts.fulfillmentPush;
+  }
+  if (opts.ebayReplay !== undefined) {
+    db.__ebayWebhookReplay = opts.ebayReplay;
   }
 
   return { db, inserts, updates };
@@ -221,6 +236,82 @@ describe("dispatchShipStationRetry :: happy path", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0]!.set.status).toBe("success");
     expect(updates[0]!.set.updatedAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("dispatchEbayWebhookRetry", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reingests the order and marks the retry row successful", async () => {
+    const omsService = { name: "oms" };
+    const ebayApiClient = { name: "ebay" };
+    const reingest = vi.fn(async () => ({ status: "ingested", omsOrderId: 123 }));
+    const { db, updates } = makeDb({
+      ebayReplay: { omsService, ebayApiClient, reingestEbayOrder: reingest },
+    });
+
+    const outcome = await dispatchEbayWebhookRetry(db, {
+      id: 901,
+      provider: "ebay",
+      topic: "ORDER.CREATED",
+      payload: { notification: { data: { orderId: "12-34567-89012" } } },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(reingest).toHaveBeenCalledWith("12-34567-89012", omsService, ebayApiClient);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("keeps the row pending without burning an attempt when boot has not wired eBay replay", async () => {
+    const { db, updates } = makeDb({ ebayReplay: null });
+
+    const outcome = await dispatchEbayWebhookRetry(db, {
+      id: 902,
+      provider: "ebay",
+      topic: "ORDER.CREATED",
+      payload: { notification: { data: { orderId: "12-34567-89012" } } },
+      attempts: 3,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.lastError).toMatch(/eBay replay service not available/);
+    expect(updates[0]!.set.attempts).toBeUndefined();
+    expect(updates[0]!.set.status).toBeUndefined();
+  });
+
+  it("dead-letters malformed eBay rows immediately", async () => {
+    const reingest = vi.fn();
+    const { db, updates } = makeDb({
+      ebayReplay: {
+        omsService: {},
+        ebayApiClient: {},
+        reingestEbayOrder: reingest,
+      },
+    });
+
+    const outcome = await dispatchEbayWebhookRetry(db, {
+      id: 903,
+      provider: "ebay",
+      topic: "ORDER.CREATED",
+      payload: { notification: { data: {} } },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("malformed");
+    expect(reingest).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("dead");
+    expect(updates[0]!.set.lastError).toMatch(/orderId missing/);
   });
 });
 

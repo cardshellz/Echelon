@@ -457,6 +457,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
     // Wire WMS sync service into eBay ingestion
     setWmsSyncService(services.wmsSync);
+    (db as any).__ebayWebhookReplay = {
+      omsService: services.oms,
+      ebayApiClient,
+      reingestEbayOrder,
+    };
 
     startEbayOrderPolling(services.oms, ebayApiClient);
 
