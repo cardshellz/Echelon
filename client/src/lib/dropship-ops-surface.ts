@@ -203,6 +203,8 @@ export interface DropshipOnboardingState {
   storeConnections: {
     activeCount: number;
     connectedCount: number;
+    launchReadyConnectedCount: number;
+    credentialAttentionCount: number;
     needsAttentionCount: number;
     totalCount: number;
     includedLimit: number;

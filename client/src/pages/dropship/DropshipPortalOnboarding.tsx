@@ -270,7 +270,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         <div>
           <h2 className="text-lg font-semibold">Connect store</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            {onboarding.storeConnections.activeCount} of {onboarding.storeConnections.includedLimit} included connection(s) used
+            {onboarding.storeConnections.launchReadyConnectedCount} launch-ready / {onboarding.storeConnections.includedLimit} included connection(s)
           </p>
         </div>
         <Badge variant="outline" className={canConnectStore ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}>
@@ -290,6 +290,16 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
+      {onboarding.storeConnections.connectedCount > 0
+        && onboarding.storeConnections.launchReadyConnectedCount === 0
+        && onboarding.storeConnections.credentialAttentionCount > 0 && (
+          <Alert className="mt-5 border-amber-200 bg-amber-50 text-amber-900">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              Connected store credentials need attention before launch. eBay requires access and refresh token references.
+            </AlertDescription>
+          </Alert>
+        )}
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
         <Button
@@ -481,7 +491,7 @@ function activationBadgeTone(input: { alreadyActive: boolean; activationReady: b
 
 function stepDescription(step: DropshipOnboardingStep): string {
   if (step.key === "vendor_profile") return "Card Shellz .ops entitlement and vendor profile are available.";
-  if (step.key === "store_connection") return "One approved marketplace store must be connected before launch.";
+  if (step.key === "store_connection") return "One marketplace store must be connected with launch-ready credentials before launch.";
   if (step.key === "catalog_available") return "Card Shellz ops controls the catalog available for vendor selection.";
   if (step.key === "wallet_payment") return "Stripe-ready funding, USDC Base funding, and auto-reload are required before launch; a current balance is optional when auto-reload is ready.";
   return "Selected products define what can be pushed to connected marketplace stores.";
