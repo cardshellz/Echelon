@@ -141,6 +141,7 @@ export interface CreateDropshipListingPushJobRepositoryInput {
   storeConnectionId: number;
   platform: DropshipSourcePlatform;
   productVariantIds: number[];
+  requestedRetailPricesByVariantId: Record<string, number>;
   idempotencyKey: string;
   requestHash: string;
   requestedBy: CreateListingPushJobInput["requestedBy"];
@@ -209,6 +210,10 @@ export class DropshipListingPreviewService {
     const context = await this.loadUsableStoreContext(parsed.vendorId, parsed.storeConnectionId);
     const config = await this.deps.repository.getStoreListingConfig(parsed.storeConnectionId);
     const uniqueVariantIds = uniquePositiveIntegers(parsed.productVariantIds);
+    const requestedRetailPriceByVariantId = normalizeRequestedRetailPricesByVariantId({
+      productVariantIds: uniqueVariantIds,
+      requestedRetailPricesByVariantId: parsed.requestedRetailPricesByVariantId,
+    });
 
     const [
       adminRules,
@@ -268,7 +273,9 @@ export class DropshipListingPreviewService {
         packageReadiness: packageReadiness.get(productVariantId) ?? null,
         pricingPolicies,
         existingListing,
-        requestedRetailPriceCents: parsed.requestedRetailPriceCents ?? null,
+        requestedRetailPriceCents: requestedRetailPriceByVariantId.get(productVariantId)
+          ?? parsed.requestedRetailPriceCents
+          ?? null,
         marketplaceListing: this.deps.marketplaceListing,
         generatedAt,
       });
@@ -308,27 +315,36 @@ export class DropshipListingPreviewService {
     preview: DropshipListingPreviewResult;
     idempotentReplay: boolean;
   }> {
-    const parsed = createListingPushJobInputSchema.extend({
-      requestedRetailPriceCents: generateVendorListingPreviewInputSchema.shape.requestedRetailPriceCents,
-    }).parse(input);
+    const parsed = createListingPushJobInputSchema.parse(input);
+    const uniqueVariantIds = uniquePositiveIntegers(parsed.productVariantIds);
+    const requestedRetailPricesByVariantId = normalizeRequestedRetailPricesByVariantId({
+      productVariantIds: uniqueVariantIds,
+      requestedRetailPricesByVariantId: parsed.requestedRetailPricesByVariantId,
+    });
+    const serializedRequestedRetailPricesByVariantId = serializeRequestedRetailPricesByVariantId(
+      requestedRetailPricesByVariantId,
+    );
     const preview = await this.generatePreview({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
-      productVariantIds: parsed.productVariantIds,
+      productVariantIds: uniqueVariantIds,
       requestedRetailPriceCents: parsed.requestedRetailPriceCents,
+      requestedRetailPricesByVariantId: serializedRequestedRetailPricesByVariantId,
       actor: parsed.requestedBy,
     });
     const requestHash = hashListingPushJobRequest({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
-      productVariantIds: uniquePositiveIntegers(parsed.productVariantIds),
+      productVariantIds: uniqueVariantIds,
       requestedRetailPriceCents: parsed.requestedRetailPriceCents ?? null,
+      requestedRetailPricesByVariantId: serializedRequestedRetailPricesByVariantId,
     });
     const result = await this.deps.repository.createListingPushJob({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       platform: preview.platform,
-      productVariantIds: uniquePositiveIntegers(parsed.productVariantIds),
+      productVariantIds: uniqueVariantIds,
+      requestedRetailPricesByVariantId: serializedRequestedRetailPricesByVariantId,
       idempotencyKey: parsed.idempotencyKey,
       requestHash,
       requestedBy: parsed.requestedBy,
@@ -392,13 +408,71 @@ export function hashListingPushJobRequest(input: {
   storeConnectionId: number;
   productVariantIds: readonly number[];
   requestedRetailPriceCents: number | null;
+  requestedRetailPricesByVariantId?: Readonly<Record<string, number>>;
 }): string {
-  return hashJson({
+  const requestedRetailPricesByVariantId = canonicalRequestedRetailPriceRecord(input.requestedRetailPricesByVariantId);
+  const payload: Record<string, unknown> = {
     vendorId: input.vendorId,
     storeConnectionId: input.storeConnectionId,
     productVariantIds: [...input.productVariantIds].sort((left, right) => left - right),
     requestedRetailPriceCents: input.requestedRetailPriceCents,
-  });
+  };
+  if (Object.keys(requestedRetailPricesByVariantId).length > 0) {
+    payload.requestedRetailPricesByVariantId = requestedRetailPricesByVariantId;
+  }
+  return hashJson(payload);
+}
+
+function normalizeRequestedRetailPricesByVariantId(input: {
+  productVariantIds: readonly number[];
+  requestedRetailPricesByVariantId?: Readonly<Record<string, number>>;
+}): Map<number, number> {
+  const result = new Map<number, number>();
+  const rawOverrides = input.requestedRetailPricesByVariantId ?? {};
+  const allowedVariantIds = new Set(input.productVariantIds);
+
+  for (const [rawProductVariantId, priceCents] of Object.entries(rawOverrides)) {
+    const productVariantId = Number(rawProductVariantId);
+    if (!Number.isInteger(productVariantId) || productVariantId <= 0) {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID",
+        "Retail price override variant id must be a positive integer.",
+        { productVariantId: rawProductVariantId },
+      );
+    }
+    if (!allowedVariantIds.has(productVariantId)) {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID",
+        "Retail price override must target a requested product variant.",
+        { productVariantId },
+      );
+    }
+    if (!Number.isInteger(priceCents) || priceCents < 0) {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID",
+        "Retail price override must be integer cents.",
+        { productVariantId, priceCents },
+      );
+    }
+    result.set(productVariantId, priceCents);
+  }
+
+  return result;
+}
+
+function serializeRequestedRetailPricesByVariantId(input: ReadonlyMap<number, number>): Record<string, number> {
+  return Object.fromEntries(
+    [...input.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([productVariantId, priceCents]) => [String(productVariantId), priceCents]),
+  );
+}
+
+function canonicalRequestedRetailPriceRecord(input?: Readonly<Record<string, number>>): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(input ?? {})
+      .sort(([left], [right]) => Number(left) - Number(right)),
+  );
 }
 
 export function makeDropshipListingPreviewLogger(): DropshipLogger {

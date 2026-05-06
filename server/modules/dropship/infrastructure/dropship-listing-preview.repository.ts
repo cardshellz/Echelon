@@ -435,6 +435,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
           jobStatus,
           JSON.stringify({
             productVariantIds: input.productVariantIds,
+            requestedRetailPricesByVariantId: input.requestedRetailPricesByVariantId,
             previewSummary: input.preview.summary,
           }),
           input.requestedBy.actorId ?? input.requestedBy.actorType,
@@ -610,6 +611,7 @@ async function recordListingJobAuditEvent(
         idempotencyKey: input.idempotencyKey,
         requestHash: input.requestHash,
         previewSummary: input.preview.summary,
+        requestedRetailPricesByVariantId: input.requestedRetailPricesByVariantId,
       }),
       input.now,
     ],

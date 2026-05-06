@@ -84,6 +84,26 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  it("applies per-variant retail price overrides to listing previews", async () => {
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPricesByVariantId: {
+        "101": 1399,
+      },
+    });
+
+    expect(result.rows[0]).toMatchObject({
+      productVariantId: 101,
+      priceCents: 1399,
+      previewStatus: "ready",
+    });
+    expect(result.rows[0]?.listingIntent).toMatchObject({
+      productVariantId: 101,
+      priceCents: 1399,
+    });
+  });
+
   it("blocks from missing connection listing config instead of hardcoded marketplace rules", async () => {
     repository.config = null;
 
@@ -98,11 +118,23 @@ describe("DropshipListingPreviewService", () => {
     expect(result.rows[0]?.blockers).not.toContain("platform_not_supported");
   });
 
+  it("rejects retail price overrides for variants outside the listing request", async () => {
+    await expect(service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPricesByVariantId: {
+        "999": 1299,
+      },
+    })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID" });
+  });
+
   it("creates listing push jobs idempotently and rejects request drift", async () => {
     const input = {
       storeConnectionId: 22,
       productVariantIds: [101],
-      requestedRetailPriceCents: 1299,
+      requestedRetailPricesByVariantId: {
+        "101": 1399,
+      },
       idempotencyKey: "listing-job-001",
     };
 
@@ -117,8 +149,14 @@ describe("DropshipListingPreviewService", () => {
       vendorId: 10,
       storeConnectionId: 22,
       productVariantIds: [101],
-      requestedRetailPriceCents: 1299,
+      requestedRetailPriceCents: null,
+      requestedRetailPricesByVariantId: {
+        "101": 1399,
+      },
     }));
+    expect(repository.lastCreatedInput?.requestedRetailPricesByVariantId).toEqual({
+      "101": 1399,
+    });
     expect(logs.map((event) => event.code)).toEqual([
       "DROPSHIP_LISTING_PUSH_JOB_CREATED",
       "DROPSHIP_LISTING_PUSH_JOB_REPLAYED",
@@ -126,7 +164,9 @@ describe("DropshipListingPreviewService", () => {
 
     await expect(service.createListingPushJobForMember("member-1", {
       ...input,
-      requestedRetailPriceCents: 1499,
+      requestedRetailPricesByVariantId: {
+        "101": 1499,
+      },
     })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
   });
 });
@@ -170,6 +210,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
     isActive: true,
   };
   jobs: DropshipListingPushJobRecord[] = [];
+  lastCreatedInput: CreateDropshipListingPushJobRepositoryInput | null = null;
 
   async loadStoreContext(): Promise<DropshipListingStoreContext | null> {
     return this.context;
@@ -221,6 +262,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   async createListingPushJob(
     input: CreateDropshipListingPushJobRepositoryInput,
   ): Promise<CreateDropshipListingPushJobRepositoryResult> {
+    this.lastCreatedInput = input;
     const existingJob = this.jobs.find((job) => job.idempotencyKey === input.idempotencyKey);
     if (existingJob) {
       if (existingJob.requestHash !== input.requestHash) {

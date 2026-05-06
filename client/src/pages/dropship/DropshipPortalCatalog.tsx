@@ -86,6 +86,7 @@ export default function DropshipPortalCatalog() {
   const [scopeCategory, setScopeCategory] = useState("");
   const [scopeProductLineId, setScopeProductLineId] = useState("");
   const [scopeProductId, setScopeProductId] = useState("");
+  const [retailPriceByVariantId, setRetailPriceByVariantId] = useState<Record<string, string>>({});
   const catalogUrl = useMemo(() => buildQueryUrl("/api/dropship/catalog", {
     search: applied.search,
     selectedOnly: applied.selectedOnly,
@@ -256,6 +257,7 @@ export default function DropshipPortalCatalog() {
       const request = buildListingPreviewRequest({
         storeConnectionId: selectedStoreConnectionIdNumber,
         rows: visibleSelectedRows,
+        retailPriceByVariantId,
       });
       if (request.productVariantIds.length === 0) {
         setError("Select at least one visible catalog row before previewing listings.");
@@ -313,6 +315,7 @@ export default function DropshipPortalCatalog() {
         storeConnectionId: selectedStoreConnectionIdNumber,
         preview: listingPreview,
         idempotencyKey: createDropshipIdempotencyKey("listing-push"),
+        retailPriceByVariantId,
       });
       if (request.productVariantIds.length === 0) {
         setError("No preview rows are ready to push.");
@@ -343,6 +346,16 @@ export default function DropshipPortalCatalog() {
     } finally {
       setPendingListingAction(null);
     }
+  }
+
+  function updateRetailPrice(productVariantId: number, value: string) {
+    setRetailPriceByVariantId((current) => ({
+      ...current,
+      [String(productVariantId)]: value,
+    }));
+    setListingPreview(null);
+    setListingPushResult(null);
+    setMessage("");
   }
 
   return (
@@ -495,6 +508,7 @@ export default function DropshipPortalCatalog() {
           ) : catalogQuery.data?.rows.length ? (
             <CatalogTable
               bulkSelectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
+              retailPriceByVariantId={retailPriceByVariantId}
               pendingSelectionAction={pendingSelectionAction}
               rows={catalogQuery.data.rows}
               selectableRowCount={visibleSelectableRows.length}
@@ -503,6 +517,7 @@ export default function DropshipPortalCatalog() {
               onBulkDeselect={() => replaceSelection("exclude", visibleSelectedRows, "bulk:exclude")}
               onBulkSelect={() => replaceSelection("include", visibleSelectableRows, "bulk:include")}
               onDeselectRow={(row) => replaceSelection("exclude", [row], `variant:${row.productVariantId}:exclude`)}
+              onRetailPriceChange={updateRetailPrice}
               onSelectRow={(row) => replaceSelection("include", [row], `variant:${row.productVariantId}:include`)}
             />
           ) : (
@@ -884,8 +899,10 @@ function CatalogTable({
   onBulkDeselect,
   onBulkSelect,
   onDeselectRow,
+  onRetailPriceChange,
   onSelectRow,
   pendingSelectionAction,
+  retailPriceByVariantId,
   rows,
   selectableRowCount,
   selectedRowCount,
@@ -895,8 +912,10 @@ function CatalogTable({
   onBulkDeselect: () => void;
   onBulkSelect: () => void;
   onDeselectRow: (row: DropshipCatalogRow) => void;
+  onRetailPriceChange: (productVariantId: number, value: string) => void;
   onSelectRow: (row: DropshipCatalogRow) => void;
   pendingSelectionAction: PendingSelectionAction;
+  retailPriceByVariantId: Readonly<Record<string, string>>;
   rows: DropshipCatalogRow[];
   selectableRowCount: number;
   selectedRowCount: number;
@@ -931,76 +950,89 @@ function CatalogTable({
           </Button>
         </div>
       </div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Product</TableHead>
-            <TableHead>Variant</TableHead>
-            <TableHead>Category</TableHead>
-            <TableHead>Quantity</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead className="text-right">Action</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => (
-            <TableRow key={row.productVariantId}>
-              <TableCell>
-                <div className="font-medium">{row.productName}</div>
-                <div className="text-xs text-zinc-500">{row.productSku || "No product SKU"}</div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{row.variantName}</div>
-                <div className="text-xs text-zinc-500">{row.variantSku || `Variant ${row.productVariantId}`}</div>
-              </TableCell>
-              <TableCell>
-                <div>{row.category ? formatStatus(row.category) : "Uncategorized"}</div>
-                {row.productLineNames.length > 0 && (
-                  <div className="text-xs text-zinc-500">{row.productLineNames.join(", ")}</div>
-                )}
-              </TableCell>
-              <TableCell className="font-mono">{row.selectionDecision.marketplaceQuantity}</TableCell>
-              <TableCell>
-                <Badge
-                  variant="outline"
-                  className={row.selectionDecision.selected
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    : "border-zinc-200 bg-zinc-50 text-zinc-600"}
-                >
-                  {row.selectionDecision.selected ? "Selected" : formatStatus(row.selectionDecision.reason)}
-                </Badge>
-              </TableCell>
-              <TableCell className="text-right">
-                {row.selectionDecision.selected ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-9 gap-2"
-                    disabled={pendingSelectionAction !== null}
-                    onClick={() => onDeselectRow(row)}
-                  >
-                    <MinusCircle className="h-4 w-4" />
-                    Remove
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-9 gap-2"
-                    disabled={pendingSelectionAction !== null || !canSelectRow(row)}
-                    onClick={() => onSelectRow(row)}
-                  >
-                    <PlusCircle className="h-4 w-4" />
-                    Select
-                  </Button>
-                )}
-              </TableCell>
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Product</TableHead>
+              <TableHead>Variant</TableHead>
+              <TableHead>Category</TableHead>
+              <TableHead>Quantity</TableHead>
+              <TableHead>Retail price</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-right">Action</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={row.productVariantId}>
+                <TableCell>
+                  <div className="font-medium">{row.productName}</div>
+                  <div className="text-xs text-zinc-500">{row.productSku || "No product SKU"}</div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{row.variantName}</div>
+                  <div className="text-xs text-zinc-500">{row.variantSku || `Variant ${row.productVariantId}`}</div>
+                </TableCell>
+                <TableCell>
+                  <div>{row.category ? formatStatus(row.category) : "Uncategorized"}</div>
+                  {row.productLineNames.length > 0 && (
+                    <div className="text-xs text-zinc-500">{row.productLineNames.join(", ")}</div>
+                  )}
+                </TableCell>
+                <TableCell className="font-mono">{row.selectionDecision.marketplaceQuantity}</TableCell>
+                <TableCell>
+                  <Input
+                    value={retailPriceByVariantId[String(row.productVariantId)] ?? ""}
+                    onChange={(event) => onRetailPriceChange(row.productVariantId, event.target.value)}
+                    className="h-9 min-w-28"
+                    inputMode="decimal"
+                    placeholder="Default"
+                    disabled={!row.selectionDecision.selected}
+                  />
+                </TableCell>
+                <TableCell>
+                  <Badge
+                    variant="outline"
+                    className={row.selectionDecision.selected
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-zinc-200 bg-zinc-50 text-zinc-600"}
+                  >
+                    {row.selectionDecision.selected ? "Selected" : formatStatus(row.selectionDecision.reason)}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-right">
+                  {row.selectionDecision.selected ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 gap-2"
+                      disabled={pendingSelectionAction !== null}
+                      onClick={() => onDeselectRow(row)}
+                    >
+                      <MinusCircle className="h-4 w-4" />
+                      Remove
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 gap-2"
+                      disabled={pendingSelectionAction !== null || !canSelectRow(row)}
+                      onClick={() => onSelectRow(row)}
+                    >
+                      <PlusCircle className="h-4 w-4" />
+                      Select
+                    </Button>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
     </>
   );
 }

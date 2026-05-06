@@ -15,6 +15,7 @@ export const createListingPushJobForMemberInputSchema = createListingPushJobInpu
   requestedBy: true,
 }).extend({
   requestedRetailPriceCents: CentsSchema.optional(),
+  requestedRetailPricesByVariantId: generateVendorListingPreviewInputSchema.shape.requestedRetailPricesByVariantId,
   idempotencyKey: idempotencyKeySchema,
   storeConnectionId: positiveIdSchema,
   productVariantIds: z.array(positiveIdSchema).min(1).max(500),
