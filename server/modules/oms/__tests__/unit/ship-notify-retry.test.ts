@@ -99,6 +99,7 @@ function makeDb(opts: {
 } = {}) {
   const inserts: RecordedInsert[] = [];
   const updates: RecordedUpdate[] = [];
+  const executes: unknown[] = [];
 
   const db: any = {
     insert: vi.fn((table: any) => ({
@@ -117,6 +118,10 @@ function makeDb(opts: {
         }),
       })),
     })),
+    execute: vi.fn(async (query: unknown) => {
+      executes.push(query);
+      return { rows: [] };
+    }),
   };
 
   if (opts.shipStationService !== undefined) {
@@ -129,7 +134,7 @@ function makeDb(opts: {
     db.__ebayWebhookReplay = opts.ebayReplay;
   }
 
-  return { db, inserts, updates };
+  return { db, inserts, updates, executes };
 }
 
 // ─── enqueueShipStationRetry tests ───────────────────────────────────
@@ -271,6 +276,30 @@ describe("dispatchEbayWebhookRetry", () => {
     expect(updates[0]!.set.status).toBe("success");
   });
 
+  it("marks the source inbox row succeeded when a replay retry succeeds", async () => {
+    const reingest = vi.fn(async () => ({ status: "already_existed", omsOrderId: 124 }));
+    const { db, executes } = makeDb({
+      ebayReplay: {
+        omsService: {},
+        ebayApiClient: {},
+        reingestEbayOrder: reingest,
+      },
+    });
+
+    const outcome = await dispatchEbayWebhookRetry(db, {
+      id: 904,
+      provider: "ebay",
+      topic: "ORDER.CREATED",
+      payload: { notification: { data: { orderId: "12-34567-89012" } } },
+      attempts: 0,
+      sourceInboxId: 55,
+    });
+
+    expect(outcome).toBe("success");
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(executes).toHaveLength(1);
+  });
+
   it("keeps the row pending without burning an attempt when boot has not wired eBay replay", async () => {
     const { db, updates } = makeDb({ ebayReplay: null });
 
@@ -312,6 +341,23 @@ describe("dispatchEbayWebhookRetry", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0]!.set.status).toBe("dead");
     expect(updates[0]!.set.lastError).toMatch(/orderId missing/);
+  });
+
+  it("marks the source inbox row dead when replay payload is malformed", async () => {
+    const { db, executes } = makeDb();
+
+    const outcome = await dispatchEbayWebhookRetry(db, {
+      id: 905,
+      provider: "ebay",
+      topic: "ORDER.CREATED",
+      payload: { notification: { data: {} } },
+      attempts: 0,
+      sourceInboxId: 56,
+    });
+
+    expect(outcome).toBe("malformed");
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(executes).toHaveLength(1);
   });
 });
 
