@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Request } from "express";
 import {
+  buildEbayWebhookInboxInput,
   buildShopifyWebhookInboxInput,
   buildWebhookIdempotencyKey,
   markWebhookFailed,
@@ -48,6 +49,42 @@ describe("webhook-inbox.service", () => {
     expect(first.eventId).toMatch(/^payload:/);
     expect(second.eventId).toBe(first.eventId);
     expect(first.idempotencyKey).toBe(second.idempotencyKey);
+  });
+
+  it("builds eBay idempotency from notification id and topic", () => {
+    const input = buildEbayWebhookInboxInput(
+      req({
+        "user-agent": "ebay",
+        "x-ebay-transmission-id": "tx-1",
+      }),
+      {
+        metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+        notification: {
+          notificationId: "note-1",
+          data: { orderId: "12-34567-89012" },
+        },
+      },
+    );
+
+    expect(input.provider).toBe("ebay");
+    expect(input.topic).toBe("MARKETPLACE_ACCOUNT_DELETION");
+    expect(input.eventId).toBe("note-1");
+    expect(input.idempotencyKey).toBe("ebay:MARKETPLACE_ACCOUNT_DELETION:ebay:note-1");
+  });
+
+  it("falls back to eBay topic and order id when notification id is absent", () => {
+    const input = buildEbayWebhookInboxInput(
+      req({}),
+      {
+        metadata: { topic: "ORDER.CREATED" },
+        notification: {
+          data: { orderId: "12-34567-89012" },
+        },
+      },
+    );
+
+    expect(input.eventId).toBe("ORDER.CREATED:12-34567-89012");
+    expect(input.idempotencyKey).toBe("ebay:ORDER.CREATED:ebay:ORDER.CREATED:12-34567-89012");
   });
 
   it("records a new inbox row and returns inserted=true", async () => {

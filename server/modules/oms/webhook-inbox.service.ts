@@ -293,3 +293,33 @@ export async function enqueueWebhookInboxReplay(
     previousStatus: inbox.status,
   };
 }
+
+export function buildEbayWebhookInboxInput(
+  req: Request,
+  payload: any,
+): WebhookInboxInput {
+  const topic = String(payload?.metadata?.topic || "unknown");
+  const sourceDomain = "ebay";
+  const notificationId = String(payload?.notification?.notificationId || "");
+  const orderId = String(payload?.notification?.data?.orderId || "");
+  const eventId = notificationId || (orderId ? `${topic}:${orderId}` : `payload:${sha256(stableJson(payload))}`);
+
+  return {
+    provider: "ebay",
+    topic,
+    eventId,
+    idempotencyKey: buildWebhookIdempotencyKey({
+      provider: "ebay",
+      topic,
+      sourceDomain,
+      eventId,
+    }),
+    sourceDomain,
+    payload,
+    headers: {
+      "user-agent": headerValue(req, "user-agent") || "",
+      "x-ebay-signature": headerValue(req, "x-ebay-signature") || "",
+      "x-ebay-transmission-id": headerValue(req, "x-ebay-transmission-id") || "",
+    },
+  };
+}
