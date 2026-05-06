@@ -3,12 +3,14 @@ import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueDelayedTrackingPush,
   enqueueOmsWmsSyncRetry,
+  enqueueWmsShipmentCreateRetry,
 } from "./webhook-retry.worker";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
 const REMEDIABLE_CODES = new Set([
   "OMS_PAID_WITHOUT_WMS",
+  "WMS_READY_WITHOUT_SHIPMENT",
   "OMS_FINAL_WMS_ACTIVE",
   "WMS_FINAL_OMS_OPEN",
   "SHIPMENT_SHIPPED_OMS_OPEN",
@@ -382,6 +384,63 @@ export async function remediateOmsFlowIssue(
       changed: true,
       omsOrderId,
       wmsOrderId: null,
+      shipmentId: null,
+      retryQueueId: null,
+    };
+  }
+
+  if (input.code === "WMS_READY_WITHOUT_SHIPMENT") {
+    const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    const result = await db.execute(sql`
+      SELECT wo.id,
+             NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+      FROM wms.orders wo
+      WHERE wo.id = ${wmsOrderId}
+        AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+        AND NOT EXISTS (
+          SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
+        )
+      LIMIT 1
+    `);
+
+    const row = firstRow<{ id: number; oms_order_id: string | null }>(result);
+    if (!row) {
+      return {
+        code: input.code,
+        action: "shipment_create_not_queued",
+        changed: false,
+        omsOrderId: null,
+        wmsOrderId,
+        shipmentId: null,
+        retryQueueId: null,
+      };
+    }
+
+    await enqueueWmsShipmentCreateRetry(
+      db,
+      wmsOrderId,
+      new Error(`manual remediation by ${input.operator || "unknown"}`),
+    );
+
+    const omsOrderId = Number(row.oms_order_id);
+    if (Number.isInteger(omsOrderId) && omsOrderId > 0) {
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+          NOW()
+        )
+      `);
+    }
+
+    return {
+      code: input.code,
+      action: "queued_wms_shipment_create",
+      changed: true,
+      omsOrderId: Number.isInteger(omsOrderId) && omsOrderId > 0 ? omsOrderId : null,
+      wmsOrderId,
       shipmentId: null,
       retryQueueId: null,
     };

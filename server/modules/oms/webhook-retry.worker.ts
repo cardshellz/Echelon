@@ -1,6 +1,7 @@
 import { webhookRetryQueue } from "@shared/schema";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
+import { createShipmentForOrder } from "../wms/create-shipment";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
@@ -240,6 +241,41 @@ export async function enqueueOmsWmsSyncRetry(
   });
 }
 
+export async function enqueueWmsShipmentCreateRetry(
+  dbArg: any,
+  wmsOrderId: number,
+  cause?: unknown,
+): Promise<void> {
+  if (
+    typeof wmsOrderId !== "number" ||
+    !Number.isInteger(wmsOrderId) ||
+    wmsOrderId <= 0
+  ) {
+    throw new Error(
+      `enqueueWmsShipmentCreateRetry: wmsOrderId must be a positive integer (got ${wmsOrderId})`,
+    );
+  }
+
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  await dbArg.insert(webhookRetryQueue).values({
+    provider: "internal",
+    topic: "wms_shipment_create",
+    payload: { wmsOrderId },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
 /**
  * Resolve the ShipStation service the worker should invoke.
  *
@@ -368,6 +404,96 @@ export async function dispatchOmsWmsSyncRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+export async function dispatchWmsShipmentCreateRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as { wmsOrderId?: number } | null;
+  const wmsOrderId = payload?.wmsOrderId;
+
+  if (
+    typeof wmsOrderId !== "number" ||
+    !Number.isInteger(wmsOrderId) ||
+    wmsOrderId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item,
+      "malformed payload: wmsOrderId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed wms_shipment_create payload)`,
+    );
+    return "malformed";
+  }
+
+  try {
+    const orderResult = await dbArg.execute(sql`
+      SELECT wo.id, wo.channel_id
+      FROM wms.orders wo
+      WHERE wo.id = ${wmsOrderId}
+        AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipments os
+          WHERE os.order_id = wo.id
+        )
+      LIMIT 1
+    `);
+    const orderRow = Array.isArray(orderResult?.rows) ? orderResult.rows[0] : null;
+    if (!orderRow) {
+      await markRowSuccess(dbArg, item);
+      console.log(
+        `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) no longer needs remediation`,
+      );
+      return "success";
+    }
+
+    const itemResult = await dbArg.execute(sql`
+      SELECT id,
+             quantity,
+             product_id AS product_variant_id
+      FROM wms.order_items
+      WHERE order_id = ${wmsOrderId}
+    `);
+    const shipmentItems = (Array.isArray(itemResult?.rows) ? itemResult.rows : []).map((row: any) => ({
+      id: Number(row.id),
+      quantity: Number(row.quantity ?? 0),
+      productVariantId:
+        row.product_variant_id == null ? null : Number(row.product_variant_id),
+    }));
+
+    const created = await createShipmentForOrder(
+      dbArg,
+      wmsOrderId,
+      orderRow.channel_id == null ? null : Number(orderRow.channel_id),
+      shipmentItems,
+    );
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}, shipment=${created.shipmentId}) succeeded`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "wms_shipment_create", orderId: wmsOrderId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -889,6 +1015,20 @@ async function processPendingWebhooks() {
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} oms_wms_sync dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === "wms_shipment_create"
+    ) {
+      try {
+        await dispatchWmsShipmentCreateRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} wms_shipment_create dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
