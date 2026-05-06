@@ -17,6 +17,31 @@ export type DropshipNotificationChannel = z.infer<typeof dropshipNotificationCha
 export const dropshipNotificationStatusSchema = z.enum(["pending", "delivered", "failed"]);
 export type DropshipNotificationStatus = z.infer<typeof dropshipNotificationStatusSchema>;
 
+export interface DropshipLaunchNotificationPreferenceDefinition {
+  eventType: string;
+  critical: boolean;
+}
+
+export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificationPreferenceDefinition[] = [
+  { eventType: "dropship_auto_reload_failed", critical: true },
+  { eventType: "dropship_entitlement_blocked", critical: true },
+  { eventType: "dropship_listing_push_failed", critical: true },
+  { eventType: "dropship_order_accepted", critical: false },
+  { eventType: "dropship_order_intake_rejected", critical: true },
+  { eventType: "dropship_order_payment_hold", critical: true },
+  { eventType: "dropship_order_payment_hold_expired", critical: true },
+  { eventType: "dropship_order_payment_hold_expiring", critical: true },
+  { eventType: "dropship_order_processing_failed", critical: true },
+  { eventType: "dropship_order_processing_retrying", critical: false },
+  { eventType: "dropship_order_received", critical: false },
+  { eventType: "dropship_order_rejected", critical: true },
+  { eventType: "dropship_return_credit_posted", critical: true },
+  { eventType: "dropship_rma_opened", critical: true },
+  { eventType: "dropship_store_disconnected", critical: true },
+  { eventType: "dropship_tracking_pushed", critical: false },
+  { eventType: "dropship_wallet_funding_failed", critical: true },
+];
+
 const sendDropshipNotificationInputSchema = z.object({
   vendorId: positiveIdSchema,
   eventType: eventTypeSchema,
@@ -155,9 +180,11 @@ export class DropshipNotificationService {
 
   async send(input: unknown): Promise<DropshipNotificationSendResult> {
     const parsed = parseNotificationInput(sendDropshipNotificationInputSchema, input, "DROPSHIP_NOTIFICATION_INVALID_SEND");
+    const critical = normalizeNotificationCriticality(parsed.eventType, parsed.critical);
     const normalized = {
       ...parsed,
-      channels: normalizeNotificationChannels(parsed.channels, parsed.critical),
+      critical,
+      channels: normalizeNotificationChannels(parsed.channels, critical),
     };
     const result = await this.deps.repository.send({
       ...normalized,
@@ -204,7 +231,12 @@ export class DropshipNotificationService {
 
   async listPreferencesForMember(memberId: string): Promise<DropshipNotificationPreferenceRecord[]> {
     const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
-    return this.deps.repository.listPreferences(vendor.vendor.vendorId);
+    const preferences = await this.deps.repository.listPreferences(vendor.vendor.vendorId);
+    return mergeDropshipLaunchNotificationPreferences(
+      vendor.vendor.vendorId,
+      preferences,
+      this.deps.clock.now(),
+    );
   }
 
   async updatePreferenceForMember(
@@ -237,7 +269,8 @@ export class DropshipNotificationService {
         },
       );
     }
-    if (parsed.critical === true && (parsed.emailEnabled === false || parsed.inAppEnabled === false)) {
+    const critical = normalizeNotificationCriticality(parsed.eventType, parsed.critical ?? false);
+    if (critical && (parsed.emailEnabled === false || parsed.inAppEnabled === false)) {
       throw new DropshipError(
         "DROPSHIP_NOTIFICATION_CRITICAL_MUTE_REJECTED",
         "Critical dropship notifications must keep email and in-app delivery enabled.",
@@ -246,6 +279,7 @@ export class DropshipNotificationService {
     }
     const preference = await this.deps.repository.upsertPreference({
       ...parsed,
+      critical,
       now: this.deps.clock.now(),
     });
     this.deps.logger.info({
@@ -343,6 +377,35 @@ export function hashDropshipNotificationSend(
   })).digest("hex");
 }
 
+export function mergeDropshipLaunchNotificationPreferences(
+  vendorId: number,
+  savedPreferences: DropshipNotificationPreferenceRecord[],
+  now: Date,
+): DropshipNotificationPreferenceRecord[] {
+  const savedByEventType = new Map(savedPreferences.map((preference) => [preference.eventType, preference]));
+  const defaults = DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.map((definition, index) => {
+    const saved = savedByEventType.get(definition.eventType);
+    if (saved) {
+      return normalizeSavedLaunchPreference(saved, definition);
+    }
+    return makeDefaultLaunchNotificationPreference({
+      vendorId,
+      definition,
+      notificationPreferenceId: -(index + 1),
+      now,
+    });
+  });
+  const defaultEventTypes = new Set(DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.map((definition) => definition.eventType));
+  const custom = savedPreferences.filter((preference) => !defaultEventTypes.has(preference.eventType));
+  return [...defaults, ...custom].sort((left, right) => left.eventType.localeCompare(right.eventType));
+}
+
+export function isDropshipCriticalLaunchNotificationEvent(eventType: string): boolean {
+  return DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.some(
+    (definition) => definition.eventType === eventType && definition.critical,
+  );
+}
+
 export function makeDropshipNotificationLogger(): DropshipLogger {
   return {
     info: (event) => logDropshipNotificationEvent("info", event),
@@ -366,6 +429,45 @@ function normalizeNotificationChannels(
     if (!normalized.includes("in_app")) normalized.push("in_app");
   }
   return normalized.sort();
+}
+
+function normalizeNotificationCriticality(eventType: string, requestedCritical: boolean): boolean {
+  return requestedCritical || isDropshipCriticalLaunchNotificationEvent(eventType);
+}
+
+function normalizeSavedLaunchPreference(
+  saved: DropshipNotificationPreferenceRecord,
+  definition: DropshipLaunchNotificationPreferenceDefinition,
+): DropshipNotificationPreferenceRecord {
+  if (!definition.critical) {
+    return saved;
+  }
+  return {
+    ...saved,
+    critical: true,
+    emailEnabled: true,
+    inAppEnabled: true,
+  };
+}
+
+function makeDefaultLaunchNotificationPreference(input: {
+  vendorId: number;
+  definition: DropshipLaunchNotificationPreferenceDefinition;
+  notificationPreferenceId: number;
+  now: Date;
+}): DropshipNotificationPreferenceRecord {
+  return {
+    notificationPreferenceId: input.notificationPreferenceId,
+    vendorId: input.vendorId,
+    eventType: input.definition.eventType,
+    critical: input.definition.critical,
+    emailEnabled: true,
+    inAppEnabled: true,
+    smsEnabled: false,
+    webhookEnabled: false,
+    createdAt: input.now,
+    updatedAt: input.now,
+  };
 }
 
 function parseNotificationInput<T>(

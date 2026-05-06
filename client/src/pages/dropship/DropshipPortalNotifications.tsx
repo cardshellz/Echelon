@@ -39,7 +39,7 @@ interface NotificationPreferenceRow {
   smsEnabled: boolean;
   webhookEnabled: boolean;
   updatedAt: string | null;
-  source: "saved" | "recent";
+  source: "saved" | "default" | "recent";
   recentCount: number;
 }
 
@@ -426,7 +426,7 @@ function NotificationPreferencesPanel({
                       <Badge variant="outline" className="border-rose-200 bg-rose-50 text-rose-800">Critical</Badge>
                     )}
                     <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
-                      {row.source === "saved" ? "Saved" : "Default"}
+                      {preferenceSourceLabel(row.source)}
                     </Badge>
                   </div>
                   <p className="mt-1 text-sm text-zinc-500">
@@ -490,6 +490,12 @@ function PreferenceSwitch({
   );
 }
 
+function preferenceSourceLabel(source: NotificationPreferenceRow["source"]): string {
+  if (source === "saved") return "Saved";
+  if (source === "default") return "Launch default";
+  return "Default";
+}
+
 function SensitiveActionVerificationPanel({
   onVerificationCodeChange,
   pendingPreferenceAction,
@@ -545,8 +551,8 @@ function buildPreferenceRows(
       inAppEnabled: preference.inAppEnabled,
       smsEnabled: preference.smsEnabled,
       webhookEnabled: preference.webhookEnabled,
-      updatedAt: preference.updatedAt,
-      source: "saved",
+      updatedAt: preference.notificationPreferenceId > 0 ? preference.updatedAt : null,
+      source: preference.notificationPreferenceId > 0 ? "saved" : "default",
       recentCount: recentCounts[preference.eventType] ?? 0,
     });
   }
