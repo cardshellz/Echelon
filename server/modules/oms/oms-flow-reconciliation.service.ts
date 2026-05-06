@@ -15,6 +15,7 @@ const REMEDIABLE_CODES = new Set([
   "WMS_FINAL_OMS_OPEN",
   "SHIPMENT_SHIPPED_OMS_OPEN",
   "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+  "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
 
@@ -624,7 +625,9 @@ export async function remediateOmsFlowIssue(
   }
 
   const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
-  const shipmentId = positiveInt(input.shipmentId, "shipmentId");
+  const shipmentId = input.shipmentId == null
+    ? undefined
+    : positiveInt(input.shipmentId, "shipmentId");
   await enqueueDelayedTrackingPush(db, omsOrderId, shipmentId);
 
   return {
@@ -633,7 +636,7 @@ export async function remediateOmsFlowIssue(
     changed: true,
     omsOrderId,
     wmsOrderId: input.wmsOrderId ? Number(input.wmsOrderId) : null,
-    shipmentId,
+    shipmentId: shipmentId ?? null,
     retryQueueId: null,
   };
 }

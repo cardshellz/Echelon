@@ -337,6 +337,29 @@ export default function OmsOrders() {
     },
   });
 
+  const requeueRetryMutation = useMutation({
+    mutationFn: async (retryQueueId: number) => {
+      const res = await fetch(`/api/oms/ops/webhook-retry/${retryQueueId}/requeue`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to requeue retry" }));
+        throw new Error(err.error || "Failed to requeue retry");
+      }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      toast({
+        title: "Retry requeued",
+        description: `${result.provider}/${result.topic} #${result.retryQueueId}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/ops/health"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Requeue failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const remediateFlowMutation = useMutation({
     mutationFn: async ({ code, row }: { code: string; row: any }) => {
       const res = await fetch("/api/oms/ops/reconciliation/remediate", {
@@ -489,7 +512,8 @@ export default function OmsOrders() {
                       issue.code === "OMS_FINAL_WMS_ACTIVE" ||
                       issue.code === "WMS_FINAL_OMS_OPEN" ||
                       issue.code === "SHIPMENT_SHIPPED_OMS_OPEN" ||
-                      issue.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"
+                      issue.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED" ||
+                      issue.code === "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"
                     ) ? (
                       <div className="mt-3 space-y-2">
                         {issue.sample.slice(0, 3).map((row: any) => (
@@ -514,6 +538,31 @@ export default function OmsOrders() {
                             >
                               <RotateCcw className="h-3.5 w-3.5" />
                               Fix
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : issue.sample.length > 0 && issue.code === "WEBHOOK_RETRY_DEAD" ? (
+                      <div className="mt-3 space-y-2">
+                        {issue.sample.slice(0, 3).map((row: any) => (
+                          <div key={row.id} className="flex items-center justify-between gap-3 rounded bg-muted p-2 text-xs">
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">
+                                #{row.id} {row.provider}/{row.topic}
+                              </div>
+                              <div className="truncate text-muted-foreground">
+                                attempts {row.attempts ?? 0} | {row.last_error || "dead-lettered"}
+                              </div>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 shrink-0 gap-1 px-2"
+                              disabled={requeueRetryMutation.isPending}
+                              onClick={() => requeueRetryMutation.mutate(Number(row.id))}
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              Requeue
                             </Button>
                           </div>
                         ))}

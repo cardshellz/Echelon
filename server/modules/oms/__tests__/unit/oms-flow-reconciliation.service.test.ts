@@ -195,6 +195,29 @@ describe("oms-flow-reconciliation.service", () => {
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
+  it("queues OMS-level shipped tracking push remediation through the retry queue", async () => {
+    const db = {
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => undefined),
+      })),
+    };
+
+    const result = await remediateOmsFlowIssue(db, {
+      code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+      omsOrderId: 10,
+      operator: "ops",
+    });
+
+    expect(result).toMatchObject({
+      action: "queued_tracking_push",
+      changed: true,
+      omsOrderId: 10,
+      wmsOrderId: null,
+      shipmentId: null,
+    });
+    expect(db.insert).toHaveBeenCalledTimes(1);
+  });
+
   it("queues OMS to WMS sync remediation through the retry queue", async () => {
     const inserts: unknown[] = [];
     const db = {
