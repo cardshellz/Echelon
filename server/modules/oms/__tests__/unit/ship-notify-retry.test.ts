@@ -51,7 +51,9 @@ vi.mock("../../../../db", () => ({
 
 import {
   enqueueShipStationRetry,
+  enqueueOmsWmsSyncRetry,
   dispatchShipStationRetry,
+  dispatchOmsWmsSyncRetry,
   recordRetryFailure,
   enqueueShopifyFulfillmentRetry,
   enqueueDelayedTrackingPush,
@@ -94,6 +96,11 @@ function makeDb(opts: {
         ) => Promise<{ status: string; omsOrderId: number }>;
       }
     | null;
+  wmsSync?:
+    | {
+        syncOmsOrderToWms: (omsOrderId: number) => Promise<number | null>;
+      }
+    | null;
   insertThrows?: Error;
   updateThrows?: Error;
 } = {}) {
@@ -132,6 +139,9 @@ function makeDb(opts: {
   }
   if (opts.ebayReplay !== undefined) {
     db.__ebayWebhookReplay = opts.ebayReplay;
+  }
+  if (opts.wmsSync !== undefined) {
+    db.__wmsSyncService = opts.wmsSync;
   }
 
   return { db, inserts, updates, executes };
@@ -212,6 +222,39 @@ describe("enqueueShipStationRetry :: DB failure", () => {
 });
 
 // ─── dispatchShipStationRetry tests ──────────────────────────────────
+
+describe("enqueueOmsWmsSyncRetry", () => {
+  it("inserts an immediately due internal OMS/WMS sync row", async () => {
+    const { db, inserts } = makeDb();
+    const before = Date.now();
+
+    await enqueueOmsWmsSyncRetry(db, 10, "manual fix");
+
+    const after = Date.now();
+    expect(inserts).toHaveLength(1);
+    const row = inserts[0]!.values;
+    expect(row.provider).toBe("internal");
+    expect(row.topic).toBe("oms_wms_sync");
+    expect(row.payload).toEqual({ omsOrderId: 10 });
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBe("manual fix");
+    expect(row.nextRetryAt).toBeInstanceOf(Date);
+    const nextMs = (row.nextRetryAt as Date).getTime();
+    expect(nextMs).toBeGreaterThanOrEqual(before - 50);
+    expect(nextMs).toBeLessThanOrEqual(after + 50);
+  });
+
+  it("rejects invalid OMS order ids", async () => {
+    const { db, inserts } = makeDb();
+
+    await expect(enqueueOmsWmsSyncRetry(db, 0, "bad")).rejects.toThrow(
+      /positive integer/,
+    );
+
+    expect(inserts).toHaveLength(0);
+  });
+});
 
 describe("dispatchShipStationRetry :: happy path", () => {
   beforeEach(() => {
@@ -358,6 +401,71 @@ describe("dispatchEbayWebhookRetry", () => {
     expect(outcome).toBe("malformed");
     expect(db.execute).toHaveBeenCalledTimes(1);
     expect(executes).toHaveLength(1);
+  });
+});
+
+describe("dispatchOmsWmsSyncRetry", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("calls syncOmsOrderToWms and marks the row successful", async () => {
+    const sync = vi.fn(async () => 200);
+    const { db, updates } = makeDb({ wmsSync: { syncOmsOrderToWms: sync } });
+
+    const outcome = await dispatchOmsWmsSyncRetry(db, {
+      id: 910,
+      provider: "internal",
+      topic: "oms_wms_sync",
+      payload: { omsOrderId: 10 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(sync).toHaveBeenCalledWith(10);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("keeps pending without incrementing attempts when WMS sync is not wired", async () => {
+    const { db, updates } = makeDb({ wmsSync: null });
+
+    const outcome = await dispatchOmsWmsSyncRetry(db, {
+      id: 911,
+      provider: "internal",
+      topic: "oms_wms_sync",
+      payload: { omsOrderId: 10 },
+      attempts: 3,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.lastError).toMatch(/WMS sync service not available/);
+    expect(updates[0]!.set.attempts).toBeUndefined();
+    expect(updates[0]!.set.status).toBeUndefined();
+  });
+
+  it("dead-letters malformed payloads immediately", async () => {
+    const sync = vi.fn();
+    const { db, updates } = makeDb({ wmsSync: { syncOmsOrderToWms: sync } });
+
+    const outcome = await dispatchOmsWmsSyncRetry(db, {
+      id: 912,
+      provider: "internal",
+      topic: "oms_wms_sync",
+      payload: { omsOrderId: "10" as any },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("malformed");
+    expect(sync).not.toHaveBeenCalled();
+    expect(updates[0]!.set.status).toBe("dead");
+    expect(updates[0]!.set.lastError).toMatch(/omsOrderId missing or invalid/);
   });
 });
 

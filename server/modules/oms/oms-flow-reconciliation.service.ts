@@ -1,10 +1,14 @@
 import { sql } from "drizzle-orm";
 import type { OmsOpsIssue } from "./ops-health.service";
-import { enqueueDelayedTrackingPush } from "./webhook-retry.worker";
+import {
+  enqueueDelayedTrackingPush,
+  enqueueOmsWmsSyncRetry,
+} from "./webhook-retry.worker";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
 const REMEDIABLE_CODES = new Set([
+  "OMS_PAID_WITHOUT_WMS",
   "OMS_FINAL_WMS_ACTIVE",
   "WMS_FINAL_OMS_OPEN",
   "SHIPMENT_SHIPPED_OMS_OPEN",
@@ -325,6 +329,62 @@ export async function remediateOmsFlowIssue(
 ): Promise<OmsFlowRemediationResult> {
   if (!REMEDIABLE_CODES.has(input.code)) {
     throw new Error(`Unsupported OMS flow remediation code: ${input.code}`);
+  }
+
+  if (input.code === "OMS_PAID_WITHOUT_WMS") {
+    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+    const result = await db.execute(sql`
+      SELECT oo.id
+      FROM oms.oms_orders oo
+      WHERE oo.id = ${omsOrderId}
+        AND oo.status NOT IN ('cancelled', 'shipped')
+        AND oo.financial_status IN ('paid', 'partially_paid')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.orders wo
+          WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+             OR (wo.source_table_id = oo.id::text)
+        )
+      LIMIT 1
+    `);
+
+    if (rows(result).length === 0) {
+      return {
+        code: input.code,
+        action: "wms_sync_not_queued",
+        changed: false,
+        omsOrderId,
+        wmsOrderId: null,
+        shipmentId: null,
+        retryQueueId: null,
+      };
+    }
+
+    await enqueueOmsWmsSyncRetry(
+      db,
+      omsOrderId,
+      new Error(`manual remediation by ${input.operator || "unknown"}`),
+    );
+
+    await db.execute(sql`
+      INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+      VALUES (
+        ${omsOrderId},
+        'flow_reconciliation_remediated',
+        ${JSON.stringify({ code: input.code, operator: input.operator })}::jsonb,
+        NOW()
+      )
+    `);
+
+    return {
+      code: input.code,
+      action: "queued_oms_wms_sync",
+      changed: true,
+      omsOrderId,
+      wmsOrderId: null,
+      shipmentId: null,
+      retryQueueId: null,
+    };
   }
 
   if (input.code === "OMS_FINAL_WMS_ACTIVE") {

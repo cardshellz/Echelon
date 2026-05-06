@@ -195,6 +195,39 @@ describe("oms-flow-reconciliation.service", () => {
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
+  it("queues OMS to WMS sync remediation through the retry queue", async () => {
+    const inserts: unknown[] = [];
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(sampleRows([{ id: 10 }]))
+        .mockResolvedValueOnce(sampleRows([])),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (row: unknown) => {
+          inserts.push(row);
+          return undefined;
+        }),
+      })),
+    };
+
+    const result = await remediateOmsFlowIssue(db, {
+      code: "OMS_PAID_WITHOUT_WMS",
+      omsOrderId: 10,
+      operator: "ops",
+    });
+
+    expect(result).toMatchObject({
+      action: "queued_oms_wms_sync",
+      changed: true,
+      omsOrderId: 10,
+      wmsOrderId: null,
+    });
+    expect(inserts).toHaveLength(1);
+    expect((inserts[0] as any).topic).toBe("oms_wms_sync");
+    expect((inserts[0] as any).payload).toEqual({ omsOrderId: 10 });
+    expect(db.execute).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects unsupported remediation codes", async () => {
     await expect(remediateOmsFlowIssue({ execute: vi.fn() }, {
       code: "NOPE",

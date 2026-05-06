@@ -344,7 +344,7 @@ export default function OmsOrders() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           code,
-          omsOrderId: row.oms_order_id,
+          omsOrderId: row.oms_order_id ?? row.id,
           wmsOrderId: row.wms_order_id,
           shipmentId: row.shipment_id,
         }),
@@ -484,6 +484,7 @@ export default function OmsOrders() {
                         ))}
                       </div>
                     ) : issue.sample.length > 0 && (
+                      issue.code === "OMS_PAID_WITHOUT_WMS" ||
                       issue.code === "OMS_FINAL_WMS_ACTIVE" ||
                       issue.code === "WMS_FINAL_OMS_OPEN" ||
                       issue.code === "SHIPMENT_SHIPPED_OMS_OPEN" ||
