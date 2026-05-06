@@ -132,6 +132,14 @@ export async function enqueueShipStationRetry(
     throw new Error("enqueueShipStationRetry: payload.resource_url required");
   }
 
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "shipstation",
+    topic: "SHIP_NOTIFY",
+    scope: sql`payload->>'resource_url' = ${payload.resource_url}`,
+  })) {
+    return;
+  }
+
   await dbArg.insert(webhookRetryQueue).values({
     provider: "shipstation",
     topic: "SHIP_NOTIFY",
@@ -220,6 +228,14 @@ export async function enqueueShopifyFulfillmentRetry(
           ? ""
           : String(cause);
 
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "shopify_fulfillment_push",
+    scope: sql`payload->>'shipmentId' = ${String(shipmentId)}`,
+  })) {
+    return;
+  }
+
   await dbArg.insert(webhookRetryQueue).values({
     provider: "internal",
     topic: "shopify_fulfillment_push",
@@ -264,22 +280,13 @@ export async function enqueueDelayedTrackingPush(
     );
   }
 
-  const existing: any = await dbArg.execute(sql`
-    SELECT id
-    FROM oms.webhook_retry_queue
-    WHERE provider = 'internal'
-      AND topic = 'delayed_tracking_push'
-      AND status = 'pending'
-      AND (
-        ${
-          shipmentId !== undefined
-            ? sql`payload->>'shipmentId' = ${String(shipmentId)}`
-            : sql`payload->>'orderId' = ${String(orderId)} AND payload->>'shipmentId' IS NULL`
-        }
-      )
-    LIMIT 1
-  `);
-  if (existing?.rows?.[0]) {
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "delayed_tracking_push",
+    scope: shipmentId !== undefined
+      ? sql`payload->>'shipmentId' = ${String(shipmentId)}`
+      : sql`payload->>'orderId' = ${String(orderId)} AND payload->>'shipmentId' IS NULL`,
+  })) {
     return;
   }
 
@@ -318,6 +325,14 @@ export async function enqueueOmsWmsSyncRetry(
           ? ""
           : String(cause);
 
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "oms_wms_sync",
+    scope: sql`payload->>'omsOrderId' = ${String(omsOrderId)}`,
+  })) {
+    return;
+  }
+
   await dbArg.insert(webhookRetryQueue).values({
     provider: "internal",
     topic: "oms_wms_sync",
@@ -353,6 +368,14 @@ export async function enqueueWmsShipmentCreateRetry(
           ? ""
           : String(cause);
 
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "wms_shipment_create",
+    scope: sql`payload->>'wmsOrderId' = ${String(wmsOrderId)}`,
+  })) {
+    return;
+  }
+
   await dbArg.insert(webhookRetryQueue).values({
     provider: "internal",
     topic: "wms_shipment_create",
@@ -362,6 +385,26 @@ export async function enqueueWmsShipmentCreateRetry(
     lastError: message || null,
     nextRetryAt: new Date(),
   });
+}
+
+async function hasPendingRetryForScope(
+  dbArg: any,
+  input: {
+    provider: string;
+    topic: string;
+    scope: any;
+  },
+): Promise<boolean> {
+  const existing: any = await dbArg.execute(sql`
+    SELECT id
+    FROM oms.webhook_retry_queue
+    WHERE provider = ${input.provider}
+      AND topic = ${input.topic}
+      AND status = 'pending'
+      AND ${input.scope}
+    LIMIT 1
+  `);
+  return Boolean(existing?.rows?.[0]);
 }
 
 export interface WebhookRetryRequeueResult {
