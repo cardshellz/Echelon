@@ -86,7 +86,17 @@ export interface LineItemData {
 export interface OmsOrderWithLines extends OmsOrder {
   lines: OmsOrderLine[];
   events?: Array<{ id: number; eventType: string; details: unknown; createdAt: Date }>;
+  flowHistory?: OmsOrderFlowHistoryEntry[];
   channelName?: string;
+}
+
+export interface OmsOrderFlowHistoryEntry {
+  id: string;
+  source: "webhook_inbox" | "webhook_retry" | "reconciliation" | "alert" | "event";
+  status: string;
+  label: string;
+  details: unknown;
+  createdAt: Date | string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +469,116 @@ export function createOmsService(db: any, reservationService?: any) {
       .where(eq(channels.id, order.channelId))
       .limit(1);
 
-    return { ...order, lines, events, channelName: channel?.name };
+    const flowHistory = await getOrderFlowHistory(order);
+
+    return { ...order, lines, events, flowHistory, channelName: channel?.name };
+  }
+
+  async function getOrderFlowHistory(order: OmsOrder): Promise<OmsOrderFlowHistoryEntry[]> {
+    const externalOrderIds = [
+      order.externalOrderId,
+      order.externalOrderNumber,
+      order.id != null ? String(order.id) : null,
+    ].filter((value): value is string => Boolean(value));
+
+    const [webhooks, retries, flowEvents] = await Promise.all([
+      db.execute(sql`
+        SELECT id, provider, topic, event_id, status, attempts, last_error,
+               first_received_at, last_attempt_at, processed_at, updated_at
+        FROM oms.webhook_inbox
+        WHERE (
+             payload->>'id' = ANY(${externalOrderIds})
+          OR payload->>'order_id' = ANY(${externalOrderIds})
+          OR payload->>'admin_graphql_api_id' = ANY(${externalOrderIds})
+          OR payload->>'name' = ANY(${externalOrderIds})
+        )
+        ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at, updated_at) DESC NULLS LAST
+        LIMIT 20
+      `),
+      db.execute(sql`
+        SELECT id, provider, topic, attempts, status, last_error,
+               next_retry_at, created_at, updated_at
+        FROM oms.webhook_retry_queue
+        WHERE (
+             payload->>'id' = ANY(${externalOrderIds})
+          OR payload->>'order_id' = ANY(${externalOrderIds})
+          OR payload->>'admin_graphql_api_id' = ANY(${externalOrderIds})
+          OR payload->>'name' = ANY(${externalOrderIds})
+          OR payload->>'orderId' = ${String(order.id)}
+        )
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT 20
+      `),
+      db.execute(sql`
+        SELECT id, event_type, details, created_at
+        FROM oms.oms_order_events
+        WHERE order_id = ${order.id}
+          AND event_type IN (
+            'flow_reconciliation_remediated',
+            'tracking_push_failed',
+            'shopify_fulfillment_push_failed',
+            'shopify_fulfillment_pushed',
+            'tracking_pushed'
+          )
+        ORDER BY created_at DESC
+        LIMIT 20
+      `),
+    ]);
+
+    const entries: OmsOrderFlowHistoryEntry[] = [];
+
+    for (const row of Array.isArray(webhooks?.rows) ? webhooks.rows : []) {
+      entries.push({
+        id: `webhook_inbox:${row.id}`,
+        source: "webhook_inbox",
+        status: row.status,
+        label: `${row.provider}/${row.topic}`,
+        details: {
+          eventId: row.event_id,
+          attempts: row.attempts,
+          lastError: row.last_error,
+        },
+        createdAt: row.processed_at ?? row.last_attempt_at ?? row.first_received_at ?? row.updated_at ?? null,
+      });
+    }
+
+    for (const row of Array.isArray(retries?.rows) ? retries.rows : []) {
+      entries.push({
+        id: `webhook_retry:${row.id}`,
+        source: "webhook_retry",
+        status: row.status,
+        label: `${row.provider}/${row.topic}`,
+        details: {
+          attempts: row.attempts,
+          lastError: row.last_error,
+          nextRetryAt: row.next_retry_at,
+        },
+        createdAt: row.updated_at ?? row.created_at ?? null,
+      });
+    }
+
+    for (const row of Array.isArray(flowEvents?.rows) ? flowEvents.rows : []) {
+      const source =
+        row.event_type === "flow_reconciliation_remediated"
+          ? "reconciliation"
+          : row.event_type.includes("failed")
+            ? "alert"
+            : "event";
+      entries.push({
+        id: `event:${row.id}`,
+        source,
+        status: row.event_type,
+        label: row.event_type,
+        details: row.details,
+        createdAt: row.created_at ?? null,
+      });
+    }
+
+    return entries.sort((a, b) => {
+      const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return bTime - aTime;
+    });
   }
 
   /**

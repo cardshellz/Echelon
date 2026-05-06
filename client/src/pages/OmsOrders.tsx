@@ -71,6 +71,15 @@ interface OmsOrderEvent {
   createdAt: string;
 }
 
+interface OmsOrderFlowHistoryEntry {
+  id: string;
+  source: "webhook_inbox" | "webhook_retry" | "reconciliation" | "alert" | "event";
+  status: string;
+  label: string;
+  details: any;
+  createdAt: string | null;
+}
+
 interface OmsOrder {
   id: number;
   channelId: number;
@@ -99,6 +108,7 @@ interface OmsOrder {
   createdAt: string;
   lines: OmsOrderLine[];
   events?: OmsOrderEvent[];
+  flowHistory?: OmsOrderFlowHistoryEntry[];
   channelName?: string;
 }
 
@@ -167,6 +177,16 @@ function channelIcon(name: string | undefined) {
   if (lower.includes("ebay")) return <Globe className="h-4 w-4 text-blue-500" />;
   if (lower.includes("shopify")) return <ShoppingCart className="h-4 w-4 text-green-500" />;
   return <Store className="h-4 w-4" />;
+}
+
+function flowHistoryColor(source: OmsOrderFlowHistoryEntry["source"], status: string): string {
+  if (status === "failed" || status === "dead" || status.includes("failed")) {
+    return "border-red-300 text-red-700 dark:text-red-300";
+  }
+  if (source === "reconciliation") return "border-amber-300 text-amber-700 dark:text-amber-300";
+  if (source === "webhook_inbox") return "border-blue-300 text-blue-700 dark:text-blue-300";
+  if (source === "webhook_retry") return "border-purple-300 text-purple-700 dark:text-purple-300";
+  return "border-muted-foreground/30 text-muted-foreground";
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +716,38 @@ export default function OmsOrders() {
                 </div>
 
                 <Separator />
+
+                {/* Flow History */}
+                {selectedOrder.flowHistory && selectedOrder.flowHistory.length > 0 && (
+                  <>
+                    <div>
+                      <h4 className="font-semibold text-sm mb-2">Flow History</h4>
+                      <div className="space-y-2">
+                        {selectedOrder.flowHistory.slice(0, 12).map((entry) => (
+                          <div key={entry.id} className="rounded-md border p-2 text-sm">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate font-medium">{entry.label}</div>
+                                <div className="mt-1 text-xs text-muted-foreground">
+                                  {entry.createdAt ? formatDate(entry.createdAt) : "No timestamp"}
+                                </div>
+                              </div>
+                              <Badge variant="outline" className={`shrink-0 text-xs ${flowHistoryColor(entry.source, entry.status)}`}>
+                                {entry.source.replace("_", " ")} · {entry.status}
+                              </Badge>
+                            </div>
+                            {entry.details && Object.keys(entry.details).length > 0 && (
+                              <pre className="mt-2 max-h-24 overflow-auto rounded bg-muted p-2 text-xs">
+                                {JSON.stringify(entry.details, null, 2)}
+                              </pre>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <Separator />
+                  </>
+                )}
 
                 {/* Line Items */}
                 <div>
