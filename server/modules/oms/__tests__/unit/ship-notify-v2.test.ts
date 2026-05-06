@@ -220,6 +220,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [] },
       // 5. SELECT oms_fulfillment_order_id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // OMS line status derivation
+      { rows: [] },
+      // delayed tracking provider guard
+      { rows: [{ provider: "shopify" }] },
+      // Shopify fulfillment provider guard
+      { rows: [{ provider: "shopify" }] },
     ]);
 
     // Fetch mock returns the SS shipment payload for the resourceUrl GET.
@@ -566,6 +572,12 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       { rows: [] },
       // 7. SELECT oms_fulfillment_order_id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // 8. OMS line status derivation
+      { rows: [] },
+      // 9. delayed tracking provider guard
+      { rows: [{ provider: "shopify" }] },
+      // 10. Shopify fulfillment provider guard
+      { rows: [{ provider: "shopify" }] },
     ];
   }
 
@@ -777,6 +789,9 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
           },
         ],
       },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: [{ provider: "shopify" }] },
     ]);
     (mock.db as any).__fulfillmentPush = {
       pushShopifyFulfillment,
@@ -792,7 +807,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
   });
 
-  it("already-shipped idempotent shipment enqueues delayed tracking for non-Shopify replay repair", async () => {
+  it("already-shipped idempotent shipment enqueues delayed tracking for non-Shopify replay repair without Shopify push", async () => {
     process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: null,
@@ -815,6 +830,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       { rows: [{ provider: "ebay" }] },
+      { rows: [{ provider: "ebay" }] },
     ]);
     (mock.db as any).__fulfillmentPush = {
       pushShopifyFulfillment,
@@ -827,7 +843,68 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
 
     await createShipStationService(mock.db).processShipNotify("/foo");
 
-    expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
+    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
+    expect(mock.calls).toContainEqual(expect.objectContaining({
+      tag: "insert",
+      values: expect.objectContaining({
+        provider: "internal",
+        topic: "delayed_tracking_push",
+        payload: { orderId: 9999, shipmentId: 501 },
+      }),
+    }));
+  });
+
+  it("non-Shopify shipment does not enqueue a Shopify retry when fulfillment push is not wired", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const warnSpy = vi.spyOn(console, "warn");
+
+    const mock = makeDb([
+      { rows: [{ id: 501, order_id: 42, status: "planned" }] },
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "planned",
+            tracking_number: null,
+            carrier: null,
+            tracking_url: null,
+          },
+        ],
+      },
+      { rows: [] },
+      {
+        rows: [
+          { id: 42, warehouse_status: "ready_to_ship", completed_at: null },
+        ],
+      },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [] },
+      { rows: [{ provider: "ebay" }] },
+      { rows: [{ provider: "ebay" }] },
+    ]);
+    (mock.db as any).__fulfillmentPush = {
+      pushTracking: vi.fn(),
+    };
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(warnSpy.mock.calls.some((args) =>
+      String(args[0] ?? "").includes("pushShopifyFulfillment not wired"),
+    )).toBe(false);
+    expect(mock.calls).not.toContainEqual(expect.objectContaining({
+      tag: "insert",
+      values: expect.objectContaining({
+        provider: "internal",
+        topic: "shopify_fulfillment_push",
+      }),
+    }));
     expect(mock.calls).toContainEqual(expect.objectContaining({
       tag: "insert",
       values: expect.objectContaining({
