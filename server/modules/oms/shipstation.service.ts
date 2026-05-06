@@ -1312,6 +1312,51 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  async function resolveOmsOrderIdForWmsOrder(
+    wmsOrderId: number,
+    shipmentId: number,
+  ): Promise<number | null> {
+    const orderResult: any = await db.execute(sql`
+      SELECT oms_fulfillment_order_id
+      FROM wms.orders
+      WHERE id = ${wmsOrderId}
+      LIMIT 1
+    `);
+    const omsPointer = orderResult?.rows?.[0]?.oms_fulfillment_order_id;
+    if (!omsPointer) {
+      console.warn(
+        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has no oms_fulfillment_order_id - skipping OMS derived update (shipment=${shipmentId})`,
+      );
+      return null;
+    }
+
+    const omsOrderId = parseInt(String(omsPointer), 10);
+    if (!Number.isInteger(omsOrderId) || omsOrderId <= 0) {
+      console.warn(
+        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${shipmentId})`,
+      );
+      return null;
+    }
+    return omsOrderId;
+  }
+
+  async function enqueueDelayedTrackingPushForShippedShipment(
+    omsOrderId: number,
+    shipmentId: number,
+  ): Promise<void> {
+    try {
+      const { enqueueDelayedTrackingPush } = await import("./webhook-retry.worker");
+      if (await shouldEnqueueDelayedTrackingPush(omsOrderId)) {
+        await enqueueDelayedTrackingPush(db, omsOrderId, shipmentId);
+        console.log(`[ShipStation Webhook V2] Enqueued delayed tracking push for order ${omsOrderId}, shipment ${shipmentId}`);
+      }
+    } catch (pushErr: any) {
+      console.error(
+        `[ShipStation Webhook V2] Failed to enqueue tracking push for order ${omsOrderId}: ${pushErr.message}`,
+      );
+    }
+  }
+
   /**
    * V2 per-shipment handler. Returns `{ processed, fallback }`:
    *   - `fallback=true` means the shipment was NOT found by
@@ -1361,8 +1406,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
     if (!changed) {
       console.log(
-        `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already in target state — no-op`,
+        `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already in target state - no-op`,
       );
+      let omsOrderId: number | null = null;
       if (event.kind === "shipped" && inventoryCore) {
         await recordInventoryForShipment(
           wmsShipmentRow.id,
@@ -1371,6 +1417,13 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         );
       }
       if (event.kind === "shipped") {
+        omsOrderId = await resolveOmsOrderIdForWmsOrder(wmsOrderId, wmsShipmentRow.id);
+        if (omsOrderId !== null) {
+          await enqueueDelayedTrackingPushForShippedShipment(
+            omsOrderId,
+            wmsShipmentRow.id,
+          );
+        }
         await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id);
       }
       return { processed: false, fallback: false };
@@ -1386,24 +1439,11 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     // Derive the OMS pointer and update OMS.
-    const orderResult: any = await db.execute(sql`
-      SELECT oms_fulfillment_order_id
-      FROM wms.orders
-      WHERE id = ${wmsOrderId}
-      LIMIT 1
-    `);
-    const omsPointer = orderResult?.rows?.[0]?.oms_fulfillment_order_id;
-    if (!omsPointer) {
-      console.warn(
-        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has no oms_fulfillment_order_id — skipping OMS derived update (shipment=${wmsShipmentRow.id})`,
-      );
-      return { processed: true, fallback: false };
-    }
-    const omsOrderId = parseInt(String(omsPointer), 10);
-    if (!Number.isInteger(omsOrderId) || omsOrderId <= 0) {
-      console.warn(
-        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${wmsShipmentRow.id})`,
-      );
+    const omsOrderId = await resolveOmsOrderIdForWmsOrder(
+      wmsOrderId,
+      wmsShipmentRow.id,
+    );
+    if (omsOrderId === null) {
       return { processed: true, fallback: false };
     }
 
@@ -1425,17 +1465,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         );
       }
 
-      try {
-        const { enqueueDelayedTrackingPush } = await import("./webhook-retry.worker");
-        if (await shouldEnqueueDelayedTrackingPush(omsOrderId)) {
-          await enqueueDelayedTrackingPush(db, omsOrderId, wmsShipmentRow.id);
-          console.log(`[ShipStation Webhook V2] Enqueued delayed tracking push for order ${omsOrderId}, shipment ${wmsShipmentRow.id}`);
-        }
-      } catch (pushErr: any) {
-        console.error(
-          `[ShipStation Webhook V2] Failed to enqueue tracking push for order ${omsOrderId}: ${pushErr.message}`,
-        );
-      }
+      await enqueueDelayedTrackingPushForShippedShipment(
+        omsOrderId,
+        wmsShipmentRow.id,
+      );
     }
 
     // Shopify fulfillment push runs after the shipment commit. The same

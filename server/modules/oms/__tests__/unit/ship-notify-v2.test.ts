@@ -42,6 +42,7 @@ interface RecordedCall {
   sqlText: string;
   tag: "execute" | "select" | "update" | "insert";
   target?: string;
+  values?: any;
 }
 
 /**
@@ -100,7 +101,7 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
     }),
     insert: (_table: any) => ({
       values: (_vals: any) => {
-        calls.push({ sqlText: "__insert__", tag: "insert" });
+        calls.push({ sqlText: "__insert__", tag: "insert", values: _vals });
         return Promise.resolve(undefined);
       },
     }),
@@ -364,10 +365,11 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     expect(processed).toBe(0); // no-op counts as not processed
 
-    // Exactly 2 execute calls: the V2 lookup + the mark-* load-current.
+    // Exactly 3 execute calls: the V2 lookup, the mark-* load-current,
+    // and the WMS->OMS pointer lookup used by replay side-effect repair.
     // No UPDATE, no rollup, no OMS writes.
     const executeSqls = mock.calls.filter((c) => c.tag === "execute");
-    expect(executeSqls.length).toBe(2);
+    expect(executeSqls.length).toBe(3);
 
     expect(mock.calls.filter((c) => c.tag === "update").length).toBe(0);
     expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
@@ -788,6 +790,52 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     await createShipStationService(mock.db).processShipNotify("/foo");
 
     expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
+  });
+
+  it("already-shipped idempotent shipment enqueues delayed tracking for non-Shopify replay repair", async () => {
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
+    const pushShopifyFulfillment = vi.fn(async () => ({
+      shopifyFulfillmentId: null,
+      alreadyPushed: false,
+    }));
+
+    const mock = makeDb([
+      { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "shipped",
+            tracking_number: "1Z12345",
+            carrier: "UPS",
+            tracking_url: null,
+          },
+        ],
+      },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ provider: "ebay" }] },
+    ]);
+    (mock.db as any).__fulfillmentPush = {
+      pushShopifyFulfillment,
+      pushTracking: vi.fn(),
+    };
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
+    expect(mock.calls).toContainEqual(expect.objectContaining({
+      tag: "insert",
+      values: expect.objectContaining({
+        provider: "internal",
+        topic: "delayed_tracking_push",
+        payload: { orderId: 9999, shipmentId: 501 },
+      }),
+    }));
   });
 });
 
