@@ -32,6 +32,8 @@ import {
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+const createShipmentForOrderMock = vi.hoisted(() => vi.fn());
+
 // The worker's top-level `import { db } from "../../db"` would otherwise
 // try to build a real Postgres client at import time and fail on
 // DATABASE_URL. We never exercise that default-db path in this file — all
@@ -49,11 +51,17 @@ vi.mock("../../../../db", () => ({
   },
 }));
 
+vi.mock("../../../wms/create-shipment", () => ({
+  createShipmentForOrder: createShipmentForOrderMock,
+}));
+
 import {
   enqueueShipStationRetry,
   enqueueOmsWmsSyncRetry,
+  enqueueWmsShipmentCreateRetry,
   dispatchShipStationRetry,
   dispatchOmsWmsSyncRetry,
+  dispatchWmsShipmentCreateRetry,
   recordRetryFailure,
   enqueueShopifyFulfillmentRetry,
   enqueueDelayedTrackingPush,
@@ -249,6 +257,39 @@ describe("enqueueOmsWmsSyncRetry", () => {
     const { db, inserts } = makeDb();
 
     await expect(enqueueOmsWmsSyncRetry(db, 0, "bad")).rejects.toThrow(
+      /positive integer/,
+    );
+
+    expect(inserts).toHaveLength(0);
+  });
+});
+
+describe("enqueueWmsShipmentCreateRetry", () => {
+  it("inserts an immediately due internal shipment-create row", async () => {
+    const { db, inserts } = makeDb();
+    const before = Date.now();
+
+    await enqueueWmsShipmentCreateRetry(db, 200, "manual fix");
+
+    const after = Date.now();
+    expect(inserts).toHaveLength(1);
+    const row = inserts[0]!.values;
+    expect(row.provider).toBe("internal");
+    expect(row.topic).toBe("wms_shipment_create");
+    expect(row.payload).toEqual({ wmsOrderId: 200 });
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBe("manual fix");
+    expect(row.nextRetryAt).toBeInstanceOf(Date);
+    const nextMs = (row.nextRetryAt as Date).getTime();
+    expect(nextMs).toBeGreaterThanOrEqual(before - 50);
+    expect(nextMs).toBeLessThanOrEqual(after + 50);
+  });
+
+  it("rejects invalid WMS order ids", async () => {
+    const { db, inserts } = makeDb();
+
+    await expect(enqueueWmsShipmentCreateRetry(db, 0, "bad")).rejects.toThrow(
       /positive integer/,
     );
 
@@ -466,6 +507,83 @@ describe("dispatchOmsWmsSyncRetry", () => {
     expect(sync).not.toHaveBeenCalled();
     expect(updates[0]!.set.status).toBe("dead");
     expect(updates[0]!.set.lastError).toMatch(/omsOrderId missing or invalid/);
+  });
+});
+
+describe("dispatchWmsShipmentCreateRetry", () => {
+  beforeEach(() => {
+    createShipmentForOrderMock.mockReset();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("loads the WMS order/items, creates a shipment, and marks success", async () => {
+    createShipmentForOrderMock.mockResolvedValue({ shipmentId: 300, created: true });
+    const { db, updates } = makeDb();
+    db.execute
+      .mockResolvedValueOnce({ rows: [{ id: 200, channel_id: 7 }] })
+      .mockResolvedValueOnce({ rows: [
+        { id: 901, quantity: 2, product_variant_id: 50 },
+        { id: 902, quantity: 1, product_variant_id: null },
+      ] });
+
+    const outcome = await dispatchWmsShipmentCreateRetry(db, {
+      id: 913,
+      provider: "internal",
+      topic: "wms_shipment_create",
+      payload: { wmsOrderId: 200 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(createShipmentForOrderMock).toHaveBeenCalledWith(
+      db,
+      200,
+      7,
+      [
+        { id: 901, quantity: 2, productVariantId: 50 },
+        { id: 902, quantity: 1, productVariantId: null },
+      ],
+    );
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("marks success when the order no longer needs shipment remediation", async () => {
+    const { db, updates } = makeDb();
+    db.execute.mockResolvedValueOnce({ rows: [] });
+
+    const outcome = await dispatchWmsShipmentCreateRetry(db, {
+      id: 914,
+      provider: "internal",
+      topic: "wms_shipment_create",
+      payload: { wmsOrderId: 201 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(createShipmentForOrderMock).not.toHaveBeenCalled();
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("dead-letters malformed payloads immediately", async () => {
+    const { db, updates } = makeDb();
+
+    const outcome = await dispatchWmsShipmentCreateRetry(db, {
+      id: 915,
+      provider: "internal",
+      topic: "wms_shipment_create",
+      payload: { wmsOrderId: "201" as any },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("malformed");
+    expect(createShipmentForOrderMock).not.toHaveBeenCalled();
+    expect(updates[0]!.set.status).toBe("dead");
+    expect(updates[0]!.set.lastError).toMatch(/wmsOrderId missing or invalid/);
   });
 });
 
