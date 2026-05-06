@@ -108,6 +108,28 @@ describe("oms-ops-alert.service", () => {
     expect(body.content).toContain("WEBHOOK_RETRY_DEAD");
   });
 
+  it("does not consume cooldown when webhook configuration is missing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const missing = await sendOmsOpsAlert(health(), {
+      webhookUrl: null,
+      nowMs: 1000,
+      cooldownMs: 60_000,
+    });
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 204 })) as unknown as typeof fetch;
+    const configured = await sendOmsOpsAlert(health(), {
+      webhookUrl: "https://example.test/webhook",
+      fetchImpl,
+      nowMs: 2000,
+      cooldownMs: 60_000,
+    });
+
+    expect(missing).toMatchObject({ sent: false, reason: "webhook_not_configured" });
+    expect(configured.sent).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("WEBHOOK_RETRY_DEAD"));
+    warn.mockRestore();
+  });
+
   it("includes a compact critical issue summary in the payload", () => {
     const payload = buildOmsOpsAlertPayload(health(), health().issues.filter((issue) => issue.severity === "critical"));
 
