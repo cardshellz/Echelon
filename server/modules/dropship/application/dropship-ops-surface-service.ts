@@ -196,6 +196,7 @@ export interface DropshipDogfoodReadinessItem {
     walletAvailableBalanceCents: number;
     activeFundingMethodCount: number;
     activeStripeFundingMethodCount: number;
+    activeUsdcBaseFundingMethodCount: number;
     autoReloadEnabled: boolean;
     autoReloadFundingMethodReady: boolean;
     notificationPreferenceCount: number;

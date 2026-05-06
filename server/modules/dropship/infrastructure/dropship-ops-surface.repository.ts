@@ -107,6 +107,7 @@ interface DogfoodReadinessRow {
   available_balance_cents: string | number | null;
   active_funding_method_count: string | number;
   active_stripe_funding_method_count: string | number;
+  active_usdc_base_funding_method_count: string | number;
   auto_reload_enabled: boolean | null;
   auto_reload_funding_method_ready: boolean | null;
   notification_preference_count: string | number;
@@ -394,6 +395,7 @@ function dogfoodReadinessSql(): string {
       wa.available_balance_cents,
       COALESCE(funding.active_funding_method_count, 0) AS active_funding_method_count,
       COALESCE(funding.active_stripe_funding_method_count, 0) AS active_stripe_funding_method_count,
+      COALESCE(funding.active_usdc_base_funding_method_count, 0) AS active_usdc_base_funding_method_count,
       ars.enabled AS auto_reload_enabled,
       COALESCE(auto_reload_funding.ready, false) AS auto_reload_funding_method_ready,
       COALESCE(notification_prefs.preference_count, 0) AS notification_preference_count
@@ -574,7 +576,11 @@ function dogfoodReadinessSql(): string {
           WHERE fm.rail IN ('stripe_card', 'stripe_ach')
             AND fm.provider_customer_id IS NOT NULL
             AND fm.provider_payment_method_id IS NOT NULL
-        ) AS active_stripe_funding_method_count
+        ) AS active_stripe_funding_method_count,
+        COUNT(*) FILTER (
+          WHERE fm.rail = 'usdc_base'
+            AND fm.usdc_wallet_address IS NOT NULL
+        ) AS active_usdc_base_funding_method_count
       FROM dropship.dropship_funding_methods fm
       WHERE fm.vendor_id = v.id
         AND fm.status = 'active'
@@ -720,6 +726,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
   const walletAvailableBalanceCents = toNumber(row.available_balance_cents ?? 0);
   const activeFundingMethodCount = toNumber(row.active_funding_method_count);
   const activeStripeFundingMethodCount = toNumber(row.active_stripe_funding_method_count);
+  const activeUsdcBaseFundingMethodCount = toNumber(row.active_usdc_base_funding_method_count);
   const autoReloadFundingMethodReady = row.auto_reload_funding_method_ready === true;
   const notificationPreferenceCount = toNumber(row.notification_preference_count);
   const defaultWarehouseId = parsePositiveIntegerOrNull(row.default_warehouse_id_text);
@@ -747,6 +754,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     walletAvailableBalanceCents,
     activeFundingMethodCount,
     activeStripeFundingMethodCount,
+    activeUsdcBaseFundingMethodCount,
     autoReloadFundingMethodReady,
     notificationPreferenceCount,
   });
@@ -795,6 +803,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
       walletAvailableBalanceCents,
       activeFundingMethodCount,
       activeStripeFundingMethodCount,
+      activeUsdcBaseFundingMethodCount,
       autoReloadEnabled: row.auto_reload_enabled === true,
       autoReloadFundingMethodReady,
       notificationPreferenceCount,
@@ -823,6 +832,7 @@ function buildDogfoodChecks(input: {
   walletAvailableBalanceCents: number;
   activeFundingMethodCount: number;
   activeStripeFundingMethodCount: number;
+  activeUsdcBaseFundingMethodCount: number;
   autoReloadFundingMethodReady: boolean;
   notificationPreferenceCount: number;
 }): DropshipDogfoodReadinessCheck[] {
@@ -966,6 +976,14 @@ function buildDogfoodChecks(input: {
           : input.activeFundingMethodCount > 0
             ? "Wallet has active funding method(s), but none are Stripe card/ACH methods ready for wallet funding."
             : "Wallet has no available balance or active funding method.",
+    },
+    {
+      key: "usdc_base_funding",
+      label: "USDC Base funding",
+      status: input.activeUsdcBaseFundingMethodCount > 0 ? "ready" : "blocked",
+      message: input.activeUsdcBaseFundingMethodCount > 0
+        ? `${input.activeUsdcBaseFundingMethodCount} active USDC Base funding method(s) registered.`
+        : "No active USDC Base funding method with a wallet address is registered.",
     },
     {
       key: "auto_reload",
