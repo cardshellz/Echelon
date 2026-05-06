@@ -1,13 +1,16 @@
 import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   AlertCircle,
   ArrowRight,
   Bell,
   CheckCircle2,
   CircleDollarSign,
+  ClipboardList,
   Clock,
   Fingerprint,
+  History,
   KeyRound,
   Mail,
   Plug,
@@ -21,20 +24,28 @@ import { Button } from "@/components/ui/button";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useDropshipAuth } from "@/lib/dropship-auth";
+import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
 import {
+  buildQueryUrl,
   fetchJson,
   formatCents,
   formatDateTime,
   formatStatus,
+  queryErrorMessage,
   sectionStatusTone,
+  type DropshipOrderListItem,
+  type DropshipOrderListResponse,
   type DropshipSettingsResponse,
   type DropshipSettingsSection,
   type DropshipStoreConnectionSummary,
+  type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingAction = "send-code" | "verify-code" | "passkey-proof" | "register-passkey" | null;
+type DropshipWalletLedgerEntry = DropshipWalletResponse["wallet"]["recentLedger"][number];
+
+const dashboardActivityLimit = 5;
 
 const sectionIcons: Record<DropshipSettingsSection["key"], React.ReactNode> = {
   account: <ShieldCheck className="h-4 w-4" />,
@@ -47,6 +58,7 @@ const sectionIcons: Record<DropshipSettingsSection["key"], React.ReactNode> = {
 };
 
 export default function DropshipPortalDashboard() {
+  const [, setLocation] = useLocation();
   const {
     passkeysSupported,
     principal,
@@ -61,10 +73,27 @@ export default function DropshipPortalDashboard() {
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const ordersUrl = buildQueryUrl("/api/dropship/orders", {
+    page: 1,
+    limit: dashboardActivityLimit,
+  });
+  const walletUrl = buildQueryUrl("/api/dropship/wallet", {
+    limit: dashboardActivityLimit,
+  });
 
   const settingsQuery = useQuery<DropshipSettingsResponse>({
     queryKey: ["/api/dropship/settings"],
     queryFn: () => fetchJson<DropshipSettingsResponse>("/api/dropship/settings"),
+    enabled: !!principal,
+  });
+  const ordersQuery = useQuery<DropshipOrderListResponse>({
+    queryKey: [ordersUrl],
+    queryFn: () => fetchJson<DropshipOrderListResponse>(ordersUrl),
+    enabled: !!principal,
+  });
+  const walletQuery = useQuery<DropshipWalletResponse>({
+    queryKey: [walletUrl],
+    queryFn: () => fetchJson<DropshipWalletResponse>(walletUrl),
     enabled: !!principal,
   });
 
@@ -168,6 +197,24 @@ export default function DropshipPortalDashboard() {
         </section>
 
         <section className="mt-4 grid gap-4 xl:grid-cols-[1fr_0.8fr]">
+          <RecentOrdersPanel
+            error={ordersQuery.error}
+            isLoading={ordersQuery.isLoading}
+            orders={ordersQuery.data?.items ?? []}
+            total={ordersQuery.data?.total ?? 0}
+            onViewAll={() => setLocation(dropshipPortalPath("/orders"))}
+          />
+
+          <RecentWalletPanel
+            availableBalanceCents={walletQuery.data?.wallet.account.availableBalanceCents ?? null}
+            error={walletQuery.error}
+            isLoading={walletQuery.isLoading}
+            ledger={walletQuery.data?.wallet.recentLedger ?? []}
+            onViewWallet={() => setLocation(dropshipPortalPath("/wallet"))}
+          />
+        </section>
+
+        <section className="mt-4 grid gap-4 xl:grid-cols-[1fr_0.8fr]">
           <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -219,6 +266,166 @@ export default function DropshipPortalDashboard() {
         </section>
       </div>
     </DropshipPortalShell>
+  );
+}
+
+function RecentOrdersPanel({
+  error,
+  isLoading,
+  onViewAll,
+  orders,
+  total,
+}: {
+  error: unknown;
+  isLoading: boolean;
+  onViewAll: () => void;
+  orders: DropshipOrderListItem[];
+  total: number;
+}) {
+  return (
+    <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-lg font-semibold">
+            <ClipboardList className="h-5 w-5 text-[#C060E0]" />
+            Recent orders
+          </h2>
+          <p className="text-sm text-zinc-500">
+            {total > 0 ? `${Math.min(orders.length, dashboardActivityLimit)} of ${total} shown` : "Latest marketplace intake"}
+          </p>
+        </div>
+        <Button type="button" variant="outline" size="sm" className="h-9 w-fit gap-2" onClick={onViewAll}>
+          Orders
+          <ArrowRight className="h-4 w-4" />
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="mt-5 space-y-3">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <Skeleton key={index} className="h-16 w-full" />
+          ))}
+        </div>
+      ) : error ? (
+        <Alert variant="destructive" className="mt-5">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{queryErrorMessage(error, "Unable to load recent dropship orders.")}</AlertDescription>
+        </Alert>
+      ) : orders.length ? (
+        <div className="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200">
+          {orders.map((order) => (
+            <RecentOrderRow key={order.intakeId} order={order} />
+          ))}
+        </div>
+      ) : (
+        <div className="mt-5 rounded-md border border-dashed border-zinc-300 p-5 text-sm text-zinc-600">
+          No dropship orders recorded yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecentOrderRow({ order }: { order: DropshipOrderListItem }) {
+  return (
+    <div className="grid gap-3 p-4 sm:grid-cols-[1fr_auto] sm:items-center">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="truncate font-medium">{order.externalOrderNumber || order.externalOrderId}</div>
+          <Badge variant="outline" className={statusTone(order.status)}>
+            {formatStatus(order.status)}
+          </Badge>
+        </div>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-500">
+          <span>{formatStatus(order.platform)} intake {order.intakeId}</span>
+          <span>{order.storeConnection.externalDisplayName || order.storeConnection.shopDomain || formatStatus(order.storeConnection.platform)}</span>
+          <span>{order.lineCount} line{order.lineCount === 1 ? "" : "s"} / {order.totalQuantity} unit{order.totalQuantity === 1 ? "" : "s"}</span>
+        </div>
+      </div>
+      <div className="whitespace-nowrap text-sm text-zinc-500">
+        {formatDateTime(order.updatedAt)}
+      </div>
+    </div>
+  );
+}
+
+function RecentWalletPanel({
+  availableBalanceCents,
+  error,
+  isLoading,
+  ledger,
+  onViewWallet,
+}: {
+  availableBalanceCents: number | null;
+  error: unknown;
+  isLoading: boolean;
+  ledger: DropshipWalletLedgerEntry[];
+  onViewWallet: () => void;
+}) {
+  return (
+    <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-lg font-semibold">
+            <History className="h-5 w-5 text-[#C060E0]" />
+            Wallet activity
+          </h2>
+          <p className="text-sm text-zinc-500">
+            Available {availableBalanceCents === null ? "not loaded" : formatCents(availableBalanceCents)}
+          </p>
+        </div>
+        <Button type="button" variant="outline" size="sm" className="h-9 w-fit gap-2" onClick={onViewWallet}>
+          Wallet
+          <ArrowRight className="h-4 w-4" />
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="mt-5 space-y-3">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <Skeleton key={index} className="h-14 w-full" />
+          ))}
+        </div>
+      ) : error ? (
+        <Alert variant="destructive" className="mt-5">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{queryErrorMessage(error, "Unable to load wallet activity.")}</AlertDescription>
+        </Alert>
+      ) : ledger.length ? (
+        <div className="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200">
+          {ledger.map((entry) => (
+            <RecentWalletLedgerRow key={entry.ledgerEntryId} entry={entry} />
+          ))}
+        </div>
+      ) : (
+        <div className="mt-5 rounded-md border border-dashed border-zinc-300 p-5 text-sm text-zinc-600">
+          No wallet ledger activity recorded yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecentWalletLedgerRow({ entry }: { entry: DropshipWalletLedgerEntry }) {
+  return (
+    <div className="grid gap-3 p-4 sm:grid-cols-[1fr_auto] sm:items-center">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="font-medium">{formatStatus(entry.type)}</div>
+          <Badge variant="outline" className={statusTone(entry.status)}>
+            {formatStatus(entry.status)}
+          </Badge>
+        </div>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-500">
+          <span>{formatDateTime(entry.createdAt)}</span>
+          {entry.referenceType && <span>{formatStatus(entry.referenceType)} {entry.referenceId ?? ""}</span>}
+          {entry.settledAt && <span>Settled {formatDateTime(entry.settledAt)}</span>}
+        </div>
+      </div>
+      <div className={`whitespace-nowrap font-mono text-sm font-semibold ${ledgerAmountTone(entry.amountCents)}`}>
+        {formatLedgerAmount(entry.amountCents)}
+      </div>
+    </div>
   );
 }
 
@@ -474,6 +681,49 @@ function StoreConnectionCard({ connection }: { connection: DropshipStoreConnecti
       </div>
     </div>
   );
+}
+
+function formatLedgerAmount(amountCents: number): string {
+  const prefix = amountCents > 0 ? "+" : "";
+  return `${prefix}${formatCents(amountCents)}`;
+}
+
+function ledgerAmountTone(amountCents: number): string {
+  if (amountCents > 0) return "text-emerald-700";
+  if (amountCents < 0) return "text-rose-700";
+  return "text-zinc-700";
+}
+
+function statusTone(status: string): string {
+  if (
+    status === "accepted"
+    || status === "active"
+    || status === "completed"
+    || status === "processing"
+    || status === "settled"
+    || status === "succeeded"
+  ) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (
+    status === "payment_hold"
+    || status === "pending"
+    || status === "queued"
+    || status === "received"
+    || status === "retrying"
+  ) {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (
+    status === "cancelled"
+    || status === "exception"
+    || status === "failed"
+    || status === "rejected"
+    || status === "voided"
+  ) {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
 function SettingsSkeleton() {
