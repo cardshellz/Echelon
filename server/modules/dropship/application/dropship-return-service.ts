@@ -53,8 +53,7 @@ const rmaItemInputSchema = z.object({
   requestedCreditCents: nonnegativeCentsSchema.nullable().optional(),
 }).strict();
 
-const createDropshipRmaInputSchema = z.object({
-  vendorId: positiveIdSchema,
+const createDropshipRmaRequestSchema = z.object({
   rmaNumber: z.string().trim().min(1).max(80),
   storeConnectionId: positiveIdSchema.nullable().optional(),
   intakeId: positiveIdSchema.nullable().optional(),
@@ -67,11 +66,17 @@ const createDropshipRmaInputSchema = z.object({
   vendorNotes: nullableStringSchema,
   items: z.array(rmaItemInputSchema).max(200).default([]),
   idempotencyKey: idempotencyKeySchema,
+}).strict();
+
+const createDropshipRmaInputSchema = createDropshipRmaRequestSchema.extend({
+  vendorId: positiveIdSchema,
   actor: z.object({
-    actorType: z.enum(["admin", "system"]),
+    actorType: z.enum(["vendor", "admin", "system"]),
     actorId: z.string().trim().min(1).max(255).optional(),
   }).strict(),
 }).strict();
+
+const createDropshipMemberRmaInputSchema = createDropshipRmaRequestSchema.omit({ returnWindowDays: true }).strict();
 
 const listDropshipRmasInputSchema = z.object({
   vendorId: positiveIdSchema.optional(),
@@ -135,6 +140,7 @@ const processDropshipRmaInspectionInputSchema = z.object({
 });
 
 export type CreateDropshipRmaInput = z.infer<typeof createDropshipRmaInputSchema>;
+export type CreateDropshipMemberRmaInput = z.infer<typeof createDropshipMemberRmaInputSchema>;
 export type ListDropshipRmasInput = z.infer<typeof listDropshipRmasInputSchema>;
 export type UpdateDropshipRmaStatusInput = z.infer<typeof updateDropshipRmaStatusInputSchema>;
 export type ProcessDropshipRmaInspectionInput = z.infer<typeof processDropshipRmaInspectionInputSchema>;
@@ -266,6 +272,16 @@ export class DropshipReturnService {
 
   async getForAdmin(rmaId: number): Promise<DropshipRmaDetail> {
     return this.requireRma({ rmaId });
+  }
+
+  async createRmaForMember(memberId: string, input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
+    const parsed = parseReturnInput(createDropshipMemberRmaInputSchema, input, "DROPSHIP_RETURN_CREATE_INVALID_INPUT");
+    const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
+    return this.createRma({
+      ...parsed,
+      vendorId: vendor.vendor.vendorId,
+      actor: { actorType: "vendor", actorId: memberId },
+    });
   }
 
   async createRma(input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
