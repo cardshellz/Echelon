@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
+  DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES,
   DropshipNotificationService,
   type DropshipNotificationEventRecord,
   type DropshipNotificationListResult,
@@ -21,6 +22,60 @@ import type {
 const now = new Date("2026-05-02T18:00:00.000Z");
 
 describe("DropshipNotificationService", () => {
+  it("lists launch notification preferences before any notification events exist", async () => {
+    const repository = new FakeNotificationRepository();
+    const service = makeService(repository, new FakeEmailSender(), []);
+
+    const preferences = await service.listPreferencesForMember("member-1");
+
+    expect(preferences).toHaveLength(DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.length);
+    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_entitlement_blocked");
+    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_order_received");
+    expect(preferences.find((preference) => preference.eventType === "dropship_order_rejected")).toMatchObject({
+      vendorId: 10,
+      critical: true,
+      emailEnabled: true,
+      inAppEnabled: true,
+      smsEnabled: false,
+      webhookEnabled: false,
+    });
+    expect(preferences.find(
+      (preference) => preference.eventType === "dropship_order_rejected",
+    )?.notificationPreferenceId).toBeLessThan(0);
+  });
+
+  it("merges saved notification preferences with launch defaults", async () => {
+    const repository = new FakeNotificationRepository();
+    repository.preferences = [
+      makePreference({
+        notificationPreferenceId: 25,
+        eventType: "dropship_order_received",
+        critical: false,
+        emailEnabled: false,
+        inAppEnabled: true,
+      }),
+      makePreference({
+        notificationPreferenceId: 26,
+        eventType: "custom_price_warning",
+        critical: false,
+        emailEnabled: false,
+        inAppEnabled: true,
+      }),
+    ];
+    const service = makeService(repository, new FakeEmailSender(), []);
+
+    const preferences = await service.listPreferencesForMember("member-1");
+
+    expect(preferences.find((preference) => preference.eventType === "dropship_order_received")).toMatchObject({
+      notificationPreferenceId: 25,
+      emailEnabled: false,
+    });
+    expect(preferences.find((preference) => preference.eventType === "custom_price_warning")).toMatchObject({
+      notificationPreferenceId: 26,
+      emailEnabled: false,
+    });
+  });
+
   it("keeps critical notifications on email and in-app channels", async () => {
     const repository = new FakeNotificationRepository();
     const emailSender = new FakeEmailSender();
@@ -48,6 +103,28 @@ describe("DropshipNotificationService", () => {
     });
   });
 
+  it("forces launch-critical event types to critical delivery", async () => {
+    const repository = new FakeNotificationRepository();
+    const service = makeService(repository, new FakeEmailSender(), []);
+
+    await service.send({
+      vendorId: 10,
+      eventType: "dropship_order_rejected",
+      channels: ["email"],
+      critical: false,
+      title: "Order rejected",
+      message: "Order rejected.",
+      payload: { intakeId: 44 },
+      idempotencyKey: "notification-order-rejected-44",
+    });
+
+    expect(repository.lastSend).toMatchObject({
+      eventType: "dropship_order_rejected",
+      critical: true,
+      channels: ["email", "in_app"],
+    });
+  });
+
   it("rejects Phase 2 notification channels in preferences", async () => {
     const service = makeService(new FakeNotificationRepository(), new FakeEmailSender(), []);
 
@@ -65,6 +142,17 @@ describe("DropshipNotificationService", () => {
       vendorId: 10,
       eventType: "return_credited",
       critical: true,
+      emailEnabled: false,
+      inAppEnabled: true,
+    })).rejects.toMatchObject({ code: "DROPSHIP_NOTIFICATION_CRITICAL_MUTE_REJECTED" });
+  });
+
+  it("rejects muting catalog-critical preferences even when critical is omitted", async () => {
+    const service = makeService(new FakeNotificationRepository(), new FakeEmailSender(), []);
+
+    await expect(service.updatePreference({
+      vendorId: 10,
+      eventType: "dropship_order_rejected",
       emailEnabled: false,
       inAppEnabled: true,
     })).rejects.toMatchObject({ code: "DROPSHIP_NOTIFICATION_CRITICAL_MUTE_REJECTED" });
