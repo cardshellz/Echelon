@@ -96,6 +96,7 @@ describe("oms-flow-reconciliation.service", () => {
           { oms_order_id: 11, shipment_id: 31 },
         ]))
         .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(sampleRows([{ id: 99 }])),
       insert: vi.fn(() => ({
         values: vi.fn(async (row: unknown) => {
@@ -108,7 +109,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await runOmsFlowReconciliation(db);
 
     expect(issues).toHaveLength(1);
-    expect(db.execute).toHaveBeenCalledTimes(10);
+    expect(db.execute).toHaveBeenCalledTimes(11);
     expect(inserts).toHaveLength(1);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("auto-queued 1 delayed tracking push retry"),
@@ -248,7 +249,7 @@ describe("oms-flow-reconciliation.service", () => {
     expect(inserts).toHaveLength(1);
     expect((inserts[0] as any).topic).toBe("oms_wms_sync");
     expect((inserts[0] as any).payload).toEqual({ omsOrderId: 10 });
-    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(db.execute).toHaveBeenCalledTimes(3);
   });
 
   it("queues WMS shipment creation remediation through the retry queue", async () => {
@@ -281,7 +282,7 @@ describe("oms-flow-reconciliation.service", () => {
     expect(inserts).toHaveLength(1);
     expect((inserts[0] as any).topic).toBe("wms_shipment_create");
     expect((inserts[0] as any).payload).toEqual({ wmsOrderId: 20 });
-    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(db.execute).toHaveBeenCalledTimes(3);
   });
 
   it("rejects unsupported remediation codes", async () => {

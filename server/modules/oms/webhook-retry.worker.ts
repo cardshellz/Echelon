@@ -395,6 +395,10 @@ async function hasPendingRetryForScope(
     scope: any;
   },
 ): Promise<boolean> {
+  if (typeof dbArg?.execute !== "function") {
+    return false;
+  }
+
   const existing: any = await dbArg.execute(sql`
     SELECT id
     FROM oms.webhook_retry_queue
