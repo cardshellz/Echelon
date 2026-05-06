@@ -35,6 +35,8 @@ const REPLAYABLE_SHOPIFY_OMS_TOPICS = new Set([
   "orders/cancelled",
   "orders/fulfilled",
   "refunds/create",
+  "fulfillments/create",
+  "fulfillments/update",
 ]);
 
 function isReplayableWebhookInboxTopic(provider: string, topic: string): boolean {
