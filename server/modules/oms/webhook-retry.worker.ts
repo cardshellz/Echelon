@@ -5,6 +5,7 @@ import { createShipmentForOrder } from "../wms/create-shipment";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
+const RETRY_SCOPE_UNIQUE_INDEX_PREFIX = "uq_webhook_retry_pending_";
 type RetryDispatchItem = {
   id: number;
   provider: string;
@@ -140,7 +141,7 @@ export async function enqueueShipStationRetry(
     return;
   }
 
-  await dbArg.insert(webhookRetryQueue).values({
+  await insertWebhookRetryQueueRow(dbArg, {
     provider: "shipstation",
     topic: "SHIP_NOTIFY",
     payload: { resource_url: payload.resource_url },
@@ -236,7 +237,7 @@ export async function enqueueShopifyFulfillmentRetry(
     return;
   }
 
-  await dbArg.insert(webhookRetryQueue).values({
+  await insertWebhookRetryQueueRow(dbArg, {
     provider: "internal",
     topic: "shopify_fulfillment_push",
     payload: { shipmentId },
@@ -290,7 +291,7 @@ export async function enqueueDelayedTrackingPush(
     return;
   }
 
-  await dbArg.insert(webhookRetryQueue).values({
+  await insertWebhookRetryQueueRow(dbArg, {
     provider: "internal",
     topic: "delayed_tracking_push",
     payload: shipmentId ? { orderId, shipmentId } : { orderId },
@@ -333,7 +334,7 @@ export async function enqueueOmsWmsSyncRetry(
     return;
   }
 
-  await dbArg.insert(webhookRetryQueue).values({
+  await insertWebhookRetryQueueRow(dbArg, {
     provider: "internal",
     topic: "oms_wms_sync",
     payload: { omsOrderId },
@@ -376,7 +377,7 @@ export async function enqueueWmsShipmentCreateRetry(
     return;
   }
 
-  await dbArg.insert(webhookRetryQueue).values({
+  await insertWebhookRetryQueueRow(dbArg, {
     provider: "internal",
     topic: "wms_shipment_create",
     payload: { wmsOrderId },
@@ -409,6 +410,71 @@ async function hasPendingRetryForScope(
     LIMIT 1
   `);
   return Boolean(existing?.rows?.[0]);
+}
+
+async function insertWebhookRetryQueueRow(
+  dbArg: any,
+  values: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await dbArg.insert(webhookRetryQueue).values(values);
+  } catch (error) {
+    if (isRetryScopeUniqueViolation(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function isRetryScopeUniqueViolation(error: unknown): boolean {
+  const pgError = findPgErrorLike(error);
+  if (!pgError || pgError.code !== "23505") {
+    return false;
+  }
+
+  const constraint =
+    typeof pgError.constraint === "string"
+      ? pgError.constraint
+      : typeof pgError.constraint_name === "string"
+        ? pgError.constraint_name
+        : null;
+
+  return Boolean(
+    constraint && constraint.startsWith(RETRY_SCOPE_UNIQUE_INDEX_PREFIX),
+  );
+}
+
+function findPgErrorLike(error: unknown): {
+  code?: unknown;
+  constraint?: unknown;
+  constraint_name?: unknown;
+  cause?: unknown;
+} | null {
+  let current = error;
+
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (!current || typeof current !== "object") {
+      return null;
+    }
+
+    const record = current as {
+      code?: unknown;
+      constraint?: unknown;
+      constraint_name?: unknown;
+      cause?: unknown;
+    };
+    if (
+      typeof record.code === "string" ||
+      typeof record.constraint === "string" ||
+      typeof record.constraint_name === "string"
+    ) {
+      return record;
+    }
+
+    current = record.cause;
+  }
+
+  return null;
 }
 
 export interface WebhookRetryRequeueResult {
