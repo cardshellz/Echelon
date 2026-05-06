@@ -31,6 +31,8 @@ import {
   beforeEach,
   afterEach,
 } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { createShipStationService } from "../../shipstation.service";
 
@@ -243,9 +245,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(updateCalls.length).toBeGreaterThanOrEqual(1);
     expect(executeSqls.some((text) => text.includes("shipped_by_line"))).toBe(true);
 
-    // Verify the audit event was inserted.
+    // Verify the audit event and Shopify fulfillment retry were inserted.
     const insertCalls = mock.calls.filter((c) => c.tag === "insert");
-    expect(insertCalls.length).toBe(1);
+    expect(insertCalls.length).toBe(2);
   });
 
   it("rejects non-ShipStation resource URLs before fetch", async () => {
@@ -368,7 +370,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(executeSqls.length).toBe(2);
 
     expect(mock.calls.filter((c) => c.tag === "update").length).toBe(0);
-    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(0);
+    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
   });
 
   it("fallback: shipment NOT found by shipstation_order_id → legacy path runs", async () => {
@@ -688,7 +690,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     expect(failureLogged).toBe(true);
   });
 
-  it("flag ON + fulfillmentPush stash missing pushShopifyFulfillment fn → warn, no retry", async () => {
+  it("flag ON + fulfillmentPush stash missing pushShopifyFulfillment fn → warn and enqueue retry", async () => {
     process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
     const warnSpy = vi.spyOn(console, "warn");
     const mock = makeDbWithPush({ omitPushFn: true });
@@ -702,8 +704,8 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       String(args[0] ?? "").includes("pushShopifyFulfillment not wired"),
     );
     expect(warned).toBe(true);
-    // Only the audit event insert.
-    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
+    // Audit event + retry row.
+    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(2);
   });
 
   it("flag ON + voided event → push NOT triggered (only shipped triggers it)", async () => {
@@ -753,13 +755,12 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     expect(pushShopifyFulfillment).not.toHaveBeenCalled();
   });
 
-  it("flag ON + already-shipped idempotent shipment → push NOT triggered (changed=false)", async () => {
+  it("flag ON + already-shipped idempotent shipment → push is retried for replay repair", async () => {
     process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
     const pushShopifyFulfillment = vi.fn();
 
     // Same as the existing idempotent test: marks-shipped sees no
-    // change, dispatchShipmentEvent returns changed=false, the V2
-    // handler bails before the push branch.
+    // change, but replay still repairs a missing Shopify push.
     const mock = makeDb([
       { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
       {
@@ -786,7 +787,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
 
     await createShipStationService(mock.db).processShipNotify("/foo");
 
-    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
+    expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
   });
 });
 
@@ -957,5 +958,18 @@ describe("processShipNotify V2 :: error resilience", () => {
       processed: 2,
       failures: [{ shipmentId: 77777 }],
     });
+  });
+});
+
+describe("shipstation.service.ts :: legacy tracking retry regression", () => {
+  const src = readFileSync(
+    resolve(__dirname, "../../shipstation.service.ts"),
+    "utf-8",
+  );
+
+  it("enqueues delayed tracking retries when legacy SHIP_NOTIFY tracking push fails", () => {
+    expect(src).toContain("enqueueDelayedTrackingPushFromShipNotify");
+    expect(src).toMatch(/pushed === false[\s\S]*enqueueDelayedTrackingPushFromShipNotify/);
+    expect(src).toMatch(/catch \(pushErr[\s\S]*enqueueDelayedTrackingPushFromShipNotify/);
   });
 });

@@ -1285,6 +1285,33 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  async function enqueueDelayedTrackingPushFromShipNotify(
+    omsOrderId: number,
+    shipmentId: number | null,
+    cause: unknown,
+  ): Promise<void> {
+    try {
+      if (!(await shouldEnqueueDelayedTrackingPush(omsOrderId))) {
+        return;
+      }
+
+      const { enqueueDelayedTrackingPush } = await import("./webhook-retry.worker");
+      await enqueueDelayedTrackingPush(
+        db,
+        omsOrderId,
+        shipmentId ?? undefined,
+      );
+      const message = cause instanceof Error ? cause.message : String(cause);
+      console.warn(
+        `[ShipStation Webhook] Enqueued delayed tracking push retry for order ${omsOrderId}${shipmentId ? `, shipment ${shipmentId}` : ""}: ${message}`,
+      );
+    } catch (retryErr: any) {
+      console.error(
+        `[ShipStation Webhook] Failed to enqueue delayed tracking push retry for order ${omsOrderId}: ${retryErr?.message ?? retryErr}`,
+      );
+    }
+  }
+
   /**
    * V2 per-shipment handler. Returns `{ processed, fallback }`:
    *   - `fallback=true` means the shipment was NOT found by
@@ -1937,18 +1964,32 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     try {
       const fulfillmentPush = (db as any).__fulfillmentPush;
       if (fulfillmentPush) {
+        let pushed: boolean | undefined;
         if (
           trackingPushShipmentId !== null &&
           typeof fulfillmentPush.pushTrackingForShipment === "function"
         ) {
-          await fulfillmentPush.pushTrackingForShipment(trackingPushShipmentId);
+          pushed = await fulfillmentPush.pushTrackingForShipment(trackingPushShipmentId);
         } else if (typeof fulfillmentPush.pushTracking === "function") {
-          await fulfillmentPush.pushTracking(omsOrderId);
+          pushed = await fulfillmentPush.pushTracking(omsOrderId);
+        }
+
+        if (pushed === false) {
+          await enqueueDelayedTrackingPushFromShipNotify(
+            omsOrderId,
+            trackingPushShipmentId,
+            new Error("fulfillment push returned false"),
+          );
         }
       }
     } catch (pushErr: any) {
       console.error(
         `[ShipStation Webhook] Failed to push tracking for order ${omsOrderId}: ${pushErr.message}`,
+      );
+      await enqueueDelayedTrackingPushFromShipNotify(
+        omsOrderId,
+        trackingPushShipmentId,
+        pushErr,
       );
     }
 
