@@ -32,12 +32,17 @@ let retryWorkerStartedAt: Date | null = null;
 let retryWorkerLastRunAt: Date | null = null;
 let retryWorkerLastSuccessAt: Date | null = null;
 let retryWorkerLastError: string | null = null;
+let retryWorkerLastSkippedAt: Date | null = null;
+let retryWorkerRunInFlight = false;
+let retryWorkerTimer: ReturnType<typeof setInterval> | null = null;
 
 export interface WebhookRetryWorkerHeartbeat {
   startedAt: string | null;
   lastRunAt: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
+  lastSkippedAt: string | null;
+  inFlight: boolean;
 }
 
 export function getWebhookRetryWorkerHeartbeat(): WebhookRetryWorkerHeartbeat {
@@ -46,26 +51,65 @@ export function getWebhookRetryWorkerHeartbeat(): WebhookRetryWorkerHeartbeat {
     lastRunAt: retryWorkerLastRunAt?.toISOString() ?? null,
     lastSuccessAt: retryWorkerLastSuccessAt?.toISOString() ?? null,
     lastError: retryWorkerLastError,
+    lastSkippedAt: retryWorkerLastSkippedAt?.toISOString() ?? null,
+    inFlight: retryWorkerRunInFlight,
   };
+}
+
+export function resetWebhookRetryWorkerHeartbeatForTest(): void {
+  retryWorkerStartedAt = null;
+  retryWorkerLastRunAt = null;
+  retryWorkerLastSuccessAt = null;
+  retryWorkerLastError = null;
+  retryWorkerLastSkippedAt = null;
+  retryWorkerRunInFlight = false;
+  if (retryWorkerTimer) {
+    clearInterval(retryWorkerTimer);
+    retryWorkerTimer = null;
+  }
+}
+
+export async function runWebhookRetryWorkerTick(
+  processor: () => Promise<void> = processPendingWebhooks,
+): Promise<"success" | "error" | "skipped"> {
+  if (retryWorkerRunInFlight) {
+    retryWorkerLastSkippedAt = new Date();
+    console.warn(`${LOG_PREFIX} Skipping retry tick because previous run is still in flight`);
+    return "skipped";
+  }
+
+  retryWorkerRunInFlight = true;
+  retryWorkerLastRunAt = new Date();
+
+  try {
+    await processor();
+    retryWorkerLastSuccessAt = new Date();
+    retryWorkerLastError = null;
+    return "success";
+  } catch (err) {
+    retryWorkerLastError = err instanceof Error ? err.message : String(err);
+    console.error(`${LOG_PREFIX} Error in worker loop:`, err);
+    return "error";
+  } finally {
+    retryWorkerRunInFlight = false;
+  }
 }
 
 /**
  * Polls the webhook_retry_queue for pending items that are due for a retry.
  */
 export async function startWebhookRetryWorker() {
+  if (retryWorkerTimer) {
+    console.warn(`${LOG_PREFIX} Worker already started; ignoring duplicate start`);
+    return;
+  }
+
   retryWorkerStartedAt = new Date();
   console.log(`${LOG_PREFIX} Started background webhook retry worker`);
 
-  setInterval(async () => {
-    try {
-      retryWorkerLastRunAt = new Date();
-      await processPendingWebhooks();
-      retryWorkerLastSuccessAt = new Date();
-      retryWorkerLastError = null;
-    } catch (err) {
-      retryWorkerLastError = err instanceof Error ? err.message : String(err);
-      console.error(`${LOG_PREFIX} Error in worker loop:`, err);
-    }
+  void runWebhookRetryWorkerTick();
+  retryWorkerTimer = setInterval(() => {
+    void runWebhookRetryWorkerTick();
   }, 60 * 1000); // Check every minute
 }
 
