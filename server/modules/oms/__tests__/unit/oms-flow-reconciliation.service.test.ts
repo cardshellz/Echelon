@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   collectOmsFlowReconciliationIssues,
+  remediateOmsFlowIssue,
   runOmsFlowReconciliation,
 } from "../../oms-flow-reconciliation.service";
 
@@ -71,5 +72,91 @@ describe("oms-flow-reconciliation.service", () => {
       expect.stringContaining("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED=3"),
     );
     warn.mockRestore();
+  });
+
+  it("remediates OMS-final/WMS-active drift and writes an audit event", async () => {
+    const tx = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(sampleRows([{ id: 20 }]))
+        .mockResolvedValueOnce(sampleRows([])),
+    };
+    const db = {
+      transaction: vi.fn(async (fn) => fn(tx)),
+    };
+
+    const result = await remediateOmsFlowIssue(db, {
+      code: "OMS_FINAL_WMS_ACTIVE",
+      omsOrderId: 10,
+      wmsOrderId: 20,
+      operator: "ops",
+    });
+
+    expect(result).toMatchObject({
+      action: "aligned_wms_from_oms",
+      changed: true,
+      omsOrderId: 10,
+      wmsOrderId: 20,
+    });
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("remediates shipped shipment/OMS-open drift from the shipment row", async () => {
+    const tx = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(sampleRows([{ id: 10, wms_order_id: 20 }]))
+        .mockResolvedValueOnce(sampleRows([])),
+    };
+    const db = {
+      transaction: vi.fn(async (fn) => fn(tx)),
+    };
+
+    const result = await remediateOmsFlowIssue(db, {
+      code: "SHIPMENT_SHIPPED_OMS_OPEN",
+      omsOrderId: 10,
+      shipmentId: 30,
+      operator: "ops",
+    });
+
+    expect(result).toMatchObject({
+      action: "marked_oms_shipped_from_wms_shipment",
+      changed: true,
+      omsOrderId: 10,
+      wmsOrderId: 20,
+      shipmentId: 30,
+    });
+  });
+
+  it("queues tracking push remediation through the retry queue", async () => {
+    const db = {
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => undefined),
+      })),
+    };
+
+    const result = await remediateOmsFlowIssue(db, {
+      code: "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+      omsOrderId: 10,
+      wmsOrderId: 20,
+      shipmentId: 30,
+      operator: "ops",
+    });
+
+    expect(result).toMatchObject({
+      action: "queued_tracking_push",
+      changed: true,
+      omsOrderId: 10,
+      wmsOrderId: 20,
+      shipmentId: 30,
+    });
+    expect(db.insert).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects unsupported remediation codes", async () => {
+    await expect(remediateOmsFlowIssue({ execute: vi.fn() }, {
+      code: "NOPE",
+      operator: "ops",
+    })).rejects.toThrow(/Unsupported OMS flow remediation code/);
   });
 });
