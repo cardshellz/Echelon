@@ -233,6 +233,53 @@ describe("DropshipOrderProcessingService", () => {
     });
   });
 
+  it("keeps processing retryable when a DropshipError is marked retryable", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const acceptanceService = new FakeAcceptanceService();
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: {
+        quote: async () => {
+          throw new DropshipError(
+            "DROPSHIP_CARRIER_RATE_PROVIDER_UNAVAILABLE",
+            "Carrier rate provider is temporarily unavailable.",
+            { retryable: true },
+          );
+        },
+      },
+      orderAcceptance: acceptanceService,
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      failureCode: "DROPSHIP_CARRIER_RATE_PROVIDER_UNAVAILABLE",
+      retryable: true,
+    });
+    expect(repository.failure).toMatchObject({
+      status: "retrying",
+      errorCode: "DROPSHIP_CARRIER_RATE_PROVIDER_UNAVAILABLE",
+      retryable: true,
+    });
+    expect(acceptanceService.lastInput).toBeNull();
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_processing_retrying",
+      critical: false,
+      payload: {
+        retryable: true,
+      },
+    });
+  });
+
   it("returns skipped without side effects when the intake is not claimable", async () => {
     const repository = new FakeProcessingRepository(makeClaim({
       claimed: false,

@@ -645,7 +645,7 @@ function classifyOrderProcessingError(error: unknown): {
     return {
       code: error.code,
       message: error.message,
-      retryable: false,
+      retryable: error.context?.retryable === true,
     };
   }
   return {
