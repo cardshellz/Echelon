@@ -435,9 +435,7 @@ describe("dropship ops surface client helpers", () => {
     expect(buildPortalReturnCreateInput({
       idempotencyKey: "portal-return-create-1",
       rmaNumber: " RMA-VENDOR-1 ",
-      storeConnectionId: "",
       intakeId: "44",
-      omsOrderId: "",
       reasonCode: " wrong_item ",
       faultCategory: "marketplace",
       labelSource: " vendor ",
@@ -454,9 +452,7 @@ describe("dropship ops surface client helpers", () => {
     })).toEqual({
       idempotencyKey: "portal-return-create-1",
       rmaNumber: "RMA-VENDOR-1",
-      storeConnectionId: null,
       intakeId: 44,
-      omsOrderId: null,
       reasonCode: "wrong_item",
       faultCategory: "marketplace",
       labelSource: "vendor",
@@ -469,9 +465,7 @@ describe("dropship ops surface client helpers", () => {
     expect(buildPortalReturnCreateInput({
       idempotencyKey: "portal-return-create-2",
       rmaNumber: "RMA-VENDOR-2",
-      storeConnectionId: "",
       intakeId: "",
-      omsOrderId: "",
       reasonCode: "",
       faultCategory: "none",
       labelSource: "",
@@ -479,6 +473,28 @@ describe("dropship ops surface client helpers", () => {
       vendorNotes: "",
       items: [],
     })).not.toHaveProperty("returnWindowDays");
+    expect(buildPortalReturnCreateInput({
+      idempotencyKey: "portal-return-create-3",
+      rmaNumber: "RMA-VENDOR-3",
+      intakeId: "45",
+      reasonCode: "",
+      faultCategory: "none",
+      labelSource: "",
+      returnTrackingNumber: "",
+      vendorNotes: "",
+      items: [],
+    })).not.toHaveProperty("omsOrderId");
+    expect(() => buildPortalReturnCreateInput({
+      idempotencyKey: "portal-return-create-4",
+      rmaNumber: "RMA-VENDOR-4",
+      intakeId: "",
+      reasonCode: "",
+      faultCategory: "none",
+      labelSource: "",
+      returnTrackingNumber: "",
+      vendorNotes: "",
+      items: [{ productVariantId: "123", quantity: "1", status: "requested", requestedCreditAmount: "" }],
+    })).toThrow("intakeId is required");
   });
 
   it("builds admin return inspection bodies from item credit and fee rows", () => {

@@ -10,6 +10,7 @@ import {
   type DropshipRmaDetail,
   type DropshipRmaInspectionResult,
   type DropshipRmaListResult,
+  type DropshipRmaOrderReference,
   type DropshipRmaStatusUpdateResult,
   type ProcessDropshipRmaInspectionInput,
   type UpdateDropshipRmaStatusInput,
@@ -55,8 +56,11 @@ describe("DropshipReturnService", () => {
     });
 
     expect(result.rma.rmaNumber).toBe("RMA-VENDOR-100");
+    expect(repository.lastOrderReferenceInput).toEqual({ vendorId: 10, intakeId: 44 });
     expect(repository.lastCreateInput).toMatchObject({
       vendorId: 10,
+      storeConnectionId: 70,
+      omsOrderId: 9001,
       rmaNumber: "RMA-VENDOR-100",
       returnWindowDays: 30,
       idempotencyKey: "vendor-rma-100",
@@ -69,9 +73,51 @@ describe("DropshipReturnService", () => {
       vendorId: 99,
       rmaNumber: "RMA-SPOOFED",
       returnWindowDays: 365,
+      storeConnectionId: 70,
+      omsOrderId: 9001,
       items: [],
       idempotencyKey: "vendor-rma-spoof",
     })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+  });
+
+  it("rejects vendor RMA item variants that are not proven by the linked order", async () => {
+    const repository = new FakeReturnRepository();
+    const service = makeService(repository, []);
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-NO-ORDER",
+      items: [{ productVariantId: 20, quantity: 1 }],
+      idempotencyKey: "vendor-rma-no-order",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-BAD-VARIANT",
+      intakeId: 44,
+      items: [{ productVariantId: 999, quantity: 1 }],
+      idempotencyKey: "vendor-rma-bad-variant",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-OVER-QTY",
+      intakeId: 44,
+      items: [{ productVariantId: 20, quantity: 4 }],
+      idempotencyKey: "vendor-rma-over-qty",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+
+    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-OVER-QTY");
+  });
+
+  it("rejects member RMA references to orders outside the vendor scope", async () => {
+    const repository = new FakeReturnRepository();
+    repository.orderReference = null;
+    const service = makeService(repository, []);
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-MISSING-ORDER",
+      intakeId: 55,
+      items: [],
+      idempotencyKey: "vendor-rma-missing-order",
+    })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_INTAKE_NOT_FOUND" });
   });
 
   it("creates RMAs with idempotency, request hash, actor, and clock context", async () => {
@@ -268,6 +314,8 @@ class FakeReturnRepository implements DropshipReturnRepository {
   lastCreateInput: (CreateDropshipRmaInput & { requestHash: string; now: Date }) | null = null;
   lastStatusInput: (UpdateDropshipRmaStatusInput & { requestHash: string; now: Date }) | null = null;
   lastInspectionInput: (ProcessDropshipRmaInspectionInput & { requestHash: string; now: Date }) | null = null;
+  lastOrderReferenceInput: Parameters<DropshipReturnRepository["getOrderReference"]>[0] | null = null;
+  orderReference: DropshipRmaOrderReference | null = makeOrderReference();
   nextStatusReplay = false;
 
   async listRmas(input: Parameters<DropshipReturnRepository["listRmas"]>[0]): Promise<DropshipRmaListResult> {
@@ -277,6 +325,11 @@ class FakeReturnRepository implements DropshipReturnRepository {
 
   async getRma(): Promise<DropshipRmaDetail | null> {
     return makeRmaDetail();
+  }
+
+  async getOrderReference(input: Parameters<DropshipReturnRepository["getOrderReference"]>[0]): Promise<DropshipRmaOrderReference | null> {
+    this.lastOrderReferenceInput = input;
+    return this.orderReference;
   }
 
   async createRma(input: CreateDropshipRmaInput & { requestHash: string; now: Date }): Promise<{
@@ -420,6 +473,19 @@ function makeRma(overrides: Partial<DropshipRmaDetail> = {}): DropshipRmaDetail 
 
 function makeRmaDetail(overrides: Partial<DropshipRmaDetail> = {}): DropshipRmaDetail {
   return makeRma(overrides);
+}
+
+function makeOrderReference(overrides: Partial<DropshipRmaOrderReference> = {}): DropshipRmaOrderReference {
+  return {
+    intakeId: 44,
+    storeConnectionId: 70,
+    omsOrderId: 9001,
+    lines: [
+      { lineIndex: 0, productVariantId: 20, quantity: 2 },
+      { lineIndex: 1, productVariantId: 21, quantity: 1 },
+    ],
+    ...overrides,
+  };
 }
 
 function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): DropshipProvisionedVendorProfile {
