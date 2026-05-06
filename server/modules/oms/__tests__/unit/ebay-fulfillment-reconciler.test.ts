@@ -11,7 +11,16 @@ function makeDb(opts: {
       pushTrackingForShipment: opts.pushTrackingForShipment,
       pushTracking: opts.pushTracking,
     },
-    execute: vi.fn().mockResolvedValue({ rows: opts.shipmentRows ?? [] }),
+    execute: vi.fn(async (query: any) => {
+      const queryText = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+      if (queryText.includes("FROM oms.webhook_retry_queue")) {
+        return { rows: [] };
+      }
+      return { rows: opts.shipmentRows ?? [] };
+    }),
+    insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
   };
 }
 
@@ -70,6 +79,25 @@ describe("EbayFulfillmentReconciler.repush", () => {
     expect(result).toBe(false);
     expect(pushTrackingForShipment).toHaveBeenCalledTimes(2);
     expect(pushTracking).not.toHaveBeenCalled();
+    expect(db.insert).toHaveBeenCalledTimes(1);
+  });
+
+  it("enqueues an order-level delayed retry when fallback tracking push returns false", async () => {
+    const pushTrackingForShipment = vi.fn().mockResolvedValue(true);
+    const pushTracking = vi.fn().mockResolvedValue(false);
+    const db = makeDb({
+      shipmentRows: [],
+      pushTrackingForShipment,
+      pushTracking,
+    });
+
+    const reconciler = new EbayFulfillmentReconciler(db as any);
+    const result = await reconciler.repush({ id: 161881 } as any);
+
+    expect(result).toBe(false);
+    expect(pushTrackingForShipment).not.toHaveBeenCalled();
+    expect(pushTracking).toHaveBeenCalledWith(161881);
+    expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
   it("returns false when no tracking push service is wired", async () => {

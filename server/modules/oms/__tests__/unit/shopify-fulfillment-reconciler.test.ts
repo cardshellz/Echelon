@@ -16,7 +16,16 @@ function makeDb(opts: {
       opts.pushShopifyFulfillment === undefined
         ? undefined
         : { pushShopifyFulfillment: opts.pushShopifyFulfillment },
-    execute: vi.fn().mockResolvedValue({ rows: opts.shipmentRows ?? [] }),
+    execute: vi.fn(async (query: any) => {
+      const queryText = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+      if (queryText.includes("FROM oms.webhook_retry_queue")) {
+        return { rows: [] };
+      }
+      return { rows: opts.shipmentRows ?? [] };
+    }),
+    insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
   };
 }
 
@@ -118,6 +127,7 @@ describe("ShopifyFulfillmentReconciler.repush", () => {
     const success = await reconciler.repush({ id: 161177 } as any);
 
     expect(success).toBe(false);
+    expect(db.insert).toHaveBeenCalledTimes(1);
     vi.restoreAllMocks();
   });
 });
