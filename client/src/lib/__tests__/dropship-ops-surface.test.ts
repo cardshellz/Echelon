@@ -8,6 +8,7 @@ import {
   buildAutoReloadConfigInput,
   buildStripeFundingSetupSessionInput,
   buildStripeWalletFundingSessionInput,
+  buildScopedSelectionReplacement,
   buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
@@ -1007,6 +1008,59 @@ describe("dropship ops surface client helpers", () => {
     ]);
   });
 
+  it("builds broad catalog selection replacements without stale opposite scope rules", () => {
+    const replacement = buildScopedSelectionReplacement({
+      existingRules: [
+        makeSelectionRule({ id: 1, scopeType: "category", action: "exclude", productVariantId: null, category: "Supplies" }),
+        makeSelectionRule({ id: 2, scopeType: "variant", action: "include", productVariantId: 99 }),
+      ],
+      target: { scopeType: "category", category: " supplies " },
+      action: "include",
+    });
+
+    expect(replacement).toEqual([
+      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 99 }),
+      expect.objectContaining({
+        scopeType: "category",
+        action: "include",
+        category: "supplies",
+        autoConnectNewSkus: true,
+        autoListNewSkus: false,
+      }),
+    ]);
+    expect(replacement.some((rule) => rule.action === "exclude" && rule.category === "Supplies")).toBe(false);
+  });
+
+  it("builds catalog-wide and product-line selection replacements", () => {
+    expect(buildScopedSelectionReplacement({
+      existingRules: [],
+      target: { scopeType: "catalog" },
+      action: "include",
+    })).toEqual([
+      expect.objectContaining({
+        scopeType: "catalog",
+        action: "include",
+        productLineId: null,
+        productId: null,
+        productVariantId: null,
+        category: null,
+      }),
+    ]);
+
+    expect(buildScopedSelectionReplacement({
+      existingRules: [makeSelectionRule({ id: 1, scopeType: "product_line", action: "include", productLineId: 12, productVariantId: null })],
+      target: { scopeType: "product_line", productLineId: 12 },
+      action: "exclude",
+    })).toEqual([
+      expect.objectContaining({
+        scopeType: "product_line",
+        action: "exclude",
+        productLineId: 12,
+        autoConnectNewSkus: false,
+      }),
+    ]);
+  });
+
   it("builds listing preview requests from selected catalog rows only", () => {
     expect(buildListingPreviewRequest({
       storeConnectionId: 12,
@@ -1289,6 +1343,7 @@ function makeCatalogRow(overrides: Partial<DropshipCatalogRow>): DropshipCatalog
     variantSku: "VARIANT",
     variantName: "Variant",
     category: null,
+    productLineIds: [],
     productLineNames: [],
     unitsPerVariant: 1,
     selectionDecision: makeSelectionDecision(false),

@@ -1154,6 +1154,7 @@ export interface DropshipCatalogRow {
   variantSku: string | null;
   variantName: string;
   category: string | null;
+  productLineIds: number[];
   productLineNames: string[];
   unitsPerVariant: number;
   selectionDecision: DropshipCatalogSelectionDecision;
@@ -1269,6 +1270,13 @@ export interface DropshipSelectionRulesReplaceResponse {
   idempotentReplay: boolean;
   rules: DropshipVendorSelectionRule[];
 }
+
+export type DropshipVendorSelectionScopeTarget =
+  | { scopeType: "catalog" }
+  | { scopeType: "product_line"; productLineId: number }
+  | { scopeType: "category"; category: string }
+  | { scopeType: "product"; productId: number }
+  | { scopeType: "variant"; productVariantId: number };
 
 export interface DropshipOrderListItem {
   intakeId: number;
@@ -2906,6 +2914,20 @@ export function buildVariantSelectionReplacement(input: {
   return [...activeRules, ...actionRules];
 }
 
+export function buildScopedSelectionReplacement(input: {
+  existingRules: readonly DropshipVendorSelectionRule[];
+  target: DropshipVendorSelectionScopeTarget;
+  action: DropshipVendorSelectionAction;
+}): DropshipVendorSelectionRuleInput[] {
+  const actionRule = scopedSelectionRuleInput(input.target, input.action);
+  const activeRules = input.existingRules
+    .filter((rule) => rule.isActive !== false)
+    .map(toReplaceableSelectionRule)
+    .filter((rule) => !isSameSelectionTarget(rule, actionRule));
+
+  return [...activeRules, actionRule];
+}
+
 function toReplaceableSelectionRule(rule: DropshipVendorSelectionRule): DropshipVendorSelectionRuleInput {
   return {
     scopeType: rule.scopeType,
@@ -2919,6 +2941,73 @@ function toReplaceableSelectionRule(rule: DropshipVendorSelectionRule): Dropship
     priority: Number.isInteger(rule.priority) ? rule.priority! : 0,
     metadata: rule.metadata ?? {},
   };
+}
+
+function scopedSelectionRuleInput(
+  target: DropshipVendorSelectionScopeTarget,
+  action: DropshipVendorSelectionAction,
+): DropshipVendorSelectionRuleInput {
+  const base = {
+    action,
+    productLineId: null,
+    productId: null,
+    productVariantId: null,
+    category: null,
+    autoConnectNewSkus: action === "include",
+    autoListNewSkus: false,
+    priority: action === "include" ? 50 : 150,
+    metadata: {
+      source: "portal_catalog_scope",
+    },
+  };
+
+  if (target.scopeType === "catalog") {
+    return {
+      ...base,
+      scopeType: "catalog",
+    };
+  }
+  if (target.scopeType === "product_line") {
+    return {
+      ...base,
+      scopeType: "product_line",
+      productLineId: assertPositiveInteger(target.productLineId, "productLineId"),
+    };
+  }
+  if (target.scopeType === "category") {
+    const category = target.category.trim();
+    if (!category) {
+      throw new Error("category is required for category selection.");
+    }
+    return {
+      ...base,
+      scopeType: "category",
+      category,
+    };
+  }
+  if (target.scopeType === "product") {
+    return {
+      ...base,
+      scopeType: "product",
+      productId: assertPositiveInteger(target.productId, "productId"),
+    };
+  }
+  return {
+    ...base,
+    scopeType: "variant",
+    productVariantId: assertPositiveInteger(target.productVariantId, "productVariantId"),
+  };
+}
+
+function isSameSelectionTarget(
+  left: Pick<DropshipVendorSelectionRuleInput, "scopeType" | "productLineId" | "productId" | "productVariantId" | "category">,
+  right: Pick<DropshipVendorSelectionRuleInput, "scopeType" | "productLineId" | "productId" | "productVariantId" | "category">,
+): boolean {
+  return left.scopeType === right.scopeType
+    && (left.productLineId ?? null) === (right.productLineId ?? null)
+    && (left.productId ?? null) === (right.productId ?? null)
+    && (left.productVariantId ?? null) === (right.productVariantId ?? null)
+    && (left.category?.trim().toLowerCase() ?? null) === (right.category?.trim().toLowerCase() ?? null);
 }
 
 function isTargetedVariantRule(rule: DropshipVendorSelectionRuleInput, variantIds: ReadonlySet<number>): boolean {
