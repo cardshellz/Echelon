@@ -264,6 +264,25 @@ export async function enqueueDelayedTrackingPush(
     );
   }
 
+  const existing: any = await dbArg.execute(sql`
+    SELECT id
+    FROM oms.webhook_retry_queue
+    WHERE provider = 'internal'
+      AND topic = 'delayed_tracking_push'
+      AND status = 'pending'
+      AND (
+        ${
+          shipmentId !== undefined
+            ? sql`payload->>'shipmentId' = ${String(shipmentId)}`
+            : sql`payload->>'orderId' = ${String(orderId)} AND payload->>'shipmentId' IS NULL`
+        }
+      )
+    LIMIT 1
+  `);
+  if (existing?.rows?.[0]) {
+    return;
+  }
+
   await dbArg.insert(webhookRetryQueue).values({
     provider: "internal",
     topic: "delayed_tracking_push",

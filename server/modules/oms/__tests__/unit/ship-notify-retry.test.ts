@@ -115,10 +115,12 @@ function makeDb(opts: {
     | null;
   insertThrows?: Error;
   updateThrows?: Error;
+  executeRows?: Array<{ rows: any[] }>;
 } = {}) {
   const inserts: RecordedInsert[] = [];
   const updates: RecordedUpdate[] = [];
   const executes: unknown[] = [];
+  const remainingExecuteRows = [...(opts.executeRows ?? [])];
 
   const db: any = {
     insert: vi.fn((table: any) => ({
@@ -139,7 +141,7 @@ function makeDb(opts: {
     })),
     execute: vi.fn(async (query: unknown) => {
       executes.push(query);
-      return { rows: [] };
+      return remainingExecuteRows.shift() ?? { rows: [] };
     }),
   };
 
@@ -1255,6 +1257,26 @@ describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
 
     expect(inserts).toHaveLength(1);
     expect(inserts[0]!.values.payload).toEqual({ orderId: 77, shipmentId: 501 });
+  });
+
+  it("does not enqueue duplicate pending delayed tracking push for the same shipment", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 123 }] }],
+    });
+
+    await enqueueDelayedTrackingPush(db, 77, 501);
+
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("does not enqueue duplicate pending delayed tracking push for the same order-level scope", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 124 }] }],
+    });
+
+    await enqueueDelayedTrackingPush(db, 77);
+
+    expect(inserts).toHaveLength(0);
   });
 
   it("dispatches delayed tracking push through shipment-scoped handler first", async () => {
