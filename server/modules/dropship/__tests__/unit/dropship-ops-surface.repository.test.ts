@@ -75,6 +75,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(String(query.mock.calls[0]?.[0])).toContain("zr_rate.zone = rr.destination_zone");
     expect(String(query.mock.calls[0]?.[0])).toContain("c.shipping_config #>> '{dropship,role}'");
     expect(String(query.mock.calls[0]?.[0])).toContain("cc.metadata #>> '{features,dropshipOms}'");
+    expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");
     expect(result.total).toBe(1);
     expect(result.items[0]?.metrics).toMatchObject({
       dropshipOmsChannelId: 7,
@@ -89,6 +90,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       activeShippingMarkupPolicyCount: 0,
       activeShippingInsurancePolicyCount: 0,
       activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadFundingMethodReady: true,
     });
     expect(result.items[0]?.readinessStatus).toBe("blocked");
@@ -171,11 +173,13 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     });
 
     expect(String(query.mock.calls[0]?.[0])).toContain("active_stripe_funding_method_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");
     expect(String(query.mock.calls[0]?.[0])).toContain("auto_reload_funding_method_ready");
     expect(result.items[0]?.readinessStatus).toBe("blocked");
     expect(result.items[0]?.metrics).toMatchObject({
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 0,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodReady: false,
     });
@@ -186,6 +190,30 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(result.items[0]?.checks.find((check) => check.key === "auto_reload")).toMatchObject({
       status: "blocked",
       message: "Auto reload is enabled, but no active Stripe card/ACH funding method with provider identity exists.",
+    });
+  });
+
+  it("blocks dogfood readiness when USDC Base funding is not registered", async () => {
+    const query = vi.fn(async () => ({
+      rows: [makeDogfoodReadinessRow({
+        active_usdc_base_funding_method_count: "0",
+      })],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodReadiness({
+      generatedAt: now,
+      page: 1,
+      limit: 50,
+    });
+
+    expect(result.items[0]?.readinessStatus).toBe("blocked");
+    expect(result.items[0]?.metrics).toMatchObject({
+      activeUsdcBaseFundingMethodCount: 0,
+    });
+    expect(result.items[0]?.checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
+      status: "blocked",
+      message: "No active USDC Base funding method with a wallet address is registered.",
     });
   });
 });
@@ -229,6 +257,7 @@ function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
     available_balance_cents: "1000",
     active_funding_method_count: "1",
     active_stripe_funding_method_count: "1",
+    active_usdc_base_funding_method_count: "1",
     auto_reload_enabled: true,
     auto_reload_funding_method_ready: true,
     notification_preference_count: "1",
