@@ -568,6 +568,22 @@ export default function OmsOrders() {
                         ))}
                       </div>
                     ) : issue.sample.length > 0 && (
+                      issue.code === "WEBHOOK_RETRY_STALE_DUE" ||
+                      issue.code === "WEBHOOK_RETRY_DUE"
+                    ) ? (
+                      <div className="mt-3 space-y-2">
+                        {issue.sample.slice(0, 3).map((row: any) => (
+                          <div key={`${issue.code}-${row.id}`} className="rounded bg-muted p-2 text-xs">
+                            <div className="truncate font-medium">
+                              #{row.id} {row.provider}/{row.topic}
+                            </div>
+                            <div className="mt-1 truncate text-muted-foreground">
+                              due {row.next_retry_at || "-"} | attempts {row.attempts ?? 0} | {row.last_error || "pending"}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : issue.sample.length > 0 && (
                       issue.code === "SHIPMENT_REQUIRES_REVIEW" ||
                       issue.code === "SHIPMENT_ON_HOLD"
                     ) ? (

@@ -54,6 +54,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     failedInbox,
     staleProcessingInbox,
     deadRetries,
+    staleDueRetries,
     pendingRetries,
     omsWithoutWms,
     wmsWithoutShipment,
@@ -134,13 +135,32 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         SELECT COUNT(*)::int AS count
         FROM oms.webhook_retry_queue
         WHERE status = 'pending'
+          AND next_retry_at <= NOW() - INTERVAL '15 minutes'
+      `,
+      sql`
+        SELECT id, provider, topic, source_inbox_id, attempts, next_retry_at, last_error
+        FROM oms.webhook_retry_queue
+        WHERE status = 'pending'
+          AND next_retry_at <= NOW() - INTERVAL '15 minutes'
+        ORDER BY next_retry_at ASC, id ASC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.webhook_retry_queue
+        WHERE status = 'pending'
           AND next_retry_at <= NOW()
+          AND next_retry_at > NOW() - INTERVAL '15 minutes'
       `,
       sql`
         SELECT id, provider, topic, source_inbox_id, attempts, next_retry_at, last_error
         FROM oms.webhook_retry_queue
         WHERE status = 'pending'
           AND next_retry_at <= NOW()
+          AND next_retry_at > NOW() - INTERVAL '15 minutes'
         ORDER BY next_retry_at ASC, id ASC
         LIMIT 10
       `,
@@ -302,6 +322,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: deadRetries.count,
       message: "Webhook retry rows are dead-lettered and need operator action.",
       sample: deadRetries.sample,
+    }),
+    issue({
+      code: "WEBHOOK_RETRY_STALE_DUE",
+      severity: "critical",
+      count: staleDueRetries.count,
+      message: "Webhook retry rows are overdue by more than 15 minutes; the retry worker may be stalled.",
+      sample: staleDueRetries.sample,
     }),
     issue({
       code: "WEBHOOK_RETRY_DUE",

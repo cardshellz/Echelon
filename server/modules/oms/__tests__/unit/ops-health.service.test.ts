@@ -24,6 +24,13 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     );
     expect(OPS_HEALTH_SRC).toMatch(/WHERE status = 'on_hold'/);
   });
+
+  it("treats stale due retry rows as critical worker backlog", () => {
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "WEBHOOK_RETRY_STALE_DUE"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(/next_retry_at <= NOW\(\) - INTERVAL '15 minutes'/);
+  });
 });
 
 describe("ops-health.service :: issue mapping", () => {
@@ -36,8 +43,12 @@ describe("ops-health.service :: issue mapping", () => {
       if (index === 11) {
         return { rows: [{ id: 11, provider: "shopify", topic: "orders/paid", attempts: 1 }] };
       }
-      if (index === 24) return { rows: [{ count: 1 }] };
-      if (index === 25) {
+      if (index === 14) return { rows: [{ count: 1 }] };
+      if (index === 15) {
+        return { rows: [{ id: 44, provider: "internal", topic: "oms_wms_sync", attempts: 2 }] };
+      }
+      if (index === 26) return { rows: [{ count: 1 }] };
+      if (index === 27) {
         return { rows: [{ shipment_id: 22, order_id: 33, status: "on_hold", on_hold_reason: "address review" }] };
       }
       return { rows: [{ count: 0 }] };
@@ -46,10 +57,14 @@ describe("ops-health.service :: issue mapping", () => {
     const health = await getOmsOpsHealth({ execute });
 
     const staleProcessing = health.issues.find((issue) => issue.code === "WEBHOOK_INBOX_STALE_PROCESSING");
+    const staleDueRetry = health.issues.find((issue) => issue.code === "WEBHOOK_RETRY_STALE_DUE");
     const onHold = health.issues.find((issue) => issue.code === "SHIPMENT_ON_HOLD");
 
     expect(staleProcessing?.sample).toEqual([
       expect.objectContaining({ id: 11, topic: "orders/paid" }),
+    ]);
+    expect(staleDueRetry?.sample).toEqual([
+      expect.objectContaining({ id: 44, topic: "oms_wms_sync" }),
     ]);
     expect(onHold?.sample).toEqual([
       expect.objectContaining({ shipment_id: 22, status: "on_hold" }),
