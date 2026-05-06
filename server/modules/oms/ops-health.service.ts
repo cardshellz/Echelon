@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { collectOmsFlowReconciliationIssues } from "./oms-flow-reconciliation.service";
+import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
 
 export interface OmsOpsIssue {
   code: string;
@@ -12,6 +13,9 @@ export interface OmsOpsIssue {
 export interface OmsOpsHealthSummary {
   generatedAt: string;
   status: "healthy" | "degraded" | "critical";
+  workers: {
+    webhookRetry: ReturnType<typeof getWebhookRetryWorkerHeartbeat>;
+  };
   counts: {
     critical: number;
     warning: number;
@@ -49,6 +53,18 @@ async function countAndSample(
 }
 
 export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
+  const webhookRetryHeartbeat = getWebhookRetryWorkerHeartbeat();
+  const nowMs = Date.now();
+  const webhookRetryWorkerStartedMs = webhookRetryHeartbeat.startedAt
+    ? new Date(webhookRetryHeartbeat.startedAt).getTime()
+    : null;
+  const webhookRetryWorkerLastRunMs = webhookRetryHeartbeat.lastRunAt
+    ? new Date(webhookRetryHeartbeat.lastRunAt).getTime()
+    : null;
+  const webhookRetryWorkerIsStale =
+    webhookRetryWorkerStartedMs !== null &&
+    nowMs - webhookRetryWorkerStartedMs > 5 * 60_000 &&
+    (webhookRetryWorkerLastRunMs === null || nowMs - webhookRetryWorkerLastRunMs > 5 * 60_000);
   const [
     flowReconciliationIssues,
     failedInbox,
@@ -302,6 +318,24 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
 
   const issues: OmsOpsIssue[] = [
     ...flowReconciliationIssues,
+    ...(process.env.DISABLE_SCHEDULERS === "true"
+      ? []
+      : [
+          issue({
+            code: "WEBHOOK_RETRY_WORKER_NOT_STARTED",
+            severity: "critical",
+            count: webhookRetryHeartbeat.startedAt ? 0 : 1,
+            message: "Webhook retry worker has not started in this process.",
+            sample: [webhookRetryHeartbeat],
+          }),
+          issue({
+            code: "WEBHOOK_RETRY_WORKER_STALE",
+            severity: "critical",
+            count: webhookRetryWorkerIsStale ? 1 : 0,
+            message: "Webhook retry worker has not run in more than 5 minutes.",
+            sample: [webhookRetryHeartbeat],
+          }),
+        ]),
     issue({
       code: "WEBHOOK_INBOX_FAILED",
       severity: "critical",
@@ -392,6 +426,9 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   return {
     generatedAt: new Date().toISOString(),
     status: counts.critical > 0 ? "critical" : counts.warning > 0 ? "degraded" : "healthy",
+    workers: {
+      webhookRetry: webhookRetryHeartbeat,
+    },
     counts,
     issues,
   };

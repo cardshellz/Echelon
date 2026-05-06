@@ -28,17 +28,42 @@ function getDefaultDb(): any {
   return require("../../db").db;
 }
 const LOG_PREFIX = "[Webhook DLQ Worker]";
+let retryWorkerStartedAt: Date | null = null;
+let retryWorkerLastRunAt: Date | null = null;
+let retryWorkerLastSuccessAt: Date | null = null;
+let retryWorkerLastError: string | null = null;
+
+export interface WebhookRetryWorkerHeartbeat {
+  startedAt: string | null;
+  lastRunAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+}
+
+export function getWebhookRetryWorkerHeartbeat(): WebhookRetryWorkerHeartbeat {
+  return {
+    startedAt: retryWorkerStartedAt?.toISOString() ?? null,
+    lastRunAt: retryWorkerLastRunAt?.toISOString() ?? null,
+    lastSuccessAt: retryWorkerLastSuccessAt?.toISOString() ?? null,
+    lastError: retryWorkerLastError,
+  };
+}
 
 /**
  * Polls the webhook_retry_queue for pending items that are due for a retry.
  */
 export async function startWebhookRetryWorker() {
+  retryWorkerStartedAt = new Date();
   console.log(`${LOG_PREFIX} Started background webhook retry worker`);
 
   setInterval(async () => {
     try {
+      retryWorkerLastRunAt = new Date();
       await processPendingWebhooks();
+      retryWorkerLastSuccessAt = new Date();
+      retryWorkerLastError = null;
     } catch (err) {
+      retryWorkerLastError = err instanceof Error ? err.message : String(err);
       console.error(`${LOG_PREFIX} Error in worker loop:`, err);
     }
   }, 60 * 1000); // Check every minute

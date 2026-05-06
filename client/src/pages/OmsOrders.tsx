@@ -130,6 +130,14 @@ interface OmsOpsIssue {
 interface OmsOpsHealth {
   generatedAt: string;
   status: "healthy" | "degraded" | "critical";
+  workers?: {
+    webhookRetry?: {
+      startedAt: string | null;
+      lastRunAt: string | null;
+      lastSuccessAt: string | null;
+      lastError: string | null;
+    };
+  };
   counts: {
     critical: number;
     warning: number;
@@ -466,6 +474,11 @@ export default function OmsOrders() {
             </div>
           </CardHeader>
           <CardContent className="pt-0">
+            {opsHealth.workers?.webhookRetry && (
+              <div className="mb-3 rounded-md bg-muted p-2 text-xs text-muted-foreground">
+                Retry worker | started {opsHealth.workers.webhookRetry.startedAt || "-"} | last run {opsHealth.workers.webhookRetry.lastRunAt || "-"} | last success {opsHealth.workers.webhookRetry.lastSuccessAt || "-"}
+              </div>
+            )}
             {opsHealth.issues.length === 0 ? (
               <div className="text-sm text-muted-foreground">No stuck webhook, WMS, or shipping handoff issues detected.</div>
             ) : (
@@ -582,6 +595,13 @@ export default function OmsOrders() {
                             </div>
                           </div>
                         ))}
+                      </div>
+                    ) : issue.sample.length > 0 && (
+                      issue.code === "WEBHOOK_RETRY_WORKER_NOT_STARTED" ||
+                      issue.code === "WEBHOOK_RETRY_WORKER_STALE"
+                    ) ? (
+                      <div className="mt-3 rounded bg-muted p-2 text-xs text-muted-foreground">
+                        started {issue.sample[0]?.startedAt || "-"} | last run {issue.sample[0]?.lastRunAt || "-"} | last error {issue.sample[0]?.lastError || "-"}
                       </div>
                     ) : issue.sample.length > 0 && (
                       issue.code === "SHIPMENT_REQUIRES_REVIEW" ||

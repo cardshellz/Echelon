@@ -66,6 +66,7 @@ import {
   recordRetryFailure,
   enqueueShopifyFulfillmentRetry,
   enqueueDelayedTrackingPush,
+  getWebhookRetryWorkerHeartbeat,
   dispatchShopifyFulfillmentRetry,
   dispatchDelayedTrackingPush,
   dispatchEbayWebhookRetry,
@@ -194,6 +195,17 @@ describe("enqueueShipStationRetry :: happy path", () => {
 
     expect(inserts[0]!.values.payload).toEqual({ resource_url: "https://ss.example/a" });
     expect((inserts[0]!.values.payload as any).shouldNotSurvive).toBeUndefined();
+  });
+});
+
+describe("webhook retry worker heartbeat", () => {
+  it("exposes null heartbeat timestamps before the worker starts", () => {
+    expect(getWebhookRetryWorkerHeartbeat()).toMatchObject({
+      startedAt: null,
+      lastRunAt: null,
+      lastSuccessAt: null,
+      lastError: null,
+    });
   });
 });
 
