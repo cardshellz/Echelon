@@ -59,6 +59,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     wmsWithoutShipment,
     unpushedShipments,
     reviewShipments,
+    onHoldShipments,
     shippedTrackingNotPushed,
   ] = await Promise.all([
     collectOmsFlowReconciliationIssues(db),
@@ -74,6 +75,22 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                last_error, updated_at
         FROM oms.webhook_inbox
         WHERE status IN ('failed', 'dead')
+        ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments
+        WHERE status = 'on_hold'
+      `,
+      sql`
+        SELECT id AS shipment_id, order_id, status, on_hold_reason, review_reason,
+               requires_review, updated_at
+        FROM wms.outbound_shipments
+        WHERE status = 'on_hold'
         ORDER BY updated_at DESC NULLS LAST, id DESC
         LIMIT 10
       `,
@@ -320,6 +337,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: reviewShipments.count,
       message: "WMS shipments are flagged for warehouse-ops review.",
       sample: reviewShipments.sample,
+    }),
+    issue({
+      code: "SHIPMENT_ON_HOLD",
+      severity: "warning",
+      count: onHoldShipments.count,
+      message: "WMS shipments are on hold and need warehouse-ops review.",
+      sample: onHoldShipments.sample,
     }),
     issue({
       code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",

@@ -16,4 +16,11 @@ describe("ops-health.service :: fulfillment alert severity", () => {
       /code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"[\s\S]*severity: "critical"/,
     );
   });
+
+  it("surfaces on-hold shipments as explicit warehouse review warnings", () => {
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "SHIPMENT_ON_HOLD"[\s\S]*severity: "warning"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(/WHERE status = 'on_hold'/);
+  });
 });

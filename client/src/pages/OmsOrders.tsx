@@ -568,6 +568,25 @@ export default function OmsOrders() {
                         ))}
                       </div>
                     ) : issue.sample.length > 0 && (
+                      issue.code === "SHIPMENT_REQUIRES_REVIEW" ||
+                      issue.code === "SHIPMENT_ON_HOLD"
+                    ) ? (
+                      <div className="mt-3 space-y-2">
+                        {issue.sample.slice(0, 3).map((row: any) => (
+                          <div
+                            key={`${issue.code}-${row.shipment_id}`}
+                            className="rounded bg-muted p-2 text-xs"
+                          >
+                            <div className="truncate font-medium">
+                              Ship {row.shipment_id} | WMS {row.order_id || "-"} | {row.status || "-"}
+                            </div>
+                            <div className="mt-1 truncate text-muted-foreground">
+                              {row.review_reason || row.on_hold_reason || "warehouse review required"}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : issue.sample.length > 0 && (
                       <pre className="mt-3 max-h-28 overflow-auto rounded bg-muted p-2 text-xs">
                         {JSON.stringify(issue.sample.slice(0, 3), null, 2)}
                       </pre>
