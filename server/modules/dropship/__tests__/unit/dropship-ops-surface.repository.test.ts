@@ -28,6 +28,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
           auto_reload_enabled: true,
           funding_method_count: "2",
           active_stripe_funding_method_count: "1",
+          active_usdc_base_funding_method_count: "1",
           auto_reload_funding_method_ready: true,
           notification_preference_count: "0",
         }],
@@ -38,11 +39,13 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     const result = await repository.getVendorSettingsOverview(10, now);
 
     expect(String(query.mock.calls[0]?.[0])).toContain("active_stripe_funding_method_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");
     expect(String(query.mock.calls[0]?.[0])).toContain("auto_reload_funding_method_ready");
     expect(result.wallet).toMatchObject({
       availableBalanceCents: 0,
       fundingMethodCount: 2,
       activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodReady: true,
     });

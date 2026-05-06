@@ -625,6 +625,7 @@ function walletAutoReloadStatus(settings: DropshipSettingsResponse["settings"] |
   if (!settings) return "Loading";
   if (!settings.wallet.autoReloadEnabled) return "Needs setup";
   if (!settings.wallet.autoReloadFundingMethodReady) return "Funding method needed";
+  if (settings.wallet.activeUsdcBaseFundingMethodCount <= 0) return "USDC needed";
   if (settings.wallet.availableBalanceCents > 0 || settings.wallet.activeStripeFundingMethodCount > 0) return "Ready";
   return "Needs funding";
 }

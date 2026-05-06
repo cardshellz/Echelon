@@ -31,6 +31,7 @@ interface VendorSettingsRow {
   auto_reload_enabled: boolean | null;
   funding_method_count: string | number;
   active_stripe_funding_method_count: string | number;
+  active_usdc_base_funding_method_count: string | number;
   auto_reload_funding_method_ready: boolean | null;
   notification_preference_count: string | number;
 }
@@ -128,6 +129,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
                 ars.enabled AS auto_reload_enabled,
                 COALESCE(fm.funding_method_count, 0) AS funding_method_count,
                 COALESCE(fm.active_stripe_funding_method_count, 0) AS active_stripe_funding_method_count,
+                COALESCE(fm.active_usdc_base_funding_method_count, 0) AS active_usdc_base_funding_method_count,
                 COALESCE(auto_reload_funding.ready, false) AS auto_reload_funding_method_ready,
                 COALESCE(np.notification_preference_count, 0) AS notification_preference_count
          FROM dropship.dropship_vendors v
@@ -140,7 +142,11 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
                WHERE rail IN ('stripe_card', 'stripe_ach')
                  AND provider_customer_id IS NOT NULL
                  AND provider_payment_method_id IS NOT NULL
-             ) AS active_stripe_funding_method_count
+             ) AS active_stripe_funding_method_count,
+             COUNT(*) FILTER (
+               WHERE rail = 'usdc_base'
+                 AND usdc_wallet_address IS NOT NULL
+             ) AS active_usdc_base_funding_method_count
            FROM dropship.dropship_funding_methods
            WHERE vendor_id = v.id
              AND status = 'active'
@@ -196,6 +202,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       autoReloadEnabled: vendor.auto_reload_enabled === true,
       fundingMethodCount: toNumber(vendor.funding_method_count),
       activeStripeFundingMethodCount: toNumber(vendor.active_stripe_funding_method_count),
+      activeUsdcBaseFundingMethodCount: toNumber(vendor.active_usdc_base_funding_method_count),
       autoReloadFundingMethodReady: vendor.auto_reload_funding_method_ready === true,
     };
     const account = {
