@@ -36,6 +36,13 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(/code: "WEBHOOK_RETRY_WORKER_NOT_STARTED"/);
     expect(OPS_HEALTH_SRC).toMatch(/code: "WEBHOOK_RETRY_WORKER_STALE"/);
   });
+
+  it("surfaces OMS scheduler heartbeat issues", () => {
+    expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_FLOW_RECONCILIATION_SCHEDULER_NOT_STARTED"/);
+    expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_FLOW_RECONCILIATION_SCHEDULER_STALE"/);
+    expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_OPS_ALERT_SCHEDULER_NOT_STARTED"/);
+    expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_OPS_ALERT_SCHEDULER_STALE"/);
+  });
 });
 
 describe("ops-health.service :: issue mapping", () => {
@@ -78,6 +85,8 @@ describe("ops-health.service :: issue mapping", () => {
         expect.objectContaining({ shipment_id: 22, status: "on_hold" }),
       ]);
       expect(health.workers.webhookRetry).toHaveProperty("startedAt");
+      expect(health.workers.omsFlowReconciliation).toHaveProperty("startedAt");
+      expect(health.workers.omsOpsAlert).toHaveProperty("startedAt");
     } finally {
       if (previousDisableSchedulers === undefined) {
         delete process.env.DISABLE_SCHEDULERS;

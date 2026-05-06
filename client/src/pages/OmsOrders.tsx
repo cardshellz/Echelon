@@ -131,14 +131,12 @@ interface OmsOpsHealth {
   generatedAt: string;
   status: "healthy" | "degraded" | "critical";
   workers?: {
-    webhookRetry?: {
-      startedAt: string | null;
-      lastRunAt: string | null;
-      lastSuccessAt: string | null;
-      lastError: string | null;
+    webhookRetry?: OmsWorkerHeartbeat & {
       lastSkippedAt: string | null;
       inFlight: boolean;
     };
+    omsFlowReconciliation?: OmsWorkerHeartbeat;
+    omsOpsAlert?: OmsWorkerHeartbeat;
   };
   counts: {
     critical: number;
@@ -146,6 +144,13 @@ interface OmsOpsHealth {
     info: number;
   };
   issues: OmsOpsIssue[];
+}
+
+interface OmsWorkerHeartbeat {
+  startedAt: string | null;
+  lastRunAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -477,8 +482,18 @@ export default function OmsOrders() {
           </CardHeader>
           <CardContent className="pt-0">
             {opsHealth.workers?.webhookRetry && (
-              <div className="mb-3 rounded-md bg-muted p-2 text-xs text-muted-foreground">
+              <div className="mb-2 rounded-md bg-muted p-2 text-xs text-muted-foreground">
                 Retry worker | {opsHealth.workers.webhookRetry.inFlight ? "running" : "idle"} | started {opsHealth.workers.webhookRetry.startedAt || "-"} | last run {opsHealth.workers.webhookRetry.lastRunAt || "-"} | last success {opsHealth.workers.webhookRetry.lastSuccessAt || "-"} | last skipped {opsHealth.workers.webhookRetry.lastSkippedAt || "-"}
+              </div>
+            )}
+            {opsHealth.workers?.omsFlowReconciliation && (
+              <div className="mb-2 rounded-md bg-muted p-2 text-xs text-muted-foreground">
+                Reconciliation scheduler | started {opsHealth.workers.omsFlowReconciliation.startedAt || "-"} | last run {opsHealth.workers.omsFlowReconciliation.lastRunAt || "-"} | last success {opsHealth.workers.omsFlowReconciliation.lastSuccessAt || "-"}
+              </div>
+            )}
+            {opsHealth.workers?.omsOpsAlert && (
+              <div className="mb-3 rounded-md bg-muted p-2 text-xs text-muted-foreground">
+                Alert scheduler | started {opsHealth.workers.omsOpsAlert.startedAt || "-"} | last run {opsHealth.workers.omsOpsAlert.lastRunAt || "-"} | last success {opsHealth.workers.omsOpsAlert.lastSuccessAt || "-"}
               </div>
             )}
             {opsHealth.issues.length === 0 ? (
@@ -600,7 +615,11 @@ export default function OmsOrders() {
                       </div>
                     ) : issue.sample.length > 0 && (
                       issue.code === "WEBHOOK_RETRY_WORKER_NOT_STARTED" ||
-                      issue.code === "WEBHOOK_RETRY_WORKER_STALE"
+                      issue.code === "WEBHOOK_RETRY_WORKER_STALE" ||
+                      issue.code === "OMS_FLOW_RECONCILIATION_SCHEDULER_NOT_STARTED" ||
+                      issue.code === "OMS_FLOW_RECONCILIATION_SCHEDULER_STALE" ||
+                      issue.code === "OMS_OPS_ALERT_SCHEDULER_NOT_STARTED" ||
+                      issue.code === "OMS_OPS_ALERT_SCHEDULER_STALE"
                     ) ? (
                       <div className="mt-3 rounded bg-muted p-2 text-xs text-muted-foreground">
                         started {issue.sample[0]?.startedAt || "-"} | last run {issue.sample[0]?.lastRunAt || "-"} | last error {issue.sample[0]?.lastError || "-"}
