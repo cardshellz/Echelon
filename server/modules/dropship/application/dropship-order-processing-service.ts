@@ -9,6 +9,7 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
   DropshipOmsFulfillmentSync,
+  DropshipOmsFulfillmentSyncRetryQueue,
 } from "./dropship-ports";
 import type {
   DropshipOrderAcceptanceResult,
@@ -124,6 +125,7 @@ export interface DropshipOrderProcessingServiceDependencies {
   walletAutoReload?: Pick<DropshipWalletService, "handleAutoReload">;
   notificationSender?: DropshipNotificationSender;
   fulfillmentSync?: DropshipOmsFulfillmentSync;
+  fulfillmentSyncRetryQueue?: DropshipOmsFulfillmentSyncRetryQueue;
   clock: DropshipClock;
   logger: DropshipLogger;
 }

@@ -11,7 +11,12 @@ import type {
   DropshipShippingQuoteResult,
   DropshipShippingQuoteService,
 } from "./dropship-shipping-quote-service";
-import type { DropshipLogEvent, DropshipLogger, DropshipOmsFulfillmentSync } from "./dropship-ports";
+import type {
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipOmsFulfillmentSync,
+  DropshipOmsFulfillmentSyncRetryQueue,
+} from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 
 const positiveIdSchema = z.number().int().positive();
@@ -50,6 +55,7 @@ export interface DropshipOrderAcceptanceWorkflowDependencies {
   shippingQuoteService: Pick<DropshipShippingQuoteService, "quote">;
   acceptanceService: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
   fulfillmentSync?: DropshipOmsFulfillmentSync;
+  fulfillmentSyncRetryQueue?: DropshipOmsFulfillmentSyncRetryQueue;
   logger: DropshipLogger;
 }
 

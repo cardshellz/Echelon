@@ -45,6 +45,13 @@ export interface DropshipOmsFulfillmentSync {
   syncOmsOrderToWms(omsOrderId: number): Promise<number | null>;
 }
 
+export interface DropshipOmsFulfillmentSyncRetryQueue {
+  enqueueOmsWmsSyncRetry(input: {
+    omsOrderId: number;
+    cause?: unknown;
+  }): Promise<void>;
+}
+
 export interface DropshipTransaction {
   readonly id: string;
 }
