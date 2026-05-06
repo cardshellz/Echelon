@@ -1425,6 +1425,11 @@ export interface DropshipOrderAcceptInput {
   idempotencyKey: string;
 }
 
+export interface DropshipOrderRejectInput {
+  idempotencyKey: string;
+  reason: string;
+}
+
 export interface DropshipOrderAcceptResponse {
   result: {
     outcome: "accepted" | "payment_hold";
@@ -1448,6 +1453,22 @@ export interface DropshipOrderAcceptResponse {
       currency: string;
       carrierServices: Array<{ carrier: string; service: string }>;
     };
+  };
+}
+
+export interface DropshipOrderRejectResponse {
+  result: {
+    intakeId: number;
+    vendorId: number;
+    storeConnectionId: number;
+    externalOrderId: string;
+    externalOrderNumber: string | null;
+    previousStatus: DropshipOpsOrderIntakeStatus;
+    status: DropshipOpsOrderIntakeStatus;
+    cancellationStatus: string | null;
+    rejectionReason: string;
+    idempotentReplay: boolean;
+    rejectedAt: string;
   };
 }
 
@@ -2696,6 +2717,20 @@ export function buildDropshipOrderAcceptInput(input: {
 }): DropshipOrderAcceptInput {
   return {
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+  };
+}
+
+export function buildDropshipOrderRejectInput(input: {
+  idempotencyKey: string;
+  reason: string;
+}): DropshipOrderRejectInput {
+  const reason = requiredTrimmedString(input.reason, "reason", 1000);
+  if (reason.length < 3) {
+    throw new Error("reason must be at least 3 characters.");
+  }
+  return {
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
+    reason,
   };
 }
 

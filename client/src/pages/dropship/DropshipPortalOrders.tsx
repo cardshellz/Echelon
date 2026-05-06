@@ -15,10 +15,19 @@ import {
   Search,
   Truck,
   Wallet,
+  XCircle,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
@@ -35,9 +44,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import {
   allDropshipOpsOrderIntakeStatuses,
   buildDropshipOrderAcceptInput,
+  buildDropshipOrderRejectInput,
   buildQueryUrl,
   createDropshipIdempotencyKey,
   fetchJson,
@@ -51,16 +62,27 @@ import {
   type DropshipOrderDetailResponse,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
+  type DropshipOrderRejectResponse,
 } from "@/lib/dropship-ops-surface";
 import { useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
-type PendingOrderAction = "send-code" | "verify-code" | "passkey-proof" | "accept" | null;
+type PendingOrderAction =
+  | "accept-send-code"
+  | "accept-verify-code"
+  | "accept-passkey-proof"
+  | "accept"
+  | "reject-send-code"
+  | "reject-verify-code"
+  | "reject-passkey-proof"
+  | "reject"
+  | null;
 
 const statusOptions = ["all", ...allDropshipOpsOrderIntakeStatuses];
 
 const orderAcceptanceAction: DropshipSensitiveAction = "high_risk_order_acceptance";
 const acceptanceStatuses = new Set(["received", "retrying", "failed", "payment_hold", "processing"]);
+const rejectionStatuses = new Set(["received", "retrying", "failed", "payment_hold"]);
 
 export default function DropshipPortalOrders() {
   const queryClient = useQueryClient();
@@ -77,7 +99,9 @@ export default function DropshipPortalOrders() {
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
   const [pendingOrderAction, setPendingOrderAction] = useState<PendingOrderAction>(null);
-  const [acceptingIntakeId, setAcceptingIntakeId] = useState<number | null>(null);
+  const [actingIntakeId, setActingIntakeId] = useState<number | null>(null);
+  const [rejectTarget, setRejectTarget] = useState<DropshipOrderListItem | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const [selectedIntakeId, setSelectedIntakeId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -102,7 +126,14 @@ export default function DropshipPortalOrders() {
   };
 
   async function acceptOrder(order: DropshipOrderListItem) {
-    if (!await ensureOrderSensitiveProof(order.intakeId)) return;
+    if (!await ensureOrderSensitiveProof({
+      intakeId: order.intakeId,
+      passkeyAction: "accept-passkey-proof",
+      sendCodeAction: "accept-send-code",
+      verifyCodeAction: "accept-verify-code",
+      sentMessage: "Verification code sent. Enter it below, then retry Accept.",
+      codeRequiredMessage: "Enter the 6-digit verification code before accepting the order.",
+    })) return;
 
     await runOrderAction("accept", order.intakeId, async () => {
       const response = await postJson<DropshipOrderAcceptResponse>(
@@ -124,32 +155,73 @@ export default function DropshipPortalOrders() {
     });
   }
 
-  async function ensureOrderSensitiveProof(intakeId: number): Promise<boolean> {
+  async function rejectOrder() {
+    if (!rejectTarget) return;
+    const order = rejectTarget;
+    if (!await ensureOrderSensitiveProof({
+      intakeId: order.intakeId,
+      passkeyAction: "reject-passkey-proof",
+      sendCodeAction: "reject-send-code",
+      verifyCodeAction: "reject-verify-code",
+      sentMessage: "Verification code sent. Enter it below, then retry Reject.",
+      codeRequiredMessage: "Enter the 6-digit verification code before rejecting the order.",
+    })) return;
+
+    await runOrderAction("reject", order.intakeId, async () => {
+      const response = await postJson<DropshipOrderRejectResponse>(
+        `/api/dropship/orders/${order.intakeId}/reject`,
+        buildDropshipOrderRejectInput({
+          idempotencyKey: createDropshipIdempotencyKey(`order-reject:${order.intakeId}`),
+          reason: rejectReason,
+        }),
+      );
+      await Promise.all([
+        ordersQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["dropship-order-detail", order.intakeId] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+      ]);
+      setEmailCodeSent(false);
+      setVerificationCode("");
+      setRejectTarget(null);
+      setRejectReason("");
+      setMessage(orderRejectionMessage(response.result));
+    });
+  }
+
+  async function ensureOrderSensitiveProof(input: {
+    intakeId: number;
+    passkeyAction: PendingOrderAction;
+    sendCodeAction: PendingOrderAction;
+    verifyCodeAction: PendingOrderAction;
+    sentMessage: string;
+    codeRequiredMessage: string;
+  }): Promise<boolean> {
     if (hasActiveProof(orderAcceptanceAction)) {
       setEmailCodeSent(false);
       setVerificationCode("");
       return true;
     }
     if (principal?.hasPasskey) {
-      return runOrderAction("passkey-proof", intakeId, async () => {
+      return runOrderAction(input.passkeyAction, input.intakeId, async () => {
         await verifyPasskeyStepUp(orderAcceptanceAction);
       });
     }
     if (!emailCodeSent) {
-      await runOrderAction("send-code", intakeId, async () => {
+      await runOrderAction(input.sendCodeAction, input.intakeId, async () => {
         await startEmailStepUp(orderAcceptanceAction);
         setEmailCodeSent(true);
         setVerificationCode("");
-        setMessage("Verification code sent. Enter it below, then retry Accept.");
+        setMessage(input.sentMessage);
       });
       return false;
     }
     if (verificationCode.length !== 6) {
-      setError("Enter the 6-digit verification code before accepting the order.");
+      setError(input.codeRequiredMessage);
       return false;
     }
 
-    const verified = await runOrderAction("verify-code", intakeId, async () => {
+    const verified = await runOrderAction(input.verifyCodeAction, input.intakeId, async () => {
       await verifyEmailStepUp({
         action: orderAcceptanceAction,
         verificationCode,
@@ -168,7 +240,7 @@ export default function DropshipPortalOrders() {
     task: () => Promise<void>,
   ): Promise<boolean> {
     setPendingOrderAction(action);
-    setAcceptingIntakeId(intakeId);
+    setActingIntakeId(intakeId);
     setError("");
     setMessage("");
     try {
@@ -179,7 +251,7 @@ export default function DropshipPortalOrders() {
       return false;
     } finally {
       setPendingOrderAction(null);
-      setAcceptingIntakeId(null);
+      setActingIntakeId(null);
     }
   }
 
@@ -261,13 +333,21 @@ export default function DropshipPortalOrders() {
             </Empty>
           ) : ordersQuery.data?.items.length ? (
             <OrdersTable
-              acceptingIntakeId={acceptingIntakeId}
+              actingIntakeId={actingIntakeId}
               emailCodeSent={emailCodeSent}
               orders={ordersQuery.data.items}
               pendingOrderAction={pendingOrderAction}
               total={ordersQuery.data.total}
               verificationCode={verificationCode}
               onAccept={acceptOrder}
+              onReject={(order) => {
+                setRejectTarget(order);
+                setRejectReason("");
+                setEmailCodeSent(false);
+                setVerificationCode("");
+                setError("");
+                setMessage("");
+              }}
               onView={(order) => setSelectedIntakeId(order.intakeId)}
             />
           ) : (
@@ -288,6 +368,21 @@ export default function DropshipPortalOrders() {
           onOpenChange={(open) => {
             if (!open) setSelectedIntakeId(null);
           }}
+        />
+        <RejectOrderDialog
+          emailCodeSent={emailCodeSent}
+          order={rejectTarget}
+          pendingOrderAction={pendingOrderAction}
+          reason={rejectReason}
+          verificationCode={verificationCode}
+          onOpenChange={(open) => {
+            if (!open && pendingOrderAction === null) {
+              setRejectTarget(null);
+              setRejectReason("");
+            }
+          }}
+          onReasonChange={setRejectReason}
+          onReject={rejectOrder}
         />
       </div>
     </DropshipPortalShell>
@@ -511,18 +606,20 @@ function OrderDetailSheet({
 }
 
 function OrdersTable({
-  acceptingIntakeId,
+  actingIntakeId,
   emailCodeSent,
   onAccept,
+  onReject,
   onView,
   orders,
   pendingOrderAction,
   total,
   verificationCode,
 }: {
-  acceptingIntakeId: number | null;
+  actingIntakeId: number | null;
   emailCodeSent: boolean;
   onAccept: (order: DropshipOrderListItem) => void;
+  onReject: (order: DropshipOrderListItem) => void;
   onView: (order: DropshipOrderListItem) => void;
   orders: DropshipOrderListItem[];
   pendingOrderAction: PendingOrderAction;
@@ -549,8 +646,8 @@ function OrdersTable({
         <TableBody>
           {orders.map((order) => {
             const canAccept = canAcceptOrder(order);
-            const disabled = !canAccept
-              || pendingOrderAction !== null
+            const canReject = canRejectOrder(order);
+            const actionDisabled = pendingOrderAction !== null
               || (emailCodeSent && verificationCode.length !== 6);
             return (
               <TableRow key={order.intakeId}>
@@ -587,15 +684,28 @@ function OrdersTable({
                         variant="outline"
                         size="sm"
                         className="h-9 gap-2"
-                        disabled={disabled}
+                        disabled={actionDisabled}
                         onClick={() => onAccept(order)}
                       >
-                        {acceptButtonIcon(order, acceptingIntakeId, emailCodeSent, pendingOrderAction)}
-                        {acceptButtonLabel(order, acceptingIntakeId, emailCodeSent, pendingOrderAction)}
+                        {acceptButtonIcon(order, actingIntakeId, emailCodeSent, pendingOrderAction)}
+                        {acceptButtonLabel(order, actingIntakeId, emailCodeSent, pendingOrderAction)}
                       </Button>
                     ) : (
                       <span className="text-sm text-zinc-500">{acceptanceStateLabel(order)}</span>
                     )}
+                    {canReject ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-9 gap-2 border-rose-200 text-rose-700 hover:bg-rose-50"
+                        disabled={actionDisabled}
+                        onClick={() => onReject(order)}
+                      >
+                        <XCircle className="h-4 w-4" />
+                        Reject
+                      </Button>
+                    ) : null}
                   </div>
                 </TableCell>
               </TableRow>
@@ -604,6 +714,71 @@ function OrdersTable({
         </TableBody>
       </Table>
     </>
+  );
+}
+
+function RejectOrderDialog({
+  emailCodeSent,
+  onOpenChange,
+  onReasonChange,
+  onReject,
+  order,
+  pendingOrderAction,
+  reason,
+  verificationCode,
+}: {
+  emailCodeSent: boolean;
+  onOpenChange: (open: boolean) => void;
+  onReasonChange: (value: string) => void;
+  onReject: () => void;
+  order: DropshipOrderListItem | null;
+  pendingOrderAction: PendingOrderAction;
+  reason: string;
+  verificationCode: string;
+}) {
+  const pending = pendingOrderAction !== null;
+  const confirmDisabled = pending
+    || reason.trim().length < 3
+    || (emailCodeSent && verificationCode.length !== 6);
+
+  return (
+    <Dialog open={order !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Reject order</DialogTitle>
+          <DialogDescription>
+            {order
+              ? `${order.externalOrderNumber || order.externalOrderId} will be marked rejected and queued for marketplace cancellation.`
+              : "Reject this dropship order."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="dropship-order-reject-reason">Reason</Label>
+          <Textarea
+            id="dropship-order-reject-reason"
+            value={reason}
+            onChange={(event) => onReasonChange(event.target.value)}
+            maxLength={1000}
+            rows={4}
+            placeholder="Why this order cannot be fulfilled"
+          />
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            className="gap-2 bg-rose-600 hover:bg-rose-700"
+            disabled={confirmDisabled}
+            onClick={onReject}
+          >
+            {pendingOrderAction === "reject-passkey-proof" ? <Fingerprint className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+            {rejectButtonLabel(pendingOrderAction)}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -721,11 +896,22 @@ function canAcceptOrder(order: DropshipOrderListItem): boolean {
   return acceptanceStatuses.has(order.status) && order.storeConnection.status === "connected";
 }
 
+function canRejectOrder(order: DropshipOrderListItem): boolean {
+  return rejectionStatuses.has(order.status) && order.storeConnection.status === "connected" && order.omsOrderId === null;
+}
+
 function orderAcceptanceMessage(result: DropshipOrderAcceptResponse["result"]): string {
   if (result.outcome === "payment_hold") {
     return `Order intake ${result.intakeId} placed on payment hold for ${formatCents(result.totalDebitCents)}.`;
   }
   return `Order intake ${result.intakeId} accepted for ${formatCents(result.totalDebitCents)}.`;
+}
+
+function orderRejectionMessage(result: DropshipOrderRejectResponse["result"]): string {
+  if (result.status === "cancelled") {
+    return `Order intake ${result.intakeId} was already rejected and cancelled.`;
+  }
+  return `Order intake ${result.intakeId} rejected and queued for marketplace cancellation.`;
 }
 
 function acceptanceStateLabel(order: DropshipOrderListItem): string {
@@ -743,9 +929,9 @@ function acceptButtonLabel(
   pendingOrderAction: PendingOrderAction,
 ): string {
   if (acceptingIntakeId !== order.intakeId) return emailCodeSent ? "Verify and accept" : "Accept";
-  if (pendingOrderAction === "send-code") return "Sending code";
-  if (pendingOrderAction === "verify-code") return "Verifying code";
-  if (pendingOrderAction === "passkey-proof") return "Waiting for passkey";
+  if (pendingOrderAction === "accept-send-code") return "Sending code";
+  if (pendingOrderAction === "accept-verify-code") return "Verifying code";
+  if (pendingOrderAction === "accept-passkey-proof") return "Waiting for passkey";
   if (pendingOrderAction === "accept") return "Accepting";
   return emailCodeSent ? "Verify and accept" : "Accept";
 }
@@ -756,17 +942,25 @@ function acceptButtonIcon(
   emailCodeSent: boolean,
   pendingOrderAction: PendingOrderAction,
 ) {
-  if (acceptingIntakeId === order.intakeId && pendingOrderAction === "passkey-proof") {
+  if (acceptingIntakeId === order.intakeId && pendingOrderAction === "accept-passkey-proof") {
     return <Fingerprint className="h-4 w-4" />;
   }
   if (
     acceptingIntakeId === order.intakeId
-    && (pendingOrderAction === "send-code" || pendingOrderAction === "verify-code")
+    && (pendingOrderAction === "accept-send-code" || pendingOrderAction === "accept-verify-code")
   ) {
     return <Mail className="h-4 w-4" />;
   }
   if (emailCodeSent) return <Mail className="h-4 w-4" />;
   return <CheckCircle2 className="h-4 w-4" />;
+}
+
+function rejectButtonLabel(pendingOrderAction: PendingOrderAction): string {
+  if (pendingOrderAction === "reject-send-code") return "Sending code";
+  if (pendingOrderAction === "reject-verify-code") return "Verifying code";
+  if (pendingOrderAction === "reject-passkey-proof") return "Waiting for passkey";
+  if (pendingOrderAction === "reject") return "Rejecting";
+  return "Reject order";
 }
 
 function statusTone(status: string): string {

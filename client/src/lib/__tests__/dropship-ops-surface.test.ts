@@ -39,6 +39,7 @@ import {
   buildCatalogExposureRuleInput,
   buildDropshipNotificationsUrl,
   buildDropshipOrderAcceptInput,
+  buildDropshipOrderRejectInput,
   buildPortalReturnCreateInput,
   buildNotificationPreferenceUpdateInput,
   catalogExposureRecordToInput,
@@ -147,6 +148,20 @@ describe("dropship ops surface client helpers", () => {
     expect(() => buildDropshipOrderAcceptInput({
       idempotencyKey: "short",
     })).toThrow("idempotencyKey must be between 8 and 200 characters.");
+  });
+
+  it("builds dropship order rejection requests with a reason", () => {
+    expect(buildDropshipOrderRejectInput({
+      idempotencyKey: " reject-order-1 ",
+      reason: " Cannot fulfill the selected SKU. ",
+    })).toEqual({
+      idempotencyKey: "reject-order-1",
+      reason: "Cannot fulfill the selected SKU.",
+    });
+    expect(() => buildDropshipOrderRejectInput({
+      idempotencyKey: "reject-order-2",
+      reason: "no",
+    })).toThrow("reason must be at least 3 characters.");
   });
 
   it("builds admin catalog exposure preview URLs with explicit filters", () => {
