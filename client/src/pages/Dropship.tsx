@@ -2195,10 +2195,24 @@ function WalletOpsTab() {
   const [usdcFromAddress, setUsdcFromAddress] = useState("");
   const [usdcToAddress, setUsdcToAddress] = useState("");
   const [usdcConfirmations, setUsdcConfirmations] = useState("12");
+  const [manualCreditIdempotencyKey, setManualCreditIdempotencyKey] = useState(() =>
+    createDropshipIdempotencyKey("admin-wallet-credit")
+  );
+  const [usdcCreditIdempotencyKey, setUsdcCreditIdempotencyKey] = useState(() =>
+    createDropshipIdempotencyKey("admin-usdc-credit")
+  );
   const [pendingAction, setPendingAction] = useState<"manual" | "usdc" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const pending = pendingAction !== null;
+
+  function resetManualCreditIdempotencyKey() {
+    setManualCreditIdempotencyKey(createDropshipIdempotencyKey("admin-wallet-credit"));
+  }
+
+  function resetUsdcCreditIdempotencyKey() {
+    setUsdcCreditIdempotencyKey(createDropshipIdempotencyKey("admin-usdc-credit"));
+  }
 
   async function creditWallet() {
     setPendingAction("manual");
@@ -2209,15 +2223,18 @@ function WalletOpsTab() {
         vendorId,
         amount,
         reason,
-        idempotencyKey: createDropshipIdempotencyKey(`admin-wallet-credit-${vendorId.trim()}`),
+        idempotencyKey: manualCreditIdempotencyKey,
       });
       const response = await postJson<DropshipAdminWalletManualCreditResponse>(
         "/api/dropship/admin/wallet/manual-credit",
         input,
       );
-      setMessage(`Vendor ${response.account.vendorId} wallet credited ${formatCents(response.ledgerEntry.amountCents)}.`);
+      setMessage(response.idempotentReplay
+        ? `Vendor ${response.account.vendorId} wallet credit already recorded for ${formatCents(response.ledgerEntry.amountCents)}.`
+        : `Vendor ${response.account.vendorId} wallet credited ${formatCents(response.ledgerEntry.amountCents)}.`);
       setAmount("");
       setReason("");
+      resetManualCreditIdempotencyKey();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
@@ -2244,19 +2261,22 @@ function WalletOpsTab() {
         fromAddress: usdcFromAddress,
         toAddress: usdcToAddress,
         confirmations: usdcConfirmations,
-        idempotencyKey: createDropshipIdempotencyKey(`admin-usdc-credit-${usdcVendorId.trim()}`),
+        idempotencyKey: usdcCreditIdempotencyKey,
       });
       const response = await postJson<DropshipAdminWalletConfirmedUsdcCreditResponse>(
         "/api/dropship/admin/wallet/usdc/confirmed-credit",
         input,
       );
-      setMessage(`Vendor ${response.account.vendorId} USDC transfer credited ${formatCents(response.ledgerEntry.amountCents)}.`);
+      setMessage(response.idempotentReplay
+        ? `Vendor ${response.account.vendorId} USDC transfer already credited for ${formatCents(response.ledgerEntry.amountCents)}.`
+        : `Vendor ${response.account.vendorId} USDC transfer credited ${formatCents(response.ledgerEntry.amountCents)}.`);
       setUsdcDollarAmount("");
       setUsdcAmount("");
       setUsdcTransactionHash("");
       setUsdcFromAddress("");
       setUsdcToAddress("");
       setUsdcConfirmations("12");
+      resetUsdcCreditIdempotencyKey();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
@@ -2302,7 +2322,10 @@ function WalletOpsTab() {
               id="dropship-wallet-credit-vendor"
               className="mt-2"
               value={vendorId}
-              onChange={(event) => setVendorId(event.target.value)}
+              onChange={(event) => {
+                setVendorId(event.target.value);
+                resetManualCreditIdempotencyKey();
+              }}
               inputMode="numeric"
               placeholder="10"
             />
@@ -2315,7 +2338,10 @@ function WalletOpsTab() {
               id="dropship-wallet-credit-amount"
               className="mt-2"
               value={amount}
-              onChange={(event) => setAmount(event.target.value)}
+              onChange={(event) => {
+                setAmount(event.target.value);
+                resetManualCreditIdempotencyKey();
+              }}
               inputMode="decimal"
               placeholder="250.00"
             />
@@ -2328,7 +2354,10 @@ function WalletOpsTab() {
               id="dropship-wallet-credit-reason"
               className="mt-2 min-h-10"
               value={reason}
-              onChange={(event) => setReason(event.target.value)}
+              onChange={(event) => {
+                setReason(event.target.value);
+                resetManualCreditIdempotencyKey();
+              }}
               maxLength={1000}
               placeholder="Dogfood wallet seed"
             />
@@ -2362,7 +2391,10 @@ function WalletOpsTab() {
               id="dropship-usdc-credit-vendor"
               className="mt-2"
               value={usdcVendorId}
-              onChange={(event) => setUsdcVendorId(event.target.value)}
+              onChange={(event) => {
+                setUsdcVendorId(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               inputMode="numeric"
               placeholder="10"
             />
@@ -2375,7 +2407,10 @@ function WalletOpsTab() {
               id="dropship-usdc-funding-method"
               className="mt-2"
               value={usdcFundingMethodId}
-              onChange={(event) => setUsdcFundingMethodId(event.target.value)}
+              onChange={(event) => {
+                setUsdcFundingMethodId(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               inputMode="numeric"
               placeholder="Optional"
             />
@@ -2388,7 +2423,10 @@ function WalletOpsTab() {
               id="dropship-usdc-dollar-amount"
               className="mt-2"
               value={usdcDollarAmount}
-              onChange={(event) => setUsdcDollarAmount(event.target.value)}
+              onChange={(event) => {
+                setUsdcDollarAmount(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               inputMode="decimal"
               placeholder="125.50"
             />
@@ -2401,7 +2439,10 @@ function WalletOpsTab() {
               id="dropship-usdc-amount"
               className="mt-2"
               value={usdcAmount}
-              onChange={(event) => setUsdcAmount(event.target.value)}
+              onChange={(event) => {
+                setUsdcAmount(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               inputMode="decimal"
               placeholder="125.50"
             />
@@ -2417,7 +2458,10 @@ function WalletOpsTab() {
               id="dropship-usdc-transaction"
               className="mt-2 font-mono text-xs"
               value={usdcTransactionHash}
-              onChange={(event) => setUsdcTransactionHash(event.target.value)}
+              onChange={(event) => {
+                setUsdcTransactionHash(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               placeholder="0x..."
             />
           </div>
@@ -2429,7 +2473,10 @@ function WalletOpsTab() {
               id="dropship-usdc-from"
               className="mt-2 font-mono text-xs"
               value={usdcFromAddress}
-              onChange={(event) => setUsdcFromAddress(event.target.value)}
+              onChange={(event) => {
+                setUsdcFromAddress(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               placeholder="Optional"
             />
           </div>
@@ -2441,7 +2488,10 @@ function WalletOpsTab() {
               id="dropship-usdc-to"
               className="mt-2 font-mono text-xs"
               value={usdcToAddress}
-              onChange={(event) => setUsdcToAddress(event.target.value)}
+              onChange={(event) => {
+                setUsdcToAddress(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               placeholder="0x..."
             />
           </div>
@@ -2453,7 +2503,10 @@ function WalletOpsTab() {
               id="dropship-usdc-confirmations"
               className="mt-2"
               value={usdcConfirmations}
-              onChange={(event) => setUsdcConfirmations(event.target.value)}
+              onChange={(event) => {
+                setUsdcConfirmations(event.target.value);
+                resetUsdcCreditIdempotencyKey();
+              }}
               inputMode="numeric"
               placeholder="12"
             />
