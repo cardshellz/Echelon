@@ -130,7 +130,7 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     offset: number;
   }): Promise<EbayOrdersResponse> {
     const params = new URLSearchParams({
-      filter: `creationdate:[${input.since.toISOString()}..${input.until.toISOString()}],orderfulfillmentstatus:{NOT_STARTED|IN_PROGRESS}`,
+      filter: `lastmodifieddate:[${input.since.toISOString()}..${input.until.toISOString()}],orderfulfillmentstatus:{NOT_STARTED|IN_PROGRESS}`,
       limit: String(EBAY_PAGE_SIZE),
       offset: String(input.offset),
     });
