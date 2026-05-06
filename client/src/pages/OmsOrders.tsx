@@ -136,6 +136,8 @@ interface OmsOpsHealth {
       lastRunAt: string | null;
       lastSuccessAt: string | null;
       lastError: string | null;
+      lastSkippedAt: string | null;
+      inFlight: boolean;
     };
   };
   counts: {
@@ -476,7 +478,7 @@ export default function OmsOrders() {
           <CardContent className="pt-0">
             {opsHealth.workers?.webhookRetry && (
               <div className="mb-3 rounded-md bg-muted p-2 text-xs text-muted-foreground">
-                Retry worker | started {opsHealth.workers.webhookRetry.startedAt || "-"} | last run {opsHealth.workers.webhookRetry.lastRunAt || "-"} | last success {opsHealth.workers.webhookRetry.lastSuccessAt || "-"}
+                Retry worker | {opsHealth.workers.webhookRetry.inFlight ? "running" : "idle"} | started {opsHealth.workers.webhookRetry.startedAt || "-"} | last run {opsHealth.workers.webhookRetry.lastRunAt || "-"} | last success {opsHealth.workers.webhookRetry.lastSuccessAt || "-"} | last skipped {opsHealth.workers.webhookRetry.lastSkippedAt || "-"}
               </div>
             )}
             {opsHealth.issues.length === 0 ? (

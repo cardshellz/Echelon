@@ -67,6 +67,8 @@ import {
   enqueueShopifyFulfillmentRetry,
   enqueueDelayedTrackingPush,
   getWebhookRetryWorkerHeartbeat,
+  resetWebhookRetryWorkerHeartbeatForTest,
+  runWebhookRetryWorkerTick,
   dispatchShopifyFulfillmentRetry,
   dispatchDelayedTrackingPush,
   dispatchEbayWebhookRetry,
@@ -199,12 +201,72 @@ describe("enqueueShipStationRetry :: happy path", () => {
 });
 
 describe("webhook retry worker heartbeat", () => {
+  beforeEach(() => {
+    resetWebhookRetryWorkerHeartbeatForTest();
+  });
+  afterEach(() => {
+    resetWebhookRetryWorkerHeartbeatForTest();
+    vi.restoreAllMocks();
+  });
+
   it("exposes null heartbeat timestamps before the worker starts", () => {
     expect(getWebhookRetryWorkerHeartbeat()).toMatchObject({
       startedAt: null,
       lastRunAt: null,
       lastSuccessAt: null,
       lastError: null,
+      lastSkippedAt: null,
+      inFlight: false,
+    });
+  });
+
+  it("records successful tick heartbeat state", async () => {
+    const result = await runWebhookRetryWorkerTick(vi.fn(async () => undefined));
+
+    expect(result).toBe("success");
+    expect(getWebhookRetryWorkerHeartbeat()).toMatchObject({
+      lastError: null,
+      lastSkippedAt: null,
+      inFlight: false,
+    });
+    expect(getWebhookRetryWorkerHeartbeat().lastRunAt).toEqual(expect.any(String));
+    expect(getWebhookRetryWorkerHeartbeat().lastSuccessAt).toEqual(expect.any(String));
+  });
+
+  it("skips overlapping ticks without running the second processor", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let releaseFirstRun: (() => void) | undefined;
+    const firstProcessor = vi.fn(() => new Promise<void>((resolve) => {
+      releaseFirstRun = resolve;
+    }));
+    const secondProcessor = vi.fn(async () => undefined);
+
+    const firstRun = runWebhookRetryWorkerTick(firstProcessor);
+    await Promise.resolve();
+
+    const secondRun = await runWebhookRetryWorkerTick(secondProcessor);
+    releaseFirstRun?.();
+    const firstResult = await firstRun;
+
+    expect(firstResult).toBe("success");
+    expect(secondRun).toBe("skipped");
+    expect(firstProcessor).toHaveBeenCalledTimes(1);
+    expect(secondProcessor).not.toHaveBeenCalled();
+    expect(getWebhookRetryWorkerHeartbeat().lastSkippedAt).toEqual(expect.any(String));
+    expect(getWebhookRetryWorkerHeartbeat().inFlight).toBe(false);
+  });
+
+  it("records tick errors without leaving the worker stuck in-flight", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await runWebhookRetryWorkerTick(vi.fn(async () => {
+      throw new Error("database unavailable");
+    }));
+
+    expect(result).toBe("error");
+    expect(getWebhookRetryWorkerHeartbeat()).toMatchObject({
+      lastError: "database unavailable",
+      inFlight: false,
     });
   });
 });
