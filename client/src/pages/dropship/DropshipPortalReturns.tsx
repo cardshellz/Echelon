@@ -31,6 +31,11 @@ import {
   formatStatus,
   postJson,
   queryErrorMessage,
+  type DropshipOrderDetail,
+  type DropshipOrderDetailLine,
+  type DropshipOrderDetailResponse,
+  type DropshipOrderListItem,
+  type DropshipOrderListResponse,
   type DropshipPortalReturnCreateResponse,
   type DropshipReturnDetail,
   type DropshipReturnDetailResponse,
@@ -59,6 +64,7 @@ const initialReturnCreateForm: PortalReturnCreateFormState = {
   labelSource: "",
   returnTrackingNumber: "",
   vendorNotes: "",
+  orderLineIndex: "",
   productVariantId: "",
   quantity: "",
   requestedCreditAmount: "",
@@ -72,6 +78,7 @@ interface PortalReturnCreateFormState {
   labelSource: string;
   returnTrackingNumber: string;
   vendorNotes: string;
+  orderLineIndex: string;
   productVariantId: string;
   quantity: string;
   requestedCreditAmount: string;
@@ -94,9 +101,31 @@ export default function DropshipPortalReturns() {
     page: 1,
     limit: 50,
   }), [applied]);
+  const orderPickerUrl = useMemo(() => buildQueryUrl("/api/dropship/orders", {
+    page: 1,
+    limit: 50,
+  }), []);
+  const selectedCreateIntakeId = useMemo(() => {
+    if (!createForm.intakeId.trim()) return null;
+    const parsed = Number(createForm.intakeId);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }, [createForm.intakeId]);
   const returnsQuery = useQuery<DropshipReturnListResponse>({
     queryKey: [returnsUrl],
     queryFn: () => fetchJson<DropshipReturnListResponse>(returnsUrl),
+  });
+  const orderPickerQuery = useQuery<DropshipOrderListResponse>({
+    queryKey: ["dropship-return-order-picker", orderPickerUrl],
+    queryFn: () => fetchJson<DropshipOrderListResponse>(orderPickerUrl),
+    enabled: createOpen,
+  });
+  const createOrderDetailQuery = useQuery<DropshipOrderDetailResponse>({
+    queryKey: ["dropship-return-order-detail", selectedCreateIntakeId],
+    queryFn: () => {
+      if (selectedCreateIntakeId === null) throw new Error("Missing selected order.");
+      return fetchJson<DropshipOrderDetailResponse>(`/api/dropship/orders/${selectedCreateIntakeId}`);
+    },
+    enabled: createOpen && selectedCreateIntakeId !== null,
   });
   const returnDetailQuery = useQuery<DropshipReturnDetailResponse>({
     queryKey: ["dropship-return-detail", selectedRmaId],
@@ -256,6 +285,8 @@ export default function DropshipPortalReturns() {
         <CreateReturnSheet
           form={createForm}
           isSubmitting={isSubmitting}
+          isOrderDetailLoading={createOrderDetailQuery.isLoading}
+          isOrdersLoading={orderPickerQuery.isLoading}
           onChange={updateCreateForm}
           onOpenChange={(open) => {
             setCreateOpen(open);
@@ -264,6 +295,10 @@ export default function DropshipPortalReturns() {
             }
           }}
           onSubmit={submitReturn}
+          orderDetail={createOrderDetailQuery.data?.order ?? null}
+          orderDetailError={createOrderDetailQuery.error}
+          orders={orderPickerQuery.data?.items ?? []}
+          ordersError={orderPickerQuery.error}
           open={createOpen}
         />
         <ReturnDetailSheet
@@ -283,18 +318,32 @@ export default function DropshipPortalReturns() {
 function CreateReturnSheet({
   form,
   isSubmitting,
+  isOrderDetailLoading,
+  isOrdersLoading,
   onChange,
   onOpenChange,
   onSubmit,
+  orderDetail,
+  orderDetailError,
+  orders,
+  ordersError,
   open,
 }: {
   form: PortalReturnCreateFormState;
   isSubmitting: boolean;
+  isOrderDetailLoading: boolean;
+  isOrdersLoading: boolean;
   onChange: <K extends keyof PortalReturnCreateFormState>(key: K, value: PortalReturnCreateFormState[K]) => void;
   onOpenChange: (open: boolean) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  orderDetail: DropshipOrderDetail | null;
+  orderDetailError: unknown;
+  orders: DropshipOrderListItem[];
+  ordersError: unknown;
   open: boolean;
 }) {
+  const selectableLines = orderDetail?.lines.filter((line) => line.productVariantId !== null) ?? [];
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
@@ -304,6 +353,35 @@ function CreateReturnSheet({
         </SheetHeader>
 
         <form className="mt-6 space-y-5" onSubmit={onSubmit}>
+          <div className="space-y-2">
+            <Label htmlFor="portal-rma-order">Order</Label>
+            <Select
+              value={form.intakeId || "none"}
+              onValueChange={(value) => {
+                onChange("intakeId", value === "none" ? "" : value);
+                onChange("orderLineIndex", "");
+                onChange("productVariantId", "");
+                onChange("quantity", "");
+              }}
+              disabled={isOrdersLoading}
+            >
+              <SelectTrigger id="portal-rma-order">
+                <SelectValue placeholder={isOrdersLoading ? "Loading orders" : "Select order"} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">No linked order</SelectItem>
+                {orders.map((order) => (
+                  <SelectItem key={order.intakeId} value={String(order.intakeId)}>
+                    {orderOptionLabel(order)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {ordersError ? (
+              <p className="text-sm text-rose-700">{queryErrorMessage(ordersError, "Unable to load orders.")}</p>
+            ) : null}
+          </div>
+
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="portal-rma-number">RMA number</Label>
@@ -322,15 +400,6 @@ function CreateReturnSheet({
                 value={form.returnTrackingNumber}
                 onChange={(event) => onChange("returnTrackingNumber", event.target.value)}
                 maxLength={255}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="portal-rma-intake">Order intake ID</Label>
-              <Input
-                id="portal-rma-intake"
-                inputMode="numeric"
-                value={form.intakeId}
-                onChange={(event) => onChange("intakeId", event.target.value)}
               />
             </div>
             <div className="space-y-2">
@@ -375,13 +444,38 @@ function CreateReturnSheet({
 
           <div className="grid gap-4 sm:grid-cols-3">
             <div className="space-y-2">
-              <Label htmlFor="portal-rma-variant">Variant ID</Label>
-              <Input
-                id="portal-rma-variant"
-                inputMode="numeric"
-                value={form.productVariantId}
-                onChange={(event) => onChange("productVariantId", event.target.value)}
-              />
+              <Label htmlFor="portal-rma-line">Order line</Label>
+              <Select
+                value={form.orderLineIndex || "none"}
+                onValueChange={(value) => {
+                  if (value === "none") {
+                    onChange("orderLineIndex", "");
+                    onChange("productVariantId", "");
+                    onChange("quantity", "");
+                    return;
+                  }
+                  const line = selectableLines.find((candidate) => String(candidate.lineIndex) === value);
+                  onChange("orderLineIndex", value);
+                  onChange("productVariantId", line?.productVariantId ? String(line.productVariantId) : "");
+                  onChange("quantity", line?.quantity ? String(line.quantity) : "");
+                }}
+                disabled={!form.intakeId || isOrderDetailLoading || selectableLines.length === 0}
+              >
+                <SelectTrigger id="portal-rma-line">
+                  <SelectValue placeholder={isOrderDetailLoading ? "Loading lines" : "Select line"} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">No linked line</SelectItem>
+                  {selectableLines.map((line) => (
+                    <SelectItem key={line.lineIndex} value={String(line.lineIndex)}>
+                      {orderLineOptionLabel(line)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {orderDetailError ? (
+                <p className="text-sm text-rose-700">{queryErrorMessage(orderDetailError, "Unable to load order lines.")}</p>
+              ) : null}
             </div>
             <div className="space-y-2">
               <Label htmlFor="portal-rma-quantity">Qty</Label>
@@ -687,6 +781,19 @@ function ReturnDetailSection({
       {children}
     </section>
   );
+}
+
+function orderOptionLabel(order: DropshipOrderListItem): string {
+  const orderNumber = order.externalOrderNumber || order.externalOrderId;
+  return `${formatStatus(order.platform)} ${orderNumber} - ${formatStatus(order.status)} - ${formatDateTime(order.receivedAt)}`;
+}
+
+function orderLineOptionLabel(line: DropshipOrderDetailLine): string {
+  const label = line.title || line.sku || `Variant ${line.productVariantId}`;
+  const price = typeof line.unitRetailPriceCents === "number"
+    ? ` - ${formatCents(line.unitRetailPriceCents)} each`
+    : "";
+  return `${label} - Qty ${line.quantity}${price}`;
 }
 
 function DetailField({ label, value }: { label: string; value: string }) {
