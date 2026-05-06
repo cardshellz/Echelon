@@ -166,6 +166,35 @@ describe("webhook-inbox.service", () => {
     expect(db.execute).toHaveBeenCalledTimes(3);
   });
 
+  it("queues an immediate retry for a failed eBay order inbox row", async () => {
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [{
+            id: 11,
+            provider: "ebay",
+            topic: "ORDER.CREATED",
+            payload: { notification: { data: { orderId: "12-34567-89012" } } },
+            status: "failed",
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ id: 78 }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    };
+
+    const result = await enqueueWebhookInboxReplay(db, 11, "ops@example.com");
+
+    expect(result).toEqual({
+      inboxId: 11,
+      retryQueueId: 78,
+      provider: "ebay",
+      topic: "ORDER.CREATED",
+      previousStatus: "failed",
+    });
+    expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
   it("rejects succeeded inbox rows so operators do not replay completed events", async () => {
     const db = {
       execute: vi.fn(async () => ({
@@ -198,7 +227,7 @@ describe("webhook-inbox.service", () => {
     };
 
     await expect(enqueueWebhookInboxReplay(db, 10, "ops@example.com"))
-      .rejects.toThrow(/not a replayable Shopify OMS topic/);
+      .rejects.toThrow(/not a replayable OMS webhook topic/);
     expect(db.execute).toHaveBeenCalledTimes(1);
   });
 });
