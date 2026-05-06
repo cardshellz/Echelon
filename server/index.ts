@@ -21,6 +21,7 @@ import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastru
 import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
+import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import { startWebhookRetryWorker, enqueueShipStationRetry, enqueueDelayedTrackingPush } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
@@ -663,6 +664,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startWebhookRetryWorker();
         startFulfillmentSweeper(db);
         startOmsFlowReconciliationScheduler(db);
+        startOmsOpsAlertScheduler(db);
         startDropshipListingPushWorker();
         startDropshipOrderProcessingWorker();
         startDropshipEbayOrderIntakeWorker();
