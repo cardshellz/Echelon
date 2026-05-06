@@ -202,6 +202,35 @@ describe("webhook-inbox.service", () => {
     expect(db.execute).toHaveBeenCalledTimes(3);
   });
 
+  it("queues an immediate retry for failed Shopify fulfillment inbox rows", async () => {
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [{
+            id: 12,
+            provider: "shopify",
+            topic: "fulfillments/update",
+            payload: { id: 9001, order_id: 12054356492447 },
+            status: "failed",
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ id: 79 }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    };
+
+    const result = await enqueueWebhookInboxReplay(db, 12, "ops@example.com");
+
+    expect(result).toEqual({
+      inboxId: 12,
+      retryQueueId: 79,
+      provider: "shopify",
+      topic: "fulfillments/update",
+      previousStatus: "failed",
+    });
+    expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
   it("links replay retry rows back to the source inbox row", () => {
     expect(WEBHOOK_INBOX_SERVICE_SRC).toContain("source_inbox_id");
     expect(WEBHOOK_INBOX_SERVICE_SRC).toContain("${inboxId}");
@@ -231,7 +260,7 @@ describe("webhook-inbox.service", () => {
         rows: [{
           id: 10,
           provider: "shopify",
-          topic: "fulfillments/create",
+          topic: "inventory_levels/update",
           payload: { id: 99 },
           status: "failed",
         }],
