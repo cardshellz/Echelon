@@ -1,6 +1,7 @@
 import type {
   DropshipLogger,
   DropshipOmsFulfillmentSync,
+  DropshipOmsFulfillmentSyncRetryQueue,
 } from "./dropship-ports";
 import type { DropshipOrderAcceptanceResult } from "./dropship-order-acceptance-service";
 
@@ -15,15 +16,12 @@ export interface SyncDropshipAcceptedOrderToWmsInput {
 export async function syncDropshipAcceptedOrderToWmsSafely(
   deps: {
     fulfillmentSync?: DropshipOmsFulfillmentSync;
+    fulfillmentSyncRetryQueue?: DropshipOmsFulfillmentSyncRetryQueue;
     logger: DropshipLogger;
   },
   input: SyncDropshipAcceptedOrderToWmsInput,
 ): Promise<void> {
   if (input.acceptance.outcome !== "accepted") {
-    return;
-  }
-
-  if (!deps.fulfillmentSync) {
     return;
   }
 
@@ -48,6 +46,22 @@ export async function syncDropshipAcceptedOrderToWmsSafely(
     return;
   }
 
+  if (!deps.fulfillmentSync) {
+    if (!deps.fulfillmentSyncRetryQueue) {
+      return;
+    }
+    deps.logger.warn({
+      code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNC_UNAVAILABLE",
+      message: "Accepted dropship order could not be synced to WMS because the sync service is unavailable.",
+      context: {
+        ...context,
+        reason: "wms_sync_service_unavailable",
+      },
+    });
+    await enqueueWmsSyncRetrySafely(deps, input.acceptance.omsOrderId, "WMS sync service unavailable");
+    return;
+  }
+
   try {
     const wmsOrderId = await deps.fulfillmentSync.syncOmsOrderToWms(input.acceptance.omsOrderId);
     if (wmsOrderId === null) {
@@ -56,6 +70,11 @@ export async function syncDropshipAcceptedOrderToWmsSafely(
         message: "Accepted dropship order did not return a WMS order id during OMS to WMS sync.",
         context,
       });
+      await enqueueWmsSyncRetrySafely(
+        deps,
+        input.acceptance.omsOrderId,
+        "WMS sync did not return a WMS order id",
+      );
       return;
     }
 
@@ -73,6 +92,33 @@ export async function syncDropshipAcceptedOrderToWmsSafely(
       message: "Accepted dropship order failed during OMS to WMS sync.",
       context: {
         ...context,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
+    await enqueueWmsSyncRetrySafely(deps, input.acceptance.omsOrderId, error);
+  }
+}
+
+async function enqueueWmsSyncRetrySafely(
+  deps: {
+    fulfillmentSyncRetryQueue?: DropshipOmsFulfillmentSyncRetryQueue;
+    logger: DropshipLogger;
+  },
+  omsOrderId: number,
+  cause: unknown,
+): Promise<void> {
+  if (!deps.fulfillmentSyncRetryQueue) {
+    return;
+  }
+
+  try {
+    await deps.fulfillmentSyncRetryQueue.enqueueOmsWmsSyncRetry({ omsOrderId, cause });
+  } catch (error) {
+    deps.logger.error({
+      code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNC_RETRY_ENQUEUE_FAILED",
+      message: "Accepted dropship order WMS sync retry enqueue failed.",
+      context: {
+        omsOrderId,
         error: error instanceof Error ? error.message : String(error),
       },
     });
