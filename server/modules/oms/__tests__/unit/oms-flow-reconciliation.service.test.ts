@@ -68,6 +68,10 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await runOmsFlowReconciliation(db);
 
     expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      code: "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+      severity: "critical",
+    });
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED=3"),
     );

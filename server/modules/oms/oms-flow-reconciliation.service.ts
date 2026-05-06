@@ -250,7 +250,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     },
     {
       code: "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
-      severity: "warning" as const,
+      severity: "critical" as const,
       count: wmsShippedNoTrackingPush.count,
       message: "Shipped WMS shipments do not have a channel tracking push success event.",
       sample: wmsShippedNoTrackingPush.sample,
