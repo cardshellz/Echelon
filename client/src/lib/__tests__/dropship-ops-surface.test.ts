@@ -448,6 +448,12 @@ describe("dropship ops surface client helpers", () => {
           status: "",
           requestedCreditAmount: "15.00",
         },
+        {
+          productVariantId: "456",
+          quantity: "2",
+          status: "requested",
+          requestedCreditAmount: "",
+        },
       ],
     })).toEqual({
       idempotencyKey: "portal-return-create-1",
@@ -460,6 +466,7 @@ describe("dropship ops surface client helpers", () => {
       vendorNotes: "buyer opened return",
       items: [
         { productVariantId: 123, quantity: 1, status: "requested", requestedCreditCents: 1500 },
+        { productVariantId: 456, quantity: 2, status: "requested", requestedCreditCents: null },
       ],
     });
     expect(buildPortalReturnCreateInput({

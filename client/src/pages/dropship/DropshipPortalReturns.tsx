@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Eye, History, Package, Plus, ReceiptText, RotateCcw, Search, Truck, Wallet } from "lucide-react";
+import { AlertCircle, Eye, History, Package, Plus, ReceiptText, RotateCcw, Search, Trash2, Truck, Wallet } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,19 +56,7 @@ const returnFaultOptions: Array<DropshipReturnFaultCategory | "none"> = [
   "carrier",
 ];
 
-const initialReturnCreateForm: PortalReturnCreateFormState = {
-  rmaNumber: "",
-  intakeId: "",
-  reasonCode: "",
-  faultCategory: "none",
-  labelSource: "",
-  returnTrackingNumber: "",
-  vendorNotes: "",
-  orderLineIndex: "",
-  productVariantId: "",
-  quantity: "",
-  requestedCreditAmount: "",
-};
+let returnItemClientCounter = 0;
 
 interface PortalReturnCreateFormState {
   rmaNumber: string;
@@ -78,10 +66,38 @@ interface PortalReturnCreateFormState {
   labelSource: string;
   returnTrackingNumber: string;
   vendorNotes: string;
+  items: PortalReturnCreateItemFormState[];
+}
+
+interface PortalReturnCreateItemFormState {
+  clientId: string;
   orderLineIndex: string;
   productVariantId: string;
   quantity: string;
   requestedCreditAmount: string;
+}
+
+function createInitialReturnCreateForm(): PortalReturnCreateFormState {
+  return {
+    rmaNumber: "",
+    intakeId: "",
+    reasonCode: "",
+    faultCategory: "none",
+    labelSource: "",
+    returnTrackingNumber: "",
+    vendorNotes: "",
+    items: [createInitialReturnItem()],
+  };
+}
+
+function createInitialReturnItem(): PortalReturnCreateItemFormState {
+  return {
+    clientId: `return-item-${returnItemClientCounter += 1}`,
+    orderLineIndex: "",
+    productVariantId: "",
+    quantity: "",
+    requestedCreditAmount: "",
+  };
 }
 
 export default function DropshipPortalReturns() {
@@ -91,7 +107,7 @@ export default function DropshipPortalReturns() {
   const [applied, setApplied] = useState({ search: "", status: "all" });
   const [selectedRmaId, setSelectedRmaId] = useState<number | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [createForm, setCreateForm] = useState<PortalReturnCreateFormState>(initialReturnCreateForm);
+  const [createForm, setCreateForm] = useState<PortalReturnCreateFormState>(() => createInitialReturnCreateForm());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -142,7 +158,14 @@ export default function DropshipPortalReturns() {
     setMessage("");
     setError("");
     try {
-      const hasItem = !returnItemFormIsBlank(createForm);
+      const items = createForm.items
+        .filter((item) => !returnItemFormIsBlank(item))
+        .map((item) => ({
+          productVariantId: item.productVariantId,
+          quantity: item.quantity,
+          status: "requested",
+          requestedCreditAmount: item.requestedCreditAmount,
+        }));
       const input = buildPortalReturnCreateInput({
         idempotencyKey: createDropshipIdempotencyKey("portal-rma-create"),
         rmaNumber: createForm.rmaNumber,
@@ -152,17 +175,10 @@ export default function DropshipPortalReturns() {
         labelSource: createForm.labelSource,
         returnTrackingNumber: createForm.returnTrackingNumber,
         vendorNotes: createForm.vendorNotes,
-        items: hasItem
-          ? [{
-              productVariantId: createForm.productVariantId,
-              quantity: createForm.quantity,
-              status: "requested",
-              requestedCreditAmount: createForm.requestedCreditAmount,
-            }]
-          : [],
+        items,
       });
       const response = await postJson<DropshipPortalReturnCreateResponse>("/api/dropship/returns", input);
-      setCreateForm(initialReturnCreateForm);
+      setCreateForm(createInitialReturnCreateForm());
       setCreateOpen(false);
       setMessage(`RMA ${response.rma.rmaNumber} submitted.`);
       setSelectedRmaId(response.rma.rmaId);
@@ -182,6 +198,52 @@ export default function DropshipPortalReturns() {
     value: PortalReturnCreateFormState[K],
   ) {
     setCreateForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateCreateReturnItem<K extends keyof PortalReturnCreateItemFormState>(
+    clientId: string,
+    key: K,
+    value: PortalReturnCreateItemFormState[K],
+  ) {
+    setCreateForm((current) => ({
+      ...current,
+      items: current.items.map((item) => (
+        item.clientId === clientId ? { ...item, [key]: value } : item
+      )),
+    }));
+  }
+
+  function patchCreateReturnItem(clientId: string, patch: Partial<PortalReturnCreateItemFormState>) {
+    setCreateForm((current) => ({
+      ...current,
+      items: current.items.map((item) => (
+        item.clientId === clientId ? { ...item, ...patch, clientId: item.clientId } : item
+      )),
+    }));
+  }
+
+  function addCreateReturnItem() {
+    setCreateForm((current) => ({
+      ...current,
+      items: [...current.items, createInitialReturnItem()],
+    }));
+  }
+
+  function removeCreateReturnItem(clientId: string) {
+    setCreateForm((current) => {
+      const nextItems = current.items.filter((item) => item.clientId !== clientId);
+      return {
+        ...current,
+        items: nextItems.length > 0 ? nextItems : [createInitialReturnItem()],
+      };
+    });
+  }
+
+  function resetCreateReturnItems() {
+    setCreateForm((current) => ({
+      ...current,
+      items: [createInitialReturnItem()],
+    }));
   }
 
   return (
@@ -287,13 +349,18 @@ export default function DropshipPortalReturns() {
           isSubmitting={isSubmitting}
           isOrderDetailLoading={createOrderDetailQuery.isLoading}
           isOrdersLoading={orderPickerQuery.isLoading}
+          onAddItem={addCreateReturnItem}
           onChange={updateCreateForm}
+          onItemChange={updateCreateReturnItem}
+          onItemPatch={patchCreateReturnItem}
           onOpenChange={(open) => {
             setCreateOpen(open);
             if (!open && !isSubmitting) {
               setError("");
             }
           }}
+          onRemoveItem={removeCreateReturnItem}
+          onResetItems={resetCreateReturnItems}
           onSubmit={submitReturn}
           orderDetail={createOrderDetailQuery.data?.order ?? null}
           orderDetailError={createOrderDetailQuery.error}
@@ -320,8 +387,13 @@ function CreateReturnSheet({
   isSubmitting,
   isOrderDetailLoading,
   isOrdersLoading,
+  onAddItem,
   onChange,
+  onItemChange,
+  onItemPatch,
   onOpenChange,
+  onRemoveItem,
+  onResetItems,
   onSubmit,
   orderDetail,
   orderDetailError,
@@ -333,8 +405,17 @@ function CreateReturnSheet({
   isSubmitting: boolean;
   isOrderDetailLoading: boolean;
   isOrdersLoading: boolean;
+  onAddItem: () => void;
   onChange: <K extends keyof PortalReturnCreateFormState>(key: K, value: PortalReturnCreateFormState[K]) => void;
+  onItemChange: <K extends keyof PortalReturnCreateItemFormState>(
+    clientId: string,
+    key: K,
+    value: PortalReturnCreateItemFormState[K],
+  ) => void;
+  onItemPatch: (clientId: string, patch: Partial<PortalReturnCreateItemFormState>) => void;
   onOpenChange: (open: boolean) => void;
+  onRemoveItem: (clientId: string) => void;
+  onResetItems: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   orderDetail: DropshipOrderDetail | null;
   orderDetailError: unknown;
@@ -343,6 +424,7 @@ function CreateReturnSheet({
   open: boolean;
 }) {
   const selectableLines = orderDetail?.lines.filter((line) => line.productVariantId !== null) ?? [];
+  const selectedLineIndexes = new Set(form.items.map((item) => item.orderLineIndex).filter(Boolean));
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -359,9 +441,7 @@ function CreateReturnSheet({
               value={form.intakeId || "none"}
               onValueChange={(value) => {
                 onChange("intakeId", value === "none" ? "" : value);
-                onChange("orderLineIndex", "");
-                onChange("productVariantId", "");
-                onChange("quantity", "");
+                onResetItems();
               }}
               disabled={isOrdersLoading}
             >
@@ -442,59 +522,103 @@ function CreateReturnSheet({
 
           <Separator />
 
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div className="space-y-2">
-              <Label htmlFor="portal-rma-line">Order line</Label>
-              <Select
-                value={form.orderLineIndex || "none"}
-                onValueChange={(value) => {
-                  if (value === "none") {
-                    onChange("orderLineIndex", "");
-                    onChange("productVariantId", "");
-                    onChange("quantity", "");
-                    return;
-                  }
-                  const line = selectableLines.find((candidate) => String(candidate.lineIndex) === value);
-                  onChange("orderLineIndex", value);
-                  onChange("productVariantId", line?.productVariantId ? String(line.productVariantId) : "");
-                  onChange("quantity", line?.quantity ? String(line.quantity) : "");
-                }}
-                disabled={!form.intakeId || isOrderDetailLoading || selectableLines.length === 0}
-              >
-                <SelectTrigger id="portal-rma-line">
-                  <SelectValue placeholder={isOrderDetailLoading ? "Loading lines" : "Select line"} />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No linked line</SelectItem>
-                  {selectableLines.map((line) => (
-                    <SelectItem key={line.lineIndex} value={String(line.lineIndex)}>
-                      {orderLineOptionLabel(line)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {orderDetailError ? (
-                <p className="text-sm text-rose-700">{queryErrorMessage(orderDetailError, "Unable to load order lines.")}</p>
-              ) : null}
+          <div className="space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <Label>Return items</Label>
+                <p className="mt-1 text-sm text-zinc-500">Add each order line included in this RMA.</p>
+              </div>
+              <Button type="button" variant="outline" className="gap-2" onClick={onAddItem}>
+                <Plus className="h-4 w-4" />
+                Add line
+              </Button>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="portal-rma-quantity">Qty</Label>
-              <Input
-                id="portal-rma-quantity"
-                inputMode="numeric"
-                value={form.quantity}
-                onChange={(event) => onChange("quantity", event.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="portal-rma-credit">Requested credit</Label>
-              <Input
-                id="portal-rma-credit"
-                inputMode="decimal"
-                value={form.requestedCreditAmount}
-                onChange={(event) => onChange("requestedCreditAmount", event.target.value)}
-              />
-            </div>
+            {orderDetailError ? (
+              <p className="text-sm text-rose-700">{queryErrorMessage(orderDetailError, "Unable to load order lines.")}</p>
+            ) : null}
+            {form.intakeId && !isOrderDetailLoading && selectableLines.length === 0 && !orderDetailError ? (
+              <p className="text-sm text-zinc-500">No linked product lines are available for this order.</p>
+            ) : null}
+            {form.items.map((item, index) => {
+              const availableLines = selectableLines.filter((line) => {
+                const lineIndex = String(line.lineIndex);
+                return item.orderLineIndex === lineIndex || !selectedLineIndexes.has(lineIndex);
+              });
+              return (
+                <div key={item.clientId} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium text-zinc-700">Line {index + 1}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      title="Remove line"
+                      aria-label="Remove line"
+                      onClick={() => onRemoveItem(item.clientId)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label htmlFor={`portal-rma-line-${item.clientId}`}>Order line</Label>
+                      <Select
+                        value={item.orderLineIndex || "none"}
+                        onValueChange={(value) => {
+                          if (value === "none") {
+                            onItemPatch(item.clientId, {
+                              orderLineIndex: "",
+                              productVariantId: "",
+                              quantity: "",
+                            });
+                            return;
+                          }
+                          const line = selectableLines.find((candidate) => String(candidate.lineIndex) === value);
+                          onItemPatch(item.clientId, {
+                            orderLineIndex: value,
+                            productVariantId: line?.productVariantId !== null && line?.productVariantId !== undefined
+                              ? String(line.productVariantId)
+                              : "",
+                            quantity: typeof line?.quantity === "number" ? String(line.quantity) : "",
+                          });
+                        }}
+                        disabled={!form.intakeId || isOrderDetailLoading || selectableLines.length === 0}
+                      >
+                        <SelectTrigger id={`portal-rma-line-${item.clientId}`}>
+                          <SelectValue placeholder={isOrderDetailLoading ? "Loading lines" : "Select line"} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">No linked line</SelectItem>
+                          {availableLines.map((line) => (
+                            <SelectItem key={`${item.clientId}-${line.lineIndex}`} value={String(line.lineIndex)}>
+                              {orderLineOptionLabel(line)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor={`portal-rma-quantity-${item.clientId}`}>Qty</Label>
+                      <Input
+                        id={`portal-rma-quantity-${item.clientId}`}
+                        inputMode="numeric"
+                        value={item.quantity}
+                        onChange={(event) => onItemChange(item.clientId, "quantity", event.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor={`portal-rma-credit-${item.clientId}`}>Requested credit</Label>
+                      <Input
+                        id={`portal-rma-credit-${item.clientId}`}
+                        inputMode="decimal"
+                        value={item.requestedCreditAmount}
+                        onChange={(event) => onItemChange(item.clientId, "requestedCreditAmount", event.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="space-y-2">
@@ -809,10 +933,10 @@ function formatNullableCents(value: number | null | undefined): string {
   return typeof value === "number" ? formatCents(value) : "Not recorded";
 }
 
-function returnItemFormIsBlank(form: PortalReturnCreateFormState): boolean {
-  return !form.productVariantId.trim()
-    && !form.quantity.trim()
-    && !form.requestedCreditAmount.trim();
+function returnItemFormIsBlank(item: PortalReturnCreateItemFormState): boolean {
+  return !item.productVariantId.trim()
+    && !item.quantity.trim()
+    && !item.requestedCreditAmount.trim();
 }
 
 function statusTone(status: string): string {
