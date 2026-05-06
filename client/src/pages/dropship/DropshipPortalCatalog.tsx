@@ -32,6 +32,7 @@ import {
 import {
   buildListingPreviewRequest,
   buildListingPushRequest,
+  buildScopedSelectionReplacement,
   buildVariantSelectionReplacement,
   buildQueryUrl,
   createDropshipIdempotencyKey,
@@ -51,12 +52,15 @@ import {
   type DropshipSelectionRulesResponse,
   type DropshipSettingsResponse,
   type DropshipVendorSelectionAction,
+  type DropshipVendorSelectionScopeTarget,
 } from "@/lib/dropship-ops-surface";
 import { useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingSelectionAction = string | null;
 type PendingListingAction = "preview" | "send-code" | "verify-code" | "passkey-proof" | "push" | null;
+type ProductLineOption = { productLineId: number; label: string };
+type ProductOption = { productId: number; label: string };
 
 export default function DropshipPortalCatalog() {
   const queryClient = useQueryClient();
@@ -79,6 +83,9 @@ export default function DropshipPortalCatalog() {
   const [verificationCode, setVerificationCode] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [scopeCategory, setScopeCategory] = useState("");
+  const [scopeProductLineId, setScopeProductLineId] = useState("");
+  const [scopeProductId, setScopeProductId] = useState("");
   const catalogUrl = useMemo(() => buildQueryUrl("/api/dropship/catalog", {
     search: applied.search,
     selectedOnly: applied.selectedOnly,
@@ -100,6 +107,9 @@ export default function DropshipPortalCatalog() {
   const visibleRows = catalogQuery.data?.rows ?? [];
   const visibleSelectableRows = visibleRows.filter(canSelectRow);
   const visibleSelectedRows = visibleRows.filter((row) => row.selectionDecision.selected);
+  const visibleCategoryOptions = useMemo(() => buildVisibleCategoryOptions(visibleRows), [visibleRows]);
+  const visibleProductLineOptions = useMemo(() => buildVisibleProductLineOptions(visibleRows), [visibleRows]);
+  const visibleProductOptions = useMemo(() => buildVisibleProductOptions(visibleRows), [visibleRows]);
   const connectedStoreConnections = (settingsQuery.data?.settings.storeConnections ?? [])
     .filter((connection) => connection.status === "connected");
   const selectedStoreConnectionIdNumber = Number(selectedStoreConnectionId);
@@ -115,6 +125,24 @@ export default function DropshipPortalCatalog() {
     }
     setSelectedStoreConnectionId(String(connectedStoreConnections[0].storeConnectionId));
   }, [connectedStoreConnections, selectedStoreConnectionId]);
+
+  useEffect(() => {
+    if (scopeCategory && !visibleCategoryOptions.includes(scopeCategory)) {
+      setScopeCategory("");
+    }
+  }, [scopeCategory, visibleCategoryOptions]);
+
+  useEffect(() => {
+    if (scopeProductLineId && !visibleProductLineOptions.some((option) => String(option.productLineId) === scopeProductLineId)) {
+      setScopeProductLineId("");
+    }
+  }, [scopeProductLineId, visibleProductLineOptions]);
+
+  useEffect(() => {
+    if (scopeProductId && !visibleProductOptions.some((option) => String(option.productId) === scopeProductId)) {
+      setScopeProductId("");
+    }
+  }, [scopeProductId, visibleProductOptions]);
 
   async function replaceSelection(action: DropshipVendorSelectionAction, rows: readonly DropshipCatalogRow[], actionKey: string) {
     if (!selectionRulesQuery.data) {
@@ -147,6 +175,72 @@ export default function DropshipPortalCatalog() {
       setListingPushResult(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Catalog selection update failed.");
+    } finally {
+      setPendingSelectionAction(null);
+    }
+  }
+
+  async function replaceScopedSelection(
+    action: DropshipVendorSelectionAction,
+    target: DropshipVendorSelectionScopeTarget,
+    actionKey: string,
+  ) {
+    if (!selectionRulesQuery.data) {
+      setError("Selection rules are still loading.");
+      return;
+    }
+
+    setPendingSelectionAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      await putJson<DropshipSelectionRulesReplaceResponse>("/api/dropship/catalog/selection-rules", {
+        idempotencyKey: createDropshipIdempotencyKey(`catalog-scope-${action}`),
+        rules: buildScopedSelectionReplacement({
+          existingRules: selectionRulesQuery.data.rules,
+          target,
+          action,
+        }),
+      });
+      await Promise.all([
+        catalogQuery.refetch(),
+        selectionRulesQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+      ]);
+      setMessage(`${selectionTargetLabel(target)} ${action === "include" ? "selected" : "removed"}.`);
+      setListingPreview(null);
+      setListingPushResult(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Catalog scope selection update failed.");
+    } finally {
+      setPendingSelectionAction(null);
+    }
+  }
+
+  async function clearSelectionRules() {
+    if (!selectionRulesQuery.data) {
+      setError("Selection rules are still loading.");
+      return;
+    }
+
+    setPendingSelectionAction("scope:clear");
+    setError("");
+    setMessage("");
+    try {
+      await putJson<DropshipSelectionRulesReplaceResponse>("/api/dropship/catalog/selection-rules", {
+        idempotencyKey: createDropshipIdempotencyKey("catalog-clear"),
+        rules: [],
+      });
+      await Promise.all([
+        catalogQuery.refetch(),
+        selectionRulesQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+      ]);
+      setMessage("Catalog selection cleared.");
+      setListingPreview(null);
+      setListingPushResult(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Catalog selection clear failed.");
     } finally {
       setPendingSelectionAction(null);
     }
@@ -339,6 +433,50 @@ export default function DropshipPortalCatalog() {
           onVerificationCodeChange={setVerificationCode}
         />
 
+        <ScopeSelectionPanel
+          categoryOptions={visibleCategoryOptions}
+          pendingSelectionAction={pendingSelectionAction}
+          productLineOptions={visibleProductLineOptions}
+          productOptions={visibleProductOptions}
+          scopeCategory={scopeCategory}
+          scopeProductId={scopeProductId}
+          scopeProductLineId={scopeProductLineId}
+          selectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
+          onCategoryChange={setScopeCategory}
+          onClearSelection={clearSelectionRules}
+          onProductChange={setScopeProductId}
+          onProductLineChange={setScopeProductLineId}
+          onSelectCatalog={() => replaceScopedSelection("include", { scopeType: "catalog" }, "scope:catalog:include")}
+          onRemoveCategory={() => {
+            if (!scopeCategory) return;
+            return replaceScopedSelection("exclude", { scopeType: "category", category: scopeCategory }, `scope:category:${scopeCategory}:exclude`);
+          }}
+          onSelectCategory={() => {
+            if (!scopeCategory) return;
+            return replaceScopedSelection("include", { scopeType: "category", category: scopeCategory }, `scope:category:${scopeCategory}:include`);
+          }}
+          onRemoveProduct={() => {
+            const productId = Number(scopeProductId);
+            if (!Number.isInteger(productId) || productId <= 0) return;
+            return replaceScopedSelection("exclude", { scopeType: "product", productId }, `scope:product:${productId}:exclude`);
+          }}
+          onSelectProduct={() => {
+            const productId = Number(scopeProductId);
+            if (!Number.isInteger(productId) || productId <= 0) return;
+            return replaceScopedSelection("include", { scopeType: "product", productId }, `scope:product:${productId}:include`);
+          }}
+          onRemoveProductLine={() => {
+            const productLineId = Number(scopeProductLineId);
+            if (!Number.isInteger(productLineId) || productLineId <= 0) return;
+            return replaceScopedSelection("exclude", { scopeType: "product_line", productLineId }, `scope:product-line:${productLineId}:exclude`);
+          }}
+          onSelectProductLine={() => {
+            const productLineId = Number(scopeProductLineId);
+            if (!Number.isInteger(productLineId) || productLineId <= 0) return;
+            return replaceScopedSelection("include", { scopeType: "product_line", productLineId }, `scope:product-line:${productLineId}:include`);
+          }}
+        />
+
         <div className="mt-5 rounded-md border border-zinc-200 bg-white">
           {catalogQuery.isLoading ? (
             <div className="space-y-2 p-4">
@@ -379,6 +517,201 @@ export default function DropshipPortalCatalog() {
         </div>
       </div>
     </DropshipPortalShell>
+  );
+}
+
+function ScopeSelectionPanel({
+  categoryOptions,
+  onCategoryChange,
+  onClearSelection,
+  onProductChange,
+  onProductLineChange,
+  onRemoveCategory,
+  onRemoveProduct,
+  onRemoveProductLine,
+  onSelectCatalog,
+  onSelectCategory,
+  onSelectProduct,
+  onSelectProductLine,
+  pendingSelectionAction,
+  productLineOptions,
+  productOptions,
+  scopeCategory,
+  scopeProductId,
+  scopeProductLineId,
+  selectionDisabled,
+}: {
+  categoryOptions: string[];
+  onCategoryChange: (value: string) => void;
+  onClearSelection: () => void;
+  onProductChange: (value: string) => void;
+  onProductLineChange: (value: string) => void;
+  onRemoveCategory: () => void;
+  onRemoveProduct: () => void;
+  onRemoveProductLine: () => void;
+  onSelectCatalog: () => void;
+  onSelectCategory: () => void;
+  onSelectProduct: () => void;
+  onSelectProductLine: () => void;
+  pendingSelectionAction: PendingSelectionAction;
+  productLineOptions: ProductLineOption[];
+  productOptions: ProductOption[];
+  scopeCategory: string;
+  scopeProductId: string;
+  scopeProductLineId: string;
+  selectionDisabled: boolean;
+}) {
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Selection scope</h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            Use broad selection rules for catalog groups, then remove individual variants as exceptions.
+          </p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Button
+            type="button"
+            className="h-10 gap-2 bg-zinc-950 hover:bg-zinc-800"
+            disabled={selectionDisabled}
+            onClick={onSelectCatalog}
+          >
+            <PlusCircle className="h-4 w-4" />
+            {pendingSelectionAction === "scope:catalog:include" ? "Selecting" : "Select all exposed"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className="h-10 gap-2"
+            disabled={selectionDisabled}
+            onClick={onClearSelection}
+          >
+            <MinusCircle className="h-4 w-4" />
+            {pendingSelectionAction === "scope:clear" ? "Clearing" : "Clear selection"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 xl:grid-cols-3">
+        <ScopedSelectionControl
+          label="Category"
+          placeholder="Select category"
+          value={scopeCategory}
+          options={categoryOptions.map((category) => ({ value: category, label: formatStatus(category) }))}
+          disabled={selectionDisabled || categoryOptions.length === 0}
+          actionDisabled={selectionDisabled || !scopeCategory}
+          actionLabel={isPendingScopeAction(pendingSelectionAction, "category", "include") ? "Selecting" : "Select category"}
+          removeActionDisabled={selectionDisabled || !scopeCategory}
+          removeActionLabel={isPendingScopeAction(pendingSelectionAction, "category", "exclude") ? "Removing" : "Remove category"}
+          onChange={onCategoryChange}
+          onAction={onSelectCategory}
+          onRemoveAction={onRemoveCategory}
+        />
+        <ScopedSelectionControl
+          label="Product line"
+          placeholder="Select product line"
+          value={scopeProductLineId}
+          options={productLineOptions.map((option) => ({
+            value: String(option.productLineId),
+            label: option.label,
+          }))}
+          disabled={selectionDisabled || productLineOptions.length === 0}
+          actionDisabled={selectionDisabled || !scopeProductLineId}
+          actionLabel={isPendingScopeAction(pendingSelectionAction, "product-line", "include") ? "Selecting" : "Select line"}
+          removeActionDisabled={selectionDisabled || !scopeProductLineId}
+          removeActionLabel={isPendingScopeAction(pendingSelectionAction, "product-line", "exclude") ? "Removing" : "Remove line"}
+          onChange={onProductLineChange}
+          onAction={onSelectProductLine}
+          onRemoveAction={onRemoveProductLine}
+        />
+        <ScopedSelectionControl
+          label="Product"
+          placeholder="Select product"
+          value={scopeProductId}
+          options={productOptions.map((option) => ({
+            value: String(option.productId),
+            label: option.label,
+          }))}
+          disabled={selectionDisabled || productOptions.length === 0}
+          actionDisabled={selectionDisabled || !scopeProductId}
+          actionLabel={isPendingScopeAction(pendingSelectionAction, "product", "include") ? "Selecting" : "Select product"}
+          removeActionDisabled={selectionDisabled || !scopeProductId}
+          removeActionLabel={isPendingScopeAction(pendingSelectionAction, "product", "exclude") ? "Removing" : "Remove product"}
+          onChange={onProductChange}
+          onAction={onSelectProduct}
+          onRemoveAction={onRemoveProduct}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ScopedSelectionControl({
+  actionDisabled,
+  actionLabel,
+  disabled,
+  label,
+  onAction,
+  onChange,
+  onRemoveAction,
+  options,
+  placeholder,
+  removeActionDisabled,
+  removeActionLabel,
+  value,
+}: {
+  actionDisabled: boolean;
+  actionLabel: string;
+  disabled: boolean;
+  label: string;
+  onAction: () => void;
+  onChange: (value: string) => void;
+  onRemoveAction: () => void;
+  options: Array<{ value: string; label: string }>;
+  placeholder: string;
+  removeActionDisabled: boolean;
+  removeActionLabel: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-md border border-zinc-200 p-3">
+      <Label>{label}</Label>
+      <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+        <Select value={value} onValueChange={onChange} disabled={disabled}>
+          <SelectTrigger className="h-10 min-w-0 flex-1">
+            <SelectValue placeholder={placeholder} />
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-10 shrink-0 gap-2"
+          disabled={actionDisabled}
+          onClick={onAction}
+        >
+          <PlusCircle className="h-4 w-4" />
+          {actionLabel}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-10 shrink-0 gap-2"
+          disabled={removeActionDisabled}
+          onClick={onRemoveAction}
+        >
+          <MinusCircle className="h-4 w-4" />
+          {removeActionLabel}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -726,6 +1059,58 @@ function pushButtonIcon(pendingListingAction: PendingListingAction, emailCodeSen
   if (pendingListingAction === "send-code" || (emailCodeSent && pendingListingAction !== "push")) return <Mail className="h-4 w-4" />;
   if (pendingListingAction === "push") return <Send className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
+}
+
+function buildVisibleCategoryOptions(rows: readonly DropshipCatalogRow[]): string[] {
+  return Array.from(new Set(rows
+    .map((row) => row.category?.trim())
+    .filter((category): category is string => Boolean(category))))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function buildVisibleProductLineOptions(rows: readonly DropshipCatalogRow[]): ProductLineOption[] {
+  const byId = new Map<number, string>();
+  for (const row of rows) {
+    (row.productLineIds ?? []).forEach((productLineId, index) => {
+      if (!Number.isInteger(productLineId) || productLineId <= 0 || byId.has(productLineId)) {
+        return;
+      }
+      byId.set(productLineId, row.productLineNames[index] || `Product line ${productLineId}`);
+    });
+  }
+  return Array.from(byId.entries())
+    .map(([productLineId, label]) => ({ productLineId, label }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function buildVisibleProductOptions(rows: readonly DropshipCatalogRow[]): ProductOption[] {
+  const byId = new Map<number, string>();
+  for (const row of rows) {
+    if (!Number.isInteger(row.productId) || row.productId <= 0 || byId.has(row.productId)) {
+      continue;
+    }
+    byId.set(row.productId, row.productName || row.productSku || `Product ${row.productId}`);
+  }
+  return Array.from(byId.entries())
+    .map(([productId, label]) => ({ productId, label }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function selectionTargetLabel(target: DropshipVendorSelectionScopeTarget): string {
+  if (target.scopeType === "catalog") return "All exposed catalog";
+  if (target.scopeType === "category") return `Category ${formatStatus(target.category)}`;
+  if (target.scopeType === "product_line") return `Product line ${target.productLineId}`;
+  if (target.scopeType === "product") return `Product ${target.productId}`;
+  return `Variant ${target.productVariantId}`;
+}
+
+function isPendingScopeAction(
+  pendingAction: PendingSelectionAction,
+  scopeKey: string,
+  action: DropshipVendorSelectionAction,
+): boolean {
+  return pendingAction?.startsWith(`scope:${scopeKey}:`) === true
+    && pendingAction.endsWith(`:${action}`);
 }
 
 function canSelectRow(row: DropshipCatalogRow): boolean {
