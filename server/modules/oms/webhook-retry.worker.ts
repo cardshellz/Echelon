@@ -161,6 +161,7 @@ export async function enqueueShipStationRetry(
  */
 export interface RetryShipStationService {
   processShipNotify(resourceUrl: string): Promise<number>;
+  pushShipment?(shipmentId: number): Promise<unknown>;
 }
 
 /**
@@ -381,6 +382,49 @@ export async function enqueueWmsShipmentCreateRetry(
     provider: "internal",
     topic: "wms_shipment_create",
     payload: { wmsOrderId },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
+export async function enqueueShipStationShipmentPushRetry(
+  dbArg: any,
+  shipmentId: number,
+  cause?: unknown,
+): Promise<void> {
+  if (
+    typeof shipmentId !== "number" ||
+    !Number.isInteger(shipmentId) ||
+    shipmentId <= 0
+  ) {
+    throw new Error(
+      `enqueueShipStationShipmentPushRetry: shipmentId must be a positive integer (got ${shipmentId})`,
+    );
+  }
+
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "shipstation_shipment_push",
+    scope: sql`payload->>'shipmentId' = ${String(shipmentId)}`,
+  })) {
+    return;
+  }
+
+  await insertWebhookRetryQueueRow(dbArg, {
+    provider: "internal",
+    topic: "shipstation_shipment_push",
+    payload: { shipmentId },
     attempts: 0,
     status: "pending",
     lastError: message || null,
@@ -746,6 +790,69 @@ export async function dispatchWmsShipmentCreateRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+export async function dispatchShipStationShipmentPushRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as { shipmentId?: number } | null;
+  const shipmentId = payload?.shipmentId;
+
+  if (
+    typeof shipmentId !== "number" ||
+    !Number.isInteger(shipmentId) ||
+    shipmentId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item,
+      "malformed payload: shipmentId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_shipment_push payload)`,
+    );
+    return "malformed";
+  }
+
+  const shipStationService = resolveShipStationService(dbArg);
+  if (!shipStationService || typeof shipStationService.pushShipment !== "function") {
+    await keepPending(
+      dbArg,
+      item.id,
+      "ShipStation shipment push service not available on db.__shipStationService",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) deferred - ShipStation push service unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    await shipStationService.pushShipment(shipmentId);
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) succeeded`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "shipstation_shipment_push", shipmentId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -1281,6 +1388,20 @@ async function processPendingWebhooks() {
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} wms_shipment_create dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === "shipstation_shipment_push"
+    ) {
+      try {
+        await dispatchShipStationShipmentPushRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} shipstation_shipment_push dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
