@@ -4,6 +4,14 @@ import { incr } from "../../instrumentation/metrics";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
+type RetryDispatchItem = {
+  id: number;
+  provider: string;
+  topic: string;
+  payload: any;
+  attempts: number;
+  sourceInboxId?: number | null;
+};
 
 /**
  * Lazy default-db accessor. The worker is the only entry point that
@@ -266,7 +274,7 @@ function isShopifyClientNotReadyError(err: any): boolean {
  */
 export async function dispatchShopifyFulfillmentRetry(
   dbArg: any,
-  item: { id: number; provider: string; topic: string; payload: any; attempts: number },
+  item: RetryDispatchItem,
 ): Promise<"success" | "pending" | "dead" | "malformed"> {
   const payload = item.payload as { shipmentId?: number } | null;
   const shipmentId = payload?.shipmentId;
@@ -278,7 +286,7 @@ export async function dispatchShopifyFulfillmentRetry(
   ) {
     await markRowDead(
       dbArg,
-      item.id,
+      item,
       "malformed payload: shipmentId missing or invalid",
     );
     console.error(
@@ -305,7 +313,7 @@ export async function dispatchShopifyFulfillmentRetry(
 
   try {
     await fulfillmentPush.pushShopifyFulfillment(shipmentId);
-    await markRowSuccess(dbArg, item.id);
+    await markRowSuccess(dbArg, item);
     console.log(
       `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) succeeded`,
     );
@@ -350,7 +358,7 @@ export async function dispatchShopifyFulfillmentRetry(
  */
 export async function dispatchDelayedTrackingPush(
   dbArg: any,
-  item: { id: number; provider: string; topic: string; payload: any; attempts: number },
+  item: RetryDispatchItem,
 ): Promise<"success" | "pending" | "dead" | "malformed"> {
   const payload = item.payload as { orderId?: number; shipmentId?: number } | null;
   const orderId = payload?.orderId;
@@ -363,7 +371,7 @@ export async function dispatchDelayedTrackingPush(
   ) {
     await markRowDead(
       dbArg,
-      item.id,
+      item,
       "malformed payload: orderId missing or invalid",
     );
     console.error(
@@ -379,7 +387,7 @@ export async function dispatchDelayedTrackingPush(
   ) {
     await markRowDead(
       dbArg,
-      item.id,
+      item,
       "malformed payload: shipmentId invalid",
     );
     console.error(
@@ -413,7 +421,7 @@ export async function dispatchDelayedTrackingPush(
           : `fulfillment push returned false for order ${orderId}`,
       );
     }
-    await markRowSuccess(dbArg, item.id);
+    await markRowSuccess(dbArg, item);
     console.log(
       `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) succeeded (pushed=${pushed})`,
     );
@@ -440,12 +448,12 @@ export async function dispatchDelayedTrackingPush(
 
 export async function dispatchEbayWebhookRetry(
   dbArg: any,
-  item: { id: number; provider: string; topic: string; payload: any; attempts: number },
+  item: RetryDispatchItem,
 ): Promise<"success" | "pending" | "dead" | "malformed"> {
   if (!item.topic?.toLowerCase().includes("order")) {
     await markRowDead(
       dbArg,
-      item.id,
+      item,
       `unsupported eBay webhook replay topic: ${item.topic || "unknown"}`,
     );
     console.error(
@@ -458,7 +466,7 @@ export async function dispatchEbayWebhookRetry(
   if (typeof orderId !== "string" || orderId.trim().length === 0) {
     await markRowDead(
       dbArg,
-      item.id,
+      item,
       "malformed payload: notification.data.orderId missing or invalid",
     );
     console.error(
@@ -486,7 +494,7 @@ export async function dispatchEbayWebhookRetry(
       ebayReplay.omsService,
       ebayReplay.ebayApiClient,
     );
-    await markRowSuccess(dbArg, item.id);
+    await markRowSuccess(dbArg, item);
     console.log(
       `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) succeeded via eBay reingest (${result.status}, oms=${result.omsOrderId})`,
     );
@@ -527,7 +535,7 @@ export async function dispatchEbayWebhookRetry(
  */
 export async function recordRetryFailure(
   dbArg: any,
-  item: { id: number; attempts: number; topic?: string; payload?: any },
+  item: { id: number; attempts: number; topic?: string; payload?: any; sourceInboxId?: number | null },
   errMessage: string,
   meta: { topic?: string; orderId?: number; shipmentId?: number } = {},
 ): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date }> {
@@ -550,6 +558,8 @@ export async function recordRetryFailure(
     .where(eq(webhookRetryQueue.id, item.id));
 
   if (status === "dead") {
+    await mirrorRetryStatusToInbox(dbArg, item, "dead", errMessage);
+
     const topic = meta.topic ?? item.topic;
     const headline =
       topic === "shopify_fulfillment_push"
@@ -577,7 +587,7 @@ export async function recordRetryFailure(
  */
 async function markRowDead(
   dbArg: any,
-  rowId: number,
+  item: { id: number; sourceInboxId?: number | null },
   reason: string,
 ): Promise<void> {
   await dbArg
@@ -587,7 +597,9 @@ async function markRowDead(
       lastError: reason,
       updatedAt: new Date(),
     })
-    .where(eq(webhookRetryQueue.id, rowId));
+    .where(eq(webhookRetryQueue.id, item.id));
+
+  await mirrorRetryStatusToInbox(dbArg, item, "dead", reason);
 }
 
 /**
@@ -612,11 +624,47 @@ async function keepPending(
 /**
  * Mark a row succeeded.
  */
-async function markRowSuccess(dbArg: any, rowId: number): Promise<void> {
+async function markRowSuccess(
+  dbArg: any,
+  item: { id: number; sourceInboxId?: number | null },
+): Promise<void> {
   await dbArg
     .update(webhookRetryQueue)
     .set({ status: "success", updatedAt: new Date() })
-    .where(eq(webhookRetryQueue.id, rowId));
+    .where(eq(webhookRetryQueue.id, item.id));
+
+  await mirrorRetryStatusToInbox(dbArg, item, "succeeded", null);
+}
+
+async function mirrorRetryStatusToInbox(
+  dbArg: any,
+  item: { id: number; sourceInboxId?: number | null },
+  status: "succeeded" | "dead",
+  lastError: string | null,
+): Promise<void> {
+  const sourceInboxId = Number(item.sourceInboxId);
+  if (!Number.isInteger(sourceInboxId) || sourceInboxId <= 0) return;
+  if (typeof dbArg?.execute !== "function") return;
+
+  if (status === "succeeded") {
+    await dbArg.execute(sql`
+      UPDATE oms.webhook_inbox
+      SET status = 'succeeded',
+          last_error = NULL,
+          processed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = ${sourceInboxId}
+    `);
+    return;
+  }
+
+  await dbArg.execute(sql`
+    UPDATE oms.webhook_inbox
+    SET status = 'dead',
+        last_error = ${lastError || "retry row dead-lettered"},
+        updated_at = NOW()
+    WHERE id = ${sourceInboxId}
+  `);
 }
 
 /**
@@ -625,7 +673,7 @@ async function markRowSuccess(dbArg: any, rowId: number): Promise<void> {
  */
 export async function dispatchShipStationRetry(
   dbArg: any,
-  item: { id: number; provider: string; topic: string; payload: any; attempts: number }
+  item: RetryDispatchItem,
 ): Promise<"success" | "pending" | "dead" | "malformed"> {
   const payload = item.payload as { resource_url?: string } | null;
   const resourceUrl = payload?.resource_url;
@@ -633,14 +681,7 @@ export async function dispatchShipStationRetry(
   if (!resourceUrl || typeof resourceUrl !== "string") {
     // Malformed row — dead-letter immediately. Retrying a missing
     // resource_url will never succeed, so burning attempts is wasteful.
-    await dbArg
-      .update(webhookRetryQueue)
-      .set({
-        status: "dead",
-        lastError: "malformed payload: missing resource_url",
-        updatedAt: new Date(),
-      })
-      .where(eq(webhookRetryQueue.id, item.id));
+    await markRowDead(dbArg, item, "malformed payload: missing resource_url");
     console.error(`${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation payload)`);
     return "malformed";
   }
@@ -659,10 +700,7 @@ export async function dispatchShipStationRetry(
 
   try {
     await shipStationService.processShipNotify(resourceUrl);
-    await dbArg
-      .update(webhookRetryQueue)
-      .set({ status: "success", updatedAt: new Date() })
-      .where(eq(webhookRetryQueue.id, item.id));
+    await markRowSuccess(dbArg, item);
     console.log(`${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) succeeded`);
     return "success";
   } catch (err: any) {
@@ -777,10 +815,7 @@ async function processPendingWebhooks() {
       // Unknown topic → dead immediately (non-retryable bad data)
       if (!KNOWN_TOPICS.has(item.topic)) {
         console.error(`${LOG_PREFIX} Item ${item.id} unknown shopify topic '${item.topic}' — marking dead`);
-        await defaultDb
-          .update(webhookRetryQueue)
-          .set({ status: "dead", lastError: `Unknown topic: ${item.topic}`, updatedAt: new Date() })
-          .where(eq(webhookRetryQueue.id, item.id));
+        await markRowDead(defaultDb, item as any, `Unknown topic: ${item.topic}`);
         continue;
       }
 
@@ -804,10 +839,7 @@ async function processPendingWebhooks() {
         });
 
         if (res.ok) {
-          await defaultDb
-            .update(webhookRetryQueue)
-            .set({ status: "success", updatedAt: new Date() })
-            .where(eq(webhookRetryQueue.id, item.id));
+          await markRowSuccess(defaultDb, item as any);
           console.log(`${LOG_PREFIX} Item ${item.id} (${item.topic}) succeeded`);
         } else {
           throw new Error(`Local API returned ${res.status}`);
@@ -860,10 +892,7 @@ async function processPendingWebhooks() {
 
       if (res.ok) {
         // Success! Mark as done
-        await defaultDb
-          .update(webhookRetryQueue)
-          .set({ status: "success", updatedAt: new Date() })
-          .where(eq(webhookRetryQueue.id, item.id));
+        await markRowSuccess(defaultDb, item as any);
         console.log(`${LOG_PREFIX} Item ${item.id} succeeded`);
       } else {
         // Still failed

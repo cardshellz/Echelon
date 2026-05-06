@@ -491,12 +491,13 @@ export function createOmsService(db: any, reservationService?: any) {
           OR payload->>'order_id' = ANY(${externalOrderIds})
           OR payload->>'admin_graphql_api_id' = ANY(${externalOrderIds})
           OR payload->>'name' = ANY(${externalOrderIds})
+          OR payload #>> '{notification,data,orderId}' = ANY(${externalOrderIds})
         )
         ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at, updated_at) DESC NULLS LAST
         LIMIT 20
       `),
       db.execute(sql`
-        SELECT id, provider, topic, attempts, status, last_error,
+        SELECT id, provider, topic, attempts, status, last_error, source_inbox_id,
                next_retry_at, created_at, updated_at
         FROM oms.webhook_retry_queue
         WHERE (
@@ -505,6 +506,7 @@ export function createOmsService(db: any, reservationService?: any) {
           OR payload->>'admin_graphql_api_id' = ANY(${externalOrderIds})
           OR payload->>'name' = ANY(${externalOrderIds})
           OR payload->>'orderId' = ${String(order.id)}
+          OR payload #>> '{notification,data,orderId}' = ANY(${externalOrderIds})
         )
         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
         LIMIT 20
@@ -551,6 +553,7 @@ export function createOmsService(db: any, reservationService?: any) {
         details: {
           attempts: row.attempts,
           lastError: row.last_error,
+          sourceInboxId: row.source_inbox_id,
           nextRetryAt: row.next_retry_at,
         },
         createdAt: row.updated_at ?? row.created_at ?? null,

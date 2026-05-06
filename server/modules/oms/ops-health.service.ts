@@ -104,7 +104,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         WHERE status = 'dead'
       `,
       sql`
-        SELECT id, provider, topic, attempts, last_error, updated_at
+        SELECT id, provider, topic, source_inbox_id, attempts, last_error, updated_at
         FROM oms.webhook_retry_queue
         WHERE status = 'dead'
         ORDER BY updated_at DESC NULLS LAST, id DESC
@@ -120,7 +120,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
           AND next_retry_at <= NOW()
       `,
       sql`
-        SELECT id, provider, topic, attempts, next_retry_at, last_error
+        SELECT id, provider, topic, source_inbox_id, attempts, next_retry_at, last_error
         FROM oms.webhook_retry_queue
         WHERE status = 'pending'
           AND next_retry_at <= NOW()

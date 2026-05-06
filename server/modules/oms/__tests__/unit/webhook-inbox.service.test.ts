@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Request } from "express";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   buildEbayWebhookInboxInput,
   buildShopifyWebhookInboxInput,
@@ -10,6 +12,11 @@ import {
   enqueueWebhookInboxReplay,
   recordWebhookReceived,
 } from "../../webhook-inbox.service";
+
+const WEBHOOK_INBOX_SERVICE_SRC = readFileSync(
+  resolve(__dirname, "../../webhook-inbox.service.ts"),
+  "utf-8",
+);
 
 function req(headers: Record<string, string>): Request {
   return { headers } as unknown as Request;
@@ -193,6 +200,11 @@ describe("webhook-inbox.service", () => {
       previousStatus: "failed",
     });
     expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("links replay retry rows back to the source inbox row", () => {
+    expect(WEBHOOK_INBOX_SERVICE_SRC).toContain("source_inbox_id");
+    expect(WEBHOOK_INBOX_SERVICE_SRC).toContain("${inboxId}");
   });
 
   it("rejects succeeded inbox rows so operators do not replay completed events", async () => {
