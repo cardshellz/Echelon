@@ -47,24 +47,30 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
       await client.query("BEGIN");
       const result = await client.query<CancellationCandidateRow>(
         `WITH candidates AS (
-           SELECT id
-           FROM dropship.dropship_order_intake
-           WHERE oms_order_id IS NULL
+           SELECT oi.id
+           FROM dropship.dropship_order_intake oi
+           INNER JOIN dropship.dropship_store_connections sc ON sc.id = oi.store_connection_id
+             AND sc.vendor_id = oi.vendor_id
+           WHERE oi.oms_order_id IS NULL
+             AND sc.status = 'connected'
+             AND sc.setup_status = 'ready'
+             AND sc.access_token_ref IS NOT NULL
+             AND (sc.platform <> 'ebay' OR sc.refresh_token_ref IS NOT NULL)
              AND (
-               (
-                 status IN ('cancelled', 'rejected')
-                 AND cancellation_status = ANY($2::varchar[])
-               )
-               OR (
-                 status IN ('cancelled', 'rejected')
-                 AND cancellation_status = $3
-                 AND updated_at <= $1 - ($4::text)::interval
-               )
-             )
-           ORDER BY updated_at ASC, id ASC
-           LIMIT $5
-           FOR UPDATE SKIP LOCKED
-         )
+                (
+                  oi.status IN ('cancelled', 'rejected')
+                  AND oi.cancellation_status = ANY($2::varchar[])
+                )
+                OR (
+                  oi.status IN ('cancelled', 'rejected')
+                  AND oi.cancellation_status = $3
+                  AND oi.updated_at <= $1 - ($4::text)::interval
+                )
+              )
+            ORDER BY oi.updated_at ASC, oi.id ASC
+            LIMIT $5
+            FOR UPDATE OF oi SKIP LOCKED
+          )
          UPDATE dropship.dropship_order_intake AS oi
          SET cancellation_status = $3,
              updated_at = $1
