@@ -97,6 +97,7 @@ const allDropshipListingPushJobStatuses: DropshipListingPushJobStatus[] = [
   "cancelled",
 ];
 
+const DROPSHIP_LISTING_PUSH_STALE_PROCESSING_MS = 30 * 60 * 1000;
 const allDropshipTrackingPushStatuses: DropshipTrackingPushStatus[] = [
   "queued",
   "processing",
@@ -862,6 +863,33 @@ export interface DropshipAdminListingPushJobListResponse {
   limit: number;
   statuses: DropshipListingPushJobStatus[];
   summary: Array<{ status: DropshipListingPushJobStatus; count: number }>;
+}
+
+export type DropshipListingPushJobRetryEligibilityReason =
+  | "failed_items_present"
+  | "failed_without_failed_items"
+  | "stale_processing"
+  | "processing_not_stale"
+  | "invalid_processing_timestamp"
+  | "status_not_retryable";
+
+export interface DropshipListingPushJobRetryEligibility {
+  canRetry: boolean;
+  reason: DropshipListingPushJobRetryEligibilityReason;
+}
+
+export interface DropshipAdminListingPushJobRetryInput {
+  idempotencyKey: string;
+  reason?: string;
+}
+
+export interface DropshipAdminListingPushJobRetryResponse {
+  jobId: number;
+  previousStatus: DropshipListingPushJobStatus;
+  status: DropshipListingPushJobStatus;
+  requeuedItemCount: number;
+  idempotentReplay: boolean;
+  updatedAt: string;
 }
 
 export interface DropshipAdminTrackingPushListItem {
@@ -1966,6 +1994,44 @@ export function buildAdminListingPushJobsUrl(input: {
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
+}
+
+export function buildAdminListingPushJobRetryInput(input: {
+  idempotencyKey: string;
+  reason: string;
+}): DropshipAdminListingPushJobRetryInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  const reason = input.reason.trim();
+  if (reason.length > 1000) {
+    throw new Error("Reason must be 1000 characters or fewer.");
+  }
+
+  return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function listingPushJobRetryEligibility(
+  job: Pick<DropshipAdminListingPushJobListItem, "status" | "updatedAt" | "itemSummary">,
+  now: Date = new Date(),
+): DropshipListingPushJobRetryEligibility {
+  if (job.status === "failed") {
+    return job.itemSummary.failed > 0
+      ? { canRetry: true, reason: "failed_items_present" }
+      : { canRetry: false, reason: "failed_without_failed_items" };
+  }
+  if (job.status === "processing") {
+    const updatedAt = new Date(job.updatedAt);
+    if (Number.isNaN(updatedAt.getTime())) {
+      return { canRetry: false, reason: "invalid_processing_timestamp" };
+    }
+    return updatedAt.getTime() <= now.getTime() - DROPSHIP_LISTING_PUSH_STALE_PROCESSING_MS
+      ? { canRetry: true, reason: "stale_processing" }
+      : { canRetry: false, reason: "processing_not_stale" };
+  }
+  return { canRetry: false, reason: "status_not_retryable" };
 }
 
 export function buildAdminTrackingPushesUrl(input: {

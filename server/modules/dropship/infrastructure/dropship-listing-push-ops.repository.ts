@@ -1,8 +1,9 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type { DropshipListingPushJobStatus } from "../application/dropship-listing-push-ops-dtos";
 import type {
+  DropshipListingPushOpsActionResult,
   DropshipListingPushOpsJobListItem,
   DropshipListingPushOpsJobListResult,
   DropshipListingPushOpsLatestItemError,
@@ -56,6 +57,22 @@ interface StatusCountRow {
   count: string | number;
 }
 
+interface ListingPushActionJobRow {
+  id: number;
+  vendor_id: number;
+  store_connection_id: number;
+  status: DropshipListingPushJobStatus;
+  updated_at: Date;
+  completed_at: Date | null;
+}
+
+interface RequeuedListingPushItemRow {
+  id: number;
+  listing_id: number | null;
+}
+
+const DEFAULT_LISTING_PUSH_OPS_STALE_PROCESSING_MINUTES = 30;
+
 export class PgDropshipListingPushOpsRepository implements DropshipListingPushOpsRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
 
@@ -93,6 +110,114 @@ export class PgDropshipListingPushOpsRepository implements DropshipListingPushOp
         statuses: input.statuses,
         summary: summary.rows.map(mapStatusCountRow),
       };
+    } finally {
+      client.release();
+    }
+  }
+
+  async retryJob(
+    input: Parameters<DropshipListingPushOpsRepository["retryJob"]>[0],
+  ): Promise<DropshipListingPushOpsActionResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await loadListingPushJobForUpdate(client, input.jobId);
+      if (!existing) {
+        throw new DropshipError(
+          "DROPSHIP_LISTING_PUSH_OPS_JOB_NOT_FOUND",
+          "Dropship listing push job was not found.",
+          { jobId: input.jobId },
+        );
+      }
+
+      if (existing.status === "queued") {
+        await client.query("COMMIT");
+        return mapActionResult(existing, existing.status, 0, true);
+      }
+
+      const staleProcessingMinutes = listingPushOpsStaleProcessingMinutes();
+      let requeuedItems: RequeuedListingPushItemRow[];
+      if (existing.status === "failed") {
+        requeuedItems = await requeueRetryableFailedItems(client, {
+          jobId: input.jobId,
+          now: input.now,
+          idempotencyKey: input.idempotencyKey,
+          actor: input.actor,
+          reason: input.reason,
+        });
+        if (requeuedItems.length === 0) {
+          throw new DropshipError(
+            "DROPSHIP_LISTING_PUSH_OPS_JOB_NOT_RETRYABLE",
+            "Dropship listing push job has no retryable failed items.",
+            { jobId: input.jobId, status: existing.status },
+          );
+        }
+        await markRequeuedListingsQueued(client, {
+          listingIds: uniquePositiveIntegers(requeuedItems.map((row) => row.listing_id)),
+          now: input.now,
+          jobId: input.jobId,
+          idempotencyKey: input.idempotencyKey,
+        });
+      } else if (existing.status === "processing") {
+        if (!isStaleProcessingJob(existing, input.now, staleProcessingMinutes)) {
+          throw new DropshipError(
+            "DROPSHIP_LISTING_PUSH_OPS_STATUS_NOT_RETRYABLE",
+            "Only failed or stale processing dropship listing push jobs can be retried.",
+            {
+              jobId: input.jobId,
+              status: existing.status,
+              updatedAt: existing.updated_at.toISOString(),
+              staleAfterMinutes: staleProcessingMinutes,
+            },
+          );
+        }
+        requeuedItems = await requeueProcessingItems(client, {
+          jobId: input.jobId,
+          now: input.now,
+          idempotencyKey: input.idempotencyKey,
+          actor: input.actor,
+          reason: input.reason,
+          staleAfterMinutes: staleProcessingMinutes,
+        });
+      } else {
+        throw new DropshipError(
+          "DROPSHIP_LISTING_PUSH_OPS_STATUS_NOT_RETRYABLE",
+          "Only failed or stale processing dropship listing push jobs can be retried.",
+          { jobId: input.jobId, status: existing.status },
+        );
+      }
+
+      const updated = await client.query<ListingPushActionJobRow>(
+        `UPDATE dropship.dropship_listing_push_jobs
+         SET status = 'queued',
+             error_message = NULL,
+             completed_at = NULL,
+             updated_at = $2
+         WHERE id = $1
+         RETURNING id, vendor_id, store_connection_id, status, updated_at, completed_at`,
+        [input.jobId, input.now],
+      );
+      const row = requiredRow(updated.rows[0], "Dropship listing push job retry did not return a row.");
+      await recordListingPushOpsAuditEvent(client, {
+        row,
+        eventType: "listing_push_job_retry_requested",
+        actor: input.actor,
+        severity: existing.status === "processing" ? "warning" : "info",
+        payload: {
+          idempotencyKey: input.idempotencyKey,
+          previousStatus: existing.status,
+          requeuedItemCount: requeuedItems.length,
+          staleJobUpdatedAt: existing.status === "processing" ? existing.updated_at.toISOString() : null,
+          staleAfterMinutes: existing.status === "processing" ? staleProcessingMinutes : null,
+          reason: input.reason ?? null,
+        },
+        occurredAt: input.now,
+      });
+      await client.query("COMMIT");
+      return mapActionResult(row, existing.status, requeuedItems.length, false);
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
     } finally {
       client.release();
     }
@@ -289,6 +414,205 @@ function mapStatusCountRow(row: StatusCountRow): DropshipListingPushOpsStatusSum
   };
 }
 
+async function loadListingPushJobForUpdate(
+  client: PoolClient,
+  jobId: number,
+): Promise<ListingPushActionJobRow | null> {
+  const result = await client.query<ListingPushActionJobRow>(
+    `SELECT id, vendor_id, store_connection_id, status, updated_at, completed_at
+     FROM dropship.dropship_listing_push_jobs
+     WHERE id = $1
+     LIMIT 1
+     FOR UPDATE`,
+    [jobId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function requeueRetryableFailedItems(
+  client: PoolClient,
+  input: {
+    jobId: number;
+    now: Date;
+    idempotencyKey: string;
+    actor: { actorType: "admin" | "system"; actorId?: string };
+    reason?: string;
+  },
+): Promise<RequeuedListingPushItemRow[]> {
+  const result = await client.query<RequeuedListingPushItemRow>(
+    `UPDATE dropship.dropship_listing_push_job_items
+     SET status = 'queued',
+         error_code = NULL,
+         error_message = NULL,
+         result = COALESCE(result, '{}'::jsonb) || $2::jsonb,
+         updated_at = $3
+     WHERE job_id = $1
+       AND status = 'failed'
+       AND COALESCE((result->'push'->>'retryable')::boolean, true) = true
+     RETURNING id, listing_id`,
+    [
+      input.jobId,
+      retryRequestPayload(input),
+      input.now,
+    ],
+  );
+  return result.rows;
+}
+
+async function requeueProcessingItems(
+  client: PoolClient,
+  input: {
+    jobId: number;
+    now: Date;
+    idempotencyKey: string;
+    actor: { actorType: "admin" | "system"; actorId?: string };
+    reason?: string;
+    staleAfterMinutes: number;
+  },
+): Promise<RequeuedListingPushItemRow[]> {
+  const result = await client.query<RequeuedListingPushItemRow>(
+    `UPDATE dropship.dropship_listing_push_job_items
+     SET status = 'queued',
+         error_code = NULL,
+         error_message = NULL,
+         result = COALESCE(result, '{}'::jsonb) || $2::jsonb,
+         updated_at = $3
+     WHERE job_id = $1
+       AND status = 'processing'
+     RETURNING id, listing_id`,
+    [
+      input.jobId,
+      retryRequestPayload(input),
+      input.now,
+    ],
+  );
+  return result.rows;
+}
+
+async function markRequeuedListingsQueued(
+  client: PoolClient,
+  input: {
+    listingIds: number[];
+    now: Date;
+    jobId: number;
+    idempotencyKey: string;
+  },
+): Promise<void> {
+  if (input.listingIds.length === 0) {
+    return;
+  }
+  await client.query(
+    `UPDATE dropship.dropship_vendor_listings
+     SET status = 'queued',
+         metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+         updated_at = $3
+     WHERE id = ANY($1::int[])`,
+    [
+      input.listingIds,
+      JSON.stringify({
+        lastPushRetry: {
+          jobId: input.jobId,
+          idempotencyKey: input.idempotencyKey,
+          requestedAt: input.now.toISOString(),
+        },
+      }),
+      input.now,
+    ],
+  );
+}
+
+async function recordListingPushOpsAuditEvent(
+  client: PoolClient,
+  input: {
+    row: ListingPushActionJobRow;
+    eventType: string;
+    actor: { actorType: "admin" | "system"; actorId?: string };
+    severity: "info" | "warning" | "error";
+    payload: Record<string, unknown>;
+    occurredAt: Date;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (vendor_id, store_connection_id, entity_type, entity_id, event_type,
+       actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, $2, 'dropship_listing_push_job', $3, $4,
+             $5, $6, $7, $8::jsonb, $9)`,
+    [
+      input.row.vendor_id,
+      input.row.store_connection_id,
+      String(input.row.id),
+      input.eventType,
+      input.actor.actorType,
+      input.actor.actorId ?? null,
+      input.severity,
+      JSON.stringify(input.payload),
+      input.occurredAt,
+    ],
+  );
+}
+
+function retryRequestPayload(input: {
+  idempotencyKey: string;
+  actor: { actorType: "admin" | "system"; actorId?: string };
+  reason?: string;
+  now: Date;
+  staleAfterMinutes?: number;
+}): string {
+  return JSON.stringify({
+    lastRetryRequest: {
+      idempotencyKey: input.idempotencyKey,
+      reason: input.reason ?? null,
+      actorType: input.actor.actorType,
+      actorId: input.actor.actorId ?? null,
+      requestedAt: input.now.toISOString(),
+      staleAfterMinutes: input.staleAfterMinutes ?? null,
+    },
+  });
+}
+
+function mapActionResult(
+  row: ListingPushActionJobRow,
+  previousStatus: DropshipListingPushJobStatus,
+  requeuedItemCount: number,
+  idempotentReplay: boolean,
+): DropshipListingPushOpsActionResult {
+  return {
+    jobId: row.id,
+    previousStatus,
+    status: row.status,
+    requeuedItemCount,
+    idempotentReplay,
+    updatedAt: row.updated_at,
+  };
+}
+
+function listingPushOpsStaleProcessingMinutes(): number {
+  const value = Number(process.env.DROPSHIP_LISTING_PUSH_STALE_PROCESSING_MINUTES);
+  return Number.isInteger(value) && value > 0 ? value : DEFAULT_LISTING_PUSH_OPS_STALE_PROCESSING_MINUTES;
+}
+
+function isStaleProcessingJob(
+  row: Pick<ListingPushActionJobRow, "updated_at">,
+  now: Date,
+  staleAfterMinutes: number,
+): boolean {
+  return row.updated_at.getTime() <= now.getTime() - staleAfterMinutes * 60_000;
+}
+
+function uniquePositiveIntegers(values: ReadonlyArray<number | null>): number[] {
+  return [...new Set(values.filter((value): value is number => (
+    typeof value === "number" && Number.isInteger(value) && value > 0
+  )))];
+}
+
+function requiredRow<T>(row: T | undefined, message: string): T {
+  if (!row) {
+    throw new Error(message);
+  }
+  return row;
+}
+
 function toSafeInteger(value: string | number, field: string): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
@@ -299,4 +623,12 @@ function toSafeInteger(value: string | number, field: string): number {
     );
   }
   return parsed;
+}
+
+async function rollbackQuietly(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    // Preserve the original error.
+  }
 }
