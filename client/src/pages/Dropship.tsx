@@ -85,6 +85,7 @@ import {
   putJson,
   queryErrorMessage,
   riskSeverityTone,
+  orderIntakeRetryEligibility,
   trackingPushRetryEligibility,
   type DropshipAdminCatalogExposurePreviewResponse,
   type DropshipAdminCatalogExposurePreviewRow,
@@ -2068,6 +2069,8 @@ function OrderIntakeOpsTab() {
     queryKey: [orderIntakeUrl],
     queryFn: () => fetchJson<DropshipAdminOrderOpsListResponse>(orderIntakeUrl),
   });
+  const orderIntakes = orderIntakeQuery.data?.items ?? [];
+  const orderRetryEligibilityNow = useMemo(() => new Date(), [orderIntakeQuery.dataUpdatedAt]);
 
   function applyOrderFilters() {
     setAppliedFilters({ search, status });
@@ -2181,8 +2184,9 @@ function OrderIntakeOpsTab() {
 
       <OrderIntakeOpsTable
         isLoading={orderIntakeQuery.isLoading || orderIntakeQuery.isFetching}
-        items={orderIntakeQuery.data?.items ?? []}
+        items={orderIntakes}
         pendingAction={pendingAction}
+        retryEligibilityNow={orderRetryEligibilityNow}
         total={orderIntakeQuery.data?.total ?? 0}
         onRunAction={runOrderAction}
       />
@@ -4977,12 +4981,14 @@ function OrderIntakeOpsTable({
   items,
   onRunAction,
   pendingAction,
+  retryEligibilityNow,
   total,
 }: {
   isLoading: boolean;
   items: DropshipAdminOrderOpsIntakeListItem[];
   onRunAction: (intake: DropshipAdminOrderOpsIntakeListItem, action: "retry" | "exception" | "process") => void;
   pendingAction: { intakeId: number; action: "retry" | "exception" | "process" } | null;
+  retryEligibilityNow: Date;
   total: number;
 }) {
   if (isLoading) {
@@ -5025,85 +5031,89 @@ function OrderIntakeOpsTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {items.map((intake) => (
-            <TableRow key={intake.intakeId}>
-              <TableCell>
-                <div className="font-medium">{intake.externalOrderNumber || intake.externalOrderId}</div>
-                <div className="text-xs text-muted-foreground">
-                  {formatStatus(intake.platform)} intake {intake.intakeId}
-                </div>
-                {intake.omsOrderId && (
-                  <div className="text-xs text-muted-foreground">OMS {intake.omsOrderId}</div>
-                )}
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{intake.vendor.businessName || intake.vendor.email || `Vendor ${intake.vendor.vendorId}`}</div>
-                <div className="text-xs text-muted-foreground">
-                  {intake.storeConnection.externalDisplayName || intake.storeConnection.shopDomain || formatStatus(intake.storeConnection.platform)}
-                </div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={orderIntakeStatusTone(intake.status)}>
-                  {formatStatus(intake.status)}
-                </Badge>
-                {intake.rejectionReason && (
-                  <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">{intake.rejectionReason}</div>
-                )}
-                {intake.paymentHoldExpiresAt && (
-                  <div className="mt-1 text-xs text-muted-foreground">Hold expires {formatDateTime(intake.paymentHoldExpiresAt)}</div>
-                )}
-              </TableCell>
-              <TableCell>{orderShipToLabel(intake)}</TableCell>
-              <TableCell>
-                {intake.latestAuditEvent ? (
-                  <>
-                    <div className="font-medium">{formatStatus(intake.latestAuditEvent.eventType)}</div>
-                    <div className="text-xs text-muted-foreground">{formatDateTime(intake.latestAuditEvent.createdAt)}</div>
-                  </>
-                ) : (
-                  <span className="text-sm text-muted-foreground">None</span>
-                )}
-              </TableCell>
-              <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{formatDateTime(intake.updatedAt)}</TableCell>
-              <TableCell>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-2"
-                    disabled={pendingAction !== null || !orderIntakeCanProcessNow(intake.status)}
-                    onClick={() => onRunAction(intake, "process")}
-                  >
-                    <PlayCircle className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "process" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                    Process
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-2"
-                    disabled={pendingAction !== null}
-                    onClick={() => onRunAction(intake, "retry")}
-                  >
-                    <RefreshCw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                    Retry
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-2"
-                    disabled={pendingAction !== null}
-                    onClick={() => onRunAction(intake, "exception")}
-                  >
-                    <AlertCircle className="h-4 w-4" />
-                    Exception
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-          ))}
+          {items.map((intake) => {
+            const retryEligibility = orderIntakeRetryEligibility(intake, retryEligibilityNow);
+            const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            return (
+              <TableRow key={intake.intakeId}>
+                <TableCell>
+                  <div className="font-medium">{intake.externalOrderNumber || intake.externalOrderId}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {formatStatus(intake.platform)} intake {intake.intakeId}
+                  </div>
+                  {intake.omsOrderId && (
+                    <div className="text-xs text-muted-foreground">OMS {intake.omsOrderId}</div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{intake.vendor.businessName || intake.vendor.email || `Vendor ${intake.vendor.vendorId}`}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {intake.storeConnection.externalDisplayName || intake.storeConnection.shopDomain || formatStatus(intake.storeConnection.platform)}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={orderIntakeStatusTone(intake.status)}>
+                    {formatStatus(intake.status)}
+                  </Badge>
+                  {intake.rejectionReason && (
+                    <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">{intake.rejectionReason}</div>
+                  )}
+                  {intake.paymentHoldExpiresAt && (
+                    <div className="mt-1 text-xs text-muted-foreground">Hold expires {formatDateTime(intake.paymentHoldExpiresAt)}</div>
+                  )}
+                </TableCell>
+                <TableCell>{orderShipToLabel(intake)}</TableCell>
+                <TableCell>
+                  {intake.latestAuditEvent ? (
+                    <>
+                      <div className="font-medium">{formatStatus(intake.latestAuditEvent.eventType)}</div>
+                      <div className="text-xs text-muted-foreground">{formatDateTime(intake.latestAuditEvent.createdAt)}</div>
+                    </>
+                  ) : (
+                    <span className="text-sm text-muted-foreground">None</span>
+                  )}
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{formatDateTime(intake.updatedAt)}</TableCell>
+                <TableCell>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2"
+                      disabled={pendingAction !== null || !orderIntakeCanProcessNow(intake.status)}
+                      onClick={() => onRunAction(intake, "process")}
+                    >
+                      <PlayCircle className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "process" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      Process
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2"
+                      disabled={pendingAction !== null || !retryEligibility.canRetry}
+                      onClick={() => onRunAction(intake, "retry")}
+                    >
+                      <RefreshCw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      {retryLabel}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2"
+                      disabled={pendingAction !== null}
+                      onClick={() => onRunAction(intake, "exception")}
+                    >
+                      <AlertCircle className="h-4 w-4" />
+                      Exception
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </section>

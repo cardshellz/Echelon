@@ -104,6 +104,7 @@ const allDropshipTrackingPushStatuses: DropshipTrackingPushStatus[] = [
   "failed",
 ];
 
+const DROPSHIP_ORDER_INTAKE_STALE_PROCESSING_MS = 30 * 60 * 1000;
 const DROPSHIP_TRACKING_PUSH_STALE_PROCESSING_MS = 30 * 60 * 1000;
 
 const allDropshipNotificationOpsStatuses: DropshipNotificationOpsStatus[] = [
@@ -967,6 +968,18 @@ export type DropshipTrackingPushRetryEligibilityReason =
 export interface DropshipTrackingPushRetryEligibility {
   canRetry: boolean;
   reason: DropshipTrackingPushRetryEligibilityReason;
+}
+
+export type DropshipOrderIntakeRetryEligibilityReason =
+  | "retryable_status"
+  | "stale_processing"
+  | "processing_not_stale"
+  | "invalid_processing_timestamp"
+  | "status_not_retryable";
+
+export interface DropshipOrderIntakeRetryEligibility {
+  canRetry: boolean;
+  reason: DropshipOrderIntakeRetryEligibilityReason;
 }
 
 export interface DropshipAdminOrderOpsActionInput {
@@ -2278,6 +2291,25 @@ export function buildAdminTrackingPushRetryInput(input: {
   }
 
   return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function orderIntakeRetryEligibility(
+  intake: Pick<DropshipAdminOrderOpsIntakeListItem, "status" | "updatedAt">,
+  now: Date = new Date(),
+): DropshipOrderIntakeRetryEligibility {
+  if (intake.status === "failed" || intake.status === "exception") {
+    return { canRetry: true, reason: "retryable_status" };
+  }
+  if (intake.status === "processing") {
+    const updatedAt = new Date(intake.updatedAt);
+    if (Number.isNaN(updatedAt.getTime())) {
+      return { canRetry: false, reason: "invalid_processing_timestamp" };
+    }
+    return updatedAt.getTime() <= now.getTime() - DROPSHIP_ORDER_INTAKE_STALE_PROCESSING_MS
+      ? { canRetry: true, reason: "stale_processing" }
+      : { canRetry: false, reason: "processing_not_stale" };
+  }
+  return { canRetry: false, reason: "status_not_retryable" };
 }
 
 export function trackingPushRetryEligibility(

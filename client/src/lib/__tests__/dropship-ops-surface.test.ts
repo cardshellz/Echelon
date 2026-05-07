@@ -55,6 +55,7 @@ import {
   listLaunchReadyStoreConnections,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
+  orderIntakeRetryEligibility,
   parseDollarInputToCents,
   queryErrorMessage,
   riskSeverityTone,
@@ -894,6 +895,46 @@ describe("dropship ops surface client helpers", () => {
       reason: " ",
       requireReason: true,
     })).toThrow();
+  });
+
+  it("identifies retryable failed and stale processing order intakes", () => {
+    const now = new Date("2026-05-03T12:00:00.000Z");
+
+    expect(orderIntakeRetryEligibility({
+      status: "failed",
+      updatedAt: "2026-05-03T11:59:00.000Z",
+    }, now)).toEqual({
+      canRetry: true,
+      reason: "retryable_status",
+    });
+    expect(orderIntakeRetryEligibility({
+      status: "exception",
+      updatedAt: "2026-05-03T11:59:00.000Z",
+    }, now)).toEqual({
+      canRetry: true,
+      reason: "retryable_status",
+    });
+    expect(orderIntakeRetryEligibility({
+      status: "processing",
+      updatedAt: "2026-05-03T11:30:00.000Z",
+    }, now)).toEqual({
+      canRetry: true,
+      reason: "stale_processing",
+    });
+    expect(orderIntakeRetryEligibility({
+      status: "processing",
+      updatedAt: "2026-05-03T11:45:00.000Z",
+    }, now)).toEqual({
+      canRetry: false,
+      reason: "processing_not_stale",
+    });
+    expect(orderIntakeRetryEligibility({
+      status: "payment_hold",
+      updatedAt: "2026-05-03T11:00:00.000Z",
+    }, now)).toEqual({
+      canRetry: false,
+      reason: "status_not_retryable",
+    });
   });
 
   it("builds catalog exposure rule inputs with exact scope targets", () => {

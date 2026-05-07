@@ -137,6 +137,7 @@ interface ActionIntakeRow {
 }
 
 const RETRYABLE_OPS_STATUSES = new Set<DropshipOrderIntakeStatus>(["failed", "exception"]);
+const DEFAULT_ORDER_OPS_STALE_PROCESSING_MINUTES = 30;
 const EXCEPTION_ACTIONABLE_STATUSES = new Set<DropshipOrderIntakeStatus>([
   "received",
   "retrying",
@@ -263,7 +264,21 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
         return mapActionResult(existing, existing.status, true);
       }
 
-      if (!RETRYABLE_OPS_STATUSES.has(existing.status)) {
+      const staleProcessingMinutes = orderOpsStaleProcessingMinutes();
+      if (existing.status === "processing") {
+        if (!isStaleProcessingIntake(existing, input.now, staleProcessingMinutes)) {
+          throw new DropshipError(
+            "DROPSHIP_ORDER_OPS_STATUS_NOT_RETRYABLE",
+            "Dropship order intake status cannot be moved to retrying by ops.",
+            {
+              intakeId: input.intakeId,
+              status: existing.status,
+              updatedAt: existing.updated_at.toISOString(),
+              staleAfterMinutes: staleProcessingMinutes,
+            },
+          );
+        }
+      } else if (!RETRYABLE_OPS_STATUSES.has(existing.status)) {
         throw new DropshipError(
           "DROPSHIP_ORDER_OPS_STATUS_NOT_RETRYABLE",
           "Dropship order intake status cannot be moved to retrying by ops.",
@@ -293,6 +308,8 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
           idempotencyKey: input.idempotencyKey,
           previousStatus: existing.status,
           previousRejectionReason: existing.rejection_reason,
+          staleProcessingUpdatedAt: existing.status === "processing" ? existing.updated_at.toISOString() : null,
+          staleAfterMinutes: existing.status === "processing" ? staleProcessingMinutes : null,
           reason: input.reason ?? null,
         },
         occurredAt: input.now,
@@ -852,6 +869,19 @@ function mapActionResult(
     idempotentReplay,
     updatedAt: row.updated_at,
   };
+}
+
+function orderOpsStaleProcessingMinutes(): number {
+  const value = Number(process.env.DROPSHIP_ORDER_PROCESSING_STALE_PROCESSING_MINUTES);
+  return Number.isInteger(value) && value > 0 ? value : DEFAULT_ORDER_OPS_STALE_PROCESSING_MINUTES;
+}
+
+function isStaleProcessingIntake(
+  row: Pick<ActionIntakeRow, "updated_at">,
+  now: Date,
+  staleAfterMinutes: number,
+): boolean {
+  return row.updated_at.getTime() <= now.getTime() - staleAfterMinutes * 60_000;
 }
 
 function normalizeOptionalString(value: unknown): string | null {
