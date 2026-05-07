@@ -65,7 +65,7 @@ describe("DropshipListingPreviewService", () => {
     expect(result.summary).toEqual({ total: 1, ready: 1, blocked: 0, warning: 0 });
     expect(result.rows[0]).toMatchObject({
       productVariantId: 101,
-      platform: "tiktok",
+      platform: "shopify",
       listingMode: "live",
       previewStatus: "ready",
       priceCents: 1299,
@@ -74,7 +74,7 @@ describe("DropshipListingPreviewService", () => {
       warnings: [],
     });
     expect(result.rows[0]?.listingIntent).toMatchObject({
-      platform: "tiktok",
+      platform: "shopify",
       listingMode: "live",
       inventoryMode: "managed_quantity_sync",
       priceMode: "vendor_defined",
@@ -116,6 +116,46 @@ describe("DropshipListingPreviewService", () => {
     expect(result.rows[0]?.previewStatus).toBe("blocked");
     expect(result.rows[0]?.blockers).toContain("listing_config_required");
     expect(result.rows[0]?.blockers).not.toContain("platform_not_supported");
+  });
+
+  it("blocks listing preview when vendor entitlement is not active", async () => {
+    repository.context = {
+      ...repository.context,
+      entitlementStatus: "grace",
+    };
+
+    await expect(service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
+      context: {
+        vendorId: 10,
+        entitlementStatus: "grace",
+      },
+    });
+  });
+
+  it("blocks listing preview when the store connection is not launch-ready", async () => {
+    repository.context = {
+      ...repository.context,
+      setupStatus: "pending",
+      storeLaunchReady: false,
+    };
+
+    await expect(service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_LISTING_STORE_BLOCKED",
+      context: {
+        storeConnectionId: 22,
+        setupStatus: "pending",
+        storeLaunchReady: false,
+      },
+    });
   });
 
   it("rejects retail price overrides for variants outside the listing request", async () => {
@@ -195,12 +235,13 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
     storeConnectionId: 22,
     storeStatus: "connected",
     setupStatus: "ready",
-    platform: "tiktok",
+    platform: "shopify",
+    storeLaunchReady: true,
   };
   config: DropshipStoreListingConfig | null = {
     id: 7,
     storeConnectionId: 22,
-    platform: "tiktok",
+    platform: "shopify",
     listingMode: "live",
     inventoryMode: "managed_quantity_sync",
     priceMode: "vendor_defined",

@@ -15,6 +15,7 @@ import type {
 } from "../application/dropship-listing-preview-service";
 import type { DropshipStoreListingConfig } from "../application/dropship-marketplace-listing-provider";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
+import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";
 
 interface StoreContextRow {
@@ -25,6 +26,8 @@ interface StoreContextRow {
   store_status: DropshipListingStoreContext["storeStatus"];
   setup_status: string;
   platform: DropshipListingStoreContext["platform"];
+  access_token_ref: string | null;
+  refresh_token_ref: string | null;
 }
 
 interface StoreListingConfigRow {
@@ -162,7 +165,9 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            sc.id AS store_connection_id,
            sc.status AS store_status,
            sc.setup_status,
-           sc.platform
+           sc.platform,
+           sc.access_token_ref,
+           sc.refresh_token_ref
          FROM dropship.dropship_vendors v
          INNER JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
          WHERE v.id = $1
@@ -179,6 +184,13 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
         storeStatus: row.store_status,
         setupStatus: row.setup_status,
         platform: row.platform,
+        storeLaunchReady: isDropshipStoreConnectionLaunchReady({
+          platform: row.platform,
+          status: row.store_status,
+          setupStatus: row.setup_status,
+          hasAccessToken: row.access_token_ref !== null,
+          hasRefreshToken: row.refresh_token_ref !== null,
+        }),
       } : null;
     } finally {
       client.release();
