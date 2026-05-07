@@ -84,6 +84,7 @@ describe("PgDropshipVendorProvisioningRepository", () => {
     const result = await repository.getStoreConnectionSummary(10);
 
     expect(String(query.mock.calls[0]?.[0])).toContain("launch_ready_connected_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("setup_status = 'ready'");
     expect(String(query.mock.calls[0]?.[0])).toContain("access_token_ref");
     expect(String(query.mock.calls[0]?.[0])).toContain("refresh_token_ref");
     expect(query.mock.calls[0]?.[1]).toEqual([10]);

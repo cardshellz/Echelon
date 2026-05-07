@@ -148,11 +148,12 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
              WHERE status IN ('connected','needs_reauth','refresh_failed','grace_period','paused')
            ) AS active_count,
            COUNT(*) FILTER (WHERE status = 'connected') AS connected_count,
-           COUNT(*) FILTER (
-             WHERE status = 'connected'
-               AND access_token_ref IS NOT NULL
-               AND (
-                 platform = 'shopify'
+            COUNT(*) FILTER (
+              WHERE status = 'connected'
+                AND setup_status = 'ready'
+                AND access_token_ref IS NOT NULL
+                AND (
+                  platform = 'shopify'
                  OR (
                    platform = 'ebay'
                    AND refresh_token_ref IS NOT NULL

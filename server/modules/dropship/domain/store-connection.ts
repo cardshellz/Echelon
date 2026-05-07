@@ -36,6 +36,10 @@ export function isDropshipStoreConnectionLaunchReady(input: {
   hasAccessToken: boolean;
   hasRefreshToken: boolean;
 }): boolean {
+  if (!(dropshipSupportedStorePlatforms as readonly string[]).includes(input.platform)) {
+    return false;
+  }
+
   if (input.status !== "connected" || input.setupStatus !== "ready" || !input.hasAccessToken) {
     return false;
   }
