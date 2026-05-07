@@ -59,6 +59,8 @@ interface CountByStatusRow {
   count: string | number;
 }
 
+const STALE_LISTING_PUSH_PROCESSING_MINUTES = 30;
+
 export class PgDropshipListingPushWorkerRepository implements DropshipListingPushWorkerRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
 
@@ -67,6 +69,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
     workerId: string;
     idempotencyKey: string;
     now: Date;
+    staleProcessingMinutes?: number;
   }): Promise<DropshipListingPushWorkerClaim> {
     const client = await this.dbPool.connect();
     try {
@@ -85,7 +88,10 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
         });
       }
 
-      if (job.status === "processing") {
+      if (
+        job.status === "processing"
+        && !isStaleProcessingJob(job, input.now, input.staleProcessingMinutes ?? STALE_LISTING_PUSH_PROCESSING_MINUTES)
+      ) {
         throw new DropshipError("DROPSHIP_LISTING_JOB_ALREADY_PROCESSING", "Dropship listing push job is already processing.", {
           jobId: input.jobId,
         });
@@ -93,9 +99,18 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
 
       let claimed = false;
       let currentJob = job;
-      if (job.status === "queued") {
+      if (job.status === "processing") {
+        currentJob = await recoverStaleProcessingJob(client, {
+          job,
+          workerId: input.workerId,
+          idempotencyKey: input.idempotencyKey,
+          staleAfterMinutes: input.staleProcessingMinutes ?? STALE_LISTING_PUSH_PROCESSING_MINUTES,
+          now: input.now,
+        });
+        claimed = true;
+      } else if (job.status === "queued") {
         const updated = await client.query<JobRow>(
-        `UPDATE dropship.dropship_listing_push_jobs AS j
+          `UPDATE dropship.dropship_listing_push_jobs AS j
            SET status = 'processing',
                updated_at = $2
            WHERE j.id = $1
@@ -440,6 +455,74 @@ async function findJobForUpdate(client: PoolClient, jobId: number): Promise<JobR
   return result.rows[0] ?? null;
 }
 
+async function recoverStaleProcessingJob(
+  client: PoolClient,
+  input: {
+    job: JobRow;
+    workerId: string;
+    idempotencyKey: string;
+    staleAfterMinutes: number;
+    now: Date;
+  },
+): Promise<JobRow> {
+  await client.query(
+    `UPDATE dropship.dropship_listing_push_job_items
+     SET status = 'queued',
+         error_code = NULL,
+         error_message = NULL,
+         result = COALESCE(result, '{}'::jsonb) || $3::jsonb,
+         updated_at = $2
+     WHERE job_id = $1
+       AND status = 'processing'`,
+    [
+      input.job.id,
+      input.now,
+      JSON.stringify({
+        staleRecovery: {
+          previousStatus: "processing",
+          status: "queued",
+          recoveredAt: input.now.toISOString(),
+          workerId: input.workerId,
+          staleAfterMinutes: input.staleAfterMinutes,
+        },
+      }),
+    ],
+  );
+
+  const updated = await client.query<JobRow>(
+    `UPDATE dropship.dropship_listing_push_jobs AS j
+     SET status = 'processing',
+         error_message = NULL,
+         updated_at = $2
+     WHERE j.id = $1
+       AND j.status = 'processing'
+     RETURNING j.id, j.vendor_id, j.store_connection_id,
+               (SELECT sc.platform FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS platform,
+               j.status, j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at`,
+    [input.job.id, input.now],
+  );
+  const currentJob = requiredRow(updated.rows[0], "Dropship stale listing push job recovery did not return a row.");
+  await recordAuditEvent(client, {
+    vendorId: currentJob.vendor_id,
+    storeConnectionId: currentJob.store_connection_id,
+    entityType: "dropship_listing_push_job",
+    entityId: String(currentJob.id),
+    eventType: "listing_push_job_stale_recovered",
+    actorId: input.workerId,
+    severity: "warning",
+    payload: {
+      idempotencyKey: input.idempotencyKey,
+      previousStatus: "processing",
+      status: "processing",
+      staleJobUpdatedAt: input.job.updated_at.toISOString(),
+      staleAfterMinutes: input.staleAfterMinutes,
+      reason: "listing push job exceeded stale processing threshold before completion.",
+    },
+    occurredAt: input.now,
+  });
+  return currentJob;
+}
+
 async function loadStoreListingConfig(
   client: PoolClient,
   storeConnectionId: number,
@@ -561,6 +644,7 @@ async function recordAuditEvent(
     entityId: string;
     eventType: string;
     actorId: string;
+    severity?: "info" | "warning" | "error";
     payload: Record<string, unknown>;
     occurredAt: Date;
   },
@@ -569,7 +653,7 @@ async function recordAuditEvent(
     `INSERT INTO dropship.dropship_audit_events
       (vendor_id, store_connection_id, entity_type, entity_id, event_type,
        actor_type, actor_id, severity, payload, created_at)
-     VALUES ($1, $2, $3, $4, $5, 'job', $6, 'info', $7::jsonb, $8)`,
+     VALUES ($1, $2, $3, $4, $5, 'job', $6, $7, $8::jsonb, $9)`,
     [
       input.vendorId,
       input.storeConnectionId,
@@ -577,6 +661,7 @@ async function recordAuditEvent(
       input.entityId,
       input.eventType,
       input.actorId,
+      input.severity ?? "info",
       JSON.stringify(input.payload),
       input.occurredAt,
     ],
@@ -654,6 +739,10 @@ function requiredNumber(value: number | null, message: string): number {
     throw new Error(message);
   }
   return value;
+}
+
+function isStaleProcessingJob(job: JobRow, now: Date, staleAfterMinutes: number): boolean {
+  return job.updated_at.getTime() <= now.getTime() - staleAfterMinutes * 60_000;
 }
 
 async function rollbackQuietly(client: PoolClient): Promise<void> {

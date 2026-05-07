@@ -49,6 +49,7 @@ export const processListingPushJobInputSchema = z.object({
   jobId: positiveIdSchema,
   workerId: z.string().trim().min(1).max(255),
   idempotencyKey: idempotencyKeySchema,
+  staleProcessingMinutes: z.number().int().positive().max(60 * 24).optional(),
 }).strict();
 
 export const recordMarketplaceOrderIntakeInputSchema = z.object({
