@@ -52,6 +52,7 @@ import {
   formatStatus,
   fetchJson,
   listingPreviewPushableCount,
+  listLaunchReadyStoreConnections,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   parseDollarInputToCents,
@@ -733,6 +734,18 @@ describe("dropship ops surface client helpers", () => {
       page: 2,
       limit: 25,
     })).toBe("/api/dropship/admin/store-connections?page=2&limit=25");
+  });
+
+  it("filters store connections to launch-ready records only", () => {
+    const connections = [
+      { storeConnectionId: 20, status: "connected", launchReady: false },
+      { storeConnectionId: 21, status: "connected", launchReady: true },
+      { storeConnectionId: 22, status: "needs_reauth", launchReady: false },
+    ];
+
+    expect(listLaunchReadyStoreConnections(connections)).toEqual([
+      { storeConnectionId: 21, status: "connected", launchReady: true },
+    ]);
   });
 
   it("builds store order processing config inputs with nullable warehouse ids", () => {

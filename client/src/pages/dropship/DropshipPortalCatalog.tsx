@@ -40,6 +40,7 @@ import {
   formatStatus,
   formatCents,
   listingPreviewPushableCount,
+  listLaunchReadyStoreConnections,
   postJson,
   putJson,
   queryErrorMessage,
@@ -111,8 +112,10 @@ export default function DropshipPortalCatalog() {
   const visibleCategoryOptions = useMemo(() => buildVisibleCategoryOptions(visibleRows), [visibleRows]);
   const visibleProductLineOptions = useMemo(() => buildVisibleProductLineOptions(visibleRows), [visibleRows]);
   const visibleProductOptions = useMemo(() => buildVisibleProductOptions(visibleRows), [visibleRows]);
-  const connectedStoreConnections = (settingsQuery.data?.settings.storeConnections ?? [])
-    .filter((connection) => connection.status === "connected");
+  const launchReadyStoreConnections = useMemo(
+    () => listLaunchReadyStoreConnections(settingsQuery.data?.settings.storeConnections ?? []),
+    [settingsQuery.data?.settings.storeConnections],
+  );
   const selectedStoreConnectionIdNumber = Number(selectedStoreConnectionId);
   const activeBulkPushProof = useMemo(() => {
     const proof = sensitiveProofs.bulk_listing_push;
@@ -121,11 +124,11 @@ export default function DropshipPortalCatalog() {
   const pushablePreviewCount = listingPreviewPushableCount(listingPreview);
 
   useEffect(() => {
-    if (selectedStoreConnectionId || connectedStoreConnections.length === 0) {
+    if (selectedStoreConnectionId || launchReadyStoreConnections.length === 0) {
       return;
     }
-    setSelectedStoreConnectionId(String(connectedStoreConnections[0].storeConnectionId));
-  }, [connectedStoreConnections, selectedStoreConnectionId]);
+    setSelectedStoreConnectionId(String(launchReadyStoreConnections[0].storeConnectionId));
+  }, [launchReadyStoreConnections, selectedStoreConnectionId]);
 
   useEffect(() => {
     if (scopeCategory && !visibleCategoryOptions.includes(scopeCategory)) {
@@ -427,7 +430,7 @@ export default function DropshipPortalCatalog() {
         )}
 
         <ListingPreviewPanel
-          connectedStoreConnections={connectedStoreConnections}
+          launchReadyStoreConnections={launchReadyStoreConnections}
           emailCodeSent={emailCodeSent}
           listingPreview={listingPreview}
           listingPushResult={listingPushResult}
@@ -731,8 +734,8 @@ function ScopedSelectionControl({
 }
 
 function ListingPreviewPanel({
-  connectedStoreConnections,
   emailCodeSent,
+  launchReadyStoreConnections,
   listingPreview,
   listingPushResult,
   onPreview,
@@ -745,8 +748,8 @@ function ListingPreviewPanel({
   selectedStoreConnectionId,
   verificationCode,
 }: {
-  connectedStoreConnections: DropshipSettingsResponse["settings"]["storeConnections"];
   emailCodeSent: boolean;
+  launchReadyStoreConnections: DropshipSettingsResponse["settings"]["storeConnections"];
   listingPreview: DropshipListingPreviewResult | null;
   listingPushResult: DropshipListingPushResponse | null;
   onPreview: () => void;
@@ -759,7 +762,7 @@ function ListingPreviewPanel({
   selectedStoreConnectionId: string;
   verificationCode: string;
 }) {
-  const previewDisabled = connectedStoreConnections.length === 0
+  const previewDisabled = launchReadyStoreConnections.length === 0
     || !selectedStoreConnectionId
     || selectedRowCount === 0
     || pendingListingAction !== null;
@@ -781,13 +784,13 @@ function ListingPreviewPanel({
           <Select
             value={selectedStoreConnectionId}
             onValueChange={onSelectedStoreConnectionIdChange}
-            disabled={connectedStoreConnections.length === 0}
+            disabled={launchReadyStoreConnections.length === 0}
           >
             <SelectTrigger className="h-10 sm:w-64">
-              <SelectValue placeholder="Select connected store" />
+              <SelectValue placeholder="Select launch-ready store" />
             </SelectTrigger>
             <SelectContent>
-              {connectedStoreConnections.map((connection) => (
+              {launchReadyStoreConnections.map((connection) => (
                 <SelectItem key={connection.storeConnectionId} value={String(connection.storeConnectionId)}>
                   {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
                 </SelectItem>
@@ -823,9 +826,9 @@ function ListingPreviewPanel({
         <PreviewMetric label="Blocked" value={String(listingPreview?.summary.blocked ?? 0)} />
       </div>
 
-      {connectedStoreConnections.length === 0 && (
+      {launchReadyStoreConnections.length === 0 && (
         <div className="mt-4 rounded-md border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          A connected store is required before listing preview or push.
+          A launch-ready store connection is required before listing preview or push.
         </div>
       )}
 
