@@ -66,12 +66,15 @@ interface TrackingPushRetryRow {
   last_error_code: string | null;
   last_error_message: string | null;
   raw_result: Record<string, unknown> | null;
+  updated_at: Date;
 }
 
 interface StatusCountRow {
   status: DropshipTrackingPushStatus;
   count: string | number;
 }
+
+const STALE_TRACKING_PUSH_PROCESSING_MINUTES = 30;
 
 export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPushOpsRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -130,23 +133,36 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
         );
       }
 
-      if (existing.status !== "failed") {
+      if (existing.status === "failed") {
+        if (!trackingPushFailureIsRetryable(existing.raw_result)) {
+          throw new DropshipError(
+            "DROPSHIP_TRACKING_PUSH_OPS_PUSH_NOT_RETRYABLE",
+            "Dropship tracking push failure was marked non-retryable.",
+            {
+              pushId: input.pushId,
+              lastErrorCode: existing.last_error_code,
+              lastErrorMessage: existing.last_error_message,
+            },
+          );
+        }
+      } else if (existing.status === "processing") {
+        if (!isStaleProcessingTrackingPush(existing, input.now, STALE_TRACKING_PUSH_PROCESSING_MINUTES)) {
+          throw new DropshipError(
+            "DROPSHIP_TRACKING_PUSH_OPS_STATUS_NOT_RETRYABLE",
+            "Only failed or stale processing dropship tracking pushes can be retried.",
+            {
+              pushId: input.pushId,
+              status: existing.status,
+              updatedAt: existing.updated_at.toISOString(),
+              staleAfterMinutes: STALE_TRACKING_PUSH_PROCESSING_MINUTES,
+            },
+          );
+        }
+      } else {
         throw new DropshipError(
           "DROPSHIP_TRACKING_PUSH_OPS_STATUS_NOT_RETRYABLE",
-          "Only failed dropship tracking pushes can be retried.",
+          "Only failed or stale processing dropship tracking pushes can be retried.",
           { pushId: input.pushId, status: existing.status },
-        );
-      }
-
-      if (!trackingPushFailureIsRetryable(existing.raw_result)) {
-        throw new DropshipError(
-          "DROPSHIP_TRACKING_PUSH_OPS_PUSH_NOT_RETRYABLE",
-          "Dropship tracking push failure was marked non-retryable.",
-          {
-            pushId: input.pushId,
-            lastErrorCode: existing.last_error_code,
-            lastErrorMessage: existing.last_error_message,
-          },
         );
       }
 
@@ -159,7 +175,7 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id,
                    wms_shipment_id, platform, external_order_id, status, idempotency_key,
                    carrier, tracking_number, shipped_at, attempt_count,
-                   last_error_code, last_error_message, raw_result`,
+                   last_error_code, last_error_message, raw_result, updated_at`,
         [
           input.pushId,
           JSON.stringify({
@@ -188,6 +204,8 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
           previousAttemptCount: toSafeNonNegativeInteger(existing.attempt_count, "attempt_count"),
           previousLastErrorCode: existing.last_error_code,
           previousLastErrorMessage: existing.last_error_message,
+          stalePushUpdatedAt: existing.status === "processing" ? existing.updated_at.toISOString() : null,
+          staleAfterMinutes: existing.status === "processing" ? STALE_TRACKING_PUSH_PROCESSING_MINUTES : null,
           reason: input.reason ?? null,
         },
         occurredAt: input.now,
@@ -195,6 +213,7 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
       await client.query("COMMIT");
       return {
         pushId: row.id,
+        previousStatus: existing.status,
         omsOrderId: toSafePositiveInteger(row.oms_order_id, "oms_order_id"),
         wmsShipmentId: toSafeOptionalPositiveInteger(row.wms_shipment_id, "wms_shipment_id"),
         carrier: row.carrier,
@@ -229,7 +248,7 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id,
                    wms_shipment_id, platform, external_order_id, status, idempotency_key,
                    carrier, tracking_number, shipped_at, attempt_count,
-                   last_error_code, last_error_message, raw_result`,
+                   last_error_code, last_error_message, raw_result, updated_at`,
         [
           input.pushId,
           input.code,
@@ -423,7 +442,7 @@ async function loadTrackingPushForRetry(
     `SELECT id, intake_id, oms_order_id, vendor_id, store_connection_id,
             wms_shipment_id, platform, external_order_id, status, idempotency_key,
             carrier, tracking_number, shipped_at, attempt_count,
-            last_error_code, last_error_message, raw_result
+            last_error_code, last_error_message, raw_result, updated_at
      FROM dropship.dropship_marketplace_tracking_pushes
      WHERE id = $1
      LIMIT 1
@@ -477,6 +496,14 @@ function trackingPushFailureIsRetryable(rawResult: Record<string, unknown> | nul
     return true;
   }
   return (lastFailure as { retryable?: unknown }).retryable !== false;
+}
+
+function isStaleProcessingTrackingPush(
+  row: TrackingPushRetryRow,
+  now: Date,
+  staleAfterMinutes: number,
+): boolean {
+  return row.updated_at.getTime() <= now.getTime() - staleAfterMinutes * 60_000;
 }
 
 function mapStatusCountRow(row: StatusCountRow): DropshipTrackingPushOpsStatusSummary {

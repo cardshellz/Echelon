@@ -92,6 +92,27 @@ describe("DropshipTrackingPushOpsService", () => {
     });
   });
 
+  it("returns the real previous status for stale processing retries", async () => {
+    const repository = new FakeTrackingPushOpsRepository();
+    repository.retryPreviousStatus = "processing";
+    const marketplaceTracking = new FakeMarketplaceTrackingService();
+    marketplaceTracking.resultStatus = "already_processing";
+    const service = makeService(repository, marketplaceTracking);
+
+    const result = await service.retryPush({
+      pushId: 42,
+      idempotencyKey: "admin-retry-42",
+      actor: { actorType: "admin", actorId: "ops-user" },
+    });
+
+    expect(result).toMatchObject({
+      pushId: 42,
+      previousStatus: "processing",
+      status: "already_processing",
+      idempotentReplay: false,
+    });
+  });
+
   it("rejects invalid retry input before changing repository state", async () => {
     const repository = new FakeTrackingPushOpsRepository();
     const marketplaceTracking = new FakeMarketplaceTrackingService();
@@ -156,6 +177,7 @@ class FakeTrackingPushOpsRepository implements DropshipTrackingPushOpsRepository
   inputs: Parameters<DropshipTrackingPushOpsRepository["listPushes"]>[0][] = [];
   retryInputs: Parameters<DropshipTrackingPushOpsRepository["prepareRetry"]>[0][] = [];
   preparedRetryFailures: Parameters<DropshipTrackingPushOpsRepository["markPreparedRetryFailed"]>[0][] = [];
+  retryPreviousStatus: DropshipTrackingPushRetryRequest["previousStatus"] = "failed";
 
   async listPushes(
     input: Parameters<DropshipTrackingPushOpsRepository["listPushes"]>[0],
@@ -177,6 +199,7 @@ class FakeTrackingPushOpsRepository implements DropshipTrackingPushOpsRepository
     this.retryInputs.push(input);
     return {
       pushId: input.pushId,
+      previousStatus: this.retryPreviousStatus,
       omsOrderId: 500,
       wmsShipmentId: 700,
       carrier: "USPS",
@@ -204,6 +227,7 @@ class FakeMarketplaceTrackingService {
     idempotencyKey?: string;
   }> = [];
   error: Error | null = null;
+  resultStatus: "succeeded" | "already_succeeded" | "already_processing" = "succeeded";
 
   async pushForOmsOrder(input: {
     omsOrderId: number;
@@ -217,6 +241,26 @@ class FakeMarketplaceTrackingService {
       throw this.error;
     }
     this.inputs.push(input);
+    if (this.resultStatus !== "succeeded") {
+      return {
+        status: this.resultStatus,
+        push: {
+          pushId: 42,
+          intakeId: 10,
+          omsOrderId: input.omsOrderId,
+          wmsShipmentId: input.wmsShipmentId ?? null,
+          vendorId: 20,
+          storeConnectionId: 30,
+          platform: "ebay" as const,
+          status: "processing",
+          externalOrderId: "ORDER-1",
+          trackingNumber: input.trackingNumber,
+          carrier: input.carrier,
+          attemptCount: 3,
+          externalFulfillmentId: null,
+        },
+      };
+    }
     return {
       status: "succeeded" as const,
       push: {

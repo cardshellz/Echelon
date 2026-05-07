@@ -80,6 +80,7 @@ export interface DropshipTrackingPushOpsListResult {
 
 export interface DropshipTrackingPushRetryRequest {
   pushId: number;
+  previousStatus: DropshipTrackingPushStatus;
   omsOrderId: number;
   wmsShipmentId: number | null;
   carrier: string;
@@ -174,6 +175,7 @@ export class DropshipTrackingPushOpsService {
       message: "Dropship tracking push retry was requested by ops.",
       context: {
         pushId: retryRequest.pushId,
+        previousStatus: retryRequest.previousStatus,
         omsOrderId: retryRequest.omsOrderId,
         wmsShipmentId: retryRequest.wmsShipmentId,
         resultStatus: result.status,
@@ -183,7 +185,7 @@ export class DropshipTrackingPushOpsService {
     });
     return {
       pushId: updatedPush?.pushId ?? retryRequest.pushId,
-      previousStatus: "failed",
+      previousStatus: retryRequest.previousStatus,
       status: result.status,
       idempotentReplay: result.status === "already_succeeded",
       updatedPush,
