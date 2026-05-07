@@ -47,6 +47,7 @@ export interface DropshipStoreConnectionProfile {
   tokenExpiresAt: Date | null;
   hasAccessToken: boolean;
   hasRefreshToken: boolean;
+  launchReady: boolean;
   lastSyncAt: Date | null;
   lastOrderSyncAt: Date | null;
   lastInventorySyncAt: Date | null;

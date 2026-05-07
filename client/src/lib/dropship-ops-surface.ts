@@ -1038,6 +1038,7 @@ export interface DropshipStoreConnectionProfileResponse {
   tokenExpiresAt: string | null;
   hasAccessToken: boolean;
   hasRefreshToken: boolean;
+  launchReady: boolean;
   lastSyncAt: string | null;
   lastOrderSyncAt: string | null;
   lastInventorySyncAt: string | null;

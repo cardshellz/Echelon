@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Pool } from "pg";
 import type {
   DropshipLogEvent,
   DropshipNotificationSenderInput,
@@ -25,6 +26,11 @@ import type {
 } from "../../application/dropship-vendor-provisioning-service";
 import { normalizeDropshipOAuthReturnTo, normalizeShopifyShopDomain } from "../../domain/store-connection";
 import { DropshipError } from "../../domain/errors";
+import { PgDropshipStoreConnectionRepository } from "../../infrastructure/dropship-store-connection.repository";
+
+vi.hoisted(() => {
+  process.env.DATABASE_URL = process.env.DATABASE_URL ?? "postgres://test:test@localhost:5432/test";
+});
 
 const now = new Date("2026-05-01T15:00:00.000Z");
 
@@ -41,6 +47,75 @@ describe("dropship store connection domain", () => {
     expect(() => normalizeDropshipOAuthReturnTo("https://attacker.example")).toThrow(DropshipError);
     expect(() => normalizeDropshipOAuthReturnTo("//attacker.example")).toThrow(DropshipError);
     expect(() => normalizeDropshipOAuthReturnTo("/\\attacker")).toThrow(DropshipError);
+  });
+});
+
+describe("PgDropshipStoreConnectionRepository", () => {
+  it("maps launch readiness from stored platform credentials and setup status", async () => {
+    const release = () => undefined;
+    const query = async () => ({
+      rows: [
+        makeStoreConnectionRow({
+          id: 20,
+          platform: "ebay",
+          setup_status: "ready",
+          access_token_ref: "access-ref",
+          refresh_token_ref: null,
+        }),
+        makeStoreConnectionRow({
+          id: 21,
+          platform: "shopify",
+          setup_status: "ready",
+          access_token_ref: "access-ref",
+          refresh_token_ref: null,
+        }),
+        makeStoreConnectionRow({
+          id: 22,
+          platform: "ebay",
+          setup_status: "pending",
+          access_token_ref: "access-ref",
+          refresh_token_ref: "refresh-ref",
+        }),
+      ],
+    });
+    const connect = async () => ({ query, release });
+    const repository = new PgDropshipStoreConnectionRepository({ connect } as unknown as Pool);
+
+    const result = await repository.listByVendorId(10);
+
+    expect(result.map((connection) => ({
+      storeConnectionId: connection.storeConnectionId,
+      platform: connection.platform,
+      hasAccessToken: connection.hasAccessToken,
+      hasRefreshToken: connection.hasRefreshToken,
+      setupStatus: connection.setupStatus,
+      launchReady: connection.launchReady,
+    }))).toEqual([
+      {
+        storeConnectionId: 20,
+        platform: "ebay",
+        hasAccessToken: true,
+        hasRefreshToken: false,
+        setupStatus: "ready",
+        launchReady: false,
+      },
+      {
+        storeConnectionId: 21,
+        platform: "shopify",
+        hasAccessToken: true,
+        hasRefreshToken: false,
+        setupStatus: "ready",
+        launchReady: true,
+      },
+      {
+        storeConnectionId: 22,
+        platform: "ebay",
+        hasAccessToken: true,
+        hasRefreshToken: true,
+        setupStatus: "pending",
+        launchReady: false,
+      },
+    ]);
   });
 });
 
@@ -544,6 +619,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
       tokenExpiresAt: input.tokenExpiresAt,
       hasAccessToken: true,
       hasRefreshToken: input.refreshTokenRef !== null,
+      launchReady: false,
     });
     this.connections = [connection];
     return connection;
@@ -557,6 +633,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
       status: "grace_period" as const,
       hasAccessToken: false,
       hasRefreshToken: false,
+      launchReady: false,
       disconnectReason: input.reason,
       disconnectedAt: input.disconnectedAt,
       graceEndsAt: input.graceEndsAt,
@@ -608,6 +685,32 @@ function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): 
   };
 }
 
+function makeStoreConnectionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 20,
+    vendor_id: 10,
+    platform: "ebay",
+    external_account_id: "external-ebay",
+    external_display_name: "External ebay",
+    shop_domain: null,
+    access_token_ref: "access-ref",
+    refresh_token_ref: "refresh-ref",
+    token_expires_at: new Date(now.getTime() + 3600000),
+    status: "connected",
+    setup_status: "ready",
+    disconnect_reason: null,
+    disconnected_at: null,
+    grace_ends_at: null,
+    last_sync_at: null,
+    last_order_sync_at: null,
+    last_inventory_sync_at: null,
+    config: {},
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
 function makeConnection(overrides: Partial<DropshipStoreConnectionProfile> = {}): DropshipStoreConnectionProfile {
   return {
     storeConnectionId: 20,
@@ -624,6 +727,7 @@ function makeConnection(overrides: Partial<DropshipStoreConnectionProfile> = {})
     tokenExpiresAt: new Date(now.getTime() + 3600000),
     hasAccessToken: true,
     hasRefreshToken: true,
+    launchReady: false,
     lastSyncAt: null,
     lastOrderSyncAt: null,
     lastInventorySyncAt: null,
