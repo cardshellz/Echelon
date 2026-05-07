@@ -4,7 +4,11 @@ import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipListingPushWorkerServiceFromEnv } from "./dropship-listing-push-worker.factory";
 
 export interface DropshipListingPushJobQueueRepository {
-  listQueuedJobIds(limit: number): Promise<number[]>;
+  listClaimableJobIds(input: {
+    limit: number;
+    now: Date;
+    staleAfterMinutes: number;
+  }): Promise<number[]>;
 }
 
 interface JobIdRow {
@@ -14,18 +18,27 @@ interface JobIdRow {
 const DROPSHIP_LISTING_PUSH_WORKER_LOCK_ID = 736204;
 const DEFAULT_INTERVAL_MS = 10_000;
 const DEFAULT_BATCH_SIZE = 10;
+const DEFAULT_STALE_PROCESSING_MINUTES = 30;
 
 export class PgDropshipListingPushJobQueueRepository implements DropshipListingPushJobQueueRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
 
-  async listQueuedJobIds(limit: number): Promise<number[]> {
+  async listClaimableJobIds(input: {
+    limit: number;
+    now: Date;
+    staleAfterMinutes: number;
+  }): Promise<number[]> {
     const result = await this.dbPool.query<JobIdRow>(
       `SELECT id
        FROM dropship.dropship_listing_push_jobs
        WHERE status = 'queued'
+          OR (
+            status = 'processing'
+            AND updated_at <= $2 - ($3::text)::interval
+          )
        ORDER BY created_at ASC, id ASC
        LIMIT $1`,
-      [limit],
+      [input.limit, input.now, `${input.staleAfterMinutes} minutes`],
     );
     return result.rows.map((row) => row.id);
   }
@@ -35,32 +48,51 @@ export async function runDropshipListingPushJob(input: {
   jobId: number;
   workerId?: string;
   idempotencyKey?: string;
+  staleProcessingMinutes?: number;
 }): Promise<void> {
   const workerId = input.workerId ?? defaultWorkerId();
   await createDropshipListingPushWorkerServiceFromEnv().processJob({
     jobId: input.jobId,
     workerId,
-    idempotencyKey: input.idempotencyKey ?? `${workerId}:job:${input.jobId}`,
+    idempotencyKey: input.idempotencyKey ?? defaultListingPushJobIdempotencyKey(input.jobId),
+    staleProcessingMinutes: input.staleProcessingMinutes,
   });
 }
 
 export async function runDropshipListingPushSweep(input: {
   repository?: DropshipListingPushJobQueueRepository;
+  processJob?: (input: {
+    jobId: number;
+    workerId: string;
+    idempotencyKey: string;
+    staleProcessingMinutes: number;
+  }) => Promise<void>;
   batchSize?: number;
+  staleProcessingMinutes?: number;
+  now?: Date;
   workerId?: string;
 } = {}): Promise<{ processed: number; failed: number }> {
   const repository = input.repository ?? new PgDropshipListingPushJobQueueRepository();
   const batchSize = input.batchSize ?? envPositiveInteger("DROPSHIP_LISTING_PUSH_WORKER_BATCH_SIZE", DEFAULT_BATCH_SIZE);
+  const staleProcessingMinutes = input.staleProcessingMinutes
+    ?? envPositiveInteger("DROPSHIP_LISTING_PUSH_STALE_PROCESSING_MINUTES", DEFAULT_STALE_PROCESSING_MINUTES);
+  const now = input.now ?? new Date();
   const workerId = input.workerId ?? defaultWorkerId();
-  const jobIds = await repository.listQueuedJobIds(batchSize);
+  const jobIds = await repository.listClaimableJobIds({
+    limit: batchSize,
+    now,
+    staleAfterMinutes: staleProcessingMinutes,
+  });
   let processed = 0;
   let failed = 0;
+  const processJob = input.processJob ?? runDropshipListingPushJob;
   for (const jobId of jobIds) {
     try {
-      await runDropshipListingPushJob({
+      await processJob({
         jobId,
         workerId,
-        idempotencyKey: `${workerId}:job:${jobId}`,
+        idempotencyKey: defaultListingPushJobIdempotencyKey(jobId),
+        staleProcessingMinutes,
       });
       processed += 1;
     } catch (error) {
@@ -121,6 +153,10 @@ export function startDropshipListingPushWorker(): void {
 
 function defaultWorkerId(): string {
   return `dropship-listing-push-${process.pid}`;
+}
+
+function defaultListingPushJobIdempotencyKey(jobId: number): string {
+  return `dropship-listing-push:job:${jobId}`;
 }
 
 function envPositiveInteger(name: string, fallback: number): number {

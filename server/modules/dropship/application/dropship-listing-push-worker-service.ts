@@ -82,6 +82,7 @@ export interface DropshipListingPushWorkerRepository {
     workerId: string;
     idempotencyKey: string;
     now: Date;
+    staleProcessingMinutes?: number;
   }): Promise<DropshipListingPushWorkerClaim>;
   markItemProcessing(input: {
     jobId: number;
@@ -139,6 +140,7 @@ export class DropshipListingPushWorkerService {
       workerId: parsed.workerId,
       idempotencyKey: parsed.idempotencyKey,
       now,
+      staleProcessingMinutes: parsed.staleProcessingMinutes,
     });
 
     if (!claim.claimed) {
