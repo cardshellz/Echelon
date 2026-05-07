@@ -47,6 +47,10 @@ describe("PgDropshipOrderCancellationRepository", () => {
 
     const claimQuery = client.query.mock.calls.find((call) => String(call[0]).includes("WITH candidates"));
     expect(String(claimQuery?.[0])).toContain("status IN ('cancelled', 'rejected')");
+    expect(String(claimQuery?.[0])).toContain("sc.status = 'connected'");
+    expect(String(claimQuery?.[0])).toContain("sc.setup_status = 'ready'");
+    expect(String(claimQuery?.[0])).toContain("sc.access_token_ref IS NOT NULL");
+    expect(String(claimQuery?.[0])).toContain("sc.platform <> 'ebay' OR sc.refresh_token_ref IS NOT NULL");
     expect(claimQuery?.[1]).toEqual([
       now,
       ["payment_hold_expired", "order_intake_rejected", "marketplace_cancellation_retrying"],

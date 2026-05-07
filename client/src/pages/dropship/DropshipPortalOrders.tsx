@@ -900,7 +900,7 @@ function canAcceptOrder(order: DropshipOrderListItem): boolean {
 }
 
 function canRejectOrder(order: DropshipOrderListItem): boolean {
-  return rejectionStatuses.has(order.status) && order.storeConnection.status === "connected" && order.omsOrderId === null;
+  return rejectionStatuses.has(order.status) && order.storeConnection.launchReady && order.omsOrderId === null;
 }
 
 function orderAcceptanceMessage(result: DropshipOrderAcceptResponse["result"]): string {

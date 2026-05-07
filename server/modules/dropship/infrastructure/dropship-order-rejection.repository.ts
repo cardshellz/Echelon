@@ -6,6 +6,7 @@ import type {
   DropshipOrderRejectionResult,
 } from "../application/dropship-order-rejection-service";
 import { DropshipError } from "../domain/errors";
+import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 
 const VENDOR_REJECTABLE_STATUSES = new Set<DropshipOrderIntakeStatus>([
   "received",
@@ -26,6 +27,14 @@ interface RejectionIntakeRow {
   cancellation_status: string | null;
   oms_order_id: string | number | null;
   updated_at: Date;
+}
+
+interface RejectionIntakeContextRow extends RejectionIntakeRow {
+  store_platform: string;
+  store_status: string;
+  setup_status: string;
+  access_token_ref: string | null;
+  refresh_token_ref: string | null;
 }
 
 export class PgDropshipOrderRejectionRepository implements DropshipOrderRejectionRepository {
@@ -101,22 +110,29 @@ async function loadIntakeForVendorUpdate(
     intakeId: number;
     vendorId: number;
   },
-): Promise<RejectionIntakeRow | null> {
-  const result = await client.query<RejectionIntakeRow>(
-    `SELECT id, vendor_id, store_connection_id, external_order_id,
-            external_order_number, status, rejection_reason,
-            cancellation_status, oms_order_id, updated_at
-     FROM dropship.dropship_order_intake
-     WHERE id = $1
-       AND vendor_id = $2
+): Promise<RejectionIntakeContextRow | null> {
+  const result = await client.query<RejectionIntakeContextRow>(
+    `SELECT oi.id, oi.vendor_id, oi.store_connection_id, oi.external_order_id,
+            oi.external_order_number, oi.status, oi.rejection_reason,
+            oi.cancellation_status, oi.oms_order_id, oi.updated_at,
+            sc.platform AS store_platform,
+            sc.status AS store_status,
+            sc.setup_status,
+            sc.access_token_ref,
+            sc.refresh_token_ref
+     FROM dropship.dropship_order_intake oi
+     INNER JOIN dropship.dropship_store_connections sc ON sc.id = oi.store_connection_id
+       AND sc.vendor_id = oi.vendor_id
+     WHERE oi.id = $1
+       AND oi.vendor_id = $2
      LIMIT 1
-     FOR UPDATE`,
+     FOR UPDATE OF oi, sc`,
     [input.intakeId, input.vendorId],
   );
   return result.rows[0] ?? null;
 }
 
-function assertCanRejectIntake(row: RejectionIntakeRow): void {
+function assertCanRejectIntake(row: RejectionIntakeContextRow): void {
   if (row.oms_order_id !== null) {
     throw new DropshipError(
       "DROPSHIP_ORDER_REJECTION_NOT_ALLOWED",
@@ -137,6 +153,25 @@ function assertCanRejectIntake(row: RejectionIntakeRow): void {
         intakeId: row.id,
         status: row.status,
         cancellationStatus: row.cancellation_status,
+      },
+    );
+  }
+
+  if (!isDropshipStoreConnectionLaunchReady({
+    platform: row.store_platform,
+    status: row.store_status,
+    setupStatus: row.setup_status,
+    hasAccessToken: row.access_token_ref !== null,
+    hasRefreshToken: row.refresh_token_ref !== null,
+  })) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_STORE_BLOCKED",
+      "Dropship store connection is not launch-ready for order rejection.",
+      {
+        intakeId: row.id,
+        storeConnectionId: row.store_connection_id,
+        storeStatus: row.store_status,
+        setupStatus: row.setup_status,
       },
     );
   }
