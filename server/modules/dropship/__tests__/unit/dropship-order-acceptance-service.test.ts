@@ -137,6 +137,15 @@ describe("buildDropshipOrderAcceptancePlan", () => {
     });
   });
 
+  it("blocks acceptance when the store connection is connected but not launch-ready", () => {
+    expectDropshipError(() => buildDropshipOrderAcceptancePlan(makePlanningInput({
+      vendor: {
+        ...makePlanningInput().vendor,
+        storeLaunchReady: false,
+      },
+    })), "DROPSHIP_ORDER_STORE_BLOCKED");
+  });
+
   it("places the intake on payment hold without accepting when wallet funds are insufficient", () => {
     const plan = buildDropshipOrderAcceptancePlan(makePlanningInput({
       wallet: {
@@ -334,6 +343,7 @@ function makePlanningInput(
       entitlementStatus: "active",
       storeConnectionId: 22,
       storeStatus: "connected",
+      storeLaunchReady: true,
       channelDiscountPercent: 20,
     },
     quote: baseQuote(),

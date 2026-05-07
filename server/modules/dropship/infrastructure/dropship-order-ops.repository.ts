@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipOrderIntakeStatus, NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type {
   DropshipOrderOpsActionResult,
@@ -42,6 +43,8 @@ interface OpsIntakeRow {
   store_platform: string;
   store_status: string;
   setup_status: string;
+  access_token_ref: string | null;
+  refresh_token_ref: string | null;
   external_display_name: string | null;
   shop_domain: string | null;
   latest_event_type: string | null;
@@ -395,6 +398,8 @@ function opsIntakeListSelectSql(): string {
       sc.platform AS store_platform,
       sc.status AS store_status,
       sc.setup_status,
+      sc.access_token_ref,
+      sc.refresh_token_ref,
       sc.external_display_name,
       sc.shop_domain,
       latest.event_type AS latest_event_type,
@@ -432,6 +437,8 @@ function opsIntakeDetailSelectSql(): string {
       sc.platform AS store_platform,
       sc.status AS store_status,
       sc.setup_status,
+      sc.access_token_ref,
+      sc.refresh_token_ref,
       sc.external_display_name,
       sc.shop_domain,
       latest.event_type AS latest_event_type,
@@ -674,6 +681,13 @@ function mapOpsIntakeRow(row: OpsIntakeRow): DropshipOrderOpsIntakeListItem {
       platform: row.store_platform,
       status: row.store_status,
       setupStatus: row.setup_status,
+      launchReady: isDropshipStoreConnectionLaunchReady({
+        platform: row.store_platform,
+        status: row.store_status,
+        setupStatus: row.setup_status,
+        hasAccessToken: row.access_token_ref !== null,
+        hasRefreshToken: row.refresh_token_ref !== null,
+      }),
       externalDisplayName: row.external_display_name,
       shopDomain: row.shop_domain,
     },

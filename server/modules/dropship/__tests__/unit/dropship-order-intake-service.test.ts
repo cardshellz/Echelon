@@ -99,6 +99,23 @@ describe("DropshipOrderIntakeService", () => {
     });
   });
 
+  it("records connected but non-launch-ready store orders as rejected intake", async () => {
+    repository.context = {
+      ...repository.context,
+      storeLaunchReady: false,
+    };
+
+    const result = await service.recordMarketplaceOrder(makeInput());
+
+    expect(result.intake.status).toBe("rejected");
+    expect(result.intake.rejectionReason).toBe("Store connection is not launch-ready for dropship order intake.");
+    expect(result.intake.cancellationStatus).toBe("order_intake_rejected");
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_intake_rejected",
+      critical: true,
+    });
+  });
+
   it("rejects platform mismatches before writing intake", async () => {
     repository.context = {
       ...repository.context,
@@ -139,7 +156,7 @@ describe("DropshipOrderIntakeService", () => {
 });
 
 describe("dropship order intake eligibility", () => {
-  it("allows only active vendors, active entitlements, and connected stores", () => {
+  it("allows only active vendors, active entitlements, and launch-ready stores", () => {
     expect(evaluateDropshipOrderIntakeEligibility(makeContext())).toEqual({
       status: "received",
       rejectionReason: null,
@@ -151,6 +168,10 @@ describe("dropship order intake eligibility", () => {
     expect(evaluateDropshipOrderIntakeEligibility({
       ...makeContext(),
       storeStatus: "grace_period",
+    })).toMatchObject({ status: "rejected" });
+    expect(evaluateDropshipOrderIntakeEligibility({
+      ...makeContext(),
+      storeLaunchReady: false,
     })).toMatchObject({ status: "rejected" });
   });
 
@@ -258,6 +279,7 @@ function makeContext(overrides: Partial<DropshipOrderIntakeStoreContext> = {}): 
     entitlementStatus: "active",
     storeConnectionId: 22,
     storeStatus: "connected",
+    storeLaunchReady: true,
     platform: "shopify",
     ...overrides,
   };

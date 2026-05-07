@@ -68,6 +68,7 @@ export interface DropshipAcceptanceVendorContext {
   entitlementStatus: string;
   storeConnectionId: number;
   storeStatus: string;
+  storeLaunchReady: boolean;
   channelDiscountPercent: number;
 }
 
@@ -432,6 +433,13 @@ function assertVendorAndStoreCanAccept(vendor: DropshipAcceptanceVendorContext):
       "DROPSHIP_ORDER_STORE_BLOCKED",
       "Dropship store connection does not allow order acceptance.",
       { storeConnectionId: vendor.storeConnectionId, storeStatus: vendor.storeStatus },
+    );
+  }
+  if (!vendor.storeLaunchReady) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_STORE_BLOCKED",
+      "Dropship store connection is not launch-ready for order acceptance.",
+      { storeConnectionId: vendor.storeConnectionId, storeStatus: vendor.storeStatus, storeLaunchReady: false },
     );
   }
 }

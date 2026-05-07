@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import {
   buildDropshipOrderAcceptancePlan,
@@ -45,7 +46,11 @@ interface VendorContextRow {
   vendor_status: string;
   entitlement_status: string;
   store_connection_id: number;
+  store_platform: string;
   store_status: string;
+  setup_status: string;
+  access_token_ref: string | null;
+  refresh_token_ref: string | null;
   channel_discount_percent: number | null;
 }
 
@@ -398,10 +403,14 @@ async function loadVendorContextForUpdate(
        p.id AS membership_plan_id,
        p.tier AS membership_plan_tier,
        v.status AS vendor_status,
-       v.entitlement_status,
-       sc.id AS store_connection_id,
-       sc.status AS store_status,
-       pp.discount_percent AS channel_discount_percent
+        v.entitlement_status,
+        sc.id AS store_connection_id,
+        sc.platform AS store_platform,
+        sc.status AS store_status,
+        sc.setup_status,
+        sc.access_token_ref,
+        sc.refresh_token_ref,
+        pp.discount_percent AS channel_discount_percent
      FROM dropship.dropship_vendors v
      INNER JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
      LEFT JOIN membership.plans p ON p.id = v.current_plan_id
@@ -424,6 +433,13 @@ async function loadVendorContextForUpdate(
     entitlementStatus: row.entitlement_status,
     storeConnectionId: row.store_connection_id,
     storeStatus: row.store_status,
+    storeLaunchReady: isDropshipStoreConnectionLaunchReady({
+      platform: row.store_platform,
+      status: row.store_status,
+      setupStatus: row.setup_status,
+      hasAccessToken: row.access_token_ref !== null,
+      hasRefreshToken: row.refresh_token_ref !== null,
+    }),
     channelDiscountPercent: normalizeDiscountPercent(row.channel_discount_percent),
   };
 }

@@ -112,6 +112,7 @@ export interface DropshipOrderIntakeStoreContext {
   entitlementStatus: string;
   storeConnectionId: number;
   storeStatus: string;
+  storeLaunchReady: boolean;
   platform: DropshipSourcePlatform;
 }
 
@@ -269,6 +270,12 @@ export function evaluateDropshipOrderIntakeEligibility(
     return {
       status: "rejected",
       rejectionReason: `Store connection status ${context.storeStatus} does not allow new dropship order intake.`,
+    };
+  }
+  if (!context.storeLaunchReady) {
+    return {
+      status: "rejected",
+      rejectionReason: "Store connection is not launch-ready for dropship order intake.",
     };
   }
   return { status: "received", rejectionReason: null };

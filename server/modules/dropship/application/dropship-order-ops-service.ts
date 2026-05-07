@@ -47,6 +47,7 @@ export interface DropshipOrderOpsStoreSummary {
   platform: string;
   status: string;
   setupStatus: string;
+  launchReady: boolean;
   externalDisplayName: string | null;
   shopDomain: string | null;
 }
