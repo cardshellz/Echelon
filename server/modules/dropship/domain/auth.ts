@@ -43,6 +43,26 @@ export interface DropshipSessionPrincipal extends DropshipAuthenticatedPrincipal
   authenticatedAt: string;
 }
 
+export interface DropshipSensitiveActionProofLike {
+  method: DropshipStepUpMethod;
+  expiresAt: string | Date;
+}
+
+export type DropshipSensitiveActionProofEvaluation =
+  | { valid: true }
+  | {
+      valid: false;
+      reason: "missing_or_expired";
+      requiredMethod?: DropshipStepUpMethod;
+      proofMethod?: DropshipStepUpMethod;
+    }
+  | {
+      valid: false;
+      reason: "method_mismatch";
+      requiredMethod: DropshipStepUpMethod;
+      proofMethod: DropshipStepUpMethod;
+    };
+
 export const DROPSHIP_PASSWORD_MIN_LENGTH = 12;
 export const DROPSHIP_PASSWORD_MAX_LENGTH = 256;
 export const DROPSHIP_EMAIL_CHALLENGE_MAX_ATTEMPTS = 5;
@@ -113,6 +133,41 @@ export function resolveSensitiveActionStepUp(
   }
 
   return principal.hasPasskey ? "passkey" : "email_mfa";
+}
+
+export function evaluateSensitiveActionProof(input: {
+  principal: DropshipAuthenticatedPrincipal;
+  action: DropshipSensitiveAction;
+  proof: DropshipSensitiveActionProofLike | null | undefined;
+  now: Date;
+}): DropshipSensitiveActionProofEvaluation {
+  const requiredMethod = resolveSensitiveActionStepUp(input.principal, input.action);
+  if (!input.proof) {
+    return { valid: false, reason: "missing_or_expired", requiredMethod };
+  }
+
+  const expiresAt = input.proof.expiresAt instanceof Date
+    ? input.proof.expiresAt
+    : new Date(input.proof.expiresAt);
+  if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= input.now.getTime()) {
+    return {
+      valid: false,
+      reason: "missing_or_expired",
+      requiredMethod,
+      proofMethod: input.proof.method,
+    };
+  }
+
+  if (input.proof.method !== requiredMethod) {
+    return {
+      valid: false,
+      reason: "method_mismatch",
+      requiredMethod,
+      proofMethod: input.proof.method,
+    };
+  }
+
+  return { valid: true };
 }
 
 export function evaluateDropshipMembershipEntitlement(

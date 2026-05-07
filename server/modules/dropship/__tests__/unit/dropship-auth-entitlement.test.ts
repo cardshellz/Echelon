@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import {
+  evaluateSensitiveActionProof,
   evaluateDropshipMembershipEntitlement,
   normalizeCardShellzEmail,
   resolveSensitiveActionStepUp,
@@ -19,6 +20,7 @@ const entitledInput: DropshipMembershipEntitlementInput = {
   planIncludesDropship: true,
   planIsActive: true,
 };
+const now = new Date("2026-05-07T12:00:00.000Z");
 
 describe("Card Shellz dropship identity policy", () => {
   it("normalizes the Card Shellz account email used for authorization", () => {
@@ -55,6 +57,80 @@ describe("Card Shellz dropship identity policy", () => {
     );
 
     expect(method).toBe("email_mfa");
+  });
+
+  it("accepts a fresh proof that matches the current sensitive-action method", () => {
+    expect(evaluateSensitiveActionProof({
+      principal: {
+        memberId: "member-1",
+        cardShellzEmail: "vendor@cardshellz.test",
+        hasPasskey: false,
+        authMethod: "password",
+      },
+      action: "add_funding_method",
+      proof: {
+        method: "email_mfa",
+        expiresAt: new Date(now.getTime() + 10 * 60_000),
+      },
+      now,
+    })).toEqual({ valid: true });
+  });
+
+  it("rejects an email MFA proof when current account state requires passkey step-up", () => {
+    expect(evaluateSensitiveActionProof({
+      principal: {
+        memberId: "member-1",
+        cardShellzEmail: "vendor@cardshellz.test",
+        hasPasskey: true,
+        authMethod: "passkey",
+      },
+      action: "add_funding_method",
+      proof: {
+        method: "email_mfa",
+        expiresAt: new Date(now.getTime() + 10 * 60_000),
+      },
+      now,
+    })).toEqual({
+      valid: false,
+      reason: "method_mismatch",
+      requiredMethod: "passkey",
+      proofMethod: "email_mfa",
+    });
+  });
+
+  it("rejects expired or invalid sensitive-action proofs", () => {
+    const principal = {
+      memberId: "member-1",
+      cardShellzEmail: "vendor@cardshellz.test",
+      hasPasskey: false,
+      authMethod: "password" as const,
+    };
+
+    expect(evaluateSensitiveActionProof({
+      principal,
+      action: "add_funding_method",
+      proof: {
+        method: "email_mfa",
+        expiresAt: new Date(now.getTime() - 1),
+      },
+      now,
+    })).toMatchObject({
+      valid: false,
+      reason: "missing_or_expired",
+    });
+
+    expect(evaluateSensitiveActionProof({
+      principal,
+      action: "add_funding_method",
+      proof: {
+        method: "email_mfa",
+        expiresAt: "not-a-date",
+      },
+      now,
+    })).toMatchObject({
+      valid: false,
+      reason: "missing_or_expired",
+    });
   });
 });
 
