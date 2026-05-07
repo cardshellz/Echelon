@@ -25,6 +25,10 @@ const returnsNotificationsMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0097_dropship_returns_notifications.sql"),
   "utf8",
 );
+const activateAccountActionMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0104_dropship_activate_account_sensitive_action.sql"),
+  "utf8",
+);
 
 describe("Dropship V2 auth schema contract", () => {
   it("stores Card Shellz member identity separately from vendor operations", () => {
@@ -46,6 +50,7 @@ describe("Dropship V2 auth schema contract", () => {
     expect(dropshipStepUpMethodEnum).toEqual(["passkey", "email_mfa"]);
     expect(dropshipSensitiveActionEnum).toContain("account_bootstrap");
     expect(dropshipSensitiveActionEnum).toContain("register_passkey");
+    expect(dropshipSensitiveActionEnum).toContain("activate_account");
     expect(dropshipSensitiveActionEnum).toContain("connect_store");
     expect(dropshipSensitiveActionEnum).toContain("add_funding_method");
     expect(dropshipSensitiveActionEnum).toContain("manage_notification_preferences");
@@ -56,5 +61,6 @@ describe("Dropship V2 auth schema contract", () => {
     expect(authRoutesMigrationSql).toContain("'password_reset'");
     expect(passkeyActionMigrationSql).toContain("'register_passkey'");
     expect(returnsNotificationsMigrationSql).toContain("'manage_notification_preferences'");
+    expect(activateAccountActionMigrationSql).toContain("'activate_account'");
   });
 });
