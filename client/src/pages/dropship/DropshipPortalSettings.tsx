@@ -28,7 +28,12 @@ import {
   type DropshipStoreConnectionProfileResponse,
   type DropshipStoreConnectionSetupCheck,
 } from "@/lib/dropship-ops-surface";
-import { dropshipPortalPath, useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
+import {
+  dropshipPortalPath,
+  isDropshipSensitiveProofActive,
+  useDropshipAuth,
+  type DropshipSensitiveAction,
+} from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingStoreAction =
@@ -80,8 +85,11 @@ export default function DropshipPortalSettings() {
   const settings = settingsQuery.data?.settings;
 
   const hasActiveProof = (action: DropshipSensitiveAction) => {
-    const proof = sensitiveProofs[action];
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
+    return isDropshipSensitiveProofActive({
+      principal,
+      action,
+      proof: sensitiveProofs[action],
+    });
   };
 
   async function ensureSensitiveActionProof(input: {

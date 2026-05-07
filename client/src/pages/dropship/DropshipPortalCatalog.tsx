@@ -55,7 +55,7 @@ import {
   type DropshipVendorSelectionAction,
   type DropshipVendorSelectionScopeTarget,
 } from "@/lib/dropship-ops-surface";
-import { useDropshipAuth } from "@/lib/dropship-auth";
+import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingSelectionAction = string | null;
@@ -118,9 +118,12 @@ export default function DropshipPortalCatalog() {
   );
   const selectedStoreConnectionIdNumber = Number(selectedStoreConnectionId);
   const activeBulkPushProof = useMemo(() => {
-    const proof = sensitiveProofs.bulk_listing_push;
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
-  }, [sensitiveProofs.bulk_listing_push]);
+    return isDropshipSensitiveProofActive({
+      principal,
+      action: "bulk_listing_push",
+      proof: sensitiveProofs.bulk_listing_push,
+    });
+  }, [principal, sensitiveProofs.bulk_listing_push]);
   const pushablePreviewCount = listingPreviewPushableCount(listingPreview);
 
   useEffect(() => {

@@ -26,7 +26,7 @@ import {
   type DropshipNotificationPreferencesResponse,
   type DropshipNotificationPreferenceUpdateResponse,
 } from "@/lib/dropship-ops-surface";
-import { useDropshipAuth } from "@/lib/dropship-auth";
+import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingPreferenceAction = "send-code" | "verify-code" | "passkey-proof" | "save" | null;
@@ -88,8 +88,11 @@ export default function DropshipPortalNotifications() {
   ), [preferencesQuery.data?.preferences, preferenceEventsQuery.data?.items]);
 
   const hasActivePreferenceProof = () => {
-    const proof = sensitiveProofs.manage_notification_preferences;
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
+    return isDropshipSensitiveProofActive({
+      principal,
+      action: "manage_notification_preferences",
+      proof: sensitiveProofs.manage_notification_preferences,
+    });
   };
 
   async function markRead(notification: DropshipNotificationListItem): Promise<void> {

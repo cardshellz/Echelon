@@ -64,7 +64,11 @@ import {
   type DropshipOrderListResponse,
   type DropshipOrderRejectResponse,
 } from "@/lib/dropship-ops-surface";
-import { useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
+import {
+  isDropshipSensitiveProofActive,
+  useDropshipAuth,
+  type DropshipSensitiveAction,
+} from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingOrderAction =
@@ -121,8 +125,11 @@ export default function DropshipPortalOrders() {
     enabled: selectedIntakeId !== null,
   });
   const hasActiveProof = (action: DropshipSensitiveAction) => {
-    const proof = sensitiveProofs[action];
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
+    return isDropshipSensitiveProofActive({
+      principal,
+      action,
+      proof: sensitiveProofs[action],
+    });
   };
 
   async function acceptOrder(order: DropshipOrderListItem) {
