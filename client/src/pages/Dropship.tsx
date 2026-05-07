@@ -85,6 +85,7 @@ import {
   putJson,
   queryErrorMessage,
   riskSeverityTone,
+  trackingPushRetryEligibility,
   type DropshipAdminCatalogExposurePreviewResponse,
   type DropshipAdminCatalogExposurePreviewRow,
   type DropshipAdminCatalogExposureRulesReplaceResponse,
@@ -1067,6 +1068,10 @@ function TrackingPushOpsTab() {
   });
 
   const pushes = trackingPushesQuery.data?.items ?? [];
+  const trackingPushRetryNow = useMemo(() => new Date(), [trackingPushesQuery.dataUpdatedAt]);
+  const recoverablePushCount = pushes.filter((push) =>
+    trackingPushRetryEligibility(push, trackingPushRetryNow).canRetry
+  ).length;
 
   function applyTrackingPushFilters() {
     setAppliedFilters({ search, status, platform });
@@ -1179,7 +1184,7 @@ function TrackingPushOpsTab() {
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Matching pushes" value={String(trackingPushesQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible failed" value={String(pushes.filter((push) => push.status === "failed").length)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible recoverable" value={String(recoverablePushCount)} />
         <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Visible attempts" value={String(pushes.reduce((sum, push) => sum + push.attemptCount, 0))} />
         <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible succeeded" value={String(pushes.filter((push) => push.status === "succeeded").length)} />
       </section>
@@ -1189,6 +1194,7 @@ function TrackingPushOpsTab() {
         onRetry={retryTrackingPush}
         pendingRetryPushId={pendingRetryPushId}
         pushes={pushes}
+        retryEligibilityNow={trackingPushRetryNow}
         summary={trackingPushesQuery.data?.summary ?? []}
         total={trackingPushesQuery.data?.total ?? 0}
       />
@@ -3874,6 +3880,7 @@ function TrackingPushesTable({
   onRetry,
   pendingRetryPushId,
   pushes,
+  retryEligibilityNow,
   summary,
   total,
 }: {
@@ -3881,6 +3888,7 @@ function TrackingPushesTable({
   onRetry: (push: DropshipAdminTrackingPushListItem) => void;
   pendingRetryPushId: number | null;
   pushes: DropshipAdminTrackingPushListItem[];
+  retryEligibilityNow: Date;
   summary: DropshipAdminTrackingPushListResponse["summary"];
   total: number;
 }) {
@@ -3927,75 +3935,79 @@ function TrackingPushesTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {pushes.map((push) => (
-            <TableRow key={push.pushId}>
-              <TableCell>
-                <div className="font-mono text-sm">#{push.pushId}</div>
-                <div className="text-xs text-muted-foreground">Try {push.attemptCount}</div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{push.externalOrderNumber || push.externalOrderId}</div>
-                <div className="text-xs text-muted-foreground">
-                  {[
-                    `OMS ${push.omsOrderId}`,
-                    push.wmsShipmentId ? `Shipment ${push.wmsShipmentId}` : null,
-                    `Intake ${push.intakeId}`,
-                  ].filter(Boolean).join(" / ")}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{push.vendor.businessName || push.vendor.email || `Vendor ${push.vendor.vendorId}`}</div>
-                <div className="text-xs text-muted-foreground">
-                  {[push.storeConnection.externalDisplayName, push.storeConnection.shopDomain, formatStatus(push.platform)]
-                    .filter(Boolean)
-                    .join(" / ")}
-                </div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={trackingPushStatusTone(push.status)}>
-                  {formatStatus(push.status)}
-                </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {push.completedAt ? `Completed ${formatDateTime(push.completedAt)}` : `Shipped ${formatDateTime(push.shippedAt)}`}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{push.carrier}</div>
-                <div className="max-w-[220px] truncate text-xs text-muted-foreground">{push.trackingNumber}</div>
-                {push.externalFulfillmentId && (
-                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">Fulfillment {push.externalFulfillmentId}</div>
-                )}
-              </TableCell>
-              <TableCell>
-                {push.lastErrorCode || push.lastErrorMessage ? (
-                  <>
-                    <div className="font-medium">{push.lastErrorCode || "Tracking push failed"}</div>
-                    <div className="max-w-[320px] truncate text-xs text-muted-foreground">
-                      {push.lastErrorMessage || "No error message recorded"}
-                    </div>
-                  </>
-                ) : (
-                  <div className="text-sm text-muted-foreground">None</div>
-                )}
-              </TableCell>
-              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                {formatDateTime(push.updatedAt)}
-              </TableCell>
-              <TableCell className="text-right">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="gap-2"
-                  disabled={push.status !== "failed" || !push.retryable || pendingRetryPushId !== null}
-                  onClick={() => onRetry(push)}
-                >
-                  <RotateCcw className={pendingRetryPushId === push.pushId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                  Retry
-                </Button>
-              </TableCell>
-            </TableRow>
-          ))}
+          {pushes.map((push) => {
+            const retryEligibility = trackingPushRetryEligibility(push, retryEligibilityNow);
+            const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            return (
+              <TableRow key={push.pushId}>
+                <TableCell>
+                  <div className="font-mono text-sm">#{push.pushId}</div>
+                  <div className="text-xs text-muted-foreground">Try {push.attemptCount}</div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{push.externalOrderNumber || push.externalOrderId}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {[
+                      `OMS ${push.omsOrderId}`,
+                      push.wmsShipmentId ? `Shipment ${push.wmsShipmentId}` : null,
+                      `Intake ${push.intakeId}`,
+                    ].filter(Boolean).join(" / ")}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{push.vendor.businessName || push.vendor.email || `Vendor ${push.vendor.vendorId}`}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {[push.storeConnection.externalDisplayName, push.storeConnection.shopDomain, formatStatus(push.platform)]
+                      .filter(Boolean)
+                      .join(" / ")}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={trackingPushStatusTone(push.status)}>
+                    {formatStatus(push.status)}
+                  </Badge>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {push.completedAt ? `Completed ${formatDateTime(push.completedAt)}` : `Shipped ${formatDateTime(push.shippedAt)}`}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{push.carrier}</div>
+                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">{push.trackingNumber}</div>
+                  {push.externalFulfillmentId && (
+                    <div className="max-w-[220px] truncate text-xs text-muted-foreground">Fulfillment {push.externalFulfillmentId}</div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {push.lastErrorCode || push.lastErrorMessage ? (
+                    <>
+                      <div className="font-medium">{push.lastErrorCode || "Tracking push failed"}</div>
+                      <div className="max-w-[320px] truncate text-xs text-muted-foreground">
+                        {push.lastErrorMessage || "No error message recorded"}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-sm text-muted-foreground">None</div>
+                  )}
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                  {formatDateTime(push.updatedAt)}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="gap-2"
+                    disabled={!retryEligibility.canRetry || pendingRetryPushId !== null}
+                    onClick={() => onRetry(push)}
+                  >
+                    <RotateCcw className={pendingRetryPushId === push.pushId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    {retryLabel}
+                  </Button>
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </section>
