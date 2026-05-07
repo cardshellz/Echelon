@@ -47,6 +47,7 @@ export interface DropshipListingStoreContext {
   storeStatus: DropshipStoreConnectionStatus;
   setupStatus: string;
   platform: DropshipSourcePlatform;
+  storeLaunchReady: boolean;
 }
 
 export interface DropshipListingCatalogCandidate extends DropshipCatalogVariantCandidate, DropshipCanonicalListingContent {
@@ -385,11 +386,18 @@ export class DropshipListingPreviewService {
         { vendorId, storeConnectionId },
       );
     }
-    if (["closed", "lapsed", "suspended"].includes(context.vendorStatus)) {
+    if (context.vendorStatus !== "active") {
       throw new DropshipError(
         "DROPSHIP_LISTING_VENDOR_BLOCKED",
         "Dropship vendor status does not allow listing preview or push.",
         { vendorId, vendorStatus: context.vendorStatus },
+      );
+    }
+    if (context.entitlementStatus !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
+        "Dropship vendor entitlement does not allow listing preview or push.",
+        { vendorId, entitlementStatus: context.entitlementStatus },
       );
     }
     if (context.storeStatus !== "connected") {
@@ -397,6 +405,20 @@ export class DropshipListingPreviewService {
         "DROPSHIP_LISTING_STORE_BLOCKED",
         "Dropship store connection is not healthy enough for listing preview or push.",
         { vendorId, storeConnectionId, storeStatus: context.storeStatus },
+      );
+    }
+    if (!context.storeLaunchReady) {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_STORE_BLOCKED",
+        "Dropship store connection is not launch-ready for listing preview or push.",
+        {
+          vendorId,
+          storeConnectionId,
+          storeStatus: context.storeStatus,
+          setupStatus: context.setupStatus,
+          platform: context.platform,
+          storeLaunchReady: false,
+        },
       );
     }
     return context;
