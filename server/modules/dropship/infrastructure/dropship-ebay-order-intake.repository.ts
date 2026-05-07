@@ -22,6 +22,9 @@ export class PgDropshipEbayOrderIntakeRepository implements DropshipEbayOrderInt
        FROM dropship.dropship_store_connections
        WHERE platform = 'ebay'
          AND status = 'connected'
+         AND setup_status = 'ready'
+         AND access_token_ref IS NOT NULL
+         AND refresh_token_ref IS NOT NULL
        ORDER BY last_order_sync_at ASC NULLS FIRST, id ASC
        LIMIT $1`,
       [input.limit],

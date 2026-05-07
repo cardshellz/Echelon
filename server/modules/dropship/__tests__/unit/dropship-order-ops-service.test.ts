@@ -378,6 +378,7 @@ function makeListItem(): DropshipOrderOpsIntakeListResult["items"][number] {
       platform: "shopify",
       status: "connected",
       setupStatus: "ready",
+      launchReady: true,
       externalDisplayName: "Shop",
       shopDomain: "shop.example.com",
     },

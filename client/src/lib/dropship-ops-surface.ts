@@ -764,6 +764,7 @@ export interface DropshipAdminOrderOpsStoreSummary {
   platform: string;
   status: string;
   setupStatus: string;
+  launchReady: boolean;
   externalDisplayName: string | null;
   shopDomain: string | null;
 }
@@ -1316,6 +1317,7 @@ export interface DropshipOrderListItem {
     platform: string;
     status: string;
     setupStatus: string;
+    launchReady: boolean;
     externalDisplayName: string | null;
     shopDomain: string | null;
   };

@@ -29,6 +29,24 @@ export function assertDropshipStorePlatform(platform: string): DropshipSupported
   });
 }
 
+export function isDropshipStoreConnectionLaunchReady(input: {
+  platform: string;
+  status: string;
+  setupStatus: string;
+  hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+}): boolean {
+  if (input.status !== "connected" || input.setupStatus !== "ready" || !input.hasAccessToken) {
+    return false;
+  }
+
+  if (input.platform === "ebay" && !input.hasRefreshToken) {
+    return false;
+  }
+
+  return true;
+}
+
 export function normalizeShopifyShopDomain(shopDomain: string): string {
   const normalized = shopDomain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!normalized) {

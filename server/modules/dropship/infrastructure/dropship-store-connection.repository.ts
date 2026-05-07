@@ -8,9 +8,10 @@ import type {
   DropshipStoreConnectionSetupCheck,
   DropshipStoreConnectionTokenRecord,
 } from "../application/dropship-store-connection-service";
-import type {
-  DropshipStoreConnectionLifecycleStatus,
-  DropshipSupportedStorePlatform,
+import {
+  isDropshipStoreConnectionLaunchReady,
+  type DropshipStoreConnectionLifecycleStatus,
+  type DropshipSupportedStorePlatform,
 } from "../domain/store-connection";
 import { DropshipError } from "../domain/errors";
 import { ensureDefaultListingConfigWithClient } from "./dropship-listing-config.repository";
@@ -679,7 +680,13 @@ function mapStoreConnectionRow(row: StoreConnectionRow): DropshipStoreConnection
     tokenExpiresAt: row.token_expires_at,
     hasAccessToken: row.access_token_ref !== null,
     hasRefreshToken: row.refresh_token_ref !== null,
-    launchReady: isStoreConnectionLaunchReady(row),
+    launchReady: isDropshipStoreConnectionLaunchReady({
+      platform: row.platform,
+      status: row.status,
+      setupStatus: row.setup_status,
+      hasAccessToken: row.access_token_ref !== null,
+      hasRefreshToken: row.refresh_token_ref !== null,
+    }),
     lastSyncAt: row.last_sync_at,
     lastOrderSyncAt: row.last_order_sync_at,
     lastInventorySyncAt: row.last_inventory_sync_at,
@@ -689,16 +696,6 @@ function mapStoreConnectionRow(row: StoreConnectionRow): DropshipStoreConnection
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-}
-
-function isStoreConnectionLaunchReady(row: StoreConnectionRow): boolean {
-  if (row.status !== "connected" || row.setup_status !== "ready" || row.access_token_ref === null) {
-    return false;
-  }
-  if (row.platform === "ebay" && row.refresh_token_ref === null) {
-    return false;
-  }
-  return true;
 }
 
 function mapAdminStoreConnectionRow(row: AdminStoreConnectionRow): DropshipAdminStoreConnectionListItem {

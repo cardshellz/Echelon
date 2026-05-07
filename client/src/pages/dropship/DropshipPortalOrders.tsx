@@ -658,6 +658,9 @@ function OrdersTable({
                 <TableCell>
                   <div className="font-medium">{order.storeConnection.externalDisplayName || formatStatus(order.storeConnection.platform)}</div>
                   <div className="text-xs text-zinc-500">{order.storeConnection.shopDomain || formatStatus(order.storeConnection.status)}</div>
+                  {!order.storeConnection.launchReady && (
+                    <div className="mt-1 text-xs text-amber-700">Store not launch-ready</div>
+                  )}
                 </TableCell>
                 <TableCell>
                   <Badge variant="outline" className={statusTone(order.status)}>{formatStatus(order.status)}</Badge>
@@ -893,7 +896,7 @@ function shipToLabel(order: DropshipOrderListItem): string {
 }
 
 function canAcceptOrder(order: DropshipOrderListItem): boolean {
-  return acceptanceStatuses.has(order.status) && order.storeConnection.status === "connected";
+  return acceptanceStatuses.has(order.status) && order.storeConnection.launchReady;
 }
 
 function canRejectOrder(order: DropshipOrderListItem): boolean {
@@ -919,6 +922,7 @@ function acceptanceStateLabel(order: DropshipOrderListItem): string {
   if (order.status === "cancelled") return "Cancelled";
   if (order.status === "rejected") return "Rejected";
   if (order.storeConnection.status !== "connected") return "Store blocked";
+  if (!order.storeConnection.launchReady) return "Store not launch-ready";
   return "Not available";
 }
 

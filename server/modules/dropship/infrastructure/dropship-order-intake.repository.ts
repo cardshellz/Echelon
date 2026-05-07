@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type {
   DropshipOrderIntakeRecord,
   DropshipOrderIntakeRepository,
@@ -18,6 +19,9 @@ interface StoreContextRow {
   entitlement_status: string;
   store_connection_id: number;
   store_status: string;
+  setup_status: string;
+  access_token_ref: string | null;
+  refresh_token_ref: string | null;
   platform: DropshipSourcePlatform;
 }
 
@@ -67,10 +71,13 @@ export class PgDropshipOrderIntakeRepository implements DropshipOrderIntakeRepos
         `SELECT
            v.id AS vendor_id,
            v.status AS vendor_status,
-           v.entitlement_status,
-           sc.id AS store_connection_id,
-           sc.status AS store_status,
-           sc.platform
+            v.entitlement_status,
+            sc.id AS store_connection_id,
+            sc.status AS store_status,
+            sc.setup_status,
+            sc.access_token_ref,
+            sc.refresh_token_ref,
+            sc.platform
          FROM dropship.dropship_vendors v
          INNER JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
          WHERE v.id = $1
@@ -437,6 +444,13 @@ function mapStoreContextRow(row: StoreContextRow | undefined): DropshipOrderInta
     entitlementStatus: row.entitlement_status,
     storeConnectionId: row.store_connection_id,
     storeStatus: row.store_status,
+    storeLaunchReady: isDropshipStoreConnectionLaunchReady({
+      platform: row.platform,
+      status: row.store_status,
+      setupStatus: row.setup_status,
+      hasAccessToken: row.access_token_ref !== null,
+      hasRefreshToken: row.refresh_token_ref !== null,
+    }),
     platform: row.platform,
   };
 }

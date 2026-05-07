@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../../../db", () => ({ pool: {} }));
+
 import { recordDropshipOrderIntakeInputSchema } from "../../application/dropship-order-intake-service";
 import {
   DropshipEbayOrderIntakePollService,
@@ -13,6 +16,7 @@ import {
   shouldRecordEbayDropshipOrder,
 } from "../../infrastructure/dropship-ebay-order-intake.mapper";
 import { EbayDropshipOrderIntakeProvider } from "../../infrastructure/dropship-ebay-order-intake.provider";
+import { PgDropshipEbayOrderIntakeRepository } from "../../infrastructure/dropship-ebay-order-intake.repository";
 import { DropshipError } from "../../domain/errors";
 import type { EbayOrder } from "../../../channels/adapters/ebay/ebay-types";
 
@@ -278,6 +282,25 @@ describe("DropshipEbayOrderIntakePollService", () => {
       ordersCreated: 0,
     });
     expect(repository.lastSuccess).toBeNull();
+  });
+});
+
+describe("PgDropshipEbayOrderIntakeRepository", () => {
+  it("polls only launch-ready connected eBay store connections", async () => {
+    const dbPool = {
+      query: vi.fn(async () => ({ rows: [] })),
+    };
+    const repository = new PgDropshipEbayOrderIntakeRepository(dbPool as any);
+
+    await repository.listPollableStoreConnections({ limit: 25 });
+
+    const [sql, params] = dbPool.query.mock.calls[0] ?? [];
+    expect(sql).toContain("platform = 'ebay'");
+    expect(sql).toContain("status = 'connected'");
+    expect(sql).toContain("setup_status = 'ready'");
+    expect(sql).toContain("access_token_ref IS NOT NULL");
+    expect(sql).toContain("refresh_token_ref IS NOT NULL");
+    expect(params).toEqual([25]);
   });
 });
 
