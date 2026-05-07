@@ -228,7 +228,7 @@ export function createOmsService(db: any, reservationService?: any) {
             taxLines: item.taxLines ?? null,
             discountAllocations: item.discountAllocations ?? null,
             orderNumber: data.externalOrderNumber || null,
-          } satisfies InsertOmsOrderLine);
+          } satisfies InsertOmsOrderLine).onConflictDoNothing();
         }
         console.log(`[OMS] Backfilled ${data.lineItems.length} missing line items for order ${existing[0].id}`);
       }
@@ -276,7 +276,7 @@ export function createOmsService(db: any, reservationService?: any) {
         taxLines: item.taxLines ?? null,
         discountAllocations: item.discountAllocations ?? null,
         orderNumber: data.externalOrderNumber || null,
-      } satisfies InsertOmsOrderLine);
+      } satisfies InsertOmsOrderLine).onConflictDoNothing();
     }
 
     // Record created event
