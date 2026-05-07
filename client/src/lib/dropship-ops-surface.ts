@@ -41,6 +41,11 @@ export type DropshipTrackingPushStatus =
   | "processing"
   | "succeeded"
   | "failed";
+export type DropshipAdminTrackingPushRetryStatus =
+  | "not_dropship"
+  | "already_succeeded"
+  | "already_processing"
+  | "succeeded";
 export type DropshipNotificationOpsStatus =
   | "pending"
   | "delivered"
@@ -98,6 +103,8 @@ const allDropshipTrackingPushStatuses: DropshipTrackingPushStatus[] = [
   "succeeded",
   "failed",
 ];
+
+const DROPSHIP_TRACKING_PUSH_STALE_PROCESSING_MS = 30 * 60 * 1000;
 
 const allDropshipNotificationOpsStatuses: DropshipNotificationOpsStatus[] = [
   "pending",
@@ -930,7 +937,7 @@ export interface DropshipAdminTrackingPushRetryInput {
 export interface DropshipAdminTrackingPushRetryResponse {
   pushId: number;
   previousStatus: DropshipTrackingPushStatus;
-  status: "not_dropship" | "already_succeeded" | "succeeded";
+  status: DropshipAdminTrackingPushRetryStatus;
   idempotentReplay: boolean;
   updatedPush: {
     pushId: number;
@@ -947,6 +954,19 @@ export interface DropshipAdminTrackingPushRetryResponse {
     attemptCount: number;
     externalFulfillmentId: string | null;
   } | null;
+}
+
+export type DropshipTrackingPushRetryEligibilityReason =
+  | "failed_retryable"
+  | "stale_processing"
+  | "failed_not_retryable"
+  | "processing_not_stale"
+  | "invalid_processing_timestamp"
+  | "status_not_retryable";
+
+export interface DropshipTrackingPushRetryEligibility {
+  canRetry: boolean;
+  reason: DropshipTrackingPushRetryEligibilityReason;
 }
 
 export interface DropshipAdminOrderOpsActionInput {
@@ -2258,6 +2278,27 @@ export function buildAdminTrackingPushRetryInput(input: {
   }
 
   return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function trackingPushRetryEligibility(
+  push: Pick<DropshipAdminTrackingPushListItem, "status" | "retryable" | "updatedAt">,
+  now: Date = new Date(),
+): DropshipTrackingPushRetryEligibility {
+  if (push.status === "failed") {
+    return push.retryable
+      ? { canRetry: true, reason: "failed_retryable" }
+      : { canRetry: false, reason: "failed_not_retryable" };
+  }
+  if (push.status === "processing") {
+    const updatedAt = new Date(push.updatedAt);
+    if (Number.isNaN(updatedAt.getTime())) {
+      return { canRetry: false, reason: "invalid_processing_timestamp" };
+    }
+    return updatedAt.getTime() <= now.getTime() - DROPSHIP_TRACKING_PUSH_STALE_PROCESSING_MS
+      ? { canRetry: true, reason: "stale_processing" }
+      : { canRetry: false, reason: "processing_not_stale" };
+  }
+  return { canRetry: false, reason: "status_not_retryable" };
 }
 
 export function buildAdminReturnStatusUpdateInput(input: {

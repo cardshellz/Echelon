@@ -59,6 +59,7 @@ import {
   queryErrorMessage,
   riskSeverityTone,
   sectionStatusTone,
+  trackingPushRetryEligibility,
 } from "../dropship-ops-surface";
 import type {
   DropshipCatalogRow,
@@ -719,6 +720,43 @@ describe("dropship ops surface client helpers", () => {
       idempotencyKey: "short",
       reason: "",
     })).toThrow();
+  });
+
+  it("identifies retryable failed and stale processing tracking pushes", () => {
+    const now = new Date("2026-05-03T12:00:00.000Z");
+
+    expect(trackingPushRetryEligibility({
+      status: "failed",
+      retryable: true,
+      updatedAt: "2026-05-03T11:59:00.000Z",
+    }, now)).toEqual({
+      canRetry: true,
+      reason: "failed_retryable",
+    });
+    expect(trackingPushRetryEligibility({
+      status: "failed",
+      retryable: false,
+      updatedAt: "2026-05-03T11:59:00.000Z",
+    }, now)).toEqual({
+      canRetry: false,
+      reason: "failed_not_retryable",
+    });
+    expect(trackingPushRetryEligibility({
+      status: "processing",
+      retryable: true,
+      updatedAt: "2026-05-03T11:30:00.000Z",
+    }, now)).toEqual({
+      canRetry: true,
+      reason: "stale_processing",
+    });
+    expect(trackingPushRetryEligibility({
+      status: "processing",
+      retryable: true,
+      updatedAt: "2026-05-03T11:45:00.000Z",
+    }, now)).toEqual({
+      canRetry: false,
+      reason: "processing_not_stale",
+    });
   });
 
   it("builds admin store connection URLs with optional filters", () => {
