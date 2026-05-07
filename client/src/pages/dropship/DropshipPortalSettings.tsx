@@ -378,6 +378,7 @@ function StoreConnectionsPanel({
   }
 
   const connections = result?.connections ?? [];
+  const launchReadyCount = connections.filter((connection) => connection.launchReady).length;
 
   return (
     <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
@@ -385,11 +386,11 @@ function StoreConnectionsPanel({
         <div>
           <h2 className="text-lg font-semibold">Store connections</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            {connections.length} of {result?.vendor.includedStoreConnections ?? 1} included connection(s) configured
+            {launchReadyCount} launch-ready / {result?.vendor.includedStoreConnections ?? 1} included connection(s)
           </p>
         </div>
-        <Badge variant="outline" className={connections.some((connection) => connection.status === "connected") ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}>
-          {connections.some((connection) => connection.status === "connected") ? "Connected" : "Attention required"}
+        <Badge variant="outline" className={launchReadyCount > 0 ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}>
+          {launchReadyCount > 0 ? "Launch ready" : "Attention required"}
         </Badge>
       </div>
 
@@ -471,6 +472,7 @@ function StoreConnectionCard({
       <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
         <ConnectionFact label="Setup" value={formatStatus(connection.setupStatus)} />
         <ConnectionFact label="Default warehouse" value={connection.orderProcessingConfig.defaultWarehouseId ? String(connection.orderProcessingConfig.defaultWarehouseId) : "Admin controlled"} />
+        <ConnectionFact label="Launch ready" value={connection.launchReady ? "Ready" : launchReadinessDetail(connection)} />
         <ConnectionFact label="Access token" value={connection.hasAccessToken ? "Present" : "Missing"} />
         <ConnectionFact label="Refresh token" value={connection.hasRefreshToken ? "Present" : "Missing"} />
         <ConnectionFact label="Last order sync" value={formatDateTime(connection.lastOrderSyncAt)} />
@@ -593,6 +595,14 @@ function canReauthorizeStoreConnection(connection: DropshipStoreConnectionProfil
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
   return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} connection ${connection.storeConnectionId}`;
+}
+
+function launchReadinessDetail(connection: DropshipStoreConnectionProfileResponse): string {
+  if (connection.status !== "connected") return formatStatus(connection.status);
+  if (connection.setupStatus !== "ready") return `Setup ${formatStatus(connection.setupStatus)}`;
+  if (!connection.hasAccessToken) return "Access token missing";
+  if (connection.platform === "ebay" && !connection.hasRefreshToken) return "Refresh token missing";
+  return "Not ready";
 }
 
 function storeConnectionStatusTone(status: DropshipStoreConnectionProfileResponse["status"]): string {
