@@ -18,6 +18,7 @@ import {
   type SearchDropshipAuditEventsInput,
 } from "../application/dropship-ops-surface-service";
 import { DropshipError } from "../domain/errors";
+import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 
 interface VendorSettingsRow {
   id: number;
@@ -201,7 +202,13 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       shopDomain: row.shop_domain,
       hasAccessToken: row.access_token_ref !== null,
       hasRefreshToken: row.refresh_token_ref !== null,
-      launchReady: isStoreConnectionLaunchReady(row),
+      launchReady: isDropshipStoreConnectionLaunchReady({
+        platform: row.platform,
+        status: row.status,
+        setupStatus: row.setup_status,
+        hasAccessToken: row.access_token_ref !== null,
+        hasRefreshToken: row.refresh_token_ref !== null,
+      }),
       updatedAt: row.updated_at,
     }));
     const wallet = {
@@ -1016,15 +1023,17 @@ function buildDogfoodChecks(input: {
 }
 
 function isDogfoodStoreConnectionReady(row: DogfoodReadinessRow): boolean {
-  if (row.store_connection_id === null || row.store_status !== "connected" || !row.access_token_ref) {
+  if (row.store_connection_id === null || row.platform === null || row.store_status === null || row.setup_status === null) {
     return false;
   }
 
-  if (requiresDogfoodRefreshToken(row.platform) && !row.refresh_token_ref) {
-    return false;
-  }
-
-  return true;
+  return isDropshipStoreConnectionLaunchReady({
+    platform: row.platform,
+    status: row.store_status,
+    setupStatus: row.setup_status,
+    hasAccessToken: row.access_token_ref !== null,
+    hasRefreshToken: row.refresh_token_ref !== null,
+  });
 }
 
 function requiresDogfoodRefreshToken(platform: string | null): boolean {
@@ -1038,8 +1047,8 @@ function buildDogfoodStoreConnectionMessage(row: DogfoodReadinessRow): string {
 
   if (isDogfoodStoreConnectionReady(row)) {
     return requiresDogfoodRefreshToken(row.platform)
-      ? "Store connection is connected with access and refresh token references."
-      : "Store connection is connected with an access token reference.";
+      ? "Store connection is launch-ready with access and refresh token references."
+      : "Store connection is launch-ready with an access token reference.";
   }
 
   const status = row.store_status ?? "missing";
@@ -1173,16 +1182,6 @@ function mapAuditEventRow(row: AuditEventRow): DropshipAuditEventRecord {
     payload: row.payload ?? {},
     createdAt: row.created_at,
   };
-}
-
-function isStoreConnectionLaunchReady(row: StoreConnectionRow): boolean {
-  if (row.status !== "connected" || row.setup_status !== "ready" || !row.access_token_ref) {
-    return false;
-  }
-  if (row.platform === "ebay" && !row.refresh_token_ref) {
-    return false;
-  }
-  return row.platform === "ebay" || row.platform === "shopify";
 }
 
 function sumCounts(counts: DropshipOpsCount[], keys: string[]): number {

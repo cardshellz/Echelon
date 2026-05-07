@@ -24,7 +24,11 @@ import type {
   DropshipProvisionedVendorProfile,
   DropshipVendorProvisioningService,
 } from "../../application/dropship-vendor-provisioning-service";
-import { normalizeDropshipOAuthReturnTo, normalizeShopifyShopDomain } from "../../domain/store-connection";
+import {
+  isDropshipStoreConnectionLaunchReady,
+  normalizeDropshipOAuthReturnTo,
+  normalizeShopifyShopDomain,
+} from "../../domain/store-connection";
 import { DropshipError } from "../../domain/errors";
 import { PgDropshipStoreConnectionRepository } from "../../infrastructure/dropship-store-connection.repository";
 
@@ -47,6 +51,37 @@ describe("dropship store connection domain", () => {
     expect(() => normalizeDropshipOAuthReturnTo("https://attacker.example")).toThrow(DropshipError);
     expect(() => normalizeDropshipOAuthReturnTo("//attacker.example")).toThrow(DropshipError);
     expect(() => normalizeDropshipOAuthReturnTo("/\\attacker")).toThrow(DropshipError);
+  });
+
+  it("requires supported platforms, setup readiness, and platform-specific tokens for launch readiness", () => {
+    expect(isDropshipStoreConnectionLaunchReady({
+      platform: "shopify",
+      status: "connected",
+      setupStatus: "ready",
+      hasAccessToken: true,
+      hasRefreshToken: false,
+    })).toBe(true);
+    expect(isDropshipStoreConnectionLaunchReady({
+      platform: "ebay",
+      status: "connected",
+      setupStatus: "ready",
+      hasAccessToken: true,
+      hasRefreshToken: false,
+    })).toBe(false);
+    expect(isDropshipStoreConnectionLaunchReady({
+      platform: "unsupported",
+      status: "connected",
+      setupStatus: "ready",
+      hasAccessToken: true,
+      hasRefreshToken: true,
+    })).toBe(false);
+    expect(isDropshipStoreConnectionLaunchReady({
+      platform: "shopify",
+      status: "connected",
+      setupStatus: "pending",
+      hasAccessToken: true,
+      hasRefreshToken: false,
+    })).toBe(false);
   });
 });
 

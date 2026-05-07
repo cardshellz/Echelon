@@ -326,7 +326,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(result.items[0]?.readinessStatus).toBe("ready");
     expect(result.items[0]?.checks.find((check) => check.key === "store_connection")).toMatchObject({
       status: "ready",
-      message: "Store connection is connected with an access token reference.",
+      message: "Store connection is launch-ready with an access token reference.",
     });
   });
 });
