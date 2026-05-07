@@ -32,7 +32,11 @@ import {
 } from "../../application/dropship-auth-dtos";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "../../application/dropship-ports";
 import { DropshipError } from "../../domain/errors";
-import type { DropshipSensitiveAction, DropshipSessionPrincipal } from "../../domain/auth";
+import {
+  evaluateSensitiveActionProof,
+  type DropshipSensitiveAction,
+  type DropshipSessionPrincipal,
+} from "../../domain/auth";
 
 declare module "express-session" {
   interface SessionData {
@@ -360,8 +364,26 @@ export function requireDropshipSensitiveActionProof(
   clock: DropshipClock = new SystemClock(),
 ) {
   return (req: Request, res: Response, next: NextFunction): void => {
+    const principal = req.session.dropship;
+    if (!principal) {
+      res.status(401).json({
+        error: {
+          code: "DROPSHIP_AUTH_REQUIRED",
+          message: "Dropship authentication is required.",
+          context: { action },
+        },
+      });
+      return;
+    }
+
     const proof = req.session.dropshipSensitiveProofs?.[action];
-    if (!proof || new Date(proof.expiresAt).getTime() <= clock.now().getTime()) {
+    const proofEvaluation = evaluateSensitiveActionProof({
+      principal,
+      action,
+      proof,
+      now: clock.now(),
+    });
+    if (!proofEvaluation.valid && proofEvaluation.reason === "missing_or_expired") {
       res.status(403).json({
         error: {
           code: "DROPSHIP_STEP_UP_REQUIRED",
@@ -371,6 +393,22 @@ export function requireDropshipSensitiveActionProof(
       });
       return;
     }
+
+    if (!proofEvaluation.valid && proofEvaluation.reason === "method_mismatch") {
+      res.status(403).json({
+        error: {
+          code: "DROPSHIP_STEP_UP_METHOD_REQUIRED",
+          message: "Current dropship sensitive-action verification method is required.",
+          context: {
+            action,
+            requiredMethod: proofEvaluation.requiredMethod,
+            proofMethod: proofEvaluation.proofMethod,
+          },
+        },
+      });
+      return;
+    }
+
     next();
   };
 }
