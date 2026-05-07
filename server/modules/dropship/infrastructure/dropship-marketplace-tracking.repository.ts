@@ -32,6 +32,7 @@ interface TrackingPushRow {
   shipped_at: Date;
   external_fulfillment_id: string | null;
   attempt_count: number;
+  updated_at: Date;
 }
 
 interface IntakeRow {
@@ -49,6 +50,8 @@ interface LineItemRow {
   external_line_item_id: string | null;
   quantity: number;
 }
+
+const STALE_TRACKING_PUSH_PROCESSING_MINUTES = 30;
 
 export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketplaceTrackingRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -93,6 +96,33 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
       if (row.status === "succeeded") {
         await client.query("COMMIT");
         return { status: "already_succeeded", push: mapPushRow(row) };
+      }
+      if (row.status === "processing") {
+        if (!isStaleTrackingPush(row, input.now, STALE_TRACKING_PUSH_PROCESSING_MINUTES)) {
+          await client.query("COMMIT");
+          return { status: "already_processing", push: mapPushRow(row) };
+        }
+        await recordAuditEvent(client, {
+          vendorId: row.vendor_id,
+          storeConnectionId: row.store_connection_id,
+          entityType: "dropship_marketplace_tracking_push",
+          entityId: String(row.id),
+          eventType: "tracking_push_stale_recovered",
+          severity: "warning",
+          payload: {
+            intakeId: row.intake_id,
+            omsOrderId: toSafeInteger(row.oms_order_id, "oms_order_id"),
+            wmsShipmentId: toSafeOptionalInteger(row.wms_shipment_id, "wms_shipment_id"),
+            platform: row.platform,
+            externalOrderId: row.external_order_id,
+            previousStatus: row.status,
+            stalePushUpdatedAt: row.updated_at.toISOString(),
+            staleAfterMinutes: STALE_TRACKING_PUSH_PROCESSING_MINUTES,
+            attemptCount: row.attempt_count,
+            reason: "tracking push exceeded stale processing threshold before completion.",
+          },
+          occurredAt: input.now,
+        });
       }
 
       const claimed = await markPushProcessing(client, row.id, input.now);
@@ -148,7 +178,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                    external_order_id, external_order_number, source_order_id, status,
                    idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-                   wms_shipment_id, external_fulfillment_id, attempt_count`,
+                   wms_shipment_id, external_fulfillment_id, attempt_count, updated_at`,
         [
           input.pushId,
           input.result.externalFulfillmentId,
@@ -203,7 +233,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
          RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                    external_order_id, external_order_number, source_order_id, status,
                    idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-                   wms_shipment_id, external_fulfillment_id, attempt_count`,
+                   wms_shipment_id, external_fulfillment_id, attempt_count, updated_at`,
         [
           input.pushId,
           input.code,
@@ -348,7 +378,7 @@ async function insertOrLoadPush(
      RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                external_order_id, external_order_number, source_order_id, status,
                idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-               wms_shipment_id, external_fulfillment_id, attempt_count`,
+               wms_shipment_id, external_fulfillment_id, attempt_count, updated_at`,
     [
       request.intakeId,
       request.omsOrderId,
@@ -374,7 +404,7 @@ async function insertOrLoadPush(
     `SELECT id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
             external_order_id, external_order_number, source_order_id, status,
             idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-            wms_shipment_id, external_fulfillment_id, attempt_count
+            wms_shipment_id, external_fulfillment_id, attempt_count, updated_at
      FROM dropship.dropship_marketplace_tracking_pushes
      WHERE idempotency_key = $1
      FOR UPDATE`,
@@ -399,7 +429,7 @@ async function markPushProcessing(
      RETURNING id, intake_id, oms_order_id, vendor_id, store_connection_id, platform,
                external_order_id, external_order_number, source_order_id, status,
                idempotency_key, request_hash, carrier, tracking_number, shipped_at,
-               wms_shipment_id, external_fulfillment_id, attempt_count`,
+               wms_shipment_id, external_fulfillment_id, attempt_count, updated_at`,
     [pushId, now],
   );
   return requiredRow(result.rows[0], "Tracking push claim did not return a row.");
@@ -470,6 +500,14 @@ function hashRequest(request: DropshipMarketplaceTrackingRequest): string {
       lineItems: request.lineItems,
     }))
     .digest("hex");
+}
+
+function isStaleTrackingPush(
+  row: TrackingPushRow,
+  now: Date,
+  staleAfterMinutes: number,
+): boolean {
+  return row.updated_at.getTime() <= now.getTime() - staleAfterMinutes * 60_000;
 }
 
 function toSafeInteger(value: string | number, field: string): number {

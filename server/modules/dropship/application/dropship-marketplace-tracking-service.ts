@@ -30,6 +30,7 @@ export interface DropshipMarketplaceTrackingPushRecord {
 export type DropshipMarketplaceTrackingClaim =
   | { status: "not_dropship" }
   | { status: "already_succeeded"; push: DropshipMarketplaceTrackingPushRecord }
+  | { status: "already_processing"; push: DropshipMarketplaceTrackingPushRecord }
   | {
       status: "claimed";
       push: DropshipMarketplaceTrackingPushRecord;
@@ -80,6 +81,7 @@ export interface PushDropshipTrackingForOmsOrderInput {
 export type PushDropshipTrackingForOmsOrderResult =
   | { status: "not_dropship" }
   | { status: "already_succeeded"; push: DropshipMarketplaceTrackingPushRecord }
+  | { status: "already_processing"; push: DropshipMarketplaceTrackingPushRecord }
   | { status: "succeeded"; push: DropshipMarketplaceTrackingPushRecord };
 
 export class DropshipMarketplaceTrackingService {
@@ -112,6 +114,22 @@ export class DropshipMarketplaceTrackingService {
     }
     if (claim.status === "already_succeeded") {
       return { status: "already_succeeded", push: claim.push };
+    }
+    if (claim.status === "already_processing") {
+      this.deps.logger.warn({
+        code: "DROPSHIP_MARKETPLACE_TRACKING_PUSH_ALREADY_PROCESSING",
+        message: "Dropship marketplace tracking push is already processing.",
+        context: {
+          pushId: claim.push.pushId,
+          intakeId: claim.push.intakeId,
+          omsOrderId: claim.push.omsOrderId,
+          wmsShipmentId: claim.push.wmsShipmentId,
+          storeConnectionId: claim.push.storeConnectionId,
+          platform: claim.push.platform,
+          attemptCount: claim.push.attemptCount,
+        },
+      });
+      return { status: "already_processing", push: claim.push };
     }
 
     try {
