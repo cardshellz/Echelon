@@ -167,6 +167,9 @@ export interface DropshipStoreConnectionSummary {
   setupStatus: string;
   externalDisplayName: string | null;
   shopDomain: string | null;
+  hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  launchReady: boolean;
   updatedAt: string;
 }
 
