@@ -31,6 +31,7 @@ import {
   formatCents,
   formatDateTime,
   formatStatus,
+  listLaunchReadyStoreConnections,
   queryErrorMessage,
   sectionStatusTone,
   type DropshipOrderListItem,
@@ -98,6 +99,10 @@ export default function DropshipPortalDashboard() {
   });
 
   const settings = settingsQuery.data?.settings;
+  const launchReadyStoreConnections = useMemo(
+    () => listLaunchReadyStoreConnections(settings?.storeConnections ?? []),
+    [settings?.storeConnections],
+  );
   const stepUpMethod = principal?.hasPasskey ? "passkey" : "email_mfa";
   const registerPasskeyProofActive = useMemo(() => {
     const proof = sensitiveProofs.register_passkey;
@@ -155,7 +160,7 @@ export default function DropshipPortalDashboard() {
               <StatusTile
                 icon={<Store className="h-4 w-4" />}
                 label="Store connections"
-                value={settings ? `${settings.storeConnections.length} of ${settings.vendor.includedStoreConnections}` : "Loading"}
+                value={settings ? `${launchReadyStoreConnections.length} launch-ready` : "Loading"}
               />
               <StatusTile
                 icon={<CircleDollarSign className="h-4 w-4" />}
@@ -244,7 +249,7 @@ export default function DropshipPortalDashboard() {
                 <h2 className="text-lg font-semibold">Stores</h2>
                 <p className="text-sm text-zinc-500">External store connection health</p>
               </div>
-              {settings && <Badge variant="outline">{settings.storeConnections.length} configured</Badge>}
+              {settings && <Badge variant="outline">{launchReadyStoreConnections.length} launch-ready</Badge>}
             </div>
             {settingsQuery.isLoading ? (
               <div className="mt-5 space-y-3">
@@ -668,12 +673,18 @@ function StoreConnectionCard({ connection }: { connection: DropshipStoreConnecti
           <h3 className="font-semibold">{connection.externalDisplayName || formatStatus(connection.platform)}</h3>
           <p className="mt-1 text-sm text-zinc-500">{connection.shopDomain || formatStatus(connection.platform)}</p>
         </div>
-        <Badge variant="outline">{formatStatus(connection.status)}</Badge>
+        <Badge variant={connection.launchReady ? "default" : "outline"}>
+          {connection.launchReady ? "Launch ready" : formatStatus(connection.status)}
+        </Badge>
       </div>
       <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
         <div>
           <div className="text-zinc-500">Setup</div>
           <div className="mt-1 font-medium">{formatStatus(connection.setupStatus)}</div>
+        </div>
+        <div>
+          <div className="text-zinc-500">Launch</div>
+          <div className="mt-1 font-medium">{connection.launchReady ? "Ready" : "Blocked"}</div>
         </div>
         <div>
           <div className="text-zinc-500">Updated</div>

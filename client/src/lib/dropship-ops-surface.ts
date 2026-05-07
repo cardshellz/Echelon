@@ -3381,6 +3381,12 @@ export function formatStatus(value: string | null | undefined): string {
     .join(" ");
 }
 
+export function listLaunchReadyStoreConnections<T extends { launchReady: boolean }>(
+  connections: readonly T[],
+): T[] {
+  return connections.filter((connection) => connection.launchReady);
+}
+
 export function sectionStatusTone(status: DropshipSectionStatus): string {
   if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "coming_soon") return "border-zinc-200 bg-zinc-50 text-zinc-600";
