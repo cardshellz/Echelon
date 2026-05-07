@@ -17,6 +17,14 @@ const WEBHOOK_INBOX_SERVICE_SRC = readFileSync(
   resolve(__dirname, "../../webhook-inbox.service.ts"),
   "utf-8",
 );
+const OMS_WEBHOOKS_SRC = readFileSync(
+  resolve(__dirname, "../../oms-webhooks.ts"),
+  "utf-8",
+);
+const OMS_SERVICE_SRC = readFileSync(
+  resolve(__dirname, "../../oms.service.ts"),
+  "utf-8",
+);
 
 function req(headers: Record<string, string>): Request {
   return { headers } as unknown as Request;
@@ -234,6 +242,17 @@ describe("webhook-inbox.service", () => {
   it("links replay retry rows back to the source inbox row", () => {
     expect(WEBHOOK_INBOX_SERVICE_SRC).toContain("source_inbox_id");
     expect(WEBHOOK_INBOX_SERVICE_SRC).toContain("${inboxId}");
+  });
+
+  it("does not target the partial OMS order-line unique index in webhook inserts", () => {
+    expect(OMS_WEBHOOKS_SRC).toContain(".onConflictDoNothing()");
+    expect(OMS_WEBHOOKS_SRC).not.toContain(
+      "onConflictDoNothing({ target: [omsOrderLines.orderId, omsOrderLines.externalLineItemId] })",
+    );
+  });
+
+  it("keeps OMS order-line ingestion idempotent for duplicate webhook replays", () => {
+    expect(OMS_SERVICE_SRC).toContain("} satisfies InsertOmsOrderLine).onConflictDoNothing()");
   });
 
   it("rejects succeeded inbox rows so operators do not replay completed events", async () => {
