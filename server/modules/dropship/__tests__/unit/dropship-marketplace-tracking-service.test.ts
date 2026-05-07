@@ -82,6 +82,39 @@ describe("DropshipMarketplaceTrackingService", () => {
     expect(repository.failInput).toBeNull();
   });
 
+  it("does not push tracking again while the same tracking push is processing", async () => {
+    const repository = new FakeTrackingRepository({
+      status: "already_processing",
+      push: makePush({ status: "processing", attemptCount: 1 }),
+    });
+    const provider = new FakeTrackingProvider();
+    const notificationSender = new FakeNotificationSender();
+    const logs: DropshipLogEvent[] = [];
+    const service = newService({
+      repository,
+      provider,
+      notificationSender,
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.pushForOmsOrder(makeInput());
+
+    expect(result.status).toBe("already_processing");
+    expect(provider.requests).toHaveLength(0);
+    expect(notificationSender.sent).toHaveLength(0);
+    expect(repository.completeInput).toBeNull();
+    expect(repository.failInput).toBeNull();
+    expect(logs).toContainEqual(expect.objectContaining({
+      code: "DROPSHIP_MARKETPLACE_TRACKING_PUSH_ALREADY_PROCESSING",
+      context: expect.objectContaining({
+        pushId: 40,
+        omsOrderId: 500,
+        wmsShipmentId: 55,
+        attemptCount: 1,
+      }),
+    }));
+  });
+
   it("records failure notification context before rethrowing marketplace errors", async () => {
     const providerError = new DropshipError(
       "DROPSHIP_EBAY_TRACKING_LINE_ITEM_IDS_REQUIRED",
@@ -181,9 +214,12 @@ class FakeTrackingRepository implements DropshipMarketplaceTrackingRepository {
 }
 
 class FakeTrackingProvider implements DropshipMarketplaceTrackingProvider {
+  requests: DropshipMarketplaceTrackingRequest[] = [];
+
   constructor(private readonly error: Error | null = null) {}
 
-  async pushTracking(): Promise<DropshipMarketplaceTrackingResult> {
+  async pushTracking(request: DropshipMarketplaceTrackingRequest): Promise<DropshipMarketplaceTrackingResult> {
+    this.requests.push(request);
     if (this.error) {
       throw this.error;
     }
