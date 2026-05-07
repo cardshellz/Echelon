@@ -24,7 +24,12 @@ import { Button } from "@/components/ui/button";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
+import {
+  dropshipPortalPath,
+  isDropshipSensitiveProofActive,
+  resolveDropshipSensitiveActionStepUp,
+  useDropshipAuth,
+} from "@/lib/dropship-auth";
 import {
   buildQueryUrl,
   fetchJson,
@@ -70,7 +75,6 @@ export default function DropshipPortalDashboard() {
     verifyPasskeyStepUp,
   } = useDropshipAuth();
   const [verificationCode, setVerificationCode] = useState("");
-  const [emailProofReady, setEmailProofReady] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -103,11 +107,14 @@ export default function DropshipPortalDashboard() {
     () => listLaunchReadyStoreConnections(settings?.storeConnections ?? []),
     [settings?.storeConnections],
   );
-  const stepUpMethod = principal?.hasPasskey ? "passkey" : "email_mfa";
+  const stepUpMethod = resolveDropshipSensitiveActionStepUp(principal, "register_passkey");
   const registerPasskeyProofActive = useMemo(() => {
-    const proof = sensitiveProofs.register_passkey;
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
-  }, [sensitiveProofs.register_passkey]);
+    return isDropshipSensitiveProofActive({
+      principal,
+      action: "register_passkey",
+      proof: sensitiveProofs.register_passkey,
+    });
+  }, [principal, sensitiveProofs.register_passkey]);
   const statusLabel = useMemo(() => {
     if (!principal) return "Not signed in";
     if (settings?.vendor.entitlementStatus) return formatStatus(settings.vendor.entitlementStatus);
@@ -181,7 +188,6 @@ export default function DropshipPortalDashboard() {
           </div>
 
           <SecurityPanel
-            emailProofReady={emailProofReady}
             error={error}
             message={message}
             passkeysSupported={passkeysSupported}
@@ -193,7 +199,6 @@ export default function DropshipPortalDashboard() {
             onVerificationCodeChange={setVerificationCode}
             run={run}
             registerPasskey={registerPasskey}
-            setEmailProofReady={setEmailProofReady}
             setMessage={setMessage}
             startEmailStepUp={startEmailStepUp}
             verifyEmailStepUp={verifyEmailStepUp}
@@ -435,7 +440,6 @@ function RecentWalletLedgerRow({ entry }: { entry: DropshipWalletLedgerEntry }) 
 }
 
 function SecurityPanel({
-  emailProofReady,
   error,
   hasPasskey,
   message,
@@ -444,7 +448,6 @@ function SecurityPanel({
   registerPasskey,
   registerPasskeyProofActive,
   run,
-  setEmailProofReady,
   setMessage,
   startEmailStepUp,
   stepUpMethod,
@@ -453,7 +456,6 @@ function SecurityPanel({
   verifyPasskeyStepUp,
   onVerificationCodeChange,
 }: {
-  emailProofReady: boolean;
   error: string;
   hasPasskey: boolean;
   message: string;
@@ -462,7 +464,6 @@ function SecurityPanel({
   registerPasskey: () => Promise<unknown>;
   registerPasskeyProofActive: boolean;
   run: (action: PendingAction, task: () => Promise<void>) => Promise<void>;
-  setEmailProofReady: (value: boolean) => void;
   setMessage: (value: string) => void;
   startEmailStepUp: (action: "register_passkey") => Promise<void>;
   stepUpMethod: "passkey" | "email_mfa";
@@ -471,7 +472,7 @@ function SecurityPanel({
   verifyPasskeyStepUp: (action: "register_passkey") => Promise<unknown>;
   onVerificationCodeChange: (value: string) => void;
 }) {
-  const proofReady = emailProofReady || registerPasskeyProofActive;
+  const proofReady = registerPasskeyProofActive;
 
   return (
     <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
@@ -545,7 +546,6 @@ function SecurityPanel({
                     action: "register_passkey",
                     verificationCode,
                   });
-                  setEmailProofReady(true);
                   onVerificationCodeChange("");
                   setMessage("Verification confirmed.");
                 })}
@@ -562,7 +562,6 @@ function SecurityPanel({
             className="h-10 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
             onClick={() => run("register-passkey", async () => {
               await registerPasskey();
-              setEmailProofReady(false);
               onVerificationCodeChange("");
               setMessage("Passkey added.");
             })}
@@ -592,7 +591,6 @@ function SecurityPanel({
             className="h-10 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
             onClick={() => run("register-passkey", async () => {
               await registerPasskey();
-              setEmailProofReady(false);
               onVerificationCodeChange("");
               setMessage("Passkey added.");
             })}

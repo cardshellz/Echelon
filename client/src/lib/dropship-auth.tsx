@@ -40,6 +40,35 @@ export interface DropshipSensitiveProof {
   expiresAt: string;
 }
 
+export type DropshipStepUpMethod = DropshipSensitiveProof["method"];
+
+export function resolveDropshipSensitiveActionStepUp(
+  principal: Pick<DropshipSessionPrincipal, "hasPasskey"> | null | undefined,
+  action: DropshipSensitiveAction,
+): DropshipStepUpMethod {
+  void action;
+  return principal?.hasPasskey ? "passkey" : "email_mfa";
+}
+
+export function isDropshipSensitiveProofActive(input: {
+  principal: Pick<DropshipSessionPrincipal, "hasPasskey"> | null | undefined;
+  action: DropshipSensitiveAction;
+  proof: DropshipSensitiveProof | null | undefined;
+  now?: number | Date;
+}): boolean {
+  if (!input.proof) return false;
+
+  const expiresAt = new Date(input.proof.expiresAt).getTime();
+  const now = input.now instanceof Date
+    ? input.now.getTime()
+    : input.now ?? Date.now();
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+    return false;
+  }
+
+  return input.proof.method === resolveDropshipSensitiveActionStepUp(input.principal, input.action);
+}
+
 interface DropshipAuthContextValue {
   principal: DropshipSessionPrincipal | null;
   sensitiveProofs: Partial<Record<DropshipSensitiveAction, DropshipSensitiveProof>>;

@@ -24,7 +24,12 @@ import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { dropshipPortalPath, useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
+import {
+  dropshipPortalPath,
+  isDropshipSensitiveProofActive,
+  useDropshipAuth,
+  type DropshipSensitiveAction,
+} from "@/lib/dropship-auth";
 import {
   buildStoreConnectionOAuthStartInput,
   fetchJson,
@@ -197,9 +202,12 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const connectProofActive = useMemo(() => {
-    const proof = sensitiveProofs.connect_store;
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
-  }, [sensitiveProofs.connect_store]);
+    return isDropshipSensitiveProofActive({
+      principal,
+      action: "connect_store",
+      proof: sensitiveProofs.connect_store,
+    });
+  }, [principal, sensitiveProofs.connect_store]);
   const canConnectStore = onboarding.storeConnections.canConnectStore;
   const shopifyDomainRequired = platform === "shopify" && !shopDomain.trim();
   const connectDisabled = !canConnectStore || shopifyDomainRequired || pendingAction !== null || (!principal?.hasPasskey && emailCodeSent && verificationCode.length !== 6);
@@ -524,9 +532,12 @@ function ActivationPanel({
     && onboarding.entitlement.status === "active"
     && requiredStepsComplete;
   const activateProofActive = useMemo(() => {
-    const proof = sensitiveProofs.activate_account;
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
-  }, [sensitiveProofs.activate_account]);
+    return isDropshipSensitiveProofActive({
+      principal,
+      action: activationAction,
+      proof: sensitiveProofs.activate_account,
+    });
+  }, [activationAction, principal, sensitiveProofs.activate_account]);
   const activateDisabled = !activationReady
     || pendingAction !== null
     || (!principal?.hasPasskey && emailCodeSent && verificationCode.length !== 6);

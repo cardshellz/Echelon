@@ -37,7 +37,12 @@ import {
   type DropshipUsdcBaseFundingMethodResponse,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
-import { dropshipPortalPath, useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
+import {
+  dropshipPortalPath,
+  isDropshipSensitiveProofActive,
+  useDropshipAuth,
+  type DropshipSensitiveAction,
+} from "@/lib/dropship-auth";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | "stripe-card" | "stripe-ach" | "usdc-base" | "fund-wallet" | null;
@@ -76,8 +81,11 @@ export default function DropshipPortalWallet() {
   const activeFundingMethods = wallet?.fundingMethods.filter((method) => method.status === "active") ?? [];
   const stripeFundingMethods = activeFundingMethods.filter(isStripeFundingMethod);
   const hasActiveProof = (action: DropshipSensitiveAction) => {
-    const proof = sensitiveProofs[action];
-    return !!proof && new Date(proof.expiresAt).getTime() > Date.now();
+    return isDropshipSensitiveProofActive({
+      principal,
+      action,
+      proof: sensitiveProofs[action],
+    });
   };
 
   useEffect(() => {
