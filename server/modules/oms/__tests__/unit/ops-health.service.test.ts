@@ -18,6 +18,12 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     );
   });
 
+  it("only reports missing shipments and ShipStation pushes for shippable work", () => {
+    expect(OPS_HEALTH_SRC).toMatch(/COALESCE\(oi\.requires_shipping, 1\) <> 0/);
+    expect(OPS_HEALTH_SRC).toMatch(/COALESCE\(oi\.quantity, 0\) > COALESCE\(oi\.fulfilled_quantity, 0\)/);
+    expect(OPS_HEALTH_SRC).toMatch(/JOIN wms\.order_items oi ON oi\.id = osi\.order_item_id/);
+  });
+
   it("surfaces on-hold shipments as explicit warehouse review warnings", () => {
     expect(OPS_HEALTH_SRC).toMatch(
       /code: "SHIPMENT_ON_HOLD"[\s\S]*severity: "warning"/,

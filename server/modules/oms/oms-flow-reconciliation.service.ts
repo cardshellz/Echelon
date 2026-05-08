@@ -196,6 +196,13 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         FROM wms.orders wo
         WHERE wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
           AND wo.created_at > NOW() - INTERVAL '14 days'
+          AND EXISTS (
+            SELECT 1
+            FROM wms.order_items oi
+            WHERE oi.order_id = wo.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          )
           AND NOT EXISTS (
             SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
           )
@@ -206,6 +213,13 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         FROM wms.orders wo
         WHERE wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
           AND wo.created_at > NOW() - INTERVAL '14 days'
+          AND EXISTS (
+            SELECT 1
+            FROM wms.order_items oi
+            WHERE oi.order_id = wo.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          )
           AND NOT EXISTS (
             SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
           )
@@ -330,6 +344,14 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.shipstation_order_id IS NULL
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+          AND EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
       `,
       sql`
         SELECT os.id AS shipment_id, os.order_id AS wms_order_id,
@@ -341,6 +363,14 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.shipstation_order_id IS NULL
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+          AND EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
         ORDER BY os.created_at ASC
         LIMIT 10
       `,
@@ -651,6 +681,13 @@ export async function remediateOmsFlowIssue(
       FROM wms.orders wo
       WHERE wo.id = ${wmsOrderId}
         AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+        AND EXISTS (
+          SELECT 1
+          FROM wms.order_items oi
+          WHERE oi.order_id = wo.id
+            AND COALESCE(oi.requires_shipping, 1) <> 0
+            AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+        )
         AND NOT EXISTS (
           SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
         )
@@ -712,6 +749,14 @@ export async function remediateOmsFlowIssue(
         AND os.shipstation_order_id IS NULL
         AND os.created_at < NOW() - INTERVAL '15 minutes'
         AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+        AND EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.order_items oi ON oi.id = osi.order_item_id
+          WHERE osi.shipment_id = os.id
+            AND COALESCE(oi.requires_shipping, 1) <> 0
+            AND COALESCE(osi.qty, 0) > 0
+        )
       LIMIT 1
     `);
 
