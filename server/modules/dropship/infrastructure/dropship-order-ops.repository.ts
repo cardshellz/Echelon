@@ -6,6 +6,7 @@ import type { DropshipOrderIntakeStatus, NormalizedDropshipOrderPayload } from "
 import type {
   DropshipOrderOpsActionResult,
   DropshipOrderOpsAuditEventDetail,
+  DropshipOrderOpsCancellationActionResult,
   DropshipOrderOpsEconomicsSnapshot,
   DropshipOrderOpsIntakeDetail,
   DropshipOrderOpsIntakeLine,
@@ -138,6 +139,11 @@ interface ActionIntakeRow {
 
 const RETRYABLE_OPS_STATUSES = new Set<DropshipOrderIntakeStatus>(["failed", "exception"]);
 const DEFAULT_ORDER_OPS_STALE_PROCESSING_MINUTES = 30;
+const MARKETPLACE_CANCELLATION_FAILED_STATUS = "marketplace_cancellation_failed";
+const MARKETPLACE_CANCELLATION_RETRYING_STATUS = "marketplace_cancellation_retrying";
+const MARKETPLACE_CANCELLATION_FAILURE_REASON_PREFIX = "Marketplace cancellation failed:";
+const PAYMENT_HOLD_EXPIRED_REASON = "Payment hold expired before wallet funds were available.";
+const ORDER_INTAKE_REJECTED_CANCELLATION_REASON = "Order intake was rejected before marketplace cancellation completed.";
 const EXCEPTION_ACTIONABLE_STATUSES = new Set<DropshipOrderIntakeStatus>([
   "received",
   "retrying",
@@ -316,6 +322,93 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
       });
       await client.query("COMMIT");
       return mapActionResult(row, existing.status, false);
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async retryMarketplaceCancellation(
+    input: Parameters<DropshipOrderOpsRepository["retryMarketplaceCancellation"]>[0],
+  ): Promise<DropshipOrderOpsCancellationActionResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await loadActionIntakeForUpdate(client, input.intakeId);
+      if (!existing) {
+        throw new DropshipError(
+          "DROPSHIP_ORDER_OPS_INTAKE_NOT_FOUND",
+          "Dropship order intake was not found.",
+          { intakeId: input.intakeId },
+        );
+      }
+
+      if (existing.cancellation_status === MARKETPLACE_CANCELLATION_RETRYING_STATUS) {
+        await client.query("COMMIT");
+        return mapCancellationActionResult(
+          existing,
+          existing.status,
+          existing.cancellation_status,
+          true,
+        );
+      }
+
+      if (existing.cancellation_status !== MARKETPLACE_CANCELLATION_FAILED_STATUS) {
+        throw new DropshipError(
+          "DROPSHIP_ORDER_OPS_CANCELLATION_STATUS_NOT_RETRYABLE",
+          "Dropship marketplace cancellation status cannot be retried by ops.",
+          {
+            intakeId: input.intakeId,
+            status: existing.status,
+            cancellationStatus: existing.cancellation_status,
+          },
+        );
+      }
+
+      const failureAudit = await loadLatestCancellationFailureAudit(client, input.intakeId);
+      const retryRejectionReason = rejectionReasonForCancellationRetry(existing, failureAudit);
+      const updated = await client.query<ActionIntakeRow>(
+        `UPDATE dropship.dropship_order_intake
+         SET status = 'cancelled',
+             cancellation_status = $2,
+             rejection_reason = $3,
+             updated_at = $4
+         WHERE id = $1
+         RETURNING id, vendor_id, store_connection_id, external_order_id, status,
+                   payment_hold_expires_at, rejection_reason, cancellation_status, updated_at`,
+        [
+          input.intakeId,
+          MARKETPLACE_CANCELLATION_RETRYING_STATUS,
+          retryRejectionReason,
+          input.now,
+        ],
+      );
+      const row = requiredRow(updated.rows[0], "Dropship marketplace cancellation retry did not return a row.");
+      await recordOpsAuditEvent(client, {
+        row,
+        eventType: "order_marketplace_cancellation_retry_requested",
+        actor: input.actor,
+        severity: "warning",
+        payload: {
+          idempotencyKey: input.idempotencyKey,
+          previousStatus: existing.status,
+          previousCancellationStatus: existing.cancellation_status,
+          previousRejectionReason: existing.rejection_reason,
+          restoredRejectionReason: retryRejectionReason,
+          latestFailureAudit: failureAudit,
+          reason: input.reason ?? null,
+        },
+        occurredAt: input.now,
+      });
+      await client.query("COMMIT");
+      return mapCancellationActionResult(
+        row,
+        existing.status,
+        existing.cancellation_status,
+        false,
+      );
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
@@ -869,6 +962,59 @@ function mapActionResult(
     idempotentReplay,
     updatedAt: row.updated_at,
   };
+}
+
+function mapCancellationActionResult(
+  row: ActionIntakeRow,
+  previousStatus: DropshipOrderIntakeStatus,
+  previousCancellationStatus: string | null,
+  idempotentReplay: boolean,
+): DropshipOrderOpsCancellationActionResult {
+  return {
+    ...mapActionResult(row, previousStatus, idempotentReplay),
+    previousCancellationStatus,
+    cancellationStatus: row.cancellation_status,
+  };
+}
+
+async function loadLatestCancellationFailureAudit(
+  client: PoolClient,
+  intakeId: number,
+): Promise<Record<string, unknown> | null> {
+  const result = await client.query<{ payload: Record<string, unknown> | null }>(
+    `SELECT payload
+     FROM dropship.dropship_audit_events
+     WHERE entity_type = 'dropship_order_intake'
+       AND entity_id = $1
+       AND event_type = 'order_marketplace_cancellation_failed'
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [String(intakeId)],
+  );
+  return result.rows[0]?.payload ?? null;
+}
+
+function rejectionReasonForCancellationRetry(
+  existing: Pick<ActionIntakeRow, "rejection_reason">,
+  latestFailureAudit: Record<string, unknown> | null,
+): string | null {
+  if (
+    existing.rejection_reason
+    && !existing.rejection_reason.startsWith(MARKETPLACE_CANCELLATION_FAILURE_REASON_PREFIX)
+  ) {
+    return existing.rejection_reason;
+  }
+
+  const previousCancellationStatus = typeof latestFailureAudit?.previousCancellationStatus === "string"
+    ? latestFailureAudit.previousCancellationStatus
+    : null;
+  if (previousCancellationStatus === "payment_hold_expired") {
+    return PAYMENT_HOLD_EXPIRED_REASON;
+  }
+  if (previousCancellationStatus === "order_intake_rejected") {
+    return ORDER_INTAKE_REJECTED_CANCELLATION_REASON;
+  }
+  return existing.rejection_reason;
 }
 
 function orderOpsStaleProcessingMinutes(): number {

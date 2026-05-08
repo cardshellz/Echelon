@@ -5,6 +5,7 @@ import {
   DropshipOrderOpsService,
   type DropshipLogEvent,
   type DropshipOrderOpsActionResult,
+  type DropshipOrderOpsCancellationActionResult,
   type DropshipOrderOpsIntakeListResult,
   type DropshipOrderOpsProcessor,
   type DropshipOrderOpsRepository,
@@ -169,6 +170,46 @@ describe("DropshipOrderOpsService", () => {
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_OPS_EXCEPTION_MARKED" });
   });
 
+  it("requests marketplace cancellation retry without retrying the whole intake", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderOpsService({
+      repository,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.retryMarketplaceCancellation({
+      intakeId: 9,
+      reason: "cancel reason config repaired",
+      idempotencyKey: "retry-cancel-9",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result).toMatchObject({
+      intakeId: 9,
+      previousStatus: "exception",
+      status: "cancelled",
+      previousCancellationStatus: "marketplace_cancellation_failed",
+      cancellationStatus: "marketplace_cancellation_retrying",
+    });
+    expect(repository.lastCancellationRetryInput).toMatchObject({
+      intakeId: 9,
+      reason: "cancel reason config repaired",
+      idempotencyKey: "retry-cancel-9",
+      now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_ORDER_OPS_CANCELLATION_RETRY_REQUESTED",
+      context: {
+        intakeId: 9,
+        previousCancellationStatus: "marketplace_cancellation_failed",
+        cancellationStatus: "marketplace_cancellation_retrying",
+        idempotencyKey: "retry-cancel-9",
+      },
+    });
+  });
+
   it("processes an intake immediately through the configured processor", async () => {
     const repository = new FakeOrderOpsRepository();
     const processor = new FakeOrderOpsProcessor();
@@ -243,6 +284,7 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
   lastListInput: Parameters<DropshipOrderOpsRepository["listIntakes"]>[0] | null = null;
   lastDetailInput: Parameters<DropshipOrderOpsRepository["getIntakeDetail"]>[0] | null = null;
   lastRetryInput: Parameters<DropshipOrderOpsRepository["retryIntake"]>[0] | null = null;
+  lastCancellationRetryInput: Parameters<DropshipOrderOpsRepository["retryMarketplaceCancellation"]>[0] | null = null;
   lastExceptionInput: Parameters<DropshipOrderOpsRepository["markException"]>[0] | null = null;
 
   async listIntakes(
@@ -333,6 +375,21 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
       intakeId: input.intakeId,
       previousStatus: "failed",
       status: "exception",
+      idempotentReplay: false,
+      updatedAt: input.now,
+    };
+  }
+
+  async retryMarketplaceCancellation(
+    input: Parameters<DropshipOrderOpsRepository["retryMarketplaceCancellation"]>[0],
+  ): Promise<DropshipOrderOpsCancellationActionResult> {
+    this.lastCancellationRetryInput = input;
+    return {
+      intakeId: input.intakeId,
+      previousStatus: "exception",
+      status: "cancelled",
+      previousCancellationStatus: "marketplace_cancellation_failed",
+      cancellationStatus: "marketplace_cancellation_retrying",
       idempotentReplay: false,
       updatedAt: input.now,
     };

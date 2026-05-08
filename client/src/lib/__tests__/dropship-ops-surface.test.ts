@@ -57,6 +57,7 @@ import {
   listLaunchReadyStoreConnections,
   listingPushJobRetryEligibility,
   notificationRetryEligibility,
+  orderCancellationRetryEligibility,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   orderIntakeRetryEligibility,
@@ -825,6 +826,21 @@ describe("dropship ops surface client helpers", () => {
     expect(notificationRetryEligibility({ channel: "in_app", status: "failed" })).toEqual({
       canRetry: false,
       reason: "channel_not_retryable",
+    });
+  });
+
+  it("only allows failed marketplace cancellation retries", () => {
+    expect(orderCancellationRetryEligibility({ cancellationStatus: "marketplace_cancellation_failed" })).toEqual({
+      canRetry: true,
+      reason: "failed_cancellation",
+    });
+    expect(orderCancellationRetryEligibility({ cancellationStatus: "marketplace_cancellation_retrying" })).toEqual({
+      canRetry: false,
+      reason: "already_retrying",
+    });
+    expect(orderCancellationRetryEligibility({ cancellationStatus: null })).toEqual({
+      canRetry: false,
+      reason: "status_not_retryable",
     });
   });
 

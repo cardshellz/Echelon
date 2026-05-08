@@ -85,6 +85,7 @@ import {
   formatStatus,
   listingPushJobRetryEligibility,
   notificationRetryEligibility,
+  orderCancellationRetryEligibility,
   postJson,
   putJson,
   queryErrorMessage,
@@ -103,6 +104,7 @@ import {
   type DropshipAdminNotificationOpsListItem,
   type DropshipAdminNotificationOpsListResponse,
   type DropshipAdminNotificationRetryResponse,
+  type DropshipAdminOrderOpsCancellationRetryResponse,
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
@@ -2178,7 +2180,7 @@ function OrderIntakeOpsTab() {
   const [actionReason, setActionReason] = useState("");
   const [pendingAction, setPendingAction] = useState<{
     intakeId: number;
-    action: "retry" | "exception" | "process";
+    action: "retry" | "exception" | "process" | "retry-cancellation";
   } | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -2201,7 +2203,7 @@ function OrderIntakeOpsTab() {
 
   async function runOrderAction(
     intake: DropshipAdminOrderOpsIntakeListItem,
-    action: "retry" | "exception" | "process",
+    action: "retry" | "exception" | "process" | "retry-cancellation",
   ) {
     setPendingAction({ intakeId: intake.intakeId, action });
     setError("");
@@ -2212,7 +2214,11 @@ function OrderIntakeOpsTab() {
         reason: actionReason,
         requireReason: action === "exception",
       });
-      const response = await postJson<DropshipAdminOrderOpsActionResponse | DropshipAdminOrderOpsProcessResponse>(
+      const response = await postJson<
+        DropshipAdminOrderOpsActionResponse
+        | DropshipAdminOrderOpsCancellationRetryResponse
+        | DropshipAdminOrderOpsProcessResponse
+      >(
         `/api/dropship/admin/order-intake/${intake.intakeId}/${action}`,
         input,
       );
@@ -5154,8 +5160,11 @@ function OrderIntakeOpsTable({
 }: {
   isLoading: boolean;
   items: DropshipAdminOrderOpsIntakeListItem[];
-  onRunAction: (intake: DropshipAdminOrderOpsIntakeListItem, action: "retry" | "exception" | "process") => void;
-  pendingAction: { intakeId: number; action: "retry" | "exception" | "process" } | null;
+  onRunAction: (
+    intake: DropshipAdminOrderOpsIntakeListItem,
+    action: "retry" | "exception" | "process" | "retry-cancellation",
+  ) => void;
+  pendingAction: { intakeId: number; action: "retry" | "exception" | "process" | "retry-cancellation" } | null;
   retryEligibilityNow: Date;
   total: number;
 }) {
@@ -5201,6 +5210,7 @@ function OrderIntakeOpsTable({
         <TableBody>
           {items.map((intake) => {
             const retryEligibility = orderIntakeRetryEligibility(intake, retryEligibilityNow);
+            const cancellationRetryEligibility = orderCancellationRetryEligibility(intake);
             const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
             return (
               <TableRow key={intake.intakeId}>
@@ -5228,6 +5238,11 @@ function OrderIntakeOpsTable({
                   )}
                   {intake.paymentHoldExpiresAt && (
                     <div className="mt-1 text-xs text-muted-foreground">Hold expires {formatDateTime(intake.paymentHoldExpiresAt)}</div>
+                  )}
+                  {intake.cancellationStatus && (
+                    <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">
+                      Cancel {formatStatus(intake.cancellationStatus)}
+                    </div>
                   )}
                 </TableCell>
                 <TableCell>{orderShipToLabel(intake)}</TableCell>
@@ -5265,6 +5280,17 @@ function OrderIntakeOpsTable({
                     >
                       <RefreshCw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
                       {retryLabel}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2"
+                      disabled={pendingAction !== null || !cancellationRetryEligibility.canRetry}
+                      onClick={() => onRunAction(intake, "retry-cancellation")}
+                    >
+                      <RotateCcw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry-cancellation" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      Retry cancel
                     </Button>
                     <Button
                       type="button"
@@ -5645,12 +5671,18 @@ function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
 }
 
 function orderActionMessage(
-  response: DropshipAdminOrderOpsActionResponse | DropshipAdminOrderOpsProcessResponse,
-  action: "retry" | "exception" | "process",
+  response:
+    | DropshipAdminOrderOpsActionResponse
+    | DropshipAdminOrderOpsCancellationRetryResponse
+    | DropshipAdminOrderOpsProcessResponse,
+  action: "retry" | "exception" | "process" | "retry-cancellation",
 ): string {
   if (action === "process" && "outcome" in response) {
     const suffix = response.failureCode ? ` (${formatStatus(response.failureCode)})` : "";
     return `Order intake ${response.intakeId} processing returned ${formatStatus(response.outcome)}${suffix}.`;
+  }
+  if (action === "retry-cancellation" && "cancellationStatus" in response) {
+    return `Order intake ${response.intakeId} marketplace cancellation moved from ${formatStatus(response.previousCancellationStatus || "none")} to ${formatStatus(response.cancellationStatus || "none")}.`;
   }
   if ("previousStatus" in response) {
     return `Order intake ${response.intakeId} moved from ${formatStatus(response.previousStatus)} to ${formatStatus(response.status)}.`;
