@@ -1,8 +1,12 @@
-import type { Express, Response } from "express";
+import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipListingPushOpsService } from "../../application/dropship-listing-push-ops-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingPushOpsServiceFromEnv } from "../../infrastructure/dropship-listing-push-ops.factory";
+
+type SessionUser = {
+  id: string;
+};
 
 export function registerDropshipAdminListingPushOpsRoutes(
   app: Express,
@@ -21,6 +25,24 @@ export function registerDropshipAdminListingPushOpsRoutes(
           search: parseOptionalStringQuery(req.query.search),
           page: parseNumberQuery(req.query.page, 1),
           limit: parseNumberQuery(req.query.limit, 50),
+        });
+        return res.json(result);
+      } catch (error) {
+        return sendDropshipListingPushOpsError(res, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/dropship/admin/listing-push-jobs/:jobId/retry",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.retryJob({
+          jobId: parsePositiveInteger(req.params.jobId, "jobId"),
+          reason: parseOptionalBodyString(req.body?.reason),
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
         });
         return res.json(result);
       } catch (error) {
@@ -53,11 +75,43 @@ function sendDropshipListingPushOpsError(res: Response, error: unknown): Respons
 function statusForDropshipListingPushOpsError(code: string): number {
   switch (code) {
     case "DROPSHIP_LISTING_PUSH_OPS_LIST_INVALID_INPUT":
+    case "DROPSHIP_LISTING_PUSH_OPS_RETRY_INVALID_INPUT":
+    case "DROPSHIP_LISTING_PUSH_OPS_INVALID_REQUEST":
     case "DROPSHIP_LISTING_PUSH_OPS_INTEGER_RANGE_ERROR":
       return 400;
+    case "DROPSHIP_LISTING_PUSH_OPS_JOB_NOT_FOUND":
+      return 404;
+    case "DROPSHIP_LISTING_PUSH_OPS_STATUS_NOT_RETRYABLE":
+    case "DROPSHIP_LISTING_PUSH_OPS_JOB_NOT_RETRYABLE":
+      return 409;
     default:
       return 500;
   }
+}
+
+function resolveIdempotencyKey(req: Request): string {
+  const header = req.header("Idempotency-Key") ?? req.header("X-Idempotency-Key");
+  const bodyKey = typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey : null;
+  const key = bodyKey ?? header;
+  if (!key) {
+    throw new DropshipError(
+      "DROPSHIP_LISTING_PUSH_OPS_INVALID_REQUEST",
+      "Idempotency-Key header or idempotencyKey body field is required.",
+    );
+  }
+  return key;
+}
+
+function adminActor(req: Request): { actorType: "admin"; actorId?: string } {
+  return {
+    actorType: "admin",
+    actorId: sessionUser(req)?.id,
+  };
+}
+
+function sessionUser(req: Request): SessionUser | null {
+  const candidate = req.session.user as SessionUser | undefined;
+  return candidate?.id ? candidate : null;
 }
 
 function parseStatusesQuery(value: unknown): string[] | undefined {
@@ -101,4 +155,20 @@ function parseOptionalPositiveIntegerQuery(value: unknown): number | undefined {
 
 function parseNumberQuery(value: unknown, fallback: number): number {
   return parseOptionalPositiveIntegerQuery(value) ?? fallback;
+}
+
+function parseOptionalBodyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function parsePositiveInteger(value: string | undefined, key: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_LISTING_PUSH_OPS_INVALID_REQUEST",
+      "Route parameter must be a positive integer.",
+      { key, value },
+    );
+  }
+  return parsed;
 }

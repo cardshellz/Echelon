@@ -15,6 +15,7 @@ import {
   buildAdminOmsChannelConfigUrl,
   buildAdminOmsChannelConfigureInput,
   buildAdminListingPushJobsUrl,
+  buildAdminListingPushJobRetryInput,
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
@@ -53,6 +54,7 @@ import {
   fetchJson,
   listingPreviewPushableCount,
   listLaunchReadyStoreConnections,
+  listingPushJobRetryEligibility,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   orderIntakeRetryEligibility,
@@ -246,6 +248,72 @@ describe("dropship ops surface client helpers", () => {
       status: "all",
       platform: "shopify",
     })).toBe("/api/dropship/admin/listing-push-jobs?statuses=queued%2Cprocessing%2Ccompleted%2Cfailed%2Ccancelled&platform=shopify&page=1&limit=50");
+  });
+
+  it("builds admin listing push job retry bodies with optional audit reasons", () => {
+    expect(buildAdminListingPushJobRetryInput({
+      idempotencyKey: "listing-job-retry-1",
+      reason: " marketplace outage resolved ",
+    })).toEqual({
+      idempotencyKey: "listing-job-retry-1",
+      reason: "marketplace outage resolved",
+    });
+    expect(buildAdminListingPushJobRetryInput({
+      idempotencyKey: "listing-job-retry-2",
+      reason: " ",
+    })).toEqual({
+      idempotencyKey: "listing-job-retry-2",
+    });
+    expect(() => buildAdminListingPushJobRetryInput({
+      idempotencyKey: "short",
+      reason: "",
+    })).toThrow();
+  });
+
+  it("identifies retryable failed and stale processing listing push jobs", () => {
+    const now = new Date("2026-05-03T12:00:00.000Z");
+    const itemSummary = {
+      total: 3,
+      queued: 0,
+      processing: 0,
+      completed: 1,
+      failed: 2,
+      blocked: 0,
+      cancelled: 0,
+    };
+
+    expect(listingPushJobRetryEligibility({
+      status: "failed",
+      itemSummary,
+      updatedAt: "2026-05-03T11:59:00.000Z",
+    }, now)).toEqual({
+      canRetry: true,
+      reason: "failed_items_present",
+    });
+    expect(listingPushJobRetryEligibility({
+      status: "failed",
+      itemSummary: { ...itemSummary, failed: 0, blocked: 2 },
+      updatedAt: "2026-05-03T11:59:00.000Z",
+    }, now)).toEqual({
+      canRetry: false,
+      reason: "failed_without_failed_items",
+    });
+    expect(listingPushJobRetryEligibility({
+      status: "processing",
+      itemSummary,
+      updatedAt: "2026-05-03T11:30:00.000Z",
+    }, now)).toEqual({
+      canRetry: true,
+      reason: "stale_processing",
+    });
+    expect(listingPushJobRetryEligibility({
+      status: "processing",
+      itemSummary,
+      updatedAt: "2026-05-03T11:45:00.000Z",
+    }, now)).toEqual({
+      canRetry: false,
+      reason: "processing_not_stale",
+    });
   });
 
   it("builds admin tracking push URLs with optional operational filters", () => {

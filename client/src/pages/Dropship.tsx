@@ -49,6 +49,7 @@ import {
   buildAdminOmsChannelConfigUrl,
   buildAdminOmsChannelConfigureInput,
   buildAdminListingPushJobsUrl,
+  buildAdminListingPushJobRetryInput,
   buildAdminNotificationEventsUrl,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
@@ -81,6 +82,7 @@ import {
   formatCents,
   formatDateTime,
   formatStatus,
+  listingPushJobRetryEligibility,
   postJson,
   putJson,
   queryErrorMessage,
@@ -95,6 +97,7 @@ import {
   type DropshipCatalogExposurePreviewRuleScope,
   type DropshipAdminListingPushJobListItem,
   type DropshipAdminListingPushJobListResponse,
+  type DropshipAdminListingPushJobRetryResponse,
   type DropshipAdminNotificationOpsListItem,
   type DropshipAdminNotificationOpsListResponse,
   type DropshipAdminOrderOpsActionResponse,
@@ -940,6 +943,7 @@ function DogfoodReadinessTab() {
 }
 
 function ListingPushOpsTab() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ListingPushStatusFilter>("default");
   const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
@@ -948,6 +952,10 @@ function ListingPushOpsTab() {
     status: "default" as ListingPushStatusFilter,
     platform: "all" as StoreConnectionPlatformFilter,
   });
+  const [retryReason, setRetryReason] = useState("");
+  const [pendingRetryJobId, setPendingRetryJobId] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   const listingPushJobsUrl = useMemo(() => buildAdminListingPushJobsUrl({
     search: appliedFilters.search,
@@ -961,19 +969,61 @@ function ListingPushOpsTab() {
   });
 
   const jobs = listingPushJobsQuery.data?.items ?? [];
+  const listingPushRetryNow = useMemo(() => new Date(), [listingPushJobsQuery.dataUpdatedAt]);
+  const recoverableJobCount = jobs.filter((job) =>
+    listingPushJobRetryEligibility(job, listingPushRetryNow).canRetry
+  ).length;
 
   function applyListingPushFilters() {
     setAppliedFilters({ search, status, platform });
   }
 
+  async function retryListingPushJob(job: DropshipAdminListingPushJobListItem) {
+    setPendingRetryJobId(job.jobId);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminListingPushJobRetryInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-listing-job-retry-${job.jobId}`),
+        reason: retryReason,
+      });
+      const response = await postJson<DropshipAdminListingPushJobRetryResponse>(
+        `/api/dropship/admin/listing-push-jobs/${job.jobId}/retry`,
+        input,
+      );
+      const itemLabel = response.requeuedItemCount === 1 ? "item" : "items";
+      setMessage(
+        `Listing push job ${response.jobId} moved from ${formatStatus(response.previousStatus)} `
+        + `to ${formatStatus(response.status)} with ${response.requeuedItemCount} ${itemLabel} requeued.`,
+      );
+      setRetryReason("");
+      await Promise.all([
+        listingPushJobsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship listing push job retry failed.");
+    } finally {
+      setPendingRetryJobId(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      {listingPushJobsQuery.error && (
+      {(listingPushJobsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {queryErrorMessage(listingPushJobsQuery.error, "Unable to load dropship listing push jobs.")}
+            {error || queryErrorMessage(listingPushJobsQuery.error, "Unable to load dropship listing push jobs.")}
           </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
 
@@ -1023,11 +1073,24 @@ function ListingPushOpsTab() {
             </Button>
           </div>
         </div>
+        <div className="mt-4 max-w-3xl">
+          <label className="text-sm font-medium" htmlFor="dropship-listing-job-retry-reason">
+            Retry reason
+          </label>
+          <Input
+            id="dropship-listing-job-retry-reason"
+            value={retryReason}
+            onChange={(event) => setRetryReason(event.target.value)}
+            placeholder="Optional retry audit note"
+            className="mt-2"
+            maxLength={1000}
+          />
+        </div>
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Matching jobs" value={String(listingPushJobsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible failed jobs" value={String(jobs.filter((job) => job.status === "failed").length)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible recoverable" value={String(recoverableJobCount)} />
         <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Visible blocked items" value={String(jobs.reduce((sum, job) => sum + job.itemSummary.blocked, 0))} />
         <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible completed items" value={String(jobs.reduce((sum, job) => sum + job.itemSummary.completed, 0))} />
       </section>
@@ -1035,6 +1098,9 @@ function ListingPushOpsTab() {
       <ListingPushJobsTable
         isLoading={listingPushJobsQuery.isLoading || listingPushJobsQuery.isFetching}
         jobs={jobs}
+        onRetry={retryListingPushJob}
+        pendingRetryJobId={pendingRetryJobId}
+        retryEligibilityNow={listingPushRetryNow}
         summary={listingPushJobsQuery.data?.summary ?? []}
         total={listingPushJobsQuery.data?.total ?? 0}
       />
@@ -3771,11 +3837,17 @@ function DogfoodReadinessTable({
 function ListingPushJobsTable({
   isLoading,
   jobs,
+  onRetry,
+  pendingRetryJobId,
+  retryEligibilityNow,
   summary,
   total,
 }: {
   isLoading: boolean;
   jobs: DropshipAdminListingPushJobListItem[];
+  onRetry: (job: DropshipAdminListingPushJobListItem) => void;
+  pendingRetryJobId: number | null;
+  retryEligibilityNow: Date;
   summary: DropshipAdminListingPushJobListResponse["summary"];
   total: number;
 }) {
@@ -3817,62 +3889,80 @@ function ListingPushJobsTable({
             <TableHead>Items</TableHead>
             <TableHead>Latest issue</TableHead>
             <TableHead className="w-[145px]">Updated</TableHead>
+            <TableHead className="w-[120px] text-right">Action</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {jobs.map((job) => (
-            <TableRow key={job.jobId}>
-              <TableCell>
-                <div className="font-mono text-sm">#{job.jobId}</div>
-                <div className="text-xs text-muted-foreground">{formatStatus(job.jobType)}</div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{job.vendor.businessName || job.vendor.email || `Vendor ${job.vendor.vendorId}`}</div>
-                <div className="text-xs text-muted-foreground">
-                  {[job.storeConnection.externalDisplayName, job.storeConnection.shopDomain, formatStatus(job.platform)]
-                    .filter(Boolean)
-                    .join(" / ")}
-                </div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={listingPushStatusTone(job.status)}>
-                  {formatStatus(job.status)}
-                </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {job.completedAt ? `Completed ${formatDateTime(job.completedAt)}` : `Created ${formatDateTime(job.createdAt)}`}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{job.itemSummary.total} total</div>
-                <div className="text-xs text-muted-foreground">
-                  {[
-                    job.itemSummary.completed ? `${job.itemSummary.completed} done` : null,
-                    job.itemSummary.failed ? `${job.itemSummary.failed} failed` : null,
-                    job.itemSummary.blocked ? `${job.itemSummary.blocked} blocked` : null,
-                    job.itemSummary.processing ? `${job.itemSummary.processing} processing` : null,
-                    job.itemSummary.queued ? `${job.itemSummary.queued} queued` : null,
-                  ].filter(Boolean).join(" / ") || "No item counts"}
-                </div>
-              </TableCell>
-              <TableCell>
-                {job.latestItemError ? (
-                  <>
-                    <div className="font-medium">{job.latestItemError.errorCode || formatStatus(job.latestItemError.status)}</div>
-                    <div className="max-w-[360px] truncate text-xs text-muted-foreground">
-                      {job.latestItemError.errorMessage || `Variant ${job.latestItemError.productVariantId}`}
-                    </div>
-                  </>
-                ) : job.errorMessage ? (
-                  <div className="max-w-[360px] truncate text-sm text-muted-foreground">{job.errorMessage}</div>
-                ) : (
-                  <div className="text-sm text-muted-foreground">None</div>
-                )}
-              </TableCell>
-              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                {formatDateTime(job.updatedAt)}
-              </TableCell>
-            </TableRow>
-          ))}
+          {jobs.map((job) => {
+            const retryEligibility = listingPushJobRetryEligibility(job, retryEligibilityNow);
+            const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            return (
+              <TableRow key={job.jobId}>
+                <TableCell>
+                  <div className="font-mono text-sm">#{job.jobId}</div>
+                  <div className="text-xs text-muted-foreground">{formatStatus(job.jobType)}</div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{job.vendor.businessName || job.vendor.email || `Vendor ${job.vendor.vendorId}`}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {[job.storeConnection.externalDisplayName, job.storeConnection.shopDomain, formatStatus(job.platform)]
+                      .filter(Boolean)
+                      .join(" / ")}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={listingPushStatusTone(job.status)}>
+                    {formatStatus(job.status)}
+                  </Badge>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {job.completedAt ? `Completed ${formatDateTime(job.completedAt)}` : `Created ${formatDateTime(job.createdAt)}`}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{job.itemSummary.total} total</div>
+                  <div className="text-xs text-muted-foreground">
+                    {[
+                      job.itemSummary.completed ? `${job.itemSummary.completed} done` : null,
+                      job.itemSummary.failed ? `${job.itemSummary.failed} failed` : null,
+                      job.itemSummary.blocked ? `${job.itemSummary.blocked} blocked` : null,
+                      job.itemSummary.processing ? `${job.itemSummary.processing} processing` : null,
+                      job.itemSummary.queued ? `${job.itemSummary.queued} queued` : null,
+                    ].filter(Boolean).join(" / ") || "No item counts"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  {job.latestItemError ? (
+                    <>
+                      <div className="font-medium">{job.latestItemError.errorCode || formatStatus(job.latestItemError.status)}</div>
+                      <div className="max-w-[360px] truncate text-xs text-muted-foreground">
+                        {job.latestItemError.errorMessage || `Variant ${job.latestItemError.productVariantId}`}
+                      </div>
+                    </>
+                  ) : job.errorMessage ? (
+                    <div className="max-w-[360px] truncate text-sm text-muted-foreground">{job.errorMessage}</div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground">None</div>
+                  )}
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                  {formatDateTime(job.updatedAt)}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="gap-2"
+                    disabled={!retryEligibility.canRetry || pendingRetryJobId !== null}
+                    onClick={() => onRetry(job)}
+                  >
+                    <RotateCcw className={pendingRetryJobId === job.jobId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    {retryLabel}
+                  </Button>
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </section>
