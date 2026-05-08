@@ -382,6 +382,41 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
   });
 
+  it("ignores ShipStation split/package edits that are not shipped", async () => {
+    const splitButNotShipped = makeShipmentPayload({
+      shipmentId: 7001,
+      orderId: 88001,
+      orderKey: "echelon-wms-shp-501",
+      trackingNumber: "",
+      shipDate: null,
+      voidDate: null,
+      shipmentItems: [
+        { lineItemKey: "wms-item-10001", sku: "SKU-A", quantity: 1 },
+      ],
+    });
+
+    const mock = makeDb([
+      {
+        rows: [
+          { id: 501, order_id: 42, status: "queued" },
+        ],
+      },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [splitButNotShipped],
+    }) as any;
+
+    const processed = await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(processed).toBe(0);
+    const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
+    expect(sqlText).toMatch(/shipstation_order_id/);
+    expect(sqlText).not.toMatch(/UPDATE wms\.order_items/);
+    expect(sqlText).not.toMatch(/UPDATE wms\.orders/);
+    expect(sqlText).not.toMatch(/INSERT INTO wms\.outbound_shipment_items/);
+  });
+
   it("fallback: shipment NOT found by shipstation_order_id → legacy path runs", async () => {
     // Pre-cutover order: orderKey is legacy echelon-oms-<id> AND no
     // shipstation_order_id is set on any outbound_shipments row.
