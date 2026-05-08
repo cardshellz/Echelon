@@ -58,6 +58,27 @@ describe("DropshipOrderOpsService", () => {
     });
   });
 
+  it("preserves explicit cancellation statuses for ops cancellation failure filters", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const service = new DropshipOrderOpsService({
+      repository,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    await service.listIntakes({
+      statuses: ["exception"],
+      cancellationStatuses: ["marketplace_cancellation_failed"],
+      page: 1,
+      limit: 50,
+    });
+
+    expect(repository.lastListInput).toMatchObject({
+      statuses: ["exception"],
+      cancellationStatuses: ["marketplace_cancellation_failed"],
+    });
+  });
+
   it("loads scoped order detail for vendor dogfooding reads", async () => {
     const repository = new FakeOrderOpsRepository();
     const service = new DropshipOrderOpsService({
@@ -298,6 +319,7 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
       limit: input.limit,
       statuses: input.statuses,
       summary: [{ status: "failed", count: 1 }],
+      cancellationSummary: [{ cancellationStatus: "marketplace_cancellation_failed", count: 1 }],
     };
   }
 

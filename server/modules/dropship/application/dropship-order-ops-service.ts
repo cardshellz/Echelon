@@ -11,6 +11,7 @@ import {
   type GetDropshipOrderOpsIntakeDetailInput,
   type ListDropshipOrderOpsIntakesInput,
   type MarkDropshipOrderOpsExceptionInput,
+  type DropshipOrderOpsCancellationStatus,
   type ProcessDropshipOrderOpsIntakeInput,
   type RetryDropshipOrderOpsCancellationInput,
   type RetryDropshipOrderOpsIntakeInput,
@@ -197,6 +198,11 @@ export interface DropshipOrderOpsStatusSummary {
   count: number;
 }
 
+export interface DropshipOrderOpsCancellationStatusSummary {
+  cancellationStatus: DropshipOrderOpsCancellationStatus | string;
+  count: number;
+}
+
 export interface DropshipOrderOpsIntakeListResult {
   items: DropshipOrderOpsIntakeListItem[];
   total: number;
@@ -204,6 +210,7 @@ export interface DropshipOrderOpsIntakeListResult {
   limit: number;
   statuses: DropshipOrderIntakeStatus[];
   summary: DropshipOrderOpsStatusSummary[];
+  cancellationSummary: DropshipOrderOpsCancellationStatusSummary[];
 }
 
 export interface DropshipOrderOpsActionResult {

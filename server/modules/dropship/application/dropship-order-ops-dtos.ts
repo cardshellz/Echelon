@@ -15,6 +15,15 @@ export const dropshipOpsOrderIntakeStatusSchema = z.enum([
   "exception",
 ]);
 
+export const dropshipOpsOrderCancellationStatusSchema = z.enum([
+  "payment_hold_expired",
+  "order_intake_rejected",
+  "marketplace_cancellation_processing",
+  "marketplace_cancellation_retrying",
+  "marketplace_cancellation_failed",
+  "marketplace_cancelled",
+]);
+
 export const dropshipOpsActorSchema = z.object({
   actorType: z.enum(["admin", "system"]),
   actorId: z.string().trim().min(1).max(255).optional(),
@@ -22,6 +31,7 @@ export const dropshipOpsActorSchema = z.object({
 
 export const listDropshipOrderOpsIntakesInputSchema = z.object({
   statuses: z.array(dropshipOpsOrderIntakeStatusSchema).min(1).max(9).optional(),
+  cancellationStatuses: z.array(dropshipOpsOrderCancellationStatusSchema).min(1).max(6).optional(),
   vendorId: positiveIdSchema.optional(),
   storeConnectionId: positiveIdSchema.optional(),
   search: z.string().trim().min(1).max(255).optional(),
@@ -63,6 +73,7 @@ export const processDropshipOrderOpsIntakeInputSchema = z.object({
   actor: dropshipOpsActorSchema,
 }).strict();
 
+export type DropshipOrderOpsCancellationStatus = z.infer<typeof dropshipOpsOrderCancellationStatusSchema>;
 export type ListDropshipOrderOpsIntakesInput = z.infer<typeof listDropshipOrderOpsIntakesInputSchema>;
 export type GetDropshipOrderOpsIntakeDetailInput = z.infer<typeof getDropshipOrderOpsIntakeDetailInputSchema>;
 export type RetryDropshipOrderOpsIntakeInput = z.infer<typeof retryDropshipOrderOpsIntakeInputSchema>;

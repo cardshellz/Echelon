@@ -44,6 +44,7 @@ import {
   allDropshipListingModes,
   allDropshipListingPriceModes,
   allDropshipListingRequiredProductFields,
+  allDropshipOrderCancellationStatuses,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
   buildAdminOmsChannelConfigUrl,
@@ -133,6 +134,7 @@ import {
   type DropshipOmsChannelConfigOverview,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
+  type DropshipOrderCancellationStatus,
   type DropshipOpsOrderIntakeStatus,
   type DropshipListingPushJobStatus,
   type DropshipNotificationOpsChannel,
@@ -160,6 +162,7 @@ import {
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
 type OrderOpsStatusFilter = DropshipOpsOrderIntakeStatus | "default" | "all";
+type OrderOpsCancellationStatusFilter = DropshipOrderCancellationStatus | "all";
 type ListingPushStatusFilter = DropshipListingPushJobStatus | "default" | "all";
 type TrackingPushStatusFilter = DropshipTrackingPushStatus | "default" | "all";
 type NotificationOpsStatusFilter = DropshipNotificationOpsStatus | "default" | "all";
@@ -424,6 +427,11 @@ const orderOpsStatusFilters: OrderOpsStatusFilter[] = [
   "received",
   "processing",
   "accepted",
+];
+
+const orderOpsCancellationStatusFilters: OrderOpsCancellationStatusFilter[] = [
+  "all",
+  ...allDropshipOrderCancellationStatuses,
 ];
 
 const storeConnectionStatusFilters: StoreConnectionStatusFilter[] = [
@@ -2173,9 +2181,11 @@ function OrderIntakeOpsTab() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<OrderOpsStatusFilter>("default");
+  const [cancellationStatus, setCancellationStatus] = useState<OrderOpsCancellationStatusFilter>("all");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "default" as OrderOpsStatusFilter,
+    cancellationStatus: "all" as OrderOpsCancellationStatusFilter,
   });
   const [actionReason, setActionReason] = useState("");
   const [pendingAction, setPendingAction] = useState<{
@@ -2188,6 +2198,7 @@ function OrderIntakeOpsTab() {
   const orderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
     search: appliedFilters.search,
     status: appliedFilters.status,
+    cancellationStatus: appliedFilters.cancellationStatus,
   }), [appliedFilters]);
 
   const orderIntakeQuery = useQuery<DropshipAdminOrderOpsListResponse>({
@@ -2198,7 +2209,7 @@ function OrderIntakeOpsTab() {
   const orderRetryEligibilityNow = useMemo(() => new Date(), [orderIntakeQuery.dataUpdatedAt]);
 
   function applyOrderFilters() {
-    setAppliedFilters({ search, status });
+    setAppliedFilters({ search, status, cancellationStatus });
   }
 
   async function runOrderAction(
@@ -2262,7 +2273,7 @@ function OrderIntakeOpsTab() {
               Review marketplace intake rows, retry recoverable failures, and mark unresolved rows as ops exceptions.
             </p>
           </div>
-          <div className="flex flex-col gap-2 lg:flex-row">
+          <div className="flex flex-col gap-2 lg:flex-row lg:flex-wrap">
             <div className="relative min-w-0 lg:w-80">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -2280,6 +2291,21 @@ function OrderIntakeOpsTab() {
                 {orderOpsStatusFilters.map((option) => (
                   <SelectItem key={option} value={option}>
                     {orderOpsStatusLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={cancellationStatus}
+              onValueChange={(value) => setCancellationStatus(value as OrderOpsCancellationStatusFilter)}
+            >
+              <SelectTrigger className="lg:w-60">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {orderOpsCancellationStatusFilters.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {orderOpsCancellationStatusLabel(option)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -2309,7 +2335,11 @@ function OrderIntakeOpsTab() {
         </div>
       </section>
 
-      <OrderIntakeSummary summary={orderIntakeQuery.data?.summary ?? []} total={orderIntakeQuery.data?.total ?? 0} />
+      <OrderIntakeSummary
+        cancellationSummary={orderIntakeQuery.data?.cancellationSummary ?? []}
+        summary={orderIntakeQuery.data?.summary ?? []}
+        total={orderIntakeQuery.data?.total ?? 0}
+      />
 
       <OrderIntakeOpsTable
         isLoading={orderIntakeQuery.isLoading || orderIntakeQuery.isFetching}
@@ -5134,18 +5164,25 @@ function StoreConnectionsTable({
 }
 
 function OrderIntakeSummary({
+  cancellationSummary,
   summary,
   total,
 }: {
+  cancellationSummary: DropshipAdminOrderOpsListResponse["cancellationSummary"];
   summary: DropshipAdminOrderOpsListResponse["summary"];
   total: number;
 }) {
   return (
-    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
       <CatalogMetric icon={<ClipboardList className="h-4 w-4" />} label="Matching intakes" value={String(total)} />
       <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Payment holds" value={String(orderStatusCount(summary, "payment_hold"))} />
       <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Retrying" value={String(orderStatusCount(summary, "retrying"))} />
       <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Failed or exception" value={String(orderStatusCount(summary, "failed") + orderStatusCount(summary, "exception"))} />
+      <CatalogMetric
+        icon={<RotateCcw className="h-4 w-4" />}
+        label="Cancel failures"
+        value={String(orderCancellationStatusCount(cancellationSummary, "marketplace_cancellation_failed"))}
+      />
     </section>
   );
 }
@@ -5670,6 +5707,11 @@ function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
   return formatStatus(status);
 }
 
+function orderOpsCancellationStatusLabel(status: OrderOpsCancellationStatusFilter): string {
+  if (status === "all") return "All cancellation states";
+  return formatStatus(status);
+}
+
 function orderActionMessage(
   response:
     | DropshipAdminOrderOpsActionResponse
@@ -5741,6 +5783,13 @@ function orderStatusCount(
   status: DropshipOpsOrderIntakeStatus,
 ): number {
   return summary.find((entry) => entry.status === status)?.count ?? 0;
+}
+
+function orderCancellationStatusCount(
+  summary: DropshipAdminOrderOpsListResponse["cancellationSummary"],
+  status: DropshipOrderCancellationStatus,
+): number {
+  return summary.find((entry) => entry.cancellationStatus === status)?.count ?? 0;
 }
 
 function orderShipToLabel(intake: DropshipAdminOrderOpsIntakeListItem): string {

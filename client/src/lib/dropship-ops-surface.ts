@@ -30,6 +30,13 @@ export type DropshipOpsOrderIntakeStatus =
   | "payment_hold"
   | "cancelled"
   | "exception";
+export type DropshipOrderCancellationStatus =
+  | "payment_hold_expired"
+  | "order_intake_rejected"
+  | "marketplace_cancellation_processing"
+  | "marketplace_cancellation_retrying"
+  | "marketplace_cancellation_failed"
+  | "marketplace_cancelled";
 export type DropshipListingPushJobStatus =
   | "queued"
   | "processing"
@@ -87,6 +94,15 @@ export const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] =
   "payment_hold",
   "cancelled",
   "exception",
+];
+
+export const allDropshipOrderCancellationStatuses: DropshipOrderCancellationStatus[] = [
+  "payment_hold_expired",
+  "order_intake_rejected",
+  "marketplace_cancellation_processing",
+  "marketplace_cancellation_retrying",
+  "marketplace_cancellation_failed",
+  "marketplace_cancelled",
 ];
 
 const allDropshipListingPushJobStatuses: DropshipListingPushJobStatus[] = [
@@ -820,6 +836,7 @@ export interface DropshipAdminOrderOpsListResponse {
   limit: number;
   statuses: DropshipOpsOrderIntakeStatus[];
   summary: Array<{ status: DropshipOpsOrderIntakeStatus; count: number }>;
+  cancellationSummary: Array<{ cancellationStatus: string; count: number }>;
 }
 
 export interface DropshipAdminListingPushJobListItem {
@@ -2001,6 +2018,7 @@ export function buildAdminCatalogExposurePreviewUrl(input: {
 export function buildAdminOrderIntakeUrl(input: {
   search: string;
   status: DropshipOpsOrderIntakeStatus | "default" | "all";
+  cancellationStatus?: DropshipOrderCancellationStatus | "all";
   page?: number;
   limit?: number;
 }): string {
@@ -2009,9 +2027,13 @@ export function buildAdminOrderIntakeUrl(input: {
     : input.status === "all"
       ? allDropshipOpsOrderIntakeStatuses.join(",")
       : input.status;
+  const cancellationStatuses = !input.cancellationStatus || input.cancellationStatus === "all"
+    ? undefined
+    : input.cancellationStatus;
   return buildQueryUrl("/api/dropship/admin/order-intake", {
     search: input.search.trim(),
     statuses,
+    cancellationStatuses,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
