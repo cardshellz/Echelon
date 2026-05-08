@@ -32,6 +32,7 @@ describe("DropshipNotificationService", () => {
     expect(preferences.map((preference) => preference.eventType)).toContain("dropship_entitlement_blocked");
     expect(preferences.map((preference) => preference.eventType)).toContain("dropship_order_received");
     expect(preferences.map((preference) => preference.eventType)).toContain("dropship_store_needs_reauth");
+    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_tracking_push_failed");
     expect(preferences.find((preference) => preference.eventType === "dropship_order_rejected")).toMatchObject({
       vendorId: 10,
       critical: true,
@@ -45,6 +46,11 @@ describe("DropshipNotificationService", () => {
     )?.notificationPreferenceId).toBeLessThan(0);
     expect(preferences.find((preference) => preference.eventType === "dropship_store_needs_reauth")).toMatchObject({
       critical: true,
+      emailEnabled: true,
+      inAppEnabled: true,
+    });
+    expect(preferences.find((preference) => preference.eventType === "dropship_tracking_push_failed")).toMatchObject({
+      critical: false,
       emailEnabled: true,
       inAppEnabled: true,
     });
@@ -126,6 +132,45 @@ describe("DropshipNotificationService", () => {
 
     expect(repository.lastSend).toMatchObject({
       eventType: "dropship_store_needs_reauth",
+      critical: true,
+      channels: ["email", "in_app"],
+    });
+  });
+
+  it("keeps retryable tracking push failures configurable while allowing explicit critical escalation", async () => {
+    const repository = new FakeNotificationRepository();
+    const service = makeService(repository, new FakeEmailSender(), []);
+
+    await service.send({
+      vendorId: 10,
+      eventType: "dropship_tracking_push_failed",
+      channels: ["email"],
+      critical: false,
+      title: "Tracking push retrying",
+      message: "Tracking push will retry.",
+      payload: { pushId: 44, retryable: true },
+      idempotencyKey: "notification-tracking-push-failed-retryable-44",
+    });
+
+    expect(repository.lastSend).toMatchObject({
+      eventType: "dropship_tracking_push_failed",
+      critical: false,
+      channels: ["email"],
+    });
+
+    await service.send({
+      vendorId: 10,
+      eventType: "dropship_tracking_push_failed",
+      channels: ["email"],
+      critical: true,
+      title: "Tracking push failed",
+      message: "Tracking push cannot continue.",
+      payload: { pushId: 45, retryable: false },
+      idempotencyKey: "notification-tracking-push-failed-terminal-45",
+    });
+
+    expect(repository.lastSend).toMatchObject({
+      eventType: "dropship_tracking_push_failed",
       critical: true,
       channels: ["email", "in_app"],
     });
