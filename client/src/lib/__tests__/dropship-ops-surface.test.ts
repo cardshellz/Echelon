@@ -17,6 +17,7 @@ import {
   buildAdminListingPushJobsUrl,
   buildAdminListingPushJobRetryInput,
   buildAdminNotificationEventsUrl,
+  buildAdminNotificationRetryInput,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminWalletConfirmedUsdcCreditInput,
@@ -55,6 +56,7 @@ import {
   listingPreviewPushableCount,
   listLaunchReadyStoreConnections,
   listingPushJobRetryEligibility,
+  notificationRetryEligibility,
   normalizePortalReturnPath,
   normalizeShopifyShopDomainInput,
   orderIntakeRetryEligibility,
@@ -789,6 +791,41 @@ describe("dropship ops surface client helpers", () => {
       idempotencyKey: "short",
       reason: "",
     })).toThrow();
+  });
+
+  it("builds admin notification retry bodies with optional audit reasons", () => {
+    expect(buildAdminNotificationRetryInput({
+      idempotencyKey: "notification-retry-1",
+      reason: " SMTP recovered ",
+    })).toEqual({
+      idempotencyKey: "notification-retry-1",
+      reason: "SMTP recovered",
+    });
+    expect(buildAdminNotificationRetryInput({
+      idempotencyKey: "notification-retry-2",
+      reason: " ",
+    })).toEqual({
+      idempotencyKey: "notification-retry-2",
+    });
+    expect(() => buildAdminNotificationRetryInput({
+      idempotencyKey: "short",
+      reason: "",
+    })).toThrow();
+  });
+
+  it("only allows failed email notification retries", () => {
+    expect(notificationRetryEligibility({ channel: "email", status: "failed" })).toEqual({
+      canRetry: true,
+      reason: "failed_email",
+    });
+    expect(notificationRetryEligibility({ channel: "email", status: "pending" })).toEqual({
+      canRetry: false,
+      reason: "status_not_retryable",
+    });
+    expect(notificationRetryEligibility({ channel: "in_app", status: "failed" })).toEqual({
+      canRetry: false,
+      reason: "channel_not_retryable",
+    });
   });
 
   it("identifies retryable failed and stale processing tracking pushes", () => {
