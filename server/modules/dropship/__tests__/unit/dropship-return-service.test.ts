@@ -6,6 +6,8 @@ import type {
 import {
   DropshipReturnService,
   type CreateDropshipRmaInput,
+  type DropshipReturnPolicyMutationResult,
+  type DropshipReturnPolicyRecord,
   type DropshipReturnRepository,
   type DropshipRmaDetail,
   type DropshipRmaInspectionResult,
@@ -57,6 +59,7 @@ describe("DropshipReturnService", () => {
 
     expect(result.rma.rmaNumber).toBe("RMA-VENDOR-100");
     expect(repository.lastOrderReferenceInput).toEqual({ vendorId: 10, intakeId: 44 });
+    expect(repository.lastPolicyLookupAt).toEqual(now);
     expect(repository.lastCreateInput).toMatchObject({
       vendorId: 10,
       storeConnectionId: 70,
@@ -78,6 +81,27 @@ describe("DropshipReturnService", () => {
       items: [],
       idempotencyKey: "vendor-rma-spoof",
     })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+  });
+
+  it("uses the active return policy window for member RMA enforcement", async () => {
+    const repository = new FakeReturnRepository();
+    repository.activePolicy = makeReturnPolicy({ returnWindowDays: 45 });
+    repository.orderReference = makeOrderReference({
+      acceptedAt: new Date("2026-04-01T19:00:00.000Z"),
+    });
+    const service = makeService(repository, []);
+
+    await service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-POLICY-WINDOW",
+      intakeId: 44,
+      items: [{ productVariantId: 20, quantity: 1 }],
+      idempotencyKey: "vendor-rma-policy-window",
+    });
+
+    expect(repository.lastCreateInput).toMatchObject({
+      rmaNumber: "RMA-POLICY-WINDOW",
+      returnWindowDays: 45,
+    });
   });
 
   it("rejects vendor RMA item variants that are not proven by the linked order", async () => {
@@ -167,6 +191,68 @@ describe("DropshipReturnService", () => {
       },
     });
     expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-EXPIRED");
+  });
+
+  it("creates configurable return policies with idempotency and audit context", async () => {
+    const repository = new FakeReturnRepository();
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs);
+    const effectiveFrom = new Date("2026-05-02T00:00:00.000Z");
+
+    const result = await service.createReturnPolicy({
+      name: "Ops 45 day returns",
+      returnWindowDays: 45,
+      effectiveFrom,
+      idempotencyKey: "return-policy-45-days",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.policy).toMatchObject({
+      policyId: 31,
+      name: "Ops 45 day returns",
+      returnWindowDays: 45,
+      isActive: true,
+    });
+    expect(repository.lastReturnPolicyInput).toMatchObject({
+      name: "Ops 45 day returns",
+      returnWindowDays: 45,
+      isActive: true,
+      effectiveFrom,
+      effectiveTo: null,
+      idempotencyKey: "return-policy-45-days",
+      actor: { actorType: "admin", actorId: "admin-1" },
+      now,
+    });
+    expect(repository.lastReturnPolicyInput?.requestHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_RETURN_POLICY_CREATED",
+      context: {
+        policyId: 31,
+        returnWindowDays: 45,
+        idempotencyKey: "return-policy-45-days",
+      },
+    });
+  });
+
+  it("rejects return policy windows with invalid effective dates", async () => {
+    const repository = new FakeReturnRepository();
+    const service = makeService(repository, []);
+
+    await expect(service.createReturnPolicy({
+      name: "Invalid return policy",
+      returnWindowDays: 30,
+      effectiveFrom: "2026-05-03T00:00:00.000Z",
+      effectiveTo: "2026-05-03T00:00:00.000Z",
+      idempotencyKey: "return-policy-invalid-window",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_POLICY_INVALID_INPUT",
+      context: {
+        effectiveFrom: "2026-05-03T00:00:00.000Z",
+        effectiveTo: "2026-05-03T00:00:00.000Z",
+      },
+    });
+    expect(repository.lastReturnPolicyInput).toBeNull();
   });
 
   it("rejects member RMA references to orders outside the vendor scope", async () => {
@@ -377,7 +463,10 @@ class FakeReturnRepository implements DropshipReturnRepository {
   lastStatusInput: (UpdateDropshipRmaStatusInput & { requestHash: string; now: Date }) | null = null;
   lastInspectionInput: (ProcessDropshipRmaInspectionInput & { requestHash: string; now: Date }) | null = null;
   lastOrderReferenceInput: Parameters<DropshipReturnRepository["getOrderReference"]>[0] | null = null;
+  lastPolicyLookupAt: Date | null = null;
+  lastReturnPolicyInput: Parameters<DropshipReturnRepository["createReturnPolicy"]>[0] | null = null;
   orderReference: DropshipRmaOrderReference | null = makeOrderReference();
+  activePolicy: DropshipReturnPolicyRecord | null = null;
   nextStatusReplay = false;
 
   async listRmas(input: Parameters<DropshipReturnRepository["listRmas"]>[0]): Promise<DropshipRmaListResult> {
@@ -392,6 +481,29 @@ class FakeReturnRepository implements DropshipReturnRepository {
   async getOrderReference(input: Parameters<DropshipReturnRepository["getOrderReference"]>[0]): Promise<DropshipRmaOrderReference | null> {
     this.lastOrderReferenceInput = input;
     return this.orderReference;
+  }
+
+  async getActiveReturnPolicy(at: Date): Promise<DropshipReturnPolicyRecord | null> {
+    this.lastPolicyLookupAt = at;
+    return this.activePolicy;
+  }
+
+  async createReturnPolicy(
+    input: Parameters<DropshipReturnRepository["createReturnPolicy"]>[0],
+  ): Promise<DropshipReturnPolicyMutationResult> {
+    this.lastReturnPolicyInput = input;
+    return {
+      policy: makeReturnPolicy({
+        policyId: 31,
+        name: input.name,
+        returnWindowDays: input.returnWindowDays,
+        isActive: input.isActive,
+        effectiveFrom: input.effectiveFrom,
+        effectiveTo: input.effectiveTo,
+        createdAt: input.now,
+      }),
+      idempotentReplay: false,
+    };
   }
 
   async createRma(input: CreateDropshipRmaInput & { requestHash: string; now: Date }): Promise<{
@@ -548,6 +660,19 @@ function makeOrderReference(overrides: Partial<DropshipRmaOrderReference> = {}):
       { lineIndex: 0, productVariantId: 20, quantity: 2 },
       { lineIndex: 1, productVariantId: 21, quantity: 1 },
     ],
+    ...overrides,
+  };
+}
+
+function makeReturnPolicy(overrides: Partial<DropshipReturnPolicyRecord> = {}): DropshipReturnPolicyRecord {
+  return {
+    policyId: 30,
+    name: "Default returns",
+    returnWindowDays: 30,
+    isActive: true,
+    effectiveFrom: now,
+    effectiveTo: null,
+    createdAt: now,
     ...overrides,
   };
 }

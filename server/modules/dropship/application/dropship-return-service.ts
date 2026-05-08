@@ -86,6 +86,19 @@ const createDropshipMemberRmaInputSchema = createDropshipRmaRequestSchema.omit({
   intakeId: positiveIdSchema,
 }).strict();
 
+const createDropshipReturnPolicyInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  returnWindowDays: z.number().int().positive().max(365).default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
+  isActive: z.boolean().default(true),
+  effectiveFrom: z.coerce.date().optional(),
+  effectiveTo: z.coerce.date().nullable().optional(),
+  idempotencyKey: idempotencyKeySchema,
+  actor: z.object({
+    actorType: z.enum(["admin", "system"]),
+    actorId: z.string().trim().min(1).max(255).optional(),
+  }).strict(),
+}).strict();
+
 const MILLISECONDS_PER_DAY = 86_400_000;
 
 const listDropshipRmasInputSchema = z.object({
@@ -151,9 +164,18 @@ const processDropshipRmaInspectionInputSchema = z.object({
 
 export type CreateDropshipRmaInput = z.infer<typeof createDropshipRmaInputSchema>;
 export type CreateDropshipMemberRmaInput = z.infer<typeof createDropshipMemberRmaInputSchema>;
+export type CreateDropshipReturnPolicyInput = z.infer<typeof createDropshipReturnPolicyInputSchema>;
 export type ListDropshipRmasInput = z.infer<typeof listDropshipRmasInputSchema>;
 export type UpdateDropshipRmaStatusInput = z.infer<typeof updateDropshipRmaStatusInputSchema>;
 export type ProcessDropshipRmaInspectionInput = z.infer<typeof processDropshipRmaInspectionInputSchema>;
+
+export type NormalizedCreateDropshipReturnPolicyInput = Omit<
+  CreateDropshipReturnPolicyInput,
+  "idempotencyKey" | "actor"
+> & {
+  effectiveFrom: Date;
+  effectiveTo: Date | null;
+};
 
 export interface DropshipRmaListItem {
   rmaId: number;
@@ -250,10 +272,39 @@ export interface DropshipRmaOrderReference {
   lines: DropshipRmaOrderLineReference[];
 }
 
+export interface DropshipReturnPolicyRecord {
+  policyId: number;
+  name: string;
+  returnWindowDays: number;
+  isActive: boolean;
+  effectiveFrom: Date;
+  effectiveTo: Date | null;
+  createdAt: Date;
+}
+
+export interface DropshipReturnPolicyMutationResult {
+  policy: DropshipReturnPolicyRecord;
+  idempotentReplay: boolean;
+}
+
+export interface DropshipReturnPolicyCommandContext {
+  idempotencyKey: string;
+  requestHash: string;
+  actor: {
+    actorType: "admin" | "system";
+    actorId?: string;
+  };
+  now: Date;
+}
+
 export interface DropshipReturnRepository {
   listRmas(input: ListDropshipRmasInput): Promise<DropshipRmaListResult>;
   getRma(input: { rmaId: number; vendorId?: number }): Promise<DropshipRmaDetail | null>;
   getOrderReference(input: { vendorId: number; intakeId: number }): Promise<DropshipRmaOrderReference | null>;
+  getActiveReturnPolicy(at: Date): Promise<DropshipReturnPolicyRecord | null>;
+  createReturnPolicy(
+    input: NormalizedCreateDropshipReturnPolicyInput & DropshipReturnPolicyCommandContext,
+  ): Promise<DropshipReturnPolicyMutationResult>;
   createRma(input: CreateDropshipRmaInput & { requestHash: string; now: Date }): Promise<{
     rma: DropshipRmaDetail;
     idempotentReplay: boolean;
@@ -291,6 +342,46 @@ export class DropshipReturnService {
     return this.deps.repository.listRmas(parsed);
   }
 
+  async getActiveReturnPolicy(): Promise<DropshipReturnPolicyRecord | null> {
+    return this.deps.repository.getActiveReturnPolicy(this.deps.clock.now());
+  }
+
+  async createReturnPolicy(input: unknown): Promise<DropshipReturnPolicyMutationResult> {
+    const parsed = parseReturnInput(
+      createDropshipReturnPolicyInputSchema,
+      input,
+      "DROPSHIP_RETURN_POLICY_INVALID_INPUT",
+    );
+    const now = this.deps.clock.now();
+    const normalized: NormalizedCreateDropshipReturnPolicyInput = {
+      name: parsed.name.trim(),
+      returnWindowDays: parsed.returnWindowDays,
+      isActive: parsed.isActive,
+      effectiveFrom: parsed.effectiveFrom ?? now,
+      effectiveTo: parsed.effectiveTo ?? null,
+    };
+    assertReturnPolicyEffectiveWindow(normalized);
+    const result = await this.deps.repository.createReturnPolicy({
+      ...normalized,
+      idempotencyKey: parsed.idempotencyKey,
+      requestHash: hashDropshipReturnPolicyCreate(normalized),
+      actor: parsed.actor,
+      now,
+    });
+    if (!result.idempotentReplay) {
+      this.deps.logger.info({
+        code: "DROPSHIP_RETURN_POLICY_CREATED",
+        message: "Dropship return policy was created.",
+        context: {
+          policyId: result.policy.policyId,
+          returnWindowDays: result.policy.returnWindowDays,
+          idempotencyKey: parsed.idempotencyKey,
+        },
+      });
+    }
+    return result;
+  }
+
   async getForMember(memberId: string, rmaId: number): Promise<DropshipRmaDetail> {
     const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
     return this.requireRma({ rmaId, vendorId: vendor.vendor.vendorId });
@@ -302,6 +393,7 @@ export class DropshipReturnService {
 
   async createRmaForMember(memberId: string, input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
     const parsed = parseReturnInput(createDropshipMemberRmaInputSchema, input, "DROPSHIP_RETURN_CREATE_INVALID_INPUT");
+    const now = this.deps.clock.now();
     const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
     const orderReference = await this.deps.repository.getOrderReference({
       vendorId: vendor.vendor.vendorId,
@@ -313,26 +405,35 @@ export class DropshipReturnService {
         intakeId: parsed.intakeId,
       });
     }
+    const returnPolicy = await this.deps.repository.getActiveReturnPolicy(now);
+    const returnWindowDays = returnPolicy?.returnWindowDays ?? DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS;
     assertMemberRmaOrderIsAccepted(parsed, orderReference);
-    assertMemberRmaWithinReturnWindow(parsed, orderReference, this.deps.clock.now());
+    assertMemberRmaWithinReturnWindow(parsed, orderReference, now, returnWindowDays);
     assertMemberRmaItemsMatchOrder(parsed, orderReference);
-    return this.createRma({
+    return this.createRmaWithNow({
       ...parsed,
       storeConnectionId: orderReference.storeConnectionId,
       omsOrderId: orderReference.omsOrderId,
-      returnWindowDays: DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS,
+      returnWindowDays,
       vendorId: vendor.vendor.vendorId,
       actor: { actorType: "vendor", actorId: memberId },
-    });
+    }, now);
   }
 
   async createRma(input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
+    return this.createRmaWithNow(input, this.deps.clock.now());
+  }
+
+  private async createRmaWithNow(
+    input: unknown,
+    now: Date,
+  ): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
     const parsed = parseReturnInput(createDropshipRmaInputSchema, input, "DROPSHIP_RETURN_CREATE_INVALID_INPUT");
     const requestHash = hashDropshipRmaCreate(parsed);
     const result = await this.deps.repository.createRma({
       ...parsed,
       requestHash,
-      now: this.deps.clock.now(),
+      now,
     });
     if (!result.idempotentReplay) {
       this.deps.logger.info({
@@ -521,6 +622,16 @@ export function hashDropshipRmaStatusUpdate(input: UpdateDropshipRmaStatusInput)
   });
 }
 
+export function hashDropshipReturnPolicyCreate(input: NormalizedCreateDropshipReturnPolicyInput): string {
+  return hashReturnRequest({
+    name: input.name,
+    returnWindowDays: input.returnWindowDays,
+    isActive: input.isActive,
+    effectiveFrom: input.effectiveFrom.toISOString(),
+    effectiveTo: input.effectiveTo?.toISOString() ?? null,
+  });
+}
+
 export function makeDropshipReturnLogger(): DropshipLogger {
   return {
     info: (event) => logDropshipReturnEvent("info", event),
@@ -547,6 +658,20 @@ function parseReturnInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input:
   return result.data;
 }
 
+function assertReturnPolicyEffectiveWindow(input: NormalizedCreateDropshipReturnPolicyInput): void {
+  if (!input.effectiveTo || input.effectiveTo.getTime() > input.effectiveFrom.getTime()) {
+    return;
+  }
+  throw new DropshipError(
+    "DROPSHIP_RETURN_POLICY_INVALID_INPUT",
+    "Dropship return policy effectiveTo must be after effectiveFrom.",
+    {
+      effectiveFrom: input.effectiveFrom.toISOString(),
+      effectiveTo: input.effectiveTo.toISOString(),
+    },
+  );
+}
+
 function assertMemberRmaOrderIsAccepted(
   input: CreateDropshipMemberRmaInput,
   orderReference: DropshipRmaOrderReference,
@@ -567,6 +692,7 @@ function assertMemberRmaWithinReturnWindow(
   input: CreateDropshipMemberRmaInput,
   orderReference: DropshipRmaOrderReference,
   now: Date,
+  returnWindowDays: number,
 ): void {
   if (!orderReference.acceptedAt) {
     throw new DropshipError(
@@ -575,7 +701,7 @@ function assertMemberRmaWithinReturnWindow(
       { intakeId: input.intakeId },
     );
   }
-  const expiresAt = new Date(orderReference.acceptedAt.getTime() + DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS * MILLISECONDS_PER_DAY);
+  const expiresAt = new Date(orderReference.acceptedAt.getTime() + returnWindowDays * MILLISECONDS_PER_DAY);
   if (now.getTime() <= expiresAt.getTime()) {
     return;
   }
@@ -585,7 +711,7 @@ function assertMemberRmaWithinReturnWindow(
     {
       intakeId: input.intakeId,
       acceptedAt: orderReference.acceptedAt.toISOString(),
-      returnWindowDays: DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS,
+      returnWindowDays,
       expiredAt: expiresAt.toISOString(),
       now: now.toISOString(),
     },

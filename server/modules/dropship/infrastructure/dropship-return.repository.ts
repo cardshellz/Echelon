@@ -5,6 +5,9 @@ import { DropshipError } from "../domain/errors";
 import type {
   CreateDropshipRmaInput,
   DropshipReturnFaultCategory,
+  DropshipReturnPolicyCommandContext,
+  DropshipReturnPolicyMutationResult,
+  DropshipReturnPolicyRecord,
   DropshipReturnRepository,
   DropshipRmaDetail,
   DropshipRmaInspectionRecord,
@@ -16,6 +19,7 @@ import type {
   DropshipRmaStatus,
   DropshipRmaStatusUpdateResult,
   ListDropshipRmasInput,
+  NormalizedCreateDropshipReturnPolicyInput,
   ProcessDropshipRmaInspectionInput,
   UpdateDropshipRmaStatusInput,
 } from "../application/dropship-return-service";
@@ -103,6 +107,23 @@ interface RmaOrderReferenceRow {
   normalized_payload: Record<string, unknown> | null;
 }
 
+interface ReturnPolicyRow {
+  id: number;
+  name: string;
+  return_window_days: number;
+  is_active: boolean;
+  effective_from: Date;
+  effective_to: Date | null;
+  created_at: Date;
+}
+
+interface ReturnPolicyCommandRow {
+  id: number;
+  command_type: string;
+  request_hash: string;
+  entity_id: string | null;
+}
+
 interface WalletAccountRow {
   id: number;
   vendor_id: number;
@@ -137,6 +158,7 @@ interface WalletLedgerRow {
 type CreateRepositoryInput = CreateDropshipRmaInput & { requestHash: string; now: Date };
 type UpdateStatusRepositoryInput = UpdateDropshipRmaStatusInput & { requestHash: string; now: Date };
 type ProcessInspectionRepositoryInput = ProcessDropshipRmaInspectionInput & { requestHash: string; now: Date };
+type CreateReturnPolicyRepositoryInput = NormalizedCreateDropshipReturnPolicyInput & DropshipReturnPolicyCommandContext;
 
 export class PgDropshipReturnRepository implements DropshipReturnRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -216,6 +238,64 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
     );
     const row = result.rows[0];
     return row ? mapRmaOrderReferenceRow(row) : null;
+  }
+
+  async getActiveReturnPolicy(at: Date): Promise<DropshipReturnPolicyRecord | null> {
+    const result = await this.dbPool.query<ReturnPolicyRow>(
+      `SELECT id, name, return_window_days, is_active, effective_from, effective_to, created_at
+       FROM dropship.dropship_return_policy_config
+       WHERE is_active = TRUE
+         AND effective_from <= $1
+         AND (effective_to IS NULL OR effective_to > $1)
+       ORDER BY effective_from DESC, id DESC
+       LIMIT 1`,
+      [at],
+    );
+    const row = result.rows[0];
+    return row ? mapReturnPolicyRow(row) : null;
+  }
+
+  async createReturnPolicy(input: CreateReturnPolicyRepositoryInput): Promise<DropshipReturnPolicyMutationResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const command = await claimReturnPolicyCommand(client, "return_policy_created", input);
+      if (command.idempotentReplay) {
+        const policy = await loadReturnPolicyByIdWithClient(
+          client,
+          parseEntityId(command.entityId, "dropship_return_policy_config"),
+        );
+        await client.query("COMMIT");
+        return { policy, idempotentReplay: true };
+      }
+
+      const inserted = await client.query<ReturnPolicyRow>(
+        `INSERT INTO dropship.dropship_return_policy_config
+          (name, return_window_days, is_active, effective_from, effective_to, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, name, return_window_days, is_active, effective_from, effective_to, created_at`,
+        [
+          input.name,
+          input.returnWindowDays,
+          input.isActive,
+          input.effectiveFrom,
+          input.effectiveTo,
+          input.now,
+        ],
+      );
+      const policy = mapReturnPolicyRow(
+        requiredRow(inserted.rows[0], "Dropship return policy insert did not return a row."),
+      );
+      await completeReturnPolicyCommand(client, command.commandId, policy.policyId, input.now);
+      await recordReturnPolicyAuditEvent(client, input, policy);
+      await client.query("COMMIT");
+      return { policy, idempotentReplay: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async createRma(input: CreateRepositoryInput): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
@@ -1153,6 +1233,123 @@ async function recordReturnAuditEvent(
   );
 }
 
+async function claimReturnPolicyCommand(
+  client: PoolClient,
+  commandType: string,
+  input: DropshipReturnPolicyCommandContext,
+): Promise<{
+  commandId: number;
+  entityId: string | null;
+  idempotentReplay: boolean;
+}> {
+  const inserted = await client.query<{ id: number }>(
+    `INSERT INTO dropship.dropship_admin_config_commands
+      (command_type, idempotency_key, request_hash, entity_type,
+       actor_type, actor_id, created_at)
+     VALUES ($1, $2, $3, $1, $4, $5, $6)
+     ON CONFLICT (idempotency_key) DO NOTHING
+     RETURNING id`,
+    [
+      commandType,
+      input.idempotencyKey,
+      input.requestHash,
+      input.actor.actorType,
+      input.actor.actorId ?? null,
+      input.now,
+    ],
+  );
+  const insertedId = inserted.rows[0]?.id;
+  if (insertedId) {
+    return { commandId: insertedId, entityId: null, idempotentReplay: false };
+  }
+
+  const existing = await client.query<ReturnPolicyCommandRow>(
+    `SELECT id, command_type, request_hash, entity_id
+     FROM dropship.dropship_admin_config_commands
+     WHERE idempotency_key = $1
+     FOR UPDATE`,
+    [input.idempotencyKey],
+  );
+  const row = requiredRow(existing.rows[0], "Dropship return policy idempotency row was not found after conflict.");
+  if (row.command_type !== commandType || row.request_hash !== input.requestHash) {
+    throw new DropshipError(
+      "DROPSHIP_RETURN_POLICY_IDEMPOTENCY_CONFLICT",
+      "Dropship return policy idempotency key was reused with a different request.",
+      {
+        commandType,
+        idempotencyKey: input.idempotencyKey,
+      },
+    );
+  }
+  if (!row.entity_id) {
+    throw new DropshipError(
+      "DROPSHIP_RETURN_POLICY_COMMAND_INCOMPLETE",
+      "Dropship return policy command replay is incomplete.",
+      {
+        commandType,
+        idempotencyKey: input.idempotencyKey,
+      },
+    );
+  }
+  return { commandId: row.id, entityId: row.entity_id, idempotentReplay: true };
+}
+
+async function completeReturnPolicyCommand(
+  client: PoolClient,
+  commandId: number,
+  policyId: number,
+  now: Date,
+): Promise<void> {
+  await client.query(
+    `UPDATE dropship.dropship_admin_config_commands
+     SET entity_type = 'dropship_return_policy_config',
+         entity_id = $2,
+         completed_at = $3
+     WHERE id = $1`,
+    [commandId, String(policyId), now],
+  );
+}
+
+async function loadReturnPolicyByIdWithClient(
+  client: PoolClient,
+  policyId: number,
+): Promise<DropshipReturnPolicyRecord> {
+  const result = await client.query<ReturnPolicyRow>(
+    `SELECT id, name, return_window_days, is_active, effective_from, effective_to, created_at
+     FROM dropship.dropship_return_policy_config
+     WHERE id = $1
+     LIMIT 1`,
+    [policyId],
+  );
+  return mapReturnPolicyRow(requiredRow(result.rows[0], "Dropship return policy was not found."));
+}
+
+async function recordReturnPolicyAuditEvent(
+  client: PoolClient,
+  input: CreateReturnPolicyRepositoryInput,
+  policy: DropshipReturnPolicyRecord,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (entity_type, entity_id, event_type, actor_type, actor_id,
+       severity, payload, created_at)
+     VALUES ('dropship_return_policy_config', $1, 'return_policy_created', $2, $3, 'info', $4::jsonb, $5)`,
+    [
+      String(policy.policyId),
+      input.actor.actorType,
+      input.actor.actorId ?? null,
+      JSON.stringify({
+        idempotencyKey: input.idempotencyKey,
+        requestHash: input.requestHash,
+        returnWindowDays: policy.returnWindowDays,
+        effectiveFrom: policy.effectiveFrom.toISOString(),
+        effectiveTo: policy.effectiveTo?.toISOString() ?? null,
+      }),
+      input.now,
+    ],
+  );
+}
+
 function assertInspectionReplay(
   inspection: DropshipRmaInspectionRecord,
   idempotencyKey: string,
@@ -1205,6 +1402,18 @@ function mapRmaOrderReferenceRow(row: RmaOrderReferenceRow): DropshipRmaOrderRef
     omsOrderId: row.oms_order_id === null ? null : safeInteger(row.oms_order_id, "oms_order_id"),
     acceptedAt: row.accepted_at,
     lines: mapRmaOrderReferenceLines(row.normalized_payload),
+  };
+}
+
+function mapReturnPolicyRow(row: ReturnPolicyRow): DropshipReturnPolicyRecord {
+  return {
+    policyId: row.id,
+    name: row.name,
+    returnWindowDays: row.return_window_days,
+    isActive: row.is_active,
+    effectiveFrom: row.effective_from,
+    effectiveTo: row.effective_to,
+    createdAt: row.created_at,
   };
 }
 
@@ -1313,6 +1522,18 @@ function requiredRow<T>(row: T | null | undefined, message: string): T {
     throw new Error(message);
   }
   return row;
+}
+
+function parseEntityId(value: string | null, entityType: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_RETURN_POLICY_COMMAND_INCOMPLETE",
+      "Dropship return policy replay entity id is invalid.",
+      { entityType, entityId: value },
+    );
+  }
+  return parsed;
 }
 
 function nullablePositiveInteger(value: unknown): number | null {
