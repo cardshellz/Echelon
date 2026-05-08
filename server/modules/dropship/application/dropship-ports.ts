@@ -126,13 +126,39 @@ export interface DropshipCatalogPort {
 }
 
 export interface DropshipListingPort {
+  generateVendorListingPreview(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    productVariantIds: number[];
+    requestedRetailPriceCents?: number;
+    requestedRetailPricesByVariantId?: Record<string, number>;
+    actor: {
+      actorType: "vendor" | "admin" | "system" | "job";
+      actorId?: string;
+    };
+  }): Promise<unknown>;
+
   enqueueListingPush(input: {
     vendorId: number;
     storeConnectionId: number;
     productVariantIds: number[];
+    requestedRetailPriceCents?: number;
+    requestedRetailPricesByVariantId?: Record<string, number>;
     idempotencyKey: string;
+    requestedBy: {
+      actorType: "vendor" | "admin" | "system" | "job";
+      actorId?: string;
+    };
     transaction: DropshipTransaction;
   }): Promise<number>;
+
+  processListingPushJob(input: {
+    jobId: number;
+    workerId: string;
+    idempotencyKey: string;
+    staleProcessingMinutes?: number;
+    transaction: DropshipTransaction;
+  }): Promise<unknown>;
 }
 
 export interface DropshipOrderIntakePort {
@@ -153,6 +179,7 @@ export interface DropshipWalletPort {
   creditFunding(input: {
     vendorId: number;
     walletAccountId: number;
+    fundingMethodId?: number;
     amountCents: number;
     currency: string;
     referenceType: string;
@@ -170,6 +197,14 @@ export interface DropshipWalletPort {
     idempotencyKey: string;
     transaction: DropshipTransaction;
   }): Promise<void>;
+
+  handleAutoReload(input: {
+    vendorId: number;
+    walletAccountId: number;
+    reason: "minimum_balance" | "payment_hold";
+    idempotencyKey: string;
+    transaction: DropshipTransaction;
+  }): Promise<unknown>;
 }
 
 export interface DropshipReservationPort {
@@ -178,6 +213,21 @@ export interface DropshipReservationPort {
     vendorId: number;
     transaction: DropshipTransaction;
   }): Promise<void>;
+}
+
+export interface DropshipOrderAcceptancePort {
+  acceptOrder(input: {
+    intakeId: number;
+    vendorId: number;
+    storeConnectionId: number;
+    shippingQuoteSnapshotId: number;
+    idempotencyKey: string;
+    actor: {
+      actorType: "vendor" | "admin" | "system" | "job";
+      actorId?: string;
+    };
+    transaction: DropshipTransaction;
+  }): Promise<unknown>;
 }
 
 export interface DropshipShippingPort {
@@ -254,6 +304,7 @@ export interface DropshipApplicationPorts {
   catalog: DropshipCatalogPort;
   listings: DropshipListingPort;
   orderIntake: DropshipOrderIntakePort;
+  orderAcceptance: DropshipOrderAcceptancePort;
   wallet: DropshipWalletPort;
   reservations: DropshipReservationPort;
   shipping: DropshipShippingPort;

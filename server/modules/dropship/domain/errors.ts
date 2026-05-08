@@ -21,15 +21,3 @@ export class DropshipError extends Error {
     };
   }
 }
-
-export class DropshipUseCaseNotImplementedError extends DropshipError {
-  constructor(useCaseName: string) {
-    super(
-      "DROPSHIP_USE_CASE_NOT_IMPLEMENTED",
-      `${useCaseName} has a validated contract but no V2 implementation yet.`,
-      { useCaseName },
-    );
-    this.name = "DropshipUseCaseNotImplementedError";
-    Object.setPrototypeOf(this, DropshipUseCaseNotImplementedError.prototype);
-  }
-}
