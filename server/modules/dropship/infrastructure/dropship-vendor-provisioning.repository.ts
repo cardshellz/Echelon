@@ -199,11 +199,19 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
     try {
       const result = await client.query<CatalogSetupSummaryRow>(
         `SELECT
-           (SELECT COUNT(*) FROM dropship.dropship_catalog_rules WHERE is_active = true) AS admin_exposure_rule_count,
+           (
+             SELECT COUNT(*)
+             FROM dropship.dropship_catalog_rules
+             WHERE action = 'include'
+               AND is_active = true
+               AND (starts_at IS NULL OR starts_at <= now())
+               AND (ends_at IS NULL OR ends_at > now())
+           ) AS admin_exposure_rule_count,
            (
              SELECT COUNT(*)
              FROM dropship.dropship_vendor_selection_rules
              WHERE vendor_id = $1
+               AND action = 'include'
                AND is_active = true
            ) AS vendor_selection_rule_count`,
         [vendorId],
