@@ -435,6 +435,8 @@ export function validateShipmentForPush(
     (sum, line) => sum + line.unit_price_cents * line.qty,
     0,
   );
+  const shippedUnitCount = items.reduce((sum, line) => sum + line.qty, 0);
+  const roundingToleranceUnits = Math.max(items.length, shippedUnitCount);
   const nonShippingTotalCents = Number.isInteger(order.non_shipping_total_cents)
     ? order.non_shipping_total_cents
     : 0;
@@ -442,8 +444,8 @@ export function validateShipmentForPush(
   const expectedTotalExclusive = linesSumCents + nonShippingTotalCents + order.tax_cents + order.shipping_cents;
   const expectedTotalInclusive = linesSumCents + nonShippingTotalCents + order.shipping_cents;
 
-  const matchesExclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, items.length, 5);
-  const matchesInclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, items.length, 5);
+  const matchesExclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, roundingToleranceUnits, 5);
+  const matchesInclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, roundingToleranceUnits, 5);
 
   if (!matchesExclusive && !matchesInclusive) {
     throw new ShipStationPushError(
@@ -452,7 +454,7 @@ export function validateShipmentForPush(
         code: SS_PUSH_INVALID_SHIPMENT,
         shipmentId,
         field: "order.total_cents",
-        value: { linesSumCents, nonShippingTotalCents, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalExclusive, expectedTotalInclusive, actualTotalCents: order.total_cents },
+        value: { linesSumCents, nonShippingTotalCents, shippedUnitCount, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalExclusive, expectedTotalInclusive, actualTotalCents: order.total_cents },
       },
     );
   }

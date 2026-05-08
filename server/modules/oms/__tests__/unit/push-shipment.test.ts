@@ -114,6 +114,23 @@ describe("validateShipmentForPush :: happy path", () => {
     ).not.toThrow();
   });
 
+  it("accepts per-unit rounding deltas on multi-quantity lines", () => {
+    expect(() =>
+      validateShipmentForPush(
+        okShipment(),
+        okOrder({
+          total_cents: 47378,
+          shipping_cents: 0,
+          tax_cents: 0,
+          non_shipping_total_cents: 78,
+        }),
+        [
+          okItem({ id: 1, unit_price_cents: 7883, qty: 6 }),
+        ],
+      ),
+    ).not.toThrow();
+  });
+
   it("accepts multiple valid lines with sum matching total_cents", () => {
     expect(() =>
       validateShipmentForPush(
@@ -203,7 +220,7 @@ describe("validateShipmentForPush :: header-level violations", () => {
     try {
       validateShipmentForPush(
         okShipment(),
-        okOrder({ total_cents: 5923 }), // 5000 + 413 + 500 + 10 = 5923
+        okOrder({ total_cents: 5924 }), // 5000 + 413 + 500 + 11 = 5924
         [okItem({ unit_price_cents: 2500, qty: 2 })],
       );
     } catch (e) {
@@ -212,7 +229,7 @@ describe("validateShipmentForPush :: header-level violations", () => {
     expect(err).toBeInstanceOf(ShipStationPushError);
     expect(err?.context.field).toBe("order.total_cents");
     expect((err?.context.value as any).linesSumCents).toBe(5000);
-    expect((err?.context.value as any).actualTotalCents).toBe(5923);
+    expect((err?.context.value as any).actualTotalCents).toBe(5924);
   });
 
   it("throws when shipping_address is missing", () => {
