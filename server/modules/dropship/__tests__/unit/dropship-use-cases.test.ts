@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { DropshipError, DropshipUseCaseNotImplementedError } from "../../domain/errors";
+import { describe, expect, it, vi } from "vitest";
+import { DropshipError } from "../../domain/errors";
 import type { DropshipApplicationPorts } from "../../application";
 import {
   DROPSHIP_REQUIRED_USE_CASE_NAMES,
@@ -8,7 +8,7 @@ import {
   validateDropshipUseCaseInput,
 } from "../../application";
 
-const fakePorts = {} as DropshipApplicationPorts;
+const transaction = { id: "txn-1" };
 
 function expectDropshipError(error: unknown, code: string) {
   expect(error).toBeInstanceOf(DropshipError);
@@ -17,7 +17,7 @@ function expectDropshipError(error: unknown, code: string) {
 
 describe("Dropship V2 use-case registry", () => {
   it("exposes every required consolidated-design use case", () => {
-    const registry = createDropshipUseCaseRegistry(fakePorts);
+    const registry = createDropshipUseCaseRegistry(makePorts());
 
     expect(Object.keys(registry).sort()).toEqual(
       [...DROPSHIP_REQUIRED_USE_CASE_NAMES].sort(),
@@ -142,9 +142,11 @@ describe("Dropship V2 use-case DTO validation", () => {
   });
 });
 
-describe("Dropship V2 pending use-case execution", () => {
-  it("fails closed after validation until an implementation is wired", async () => {
-    const registry = createDropshipUseCaseRegistry(fakePorts);
+describe("Dropship V2 port-backed use-case execution", () => {
+  it("executes read-only listing previews without a write transaction or audit event", async () => {
+    const ports = makePorts();
+    ports.listings.generateVendorListingPreview = vi.fn().mockResolvedValue({ rows: [] });
+    const registry = createDropshipUseCaseRegistry(ports);
 
     await expect(
       registry.GenerateVendorListingPreview.execute({
@@ -153,11 +155,103 @@ describe("Dropship V2 pending use-case execution", () => {
         productVariantIds: [3],
         actor: { actorType: "vendor", actorId: "member-1" },
       }),
-    ).rejects.toBeInstanceOf(DropshipUseCaseNotImplementedError);
+    ).resolves.toEqual({ rows: [] });
+
+    expect(ports.listings.generateVendorListingPreview).toHaveBeenCalledWith({
+      vendorId: 1,
+      storeConnectionId: 2,
+      productVariantIds: [3],
+      actor: { actorType: "vendor", actorId: "member-1" },
+    });
+    expect(ports.transactions.runInTransaction).not.toHaveBeenCalled();
+    expect(ports.auditEvents.record).not.toHaveBeenCalled();
+  });
+
+  it("runs mutating use cases in a transaction and audits the successful execution", async () => {
+    const ports = makePorts();
+    ports.listings.enqueueListingPush = vi.fn().mockResolvedValue(55);
+    const registry = createDropshipUseCaseRegistry(ports);
+
+    await expect(
+      registry.CreateListingPushJob.execute({
+        vendorId: 1,
+        storeConnectionId: 2,
+        productVariantIds: [3, 4],
+        requestedRetailPricesByVariantId: { "3": 1200, "4": 1500 },
+        idempotencyKey: "listing-job-123",
+        requestedBy: { actorType: "vendor", actorId: "member-1" },
+      }),
+    ).resolves.toEqual({ jobId: 55 });
+
+    expect(ports.transactions.runInTransaction).toHaveBeenCalledTimes(1);
+    expect(ports.listings.enqueueListingPush).toHaveBeenCalledWith({
+      vendorId: 1,
+      storeConnectionId: 2,
+      productVariantIds: [3, 4],
+      requestedRetailPricesByVariantId: { "3": 1200, "4": 1500 },
+      idempotencyKey: "listing-job-123",
+      requestedBy: { actorType: "vendor", actorId: "member-1" },
+      transaction,
+    });
+    expect(ports.auditEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        vendorId: 1,
+        storeConnectionId: 2,
+        entityType: "dropship_use_case",
+        entityId: "CreateListingPushJob",
+        eventType: "dropship_use_case_create_listing_push_job",
+        actorType: "vendor",
+        actorId: "member-1",
+        severity: "info",
+        payload: expect.objectContaining({
+          useCaseName: "CreateListingPushJob",
+          input: expect.objectContaining({
+            productVariantCount: 2,
+            requestedRetailPriceVariantCount: 2,
+            idempotencyKey: "listing-job-123",
+          }),
+        }),
+      }),
+      transaction,
+    );
+  });
+
+  it("redacts raw marketplace payloads from use-case audit events", async () => {
+    const ports = makePorts();
+    ports.orderIntake.recordMarketplaceIntake = vi.fn().mockResolvedValue(44);
+    const registry = createDropshipUseCaseRegistry(ports);
+
+    await expect(
+      registry.RecordMarketplaceOrderIntake.execute({
+        vendorId: 1,
+        storeConnectionId: 2,
+        platform: "shopify",
+        externalOrderId: "gid://shopify/Order/1",
+        rawPayload: {
+          customer: {
+            email: "buyer@example.com",
+          },
+        },
+        payloadHash: "0123456789abcdef",
+        idempotencyKey: "intake-shopify-1",
+      }),
+    ).resolves.toEqual({ intakeId: 44 });
+
+    expect(ports.auditEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          input: expect.objectContaining({
+            rawPayload: "[redacted]",
+          }),
+        }),
+      }),
+      transaction,
+    );
   });
 
   it("throws structured validation errors before implementation errors", async () => {
-    const registry = createDropshipUseCaseRegistry(fakePorts);
+    const ports = makePorts();
+    const registry = createDropshipUseCaseRegistry(ports);
     let thrown: unknown;
 
     try {
@@ -176,5 +270,72 @@ describe("Dropship V2 pending use-case execution", () => {
     expect((thrown as DropshipError).context).toMatchObject({
       useCaseName: "DebitWalletForOrder",
     });
+    expect(ports.transactions.runInTransaction).not.toHaveBeenCalled();
   });
 });
+
+function makePorts(): DropshipApplicationPorts {
+  return {
+    clock: {
+      now: vi.fn(() => new Date("2026-05-08T12:00:00.000Z")),
+    },
+    logger: {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
+    transactions: {
+      runInTransaction: vi.fn(async (operation) => operation(transaction)),
+    },
+    auditEvents: {
+      record: vi.fn(async () => undefined),
+    },
+    identity: {
+      resolveMemberByCardShellzEmail: vi.fn(async () => null),
+    },
+    entitlement: {
+      getEntitlementByMemberId: vi.fn(async () => null),
+    },
+    authChallenges: {
+      createSensitiveActionChallenge: vi.fn(async () => ({
+        challengeId: 1,
+        expiresAt: new Date("2026-05-08T12:10:00.000Z"),
+      })),
+    },
+    catalog: {
+      assertVariantCatalogVisible: vi.fn(async () => undefined),
+    },
+    listings: {
+      generateVendorListingPreview: vi.fn(async () => ({ rows: [] })),
+      enqueueListingPush: vi.fn(async () => 1),
+      processListingPushJob: vi.fn(async () => ({ processed: true })),
+    },
+    orderIntake: {
+      recordMarketplaceIntake: vi.fn(async () => 1),
+    },
+    orderAcceptance: {
+      acceptOrder: vi.fn(async () => ({ accepted: true })),
+    },
+    wallet: {
+      creditFunding: vi.fn(async () => undefined),
+      debitOrder: vi.fn(async () => undefined),
+      handleAutoReload: vi.fn(async () => ({ handled: true })),
+    },
+    reservations: {
+      reserveForAcceptedOrder: vi.fn(async () => undefined),
+    },
+    shipping: {
+      quote: vi.fn(async () => 1),
+    },
+    marketplace: {
+      refreshStoreToken: vi.fn(async () => undefined),
+      pushTracking: vi.fn(async () => undefined),
+    },
+    returns: {
+      processInspection: vi.fn(async () => undefined),
+    },
+    notifications: {
+      send: vi.fn(async () => undefined),
+    },
+  };
+}

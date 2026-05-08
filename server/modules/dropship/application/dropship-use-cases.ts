@@ -1,6 +1,6 @@
 import type { z } from "zod";
-import { DropshipError, DropshipUseCaseNotImplementedError } from "../domain/errors";
-import type { DropshipApplicationPorts } from "./dropship-ports";
+import { DropshipError } from "../domain/errors";
+import type { DropshipApplicationPorts, DropshipTransaction } from "./dropship-ports";
 import {
   acceptDropshipOrderInputSchema,
   createListingPushJobInputSchema,
@@ -64,6 +64,22 @@ export interface DropshipUseCase<TInput, TOutput> {
   readonly descriptor: DropshipUseCaseDescriptor<TInput>;
   execute(input: unknown): Promise<TOutput>;
 }
+
+export type DropshipUseCaseOutputMap = {
+  GenerateVendorListingPreview: unknown;
+  CreateListingPushJob: { jobId: number };
+  ProcessListingPushJob: unknown;
+  RecordMarketplaceOrderIntake: { intakeId: number };
+  AcceptDropshipOrder: unknown;
+  QuoteDropshipShipping: { quoteSnapshotId: number };
+  CreditWalletFunding: void;
+  DebitWalletForOrder: void;
+  HandleAutoReload: unknown;
+  RefreshStoreToken: void;
+  PushTrackingToVendorStore: void;
+  ProcessReturnInspection: void;
+  SendDropshipNotification: void;
+};
 
 export type DropshipUseCaseDescriptors = {
   GenerateVendorListingPreview: DropshipUseCaseDescriptor<GenerateVendorListingPreviewInput>;
@@ -191,7 +207,7 @@ export const dropshipUseCaseDescriptors: DropshipUseCaseDescriptors = {
 export type DropshipUseCaseRegistry = {
   [K in keyof DropshipUseCaseDescriptors]: DropshipUseCase<
     z.infer<DropshipUseCaseDescriptors[K]["inputSchema"]>,
-    never
+    DropshipUseCaseOutputMap[K]
   >;
 };
 
@@ -218,59 +234,283 @@ export function validateDropshipUseCaseInput<TInput>(
   return result.data;
 }
 
-class PendingDropshipUseCase<TInput> implements DropshipUseCase<TInput, never> {
+type DropshipUseCaseExecutor<TInput, TOutput> = (
+  input: TInput,
+  transaction: DropshipTransaction | null,
+) => Promise<TOutput>;
+
+class PortBackedDropshipUseCase<TInput, TOutput> implements DropshipUseCase<TInput, TOutput> {
   constructor(
     public readonly descriptor: DropshipUseCaseDescriptor<TInput>,
+    private readonly ports: DropshipApplicationPorts,
+    private readonly executor: DropshipUseCaseExecutor<TInput, TOutput>,
   ) {}
 
-  async execute(input: unknown): Promise<never> {
-    validateDropshipUseCaseInput(this.descriptor, input);
-    throw new DropshipUseCaseNotImplementedError(this.descriptor.name);
+  async execute(input: unknown): Promise<TOutput> {
+    const parsed = validateDropshipUseCaseInput(this.descriptor, input);
+    if (this.descriptor.transactionPolicy === "required") {
+      return this.ports.transactions.runInTransaction(async (transaction) => {
+        const output = await this.executor(parsed, transaction);
+        if (this.descriptor.auditPolicy === "required") {
+          await this.ports.auditEvents.record(
+            buildDropshipUseCaseAuditEvent(this.descriptor.name, parsed),
+            transaction,
+          );
+        }
+        return output;
+      });
+    }
+
+    return this.executor(parsed, null);
   }
 }
 
 export function createDropshipUseCaseRegistry(
-  _ports: DropshipApplicationPorts,
+  ports: DropshipApplicationPorts,
 ): DropshipUseCaseRegistry {
   return {
-    GenerateVendorListingPreview: new PendingDropshipUseCase(
+    GenerateVendorListingPreview: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.GenerateVendorListingPreview,
+      ports,
+      (input) => ports.listings.generateVendorListingPreview(input),
     ),
-    CreateListingPushJob: new PendingDropshipUseCase(
+    CreateListingPushJob: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.CreateListingPushJob,
+      ports,
+      async (input, transaction) => ({
+        jobId: await ports.listings.enqueueListingPush({
+          ...input,
+          transaction: requireDropshipUseCaseTransaction("CreateListingPushJob", transaction),
+        }),
+      }),
     ),
-    ProcessListingPushJob: new PendingDropshipUseCase(
+    ProcessListingPushJob: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.ProcessListingPushJob,
+      ports,
+      (input, transaction) => ports.listings.processListingPushJob({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("ProcessListingPushJob", transaction),
+      }),
     ),
-    RecordMarketplaceOrderIntake: new PendingDropshipUseCase(
+    RecordMarketplaceOrderIntake: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.RecordMarketplaceOrderIntake,
+      ports,
+      async (input, transaction) => ({
+        intakeId: await ports.orderIntake.recordMarketplaceIntake({
+          ...input,
+          transaction: requireDropshipUseCaseTransaction("RecordMarketplaceOrderIntake", transaction),
+        }),
+      }),
     ),
-    AcceptDropshipOrder: new PendingDropshipUseCase(
+    AcceptDropshipOrder: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.AcceptDropshipOrder,
+      ports,
+      (input, transaction) => ports.orderAcceptance.acceptOrder({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("AcceptDropshipOrder", transaction),
+      }),
     ),
-    QuoteDropshipShipping: new PendingDropshipUseCase(
+    QuoteDropshipShipping: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.QuoteDropshipShipping,
+      ports,
+      async (input, transaction) => ({
+        quoteSnapshotId: await ports.shipping.quote({
+          ...input,
+          transaction: requireDropshipUseCaseTransaction("QuoteDropshipShipping", transaction),
+        }),
+      }),
     ),
-    CreditWalletFunding: new PendingDropshipUseCase(
+    CreditWalletFunding: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.CreditWalletFunding,
+      ports,
+      (input, transaction) => ports.wallet.creditFunding({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("CreditWalletFunding", transaction),
+      }),
     ),
-    DebitWalletForOrder: new PendingDropshipUseCase(
+    DebitWalletForOrder: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.DebitWalletForOrder,
+      ports,
+      (input, transaction) => ports.wallet.debitOrder({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("DebitWalletForOrder", transaction),
+      }),
     ),
-    HandleAutoReload: new PendingDropshipUseCase(
+    HandleAutoReload: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.HandleAutoReload,
+      ports,
+      (input, transaction) => ports.wallet.handleAutoReload({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("HandleAutoReload", transaction),
+      }),
     ),
-    RefreshStoreToken: new PendingDropshipUseCase(
+    RefreshStoreToken: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.RefreshStoreToken,
+      ports,
+      (input, transaction) => ports.marketplace.refreshStoreToken({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("RefreshStoreToken", transaction),
+      }),
     ),
-    PushTrackingToVendorStore: new PendingDropshipUseCase(
+    PushTrackingToVendorStore: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.PushTrackingToVendorStore,
+      ports,
+      (input, transaction) => ports.marketplace.pushTracking({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("PushTrackingToVendorStore", transaction),
+      }),
     ),
-    ProcessReturnInspection: new PendingDropshipUseCase(
+    ProcessReturnInspection: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.ProcessReturnInspection,
+      ports,
+      (input, transaction) => ports.returns.processInspection({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("ProcessReturnInspection", transaction),
+      }),
     ),
-    SendDropshipNotification: new PendingDropshipUseCase(
+    SendDropshipNotification: new PortBackedDropshipUseCase(
       dropshipUseCaseDescriptors.SendDropshipNotification,
+      ports,
+      (input, transaction) => ports.notifications.send({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("SendDropshipNotification", transaction),
+      }),
     ),
   };
+}
+
+function requireDropshipUseCaseTransaction(
+  useCaseName: DropshipUseCaseName,
+  transaction: DropshipTransaction | null,
+): DropshipTransaction {
+  if (transaction) {
+    return transaction;
+  }
+  throw new DropshipError(
+    "DROPSHIP_USE_CASE_TRANSACTION_REQUIRED",
+    `${useCaseName} requires a transaction.`,
+    { useCaseName },
+  );
+}
+
+function buildDropshipUseCaseAuditEvent<TInput>(
+  useCaseName: DropshipUseCaseName,
+  input: TInput,
+) {
+  const auditInput = normalizeDropshipUseCaseAuditInput(input);
+  return {
+    vendorId: auditInput.vendorId,
+    storeConnectionId: auditInput.storeConnectionId,
+    entityType: "dropship_use_case",
+    entityId: useCaseName,
+    eventType: `dropship_use_case_${dropshipUseCaseNameToAuditEventSuffix(useCaseName)}`,
+    actorType: auditInput.actorType,
+    actorId: auditInput.actorId,
+    severity: "info" as const,
+    payload: {
+      useCaseName,
+      input: auditInput.payload,
+    },
+  };
+}
+
+function dropshipUseCaseNameToAuditEventSuffix(useCaseName: DropshipUseCaseName): string {
+  return useCaseName.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+function normalizeDropshipUseCaseAuditInput(input: unknown): {
+  vendorId?: number;
+  storeConnectionId?: number;
+  actorType: "vendor" | "admin" | "system" | "job";
+  actorId?: string;
+  payload: Record<string, unknown>;
+} {
+  if (!isRecord(input)) {
+    return {
+      actorType: "system",
+      payload: {},
+    };
+  }
+
+  const actor = extractDropshipUseCaseActor(input);
+  return {
+    vendorId: numberProperty(input, "vendorId"),
+    storeConnectionId: numberProperty(input, "storeConnectionId"),
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    payload: sanitizeDropshipUseCaseAuditPayload(input),
+  };
+}
+
+function extractDropshipUseCaseActor(input: Record<string, unknown>): {
+  actorType: "vendor" | "admin" | "system" | "job";
+  actorId?: string;
+} {
+  const actor = isRecord(input.actor)
+    ? input.actor
+    : isRecord(input.requestedBy)
+      ? input.requestedBy
+      : null;
+  if (actor) {
+    const actorType = actor.actorType;
+    if (
+      actorType === "vendor"
+      || actorType === "admin"
+      || actorType === "system"
+      || actorType === "job"
+    ) {
+      const actorId = typeof actor.actorId === "string" ? actor.actorId : undefined;
+      return actorId ? { actorType, actorId } : { actorType };
+    }
+  }
+
+  if (typeof input.workerId === "string") {
+    return { actorType: "job", actorId: input.workerId };
+  }
+  return { actorType: "system" };
+}
+
+function sanitizeDropshipUseCaseAuditPayload(input: Record<string, unknown>): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (key === "rawPayload" || key === "payload" || key === "message" || key === "destination") {
+      payload[key] = "[redacted]";
+      continue;
+    }
+    if (key === "productVariantIds" && Array.isArray(value)) {
+      payload.productVariantCount = value.length;
+      continue;
+    }
+    if (key === "items" && Array.isArray(value)) {
+      payload.itemCount = value.length;
+      continue;
+    }
+    if (key === "requestedRetailPricesByVariantId" && isRecord(value)) {
+      payload.requestedRetailPriceVariantCount = Object.keys(value).length;
+      continue;
+    }
+    if (key === "actor" || key === "requestedBy") {
+      payload[key] = sanitizeDropshipUseCaseActorPayload(value);
+      continue;
+    }
+    payload[key] = value;
+  }
+  return payload;
+}
+
+function sanitizeDropshipUseCaseActorPayload(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  return {
+    actorType: value.actorType,
+    actorId: value.actorId,
+  };
+}
+
+function numberProperty(input: Record<string, unknown>, key: string): number | undefined {
+  const value = input[key];
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
