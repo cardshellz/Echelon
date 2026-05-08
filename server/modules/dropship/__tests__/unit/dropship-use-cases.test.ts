@@ -48,6 +48,10 @@ describe("Dropship V2 use-case registry", () => {
       "ebay",
       "shopify",
     ]);
+    expect(dropshipUseCaseDescriptors.ProcessMarketplaceOrderCancellations.externalApiMocksRequired).toEqual([
+      "ebay",
+      "shopify",
+    ]);
     expect(dropshipUseCaseDescriptors.CreditWalletFunding.externalApiMocksRequired).toEqual([
       "stripe",
       "usdc_base",
@@ -56,6 +60,9 @@ describe("Dropship V2 use-case registry", () => {
       "carrier",
     ]);
     expect(dropshipUseCaseDescriptors.SendDropshipNotification.externalApiMocksRequired).toEqual([
+      "email",
+    ]);
+    expect(dropshipUseCaseDescriptors.NotifyExpiringPaymentHolds.externalApiMocksRequired).toEqual([
       "email",
     ]);
   });
@@ -139,6 +146,41 @@ describe("Dropship V2 use-case DTO validation", () => {
 
     expect(parsed.storeConnectionId).toBe(2);
     expect(parsed.externalOrderId).toBe("ORDER-1");
+  });
+
+  it("validates order exception worker bounds", () => {
+    expect(() =>
+      validateDropshipUseCaseInput(
+        dropshipUseCaseDescriptors.RejectDropshipOrder,
+        {
+          intakeId: 1,
+          vendorId: 1,
+          reason: "no",
+          idempotencyKey: "reject-order-123",
+          actor: { actorType: "vendor", actorId: "member-1" },
+        },
+      ),
+    ).toThrow(DropshipError);
+
+    expect(() =>
+      validateDropshipUseCaseInput(
+        dropshipUseCaseDescriptors.ProcessMarketplaceOrderCancellations,
+        {
+          workerId: "worker-1",
+          limit: 501,
+        },
+      ),
+    ).toThrow(DropshipError);
+
+    expect(() =>
+      validateDropshipUseCaseInput(
+        dropshipUseCaseDescriptors.NotifyExpiringPaymentHolds,
+        {
+          workerId: "worker-1",
+          warningWindowMinutes: 60 * 24 * 8,
+        },
+      ),
+    ).toThrow(DropshipError);
   });
 });
 
@@ -249,6 +291,108 @@ describe("Dropship V2 port-backed use-case execution", () => {
     );
   });
 
+  it("covers vendor order rejection in the executable use-case contract", async () => {
+    const ports = makePorts();
+    ports.orderRejection.rejectOrder = vi.fn().mockResolvedValue({ intakeId: 88, status: "rejected" });
+    const registry = createDropshipUseCaseRegistry(ports);
+
+    await expect(
+      registry.RejectDropshipOrder.execute({
+        intakeId: 88,
+        vendorId: 1,
+        reason: "Buyer requested cancellation",
+        idempotencyKey: "reject-order-88",
+        actor: { actorType: "vendor", actorId: "member-1" },
+      }),
+    ).resolves.toEqual({ intakeId: 88, status: "rejected" });
+
+    expect(ports.orderRejection.rejectOrder).toHaveBeenCalledWith({
+      intakeId: 88,
+      vendorId: 1,
+      reason: "Buyer requested cancellation",
+      idempotencyKey: "reject-order-88",
+      actor: { actorType: "vendor", actorId: "member-1" },
+      transaction,
+    });
+    expect(ports.auditEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        vendorId: 1,
+        entityId: "RejectDropshipOrder",
+        eventType: "dropship_use_case_reject_dropship_order",
+        actorType: "vendor",
+        actorId: "member-1",
+      }),
+      transaction,
+    );
+  });
+
+  it("covers worker-driven order exception flows with job actor audit context", async () => {
+    const ports = makePorts();
+    ports.orderCancellations.processPendingCancellations = vi.fn().mockResolvedValue({ attempted: 1 });
+    ports.paymentHolds.expireExpiredPaymentHolds = vi.fn().mockResolvedValue({ expiredCount: 1 });
+    ports.paymentHolds.notifyExpiringPaymentHolds = vi.fn().mockResolvedValue({ notifiedCount: 1 });
+    const registry = createDropshipUseCaseRegistry(ports);
+
+    await expect(
+      registry.ProcessMarketplaceOrderCancellations.execute({
+        workerId: "worker-1",
+        limit: 25,
+      }),
+    ).resolves.toEqual({ attempted: 1 });
+    await expect(
+      registry.ExpirePaymentHolds.execute({
+        workerId: "worker-1",
+        limit: 10,
+      }),
+    ).resolves.toEqual({ expiredCount: 1 });
+    await expect(
+      registry.NotifyExpiringPaymentHolds.execute({
+        workerId: "worker-1",
+        warningWindowMinutes: 120,
+      }),
+    ).resolves.toEqual({ notifiedCount: 1 });
+
+    expect(ports.orderCancellations.processPendingCancellations).toHaveBeenCalledWith({
+      workerId: "worker-1",
+      limit: 25,
+      transaction,
+    });
+    expect(ports.paymentHolds.expireExpiredPaymentHolds).toHaveBeenCalledWith({
+      workerId: "worker-1",
+      limit: 10,
+      transaction,
+    });
+    expect(ports.paymentHolds.notifyExpiringPaymentHolds).toHaveBeenCalledWith({
+      workerId: "worker-1",
+      warningWindowMinutes: 120,
+      transaction,
+    });
+    expect(ports.auditEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entityId: "ProcessMarketplaceOrderCancellations",
+        actorType: "job",
+        actorId: "worker-1",
+      }),
+      transaction,
+    );
+    expect(ports.auditEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entityId: "ExpirePaymentHolds",
+        actorType: "job",
+        actorId: "worker-1",
+      }),
+      transaction,
+    );
+    expect(ports.auditEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entityId: "NotifyExpiringPaymentHolds",
+        actorType: "job",
+        actorId: "worker-1",
+      }),
+      transaction,
+    );
+  });
+
   it("throws structured validation errors before implementation errors", async () => {
     const ports = makePorts();
     const registry = createDropshipUseCaseRegistry(ports);
@@ -315,6 +459,16 @@ function makePorts(): DropshipApplicationPorts {
     },
     orderAcceptance: {
       acceptOrder: vi.fn(async () => ({ accepted: true })),
+    },
+    orderRejection: {
+      rejectOrder: vi.fn(async () => ({ rejected: true })),
+    },
+    orderCancellations: {
+      processPendingCancellations: vi.fn(async () => ({ processed: true })),
+    },
+    paymentHolds: {
+      expireExpiredPaymentHolds: vi.fn(async () => ({ expiredCount: 0 })),
+      notifyExpiringPaymentHolds: vi.fn(async () => ({ notifiedCount: 0 })),
     },
     wallet: {
       creditFunding: vi.fn(async () => undefined),

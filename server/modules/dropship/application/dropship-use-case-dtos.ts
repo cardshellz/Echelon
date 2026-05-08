@@ -80,6 +80,22 @@ export const rejectDropshipOrderInputSchema = z.object({
   actor: actorSchema,
 }).strict();
 
+export const processMarketplaceOrderCancellationsInputSchema = z.object({
+  workerId: z.string().trim().min(1).max(255),
+  limit: z.number().int().positive().max(500).optional(),
+}).strict();
+
+export const expirePaymentHoldsInputSchema = z.object({
+  workerId: z.string().trim().min(1).max(255),
+  limit: z.number().int().positive().max(500).optional(),
+}).strict();
+
+export const notifyExpiringPaymentHoldsInputSchema = z.object({
+  workerId: z.string().trim().min(1).max(255),
+  limit: z.number().int().positive().max(500).optional(),
+  warningWindowMinutes: z.number().int().positive().max(60 * 24 * 7).optional(),
+}).strict();
+
 export const quoteDropshipShippingInputSchema = z.object({
   vendorId: positiveIdSchema,
   storeConnectionId: positiveIdSchema,
@@ -160,6 +176,9 @@ export type ProcessListingPushJobInput = z.infer<typeof processListingPushJobInp
 export type RecordMarketplaceOrderIntakeInput = z.infer<typeof recordMarketplaceOrderIntakeInputSchema>;
 export type AcceptDropshipOrderInput = z.infer<typeof acceptDropshipOrderInputSchema>;
 export type RejectDropshipOrderInput = z.infer<typeof rejectDropshipOrderInputSchema>;
+export type ProcessMarketplaceOrderCancellationsInput = z.infer<typeof processMarketplaceOrderCancellationsInputSchema>;
+export type ExpirePaymentHoldsInput = z.infer<typeof expirePaymentHoldsInputSchema>;
+export type NotifyExpiringPaymentHoldsInput = z.infer<typeof notifyExpiringPaymentHoldsInputSchema>;
 export type QuoteDropshipShippingInput = z.infer<typeof quoteDropshipShippingInputSchema>;
 export type CreditWalletFundingInput = z.infer<typeof creditWalletFundingInputSchema>;
 export type DebitWalletForOrderInput = z.infer<typeof debitWalletForOrderInputSchema>;

@@ -6,27 +6,35 @@ import {
   createListingPushJobInputSchema,
   creditWalletFundingInputSchema,
   debitWalletForOrderInputSchema,
+  expirePaymentHoldsInputSchema,
   generateVendorListingPreviewInputSchema,
   handleAutoReloadInputSchema,
+  notifyExpiringPaymentHoldsInputSchema,
+  processMarketplaceOrderCancellationsInputSchema,
   processListingPushJobInputSchema,
   processReturnInspectionInputSchema,
   pushTrackingToVendorStoreInputSchema,
   quoteDropshipShippingInputSchema,
   recordMarketplaceOrderIntakeInputSchema,
   refreshStoreTokenInputSchema,
+  rejectDropshipOrderInputSchema,
   sendDropshipNotificationInputSchema,
   type AcceptDropshipOrderInput,
   type CreateListingPushJobInput,
   type CreditWalletFundingInput,
   type DebitWalletForOrderInput,
+  type ExpirePaymentHoldsInput,
   type GenerateVendorListingPreviewInput,
   type HandleAutoReloadInput,
+  type NotifyExpiringPaymentHoldsInput,
   type ProcessListingPushJobInput,
+  type ProcessMarketplaceOrderCancellationsInput,
   type ProcessReturnInspectionInput,
   type PushTrackingToVendorStoreInput,
   type QuoteDropshipShippingInput,
   type RecordMarketplaceOrderIntakeInput,
   type RefreshStoreTokenInput,
+  type RejectDropshipOrderInput,
   type SendDropshipNotificationInput,
 } from "./dropship-use-case-dtos";
 
@@ -36,6 +44,10 @@ export const DROPSHIP_REQUIRED_USE_CASE_NAMES = [
   "ProcessListingPushJob",
   "RecordMarketplaceOrderIntake",
   "AcceptDropshipOrder",
+  "RejectDropshipOrder",
+  "ProcessMarketplaceOrderCancellations",
+  "ExpirePaymentHolds",
+  "NotifyExpiringPaymentHolds",
   "QuoteDropshipShipping",
   "CreditWalletFunding",
   "DebitWalletForOrder",
@@ -71,6 +83,10 @@ export type DropshipUseCaseOutputMap = {
   ProcessListingPushJob: unknown;
   RecordMarketplaceOrderIntake: { intakeId: number };
   AcceptDropshipOrder: unknown;
+  RejectDropshipOrder: unknown;
+  ProcessMarketplaceOrderCancellations: unknown;
+  ExpirePaymentHolds: unknown;
+  NotifyExpiringPaymentHolds: unknown;
   QuoteDropshipShipping: { quoteSnapshotId: number };
   CreditWalletFunding: void;
   DebitWalletForOrder: void;
@@ -87,6 +103,10 @@ export type DropshipUseCaseDescriptors = {
   ProcessListingPushJob: DropshipUseCaseDescriptor<ProcessListingPushJobInput>;
   RecordMarketplaceOrderIntake: DropshipUseCaseDescriptor<RecordMarketplaceOrderIntakeInput>;
   AcceptDropshipOrder: DropshipUseCaseDescriptor<AcceptDropshipOrderInput>;
+  RejectDropshipOrder: DropshipUseCaseDescriptor<RejectDropshipOrderInput>;
+  ProcessMarketplaceOrderCancellations: DropshipUseCaseDescriptor<ProcessMarketplaceOrderCancellationsInput>;
+  ExpirePaymentHolds: DropshipUseCaseDescriptor<ExpirePaymentHoldsInput>;
+  NotifyExpiringPaymentHolds: DropshipUseCaseDescriptor<NotifyExpiringPaymentHoldsInput>;
   QuoteDropshipShipping: DropshipUseCaseDescriptor<QuoteDropshipShippingInput>;
   CreditWalletFunding: DropshipUseCaseDescriptor<CreditWalletFundingInput>;
   DebitWalletForOrder: DropshipUseCaseDescriptor<DebitWalletForOrderInput>;
@@ -137,6 +157,38 @@ export const dropshipUseCaseDescriptors: DropshipUseCaseDescriptors = {
     idempotencyPolicy: "required",
     auditPolicy: "required",
     externalApiMocksRequired: [],
+  },
+  RejectDropshipOrder: {
+    name: "RejectDropshipOrder",
+    inputSchema: rejectDropshipOrderInputSchema,
+    transactionPolicy: "required",
+    idempotencyPolicy: "required",
+    auditPolicy: "required",
+    externalApiMocksRequired: [],
+  },
+  ProcessMarketplaceOrderCancellations: {
+    name: "ProcessMarketplaceOrderCancellations",
+    inputSchema: processMarketplaceOrderCancellationsInputSchema,
+    transactionPolicy: "required",
+    idempotencyPolicy: "required",
+    auditPolicy: "required",
+    externalApiMocksRequired: ["ebay", "shopify"],
+  },
+  ExpirePaymentHolds: {
+    name: "ExpirePaymentHolds",
+    inputSchema: expirePaymentHoldsInputSchema,
+    transactionPolicy: "required",
+    idempotencyPolicy: "required",
+    auditPolicy: "required",
+    externalApiMocksRequired: [],
+  },
+  NotifyExpiringPaymentHolds: {
+    name: "NotifyExpiringPaymentHolds",
+    inputSchema: notifyExpiringPaymentHoldsInputSchema,
+    transactionPolicy: "required",
+    idempotencyPolicy: "required",
+    auditPolicy: "required",
+    externalApiMocksRequired: ["email"],
   },
   QuoteDropshipShipping: {
     name: "QuoteDropshipShipping",
@@ -308,6 +360,38 @@ export function createDropshipUseCaseRegistry(
       (input, transaction) => ports.orderAcceptance.acceptOrder({
         ...input,
         transaction: requireDropshipUseCaseTransaction("AcceptDropshipOrder", transaction),
+      }),
+    ),
+    RejectDropshipOrder: new PortBackedDropshipUseCase(
+      dropshipUseCaseDescriptors.RejectDropshipOrder,
+      ports,
+      (input, transaction) => ports.orderRejection.rejectOrder({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("RejectDropshipOrder", transaction),
+      }),
+    ),
+    ProcessMarketplaceOrderCancellations: new PortBackedDropshipUseCase(
+      dropshipUseCaseDescriptors.ProcessMarketplaceOrderCancellations,
+      ports,
+      (input, transaction) => ports.orderCancellations.processPendingCancellations({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("ProcessMarketplaceOrderCancellations", transaction),
+      }),
+    ),
+    ExpirePaymentHolds: new PortBackedDropshipUseCase(
+      dropshipUseCaseDescriptors.ExpirePaymentHolds,
+      ports,
+      (input, transaction) => ports.paymentHolds.expireExpiredPaymentHolds({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("ExpirePaymentHolds", transaction),
+      }),
+    ),
+    NotifyExpiringPaymentHolds: new PortBackedDropshipUseCase(
+      dropshipUseCaseDescriptors.NotifyExpiringPaymentHolds,
+      ports,
+      (input, transaction) => ports.paymentHolds.notifyExpiringPaymentHolds({
+        ...input,
+        transaction: requireDropshipUseCaseTransaction("NotifyExpiringPaymentHolds", transaction),
       }),
     ),
     QuoteDropshipShipping: new PortBackedDropshipUseCase(
