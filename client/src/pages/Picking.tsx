@@ -612,18 +612,25 @@ export default function Picking() {
     shippingServiceLevel: (order as any).shippingServiceLevel,
     memberPlanName: (order as any).memberPlanName,
     memberPlanColor: (order as any).memberPlanColor,
-    items: order.items.map((item): PickItem => ({
-      id: item.id,
-      sku: item.sku,
-      name: item.name,
-      location: item.location,
-      qty: item.quantity,
-      picked: item.pickedQuantity,
-      status: item.status as "pending" | "in_progress" | "completed" | "short",
-      orderId: order.orderNumber,
-      image: item.imageUrl || "",
-      barcode: item.barcode || undefined,
-    })),
+    items: order.items
+      .map((item): PickItem => {
+        const fulfilled = Math.max(0, item.fulfilledQuantity || 0);
+        const remainingQty = Math.max(0, item.quantity - fulfilled);
+        const pickedRemaining = Math.min(item.pickedQuantity || 0, remainingQty);
+        return {
+          id: item.id,
+          sku: item.sku,
+          name: item.name,
+          location: item.location,
+          qty: remainingQty,
+          picked: pickedRemaining,
+          status: remainingQty <= 0 ? "completed" : item.status as "pending" | "in_progress" | "completed" | "short",
+          orderId: order.orderNumber,
+          image: item.imageUrl || "",
+          barcode: item.barcode || undefined,
+        };
+      })
+      .filter((item) => item.qty > 0 || item.status === "short"),
   }));
 
   // Group combined orders into single entries

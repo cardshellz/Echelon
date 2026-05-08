@@ -417,6 +417,103 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(sqlText).not.toMatch(/INSERT INTO wms\.outbound_shipment_items/);
   });
 
+  it("applies shipped split quantities to WMS order_items without completing the remaining quantity", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7001,
+      orderId: 555000,
+      orderKey: "echelon-wms-shp-501",
+      shipmentItems: [
+        { lineItemKey: "wms-item-10001", sku: "SKU-A", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+
+    const mock = makeDb([
+      // V2 lookup by shipstation_order_id.
+      { rows: [{ id: 501, order_id: 42, status: "planned", shipstation_order_id: 555000 }] },
+      // Existing shipment item row belongs to the original shipment.
+      { rows: [{ id: 10001, order_item_id: 30001 }] },
+      // Source item copied from the original shipment row.
+      {
+        rows: [
+          {
+            id: 10001,
+            order_item_id: 30001,
+            product_variant_id: 40001,
+            from_location_id: 50001,
+            box_id: null,
+            weight_oz: 4,
+          },
+        ],
+      },
+      // UPDATE wms.outbound_shipment_items.
+      { rows: [] },
+      // loadValidatedInventoryShipmentItems.
+      {
+        rows: [
+          {
+            id: 10001,
+            order_item_id: 30001,
+            product_variant_id: 40001,
+            qty: 1,
+            from_location_id: 50001,
+          },
+        ],
+      },
+      // markShipmentShipped load-current.
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "planned",
+            tracking_number: null,
+            carrier: null,
+            tracking_url: null,
+          },
+        ],
+      },
+      // UPDATE outbound_shipments.
+      { rows: [] },
+      // recompute: order row.
+      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
+      // recompute: one shipped package, one still open package.
+      { rows: [{ status: "shipped" }, { status: "queued" }] },
+      // recompute UPDATE wms.orders to partially_shipped.
+      { rows: [] },
+      // resolve OMS id.
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // OMS line status derivation.
+      { rows: [] },
+      // applyShipmentQuantitiesToWmsOrderItems.
+      { rows: [] },
+      // delayed tracking provider guard.
+      { rows: [{ provider: "shopify" }] },
+      // Shopify fulfillment provider guard.
+      { rows: [{ provider: "shopify" }] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const processed = await createShipStationService(mock.db, inventoryCore)
+      .processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+      orderItemId: 30001,
+      qty: 1,
+      shipmentId: "501",
+    }));
+    const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
+    expect(sqlText).toMatch(/fulfilled_quantity = LEAST\(quantity, COALESCE\(fulfilled_quantity, 0\) \+/);
+    expect(sqlText).toMatch(/picked_quantity = LEAST\(quantity, GREATEST/);
+    expect(sqlText).toMatch(/warehouse_status = /);
+  });
+
   it("fallback: shipment NOT found by shipstation_order_id → legacy path runs", async () => {
     // Pre-cutover order: orderKey is legacy echelon-oms-<id> AND no
     // shipstation_order_id is set on any outbound_shipments row.
