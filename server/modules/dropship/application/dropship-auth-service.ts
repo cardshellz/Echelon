@@ -13,6 +13,7 @@ import {
 } from "../domain/auth";
 import type {
   DropshipClock,
+  DropshipEntitlementSnapshot,
   DropshipEntitlementPort,
   DropshipIdentityPort,
   DropshipLogger,
@@ -221,6 +222,23 @@ export class DropshipAuthService {
     return this.buildSessionPrincipal(identity, entitlementStatus, "password");
   }
 
+  async refreshSessionPrincipal(principal: DropshipSessionPrincipal): Promise<DropshipSessionPrincipal> {
+    const identity = await this.deps.authIdentities.findAuthIdentityByMemberId(principal.memberId);
+    if (!identity || identity.status !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_AUTH_IDENTITY_REQUIRED",
+        "Active dropship auth identity is required to refresh the session.",
+        { memberId: principal.memberId },
+      );
+    }
+
+    const entitlement = await this.requireLoginEntitlementSnapshot(identity.memberId);
+    return this.buildSessionPrincipal({
+      ...identity,
+      primaryEmail: entitlement.cardShellzEmail ?? identity.primaryEmail,
+    }, entitlement.status, principal.authMethod, principal.authenticatedAt);
+  }
+
   async startSensitiveActionChallenge(
     principal: DropshipSessionPrincipal,
     input: StartDropshipSensitiveActionChallengeInput,
@@ -311,6 +329,13 @@ export class DropshipAuthService {
   private async requireLoginEntitlement(
     memberId: string,
   ): Promise<"active" | "grace"> {
+    const entitlement = await this.requireLoginEntitlementSnapshot(memberId);
+    return entitlement.status;
+  }
+
+  private async requireLoginEntitlementSnapshot(
+    memberId: string,
+  ): Promise<DropshipEntitlementSnapshot & { status: "active" | "grace" }> {
     const entitlement = await this.deps.entitlement.getEntitlementByMemberId(memberId);
     if (!entitlement || !isLoginEntitled(entitlement.status)) {
       throw new DropshipError(
@@ -324,13 +349,14 @@ export class DropshipAuthService {
       );
     }
 
-    return entitlement.status;
+    return entitlement as DropshipEntitlementSnapshot & { status: "active" | "grace" };
   }
 
   private buildSessionPrincipal(
     identity: DropshipAuthIdentityRecord,
     entitlementStatus: "active" | "grace",
     authMethod: "password" | "passkey",
+    authenticatedAt: string = this.deps.clock.now().toISOString(),
   ): DropshipSessionPrincipal {
     return {
       authIdentityId: identity.authIdentityId,
@@ -339,7 +365,7 @@ export class DropshipAuthService {
       hasPasskey: !!identity.passkeyEnrolledAt,
       authMethod,
       entitlementStatus,
-      authenticatedAt: this.deps.clock.now().toISOString(),
+      authenticatedAt,
     };
   }
 

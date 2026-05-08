@@ -167,11 +167,7 @@ export function registerDropshipAuthRoutes(
   });
 
   app.post("/api/dropship/auth/logout", (req, res) => {
-    delete req.session.dropship;
-    delete req.session.dropshipSensitiveProofs;
-    delete req.session.dropshipPasskeyRegistration;
-    delete req.session.dropshipPasskeyLogin;
-    delete req.session.dropshipPasskeySensitiveAction;
+    clearDropshipSession(req);
     req.session.save((error) => {
       if (error) {
         return res.status(500).json({
@@ -185,11 +181,24 @@ export function registerDropshipAuthRoutes(
     });
   });
 
-  app.get("/api/dropship/auth/me", requireDropshipAuth, (req, res) => {
-    return res.json({
-      principal: req.session.dropship,
-      sensitiveProofs: req.session.dropshipSensitiveProofs ?? {},
-    });
+  app.get("/api/dropship/auth/me", requireDropshipAuth, async (req, res) => {
+    try {
+      const principal = await service.refreshSessionPrincipal(req.session.dropship!);
+      const vendor = await provisionDropshipVendorProfile(vendorProvisioningService, principal);
+      req.session.dropship = principal;
+      await saveSession(req);
+      return res.json({
+        principal,
+        vendor,
+        sensitiveProofs: req.session.dropshipSensitiveProofs ?? {},
+      });
+    } catch (error) {
+      if (shouldClearDropshipSessionOnRefreshError(error)) {
+        clearDropshipSession(req);
+        await saveSession(req).catch(() => undefined);
+      }
+      return sendDropshipAuthError(res, error);
+    }
   });
 
   app.post(
@@ -344,6 +353,25 @@ async function provisionDropshipVendorProfile(
 ): Promise<DropshipProvisionedVendorProfile> {
   const result = await service.provisionForMember(principal.memberId);
   return result.vendor;
+}
+
+function clearDropshipSession(req: Request): void {
+  delete req.session.dropship;
+  delete req.session.dropshipSensitiveProofs;
+  delete req.session.dropshipPasskeyRegistration;
+  delete req.session.dropshipPasskeyLogin;
+  delete req.session.dropshipPasskeySensitiveAction;
+}
+
+function shouldClearDropshipSessionOnRefreshError(error: unknown): boolean {
+  if (!(error instanceof DropshipError)) {
+    return false;
+  }
+  return [
+    "DROPSHIP_ENTITLEMENT_REQUIRED",
+    "DROPSHIP_AUTH_IDENTITY_REQUIRED",
+    "DROPSHIP_AUTH_IDENTITY_MEMBER_MISMATCH",
+  ].includes(error.code);
 }
 
 export function requireDropshipAuth(req: Request, res: Response, next: NextFunction): void {
@@ -504,6 +532,7 @@ function statusForDropshipError(code: string): number {
     case "DROPSHIP_PASSKEY_CHALLENGE_MEMBER_MISMATCH":
     case "DROPSHIP_PASSKEY_MEMBER_MISMATCH":
     case "DROPSHIP_AUTH_IDENTITY_REQUIRED":
+    case "DROPSHIP_AUTH_IDENTITY_MEMBER_MISMATCH":
       return 403;
     case "DROPSHIP_PASSKEY_ALREADY_REGISTERED":
       return 409;
