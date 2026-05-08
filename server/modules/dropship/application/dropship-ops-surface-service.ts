@@ -266,6 +266,7 @@ export class DropshipOpsSurfaceService {
       repository: DropshipOpsSurfaceRepository;
       clock: DropshipClock;
       logger: DropshipLogger;
+      env?: NodeJS.ProcessEnv;
     },
   ) {}
 
@@ -316,7 +317,7 @@ export class DropshipOpsSurfaceService {
       generatedAt: this.deps.clock.now(),
     });
     const { launchGateItems, ...publicResult } = result;
-    const systemChecks = buildDropshipSystemReadinessChecks(process.env);
+    const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env);
     this.deps.logger.info({
       code: "DROPSHIP_DOGFOOD_READINESS_VIEWED",
       message: "Dropship dogfood readiness was loaded.",
@@ -345,9 +346,9 @@ export function buildDropshipDogfoodLaunchGate(input: {
   items: readonly DropshipDogfoodReadinessItem[];
   systemChecks: readonly DropshipSystemReadinessCheck[];
 }): DropshipDogfoodLaunchGate {
-  const readyVendorStoreCount = readinessSummaryCount(input.summary, "ready");
-  const warningVendorStoreCount = readinessSummaryCount(input.summary, "warning");
-  const blockedVendorStoreCount = readinessSummaryCount(input.summary, "blocked");
+  const readyVendorStoreCount = input.items.filter((item) => item.readinessStatus === "ready").length;
+  const warningVendorStoreCount = input.items.filter((item) => item.readinessStatus === "warning").length;
+  const blockedVendorStoreCount = input.items.filter((item) => item.readinessStatus === "blocked").length;
   const systemBlocked = input.systemChecks.filter((check) => check.status === "blocked");
   const systemWarnings = input.systemChecks.filter((check) => check.status === "warning");
   const vendorBlockers = input.items.flatMap((item) =>
@@ -429,13 +430,6 @@ function buildDogfoodLaunchGateMessage(input: {
     return `${input.readyVendorStoreCount} vendor/store row(s) ready; ${input.blockedVendorStoreCount} blocked row(s) and ${input.warningCount} warning(s) remain.`;
   }
   return `${input.readyVendorStoreCount} vendor/store row(s) ready for dogfood.`;
-}
-
-function readinessSummaryCount(
-  summary: readonly DropshipDogfoodReadinessSummary[],
-  status: DropshipDogfoodReadinessStatus,
-): number {
-  return summary.find((item) => item.status === status)?.count ?? 0;
 }
 
 export function buildDropshipSystemReadinessChecks(

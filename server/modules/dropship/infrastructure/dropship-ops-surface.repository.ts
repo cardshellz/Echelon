@@ -348,8 +348,16 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
        ORDER BY v.updated_at DESC, v.id DESC, sc.updated_at DESC NULLS LAST, sc.id DESC NULLS LAST`,
       filters.params,
     );
+    const launchGateResult = filters.whereSql
+      ? await this.dbPool.query<DogfoodReadinessRow>(
+          `${dogfoodReadinessSql()}
+           ORDER BY v.updated_at DESC, v.id DESC, sc.updated_at DESC NULLS LAST, sc.id DESC NULLS LAST`,
+          [],
+        )
+      : result;
 
     const allItems = result.rows.map(mapDogfoodReadinessRow);
+    const launchGateItems = launchGateResult.rows.map(mapDogfoodReadinessRow);
     const filteredItems = input.status
       ? allItems.filter((item) => item.readinessStatus === input.status)
       : allItems;
@@ -358,7 +366,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
     return {
       generatedAt: input.generatedAt,
       items: filteredItems.slice(offset, offset + input.limit),
-      launchGateItems: allItems,
+      launchGateItems,
       total: filteredItems.length,
       page: input.page,
       limit: input.limit,

@@ -238,24 +238,28 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     ]);
   });
 
-  it("keeps full dogfood readiness rows available for launch gate evaluation while paginating visible rows", async () => {
-    const query = vi.fn(async () => ({
-      rows: [
-        makeDogfoodReadinessRow({ vendor_id: 10, member_id: "member-1" }),
-        makeDogfoodReadinessRow({ vendor_id: 11, member_id: "member-2" }),
-      ],
+  it("keeps global dogfood readiness rows available for launch gate evaluation while filtering visible rows", async () => {
+    const query = vi.fn(async (_sql: string, params?: unknown[]) => ({
+      rows: params?.includes("ebay")
+        ? [makeDogfoodReadinessRow({ vendor_id: 10, member_id: "member-1", platform: "ebay" })]
+        : [
+            makeDogfoodReadinessRow({ vendor_id: 10, member_id: "member-1", platform: "ebay" }),
+            makeDogfoodReadinessRow({ vendor_id: 11, member_id: "member-2", platform: "shopify", listing_config_platform: "shopify", refresh_token_ref: null }),
+          ],
     }));
     const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
 
     const result = await repository.listDogfoodReadiness({
       generatedAt: now,
+      platform: "ebay",
       page: 1,
       limit: 1,
     });
 
+    expect(query).toHaveBeenCalledTimes(2);
     expect(result.items).toHaveLength(1);
     expect(result.launchGateItems).toHaveLength(2);
-    expect(result.total).toBe(2);
+    expect(result.total).toBe(1);
   });
 
   it("blocks dogfood readiness when launch wallet and auto-reload funding are not usable", async () => {
