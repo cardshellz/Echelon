@@ -10,6 +10,7 @@ import {
   formatNotificationCurrency,
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
   DropshipClock,
   DropshipLogEvent,
@@ -902,7 +903,7 @@ export class DropshipWalletService {
 
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: parsed.vendorId,
-      eventType: "dropship_wallet_funding_failed",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_FAILED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship wallet funding failed",

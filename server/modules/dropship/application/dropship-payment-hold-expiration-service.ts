@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
   DropshipClock,
   DropshipLogEvent,
@@ -97,7 +98,7 @@ export class DropshipPaymentHoldExpirationService {
     for (const hold of expired) {
       await sendDropshipNotificationSafely(this.deps, {
         vendorId: hold.vendorId,
-        eventType: "dropship_order_payment_hold_expired",
+        eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRED,
         critical: true,
         channels: ["email", "in_app"],
         title: "Dropship order payment hold expired",
@@ -146,7 +147,7 @@ export class DropshipPaymentHoldExpirationService {
       );
       await sendDropshipNotificationSafely(this.deps, {
         vendorId: hold.vendorId,
-        eventType: "dropship_order_payment_hold_expiring",
+        eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRING,
         critical: true,
         channels: ["email", "in_app"],
         title: "Dropship order payment hold expiring",

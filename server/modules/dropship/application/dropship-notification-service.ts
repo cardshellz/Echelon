@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 
@@ -23,25 +24,25 @@ export interface DropshipLaunchNotificationPreferenceDefinition {
 }
 
 export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificationPreferenceDefinition[] = [
-  { eventType: "dropship_auto_reload_failed", critical: true },
-  { eventType: "dropship_entitlement_blocked", critical: true },
-  { eventType: "dropship_listing_push_failed", critical: true },
-  { eventType: "dropship_order_accepted", critical: false },
-  { eventType: "dropship_order_intake_rejected", critical: true },
-  { eventType: "dropship_order_payment_hold", critical: true },
-  { eventType: "dropship_order_payment_hold_expired", critical: true },
-  { eventType: "dropship_order_payment_hold_expiring", critical: true },
-  { eventType: "dropship_order_processing_failed", critical: true },
-  { eventType: "dropship_order_processing_retrying", critical: false },
-  { eventType: "dropship_order_received", critical: false },
-  { eventType: "dropship_order_rejected", critical: true },
-  { eventType: "dropship_return_credit_posted", critical: true },
-  { eventType: "dropship_rma_opened", critical: true },
-  { eventType: "dropship_store_disconnected", critical: true },
-  { eventType: "dropship_store_needs_reauth", critical: true },
-  { eventType: "dropship_tracking_push_failed", critical: false },
-  { eventType: "dropship_tracking_pushed", critical: false },
-  { eventType: "dropship_wallet_funding_failed", critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.AUTO_RELOAD_FAILED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ENTITLEMENT_BLOCKED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_PUSH_FAILED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_ACCEPTED, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_INTAKE_REJECTED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRING, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PROCESSING_FAILED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PROCESSING_RETRYING, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_RECEIVED, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_REJECTED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.RETURN_CREDIT_POSTED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.RMA_OPENED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_DISCONNECTED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_NEEDS_REAUTH, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSH_FAILED, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSHED, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_FAILED, critical: true },
 ];
 
 const sendDropshipNotificationInputSchema = z.object({

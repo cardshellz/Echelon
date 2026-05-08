@@ -18,6 +18,7 @@ import type {
   DropshipNotificationSender,
 } from "./dropship-ports";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
   DropshipListingInventoryMode,
   DropshipListingMode,
@@ -511,7 +512,7 @@ export class DropshipStoreConnectionService {
   }): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: input.connection.vendorId,
-      eventType: "dropship_store_disconnected",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_DISCONNECTED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship store disconnected",

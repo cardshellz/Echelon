@@ -10,6 +10,7 @@ import type {
   DropshipNotificationSender,
 } from "../application/dropship-ports";
 import { sendDropshipNotificationSafely } from "../application/dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "../application/dropship-notification-events";
 import {
   makeDropshipStoreConnectionLogger,
 } from "../application/dropship-store-connection-service";
@@ -301,7 +302,7 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
       logger: this.logger,
     }, {
       vendorId: input.vendorId,
-      eventType: "dropship_store_needs_reauth",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_NEEDS_REAUTH,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship store needs reauthorization",

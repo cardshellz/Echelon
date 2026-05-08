@@ -12,6 +12,7 @@ import type {
   DropshipNotificationSender,
 } from "./dropship-ports";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 
 export interface DropshipProvisionedVendorProfile {
   vendorId: number;
@@ -247,7 +248,7 @@ export class DropshipVendorProvisioningService {
 
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: result.vendor.vendorId,
-      eventType: "dropship_entitlement_blocked",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.ENTITLEMENT_BLOCKED,
       critical: true,
       channels: ["email", "in_app"],
       title: entitlement.status === "suspended"

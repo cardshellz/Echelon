@@ -13,6 +13,10 @@ import {
   type RecordDropshipNotificationEventsRepositoryInput,
   type UpsertDropshipNotificationPreferenceRepositoryInput,
 } from "../../application/dropship-notification-service";
+import {
+  DROPSHIP_NOTIFICATION_EVENTS,
+  DROPSHIP_NOTIFICATION_EVENT_TYPES,
+} from "../../application/dropship-notification-events";
 import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipProvisionedVendorProfile,
@@ -22,6 +26,14 @@ import type {
 const now = new Date("2026-05-02T18:00:00.000Z");
 
 describe("DropshipNotificationService", () => {
+  it("keeps launch notification preferences aligned with the event registry", () => {
+    const preferenceEventTypes = DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.map((preference) => preference.eventType);
+
+    expect(new Set(DROPSHIP_NOTIFICATION_EVENT_TYPES).size).toBe(DROPSHIP_NOTIFICATION_EVENT_TYPES.length);
+    expect(new Set(preferenceEventTypes).size).toBe(preferenceEventTypes.length);
+    expect([...preferenceEventTypes].sort()).toEqual([...DROPSHIP_NOTIFICATION_EVENT_TYPES].sort());
+  });
+
   it("lists launch notification preferences before any notification events exist", async () => {
     const repository = new FakeNotificationRepository();
     const service = makeService(repository, new FakeEmailSender(), []);
@@ -29,11 +41,11 @@ describe("DropshipNotificationService", () => {
     const preferences = await service.listPreferencesForMember("member-1");
 
     expect(preferences).toHaveLength(DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.length);
-    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_entitlement_blocked");
-    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_order_received");
-    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_store_needs_reauth");
-    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_tracking_push_failed");
-    expect(preferences.find((preference) => preference.eventType === "dropship_order_rejected")).toMatchObject({
+    expect(preferences.map((preference) => preference.eventType)).toContain(DROPSHIP_NOTIFICATION_EVENTS.ENTITLEMENT_BLOCKED);
+    expect(preferences.map((preference) => preference.eventType)).toContain(DROPSHIP_NOTIFICATION_EVENTS.ORDER_RECEIVED);
+    expect(preferences.map((preference) => preference.eventType)).toContain(DROPSHIP_NOTIFICATION_EVENTS.STORE_NEEDS_REAUTH);
+    expect(preferences.map((preference) => preference.eventType)).toContain(DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSH_FAILED);
+    expect(preferences.find((preference) => preference.eventType === DROPSHIP_NOTIFICATION_EVENTS.ORDER_REJECTED)).toMatchObject({
       vendorId: 10,
       critical: true,
       emailEnabled: true,
@@ -42,14 +54,14 @@ describe("DropshipNotificationService", () => {
       webhookEnabled: false,
     });
     expect(preferences.find(
-      (preference) => preference.eventType === "dropship_order_rejected",
+      (preference) => preference.eventType === DROPSHIP_NOTIFICATION_EVENTS.ORDER_REJECTED,
     )?.notificationPreferenceId).toBeLessThan(0);
-    expect(preferences.find((preference) => preference.eventType === "dropship_store_needs_reauth")).toMatchObject({
+    expect(preferences.find((preference) => preference.eventType === DROPSHIP_NOTIFICATION_EVENTS.STORE_NEEDS_REAUTH)).toMatchObject({
       critical: true,
       emailEnabled: true,
       inAppEnabled: true,
     });
-    expect(preferences.find((preference) => preference.eventType === "dropship_tracking_push_failed")).toMatchObject({
+    expect(preferences.find((preference) => preference.eventType === DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSH_FAILED)).toMatchObject({
       critical: false,
       emailEnabled: true,
       inAppEnabled: true,

@@ -1,5 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
   DropshipClock,
   DropshipLogger,
@@ -182,7 +183,7 @@ export class DropshipMarketplaceTrackingService {
   ): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: push.vendorId,
-      eventType: "dropship_tracking_pushed",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSHED,
       critical: false,
       channels: ["email", "in_app"],
       title: "Dropship tracking pushed",
@@ -212,7 +213,7 @@ export class DropshipMarketplaceTrackingService {
   ): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: push.vendorId,
-      eventType: "dropship_tracking_push_failed",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSH_FAILED,
       critical: !failure.retryable,
       channels: ["email", "in_app"],
       title: failure.retryable ? "Dropship tracking push retrying" : "Dropship tracking push failed",
