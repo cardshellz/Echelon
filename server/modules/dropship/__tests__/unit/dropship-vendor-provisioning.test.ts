@@ -136,6 +136,33 @@ describe("PgDropshipVendorProvisioningRepository", () => {
     });
     expect(release).toHaveBeenCalledTimes(1);
   });
+
+  it("counts only currently active include catalog rules for onboarding gates", async () => {
+    const release = vi.fn();
+    const query = vi.fn(async () => ({
+      rows: [{
+        admin_exposure_rule_count: "1",
+        vendor_selection_rule_count: "1",
+      }],
+    }));
+    const connect = vi.fn(async () => ({ query, release }));
+    const repository = new PgDropshipVendorProvisioningRepository({ connect } as unknown as Pool);
+
+    const result = await repository.getCatalogSetupSummary(10);
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("FROM dropship.dropship_catalog_rules");
+    expect(sql).toContain("action = 'include'");
+    expect(sql).toContain("(starts_at IS NULL OR starts_at <= now())");
+    expect(sql).toContain("(ends_at IS NULL OR ends_at > now())");
+    expect(sql).toContain("FROM dropship.dropship_vendor_selection_rules");
+    expect(query.mock.calls[0]?.[1]).toEqual([10]);
+    expect(result).toEqual({
+      adminExposureRuleCount: 1,
+      vendorSelectionRuleCount: 1,
+    });
+    expect(release).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("DropshipVendorProvisioningService", () => {
