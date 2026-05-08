@@ -467,18 +467,6 @@ export function validateShipmentForPush(
     });
   }
 
-  // 6. Customer email — required so SS can send tracking notifications.
-  if (
-    typeof order.customer_email !== "string" ||
-    order.customer_email.trim().length === 0
-  ) {
-    throw new ShipStationPushError("order has no customer_email", {
-      code: SS_PUSH_INVALID_SHIPMENT,
-      shipmentId,
-      field: "order.customer_email",
-      value: order.customer_email,
-    });
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2516,7 +2504,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       paymentDate: orderDateIso,
       orderStatus: "awaiting_shipment",
       customerUsername: orderRow.customer_name || "",
-      customerEmail: orderRow.customer_email || "",
+      customerEmail: orderRow.customer_email || `no-email+wms-${orderRow.id}@cardshellz.local`,
       billTo: {
         name: orderRow.customer_name || "",
       },

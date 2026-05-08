@@ -225,18 +225,14 @@ describe("validateShipmentForPush :: header-level violations", () => {
     expect(err?.context.field).toBe("order.shipping_address");
   });
 
-  it("throws when customer_email is missing", () => {
-    let err: ShipStationPushError | undefined;
-    try {
+  it("accepts missing customer_email because ShipStation can still ship with a valid address", () => {
+    expect(() =>
       validateShipmentForPush(
         okShipment(),
         okOrder({ customer_email: null }),
         [okItem()],
-      );
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err?.context.field).toBe("order.customer_email");
+      ),
+    ).not.toThrow();
   });
 });
 
@@ -393,6 +389,35 @@ describe("pushShipment :: happy path", () => {
     expect(payload.shipTo.street2).toBe("");
     expect(payload.shipTo.company).toBe("");
     expect(payload.customerEmail).toBe(orderRow.customer_email);
+  });
+
+  it("uses a stable placeholder email when WMS has no customer email", async () => {
+    const shipmentRow = okShipment();
+    const orderRow = okOrder({ customer_email: null });
+    const items = [okItem()];
+
+    const mock = makeDb([
+      { rows: [shipmentRow] },
+      { rows: [orderRow] },
+      { rows: items },
+      { rows: [] },
+    ]);
+
+    const fetchMock = mockFetchOnceOk({
+      orderId: 555001,
+      orderNumber: shipmentRow.id,
+      orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+      orderStatus: "awaiting_shipment",
+    });
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    await svc.pushShipment(shipmentRow.id);
+
+    const [, init] = fetchMock.mock.calls[0] as any;
+    const payload = JSON.parse(init.body);
+    expect(payload.customerEmail).toBe(`no-email+wms-${orderRow.id}@cardshellz.local`);
+    expect(payload.shipTo.street1).toBe(orderRow.shipping_address);
   });
 
   it("sends address line 2 and company name to ShipStation", async () => {
