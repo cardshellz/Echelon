@@ -958,6 +958,22 @@ export interface DropshipAdminNotificationOpsListResponse {
   channelSummary: Array<{ channel: DropshipNotificationOpsChannel; count: number }>;
 }
 
+export interface DropshipAdminNotificationRetryInput {
+  idempotencyKey: string;
+  reason?: string;
+}
+
+export interface DropshipAdminNotificationRetryResponse {
+  notificationEventId: number;
+  previousStatus: DropshipNotificationOpsStatus;
+  status: DropshipNotificationOpsStatus;
+  deliveredAt: string | null;
+  idempotentReplay: boolean;
+  failureCode: string | null;
+  failureMessage: string | null;
+  updatedEvent: DropshipAdminNotificationOpsListItem;
+}
+
 export interface DropshipAdminTrackingPushRetryInput {
   idempotencyKey: string;
   reason?: string;
@@ -1008,6 +1024,16 @@ export type DropshipOrderIntakeRetryEligibilityReason =
 export interface DropshipOrderIntakeRetryEligibility {
   canRetry: boolean;
   reason: DropshipOrderIntakeRetryEligibilityReason;
+}
+
+export type DropshipNotificationRetryEligibilityReason =
+  | "failed_email"
+  | "status_not_retryable"
+  | "channel_not_retryable";
+
+export interface DropshipNotificationRetryEligibility {
+  canRetry: boolean;
+  reason: DropshipNotificationRetryEligibilityReason;
 }
 
 export interface DropshipAdminOrderOpsActionInput {
@@ -2357,6 +2383,35 @@ export function buildAdminTrackingPushRetryInput(input: {
   }
 
   return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function buildAdminNotificationRetryInput(input: {
+  idempotencyKey: string;
+  reason: string;
+}): DropshipAdminNotificationRetryInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  const reason = input.reason.trim();
+  if (reason.length > 1000) {
+    throw new Error("Reason must be 1000 characters or fewer.");
+  }
+
+  return reason ? { idempotencyKey, reason } : { idempotencyKey };
+}
+
+export function notificationRetryEligibility(
+  event: Pick<DropshipAdminNotificationOpsListItem, "channel" | "status">,
+): DropshipNotificationRetryEligibility {
+  if (event.channel !== "email") {
+    return { canRetry: false, reason: "channel_not_retryable" };
+  }
+  if (event.status === "failed") {
+    return { canRetry: true, reason: "failed_email" };
+  }
+  return { canRetry: false, reason: "status_not_retryable" };
 }
 
 export function orderIntakeRetryEligibility(

@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type {
@@ -9,6 +9,7 @@ import type {
   DropshipNotificationOpsChannelSummary,
   DropshipNotificationOpsEventRecord,
   DropshipNotificationOpsListResult,
+  DropshipNotificationOpsPreparedRetry,
   DropshipNotificationOpsRepository,
   DropshipNotificationOpsStatusSummary,
 } from "../application/dropship-notification-ops-service";
@@ -33,7 +34,7 @@ interface NotificationOpsRow {
   email: string | null;
   vendor_status: string;
   entitlement_status: string;
-  total_count: string | number;
+  total_count?: string | number;
 }
 
 interface StatusCountRow {
@@ -87,7 +88,7 @@ export class PgDropshipNotificationOpsRepository implements DropshipNotification
 
       return {
         items: rows.rows.map(mapNotificationOpsRow),
-        total: rows.rows.length > 0 ? toSafeNonNegativeInteger(rows.rows[0].total_count, "total_count") : 0,
+        total: rows.rows.length > 0 ? toSafeNonNegativeInteger(rows.rows[0].total_count ?? 0, "total_count") : 0,
         page: input.page,
         limit: input.limit,
         statuses: input.statuses,
@@ -99,9 +100,137 @@ export class PgDropshipNotificationOpsRepository implements DropshipNotification
       client.release();
     }
   }
+
+  async prepareEmailRetry(
+    input: Parameters<DropshipNotificationOpsRepository["prepareEmailRetry"]>[0],
+  ): Promise<DropshipNotificationOpsPreparedRetry> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await loadNotificationEventForUpdate(client, input.notificationEventId);
+      if (!existing) {
+        throw new DropshipError(
+          "DROPSHIP_NOTIFICATION_OPS_EVENT_NOT_FOUND",
+          "Dropship notification event was not found.",
+          { notificationEventId: input.notificationEventId },
+        );
+      }
+      if (existing.channel !== "email" || existing.status !== "failed") {
+        throw new DropshipError(
+          "DROPSHIP_NOTIFICATION_OPS_STATUS_NOT_RETRYABLE",
+          "Only failed email notification events can be retried.",
+          {
+            notificationEventId: existing.notificationEventId,
+            channel: existing.channel,
+            status: existing.status,
+          },
+        );
+      }
+
+      await client.query(
+        `UPDATE dropship.dropship_notification_events
+         SET status = 'pending',
+             delivered_at = NULL
+         WHERE id = $1
+           AND vendor_id = $2
+           AND channel = 'email'
+           AND status = 'failed'`,
+        [existing.notificationEventId, existing.vendor.vendorId],
+      );
+      const updated = requiredRow(
+        await loadNotificationEventForUpdate(client, input.notificationEventId),
+        "Dropship notification email retry update returned no row.",
+      );
+      await recordNotificationOpsAuditEvent(client, {
+        event: updated,
+        eventType: "notification_email_retry_requested",
+        actor: input.actor,
+        severity: "info",
+        payload: {
+          idempotencyKey: input.idempotencyKey,
+          previousStatus: existing.status,
+          reason: input.reason ?? null,
+        },
+        occurredAt: input.now,
+      });
+      await client.query("COMMIT");
+      return {
+        event: updated,
+        previousStatus: existing.status,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateEmailRetryDelivery(
+    input: Parameters<DropshipNotificationOpsRepository["updateEmailRetryDelivery"]>[0],
+  ): Promise<DropshipNotificationOpsEventRecord> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE dropship.dropship_notification_events
+         SET status = $3,
+             delivered_at = $4
+         WHERE id = $1
+           AND vendor_id = $2
+           AND channel = 'email'`,
+        [
+          input.notificationEventId,
+          input.vendorId,
+          input.status,
+          input.deliveredAt,
+        ],
+      );
+      const updated = await loadNotificationEventForUpdate(client, input.notificationEventId);
+      if (!updated || updated.vendor.vendorId !== input.vendorId || updated.channel !== "email") {
+        throw new DropshipError(
+          "DROPSHIP_NOTIFICATION_OPS_EVENT_NOT_FOUND",
+          "Dropship notification email event was not found.",
+          { vendorId: input.vendorId, notificationEventId: input.notificationEventId },
+        );
+      }
+      await recordNotificationOpsAuditEvent(client, {
+        event: updated,
+        eventType: input.status === "delivered"
+          ? "notification_email_retry_delivered"
+          : "notification_email_retry_failed",
+        actor: input.actor,
+        severity: input.status === "delivered" ? "info" : "error",
+        payload: {
+          idempotencyKey: input.idempotencyKey,
+          status: input.status,
+          failureCode: input.failureCode,
+          failureMessage: input.failureMessage,
+        },
+        occurredAt: input.now,
+      });
+      await client.query("COMMIT");
+      return updated;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 function notificationSelectSql(): string {
+  return `${notificationSelectColumnsSql(true)}
+  ` + notificationBaseFromSql();
+}
+
+function notificationActionSelectSql(): string {
+  return `${notificationSelectColumnsSql(false)}
+  ` + notificationBaseFromSql();
+}
+
+function notificationSelectColumnsSql(includeTotalCount: boolean): string {
   return `
     SELECT
       ne.id,
@@ -122,9 +251,9 @@ function notificationSelectSql(): string {
       v.business_name,
       v.email,
       v.status AS vendor_status,
-      v.entitlement_status,
-      COUNT(*) OVER() AS total_count
-  ` + notificationBaseFromSql();
+      v.entitlement_status
+      ${includeTotalCount ? ", COUNT(*) OVER() AS total_count" : ""}
+  `;
 }
 
 function notificationBaseFromSql(): string {
@@ -222,6 +351,57 @@ function mapChannelCountRow(row: ChannelCountRow): DropshipNotificationOpsChanne
   };
 }
 
+async function loadNotificationEventForUpdate(
+  client: PoolClient,
+  notificationEventId: number,
+): Promise<DropshipNotificationOpsEventRecord | null> {
+  const result = await client.query<NotificationOpsRow>(
+    `${notificationActionSelectSql()}
+     WHERE ne.id = $1
+     LIMIT 1
+     FOR UPDATE OF ne`,
+    [notificationEventId],
+  );
+  return result.rows[0] ? mapNotificationOpsRow(result.rows[0]) : null;
+}
+
+async function recordNotificationOpsAuditEvent(
+  client: PoolClient,
+  input: {
+    event: DropshipNotificationOpsEventRecord;
+    eventType: string;
+    actor: { actorType: "admin" | "system"; actorId?: string };
+    severity: "info" | "warning" | "error";
+    payload: Record<string, unknown>;
+    occurredAt: Date;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (vendor_id, entity_type, entity_id, event_type,
+       actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, 'dropship_notification_events', $2, $3,
+             $4, $5, $6, $7::jsonb, $8)`,
+    [
+      input.event.vendor.vendorId,
+      String(input.event.notificationEventId),
+      input.eventType,
+      input.actor.actorType,
+      input.actor.actorId ?? null,
+      input.severity,
+      JSON.stringify(input.payload),
+      input.occurredAt,
+    ],
+  );
+}
+
+function requiredRow<T>(row: T | null | undefined, message: string): T {
+  if (!row) {
+    throw new Error(message);
+  }
+  return row;
+}
+
 function toSafeNonNegativeInteger(value: string | number, field: string): number {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
@@ -232,4 +412,12 @@ function toSafeNonNegativeInteger(value: string | number, field: string): number
     );
   }
   return parsed;
+}
+
+async function rollbackQuietly(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    // Preserve the original error.
+  }
 }

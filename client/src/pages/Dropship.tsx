@@ -51,6 +51,7 @@ import {
   buildAdminListingPushJobsUrl,
   buildAdminListingPushJobRetryInput,
   buildAdminNotificationEventsUrl,
+  buildAdminNotificationRetryInput,
   buildAdminOrderIntakeUrl,
   buildAdminOrderOpsActionInput,
   buildAdminReturnCreateInput,
@@ -83,6 +84,7 @@ import {
   formatDateTime,
   formatStatus,
   listingPushJobRetryEligibility,
+  notificationRetryEligibility,
   postJson,
   putJson,
   queryErrorMessage,
@@ -100,6 +102,7 @@ import {
   type DropshipAdminListingPushJobRetryResponse,
   type DropshipAdminNotificationOpsListItem,
   type DropshipAdminNotificationOpsListResponse,
+  type DropshipAdminNotificationRetryResponse,
   type DropshipAdminOrderOpsActionResponse,
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
@@ -1270,6 +1273,7 @@ function TrackingPushOpsTab() {
 }
 
 function NotificationOpsTab() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<NotificationOpsStatusFilter>("default");
   const [channel, setChannel] = useState<NotificationOpsChannelFilter>("all");
@@ -1280,6 +1284,10 @@ function NotificationOpsTab() {
     channel: "all" as NotificationOpsChannelFilter,
     critical: "all" as NotificationOpsCriticalFilter,
   });
+  const [retryReason, setRetryReason] = useState("");
+  const [pendingRetryEventId, setPendingRetryEventId] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   const notificationEventsUrl = useMemo(() => buildAdminNotificationEventsUrl({
     search: appliedFilters.search,
@@ -1294,19 +1302,53 @@ function NotificationOpsTab() {
   });
 
   const events = notificationEventsQuery.data?.items ?? [];
+  const recoverableEventCount = events.filter((event) => notificationRetryEligibility(event).canRetry).length;
 
   function applyNotificationFilters() {
     setAppliedFilters({ search, status, channel, critical });
   }
 
+  async function retryNotificationEvent(event: DropshipAdminNotificationOpsListItem) {
+    setPendingRetryEventId(event.notificationEventId);
+    setError("");
+    setMessage("");
+    try {
+      const input = buildAdminNotificationRetryInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-notification-retry-${event.notificationEventId}`),
+        reason: retryReason,
+      });
+      const response = await postJson<DropshipAdminNotificationRetryResponse>(
+        `/api/dropship/admin/notifications/${event.notificationEventId}/retry`,
+        input,
+      );
+      setMessage(`Notification ${response.notificationEventId} retry returned ${formatStatus(response.status)}.`);
+      setRetryReason("");
+      await Promise.all([
+        notificationEventsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship notification retry failed.");
+    } finally {
+      setPendingRetryEventId(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      {notificationEventsQuery.error && (
+      {(notificationEventsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {queryErrorMessage(notificationEventsQuery.error, "Unable to load dropship notification events.")}
+            {error || queryErrorMessage(notificationEventsQuery.error, "Unable to load dropship notification events.")}
           </AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
 
@@ -1370,11 +1412,24 @@ function NotificationOpsTab() {
             </Button>
           </div>
         </div>
+        <div className="mt-4">
+          <label htmlFor="dropship-notification-retry-reason" className="text-sm font-medium">
+            Retry audit note
+          </label>
+          <Input
+            id="dropship-notification-retry-reason"
+            value={retryReason}
+            onChange={(event) => setRetryReason(event.target.value)}
+            placeholder="Optional retry audit note"
+            className="mt-2"
+            maxLength={1000}
+          />
+        </div>
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <CatalogMetric icon={<Bell className="h-4 w-4" />} label="Matching events" value={String(notificationEventsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible failed" value={String(events.filter((event) => event.status === "failed").length)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible recoverable" value={String(recoverableEventCount)} />
         <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Visible pending" value={String(events.filter((event) => event.status === "pending").length)} />
         <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Critical visible" value={String(events.filter((event) => event.critical).length)} />
       </section>
@@ -1383,6 +1438,8 @@ function NotificationOpsTab() {
         channelSummary={notificationEventsQuery.data?.channelSummary ?? []}
         events={events}
         isLoading={notificationEventsQuery.isLoading || notificationEventsQuery.isFetching}
+        onRetry={retryNotificationEvent}
+        pendingRetryEventId={pendingRetryEventId}
         summary={notificationEventsQuery.data?.summary ?? []}
         total={notificationEventsQuery.data?.total ?? 0}
       />
@@ -4112,12 +4169,16 @@ function NotificationEventsTable({
   channelSummary,
   events,
   isLoading,
+  onRetry,
+  pendingRetryEventId,
   summary,
   total,
 }: {
   channelSummary: DropshipAdminNotificationOpsListResponse["channelSummary"];
   events: DropshipAdminNotificationOpsListItem[];
   isLoading: boolean;
+  onRetry: (event: DropshipAdminNotificationOpsListItem) => void;
+  pendingRetryEventId: number | null;
   summary: DropshipAdminNotificationOpsListResponse["summary"];
   total: number;
 }) {
@@ -4165,56 +4226,73 @@ function NotificationEventsTable({
             <TableHead>Message</TableHead>
             <TableHead>Delivery</TableHead>
             <TableHead className="w-[145px]">Created</TableHead>
+            <TableHead className="w-[120px] text-right">Action</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {events.map((event) => (
-            <TableRow key={event.notificationEventId}>
-              <TableCell>
-                <div className="font-mono text-sm">#{event.notificationEventId}</div>
-                <div className="max-w-[180px] truncate text-xs text-muted-foreground">{formatStatus(event.eventType)}</div>
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{event.vendor.businessName || event.vendor.email || `Vendor ${event.vendor.vendorId}`}</div>
-                <div className="text-xs text-muted-foreground">
-                  {[event.vendor.email, event.vendor.memberId].filter(Boolean).join(" / ") || formatStatus(event.vendor.status)}
-                </div>
-              </TableCell>
-              <TableCell>
-                <Badge variant="outline" className={notificationOpsStatusTone(event.status)}>
-                  {formatStatus(event.status)}
-                </Badge>
-                {event.critical && (
-                  <Badge variant="outline" className="ml-2 border-rose-200 bg-rose-50 text-rose-800">
-                    Critical
+          {events.map((event) => {
+            const retryEligibility = notificationRetryEligibility(event);
+            return (
+              <TableRow key={event.notificationEventId}>
+                <TableCell>
+                  <div className="font-mono text-sm">#{event.notificationEventId}</div>
+                  <div className="max-w-[180px] truncate text-xs text-muted-foreground">{formatStatus(event.eventType)}</div>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{event.vendor.businessName || event.vendor.email || `Vendor ${event.vendor.vendorId}`}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {[event.vendor.email, event.vendor.memberId].filter(Boolean).join(" / ") || formatStatus(event.vendor.status)}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={notificationOpsStatusTone(event.status)}>
+                    {formatStatus(event.status)}
                   </Badge>
-                )}
-              </TableCell>
-              <TableCell>
-                <div className="font-medium">{formatStatus(event.channel)}</div>
-                <div className="max-w-[220px] truncate text-xs text-muted-foreground">
-                  {event.requestHash || event.idempotencyKey || "No request hash"}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="max-w-[360px] truncate font-medium">{event.title}</div>
-                <div className="max-w-[360px] truncate text-xs text-muted-foreground">
-                  {event.message || "No message body"}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="text-sm">
-                  {event.deliveredAt ? `Delivered ${formatDateTime(event.deliveredAt)}` : "Not delivered"}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {event.readAt ? `Read ${formatDateTime(event.readAt)}` : "Unread or not tracked"}
-                </div>
-              </TableCell>
-              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                {formatDateTime(event.createdAt)}
-              </TableCell>
-            </TableRow>
-          ))}
+                  {event.critical && (
+                    <Badge variant="outline" className="ml-2 border-rose-200 bg-rose-50 text-rose-800">
+                      Critical
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{formatStatus(event.channel)}</div>
+                  <div className="max-w-[220px] truncate text-xs text-muted-foreground">
+                    {event.requestHash || event.idempotencyKey || "No request hash"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="max-w-[360px] truncate font-medium">{event.title}</div>
+                  <div className="max-w-[360px] truncate text-xs text-muted-foreground">
+                    {event.message || "No message body"}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="text-sm">
+                    {event.deliveredAt ? `Delivered ${formatDateTime(event.deliveredAt)}` : "Not delivered"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {event.readAt ? `Read ${formatDateTime(event.readAt)}` : "Unread or not tracked"}
+                  </div>
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                  {formatDateTime(event.createdAt)}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="gap-2"
+                    disabled={!retryEligibility.canRetry || pendingRetryEventId !== null}
+                    onClick={() => onRetry(event)}
+                  >
+                    <RotateCcw className={pendingRetryEventId === event.notificationEventId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                    Retry
+                  </Button>
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </section>
