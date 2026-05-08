@@ -107,6 +107,30 @@ describe("DropshipReturnService", () => {
     expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-OVER-QTY");
   });
 
+  it("rejects member RMA references to unaccepted order intake", async () => {
+    const repository = new FakeReturnRepository();
+    repository.orderReference = makeOrderReference({
+      status: "payment_hold",
+      omsOrderId: null,
+    });
+    const service = makeService(repository, []);
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-UNACCEPTED",
+      intakeId: 44,
+      items: [{ productVariantId: 20, quantity: 1 }],
+      idempotencyKey: "vendor-rma-unaccepted",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+      context: {
+        intakeId: 44,
+        status: "payment_hold",
+        omsOrderId: null,
+      },
+    });
+    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-UNACCEPTED");
+  });
+
   it("rejects member RMA references to orders outside the vendor scope", async () => {
     const repository = new FakeReturnRepository();
     repository.orderReference = null;
@@ -479,6 +503,7 @@ function makeOrderReference(overrides: Partial<DropshipRmaOrderReference> = {}):
   return {
     intakeId: 44,
     storeConnectionId: 70,
+    status: "accepted",
     omsOrderId: 9001,
     lines: [
       { lineIndex: 0, productVariantId: 20, quantity: 2 },
