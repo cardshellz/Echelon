@@ -52,6 +52,8 @@ function getActionLabel(action: DropshipSensitiveAction): string {
       return "remove a funding method";
     case "wallet_funding_high_value":
       return "fund your dropship wallet";
+    case "manage_catalog_selection":
+      return "manage catalog selection";
     case "bulk_listing_push":
       return "push listings in bulk";
     case "high_risk_order_acceptance":

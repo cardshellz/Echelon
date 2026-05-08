@@ -77,6 +77,8 @@ export default function DropshipPortalCatalog() {
   const [applied, setApplied] = useState({ search: "", selectedOnly: "false" });
   const [pendingSelectionAction, setPendingSelectionAction] = useState<PendingSelectionAction>(null);
   const [pendingListingAction, setPendingListingAction] = useState<PendingListingAction>(null);
+  const [selectionEmailCodeSent, setSelectionEmailCodeSent] = useState(false);
+  const [selectionVerificationCode, setSelectionVerificationCode] = useState("");
   const [selectedStoreConnectionId, setSelectedStoreConnectionId] = useState("");
   const [listingPreview, setListingPreview] = useState<DropshipListingPreviewResult | null>(null);
   const [listingPushResult, setListingPushResult] = useState<DropshipListingPushResponse | null>(null);
@@ -124,6 +126,13 @@ export default function DropshipPortalCatalog() {
       proof: sensitiveProofs.bulk_listing_push,
     });
   }, [principal, sensitiveProofs.bulk_listing_push]);
+  const activeCatalogSelectionProof = useMemo(() => {
+    return isDropshipSensitiveProofActive({
+      principal,
+      action: "manage_catalog_selection",
+      proof: sensitiveProofs.manage_catalog_selection,
+    });
+  }, [principal, sensitiveProofs.manage_catalog_selection]);
   const pushablePreviewCount = listingPreviewPushableCount(listingPreview);
 
   useEffect(() => {
@@ -157,6 +166,9 @@ export default function DropshipPortalCatalog() {
       return;
     }
     if (rows.length === 0) {
+      return;
+    }
+    if (!(await ensureCatalogSelectionProof())) {
       return;
     }
 
@@ -196,6 +208,9 @@ export default function DropshipPortalCatalog() {
       setError("Selection rules are still loading.");
       return;
     }
+    if (!(await ensureCatalogSelectionProof())) {
+      return;
+    }
 
     setPendingSelectionAction(actionKey);
     setError("");
@@ -229,6 +244,9 @@ export default function DropshipPortalCatalog() {
       setError("Selection rules are still loading.");
       return;
     }
+    if (!(await ensureCatalogSelectionProof())) {
+      return;
+    }
 
     setPendingSelectionAction("scope:clear");
     setError("");
@@ -248,6 +266,62 @@ export default function DropshipPortalCatalog() {
       setListingPushResult(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Catalog selection clear failed.");
+    } finally {
+      setPendingSelectionAction(null);
+    }
+  }
+
+  async function ensureCatalogSelectionProof(): Promise<boolean> {
+    if (activeCatalogSelectionProof) {
+      return true;
+    }
+
+    if (principal?.hasPasskey) {
+      return runSelectionProofAction("proof:passkey", async () => {
+        await verifyPasskeyStepUp("manage_catalog_selection");
+      });
+    }
+
+    if (!selectionEmailCodeSent) {
+      await runSelectionProofAction("proof:send-code", async () => {
+        await startEmailStepUp("manage_catalog_selection");
+        setSelectionEmailCodeSent(true);
+        setSelectionVerificationCode("");
+        setMessage("Verification code sent.");
+      });
+      return false;
+    }
+
+    if (selectionVerificationCode.length !== 6) {
+      setError("Enter the 6-digit verification code before updating catalog selection.");
+      return false;
+    }
+
+    const verified = await runSelectionProofAction("proof:verify-code", async () => {
+      await verifyEmailStepUp({
+        action: "manage_catalog_selection",
+        verificationCode: selectionVerificationCode,
+      });
+    });
+    if (!verified) {
+      return false;
+    }
+
+    setSelectionEmailCodeSent(false);
+    setSelectionVerificationCode("");
+    return true;
+  }
+
+  async function runSelectionProofAction(action: PendingSelectionAction, task: () => Promise<void>): Promise<boolean> {
+    setPendingSelectionAction(action);
+    setError("");
+    setMessage("");
+    try {
+      await task();
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Catalog selection verification failed.");
+      return false;
     } finally {
       setPendingSelectionAction(null);
     }
@@ -450,6 +524,13 @@ export default function DropshipPortalCatalog() {
             setListingPushResult(null);
           }}
           onVerificationCodeChange={setVerificationCode}
+        />
+
+        <CatalogSelectionProofPanel
+          emailCodeSent={selectionEmailCodeSent}
+          pendingSelectionAction={pendingSelectionAction}
+          verificationCode={selectionVerificationCode}
+          onVerificationCodeChange={setSelectionVerificationCode}
         />
 
         <ScopeSelectionPanel
@@ -733,6 +814,56 @@ function ScopedSelectionControl({
         </Button>
       </div>
     </div>
+  );
+}
+
+function CatalogSelectionProofPanel({
+  emailCodeSent,
+  onVerificationCodeChange,
+  pendingSelectionAction,
+  verificationCode,
+}: {
+  emailCodeSent: boolean;
+  onVerificationCodeChange: (value: string) => void;
+  pendingSelectionAction: PendingSelectionAction;
+  verificationCode: string;
+}) {
+  const showingPasskey = pendingSelectionAction === "proof:passkey";
+  if (!emailCodeSent && !showingPasskey) {
+    return null;
+  }
+
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold">Catalog selection verification</h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            {showingPasskey ? "Waiting for passkey confirmation." : "Enter the 6-digit code to apply catalog selection changes."}
+          </p>
+        </div>
+        <Badge variant="outline" className="w-fit border-zinc-200 bg-zinc-50 text-zinc-700">
+          {showingPasskey ? "Passkey" : "Email MFA"}
+        </Badge>
+      </div>
+      {emailCodeSent && (
+        <div className="mt-4 max-w-sm space-y-2">
+          <Label>Verification code</Label>
+          <InputOTP
+            maxLength={6}
+            value={verificationCode}
+            onChange={onVerificationCodeChange}
+            containerClassName="justify-between"
+          >
+            <InputOTPGroup>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
+        </div>
+      )}
+    </section>
   );
 }
 

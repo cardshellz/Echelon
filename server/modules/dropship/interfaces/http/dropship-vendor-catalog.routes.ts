@@ -9,7 +9,7 @@ import {
 import { InventoryServiceDropshipAtpProvider } from "../../infrastructure/dropship-atp.provider";
 import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-selection-atp.repository";
 import { DropshipError } from "../../domain/errors";
-import { requireDropshipAuth } from "./dropship-auth.routes";
+import { requireDropshipAuth, requireDropshipSensitiveActionProof } from "./dropship-auth.routes";
 
 export function registerDropshipVendorCatalogRoutes(
   app: Express,
@@ -28,23 +28,28 @@ export function registerDropshipVendorCatalogRoutes(
     }
   });
 
-  app.put("/api/dropship/catalog/selection-rules", requireDropshipAuth, async (req, res) => {
-    try {
-      const vendor = await service.requireVendorForMember(req.session.dropship!.memberId);
-      const result = await service.replaceSelectionRules({
-        vendorId: vendor.vendorId,
-        idempotencyKey: resolveIdempotencyKey(req),
-        actor: {
-          actorType: "vendor",
-          actorId: req.session.dropship!.memberId,
-        },
-        rules: req.body?.rules,
-      });
-      return res.status(result.idempotentReplay ? 200 : 201).json(result);
-    } catch (error) {
-      return sendDropshipVendorCatalogError(res, error);
-    }
-  });
+  app.put(
+    "/api/dropship/catalog/selection-rules",
+    requireDropshipAuth,
+    requireDropshipSensitiveActionProof("manage_catalog_selection"),
+    async (req, res) => {
+      try {
+        const vendor = await service.requireVendorForMember(req.session.dropship!.memberId);
+        const result = await service.replaceSelectionRules({
+          vendorId: vendor.vendorId,
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: {
+            actorType: "vendor",
+            actorId: req.session.dropship!.memberId,
+          },
+          rules: req.body?.rules,
+        });
+        return res.status(result.idempotentReplay ? 200 : 201).json(result);
+      } catch (error) {
+        return sendDropshipVendorCatalogError(res, error);
+      }
+    },
+  );
 
   app.get("/api/dropship/catalog", requireDropshipAuth, async (req, res) => {
     try {
@@ -163,6 +168,12 @@ function statusForDropshipVendorCatalogError(code: string): number {
     return 409;
   }
   if (code === "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED") {
+    return 403;
+  }
+  if (code === "DROPSHIP_AUTH_REQUIRED") {
+    return 401;
+  }
+  if (code === "DROPSHIP_STEP_UP_REQUIRED" || code === "DROPSHIP_STEP_UP_METHOD_REQUIRED") {
     return 403;
   }
   return 400;

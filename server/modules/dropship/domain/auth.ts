@@ -15,6 +15,7 @@ export const dropshipSensitiveActionEnum = [
   "add_funding_method",
   "remove_funding_method",
   "wallet_funding_high_value",
+  "manage_catalog_selection",
   "bulk_listing_push",
   "high_risk_order_acceptance",
   "manage_notification_preferences",
