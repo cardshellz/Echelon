@@ -170,6 +170,7 @@ export interface WmsOrderRow {
   shipping_cents: number;
   discount_cents: number;
   total_cents: number;
+  non_shipping_total_cents?: number;
   currency: string;
   order_placed_at: Date | string | null;
   external_order_id: string | null;
@@ -331,6 +332,7 @@ export function validateShipmentForPush(
     | "shipping_cents"
     | "discount_cents"
     | "total_cents"
+    | "non_shipping_total_cents"
     | "shipping_address"
     | "customer_email"
   >,
@@ -433,9 +435,12 @@ export function validateShipmentForPush(
     (sum, line) => sum + line.unit_price_cents * line.qty,
     0,
   );
+  const nonShippingTotalCents = Number.isInteger(order.non_shipping_total_cents)
+    ? order.non_shipping_total_cents
+    : 0;
   
-  const expectedTotalExclusive = linesSumCents + order.tax_cents + order.shipping_cents;
-  const expectedTotalInclusive = linesSumCents + order.shipping_cents;
+  const expectedTotalExclusive = linesSumCents + nonShippingTotalCents + order.tax_cents + order.shipping_cents;
+  const expectedTotalInclusive = linesSumCents + nonShippingTotalCents + order.shipping_cents;
 
   const matchesExclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, items.length, 5);
   const matchesInclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, items.length, 5);
@@ -447,7 +452,7 @@ export function validateShipmentForPush(
         code: SS_PUSH_INVALID_SHIPMENT,
         shipmentId,
         field: "order.total_cents",
-        value: { linesSumCents, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalExclusive, expectedTotalInclusive, actualTotalCents: order.total_cents },
+        value: { linesSumCents, nonShippingTotalCents, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalExclusive, expectedTotalInclusive, actualTotalCents: order.total_cents },
       },
     );
   }
@@ -2469,6 +2474,14 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       shipping_cents: wmsOrders.shippingCents,
       discount_cents: wmsOrders.discountCents,
       total_cents: wmsOrders.totalCents,
+      non_shipping_total_cents: sql<number>`
+        COALESCE((
+          SELECT SUM(oi.total_price_cents)
+          FROM wms.order_items oi
+          WHERE oi.order_id = ${wmsOrders.id}
+            AND COALESCE(oi.requires_shipping, 1) = 0
+        ), 0)
+      `,
       currency: wmsOrders.currency,
       order_placed_at: wmsOrders.orderPlacedAt,
     })
