@@ -420,6 +420,28 @@ export interface DropshipSystemReadinessCheck {
   requiredEnv: string[];
 }
 
+export interface DropshipDogfoodLaunchGateBlocker {
+  scope: "system" | "vendor_store";
+  key: string;
+  label: string;
+  message: string;
+  vendorId?: number;
+  storeConnectionId?: number | null;
+}
+
+export interface DropshipDogfoodLaunchGate {
+  status: DropshipDogfoodReadinessStatus;
+  readyVendorStoreCount: number;
+  warningVendorStoreCount: number;
+  blockedVendorStoreCount: number;
+  systemBlockedCount: number;
+  systemWarningCount: number;
+  blockerCount: number;
+  warningCount: number;
+  message: string;
+  firstBlockers: DropshipDogfoodLaunchGateBlocker[];
+}
+
 export interface DropshipDogfoodReadinessItem {
   vendor: {
     vendorId: number;
@@ -477,6 +499,7 @@ export interface DropshipDogfoodReadinessResponse {
   limit: number;
   summary: Array<{ status: DropshipDogfoodReadinessStatus; count: number }>;
   systemChecks: DropshipSystemReadinessCheck[];
+  launchGate: DropshipDogfoodLaunchGate;
 }
 
 export interface DropshipOmsChannelOption {
