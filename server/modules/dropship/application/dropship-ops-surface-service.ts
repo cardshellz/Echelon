@@ -239,6 +239,7 @@ export interface DropshipDogfoodLaunchGate {
 export interface DropshipDogfoodReadinessResult {
   generatedAt: Date;
   items: DropshipDogfoodReadinessItem[];
+  launchGateItems?: DropshipDogfoodReadinessItem[];
   total: number;
   page: number;
   limit: number;
@@ -314,6 +315,7 @@ export class DropshipOpsSurfaceService {
       ...parsed,
       generatedAt: this.deps.clock.now(),
     });
+    const { launchGateItems, ...publicResult } = result;
     const systemChecks = buildDropshipSystemReadinessChecks(process.env);
     this.deps.logger.info({
       code: "DROPSHIP_DOGFOOD_READINESS_VIEWED",
@@ -327,11 +329,11 @@ export class DropshipOpsSurfaceService {
       },
     });
     return {
-      ...result,
+      ...publicResult,
       systemChecks,
       launchGate: buildDropshipDogfoodLaunchGate({
-        summary: result.summary,
-        items: result.items,
+        summary: publicResult.summary,
+        items: launchGateItems ?? publicResult.items,
         systemChecks,
       }),
     };
@@ -360,6 +362,18 @@ export function buildDropshipDogfoodLaunchGate(input: {
         storeConnectionId: item.storeConnection.storeConnectionId,
       })),
   );
+  const vendorWarnings = input.items.flatMap((item) =>
+    item.checks
+      .filter((check) => check.status === "warning")
+      .map((check) => ({
+        scope: "vendor_store" as const,
+        key: check.key,
+        label: check.label,
+        message: check.message,
+        vendorId: item.vendor.vendorId,
+        storeConnectionId: item.storeConnection.storeConnectionId,
+      })),
+  );
   const firstBlockers: DropshipDogfoodLaunchGateBlocker[] = [
     ...systemBlocked.map((check) => ({
       scope: "system" as const,
@@ -370,8 +384,8 @@ export function buildDropshipDogfoodLaunchGate(input: {
     ...vendorBlockers,
   ].slice(0, 10);
 
-  const blockerCount = systemBlocked.length + blockedVendorStoreCount;
-  const warningCount = systemWarnings.length + warningVendorStoreCount;
+  const blockerCount = systemBlocked.length + vendorBlockers.length;
+  const warningCount = systemWarnings.length + vendorWarnings.length;
   const status: DropshipDogfoodReadinessStatus = systemBlocked.length > 0 || readyVendorStoreCount === 0
     ? "blocked"
     : warningCount > 0 || blockedVendorStoreCount > 0

@@ -328,12 +328,23 @@ describe("DropshipOpsSurfaceService", () => {
       items: [
         makeDogfoodReadinessItem({
           readinessStatus: "blocked",
-          blockerCount: 1,
+          blockerCount: 2,
+          warningCount: 1,
           checks: [{
             key: "wallet",
             label: "Wallet",
             status: "blocked",
             message: "Wallet has no available balance or active funding method.",
+          }, {
+            key: "shipping_rates",
+            label: "Shipping rates",
+            status: "blocked",
+            message: "Shipping rates are missing.",
+          }, {
+            key: "notifications",
+            label: "Notifications",
+            status: "warning",
+            message: "SMTP_FROM is recommended.",
           }],
         }),
       ],
@@ -445,6 +456,7 @@ describe("DropshipOpsSurfaceService", () => {
     });
 
     expect(result.summary).toEqual([{ status: "blocked", count: 1 }]);
+    expect("launchGateItems" in result).toBe(false);
     expect(result.systemChecks).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: "token_vault" }),
       expect.objectContaining({ key: "order_processing_worker" }),
@@ -526,6 +538,16 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
     return {
       generatedAt: input.generatedAt,
       items: [],
+      launchGateItems: [makeDogfoodReadinessItem({
+        readinessStatus: "blocked",
+        blockerCount: 1,
+        checks: [{
+          key: "wallet",
+          label: "Wallet",
+          status: "blocked",
+          message: "Wallet has no available balance or active funding method.",
+        }],
+      })],
       total: 0,
       page: input.page,
       limit: input.limit,
