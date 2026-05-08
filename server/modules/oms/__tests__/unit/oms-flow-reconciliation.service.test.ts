@@ -22,7 +22,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await collectOmsFlowReconciliationIssues(db);
 
     expect(issues).toEqual([]);
-    expect(db.execute).toHaveBeenCalledTimes(10);
+    expect(db.execute).toHaveBeenCalledTimes(14);
   });
 
   it("returns critical OMS/WMS and shipment drift issues with samples", async () => {
@@ -50,6 +50,35 @@ describe("oms-flow-reconciliation.service", () => {
     ]);
     expect(issues.every((issue) => issue.severity === "critical")).toBe(true);
     expect(issues[0].sample).toEqual([{ oms_order_id: 1 }]);
+  });
+
+  it("returns critical missing bridge issues with samples", async () => {
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(1))
+        .mockResolvedValueOnce(sampleRows([{ oms_order_id: 10 }]))
+        .mockResolvedValueOnce(countRows(1))
+        .mockResolvedValueOnce(sampleRows([{ wms_order_id: 20 }]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([])),
+    };
+
+    const issues = await collectOmsFlowReconciliationIssues(db);
+
+    expect(issues.map((issue) => issue.code)).toEqual([
+      "OMS_PAID_WITHOUT_WMS",
+      "WMS_READY_WITHOUT_SHIPMENT",
+    ]);
+    expect(issues.every((issue) => issue.severity === "critical")).toBe(true);
   });
 
   it("logs a compact summary when scheduled reconciliation finds issues", async () => {
@@ -101,6 +130,9 @@ describe("oms-flow-reconciliation.service", () => {
         ]))
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(sampleRows([{ id: 99 }])),
@@ -115,10 +147,10 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await runOmsFlowReconciliation(db);
 
     expect(issues).toHaveLength(1);
-    expect(db.execute).toHaveBeenCalledTimes(13);
+    expect(db.execute).toHaveBeenCalledTimes(18);
     expect(inserts).toHaveLength(1);
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("auto-queued 1 delayed tracking push retry"),
+      expect.stringContaining("auto-queued 2 delayed tracking push retry"),
     );
     warn.mockRestore();
   });
@@ -129,6 +161,10 @@ describe("oms-flow-reconciliation.service", () => {
     const db = {
       execute: vi
         .fn()
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(countRows(0))
@@ -160,6 +196,60 @@ describe("oms-flow-reconciliation.service", () => {
     expect((inserts[0] as any).payload).toEqual({ shipmentId: 482 });
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("auto-queued 1 ShipStation shipment push retry"),
+    );
+    warn.mockRestore();
+  });
+
+  it("auto-remediates missing WMS and missing shipment bridge issues through retry rows", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const inserts: unknown[] = [];
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(1))
+        .mockResolvedValueOnce(sampleRows([{ oms_order_id: 10 }]))
+        .mockResolvedValueOnce(countRows(1))
+        .mockResolvedValueOnce(sampleRows([{ wms_order_id: 20 }]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        // OMS_PAID_WITHOUT_WMS remediation SELECT + duplicate retry check + audit event.
+        .mockResolvedValueOnce(sampleRows([{ id: 10 }]))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([]))
+        // WMS_READY_WITHOUT_SHIPMENT remediation SELECT + duplicate retry check + audit event.
+        .mockResolvedValueOnce(sampleRows([{ id: 20, oms_order_id: "10" }]))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([])),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (row: unknown) => {
+          inserts.push(row);
+          return undefined;
+        }),
+      })),
+    };
+
+    const issues = await runOmsFlowReconciliation(db);
+
+    expect(issues.map((issue) => issue.code)).toEqual([
+      "OMS_PAID_WITHOUT_WMS",
+      "WMS_READY_WITHOUT_SHIPMENT",
+    ]);
+    expect(inserts).toHaveLength(2);
+    expect((inserts[0] as any).topic).toBe("oms_wms_sync");
+    expect((inserts[1] as any).topic).toBe("wms_shipment_create");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("auto-remediated 1 OMS_PAID_WITHOUT_WMS row"),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("auto-remediated 1 WMS_READY_WITHOUT_SHIPMENT row"),
     );
     warn.mockRestore();
   });

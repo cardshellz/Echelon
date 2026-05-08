@@ -20,6 +20,7 @@ const REMEDIABLE_CODES = new Set([
   "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
+const AUTO_FLOW_REMEDIATION_LIMIT = 10;
 let reconciliationSchedulerStartedAt: Date | null = null;
 let reconciliationSchedulerLastRunAt: Date | null = null;
 let reconciliationSchedulerLastSuccessAt: Date | null = null;
@@ -124,6 +125,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     wmsFinalOmsOpen,
     shipmentShippedOmsOpen,
     wmsShippedNoTrackingPush,
+    omsPaidWithoutWms,
+    wmsReadyWithoutShipment,
     unpushedShipStationShipments,
   ] = await Promise.all([
     countAndSample(
@@ -151,6 +154,62 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
           AND oo.updated_at < NOW() - INTERVAL '10 minutes'
         ORDER BY oo.updated_at ASC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.oms_orders oo
+        WHERE oo.status NOT IN ('cancelled', 'shipped')
+          AND oo.financial_status IN ('paid', 'partially_paid')
+          AND oo.created_at > NOW() - INTERVAL '14 days'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.orders wo
+            WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+               OR (wo.source_table_id = oo.id::text)
+          )
+      `,
+      sql`
+        SELECT oo.id AS oms_order_id, oo.external_order_number, oo.external_order_id,
+               oo.status, oo.financial_status, oo.created_at
+        FROM oms.oms_orders oo
+        WHERE oo.status NOT IN ('cancelled', 'shipped')
+          AND oo.financial_status IN ('paid', 'partially_paid')
+          AND oo.created_at > NOW() - INTERVAL '14 days'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.orders wo
+            WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+               OR (wo.source_table_id = oo.id::text)
+          )
+        ORDER BY oo.created_at DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.orders wo
+        WHERE wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+          AND wo.created_at > NOW() - INTERVAL '14 days'
+          AND NOT EXISTS (
+            SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
+          )
+      `,
+      sql`
+        SELECT wo.id AS wms_order_id, wo.order_number, wo.warehouse_status,
+               wo.created_at, NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+        FROM wms.orders wo
+        WHERE wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+          AND wo.created_at > NOW() - INTERVAL '14 days'
+          AND NOT EXISTS (
+            SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
+          )
+        ORDER BY wo.created_at DESC
         LIMIT 10
       `,
     ),
@@ -318,6 +377,20 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       sample: wmsShippedNoTrackingPush.sample,
     },
     {
+      code: "OMS_PAID_WITHOUT_WMS",
+      severity: "critical" as const,
+      count: omsPaidWithoutWms.count,
+      message: "Paid OMS orders have not reached WMS.",
+      sample: omsPaidWithoutWms.sample,
+    },
+    {
+      code: "WMS_READY_WITHOUT_SHIPMENT",
+      severity: "critical" as const,
+      count: wmsReadyWithoutShipment.count,
+      message: "Ready WMS orders have no outbound shipment row.",
+      sample: wmsReadyWithoutShipment.sample,
+    },
+    {
       code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
       severity: "critical" as const,
       count: unpushedShipStationShipments.count,
@@ -335,9 +408,99 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
+  await autoRemediateCriticalFlowIssues(dbArg, issues);
   await autoQueueStaleTrackingPushRetries(dbArg, issues);
   await autoQueueStaleShipStationPushRetries(dbArg, issues);
   return issues;
+}
+
+async function autoRemediateCriticalFlowIssues(
+  db: any,
+  issues: OmsOpsIssue[],
+): Promise<void> {
+  const mappings: Array<{
+    code: string;
+    inputFromSample: (sample: any) => Omit<OmsFlowRemediationInput, "operator"> | null;
+  }> = [
+    {
+      code: "OMS_PAID_WITHOUT_WMS",
+      inputFromSample: (sample) => {
+        const omsOrderId = Number(sample.oms_order_id ?? sample.id);
+        return Number.isInteger(omsOrderId) && omsOrderId > 0
+          ? { code: "OMS_PAID_WITHOUT_WMS", omsOrderId }
+          : null;
+      },
+    },
+    {
+      code: "WMS_READY_WITHOUT_SHIPMENT",
+      inputFromSample: (sample) => {
+        const wmsOrderId = Number(sample.wms_order_id ?? sample.id);
+        return Number.isInteger(wmsOrderId) && wmsOrderId > 0
+          ? { code: "WMS_READY_WITHOUT_SHIPMENT", wmsOrderId }
+          : null;
+      },
+    },
+    {
+      code: "OMS_FINAL_WMS_ACTIVE",
+      inputFromSample: (sample) => {
+        const omsOrderId = Number(sample.oms_order_id);
+        const wmsOrderId = Number(sample.wms_order_id);
+        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
+          Number.isInteger(wmsOrderId) && wmsOrderId > 0
+          ? { code: "OMS_FINAL_WMS_ACTIVE", omsOrderId, wmsOrderId }
+          : null;
+      },
+    },
+    {
+      code: "WMS_FINAL_OMS_OPEN",
+      inputFromSample: (sample) => {
+        const omsOrderId = Number(sample.oms_order_id);
+        const wmsOrderId = Number(sample.wms_order_id);
+        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
+          Number.isInteger(wmsOrderId) && wmsOrderId > 0
+          ? { code: "WMS_FINAL_OMS_OPEN", omsOrderId, wmsOrderId }
+          : null;
+      },
+    },
+    {
+      code: "SHIPMENT_SHIPPED_OMS_OPEN",
+      inputFromSample: (sample) => {
+        const omsOrderId = Number(sample.oms_order_id);
+        const shipmentId = Number(sample.shipment_id);
+        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
+          Number.isInteger(shipmentId) && shipmentId > 0
+          ? { code: "SHIPMENT_SHIPPED_OMS_OPEN", omsOrderId, shipmentId }
+          : null;
+      },
+    },
+  ];
+
+  for (const mapping of mappings) {
+    const issue = issues.find((entry) => entry.code === mapping.code);
+    if (!issue) continue;
+
+    let changed = 0;
+    for (const sample of issue.sample.slice(0, AUTO_FLOW_REMEDIATION_LIMIT)) {
+      const remediationInput = mapping.inputFromSample(sample);
+      if (!remediationInput) continue;
+
+      try {
+        const result = await remediateOmsFlowIssue(db, {
+          ...remediationInput,
+          operator: "scheduled_reconciliation",
+        });
+        if (result.changed) changed++;
+      } catch (error: any) {
+        console.warn(
+          `${LOG_PREFIX} auto-remediation failed for ${mapping.code}: ${error?.message || error}`,
+        );
+      }
+    }
+
+    if (changed > 0) {
+      console.warn(`${LOG_PREFIX} auto-remediated ${changed} ${mapping.code} row(s)`);
+    }
+  }
 }
 
 async function autoQueueStaleTrackingPushRetries(
