@@ -89,7 +89,9 @@ export const orders = wmsSchema.table("orders", {
 
   // ===== SHIPPING ADDRESS (for labels) =====
   shippingName: text("shipping_name"), // Recipient name from shipping address
+  shippingCompany: text("shipping_company"),
   shippingAddress: text("shipping_address"), // Legacy single-line format
+  shippingAddress2: text("shipping_address2"),
   shippingCity: text("shipping_city"),
   shippingState: text("shipping_state"),
   shippingPostalCode: text("shipping_postal_code"),

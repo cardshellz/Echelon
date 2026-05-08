@@ -50,6 +50,7 @@ export const omsOrders = omsSchema.table("oms_orders", {
 
   // Shipping address
   shipToName: varchar("ship_to_name", { length: 200 }),
+  shipToCompany: varchar("ship_to_company", { length: 200 }),
   shipToAddress1: varchar("ship_to_address1", { length: 300 }),
   shipToAddress2: varchar("ship_to_address2", { length: 300 }),
   shipToCity: varchar("ship_to_city", { length: 100 }),

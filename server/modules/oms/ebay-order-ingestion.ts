@@ -111,6 +111,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     customerEmail: shipTo?.email,
     customerPhone: shipTo?.primaryPhone?.phoneNumber,
     shipToName: shipTo?.fullName,
+    shipToCompany: (shipTo as any)?.companyName || (address as any)?.companyName || null,
     shipToAddress1: address?.addressLine1,
     shipToAddress2: address?.addressLine2,
     shipToCity: address?.city,
