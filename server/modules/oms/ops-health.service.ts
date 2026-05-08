@@ -239,7 +239,10 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
               AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
           )
           AND NOT EXISTS (
-            SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
+            SELECT 1
+            FROM wms.outbound_shipments os
+            WHERE os.order_id = wo.id
+              AND os.status <> 'voided'
           )
       `,
       sql`
@@ -256,7 +259,10 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
               AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
           )
           AND NOT EXISTS (
-            SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id
+            SELECT 1
+            FROM wms.outbound_shipments os
+            WHERE os.order_id = wo.id
+              AND os.status <> 'voided'
           )
         ORDER BY wo.created_at DESC
         LIMIT 10

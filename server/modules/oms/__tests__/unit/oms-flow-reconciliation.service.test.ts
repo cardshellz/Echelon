@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   collectOmsFlowReconciliationIssues,
   remediateOmsFlowIssue,
   runOmsFlowReconciliation,
 } from "../../oms-flow-reconciliation.service";
+
+const OMS_FLOW_RECONCILIATION_SRC = readFileSync(
+  resolve(__dirname, "../../oms-flow-reconciliation.service.ts"),
+  "utf-8",
+);
 
 function countRows(count: number) {
   return { rows: [{ count }] };
@@ -79,6 +86,12 @@ describe("oms-flow-reconciliation.service", () => {
       "WMS_READY_WITHOUT_SHIPMENT",
     ]);
     expect(issues.every((issue) => issue.severity === "critical")).toBe(true);
+  });
+
+  it("treats voided-only outbound shipments as missing shipment work", () => {
+    expect(OMS_FLOW_RECONCILIATION_SRC).toMatch(
+      /WHERE os\.order_id = wo\.id\s+AND os\.status <> 'voided'/,
+    );
   });
 
   it("logs a compact summary when scheduled reconciliation finds issues", async () => {
