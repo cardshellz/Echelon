@@ -26,6 +26,7 @@ import {
   linkChildToParentShipment,
   ChildWithoutParentShipmentError,
 } from "../wms/create-shipment";
+import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
 
 // Feature flag: gates §6 Commit 7 behavior (financial snapshot at
 // OMS→WMS sync). Default false; new wms.orders / wms.order_items cents
@@ -448,10 +449,24 @@ export class WmsSyncService {
               `[WMS Sync] Pushed shipment ${shipmentIdForPush} to ShipStation via pushShipment (PUSH_FROM_WMS=true)`,
             );
           } catch (err: any) {
-            // Don't block the sync — reconcile will retry the push.
+            // Don't block the sync, but do persist a retry immediately.
+            // Health/reconciliation is the safety net; this retry row is
+            // the hot-path guarantee for transient ShipStation/API/data
+            // failures after the WMS shipment row already exists.
             console.error(
               `[WMS Sync] pushShipment failed for shipment ${shipmentIdForPush} (OMS order ${omsOrderId}): ${err.message}`,
             );
+            try {
+              await enqueueShipStationShipmentPushRetry(
+                db,
+                shipmentIdForPush,
+                err,
+              );
+            } catch (retryErr: any) {
+              console.error(
+                `[WMS Sync] failed to enqueue ShipStation retry for shipment ${shipmentIdForPush}: ${retryErr?.message ?? String(retryErr)}`,
+              );
+            }
           }
         } else {
           // Legacy path: push via pushOrder reading OMS.
