@@ -3,6 +3,7 @@ import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import { syncDropshipAcceptedOrderToWmsSafely } from "./dropship-fulfillment-sync-dispatch";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
   DropshipClock,
   DropshipLogEvent,
@@ -384,7 +385,7 @@ export class DropshipOrderProcessingService {
   }): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: input.claim.intake.vendorId,
-      eventType: "dropship_auto_reload_failed",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.AUTO_RELOAD_FAILED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship auto-reload failed",
@@ -427,7 +428,7 @@ export class DropshipOrderProcessingService {
   ): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: claim.intake.vendorId,
-      eventType: "dropship_order_payment_hold_expired",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship order payment hold expired",
@@ -461,7 +462,9 @@ export class DropshipOrderProcessingService {
   ): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: claim.intake.vendorId,
-      eventType: classified.retryable ? "dropship_order_processing_retrying" : "dropship_order_processing_failed",
+      eventType: classified.retryable
+        ? DROPSHIP_NOTIFICATION_EVENTS.ORDER_PROCESSING_RETRYING
+        : DROPSHIP_NOTIFICATION_EVENTS.ORDER_PROCESSING_FAILED,
       critical: !classified.retryable,
       channels: ["email", "in_app"],
       title: classified.retryable ? "Dropship order processing retrying" : "Dropship order processing failed",

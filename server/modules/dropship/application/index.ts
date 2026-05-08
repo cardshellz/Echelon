@@ -16,6 +16,7 @@ export * from "./dropship-marketplace-tracking-provider";
 export * from "./dropship-marketplace-tracking-service";
 export * from "./dropship-fulfillment-sync-dispatch";
 export * from "./dropship-notification-dispatch";
+export * from "./dropship-notification-events";
 export * from "./dropship-notification-service";
 export * from "./dropship-notification-ops-dtos";
 export * from "./dropship-notification-ops-service";

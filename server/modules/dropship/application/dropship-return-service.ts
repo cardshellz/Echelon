@@ -6,6 +6,7 @@ import {
   formatNotificationCurrency,
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
   DropshipClock,
   DropshipLogEvent,
@@ -405,7 +406,7 @@ export class DropshipReturnService {
   private async notifyRmaCreated(rma: DropshipRmaDetail): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: rma.vendorId,
-      eventType: "dropship_rma_opened",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.RMA_OPENED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship RMA opened",
@@ -440,7 +441,7 @@ export class DropshipReturnService {
 
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: result.rma.vendorId,
-      eventType: "dropship_return_credit_posted",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.RETURN_CREDIT_POSTED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship return credit posted",

@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { DropshipError } from "../../domain/errors";
 import { normalizeShopifyShopDomain } from "../../domain/store-connection";
 import { sendDropshipNotificationSafely } from "../../application/dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "../../application/dropship-notification-events";
 import type {
   DropshipClock,
   DropshipLogger,
@@ -240,7 +241,7 @@ async function notifyShopifyStoreUninstalled(input: {
     logger: dropshipMarketplaceOrderIntakeRouteLogger,
   }, {
     vendorId: input.vendorId,
-    eventType: "dropship_store_disconnected",
+    eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_DISCONNECTED,
     critical: true,
     channels: ["email", "in_app"],
     title: "Dropship store disconnected",

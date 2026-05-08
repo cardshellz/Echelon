@@ -1,5 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type { DropshipOrderIntakeStatus } from "./dropship-order-intake-service";
 import type {
   DropshipClock,
@@ -78,7 +79,7 @@ export class DropshipOrderRejectionService {
   ): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: result.vendorId,
-      eventType: "dropship_order_rejected",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_REJECTED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship order rejected",

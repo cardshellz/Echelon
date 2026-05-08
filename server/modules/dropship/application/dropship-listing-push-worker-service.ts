@@ -1,5 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
+import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
   DropshipClock,
   DropshipLogEvent,
@@ -266,7 +267,7 @@ export class DropshipListingPushWorkerService {
 
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: result.job.vendorId,
-      eventType: "dropship_listing_push_failed",
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_PUSH_FAILED,
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship listing push failed",
