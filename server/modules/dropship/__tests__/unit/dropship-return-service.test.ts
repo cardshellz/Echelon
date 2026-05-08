@@ -107,6 +107,19 @@ describe("DropshipReturnService", () => {
     expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-OVER-QTY");
   });
 
+  it("rejects member RMAs without a linked accepted order intake", async () => {
+    const repository = new FakeReturnRepository();
+    const service = makeService(repository, []);
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-MISSING-LINK",
+      items: [],
+      idempotencyKey: "vendor-rma-missing-link",
+    })).rejects.toMatchObject({ code: "DROPSHIP_RETURN_CREATE_INVALID_INPUT" });
+    expect(repository.lastOrderReferenceInput).toBeNull();
+    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-MISSING-LINK");
+  });
+
   it("rejects member RMA references to unaccepted order intake", async () => {
     const repository = new FakeReturnRepository();
     repository.orderReference = makeOrderReference({
@@ -129,6 +142,31 @@ describe("DropshipReturnService", () => {
       },
     });
     expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-UNACCEPTED");
+  });
+
+  it("rejects member RMA references outside the return window", async () => {
+    const repository = new FakeReturnRepository();
+    repository.orderReference = makeOrderReference({
+      acceptedAt: new Date("2026-04-01T18:59:59.999Z"),
+    });
+    const service = makeService(repository, []);
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-EXPIRED",
+      intakeId: 44,
+      items: [{ productVariantId: 20, quantity: 1 }],
+      idempotencyKey: "vendor-rma-expired",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_WINDOW_EXPIRED",
+      context: {
+        intakeId: 44,
+        acceptedAt: "2026-04-01T18:59:59.999Z",
+        returnWindowDays: 30,
+        expiredAt: "2026-05-01T18:59:59.999Z",
+        now: now.toISOString(),
+      },
+    });
+    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-EXPIRED");
   });
 
   it("rejects member RMA references to orders outside the vendor scope", async () => {
@@ -505,6 +543,7 @@ function makeOrderReference(overrides: Partial<DropshipRmaOrderReference> = {}):
     storeConnectionId: 70,
     status: "accepted",
     omsOrderId: 9001,
+    acceptedAt: new Date("2026-05-01T19:00:00.000Z"),
     lines: [
       { lineIndex: 0, productVariantId: 20, quantity: 2 },
       { lineIndex: 1, productVariantId: 21, quantity: 1 },

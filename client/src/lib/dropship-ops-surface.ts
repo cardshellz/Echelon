@@ -2636,7 +2636,7 @@ export function buildPortalReturnCreateInput(input: {
 }): DropshipPortalReturnCreateInput {
   const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
   const rmaNumber = requiredTrimmedString(input.rmaNumber, "rmaNumber", 80);
-  const intakeId = parseOptionalPositiveInteger(input.intakeId, "intakeId");
+  const intakeId = parsePositiveInteger(input.intakeId, "intakeId");
   const vendorNotes = optionalTrimmedString(input.vendorNotes, "vendorNotes", 5000);
   const items = input.items.map((item, index) => {
     const status = item.status.trim() || "requested";
@@ -2650,10 +2650,6 @@ export function buildPortalReturnCreateInput(input: {
       requestedCreditCents: parseNullableDollarInputToCents(item.requestedCreditAmount, `items.${index}.requestedCreditAmount`),
     };
   });
-  if (!intakeId && items.some((item) => item.productVariantId !== null)) {
-    throw new Error("intakeId is required when linking RMA items to product variants.");
-  }
-
   return {
     rmaNumber,
     intakeId,
