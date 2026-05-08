@@ -110,6 +110,8 @@ import {
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOrderOpsProcessResponse,
+  type DropshipOrderDetail,
+  type DropshipOrderDetailResponse,
   type DropshipAdminOmsChannelConfigResponse,
   type DropshipAdminOmsChannelConfigureResponse,
   type DropshipAdminReturnCreateResponse,
@@ -2199,6 +2201,7 @@ function OrderIntakeOpsTab() {
     intakeId: number;
     action: "retry" | "exception" | "process" | "retry-cancellation";
   } | null>(null);
+  const [selectedIntakeId, setSelectedIntakeId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -2211,6 +2214,14 @@ function OrderIntakeOpsTab() {
   const orderIntakeQuery = useQuery<DropshipAdminOrderOpsListResponse>({
     queryKey: [orderIntakeUrl],
     queryFn: () => fetchJson<DropshipAdminOrderOpsListResponse>(orderIntakeUrl),
+  });
+  const orderDetailQuery = useQuery<DropshipOrderDetailResponse>({
+    queryKey: ["dropship-admin-order-detail", selectedIntakeId],
+    queryFn: () => {
+      if (selectedIntakeId === null) throw new Error("Missing selected intake.");
+      return fetchJson<DropshipOrderDetailResponse>(`/api/dropship/admin/order-intake/${selectedIntakeId}`);
+    },
+    enabled: selectedIntakeId !== null,
   });
   const orderIntakes = orderIntakeQuery.data?.items ?? [];
   const orderRetryEligibilityNow = useMemo(() => new Date(), [orderIntakeQuery.dataUpdatedAt]);
@@ -2351,10 +2362,19 @@ function OrderIntakeOpsTab() {
       <OrderIntakeOpsTable
         isLoading={orderIntakeQuery.isLoading || orderIntakeQuery.isFetching}
         items={orderIntakes}
+        selectedIntakeId={selectedIntakeId}
         pendingAction={pendingAction}
         retryEligibilityNow={orderRetryEligibilityNow}
         total={orderIntakeQuery.data?.total ?? 0}
+        onSelectDetail={(intake) => setSelectedIntakeId(intake.intakeId)}
         onRunAction={runOrderAction}
+      />
+      <OrderIntakeDetailPanel
+        error={orderDetailQuery.error}
+        isLoading={orderDetailQuery.isLoading || orderDetailQuery.isFetching}
+        onClose={() => setSelectedIntakeId(null)}
+        order={orderDetailQuery.data?.order ?? null}
+        selectedIntakeId={selectedIntakeId}
       />
     </div>
   );
@@ -5276,19 +5296,23 @@ function OrderIntakeSummary({
 function OrderIntakeOpsTable({
   isLoading,
   items,
+  onSelectDetail,
   onRunAction,
   pendingAction,
   retryEligibilityNow,
+  selectedIntakeId,
   total,
 }: {
   isLoading: boolean;
   items: DropshipAdminOrderOpsIntakeListItem[];
+  onSelectDetail: (intake: DropshipAdminOrderOpsIntakeListItem) => void;
   onRunAction: (
     intake: DropshipAdminOrderOpsIntakeListItem,
     action: "retry" | "exception" | "process" | "retry-cancellation",
   ) => void;
   pendingAction: { intakeId: number; action: "retry" | "exception" | "process" | "retry-cancellation" } | null;
   retryEligibilityNow: Date;
+  selectedIntakeId: number | null;
   total: number;
 }) {
   if (isLoading) {
@@ -5327,7 +5351,7 @@ function OrderIntakeOpsTable({
             <TableHead>Ship to</TableHead>
             <TableHead>Latest audit</TableHead>
             <TableHead>Updated</TableHead>
-            <TableHead className="w-[280px]">Actions</TableHead>
+            <TableHead className="w-[360px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -5381,7 +5405,18 @@ function OrderIntakeOpsTable({
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{formatDateTime(intake.updatedAt)}</TableCell>
                 <TableCell>
-                  <div className="flex flex-col gap-2 sm:flex-row">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                    <Button
+                      type="button"
+                      variant={selectedIntakeId === intake.intakeId ? "default" : "outline"}
+                      size="sm"
+                      className={selectedIntakeId === intake.intakeId ? "h-8 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" : "h-8 gap-2"}
+                      disabled={pendingAction !== null}
+                      onClick={() => onSelectDetail(intake)}
+                    >
+                      <FileSearch className="h-4 w-4" />
+                      Detail
+                    </Button>
                     <Button
                       type="button"
                       variant="outline"
@@ -5435,6 +5470,268 @@ function OrderIntakeOpsTable({
       </Table>
     </section>
   );
+}
+
+function OrderIntakeDetailPanel({
+  error,
+  isLoading,
+  onClose,
+  order,
+  selectedIntakeId,
+}: {
+  error: unknown;
+  isLoading: boolean;
+  onClose: () => void;
+  order: DropshipOrderDetail | null;
+  selectedIntakeId: number | null;
+}) {
+  if (selectedIntakeId === null) return null;
+
+  if (isLoading) {
+    return (
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-7 w-64" />
+        <div className="mt-4 grid gap-3 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={index} className="h-20 w-full" />
+          ))}
+        </div>
+        <Skeleton className="mt-4 h-40 w-full" />
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertDescription>{queryErrorMessage(error, "Unable to load dropship order detail.")}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (!order) return null;
+
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">
+              {order.externalOrderNumber || order.externalOrderId}
+            </h2>
+            <Badge variant="outline" className={orderIntakeStatusTone(order.status as DropshipOpsOrderIntakeStatus)}>
+              {formatStatus(order.status)}
+            </Badge>
+            {order.cancellationStatus && (
+              <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-900">
+                {formatStatus(order.cancellationStatus)}
+              </Badge>
+            )}
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {formatStatus(order.platform)} intake {order.intakeId} / {order.vendor.businessName || order.vendor.email || `Vendor ${order.vendor.vendorId}`} / {order.storeConnection.externalDisplayName || order.storeConnection.shopDomain || `Store ${order.storeConnection.storeConnectionId}`}
+          </p>
+        </div>
+        <Button type="button" variant="ghost" size="sm" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CatalogMetric icon={<ClipboardList className="h-4 w-4" />} label="Lines / units" value={`${order.lineCount} / ${order.totalQuantity}`} />
+        <CatalogMetric icon={<CircleDollarSign className="h-4 w-4" />} label="Grand total" value={formatOptionalCents(order.totals?.grandTotalCents)} />
+        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Tracking pushes" value={String(order.trackingPushes.length)} />
+        <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Wallet debit" value={formatOptionalCents(order.walletLedgerEntry?.amountCents)} />
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+        <div className="rounded-md border">
+          <div className="border-b px-4 py-3">
+            <h3 className="font-semibold">Order lines</h3>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Line</TableHead>
+                <TableHead>SKU</TableHead>
+                <TableHead className="text-right">Qty</TableHead>
+                <TableHead className="text-right">Unit</TableHead>
+                <TableHead className="text-right">Total</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {order.lines.map((line) => (
+                <TableRow key={`${line.lineIndex}:${line.externalLineItemId ?? line.sku ?? "line"}`}>
+                  <TableCell>
+                    <div className="font-medium">{line.title || `Line ${line.lineIndex + 1}`}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {line.productVariantId ? `Variant ${line.productVariantId}` : "Variant not linked"}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-mono text-sm">{line.sku || "None"}</div>
+                    <div className="max-w-[180px] truncate text-xs text-muted-foreground">
+                      {line.externalListingId || line.externalOfferId || line.externalLineItemId || "No marketplace line id"}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-right font-mono">{line.quantity}</TableCell>
+                  <TableCell className="text-right font-mono">{formatOptionalCents(line.unitRetailPriceCents)}</TableCell>
+                  <TableCell className="text-right font-mono">{formatOptionalCents(line.lineRetailTotalCents)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+
+        <div className="space-y-4">
+          <div className="rounded-md border p-4">
+            <h3 className="font-semibold">Money and quote</h3>
+            <div className="mt-3 grid gap-2 text-sm">
+              <DetailMoneyRow label="Retail subtotal" value={order.totals?.retailSubtotalCents} />
+              <DetailMoneyRow label="Marketplace shipping" value={order.totals?.shippingPaidCents} />
+              <DetailMoneyRow label="Wholesale subtotal" value={order.economicsSnapshot?.wholesaleSubtotalCents} />
+              <DetailMoneyRow label="Shipping charged" value={order.economicsSnapshot?.shippingCents ?? order.shippingQuoteSnapshot?.totalShippingCents} />
+              <DetailMoneyRow label="Insurance pool" value={order.economicsSnapshot?.insurancePoolCents ?? order.shippingQuoteSnapshot?.insurancePoolCents} />
+              <DetailMoneyRow label="Fees" value={order.economicsSnapshot?.feesCents} />
+              <DetailMoneyRow label="Total debit" value={order.economicsSnapshot?.totalDebitCents ?? order.walletLedgerEntry?.amountCents} />
+            </div>
+            <div className="mt-3 text-xs text-muted-foreground">
+              {order.shippingQuoteSnapshot
+                ? `Quote ${order.shippingQuoteSnapshot.quoteSnapshotId} / warehouse ${order.shippingQuoteSnapshot.warehouseId} / ${order.shippingQuoteSnapshot.packageCount} package(s)`
+                : "No shipping quote snapshot"}
+            </div>
+          </div>
+
+          <div className="rounded-md border p-4">
+            <h3 className="font-semibold">State</h3>
+            <div className="mt-3 grid gap-2 text-sm text-muted-foreground">
+              <div>OMS order: <span className="font-mono text-foreground">{order.omsOrderId ?? "None"}</span></div>
+              <div>Received: <span className="text-foreground">{formatDateTime(order.receivedAt)}</span></div>
+              <div>Accepted: <span className="text-foreground">{formatDateTime(order.acceptedAt)}</span></div>
+              <div>Payment hold: <span className="text-foreground">{formatDateTime(order.paymentHoldExpiresAt)}</span></div>
+              {order.rejectionReason && (
+                <div className="text-rose-700">Rejection: {order.rejectionReason}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <div className="rounded-md border">
+          <div className="border-b px-4 py-3">
+            <h3 className="font-semibold">Tracking pushes</h3>
+          </div>
+          {order.trackingPushes.length === 0 ? (
+            <div className="p-4 text-sm text-muted-foreground">No tracking pushes recorded.</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Tracking</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Shipment</TableHead>
+                  <TableHead>Updated</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {order.trackingPushes.map((push) => (
+                  <TableRow key={push.pushId}>
+                    <TableCell>
+                      <div className="font-mono text-sm">{push.trackingNumber}</div>
+                      <div className="text-xs text-muted-foreground">{push.carrier} / {formatStatus(push.platform)}</div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline" className={trackingPushStatusTone(push.status)}>
+                        {formatStatus(push.status)}
+                      </Badge>
+                      {push.lastErrorMessage && (
+                        <div className="mt-1 max-w-[220px] truncate text-xs text-muted-foreground">{push.lastErrorMessage}</div>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <div className="font-mono text-sm">{push.wmsShipmentId ?? "None"}</div>
+                      <div className="text-xs text-muted-foreground">{push.externalFulfillmentId || "No marketplace fulfillment"}</div>
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                      {formatDateTime(push.updatedAt)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+
+        <div className="rounded-md border">
+          <div className="border-b px-4 py-3">
+            <h3 className="font-semibold">Audit trail</h3>
+          </div>
+          {order.auditEvents.length === 0 ? (
+            <div className="p-4 text-sm text-muted-foreground">No audit events recorded.</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Event</TableHead>
+                  <TableHead>Actor</TableHead>
+                  <TableHead>Payload</TableHead>
+                  <TableHead>Created</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {order.auditEvents.slice(0, 8).map((event, index) => (
+                  <TableRow key={`${event.eventType}:${event.createdAt}:${index}`}>
+                    <TableCell>
+                      <Badge variant="outline" className={riskSeverityTone(event.severity)}>
+                        {formatStatus(event.eventType)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="text-sm">{formatStatus(event.actorType)}</div>
+                      <div className="max-w-[160px] truncate text-xs text-muted-foreground">{event.actorId || "System"}</div>
+                    </TableCell>
+                    <TableCell className="max-w-[260px] truncate text-xs text-muted-foreground">
+                      {compactJsonPayload(event.payload)}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                      {formatDateTime(event.createdAt)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DetailMoneyRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: number | null | undefined;
+}) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-mono">{formatOptionalCents(value)}</span>
+    </div>
+  );
+}
+
+function formatOptionalCents(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isSafeInteger(value) ? formatCents(value) : "None";
+}
+
+function compactJsonPayload(payload: Record<string, unknown>): string {
+  const text = JSON.stringify(payload);
+  if (!text || text === "{}") return "{}";
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
 }
 
 function CatalogRuleTargetInput({

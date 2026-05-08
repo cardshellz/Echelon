@@ -35,6 +35,23 @@ export function registerDropshipAdminOrderOpsRoutes(
     },
   );
 
+  app.get(
+    "/api/dropship/admin/order-intake/:intakeId",
+    requirePermission("dropship", "view"),
+    async (req, res) => {
+      try {
+        const order = await service.getIntakeDetail({
+          intakeId: parsePositiveInteger(req.params.intakeId, "intakeId"),
+          vendorId: parseOptionalPositiveIntegerQuery(req.query.vendorId),
+          storeConnectionId: parseOptionalPositiveIntegerQuery(req.query.storeConnectionId),
+        });
+        return res.json({ order });
+      } catch (error) {
+        return sendDropshipOrderOpsError(res, error);
+      }
+    },
+  );
+
   app.post(
     "/api/dropship/admin/order-intake/:intakeId/process",
     requirePermission("dropship", "manage_operations"),
@@ -131,6 +148,7 @@ function sendDropshipOrderOpsError(res: Response, error: unknown): Response {
 function statusForDropshipOrderOpsError(code: string): number {
   switch (code) {
     case "DROPSHIP_ORDER_OPS_LIST_INVALID_INPUT":
+    case "DROPSHIP_ORDER_OPS_DETAIL_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_RETRY_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_CANCELLATION_RETRY_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_EXCEPTION_INVALID_INPUT":
