@@ -358,6 +358,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
     return {
       generatedAt: input.generatedAt,
       items: filteredItems.slice(offset, offset + input.limit),
+      launchGateItems: allItems,
       total: filteredItems.length,
       page: input.page,
       limit: input.limit,

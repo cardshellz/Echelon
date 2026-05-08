@@ -238,6 +238,26 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     ]);
   });
 
+  it("keeps full dogfood readiness rows available for launch gate evaluation while paginating visible rows", async () => {
+    const query = vi.fn(async () => ({
+      rows: [
+        makeDogfoodReadinessRow({ vendor_id: 10, member_id: "member-1" }),
+        makeDogfoodReadinessRow({ vendor_id: 11, member_id: "member-2" }),
+      ],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodReadiness({
+      generatedAt: now,
+      page: 1,
+      limit: 1,
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.launchGateItems).toHaveLength(2);
+    expect(result.total).toBe(2);
+  });
+
   it("blocks dogfood readiness when launch wallet and auto-reload funding are not usable", async () => {
     const query = vi.fn(async () => ({
       rows: [makeDogfoodReadinessRow({
