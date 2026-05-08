@@ -409,6 +409,7 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
       vendorStatusCounts: [],
       storeConnectionStatusCounts: [],
       orderIntakeStatusCounts: [],
+      orderCancellationStatusCounts: [],
       listingPushJobStatusCounts: [],
       trackingPushStatusCounts: [{ key: "failed", count: 2 }],
       rmaStatusCounts: [],

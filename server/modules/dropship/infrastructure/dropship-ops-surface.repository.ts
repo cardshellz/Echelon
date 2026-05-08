@@ -261,6 +261,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       vendorStatusCounts,
       storeConnectionStatusCounts,
       orderIntakeStatusCounts,
+      orderCancellationStatusCounts,
       listingPushJobStatusCounts,
       trackingPushStatusCounts,
       rmaStatusCounts,
@@ -270,6 +271,11 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       this.countByStatus("dropship.dropship_vendors", "status", input, { hasVendorId: true, hasStoreConnectionId: false }),
       this.countByStatus("dropship.dropship_store_connections", "status", input, { hasVendorId: true, hasStoreConnectionId: true }),
       this.countByStatus("dropship.dropship_order_intake", "status", input, { hasVendorId: true, hasStoreConnectionId: true }),
+      this.countByStatus("dropship.dropship_order_intake", "cancellation_status", input, {
+        hasVendorId: true,
+        hasStoreConnectionId: true,
+        excludeNullStatus: true,
+      }),
       this.countByStatus("dropship.dropship_listing_push_jobs", "status", input, { hasVendorId: true, hasStoreConnectionId: false }),
       this.countByStatus("dropship.dropship_marketplace_tracking_pushes", "status", input, { hasVendorId: true, hasStoreConnectionId: true }),
       this.countByStatus("dropship.dropship_rmas", "status", input, { hasVendorId: true, hasStoreConnectionId: true }),
@@ -287,6 +293,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       riskBuckets: buildRiskBuckets({
         storeConnectionStatusCounts,
         orderIntakeStatusCounts,
+        orderCancellationStatusCounts,
         listingPushJobStatusCounts,
         trackingPushStatusCounts,
         rmaStatusCounts,
@@ -295,6 +302,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       vendorStatusCounts,
       storeConnectionStatusCounts,
       orderIntakeStatusCounts,
+      orderCancellationStatusCounts,
       listingPushJobStatusCounts,
       trackingPushStatusCounts,
       rmaStatusCounts,
@@ -362,13 +370,14 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
     tableName: string,
     statusColumn: string,
     input: { vendorId?: number; storeConnectionId?: number },
-    options: { hasVendorId: boolean; hasStoreConnectionId: boolean },
+    options: { hasVendorId: boolean; hasStoreConnectionId: boolean; excludeNullStatus?: boolean },
   ): Promise<DropshipOpsCount[]> {
     const filters = buildScopeFilters(input, options);
+    const whereSql = appendCountStatusFilter(filters.whereSql, `${statusColumn} IS NOT NULL`, options.excludeNullStatus === true);
     const result = await this.dbPool.query<CountRow>(
       `SELECT ${statusColumn} AS key, COUNT(*) AS count
        FROM ${tableName}
-       ${filters.whereSql}
+       ${whereSql}
        GROUP BY ${statusColumn}
        ORDER BY ${statusColumn} ASC`,
       filters.params,
@@ -681,6 +690,7 @@ function catalogVariantRuleMatchSql(ruleAlias: string): string {
 function buildRiskBuckets(input: {
   storeConnectionStatusCounts: DropshipOpsCount[];
   orderIntakeStatusCounts: DropshipOpsCount[];
+  orderCancellationStatusCounts: DropshipOpsCount[];
   listingPushJobStatusCounts: DropshipOpsCount[];
   trackingPushStatusCounts: DropshipOpsCount[];
   rmaStatusCounts: DropshipOpsCount[];
@@ -704,6 +714,12 @@ function buildRiskBuckets(input: {
       label: "Payment holds",
       severity: "warning",
       count: sumCounts(input.orderIntakeStatusCounts, ["payment_hold"]),
+    },
+    {
+      key: "marketplace_cancellation_failures",
+      label: "Marketplace cancellation failures",
+      severity: "error",
+      count: sumCounts(input.orderCancellationStatusCounts, ["marketplace_cancellation_failed"]),
     },
     {
       key: "listing_push_failures",
@@ -1105,6 +1121,13 @@ function buildScopeFilters(
     whereSql: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
     params,
   };
+}
+
+function appendCountStatusFilter(whereSql: string, clause: string, enabled: boolean): string {
+  if (!enabled) {
+    return whereSql;
+  }
+  return whereSql ? `${whereSql} AND ${clause}` : `WHERE ${clause}`;
 }
 
 function buildAuditFilters(input: SearchDropshipAuditEventsInput): { whereSql: string; params: unknown[] } {
