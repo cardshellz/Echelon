@@ -138,6 +138,70 @@ describe("DropshipAuthService", () => {
     expect(deps.sentEmails).toEqual([]);
   });
 
+  it("refreshes a session principal against current identity and entitlement state", async () => {
+    deps.entitlement.status = "grace";
+    deps.identitiesByEmail.set("vendor@cardshellz.test", {
+      authIdentityId: 404,
+      memberId: "member-1",
+      primaryEmail: "vendor@cardshellz.test",
+      passwordHash: "hashed:StrongPassword123",
+      passwordHashAlgorithm: "test",
+      status: "active",
+      passkeyEnrolledAt: now,
+    });
+
+    const refreshed = await service.refreshSessionPrincipal({
+      authIdentityId: 404,
+      memberId: "member-1",
+      cardShellzEmail: "vendor@cardshellz.test",
+      hasPasskey: false,
+      authMethod: "password",
+      entitlementStatus: "active",
+      authenticatedAt: "2026-04-30T10:00:00.000Z",
+    });
+
+    expect(refreshed).toMatchObject({
+      authIdentityId: 404,
+      memberId: "member-1",
+      cardShellzEmail: "vendor@cardshellz.test",
+      hasPasskey: true,
+      authMethod: "password",
+      entitlementStatus: "grace",
+      authenticatedAt: "2026-04-30T10:00:00.000Z",
+    });
+  });
+
+  it("rejects session refresh when the current .ops entitlement has lapsed", async () => {
+    deps.entitlement.status = "lapsed";
+    deps.entitlement.reasonCode = "SUBSCRIPTION_NOT_ACTIVE";
+    deps.identitiesByEmail.set("vendor@cardshellz.test", {
+      authIdentityId: 405,
+      memberId: "member-1",
+      primaryEmail: "vendor@cardshellz.test",
+      passwordHash: "hashed:StrongPassword123",
+      passwordHashAlgorithm: "test",
+      status: "active",
+      passkeyEnrolledAt: null,
+    });
+
+    await expect(service.refreshSessionPrincipal({
+      authIdentityId: 405,
+      memberId: "member-1",
+      cardShellzEmail: "vendor@cardshellz.test",
+      hasPasskey: false,
+      authMethod: "password",
+      entitlementStatus: "active",
+      authenticatedAt: "2026-04-30T10:00:00.000Z",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_ENTITLEMENT_REQUIRED",
+      context: {
+        memberId: "member-1",
+        entitlementStatus: "lapsed",
+        reasonCode: "SUBSCRIPTION_NOT_ACTIVE",
+      },
+    });
+  });
+
   it("blocks password login when the .ops entitlement has lapsed", async () => {
     deps.entitlement.status = "lapsed";
     deps.identitiesByEmail.set("vendor@cardshellz.test", {
