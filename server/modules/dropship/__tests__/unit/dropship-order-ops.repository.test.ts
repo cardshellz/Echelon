@@ -9,6 +9,62 @@ vi.hoisted(() => {
 const now = new Date("2026-05-03T12:00:00.000Z");
 
 describe("PgDropshipOrderOpsRepository", () => {
+  it("filters and searches order intake cancellation states for ops review", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("COUNT(*) OVER()")) {
+        expect(sqlText).toContain("oi.status = ANY($1::text[])");
+        expect(sqlText).toContain("oi.cancellation_status = ANY($2::text[])");
+        expect(sqlText).toContain("oi.rejection_reason ILIKE $3");
+        expect(sqlText).toContain("oi.cancellation_status ILIKE $3");
+        expect(params).toEqual([
+          ["exception"],
+          ["marketplace_cancellation_failed"],
+          "%cancel failed%",
+          25,
+          0,
+        ]);
+        return { rows: [makeListRow()] };
+      }
+      if (sqlText.includes("SELECT oi.status, COUNT(*) AS count")) {
+        expect(sqlText).not.toContain("oi.status = ANY");
+        expect(sqlText).toContain("oi.cancellation_status = ANY($1::text[])");
+        expect(params).toEqual([
+          ["marketplace_cancellation_failed"],
+          "%cancel failed%",
+        ]);
+        return { rows: [{ status: "exception", count: "1" }] };
+      }
+      if (sqlText.includes("SELECT oi.cancellation_status, COUNT(*) AS count")) {
+        expect(sqlText).not.toContain("oi.status = ANY");
+        expect(sqlText).not.toContain("oi.cancellation_status = ANY");
+        expect(sqlText).toContain("oi.cancellation_status IS NOT NULL");
+        expect(params).toEqual(["%cancel failed%"]);
+        return { rows: [{ cancellation_status: "marketplace_cancellation_failed", count: "1" }] };
+      }
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const repository = new PgDropshipOrderOpsRepository(makePool(makeClient(query)));
+
+    const result = await repository.listIntakes({
+      statuses: ["exception"],
+      cancellationStatuses: ["marketplace_cancellation_failed"],
+      search: "cancel failed",
+      page: 1,
+      limit: 25,
+    });
+
+    expect(result.total).toBe(1);
+    expect(result.items[0]).toMatchObject({
+      intakeId: 42,
+      status: "exception",
+      cancellationStatus: "marketplace_cancellation_failed",
+    });
+    expect(result.cancellationSummary).toEqual([
+      { cancellationStatus: "marketplace_cancellation_failed", count: 1 },
+    ]);
+  });
+
   it("rejects non-stale processing intake retries without updating the row", async () => {
     const query = vi.fn(async (sql: string) => {
       const sqlText = String(sql);
@@ -262,6 +318,47 @@ function makeActionRow(overrides: Record<string, unknown> = {}) {
     rejection_reason: "previous failure",
     cancellation_status: null,
     updated_at: now,
+    ...overrides,
+  };
+}
+
+function makeListRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 42,
+    vendor_id: 10,
+    store_connection_id: 22,
+    platform: "ebay",
+    external_order_id: "ORDER-42",
+    external_order_number: "1001",
+    status: "exception",
+    payment_hold_expires_at: null,
+    rejection_reason: "Marketplace cancellation failed: config missing",
+    cancellation_status: "marketplace_cancellation_failed",
+    normalized_payload: {
+      lines: [{ quantity: 2 }],
+      shipTo: { country: "US", postalCode: "10001" },
+    },
+    oms_order_id: null,
+    received_at: now,
+    accepted_at: null,
+    updated_at: now,
+    member_id: "member-1",
+    business_name: "Vendor Co",
+    email: "vendor@example.com",
+    vendor_status: "active",
+    entitlement_status: "active",
+    store_platform: "ebay",
+    store_status: "connected",
+    setup_status: "ready",
+    access_token_ref: "token-ref",
+    refresh_token_ref: "refresh-ref",
+    external_display_name: "Vendor eBay",
+    shop_domain: null,
+    latest_event_type: "order_marketplace_cancellation_failed",
+    latest_event_severity: "error",
+    latest_event_created_at: now,
+    latest_event_payload: { errorCode: "CONFIG_MISSING" },
+    total_count: "1",
     ...overrides,
   };
 }

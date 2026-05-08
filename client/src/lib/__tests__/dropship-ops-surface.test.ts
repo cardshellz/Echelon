@@ -224,9 +224,12 @@ describe("dropship ops surface client helpers", () => {
     expect(buildAdminOrderIntakeUrl({
       search: "",
       status: "failed",
+      cancellationStatus: "marketplace_cancellation_failed",
       page: 2,
       limit: 25,
-    })).toBe("/api/dropship/admin/order-intake?statuses=failed&page=2&limit=25");
+    })).toBe(
+      "/api/dropship/admin/order-intake?statuses=failed&cancellationStatuses=marketplace_cancellation_failed&page=2&limit=25",
+    );
     expect(buildAdminOrderIntakeUrl({
       search: "",
       status: "all",

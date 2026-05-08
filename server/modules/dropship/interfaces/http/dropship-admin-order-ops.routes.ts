@@ -19,6 +19,9 @@ export function registerDropshipAdminOrderOpsRoutes(
       try {
         const result = await service.listIntakes({
           statuses: parseStatusesQuery(req.query.statuses ?? req.query.status),
+          cancellationStatuses: parseStatusesQuery(
+            req.query.cancellationStatuses ?? req.query.cancellationStatus,
+          ),
           vendorId: parseOptionalPositiveIntegerQuery(req.query.vendorId),
           storeConnectionId: parseOptionalPositiveIntegerQuery(req.query.storeConnectionId),
           search: parseOptionalStringQuery(req.query.search),

@@ -3,6 +3,7 @@ import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipOrderIntakeStatus, NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
+import type { DropshipOrderOpsCancellationStatus } from "../application/dropship-order-ops-dtos";
 import type {
   DropshipOrderOpsActionResult,
   DropshipOrderOpsAuditEventDetail,
@@ -57,6 +58,11 @@ interface OpsIntakeRow {
 
 interface StatusCountRow {
   status: DropshipOrderIntakeStatus;
+  count: string | number;
+}
+
+interface CancellationStatusCountRow {
+  cancellation_status: DropshipOrderOpsCancellationStatus | string;
   count: string | number;
 }
 
@@ -182,6 +188,20 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
         summaryFilters.params,
       );
 
+      const cancellationSummaryFilters = buildOpsIntakeFilters(input, {
+        includeStatuses: false,
+        includeCancellationStatuses: false,
+      });
+      const cancellationSummary = await client.query<CancellationStatusCountRow>(
+        `SELECT oi.cancellation_status, COUNT(*) AS count
+         ${opsIntakeBaseFromSql()}
+         ${cancellationSummaryFilters.whereSql}
+         ${cancellationSummaryFilters.whereSql ? "AND" : "WHERE"} oi.cancellation_status IS NOT NULL
+         GROUP BY oi.cancellation_status
+         ORDER BY oi.cancellation_status ASC`,
+        cancellationSummaryFilters.params,
+      );
+
       return {
         items: rows.rows.map(mapOpsIntakeRow),
         total: rows.rows.length > 0 ? toSafeInteger(rows.rows[0].total_count, "total_count") : 0,
@@ -189,6 +209,7 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
         limit: input.limit,
         statuses: input.statuses,
         summary: summary.rows.map(mapStatusCountRow),
+        cancellationSummary: cancellationSummary.rows.map(mapCancellationStatusCountRow),
       };
     } finally {
       client.release();
@@ -642,17 +663,26 @@ function opsIntakeBaseFromSql(): string {
 function buildOpsIntakeFilters(
   input: {
     statuses?: readonly DropshipOrderIntakeStatus[];
+    cancellationStatuses?: readonly DropshipOrderOpsCancellationStatus[];
     vendorId?: number;
     storeConnectionId?: number;
     search?: string;
   },
-  options: { includeStatuses: boolean },
+  options: { includeStatuses: boolean; includeCancellationStatuses?: boolean },
 ): { whereSql: string; params: unknown[] } {
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (options.includeStatuses && input.statuses && input.statuses.length > 0) {
     params.push(input.statuses);
     clauses.push(`oi.status = ANY($${params.length}::text[])`);
+  }
+  if (
+    options.includeCancellationStatuses !== false
+    && input.cancellationStatuses
+    && input.cancellationStatuses.length > 0
+  ) {
+    params.push(input.cancellationStatuses);
+    clauses.push(`oi.cancellation_status = ANY($${params.length}::text[])`);
   }
   if (input.vendorId) {
     params.push(input.vendorId);
@@ -667,6 +697,8 @@ function buildOpsIntakeFilters(
     clauses.push(`(
       oi.external_order_id ILIKE $${params.length}
       OR oi.external_order_number ILIKE $${params.length}
+      OR oi.rejection_reason ILIKE $${params.length}
+      OR oi.cancellation_status ILIKE $${params.length}
       OR v.business_name ILIKE $${params.length}
       OR v.email ILIKE $${params.length}
       OR sc.external_display_name ILIKE $${params.length}
@@ -947,6 +979,15 @@ function mapStatusCountRow(row: StatusCountRow): DropshipOrderOpsStatusSummary {
   return {
     status: row.status,
     count: toSafeInteger(row.count, "status_count"),
+  };
+}
+
+function mapCancellationStatusCountRow(
+  row: CancellationStatusCountRow,
+): { cancellationStatus: DropshipOrderOpsCancellationStatus | string; count: number } {
+  return {
+    cancellationStatus: row.cancellation_status,
+    count: toSafeInteger(row.count, "cancellation_status_count"),
   };
 }
 
