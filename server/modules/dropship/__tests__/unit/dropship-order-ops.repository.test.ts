@@ -114,6 +114,121 @@ describe("PgDropshipOrderOpsRepository", () => {
       reason: "recover stale processing intake",
     });
   });
+
+  it("moves failed marketplace cancellations to retrying without clearing cancellation context", async () => {
+    const query = vi.fn(async (sql: string) => {
+      const sqlText = String(sql);
+      if (sqlText === "BEGIN" || sqlText === "COMMIT") {
+        return { rows: [] };
+      }
+      if (sqlText.trim().startsWith("SELECT") && sqlText.includes("FOR UPDATE")) {
+        return {
+          rows: [
+            makeActionRow({
+              status: "exception",
+              cancellation_status: "marketplace_cancellation_failed",
+              rejection_reason: "Marketplace cancellation failed: DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED - missing cancel reason",
+            }),
+          ],
+        };
+      }
+      if (sqlText.includes("FROM dropship.dropship_audit_events")) {
+        return {
+          rows: [{
+            payload: {
+              previousCancellationStatus: "order_intake_rejected",
+              errorCode: "DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED",
+            },
+          }],
+        };
+      }
+      if (sqlText.includes("UPDATE dropship.dropship_order_intake")) {
+        return {
+          rows: [
+            makeActionRow({
+              status: "cancelled",
+              cancellation_status: "marketplace_cancellation_retrying",
+              rejection_reason: "Order intake was rejected before marketplace cancellation completed.",
+              updated_at: now,
+            }),
+          ],
+        };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const repository = new PgDropshipOrderOpsRepository(makePool(makeClient(query)));
+
+    const result = await repository.retryMarketplaceCancellation(makeCancellationRetryInput());
+
+    expect(result).toMatchObject({
+      intakeId: 42,
+      previousStatus: "exception",
+      status: "cancelled",
+      previousCancellationStatus: "marketplace_cancellation_failed",
+      cancellationStatus: "marketplace_cancellation_retrying",
+      idempotentReplay: false,
+      updatedAt: now,
+    });
+
+    const updateCall = query.mock.calls.find((call) =>
+      String(call[0]).includes("UPDATE dropship.dropship_order_intake"),
+    );
+    expect(updateCall?.[1]).toEqual([
+      42,
+      "marketplace_cancellation_retrying",
+      "Order intake was rejected before marketplace cancellation completed.",
+      now,
+    ]);
+
+    const auditCall = query.mock.calls.find((call) =>
+      String(call[0]).includes("INSERT INTO dropship.dropship_audit_events"),
+    );
+    expect(auditCall?.[1]?.[3]).toBe("order_marketplace_cancellation_retry_requested");
+    expect(auditCall?.[1]?.[6]).toBe("warning");
+    expect(JSON.parse(String(auditCall?.[1]?.[7]))).toMatchObject({
+      idempotencyKey: "admin-retry-cancel-42",
+      previousStatus: "exception",
+      previousCancellationStatus: "marketplace_cancellation_failed",
+      restoredRejectionReason: "Order intake was rejected before marketplace cancellation completed.",
+      reason: "cancel reason config repaired",
+    });
+  });
+
+  it("rejects cancellation retry when cancellation status is not failed", async () => {
+    const query = vi.fn(async (sql: string) => {
+      const sqlText = String(sql);
+      if (sqlText === "BEGIN" || sqlText === "ROLLBACK") {
+        return { rows: [] };
+      }
+      if (sqlText.trim().startsWith("SELECT") && sqlText.includes("FOR UPDATE")) {
+        return {
+          rows: [
+            makeActionRow({
+              status: "cancelled",
+              cancellation_status: "marketplace_cancelled",
+            }),
+          ],
+        };
+      }
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const repository = new PgDropshipOrderOpsRepository(makePool(makeClient(query)));
+
+    await expect(repository.retryMarketplaceCancellation(makeCancellationRetryInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_OPS_CANCELLATION_STATUS_NOT_RETRYABLE",
+      context: {
+        intakeId: 42,
+        status: "cancelled",
+        cancellationStatus: "marketplace_cancelled",
+      },
+    });
+    expect(query.mock.calls.some((call) =>
+      String(call[0]).includes("UPDATE dropship.dropship_order_intake"),
+    )).toBe(false);
+  });
 });
 
 function makeRetryInput() {
@@ -121,6 +236,16 @@ function makeRetryInput() {
     intakeId: 42,
     idempotencyKey: "admin-retry-42",
     reason: "recover stale processing intake",
+    actor: { actorType: "admin" as const, actorId: "ops-user" },
+    now,
+  };
+}
+
+function makeCancellationRetryInput() {
+  return {
+    intakeId: 42,
+    idempotencyKey: "admin-retry-cancel-42",
+    reason: "cancel reason config repaired",
     actor: { actorType: "admin" as const, actorId: "ops-user" },
     now,
   };

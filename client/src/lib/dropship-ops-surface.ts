@@ -1049,6 +1049,22 @@ export interface DropshipAdminOrderOpsActionResponse {
   updatedAt: string;
 }
 
+export interface DropshipAdminOrderOpsCancellationRetryResponse extends DropshipAdminOrderOpsActionResponse {
+  previousCancellationStatus: string | null;
+  cancellationStatus: string | null;
+}
+
+export type DropshipOrderCancellationRetryEligibilityReason =
+  | "failed_cancellation"
+  | "already_retrying"
+  | "already_processing"
+  | "status_not_retryable";
+
+export interface DropshipOrderCancellationRetryEligibility {
+  canRetry: boolean;
+  reason: DropshipOrderCancellationRetryEligibilityReason;
+}
+
 export interface DropshipAdminWalletManualCreditInput {
   vendorId: number;
   amountCents: number;
@@ -2410,6 +2426,21 @@ export function notificationRetryEligibility(
   }
   if (event.status === "failed") {
     return { canRetry: true, reason: "failed_email" };
+  }
+  return { canRetry: false, reason: "status_not_retryable" };
+}
+
+export function orderCancellationRetryEligibility(
+  intake: Pick<DropshipAdminOrderOpsIntakeListItem, "cancellationStatus">,
+): DropshipOrderCancellationRetryEligibility {
+  if (intake.cancellationStatus === "marketplace_cancellation_failed") {
+    return { canRetry: true, reason: "failed_cancellation" };
+  }
+  if (intake.cancellationStatus === "marketplace_cancellation_retrying") {
+    return { canRetry: false, reason: "already_retrying" };
+  }
+  if (intake.cancellationStatus === "marketplace_cancellation_processing") {
+    return { canRetry: false, reason: "already_processing" };
   }
   return { canRetry: false, reason: "status_not_retryable" };
 }

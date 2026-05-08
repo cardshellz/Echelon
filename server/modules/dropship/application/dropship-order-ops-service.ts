@@ -6,11 +6,13 @@ import {
   listDropshipOrderOpsIntakesInputSchema,
   markDropshipOrderOpsExceptionInputSchema,
   processDropshipOrderOpsIntakeInputSchema,
+  retryDropshipOrderOpsCancellationInputSchema,
   retryDropshipOrderOpsIntakeInputSchema,
   type GetDropshipOrderOpsIntakeDetailInput,
   type ListDropshipOrderOpsIntakesInput,
   type MarkDropshipOrderOpsExceptionInput,
   type ProcessDropshipOrderOpsIntakeInput,
+  type RetryDropshipOrderOpsCancellationInput,
   type RetryDropshipOrderOpsIntakeInput,
 } from "./dropship-order-ops-dtos";
 import type { DropshipOrderProcessingResult } from "./dropship-order-processing-service";
@@ -212,6 +214,11 @@ export interface DropshipOrderOpsActionResult {
   updatedAt: Date;
 }
 
+export interface DropshipOrderOpsCancellationActionResult extends DropshipOrderOpsActionResult {
+  previousCancellationStatus: string | null;
+  cancellationStatus: string | null;
+}
+
 export interface DropshipOrderOpsRepository {
   listIntakes(input: ListDropshipOrderOpsIntakesInput & {
     statuses: DropshipOrderIntakeStatus[];
@@ -222,6 +229,10 @@ export interface DropshipOrderOpsRepository {
   retryIntake(input: RetryDropshipOrderOpsIntakeInput & {
     now: Date;
   }): Promise<DropshipOrderOpsActionResult>;
+
+  retryMarketplaceCancellation(input: RetryDropshipOrderOpsCancellationInput & {
+    now: Date;
+  }): Promise<DropshipOrderOpsCancellationActionResult>;
 
   markException(input: MarkDropshipOrderOpsExceptionInput & {
     now: Date;
@@ -284,6 +295,28 @@ export class DropshipOrderOpsService {
         intakeId: result.intakeId,
         previousStatus: result.previousStatus,
         status: result.status,
+        idempotentReplay: result.idempotentReplay,
+        idempotencyKey: parsed.idempotencyKey,
+      },
+    });
+    return result;
+  }
+
+  async retryMarketplaceCancellation(input: unknown): Promise<DropshipOrderOpsCancellationActionResult> {
+    const parsed = parseRetryCancellationInput(input);
+    const result = await this.deps.repository.retryMarketplaceCancellation({
+      ...parsed,
+      now: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_ORDER_OPS_CANCELLATION_RETRY_REQUESTED",
+      message: "Dropship marketplace cancellation retry was requested by ops.",
+      context: {
+        intakeId: result.intakeId,
+        previousStatus: result.previousStatus,
+        status: result.status,
+        previousCancellationStatus: result.previousCancellationStatus,
+        cancellationStatus: result.cancellationStatus,
         idempotentReplay: result.idempotentReplay,
         idempotencyKey: parsed.idempotencyKey,
       },
@@ -375,6 +408,14 @@ function parseRetryInput(input: unknown): RetryDropshipOrderOpsIntakeInput {
   const result = retryDropshipOrderOpsIntakeInputSchema.safeParse(input);
   if (!result.success) {
     throw validationError("DROPSHIP_ORDER_OPS_RETRY_INVALID_INPUT", result.error.issues);
+  }
+  return result.data;
+}
+
+function parseRetryCancellationInput(input: unknown): RetryDropshipOrderOpsCancellationInput {
+  const result = retryDropshipOrderOpsCancellationInputSchema.safeParse(input);
+  if (!result.success) {
+    throw validationError("DROPSHIP_ORDER_OPS_CANCELLATION_RETRY_INVALID_INPUT", result.error.issues);
   }
   return result.data;
 }
