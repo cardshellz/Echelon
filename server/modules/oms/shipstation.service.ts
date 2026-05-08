@@ -1218,6 +1218,31 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  async function applyShipmentQuantitiesToWmsOrderItems(items: any[]): Promise<void> {
+    for (const item of items) {
+      const orderItemId = Number(item.order_item_id);
+      const qty = Number(item.qty);
+      if (!Number.isInteger(orderItemId) || orderItemId <= 0) continue;
+      if (!Number.isInteger(qty) || qty <= 0) continue;
+
+      await db.execute(sql`
+        UPDATE wms.order_items
+        SET fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}),
+            picked_quantity = LEAST(quantity, GREATEST(COALESCE(picked_quantity, 0), COALESCE(fulfilled_quantity, 0) + ${qty})),
+            status = CASE
+              WHEN LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}) >= quantity THEN 'completed'
+              ELSE status
+            END,
+            picked_at = CASE
+              WHEN LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}) >= quantity
+                   AND picked_at IS NULL THEN NOW()
+              ELSE picked_at
+            END
+        WHERE id = ${orderItemId}
+      `);
+    }
+  }
+
   async function getOmsOrderProvider(omsOrderId: number): Promise<string | null> {
     const result: any = await db.execute(sql`
       SELECT c.provider
@@ -1436,6 +1461,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         );
       }
       if (event.kind === "shipped") {
+        await applyShipmentQuantitiesToWmsOrderItems(inventoryItemsToRecord);
+      }
+      if (event.kind === "shipped") {
         omsOrderId = await resolveOmsOrderIdForWmsOrder(wmsOrderId, wmsShipmentRow.id);
         if (omsOrderId !== null) {
           await enqueueDelayedTrackingPushForShippedShipment(
@@ -1483,6 +1511,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           inventoryItemsToRecord,
         );
       }
+      await applyShipmentQuantitiesToWmsOrderItems(inventoryItemsToRecord);
 
       await enqueueDelayedTrackingPushForShippedShipment(
         omsOrderId,

@@ -220,7 +220,7 @@ export const orderMethods: IOrderStorage = {
         AND (oms.financial_status IS NULL OR oms.financial_status NOT IN ('refunded', 'voided'))
         AND (
           -- Ready/in_progress orders: show in pick queue
-          o.warehouse_status IN ('ready', 'in_progress')
+          o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped')
           -- Completed orders: show for 24 hours in done queue
           OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours')
         )
