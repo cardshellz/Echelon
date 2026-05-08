@@ -124,6 +124,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     wmsFinalOmsOpen,
     shipmentShippedOmsOpen,
     wmsShippedNoTrackingPush,
+    unpushedShipStationShipments,
   ] = await Promise.all([
     countAndSample(
       db,
@@ -260,6 +261,31 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE os.status IN ('planned', 'queued')
+          AND os.created_at < NOW() - INTERVAL '15 minutes'
+          AND os.shipstation_order_id IS NULL
+          AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+      `,
+      sql`
+        SELECT os.id AS shipment_id, os.order_id AS wms_order_id,
+               wo.order_number, os.status, os.created_at,
+               NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE os.status IN ('planned', 'queued')
+          AND os.created_at < NOW() - INTERVAL '15 minutes'
+          AND os.shipstation_order_id IS NULL
+          AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+        ORDER BY os.created_at ASC
+        LIMIT 10
+      `,
+    ),
   ]);
 
   const issues: OmsOpsIssue[] = [
@@ -291,6 +317,13 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       message: "Shipped WMS shipments do not have a channel tracking push success event.",
       sample: wmsShippedNoTrackingPush.sample,
     },
+    {
+      code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
+      severity: "critical" as const,
+      count: unpushedShipStationShipments.count,
+      message: "Outbound shipments are old enough to have been pushed but have no ShipStation id.",
+      sample: unpushedShipStationShipments.sample,
+    },
   ];
 
   return issues.filter((entry) => entry.count > 0);
@@ -303,6 +336,7 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
   await autoQueueStaleTrackingPushRetries(dbArg, issues);
+  await autoQueueStaleShipStationPushRetries(dbArg, issues);
   return issues;
 }
 
@@ -352,6 +386,33 @@ async function autoQueueStaleTrackingPushRetries(
 
   if (queued > 0) {
     console.warn(`${LOG_PREFIX} auto-queued ${queued} delayed tracking push retry row(s)`);
+  }
+}
+
+async function autoQueueStaleShipStationPushRetries(
+  db: any,
+  issues: OmsOpsIssue[],
+): Promise<void> {
+  const issue = issues.find((entry) => entry.code === "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION");
+  if (!issue) return;
+
+  let queued = 0;
+  for (const sample of issue.sample.slice(0, AUTO_TRACKING_RETRY_LIMIT)) {
+    const shipmentId = Number((sample as any).shipment_id);
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      continue;
+    }
+
+    await enqueueShipStationShipmentPushRetry(
+      db,
+      shipmentId,
+      new Error("scheduled reconciliation: shipment missing ShipStation order id"),
+    );
+    queued++;
+  }
+
+  if (queued > 0) {
+    console.warn(`${LOG_PREFIX} auto-queued ${queued} ShipStation shipment push retry row(s)`);
   }
 }
 
