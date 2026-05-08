@@ -1431,6 +1431,7 @@ export type DropshipVendorSelectionScopeTarget =
 
 export interface DropshipOrderListItem {
   intakeId: number;
+  vendor: DropshipAdminOrderOpsVendorSummary;
   platform: string;
   externalOrderId: string;
   externalOrderNumber: string | null;
