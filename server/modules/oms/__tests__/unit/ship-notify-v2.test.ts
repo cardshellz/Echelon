@@ -514,6 +514,90 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(sqlText).toMatch(/warehouse_status = /);
   });
 
+  it("matches ShipStation shipment items by exact SKU/qty when lineItemKey is missing", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7002,
+      orderId: 555001,
+      orderKey: "echelon-wms-shp-501",
+      shipmentItems: [
+        { lineItemKey: null, sku: "SKU-A", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+
+    const mock = makeDb([
+      { rows: [{ id: 501, order_id: 42, status: "planned", shipstation_order_id: 555001 }] },
+      {
+        rows: [
+          { id: 10001, order_item_id: 30001, sku: "SKU-A", qty: 1 },
+        ],
+      },
+      {
+        rows: [
+          {
+            id: 10001,
+            order_item_id: 30001,
+            product_variant_id: 40001,
+            from_location_id: 50001,
+            box_id: null,
+            weight_oz: 4,
+          },
+        ],
+      },
+      { rows: [] },
+      {
+        rows: [
+          {
+            id: 10001,
+            order_item_id: 30001,
+            product_variant_id: 40001,
+            qty: 1,
+            from_location_id: 50001,
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "planned",
+            tracking_number: null,
+            carrier: null,
+            tracking_url: null,
+          },
+        ],
+      },
+      { rows: [] },
+      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: [{ provider: "shopify" }] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const processed = await createShipStationService(mock.db, inventoryCore)
+      .processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+      orderItemId: 30001,
+      qty: 1,
+      shipmentId: "501",
+    }));
+    const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
+    expect(sqlText).not.toMatch(/shipstation_split_items_unmapped/);
+  });
+
   it("fallback: shipment NOT found by shipstation_order_id → legacy path runs", async () => {
     // Pre-cutover order: orderKey is legacy echelon-oms-<id> AND no
     // shipstation_order_id is set on any outbound_shipments row.
