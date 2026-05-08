@@ -1025,18 +1025,20 @@ export function createFulfillmentPushService(
 
     // ---- 7. Resolve Shopify fulfillment-order line items ---------------
     // Path A (D2/D4): read FO line item IDs from oms.oms_order_lines
-    // populated by C22b. Cheap (single join on existing data), no
-    // Shopify GQL call needed for the resolution step.
+    // populated by C22b, then validate those stored IDs against live
+    // Shopify remainingQuantity before creating a fulfillment. Partial
+    // cancellations/refunds can make previously stored FO line IDs stale.
     //
     // Path B (fallback): live Shopify GQL `order.fulfillmentOrders`
     // query + greedy SKU/qty matching (the C21 behaviour). Used when
-    // any item's stored FO line item id is null — typical for orders
-    // ingested before C22a/b shipped, or when C22b's populate step hit
-    // a transient Shopify error.
+    // any item's stored FO line item id is null/stale — typical for
+    // orders ingested before C22a/b shipped, transient Shopify errors,
+    // or Shopify fulfillment-order changes after cancellations.
     const pathARead = await tryReadPathA(db, shipmentId);
     let resolved: ResolvedFulfillmentOrderLine[] = [];
     let pathAUsed = false;
     let pathAReason = "";
+    let liveCandidates: ShopifyFulfillmentOrderLineCandidate[] | null = null;
 
     if (pathARead === null) {
       pathAReason = "no rows joinable to oms_order_lines";
@@ -1045,38 +1047,52 @@ export function createFulfillmentPushService(
     } else if (pathARead.some((r) => !r.fulfillmentOrderId || !r.fulfillmentOrderLineItemId)) {
       pathAReason = "some oms_order_lines have null FO line item id";
     } else {
-      // All rows usable — go Path A.
-      resolved = pathARead.map((r) => ({
-        fulfillmentOrderId: r.fulfillmentOrderId!,
-        fulfillmentOrderLineItemId: r.fulfillmentOrderLineItemId!,
-        quantity: r.quantity,
-        omsOrderLineId: r.omsOrderLineId,
-      }));
-      pathAUsed = true;
-      console.log(
-        `[pushShopifyFulfillment] shipment ${shipmentId} using Path A (stored FO line item ids from oms_order_lines)`,
+      liveCandidates = await fetchFulfillmentOrderLineCandidates(
+        _shopifyClient,
+        shopifyOrderGid,
+        shipmentId,
       );
+      const validation = validatePathAAgainstLiveCandidates(
+        shopifyOrderGid,
+        pathARead,
+        shipmentId,
+        liveCandidates,
+      );
+      if (validation.ok) {
+        resolved = validation.resolved;
+        pathAUsed = true;
+        console.log(
+          `[pushShopifyFulfillment] shipment ${shipmentId} using Path A (stored FO line item ids validated against live Shopify quantities)`,
+        );
+      } else {
+        pathAReason = validation.reason;
+      }
     }
 
     if (!pathAUsed) {
       console.log(
         `[pushShopifyFulfillment] shipment ${shipmentId} using Path B (Shopify fulfillmentOrders GQL) — reason: ${pathAReason}`,
       );
-      resolved = await resolveFulfillmentOrderLines(
-        _shopifyClient,
-        shopifyOrderGid,
-        positiveItems,
-        shipmentId,
-      );
+      resolved = liveCandidates
+        ? resolveFulfillmentOrderLinesFromCandidates(
+            shopifyOrderGid,
+            positiveItems,
+            shipmentId,
+            liveCandidates,
+          )
+        : await resolveFulfillmentOrderLines(
+            _shopifyClient,
+            shopifyOrderGid,
+            positiveItems,
+            shipmentId,
+          );
 
       // Self-healing back-write (D2): now that Path B has resolved
-      // these IDs, store them on oms_order_lines so the next push for
-      // this order uses Path A. The `WHERE shopify_fulfillment_order_line_item_id IS NULL`
-      // clause is the idempotency guard — it never overwrites an
-      // existing value, which keeps races between concurrent pushes
-      // and the C22b ingest-time populate harmless. Failures here are
-      // non-fatal: the actual push must still go through, and the
-      // next attempt will simply re-run Path B.
+      // these IDs, store them on oms_order_lines so the next push can
+      // use Path A. The WHERE guard only updates null or stale values,
+      // which lets us repair fulfillment-order mappings changed by
+      // Shopify partial cancellations/refunds without touching rows
+      // that already match the live Shopify response.
       for (const r of resolved) {
         if (
           r.omsOrderLineId &&
@@ -1089,7 +1105,12 @@ export function createFulfillmentPushService(
                  SET shopify_fulfillment_order_id = ${r.fulfillmentOrderId},
                      shopify_fulfillment_order_line_item_id = ${r.fulfillmentOrderLineItemId}
                WHERE id = ${r.omsOrderLineId}
-                 AND shopify_fulfillment_order_line_item_id IS NULL
+                 AND (
+                   shopify_fulfillment_order_id IS NULL
+                   OR shopify_fulfillment_order_id <> ${r.fulfillmentOrderId}
+                   OR shopify_fulfillment_order_line_item_id IS NULL
+                   OR shopify_fulfillment_order_line_item_id <> ${r.fulfillmentOrderLineItemId}
+                 )
             `);
           } catch (err: any) {
             console.error(
@@ -1784,6 +1805,14 @@ interface ShopifyFulfillmentOrderQueryNode {
   };
 }
 
+interface ShopifyFulfillmentOrderLineCandidate {
+  fulfillmentOrderId: string;
+  fulfillmentOrderLineItemId: string;
+  sku: string | null;
+  remaining: number;
+  status: string;
+}
+
 const FULFILLMENT_ORDERS_QUERY = `
   query fulfillmentOrdersForOrder($id: ID!) {
     order(id: $id) {
@@ -1827,6 +1856,24 @@ async function resolveFulfillmentOrderLines(
   items: WmsShipmentItemForShopify[],
   shipmentId: number,
 ): Promise<ResolvedFulfillmentOrderLine[]> {
+  const candidates = await fetchFulfillmentOrderLineCandidates(
+    client,
+    shopifyOrderGid,
+    shipmentId,
+  );
+  return resolveFulfillmentOrderLinesFromCandidates(
+    shopifyOrderGid,
+    items,
+    shipmentId,
+    candidates,
+  );
+}
+
+async function fetchFulfillmentOrderLineCandidates(
+  client: ShopifyAdminGraphQLClient,
+  shopifyOrderGid: string,
+  shipmentId: number,
+): Promise<ShopifyFulfillmentOrderLineCandidate[]> {
   let response: any;
   try {
     response = await client.request<any>(FULFILLMENT_ORDERS_QUERY, { id: shopifyOrderGid });
@@ -1844,14 +1891,7 @@ async function resolveFulfillmentOrderLines(
   const fulfillmentOrders: ShopifyFulfillmentOrderQueryNode[] =
     response?.order?.fulfillmentOrders?.edges?.map((e: any) => e.node) ?? [];
 
-  // Build a flat working list of FO line items we can mutate as we allocate.
-  const candidates: Array<{
-    fulfillmentOrderId: string;
-    fulfillmentOrderLineItemId: string;
-    sku: string | null;
-    remaining: number;
-    status: string;
-  }> = [];
+  const candidates: ShopifyFulfillmentOrderLineCandidate[] = [];
   for (const fo of fulfillmentOrders) {
     for (const edge of fo.lineItems.edges) {
       candidates.push({
@@ -1866,6 +1906,15 @@ async function resolveFulfillmentOrderLines(
     }
   }
 
+  return candidates;
+}
+
+function resolveFulfillmentOrderLinesFromCandidates(
+  shopifyOrderGid: string,
+  items: WmsShipmentItemForShopify[],
+  shipmentId: number,
+  candidates: ShopifyFulfillmentOrderLineCandidate[],
+): ResolvedFulfillmentOrderLine[] {
   if (candidates.length === 0) {
     throw new ShopifyFulfillmentPushError(
       `Shopify order ${shopifyOrderGid} has no fulfillment orders / line items available`,
@@ -1923,6 +1972,52 @@ async function resolveFulfillmentOrderLines(
   }
 
   return resolved;
+}
+
+function validatePathAAgainstLiveCandidates(
+  shopifyOrderGid: string,
+  pathARead: PathARow[],
+  shipmentId: number,
+  candidates: ShopifyFulfillmentOrderLineCandidate[],
+): { ok: true; resolved: ResolvedFulfillmentOrderLine[] } | { ok: false; reason: string } {
+  const working = candidates.map((candidate) => ({ ...candidate }));
+  const resolved: ResolvedFulfillmentOrderLine[] = [];
+
+  for (const row of pathARead) {
+    const candidate = working.find(
+      (entry) =>
+        entry.fulfillmentOrderId === row.fulfillmentOrderId &&
+        entry.fulfillmentOrderLineItemId === row.fulfillmentOrderLineItemId,
+    );
+    if (!candidate) {
+      return {
+        ok: false,
+        reason: `shipment ${shipmentId} stored FO line item ${row.fulfillmentOrderLineItemId} is no longer present on Shopify order ${shopifyOrderGid}`,
+      };
+    }
+    if (candidate.status === "CLOSED" || candidate.status === "CANCELLED") {
+      return {
+        ok: false,
+        reason: `shipment ${shipmentId} stored FO ${candidate.fulfillmentOrderId} is ${candidate.status}`,
+      };
+    }
+    if (candidate.remaining < row.quantity) {
+      return {
+        ok: false,
+        reason: `shipment ${shipmentId} stored FO line item ${row.fulfillmentOrderLineItemId} has remainingQuantity=${candidate.remaining}, shipment quantity=${row.quantity}`,
+      };
+    }
+
+    resolved.push({
+      fulfillmentOrderId: candidate.fulfillmentOrderId,
+      fulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
+      quantity: row.quantity,
+      omsOrderLineId: row.omsOrderLineId,
+    });
+    candidate.remaining -= row.quantity;
+  }
+
+  return { ok: true, resolved };
 }
 
 // ---------------------------------------------------------------------------
@@ -2160,6 +2255,8 @@ export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushServ
 export const __test__ = {
   resolveEbayFulfillmentShippedDate,
   resolveFulfillmentOrderLines,
+  resolveFulfillmentOrderLinesFromCandidates,
+  validatePathAAgainstLiveCandidates,
   tryReadPathA,
   getOurShopifyLocationIds,
   fetchOurFulfillmentOrderIds,

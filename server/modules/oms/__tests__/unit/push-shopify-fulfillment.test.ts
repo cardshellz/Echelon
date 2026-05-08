@@ -9,8 +9,8 @@
  *       D1  Idempotency: skip push when shipment already has
  *           shopify_fulfillment_id; return alreadyPushed:true.
  *       D2/D4 Path A primary: when oms.oms_order_lines carry FO line
- *           item ids (populated by C22b ingest), use them directly and
- *           skip the live Shopify FO resolution query.
+ *           item ids (populated by C22b ingest), validate them against
+ *           live Shopify remainingQuantity before use.
  *       D2  Self-healing back-write: when Path B resolves IDs, write
  *           them to oms_order_lines so the next push uses Path A.
  *           Failure here is non-fatal.
@@ -148,6 +148,49 @@ function okFulfillmentOrdersResponse() {
                   {
                     node: {
                       id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+                      sku: "ABC-1",
+                      remainingQuantity: 2,
+                    },
+                  },
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrderLineItem/777-2",
+                      sku: "XYZ-9",
+                      remainingQuantity: 1,
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    },
+  };
+}
+
+function staleAndCurrentFulfillmentOrdersResponse() {
+  return {
+    order: {
+      id: SHOPIFY_ORDER_GID,
+      fulfillmentOrders: {
+        edges: [
+          {
+            node: {
+              id: FO_GID,
+              status: "OPEN",
+              lineItems: {
+                edges: [
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+                      sku: "ABC-1",
+                      remainingQuantity: 0,
+                    },
+                  },
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrderLineItem/current-1",
                       sku: "ABC-1",
                       remainingQuantity: 2,
                     },
@@ -873,6 +916,7 @@ describe("pushShopifyFulfillment :: idempotency (D1)", () => {
       { rows: [] },                                      // 9. UPDATE
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(),
     ]);
@@ -896,6 +940,7 @@ describe("pushShopifyFulfillment :: idempotency (D1)", () => {
       { rows: [] },
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(),
     ]);
@@ -913,7 +958,7 @@ describe("pushShopifyFulfillment :: idempotency (D1)", () => {
 // ─── C22c: Path A primary (D2/D4) ───────────────────────────────────
 
 describe("pushShopifyFulfillment :: Path A primary (D2/D4)", () => {
-  it("uses Path A and skips the fulfillmentOrders resolver query when all FO IDs are stored", async () => {
+  it("uses Path A after validating stored FO IDs against live Shopify quantities", async () => {
     const db = makeDb([
       { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
@@ -925,7 +970,7 @@ describe("pushShopifyFulfillment :: Path A primary (D2/D4)", () => {
       { rows: [] },
     ]);
     const client = makeShopifyClient([
-      // No fulfillmentOrders resolver query — Path A skipped it.
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(),
     ]);
@@ -935,13 +980,14 @@ describe("pushShopifyFulfillment :: Path A primary (D2/D4)", () => {
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
 
     expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
-    // Exactly 2 GQL calls (location filter + create), NOT 3.
-    expect(client.calls).toHaveLength(2);
-    expect(client.calls[0].query).toContain("assignedLocation");
-    expect(client.calls[1].query).toContain("fulfillmentCreateV2");
+    // Validation query + location filter + create.
+    expect(client.calls).toHaveLength(3);
+    expect(client.calls[0].query).toContain("remainingQuantity");
+    expect(client.calls[1].query).toContain("assignedLocation");
+    expect(client.calls[2].query).toContain("fulfillmentCreateV2");
 
     // Mutation payload uses the stored IDs from Path A.
-    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
     expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
     expect(fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderId).toBe(FO_GID);
   });
@@ -1046,6 +1092,7 @@ describe("pushShopifyFulfillment :: self-healing back-write (D2)", () => {
       { rows: [] },
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(),
     ]);
@@ -1058,6 +1105,41 @@ describe("pushShopifyFulfillment :: self-healing back-write (D2)", () => {
       q.sqlText.includes("UPDATE oms.oms_order_lines"),
     );
     expect(backWrites).toHaveLength(0);
+  });
+
+  it("falls back to live Shopify quantities and refreshes stale Path A IDs after a partial cancellation", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAFullyPopulatedRows() },
+      { rows: [] }, { rows: [] },
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      staleAndCurrentFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
+    expect(fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderLineItems[0]).toEqual({
+      id: "gid://shopify/FulfillmentOrderLineItem/current-1",
+      quantity: 2,
+    });
+
+    const backWrites = db.capturedQueries.filter((q) =>
+      q.sqlText.includes("UPDATE oms.oms_order_lines"),
+    );
+    expect(backWrites).toHaveLength(2);
+    expect(backWrites[0].sqlText).toContain("shopify_fulfillment_order_line_item_id <>");
   });
 
   it("push still succeeds when a back-write UPDATE throws (non-fatal)", async () => {
@@ -1131,6 +1213,7 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
       { rows: [] },
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse([{ id: FO_GID, locationGid: OUR_LOCATION_GID }]),
       okFulfillmentCreateV2Response(),
     ]);
@@ -1140,7 +1223,7 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
     expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
 
-    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
     expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
   });
 
@@ -1156,6 +1239,7 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
       // No UPDATE — we early-return before persisting.
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       // FO assigned to ShipMonk, NOT in our locations.
       okLocationFilterResponse([{ id: FO_GID, locationGid: SHIPMONK_LOCATION_GID }]),
       // No create call expected.
@@ -1165,9 +1249,9 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
 
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
     expect(result).toEqual({ shopifyFulfillmentId: null, alreadyPushed: false });
-    // Only one GQL call (the location-filter query) — no create.
-    expect(client.calls).toHaveLength(1);
-    expect(client.calls[0].query).toContain("assignedLocation");
+    // Validation + location-filter query; no create.
+    expect(client.calls).toHaveLength(2);
+    expect(client.calls[1].query).toContain("assignedLocation");
   });
 
   it("filters out 3PL FOs when some are ours and some are not (mixed)", async () => {
@@ -1203,6 +1287,49 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
       { rows: [] }, // UPDATE
     ]);
     const client = makeShopifyClient([
+      {
+        order: {
+          id: SHOPIFY_ORDER_GID,
+          fulfillmentOrders: {
+            edges: [
+              {
+                node: {
+                  id: ourFo,
+                  status: "OPEN",
+                  lineItems: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/FulfillmentOrderLineItem/ours-1",
+                          sku: "ABC-1",
+                          remainingQuantity: 2,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+              {
+                node: {
+                  id: threePlFo,
+                  status: "OPEN",
+                  lineItems: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/FulfillmentOrderLineItem/3pl-1",
+                          sku: "XYZ-9",
+                          remainingQuantity: 1,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
       okLocationFilterResponse([
         { id: ourFo, locationGid: OUR_LOCATION_GID },
         { id: threePlFo, locationGid: SHIPMONK_LOCATION_GID },
@@ -1215,7 +1342,7 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
     expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
 
-    const fulfillment = (client.calls[1].variables as any).fulfillment;
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
     expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
     expect(fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderId).toBe(ourFo);
   });
@@ -1232,6 +1359,7 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
       { rows: [] }, // UPDATE
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       // No location-filter query expected (skipped due to empty config).
       okFulfillmentCreateV2Response(),
     ]);
@@ -1240,9 +1368,9 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
 
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
     expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
-    // Only the create call fires (filter skipped, Path A)
-    expect(client.calls).toHaveLength(1);
-    expect(client.calls[0].query).toContain("fulfillmentCreateV2");
+    // Validation + create call fire (filter skipped, Path A)
+    expect(client.calls).toHaveLength(2);
+    expect(client.calls[1].query).toContain("fulfillmentCreateV2");
   });
 
   it("matches numeric stored shopify_location_id against Shopify's gid form", async () => {
@@ -1259,6 +1387,7 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
       { rows: [] }, // UPDATE
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse([{ id: FO_GID, locationGid: OUR_LOCATION_GID }]),
       okFulfillmentCreateV2Response(),
     ]);
@@ -1320,8 +1449,8 @@ describe("setShopifyClient", () => {
 //   - Each sibling that pushes consumes 8–11 db.execute calls of its
 //     own (idempotency, shipment, order, channel.provider, items,
 //     Path A read, [back-writes if Path B], warehouses, channels,
-//     UPDATE shipment) plus 2 GQL calls (location filter + create) on
-//     Path A or 3 GQL calls on Path B.
+//     UPDATE shipment) plus 3 GQL calls (live quantity validation +
+//     location filter + create) on Path A.
 //   - The fan-out's narrowing step requires the SIBLINGS query to
 //     return a row for the triggering shipment id.
 
@@ -1453,10 +1582,12 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
       ),
     ]);
     const client = makeShopifyClient([
-      // sibling 1 (parent): location filter + create
+      // sibling 1 (parent): validation + location filter + create
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentParent),
-      // sibling 2 (child): location filter + create
+      // sibling 2 (child): validation + location filter + create
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentChild),
     ]);
@@ -1532,8 +1663,10 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
       ),
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentParent),
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentChild),
     ]);
@@ -1599,10 +1732,13 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
       ),
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fId(1)),
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fId(2)),
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fId(3)),
     ]);
@@ -1665,6 +1801,7 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
     ]);
     const client = makeShopifyClient([
       // Only the parent push touches Shopify.
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentParent),
     ]);
@@ -1718,6 +1855,7 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
       ),
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentParent),
     ]);
@@ -1766,6 +1904,7 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
       ),
     ]);
     const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentParent),
     ]);
@@ -1862,9 +2001,11 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
     ]);
     const client = makeShopifyClient([
       // parent
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentParent),
       // child: location filter ok, then create throws
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       new Error("ECONNRESET"),
     ]);
@@ -1944,9 +2085,11 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
     ]);
     const client = makeShopifyClient([
       // parent: location filter ok, then create errors
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       new Error("ECONNRESET"),
       // child: success
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(fulfillmentChild),
     ]);
@@ -1987,8 +2130,9 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
       { rows: [] },
     ]);
     const client = makeShopifyClient([
-      // Exactly 2 GQL calls: location filter + create. No siblings query
+      // Exactly 3 GQL calls: validation + location filter + create. No siblings query
       // and no fan-out.
+      okFulfillmentOrdersResponse(),
       okLocationFilterResponse(),
       okFulfillmentCreateV2Response(),
     ]);
@@ -1997,7 +2141,7 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
 
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
     expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
-    expect(client.calls).toHaveLength(2);
+    expect(client.calls).toHaveLength(3);
 
     // No siblings SELECT was issued.
     const siblingsQueries = db.capturedQueries.filter((q) =>
