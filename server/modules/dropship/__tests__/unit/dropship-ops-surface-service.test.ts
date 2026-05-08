@@ -19,6 +19,30 @@ import type {
 } from "../../application/dropship-vendor-provisioning-service";
 
 const now = new Date("2026-05-02T20:00:00.000Z");
+const launchReadyEnv: NodeJS.ProcessEnv = {
+  DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED: "true",
+  DROPSHIP_TOKEN_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
+  DROPSHIP_STORE_OAUTH_STATE_SECRET: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  EBAY_CLIENT_ID: "ebay-client-id",
+  EBAY_CLIENT_SECRET: "ebay-client-secret",
+  EBAY_VENDOR_RUNAME: "ebay-vendor-runame",
+  SHOPIFY_API_KEY: "shopify-api-key",
+  SHOPIFY_API_SECRET: "shopify-api-secret",
+  DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI: "https://cardshellz.test/dropship/oauth/shopify/callback",
+  DROPSHIP_PUBLIC_BASE_URL: "https://cardshellz.test",
+  SMTP_HOST: "smtp.cardshellz.test",
+  SMTP_USER: "dropship@cardshellz.test",
+  SMTP_PASS: "smtp-secret",
+  SMTP_FROM: "dropship@cardshellz.test",
+  SHIPSTATION_API_KEY: "shipstation-key",
+  SHIPSTATION_API_SECRET: "shipstation-secret",
+  SHIPSTATION_WEBHOOK_SECRET: "shipstation-webhook-secret",
+  WMS_SHIPMENT_AT_SYNC: "true",
+  PUSH_FROM_WMS: "true",
+  SHIP_NOTIFY_V2: "true",
+  STRIPE_SECRET_KEY: "stripe-secret-key",
+  DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook-secret",
+};
 
 describe("DropshipOpsSurfaceService", () => {
   it("builds launch settings sections with Phase 2 surfaces marked coming soon", () => {
@@ -305,9 +329,9 @@ describe("DropshipOpsSurfaceService", () => {
   it("builds an explicit launch gate from system and vendor readiness", () => {
     const gate = buildDropshipDogfoodLaunchGate({
       summary: [
-        { status: "ready", count: 1 },
-        { status: "warning", count: 1 },
-        { status: "blocked", count: 2 },
+        { status: "ready", count: 0 },
+        { status: "warning", count: 0 },
+        { status: "blocked", count: 0 },
       ],
       systemChecks: [
         {
@@ -327,9 +351,25 @@ describe("DropshipOpsSurfaceService", () => {
       ],
       items: [
         makeDogfoodReadinessItem({
+          readinessStatus: "ready",
+          blockerCount: 0,
+          warningCount: 0,
+          checks: [],
+        }),
+        makeDogfoodReadinessItem({
+          readinessStatus: "warning",
+          blockerCount: 0,
+          warningCount: 1,
+          checks: [{
+            key: "notifications",
+            label: "Notifications",
+            status: "warning",
+            message: "SMTP_FROM is recommended.",
+          }],
+        }),
+        makeDogfoodReadinessItem({
           readinessStatus: "blocked",
           blockerCount: 2,
-          warningCount: 1,
           checks: [{
             key: "wallet",
             label: "Wallet",
@@ -340,11 +380,6 @@ describe("DropshipOpsSurfaceService", () => {
             label: "Shipping rates",
             status: "blocked",
             message: "Shipping rates are missing.",
-          }, {
-            key: "notifications",
-            label: "Notifications",
-            status: "warning",
-            message: "SMTP_FROM is recommended.",
           }],
         }),
       ],
@@ -354,12 +389,12 @@ describe("DropshipOpsSurfaceService", () => {
       status: "warning",
       readyVendorStoreCount: 1,
       warningVendorStoreCount: 1,
-      blockedVendorStoreCount: 2,
+      blockedVendorStoreCount: 1,
       systemBlockedCount: 0,
       systemWarningCount: 1,
       blockerCount: 2,
       warningCount: 2,
-      message: "1 vendor/store row(s) ready; 2 blocked row(s) and 2 warning(s) remain.",
+      message: "1 vendor/store row(s) ready; 1 blocked row(s) and 2 warning(s) remain.",
     });
     expect(gate.firstBlockers[0]).toMatchObject({
       scope: "vendor_store",
@@ -445,7 +480,7 @@ describe("DropshipOpsSurfaceService", () => {
   it("lists dogfood readiness with validated filters and generated timestamp", async () => {
     const repository = new FakeOpsSurfaceRepository();
     const logs: DropshipLogEvent[] = [];
-    const service = makeService(repository, logs);
+    const service = makeService(repository, logs, launchReadyEnv);
 
     const result = await service.listDogfoodReadiness({
       status: "blocked",
@@ -457,6 +492,17 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(result.summary).toEqual([{ status: "blocked", count: 1 }]);
     expect("launchGateItems" in result).toBe(false);
+    expect(result.launchGate).toMatchObject({
+      status: "blocked",
+      blockedVendorStoreCount: 1,
+    });
+    expect(result.launchGate?.firstBlockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "wallet",
+        vendorId: 10,
+        storeConnectionId: 20,
+      }),
+    ]));
     expect(result.systemChecks).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: "token_vault" }),
       expect.objectContaining({ key: "order_processing_worker" }),
@@ -567,7 +613,11 @@ class FakeVendorProvisioningService {
   }
 }
 
-function makeService(repository: DropshipOpsSurfaceRepository, logs: DropshipLogEvent[]): DropshipOpsSurfaceService {
+function makeService(
+  repository: DropshipOpsSurfaceRepository,
+  logs: DropshipLogEvent[],
+  env?: NodeJS.ProcessEnv,
+): DropshipOpsSurfaceService {
   return new DropshipOpsSurfaceService({
     vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
     repository,
@@ -577,6 +627,7 @@ function makeService(repository: DropshipOpsSurfaceRepository, logs: DropshipLog
       warn: (event) => logs.push(event),
       error: (event) => logs.push(event),
     },
+    env,
   });
 }
 

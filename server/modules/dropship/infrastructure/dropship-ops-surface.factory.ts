@@ -12,5 +12,6 @@ export function createDropshipOpsSurfaceServiceFromEnv(): DropshipOpsSurfaceServ
     repository: new PgDropshipOpsSurfaceRepository(),
     clock: systemDropshipOpsSurfaceClock,
     logger: makeDropshipOpsSurfaceLogger(),
+    env: process.env,
   });
 }
