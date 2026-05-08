@@ -53,7 +53,7 @@ describe("Card Shellz dropship identity policy", () => {
         hasPasskey: false,
         authMethod: "password",
       },
-      "connect_store",
+      "manage_catalog_selection",
     );
 
     expect(method).toBe("email_mfa");

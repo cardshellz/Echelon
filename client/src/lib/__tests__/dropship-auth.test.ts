@@ -30,6 +30,7 @@ describe("dropship sensitive-action proof helpers", () => {
   it("uses email MFA until a passkey is enrolled", () => {
     expect(resolveDropshipSensitiveActionStepUp(null, "add_funding_method")).toBe("email_mfa");
     expect(resolveDropshipSensitiveActionStepUp({ hasPasskey: false }, "add_funding_method")).toBe("email_mfa");
+    expect(resolveDropshipSensitiveActionStepUp({ hasPasskey: false }, "manage_catalog_selection")).toBe("email_mfa");
     expect(resolveDropshipSensitiveActionStepUp({ hasPasskey: true }, "add_funding_method")).toBe("passkey");
   });
 
