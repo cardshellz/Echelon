@@ -739,6 +739,7 @@ export async function dispatchWmsShipmentCreateRetry(
           SELECT 1
           FROM wms.outbound_shipments os
           WHERE os.order_id = wo.id
+            AND os.status <> 'voided'
         )
       LIMIT 1
     `);
@@ -757,6 +758,8 @@ export async function dispatchWmsShipmentCreateRetry(
              product_id AS product_variant_id
       FROM wms.order_items
       WHERE order_id = ${wmsOrderId}
+        AND COALESCE(requires_shipping, 1) <> 0
+        AND COALESCE(quantity, 0) > COALESCE(fulfilled_quantity, 0)
     `);
     const shipmentItems = (Array.isArray(itemResult?.rows) ? itemResult.rows : []).map((row: any) => ({
       id: Number(row.id),

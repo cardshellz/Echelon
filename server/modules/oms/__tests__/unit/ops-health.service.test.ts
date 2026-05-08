@@ -24,6 +24,10 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(/JOIN wms\.order_items oi ON oi\.id = osi\.order_item_id/);
   });
 
+  it("treats voided-only ShipStation shipments as missing shipment work", () => {
+    expect(OPS_HEALTH_SRC).toMatch(/WHERE os\.order_id = wo\.id\s+AND os\.status <> 'voided'/);
+  });
+
   it("surfaces on-hold shipments as explicit warehouse review warnings", () => {
     expect(OPS_HEALTH_SRC).toMatch(
       /code: "SHIPMENT_ON_HOLD"[\s\S]*severity: "warning"/,

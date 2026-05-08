@@ -76,6 +76,11 @@ import {
   dispatchEbayWebhookRetry,
 } from "../../webhook-retry.worker";
 
+const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
+  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  "utf8",
+);
+
 // ─── DB mock helpers ─────────────────────────────────────────────────
 
 interface RecordedInsert {
@@ -831,6 +836,12 @@ describe("dispatchWmsShipmentCreateRetry", () => {
       ],
     );
     expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("allows remediation when all existing outbound shipments are voided", () => {
+    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(
+      /WHERE os\.order_id = wo\.id\s+AND os\.status <> 'voided'/,
+    );
   });
 
   it("marks success when the order no longer needs shipment remediation", async () => {
