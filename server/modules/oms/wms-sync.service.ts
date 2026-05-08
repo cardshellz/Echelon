@@ -12,7 +12,7 @@
 import { db } from "../../db";
 import { sql, eq, and } from "drizzle-orm";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
-import { wmsOrders, wmsOrderItems } from "@shared/schema";
+import { outboundShipmentItems, outboundShipments, wmsOrders, wmsOrderItems } from "@shared/schema";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, type ShippingServiceLevel } from "../orders/sort-rank";
@@ -83,8 +83,12 @@ export class WmsSyncService {
         .limit(1);
 
       if (existingWmsOrder.length > 0) {
-        console.log(`[WMS Sync] Order ${omsOrderId} already synced to WMS (id ${existingWmsOrder[0].id})`);
-        return existingWmsOrder[0].id;
+        const wmsOrderId = existingWmsOrder[0].id;
+        const reconciled = await this.reconcileExistingWmsOrderLines(omsOrderId, wmsOrderId);
+        console.log(
+          `[WMS Sync] Order ${omsOrderId} already synced to WMS (id ${wmsOrderId}); reconciled ${reconciled.insertedItems} missing item(s)`,
+        );
+        return wmsOrderId;
       }
 
       // 2. Fetch OMS order + line items
@@ -512,6 +516,115 @@ export class WmsSyncService {
     if (omsOrder.fulfillmentStatus === "fulfilled") return "shipped";
     if (omsOrder.financialStatus === "paid") return "ready";
     return "pending";
+  }
+
+  private async reconcileExistingWmsOrderLines(
+    omsOrderId: number,
+    wmsOrderId: number,
+  ): Promise<{ insertedItems: number; updatedShipments: number }> {
+    const omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
+    if (omsLines.length === 0) return { insertedItems: 0, updatedShipments: 0 };
+
+    const existingItems = await db
+      .select({ omsOrderLineId: wmsOrderItems.omsOrderLineId })
+      .from(wmsOrderItems)
+      .where(eq(wmsOrderItems.orderId, wmsOrderId));
+    const existingOmsLineIds = new Set(
+      existingItems.map((item) => item.omsOrderLineId).filter((id): id is number => id != null),
+    );
+    const missingLines = omsLines.filter((line) => !existingOmsLineIds.has(line.id));
+    if (missingLines.length === 0) return { insertedItems: 0, updatedShipments: 0 };
+
+    const insertedItems: {
+      id: number;
+      omsOrderLineId: number | null;
+      productId: number | null;
+      quantity: number;
+    }[] = [];
+
+    for (const line of missingLines) {
+      const variantId = line.productVariantId || null;
+      let binLocation: { location: string; zone: string } | null = null;
+      if (variantId) {
+        try {
+          const res = await db.execute<{ code: string; zone_id: number | null }>(sql`
+            SELECT wl.code, wl.zone_id
+            FROM product_locations pl
+            JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
+            WHERE pl.product_variant_id = ${variantId} AND pl.is_primary = 1
+            LIMIT 1
+          `);
+          if (res.rows.length > 0) {
+            binLocation = {
+              location: String(res.rows[0].code),
+              zone: res.rows[0].zone_id ? String(res.rows[0].zone_id) : "U",
+            };
+          }
+        } catch {
+          console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}`);
+        }
+      }
+
+      const itemRequiresShipping = line.requiresShipping !== false;
+      const [inserted] = await db
+        .insert(wmsOrderItems)
+        .values({
+          orderId: wmsOrderId,
+          omsOrderLineId: line.id,
+          sku: line.sku || "UNKNOWN",
+          name: line.title || "Unknown Item",
+          quantity: line.quantity || 0,
+          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          status: itemRequiresShipping ? "pending" : "completed",
+          location: binLocation?.location || "UNASSIGNED",
+          zone: binLocation?.zone || "U",
+          productId: variantId,
+          requiresShipping: itemRequiresShipping ? 1 : 0,
+          unitPriceCents: (line as any).paidPriceCents ?? 0,
+          paidPriceCents: (line as any).paidPriceCents ?? 0,
+          totalPriceCents: (line as any).totalPriceCents ?? 0,
+        } as any)
+        .returning({
+          id: wmsOrderItems.id,
+          omsOrderLineId: wmsOrderItems.omsOrderLineId,
+          productId: wmsOrderItems.productId,
+          quantity: wmsOrderItems.quantity,
+        });
+      if (inserted) insertedItems.push(inserted);
+    }
+
+    const plannedShipments = await db
+      .select({ id: outboundShipments.id })
+      .from(outboundShipments)
+      .where(and(eq(outboundShipments.orderId, wmsOrderId), eq(outboundShipments.status, "planned")));
+    let updatedShipments = 0;
+    for (const shipment of plannedShipments) {
+      for (const item of insertedItems) {
+        const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
+        if (!line || line.requiresShipping === false) continue;
+        await db.insert(outboundShipmentItems).values({
+          shipmentId: shipment.id,
+          orderItemId: item.id,
+          productVariantId: item.productId,
+          qty: item.quantity ?? 0,
+        });
+        updatedShipments += 1;
+      }
+      try {
+        await enqueueShipStationShipmentPushRetry(
+          db,
+          shipment.id,
+          new Error("WMS line reconciliation added missing shipment item"),
+        );
+      } catch (err: any) {
+        console.error(
+          `[WMS Sync] failed to enqueue ShipStation retry for reconciled shipment ${shipment.id}: ${err?.message ?? String(err)}`,
+        );
+      }
+    }
+
+    return { insertedItems: insertedItems.length, updatedShipments };
   }
 
   /**
