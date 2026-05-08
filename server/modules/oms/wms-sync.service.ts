@@ -265,7 +265,7 @@ export class WmsSyncService {
       // off or shipment creation failed — in either case step 8 falls
       // back to the legacy pushOrder path.
       let shipmentIdForPush: number | null = null;
-      if (WMS_SHIPMENT_AT_SYNC) {
+      if (WMS_SHIPMENT_AT_SYNC && hasShippableItems) {
         // §6 Commit 14: routing by combined_role.
         //
         // `combined_group_id` + `combined_role` live on the WMS
@@ -313,14 +313,16 @@ export class WmsSyncService {
               // parent's) — per-order finance / Shopify fulfillment
               // semantics require the child's own items on the
               // child's shipment row.
-              const childItems = await db
+              const childItems = (await db
                 .select({
                   id: wmsOrderItems.id,
                   quantity: wmsOrderItems.quantity,
                   productVariantId: wmsOrderItems.productId,
+                  requiresShipping: wmsOrderItems.requiresShipping,
                 })
                 .from(wmsOrderItems)
-                .where(eq(wmsOrderItems.orderId, newWmsOrder.id));
+                .where(eq(wmsOrderItems.orderId, newWmsOrder.id)))
+                .filter((i: any) => i.requiresShipping !== 0);
 
               const { shipmentId, created } =
                 await linkChildToParentShipment(
@@ -383,6 +385,7 @@ export class WmsSyncService {
             }
 
             const shipmentItemInputs = omsLines
+              .filter((line) => line.requiresShipping !== false)
               .map((line) => {
                 const item = itemsByOmsLineId.get(line.id);
                 return item != null
