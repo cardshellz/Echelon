@@ -162,6 +162,14 @@ export interface DropshipOrderOpsAuditEventDetail extends DropshipOrderOpsAuditS
   actorId: string | null;
 }
 
+export interface DropshipOrderOpsTrackingLineItemSummary {
+  externalLineItemId: string | null;
+  sku: string | null;
+  title: string | null;
+  productVariantId: number | null;
+  quantity: number;
+}
+
 export interface DropshipOrderOpsTrackingPushSummary {
   pushId: number;
   wmsShipmentId: number | null;
@@ -175,6 +183,7 @@ export interface DropshipOrderOpsTrackingPushSummary {
   retryable: boolean;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
+  lineItems: DropshipOrderOpsTrackingLineItemSummary[];
   createdAt: Date;
   updatedAt: Date;
   completedAt: Date | null;

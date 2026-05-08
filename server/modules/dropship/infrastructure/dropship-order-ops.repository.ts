@@ -16,6 +16,7 @@ import type {
   DropshipOrderOpsRepository,
   DropshipOrderOpsShippingQuoteSnapshot,
   DropshipOrderOpsStatusSummary,
+  DropshipOrderOpsTrackingLineItemSummary,
   DropshipOrderOpsTrackingPushSummary,
   DropshipOrderOpsWalletLedgerEntry,
 } from "../application/dropship-order-ops-service";
@@ -126,9 +127,20 @@ interface TrackingPushDetailRow {
   retryable: boolean | null;
   last_error_code: string | null;
   last_error_message: string | null;
+  line_items: unknown;
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
+}
+
+interface TrackingPushLineItemPayload {
+  externalLineItemId?: unknown;
+  external_line_item_id?: unknown;
+  sku?: unknown;
+  title?: unknown;
+  productVariantId?: unknown;
+  product_variant_id?: unknown;
+  quantity?: unknown;
 }
 
 interface ActionIntakeRow {
@@ -242,26 +254,83 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
       );
       const trackingPushes = await client.query<TrackingPushDetailRow>(
         `SELECT
-           id,
-           wms_shipment_id,
-           platform,
-           status,
-           carrier,
-           tracking_number,
-           shipped_at,
-           external_fulfillment_id,
-           attempt_count,
-           COALESCE((raw_result->'lastFailure'->>'retryable')::boolean, true) AS retryable,
-           last_error_code,
-           last_error_message,
-           created_at,
-           updated_at,
-           completed_at
-         FROM dropship.dropship_marketplace_tracking_pushes
-         WHERE intake_id = $1
-           AND vendor_id = $2
-           AND store_connection_id = $3
-         ORDER BY shipped_at DESC, id DESC
+           tp.id,
+           tp.wms_shipment_id,
+           tp.platform,
+           tp.status,
+           tp.carrier,
+           tp.tracking_number,
+           tp.shipped_at,
+           tp.external_fulfillment_id,
+           tp.attempt_count,
+           COALESCE((tp.raw_result->'lastFailure'->>'retryable')::boolean, true) AS retryable,
+           tp.last_error_code,
+           tp.last_error_message,
+           COALESCE(
+             CASE
+               WHEN tp.wms_shipment_id IS NOT NULL THEN (
+                 SELECT jsonb_agg(
+                   jsonb_build_object(
+                     'externalLineItemId', shipment_lines.external_line_item_id,
+                     'sku', shipment_lines.sku,
+                     'title', shipment_lines.title,
+                     'productVariantId', shipment_lines.product_variant_id,
+                     'quantity', shipment_lines.quantity
+                   )
+                   ORDER BY shipment_lines.first_shipment_item_id
+                 )
+                 FROM (
+                   SELECT
+                     ol.external_line_item_id,
+                     ol.sku,
+                     ol.title,
+                     ol.product_variant_id,
+                     SUM(COALESCE(si.qty, 0))::int AS quantity,
+                     MIN(si.id) AS first_shipment_item_id
+                   FROM wms.outbound_shipment_items si
+                   INNER JOIN wms.order_items wi ON wi.id = si.order_item_id
+                   INNER JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+                   WHERE si.shipment_id = tp.wms_shipment_id
+                     AND ol.order_id = tp.oms_order_id
+                     AND COALESCE(si.qty, 0) > 0
+                   GROUP BY ol.external_line_item_id, ol.sku, ol.title, ol.product_variant_id
+                 ) shipment_lines
+               )
+               ELSE (
+                 SELECT jsonb_agg(
+                   jsonb_build_object(
+                     'externalLineItemId', order_lines.external_line_item_id,
+                     'sku', order_lines.sku,
+                     'title', order_lines.title,
+                     'productVariantId', order_lines.product_variant_id,
+                     'quantity', order_lines.quantity
+                   )
+                   ORDER BY order_lines.first_order_line_id
+                 )
+                 FROM (
+                   SELECT
+                     ol.external_line_item_id,
+                     ol.sku,
+                     ol.title,
+                     ol.product_variant_id,
+                     COALESCE(ol.quantity, 0)::int AS quantity,
+                     ol.id AS first_order_line_id
+                   FROM oms.oms_order_lines ol
+                   WHERE ol.order_id = tp.oms_order_id
+                     AND COALESCE(ol.quantity, 0) > 0
+                 ) order_lines
+               )
+             END,
+             '[]'::jsonb
+           ) AS line_items,
+           tp.created_at,
+           tp.updated_at,
+           tp.completed_at
+         FROM dropship.dropship_marketplace_tracking_pushes tp
+         WHERE tp.intake_id = $1
+           AND tp.vendor_id = $2
+           AND tp.store_connection_id = $3
+         ORDER BY tp.shipped_at DESC, tp.id DESC
          LIMIT 50`,
         [row.id, row.vendor_id, row.store_connection_id],
       );
@@ -969,10 +1038,27 @@ function mapTrackingPushDetailRow(row: TrackingPushDetailRow): DropshipOrderOpsT
     retryable: row.retryable !== false,
     lastErrorCode: row.last_error_code,
     lastErrorMessage: row.last_error_message,
+    lineItems: mapTrackingPushLineItems(row.line_items),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
   };
+}
+
+function mapTrackingPushLineItems(value: unknown): DropshipOrderOpsTrackingLineItemSummary[] {
+  return parseJsonArray(value, "tracking_push_line_items").flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const payload = item as TrackingPushLineItemPayload;
+    const quantity = normalizePositiveIntegerValue(payload.quantity);
+    if (quantity === null) return [];
+    return [{
+      externalLineItemId: normalizeOptionalString(payload.externalLineItemId ?? payload.external_line_item_id),
+      sku: normalizeOptionalString(payload.sku),
+      title: normalizeOptionalString(payload.title),
+      productVariantId: normalizePositiveIntegerValue(payload.productVariantId ?? payload.product_variant_id),
+      quantity,
+    }];
+  });
 }
 
 function mapStatusCountRow(row: StatusCountRow): DropshipOrderOpsStatusSummary {
@@ -1085,6 +1171,15 @@ function normalizePositiveInteger(value: unknown): number | null {
   return value;
 }
 
+function normalizePositiveIntegerValue(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value.trim())) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function normalizeOptionalSafeInteger(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
@@ -1110,6 +1205,28 @@ function requiredSafeInteger(value: string | number | null, field: string): numb
 function optionalSafeInteger(value: string | number | null, field: string): number | null {
   if (value === null) return null;
   return toSafeInteger(value, field);
+}
+
+function parseJsonArray(value: unknown, field: string): unknown[] {
+  if (value === null || value === undefined) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (Array.isArray(parsed)) return parsed;
+    } catch (error) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_INVALID_JSON_ARRAY",
+        "Dropship order detail JSON array value is invalid.",
+        { field, error: error instanceof Error ? error.message : String(error) },
+      );
+    }
+  }
+  throw new DropshipError(
+    "DROPSHIP_ORDER_OPS_INVALID_JSON_ARRAY",
+    "Dropship order detail JSON array value is invalid.",
+    { field },
+  );
 }
 
 function sumLineQuantities(lines: readonly unknown[]): number {

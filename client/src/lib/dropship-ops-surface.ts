@@ -1555,9 +1555,18 @@ export interface DropshipOrderTrackingPushSummary {
   retryable: boolean;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
+  lineItems: DropshipOrderTrackingLineItemSummary[];
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+}
+
+export interface DropshipOrderTrackingLineItemSummary {
+  externalLineItemId: string | null;
+  sku: string | null;
+  title: string | null;
+  productVariantId: number | null;
+  quantity: number;
 }
 
 export interface DropshipOrderDetail extends DropshipOrderListItem {
