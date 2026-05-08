@@ -96,6 +96,24 @@ describe("validateShipmentForPush :: happy path", () => {
     ).not.toThrow();
   });
 
+  it("accepts mixed physical and non-shipping order totals", () => {
+    expect(() =>
+      validateShipmentForPush(
+        okShipment(),
+        okOrder({
+          total_cents: 3343,
+          shipping_cents: 799,
+          tax_cents: 0,
+          non_shipping_total_cents: 100,
+        }),
+        [
+          okItem({ id: 1, unit_price_cents: 998, qty: 1 }),
+          okItem({ id: 2, unit_price_cents: 723, qty: 2 }),
+        ],
+      ),
+    ).not.toThrow();
+  });
+
   it("accepts multiple valid lines with sum matching total_cents", () => {
     expect(() =>
       validateShipmentForPush(
