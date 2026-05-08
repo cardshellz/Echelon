@@ -149,6 +149,7 @@ export async function bridgeShopifyOrderToOms(
       customerName: raw.customer_name || raw.shipping_name || "",
       customerEmail: raw.customer_email || "",
       shipToName: raw.shipping_name,
+      shipToCompany: raw.shipping_company || null,
       shipToAddress1: raw.shipping_address1,
       shipToAddress2: raw.shipping_address2,
       shipToCity: raw.shipping_city,

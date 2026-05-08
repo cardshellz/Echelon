@@ -158,7 +158,9 @@ export interface WmsOrderRow {
   customer_name: string | null;
   customer_email: string | null;
   shipping_name: string | null;
+  shipping_company: string | null;
   shipping_address: string | null;
+  shipping_address2: string | null;
   shipping_city: string | null;
   shipping_state: string | null;
   shipping_postal_code: string | null;
@@ -702,6 +704,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       },
       shipTo: {
         name: omsOrder.shipToName || omsOrder.customerName || "",
+        company: (omsOrder as any).shipToCompany || "",
         street1: omsOrder.shipToAddress1 || "",
         street2: omsOrder.shipToAddress2 || "",
         city: omsOrder.shipToCity || "",
@@ -2402,7 +2405,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       customer_name: wmsOrders.customerName,
       customer_email: wmsOrders.customerEmail,
       shipping_name: wmsOrders.shippingName,
+      shipping_company: wmsOrders.shippingCompany,
       shipping_address: wmsOrders.shippingAddress,
+      shipping_address2: wmsOrders.shippingAddress2,
       shipping_city: wmsOrders.shippingCity,
       shipping_state: wmsOrders.shippingState,
       shipping_postal_code: wmsOrders.shippingPostalCode,
@@ -2488,8 +2493,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       },
       shipTo: {
         name: orderRow.shipping_name || orderRow.customer_name || "",
+        company: orderRow.shipping_company || "",
         street1: orderRow.shipping_address || "",
-        street2: "",
+        street2: orderRow.shipping_address2 || "",
         city: orderRow.shipping_city || "",
         state: orderRow.shipping_state || "",
         postalCode: orderRow.shipping_postal_code || "",

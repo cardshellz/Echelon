@@ -627,6 +627,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     customerEmail: shopifyOrder.email || customer.email,
     customerPhone: shipping.phone || customer.phone,
     shipToName: shipping.name,
+    shipToCompany: shipping.company || null,
     shipToAddress1: shipping.address1,
     shipToAddress2: shipping.address2,
     shipToCity: shipping.city,
@@ -1002,6 +1003,7 @@ export function registerOmsWebhooks(
             existing.customerName,
           customerEmail: shopifyOrder.email || existing.customerEmail,
           shipToName: shipping.name || existing.shipToName,
+          shipToCompany: shipping.company ?? existing.shipToCompany,
           shipToAddress1: shipping.address1 || existing.shipToAddress1,
           shipToAddress2: shipping.address2 ?? existing.shipToAddress2,
           shipToCity: shipping.city || existing.shipToCity,
@@ -1082,7 +1084,9 @@ export function registerOmsWebhooks(
           await db.execute(sql`
             UPDATE wms.orders SET
               shipping_name = ${shipping.name || null},
+              shipping_company = ${shipping.company || null},
               shipping_address = ${shipping.address1 || null},
+              shipping_address2 = ${shipping.address2 || null},
               shipping_city = ${shipping.city || null},
               shipping_state = ${shipping.province_code || shipping.province || null},
               shipping_postal_code = ${shipping.zip || null},

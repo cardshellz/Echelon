@@ -55,7 +55,9 @@ function okOrder(overrides: Partial<WmsOrderRow> = {}): WmsOrderRow {
     customer_name: "Jane Customer",
     customer_email: "jane@example.com",
     shipping_name: "Jane Customer",
+    shipping_company: null,
     shipping_address: "123 Main St",
+    shipping_address2: null,
     shipping_city: "Springfield",
     shipping_state: "IL",
     shipping_postal_code: "62701",
@@ -388,7 +390,41 @@ describe("pushShipment :: happy path", () => {
       `oms_order_id:${orderRow.oms_fulfillment_order_id}`,
     );
     expect(payload.shipTo.street1).toBe(orderRow.shipping_address);
+    expect(payload.shipTo.street2).toBe("");
+    expect(payload.shipTo.company).toBe("");
     expect(payload.customerEmail).toBe(orderRow.customer_email);
+  });
+
+  it("sends address line 2 and company name to ShipStation", async () => {
+    const shipmentRow = okShipment();
+    const orderRow = okOrder({
+      shipping_company: "Acme Card Shop",
+      shipping_address: "123 Main St",
+      shipping_address2: "Suite 400",
+    });
+    const mock = makeDb([
+      { rows: [shipmentRow] },
+      { rows: [orderRow] },
+      { rows: [okItem()] },
+      { rows: [] },
+      { rows: [] },
+    ]);
+    const fetchMock = mockFetchOnceOk({
+      orderId: 555000,
+      orderNumber: shipmentRow.id,
+      orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+      orderStatus: "awaiting_shipment",
+    });
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    await svc.pushShipment(shipmentRow.id);
+
+    const [, init] = fetchMock.mock.calls[0] as any;
+    const payload = JSON.parse(init.body);
+    expect(payload.shipTo.company).toBe("Acme Card Shop");
+    expect(payload.shipTo.street1).toBe("123 Main St");
+    expect(payload.shipTo.street2).toBe("Suite 400");
   });
 
   it("re-pushes a previously-voided shipment and clears void columns on transition to queued", async () => {

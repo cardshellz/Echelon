@@ -27,6 +27,7 @@ export interface OrderData {
   customerEmail?: string;
   customerPhone?: string;
   shipToName?: string;
+  shipToCompany?: string | null;
   shipToAddress1?: string;
   shipToAddress2?: string;
   shipToCity?: string;
@@ -127,6 +128,7 @@ export function createOmsService(db: any, reservationService?: any) {
         customerEmail: data.customerEmail,
         customerPhone: data.customerPhone,
         shipToName: data.shipToName,
+        shipToCompany: data.shipToCompany ?? null,
         shipToAddress1: data.shipToAddress1,
         shipToAddress2: data.shipToAddress2,
         shipToCity: data.shipToCity,
