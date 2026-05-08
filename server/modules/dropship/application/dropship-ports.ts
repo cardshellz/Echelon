@@ -230,6 +230,43 @@ export interface DropshipOrderAcceptancePort {
   }): Promise<unknown>;
 }
 
+export interface DropshipOrderRejectionPort {
+  rejectOrder(input: {
+    intakeId: number;
+    vendorId: number;
+    reason: string;
+    idempotencyKey: string;
+    actor: {
+      actorType: "vendor" | "admin" | "system" | "job";
+      actorId?: string;
+    };
+    transaction: DropshipTransaction;
+  }): Promise<unknown>;
+}
+
+export interface DropshipOrderCancellationPort {
+  processPendingCancellations(input: {
+    workerId: string;
+    limit?: number;
+    transaction: DropshipTransaction;
+  }): Promise<unknown>;
+}
+
+export interface DropshipPaymentHoldPort {
+  expireExpiredPaymentHolds(input: {
+    workerId: string;
+    limit?: number;
+    transaction: DropshipTransaction;
+  }): Promise<unknown>;
+
+  notifyExpiringPaymentHolds(input: {
+    workerId: string;
+    limit?: number;
+    warningWindowMinutes?: number;
+    transaction: DropshipTransaction;
+  }): Promise<unknown>;
+}
+
 export interface DropshipShippingPort {
   quote(input: {
     vendorId: number;
@@ -305,6 +342,9 @@ export interface DropshipApplicationPorts {
   listings: DropshipListingPort;
   orderIntake: DropshipOrderIntakePort;
   orderAcceptance: DropshipOrderAcceptancePort;
+  orderRejection: DropshipOrderRejectionPort;
+  orderCancellations: DropshipOrderCancellationPort;
+  paymentHolds: DropshipPaymentHoldPort;
   wallet: DropshipWalletPort;
   reservations: DropshipReservationPort;
   shipping: DropshipShippingPort;
