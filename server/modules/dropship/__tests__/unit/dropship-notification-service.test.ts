@@ -31,6 +31,7 @@ describe("DropshipNotificationService", () => {
     expect(preferences).toHaveLength(DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.length);
     expect(preferences.map((preference) => preference.eventType)).toContain("dropship_entitlement_blocked");
     expect(preferences.map((preference) => preference.eventType)).toContain("dropship_order_received");
+    expect(preferences.map((preference) => preference.eventType)).toContain("dropship_store_needs_reauth");
     expect(preferences.find((preference) => preference.eventType === "dropship_order_rejected")).toMatchObject({
       vendorId: 10,
       critical: true,
@@ -42,6 +43,11 @@ describe("DropshipNotificationService", () => {
     expect(preferences.find(
       (preference) => preference.eventType === "dropship_order_rejected",
     )?.notificationPreferenceId).toBeLessThan(0);
+    expect(preferences.find((preference) => preference.eventType === "dropship_store_needs_reauth")).toMatchObject({
+      critical: true,
+      emailEnabled: true,
+      inAppEnabled: true,
+    });
   });
 
   it("merges saved notification preferences with launch defaults", async () => {
@@ -109,17 +115,17 @@ describe("DropshipNotificationService", () => {
 
     await service.send({
       vendorId: 10,
-      eventType: "dropship_order_rejected",
+      eventType: "dropship_store_needs_reauth",
       channels: ["email"],
       critical: false,
-      title: "Order rejected",
-      message: "Order rejected.",
-      payload: { intakeId: 44 },
-      idempotencyKey: "notification-order-rejected-44",
+      title: "Store needs reauthorization",
+      message: "Reconnect the store.",
+      payload: { storeConnectionId: 22 },
+      idempotencyKey: "notification-store-needs-reauth-22",
     });
 
     expect(repository.lastSend).toMatchObject({
-      eventType: "dropship_order_rejected",
+      eventType: "dropship_store_needs_reauth",
       critical: true,
       channels: ["email", "in_app"],
     });

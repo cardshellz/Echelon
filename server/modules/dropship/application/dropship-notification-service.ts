@@ -38,6 +38,7 @@ export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificatio
   { eventType: "dropship_return_credit_posted", critical: true },
   { eventType: "dropship_rma_opened", critical: true },
   { eventType: "dropship_store_disconnected", critical: true },
+  { eventType: "dropship_store_needs_reauth", critical: true },
   { eventType: "dropship_tracking_pushed", critical: false },
   { eventType: "dropship_wallet_funding_failed", critical: true },
 ];
