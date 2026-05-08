@@ -128,6 +128,7 @@ import {
   type DropshipAdminTrackingPushRetryResponse,
   type DropshipAdminWalletConfirmedUsdcCreditResponse,
   type DropshipAdminWalletManualCreditResponse,
+  type DropshipDogfoodLaunchGate,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
   type DropshipDogfoodReadinessStatus,
@@ -813,6 +814,7 @@ function DogfoodReadinessTab() {
   const items = readinessQuery.data?.items ?? [];
   const summary = readinessQuery.data?.summary ?? [];
   const systemChecks = readinessQuery.data?.systemChecks ?? [];
+  const launchGate = readinessQuery.data?.launchGate ?? null;
   const omsConfig = omsChannelConfigQuery.data?.config ?? null;
 
   useEffect(() => {
@@ -888,6 +890,11 @@ function DogfoodReadinessTab() {
 
       <SystemReadinessPanel
         checks={systemChecks}
+        isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
+      />
+
+      <DogfoodLaunchGatePanel
+        gate={launchGate}
         isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
       />
 
@@ -3783,6 +3790,85 @@ function SystemReadinessPanel({
         ))}
       </div>
     </section>
+  );
+}
+
+function DogfoodLaunchGatePanel({
+  gate,
+  isLoading,
+}: {
+  gate: DropshipDogfoodLaunchGate | null;
+  isLoading: boolean;
+}) {
+  if (isLoading && !gate) {
+    return (
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-6 w-48" />
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={index} className="h-20 w-full" />
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  if (!gate) {
+    return null;
+  }
+
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">Dogfood launch gate</h2>
+            <Badge variant="outline" className={dogfoodReadinessStatusTone(gate.status)}>
+              {formatStatus(gate.status)}
+            </Badge>
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">{gate.message}</p>
+        </div>
+        <div className="grid w-full gap-2 sm:grid-cols-2 lg:w-auto lg:min-w-[520px] lg:grid-cols-4">
+          <LaunchGateMetric label="Ready" value={gate.readyVendorStoreCount} />
+          <LaunchGateMetric label="System blocked" value={gate.systemBlockedCount} />
+          <LaunchGateMetric label="Rows blocked" value={gate.blockedVendorStoreCount} />
+          <LaunchGateMetric label="Warnings" value={gate.warningCount} />
+        </div>
+      </div>
+      {gate.firstBlockers.length > 0 && (
+        <div className="mt-4 grid gap-2 lg:grid-cols-2">
+          {gate.firstBlockers.slice(0, 4).map((blocker, index) => (
+            <div key={`${blocker.scope}:${blocker.key}:${blocker.vendorId ?? "system"}:${index}`} className="rounded-md border p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-medium">{blocker.label}</div>
+                  <div className="mt-1 text-sm text-muted-foreground">{blocker.message}</div>
+                </div>
+                <Badge variant="outline" className="shrink-0 border-zinc-200 bg-zinc-50 text-zinc-700">
+                  {blocker.scope === "system" ? "System" : `Vendor ${blocker.vendorId}`}
+                </Badge>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LaunchGateMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: number;
+}) {
+  return (
+    <div className="rounded-md border px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 font-mono text-lg font-semibold">{value}</div>
+    </div>
   );
 }
 

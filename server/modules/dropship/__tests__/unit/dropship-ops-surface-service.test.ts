@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
+  buildDropshipDogfoodLaunchGate,
   buildDropshipSystemReadinessChecks,
   buildDropshipSettingsSections,
   DropshipOpsSurfaceService,
   type DropshipAdminOpsOverview,
   type DropshipAuditEventSearchResult,
+  type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResult,
   type DropshipOpsSurfaceRepository,
   type DropshipVendorSettingsOverview,
@@ -300,6 +302,98 @@ describe("DropshipOpsSurfaceService", () => {
     expect(JSON.stringify(checks)).not.toContain("smtp-secret");
   });
 
+  it("builds an explicit launch gate from system and vendor readiness", () => {
+    const gate = buildDropshipDogfoodLaunchGate({
+      summary: [
+        { status: "ready", count: 1 },
+        { status: "warning", count: 1 },
+        { status: "blocked", count: 2 },
+      ],
+      systemChecks: [
+        {
+          key: "token_vault",
+          label: "Token vault",
+          status: "ready",
+          message: "Token vault configured.",
+          requiredEnv: ["DROPSHIP_TOKEN_ENCRYPTION_KEY"],
+        },
+        {
+          key: "email_notifications",
+          label: "Email notifications",
+          status: "warning",
+          message: "SMTP_FROM is recommended.",
+          requiredEnv: ["SMTP_FROM recommended"],
+        },
+      ],
+      items: [
+        makeDogfoodReadinessItem({
+          readinessStatus: "blocked",
+          blockerCount: 1,
+          checks: [{
+            key: "wallet",
+            label: "Wallet",
+            status: "blocked",
+            message: "Wallet has no available balance or active funding method.",
+          }],
+        }),
+      ],
+    });
+
+    expect(gate).toMatchObject({
+      status: "warning",
+      readyVendorStoreCount: 1,
+      warningVendorStoreCount: 1,
+      blockedVendorStoreCount: 2,
+      systemBlockedCount: 0,
+      systemWarningCount: 1,
+      blockerCount: 2,
+      warningCount: 2,
+      message: "1 vendor/store row(s) ready; 2 blocked row(s) and 2 warning(s) remain.",
+    });
+    expect(gate.firstBlockers[0]).toMatchObject({
+      scope: "vendor_store",
+      key: "wallet",
+      vendorId: 10,
+      storeConnectionId: 20,
+    });
+  });
+
+  it("blocks the launch gate when system prerequisites block or no vendor store is ready", () => {
+    expect(buildDropshipDogfoodLaunchGate({
+      summary: [
+        { status: "ready", count: 1 },
+        { status: "warning", count: 0 },
+        { status: "blocked", count: 0 },
+      ],
+      systemChecks: [{
+        key: "shipstation_webhook_security",
+        label: "ShipStation webhook security",
+        status: "blocked",
+        message: "SHIPSTATION_WEBHOOK_SECRET is missing.",
+        requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
+      }],
+      items: [],
+    })).toMatchObject({
+      status: "blocked",
+      systemBlockedCount: 1,
+      message: "1 system prerequisite(s) block dogfood.",
+    });
+
+    expect(buildDropshipDogfoodLaunchGate({
+      summary: [
+        { status: "ready", count: 0 },
+        { status: "warning", count: 0 },
+        { status: "blocked", count: 1 },
+      ],
+      systemChecks: [],
+      items: [],
+    })).toMatchObject({
+      status: "blocked",
+      readyVendorStoreCount: 0,
+      message: "No vendor/store row is ready for dogfood.",
+    });
+  });
+
   it("scopes vendor settings through Shellz Club member provisioning", async () => {
     const repository = new FakeOpsSurfaceRepository();
     const service = makeService(repository, []);
@@ -494,6 +588,60 @@ function makeSettingsOverview(overrides: Partial<DropshipVendorSettingsOverview>
     },
     sections: [],
     generatedAt: now,
+    ...overrides,
+  };
+}
+
+function makeDogfoodReadinessItem(
+  overrides: Partial<DropshipDogfoodReadinessItem> = {},
+): DropshipDogfoodReadinessItem {
+  return {
+    vendor: {
+      vendorId: 10,
+      memberId: "member-1",
+      businessName: "Vendor Test",
+      email: "vendor@cardshellz.test",
+      status: "active",
+      entitlementStatus: "active",
+    },
+    storeConnection: {
+      storeConnectionId: 20,
+      platform: "ebay",
+      status: "connected",
+      setupStatus: "ready",
+      externalDisplayName: "Vendor eBay",
+      shopDomain: null,
+      updatedAt: now,
+    },
+    readinessStatus: "ready",
+    blockerCount: 0,
+    warningCount: 0,
+    checks: [],
+    metrics: {
+      dropshipOmsChannelId: 7,
+      dropshipOmsChannelCount: 1,
+      defaultWarehouseId: 1,
+      adminCatalogIncludeRuleCount: 1,
+      vendorSelectionIncludeRuleCount: 1,
+      activeShippingBoxCount: 1,
+      activeShippingZoneRuleCount: 1,
+      activeShippingRateTableCount: 1,
+      activeShippingRateRowCount: 1,
+      selectedVariantCount: 1,
+      selectedPackageProfileCount: 1,
+      selectedVariantMissingPackageProfileCount: 0,
+      activeShippingMarkupPolicyCount: 1,
+      activeShippingInsurancePolicyCount: 1,
+      listingConfigActive: true,
+      setupOpenBlockerCount: 0,
+      walletAvailableBalanceCents: 1000,
+      activeFundingMethodCount: 2,
+      activeStripeFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 1,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodReady: true,
+      notificationPreferenceCount: 0,
+    },
     ...overrides,
   };
 }

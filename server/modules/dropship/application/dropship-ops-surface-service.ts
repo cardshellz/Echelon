@@ -214,6 +214,28 @@ export interface DropshipDogfoodReadinessSummary {
   count: number;
 }
 
+export interface DropshipDogfoodLaunchGateBlocker {
+  scope: "system" | "vendor_store";
+  key: string;
+  label: string;
+  message: string;
+  vendorId?: number;
+  storeConnectionId?: number | null;
+}
+
+export interface DropshipDogfoodLaunchGate {
+  status: DropshipDogfoodReadinessStatus;
+  readyVendorStoreCount: number;
+  warningVendorStoreCount: number;
+  blockedVendorStoreCount: number;
+  systemBlockedCount: number;
+  systemWarningCount: number;
+  blockerCount: number;
+  warningCount: number;
+  message: string;
+  firstBlockers: DropshipDogfoodLaunchGateBlocker[];
+}
+
 export interface DropshipDogfoodReadinessResult {
   generatedAt: Date;
   items: DropshipDogfoodReadinessItem[];
@@ -222,6 +244,7 @@ export interface DropshipDogfoodReadinessResult {
   limit: number;
   summary: DropshipDogfoodReadinessSummary[];
   systemChecks: DropshipSystemReadinessCheck[];
+  launchGate?: DropshipDogfoodLaunchGate;
 }
 
 export interface DropshipOpsSurfaceRepository {
@@ -291,6 +314,7 @@ export class DropshipOpsSurfaceService {
       ...parsed,
       generatedAt: this.deps.clock.now(),
     });
+    const systemChecks = buildDropshipSystemReadinessChecks(process.env);
     this.deps.logger.info({
       code: "DROPSHIP_DOGFOOD_READINESS_VIEWED",
       message: "Dropship dogfood readiness was loaded.",
@@ -304,9 +328,100 @@ export class DropshipOpsSurfaceService {
     });
     return {
       ...result,
-      systemChecks: buildDropshipSystemReadinessChecks(process.env),
+      systemChecks,
+      launchGate: buildDropshipDogfoodLaunchGate({
+        summary: result.summary,
+        items: result.items,
+        systemChecks,
+      }),
     };
   }
+}
+
+export function buildDropshipDogfoodLaunchGate(input: {
+  summary: readonly DropshipDogfoodReadinessSummary[];
+  items: readonly DropshipDogfoodReadinessItem[];
+  systemChecks: readonly DropshipSystemReadinessCheck[];
+}): DropshipDogfoodLaunchGate {
+  const readyVendorStoreCount = readinessSummaryCount(input.summary, "ready");
+  const warningVendorStoreCount = readinessSummaryCount(input.summary, "warning");
+  const blockedVendorStoreCount = readinessSummaryCount(input.summary, "blocked");
+  const systemBlocked = input.systemChecks.filter((check) => check.status === "blocked");
+  const systemWarnings = input.systemChecks.filter((check) => check.status === "warning");
+  const vendorBlockers = input.items.flatMap((item) =>
+    item.checks
+      .filter((check) => check.status === "blocked")
+      .map((check) => ({
+        scope: "vendor_store" as const,
+        key: check.key,
+        label: check.label,
+        message: check.message,
+        vendorId: item.vendor.vendorId,
+        storeConnectionId: item.storeConnection.storeConnectionId,
+      })),
+  );
+  const firstBlockers: DropshipDogfoodLaunchGateBlocker[] = [
+    ...systemBlocked.map((check) => ({
+      scope: "system" as const,
+      key: check.key,
+      label: check.label,
+      message: check.message,
+    })),
+    ...vendorBlockers,
+  ].slice(0, 10);
+
+  const blockerCount = systemBlocked.length + blockedVendorStoreCount;
+  const warningCount = systemWarnings.length + warningVendorStoreCount;
+  const status: DropshipDogfoodReadinessStatus = systemBlocked.length > 0 || readyVendorStoreCount === 0
+    ? "blocked"
+    : warningCount > 0 || blockedVendorStoreCount > 0
+      ? "warning"
+      : "ready";
+
+  return {
+    status,
+    readyVendorStoreCount,
+    warningVendorStoreCount,
+    blockedVendorStoreCount,
+    systemBlockedCount: systemBlocked.length,
+    systemWarningCount: systemWarnings.length,
+    blockerCount,
+    warningCount,
+    message: buildDogfoodLaunchGateMessage({
+      status,
+      readyVendorStoreCount,
+      systemBlockedCount: systemBlocked.length,
+      blockedVendorStoreCount,
+      warningCount,
+    }),
+    firstBlockers,
+  };
+}
+
+function buildDogfoodLaunchGateMessage(input: {
+  status: DropshipDogfoodReadinessStatus;
+  readyVendorStoreCount: number;
+  systemBlockedCount: number;
+  blockedVendorStoreCount: number;
+  warningCount: number;
+}): string {
+  if (input.systemBlockedCount > 0) {
+    return `${input.systemBlockedCount} system prerequisite(s) block dogfood.`;
+  }
+  if (input.readyVendorStoreCount === 0) {
+    return "No vendor/store row is ready for dogfood.";
+  }
+  if (input.status === "warning") {
+    return `${input.readyVendorStoreCount} vendor/store row(s) ready; ${input.blockedVendorStoreCount} blocked row(s) and ${input.warningCount} warning(s) remain.`;
+  }
+  return `${input.readyVendorStoreCount} vendor/store row(s) ready for dogfood.`;
+}
+
+function readinessSummaryCount(
+  summary: readonly DropshipDogfoodReadinessSummary[],
+  status: DropshipDogfoodReadinessStatus,
+): number {
+  return summary.find((item) => item.status === status)?.count ?? 0;
 }
 
 export function buildDropshipSystemReadinessChecks(
