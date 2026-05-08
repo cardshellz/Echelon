@@ -1002,7 +1002,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       return;
     }
 
-    const parsedItems = ssItems
+    let parsedItems = ssItems
       .map((item) => ({
         sourceShipmentItemId: parseWmsShipmentItemLineKey(item.lineItemKey),
         qty: Number(item.quantity),
@@ -1013,24 +1013,59 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         item.qty >= 0
       ) as Array<{ sourceShipmentItemId: number; qty: number }>;
 
-    if (parsedItems.length === 0) {
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = 'shipstation_split_items_unmapped',
-            updated_at = NOW()
-        WHERE id = ${targetShipmentId}
-      `);
-      throw new Error(
-        `ShipStation shipment ${shipment.shipmentId} has no parseable wms-item lineItemKey values`,
-      );
-    }
-
     const targetItems: any = await db.execute(sql`
-      SELECT id, order_item_id
-      FROM wms.outbound_shipment_items
-      WHERE shipment_id = ${targetShipmentId}
+      SELECT osi.id, osi.order_item_id, oi.sku, osi.qty
+      FROM wms.outbound_shipment_items osi
+      LEFT JOIN wms.order_items oi ON oi.id = osi.order_item_id
+      WHERE osi.shipment_id = ${targetShipmentId}
     `);
+
+    if (parsedItems.length === 0) {
+      const remainingTargets = [...(targetItems?.rows ?? [])];
+      const fallbackItems: Array<{ sourceShipmentItemId: number; qty: number }> = [];
+
+      for (const ssItem of ssItems) {
+        const sku = typeof ssItem.sku === "string" ? ssItem.sku.trim() : "";
+        const qty = Number(ssItem.quantity);
+        if (!sku || !Number.isInteger(qty) || qty < 0) {
+          continue;
+        }
+
+        const matchIndex = remainingTargets.findIndex((row: any) =>
+          String(row.sku ?? "").trim() === sku &&
+          Number(row.qty) === qty &&
+          Number.isInteger(Number(row.id)) &&
+          Number(row.id) > 0
+        );
+        if (matchIndex === -1) {
+          continue;
+        }
+
+        const [matched] = remainingTargets.splice(matchIndex, 1);
+        fallbackItems.push({
+          sourceShipmentItemId: Number(matched.id),
+          qty,
+        });
+      }
+
+      if (fallbackItems.length === ssItems.length && fallbackItems.length > 0) {
+        parsedItems = fallbackItems;
+        console.warn(
+          `[ShipStation Webhook V2] Shipment ${targetShipmentId} received ShipStation shipment ${shipment.shipmentId} without parseable lineItemKey values; matched items by exact SKU/qty.`,
+        );
+      } else {
+        await db.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET requires_review = true,
+              review_reason = 'shipstation_split_items_unmapped',
+              updated_at = NOW()
+          WHERE id = ${targetShipmentId}
+        `);
+        throw new Error(
+          `ShipStation shipment ${shipment.shipmentId} has no parseable wms-item lineItemKey values`,
+        );
+      }
+    }
     const targetItemIds = new Set(
       (targetItems?.rows ?? []).map((row: any) => Number(row.id)),
     );
