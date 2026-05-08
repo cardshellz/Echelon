@@ -82,7 +82,11 @@ const createDropshipMemberRmaInputSchema = createDropshipRmaRequestSchema.omit({
   omsOrderId: true,
   returnWindowDays: true,
   storeConnectionId: true,
+}).extend({
+  intakeId: positiveIdSchema,
 }).strict();
+
+const MILLISECONDS_PER_DAY = 86_400_000;
 
 const listDropshipRmasInputSchema = z.object({
   vendorId: positiveIdSchema.optional(),
@@ -242,6 +246,7 @@ export interface DropshipRmaOrderReference {
   storeConnectionId: number;
   status: DropshipOrderIntakeStatus;
   omsOrderId: number | null;
+  acceptedAt: Date | null;
   lines: DropshipRmaOrderLineReference[];
 }
 
@@ -298,24 +303,24 @@ export class DropshipReturnService {
   async createRmaForMember(memberId: string, input: unknown): Promise<{ rma: DropshipRmaDetail; idempotentReplay: boolean }> {
     const parsed = parseReturnInput(createDropshipMemberRmaInputSchema, input, "DROPSHIP_RETURN_CREATE_INVALID_INPUT");
     const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
-    const orderReference = parsed.intakeId
-      ? await this.deps.repository.getOrderReference({
-          vendorId: vendor.vendor.vendorId,
-          intakeId: parsed.intakeId,
-        })
-      : null;
-    if (parsed.intakeId && !orderReference) {
+    const orderReference = await this.deps.repository.getOrderReference({
+      vendorId: vendor.vendor.vendorId,
+      intakeId: parsed.intakeId,
+    });
+    if (!orderReference) {
       throw new DropshipError("DROPSHIP_ORDER_INTAKE_NOT_FOUND", "Dropship order intake was not found for the vendor.", {
         vendorId: vendor.vendor.vendorId,
         intakeId: parsed.intakeId,
       });
     }
     assertMemberRmaOrderIsAccepted(parsed, orderReference);
+    assertMemberRmaWithinReturnWindow(parsed, orderReference, this.deps.clock.now());
     assertMemberRmaItemsMatchOrder(parsed, orderReference);
     return this.createRma({
       ...parsed,
-      storeConnectionId: orderReference?.storeConnectionId ?? null,
-      omsOrderId: orderReference?.omsOrderId ?? null,
+      storeConnectionId: orderReference.storeConnectionId,
+      omsOrderId: orderReference.omsOrderId,
+      returnWindowDays: DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS,
       vendorId: vendor.vendor.vendorId,
       actor: { actorType: "vendor", actorId: memberId },
     });
@@ -544,9 +549,8 @@ function parseReturnInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input:
 
 function assertMemberRmaOrderIsAccepted(
   input: CreateDropshipMemberRmaInput,
-  orderReference: DropshipRmaOrderReference | null,
+  orderReference: DropshipRmaOrderReference,
 ): void {
-  if (!input.intakeId || !orderReference) return;
   if (orderReference.status === "accepted" && orderReference.omsOrderId !== null) return;
   throw new DropshipError(
     "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
@@ -555,6 +559,35 @@ function assertMemberRmaOrderIsAccepted(
       intakeId: input.intakeId,
       status: orderReference.status,
       omsOrderId: orderReference.omsOrderId,
+    },
+  );
+}
+
+function assertMemberRmaWithinReturnWindow(
+  input: CreateDropshipMemberRmaInput,
+  orderReference: DropshipRmaOrderReference,
+  now: Date,
+): void {
+  if (!orderReference.acceptedAt) {
+    throw new DropshipError(
+      "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+      "RMA intake references must include an accepted timestamp.",
+      { intakeId: input.intakeId },
+    );
+  }
+  const expiresAt = new Date(orderReference.acceptedAt.getTime() + DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS * MILLISECONDS_PER_DAY);
+  if (now.getTime() <= expiresAt.getTime()) {
+    return;
+  }
+  throw new DropshipError(
+    "DROPSHIP_RETURN_WINDOW_EXPIRED",
+    "Dropship order is outside the return window.",
+    {
+      intakeId: input.intakeId,
+      acceptedAt: orderReference.acceptedAt.toISOString(),
+      returnWindowDays: DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS,
+      expiredAt: expiresAt.toISOString(),
+      now: now.toISOString(),
     },
   );
 }

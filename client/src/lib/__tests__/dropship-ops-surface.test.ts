@@ -566,7 +566,7 @@ describe("dropship ops surface client helpers", () => {
     expect(buildPortalReturnCreateInput({
       idempotencyKey: "portal-return-create-2",
       rmaNumber: "RMA-VENDOR-2",
-      intakeId: "",
+      intakeId: "45",
       reasonCode: "",
       faultCategory: "none",
       labelSource: "",
@@ -595,7 +595,7 @@ describe("dropship ops surface client helpers", () => {
       returnTrackingNumber: "",
       vendorNotes: "",
       items: [{ productVariantId: "123", quantity: "1", status: "requested", requestedCreditAmount: "" }],
-    })).toThrow("intakeId is required");
+    })).toThrow("intakeId must be a positive integer.");
   });
 
   it("builds admin return inspection bodies from item credit and fee rows", () => {

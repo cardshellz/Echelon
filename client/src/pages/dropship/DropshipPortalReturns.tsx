@@ -439,18 +439,17 @@ function CreateReturnSheet({
           <div className="space-y-2">
             <Label htmlFor="portal-rma-order">Order</Label>
             <Select
-              value={form.intakeId || "none"}
+              value={form.intakeId || undefined}
               onValueChange={(value) => {
-                onChange("intakeId", value === "none" ? "" : value);
+                onChange("intakeId", value);
                 onResetItems();
               }}
               disabled={isOrdersLoading}
             >
               <SelectTrigger id="portal-rma-order">
-                <SelectValue placeholder={isOrdersLoading ? "Loading orders" : "Select order"} />
+                <SelectValue placeholder={isOrdersLoading ? "Loading orders" : "Select accepted order"} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">No linked order</SelectItem>
                 {orders.map((order) => (
                   <SelectItem key={order.intakeId} value={String(order.intakeId)}>
                     {orderOptionLabel(order)}
