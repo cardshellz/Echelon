@@ -63,6 +63,7 @@ import {
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
   type DropshipOrderRejectResponse,
+  type DropshipOrderTrackingLineItemSummary,
 } from "@/lib/dropship-ops-surface";
 import {
   isDropshipSensitiveProofActive,
@@ -538,6 +539,22 @@ function OrderDetailSheet({
                               {push.wmsShipmentId ? `Shipment ${push.wmsShipmentId}` : "Order shipment"}
                             </div>
                             <div className="text-xs text-zinc-500">{formatStatus(push.platform)} push {push.pushId}</div>
+                            <div className="mt-2 space-y-1">
+                              {push.lineItems.length ? push.lineItems.map((line, index) => (
+                                <div
+                                  key={`${push.pushId}:${line.externalLineItemId ?? line.sku ?? index}`}
+                                  className="max-w-72 text-xs text-zinc-600"
+                                >
+                                  <span className="font-mono text-zinc-800">{line.quantity}x</span>{" "}
+                                  <span>{trackingLineLabel(line)}</span>
+                                  {line.externalLineItemId && (
+                                    <div className="truncate text-zinc-500">Line {line.externalLineItemId}</div>
+                                  )}
+                                </div>
+                              )) : (
+                                <div className="text-xs text-zinc-500">Line detail unavailable</div>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell>
                             <div className="font-medium">{push.carrier}</div>
@@ -819,6 +836,14 @@ function DetailField({ label, value }: { label: string; value: string }) {
       <div className="mt-1 break-words text-zinc-900">{value}</div>
     </div>
   );
+}
+
+function trackingLineLabel(line: DropshipOrderTrackingLineItemSummary): string {
+  if (line.title && line.sku) return `${line.title} (${line.sku})`;
+  if (line.title) return line.title;
+  if (line.sku) return line.sku;
+  if (line.productVariantId) return `Variant ${line.productVariantId}`;
+  return "Marketplace line";
 }
 
 function shipToAddressLines(order: DropshipOrderDetail): string[] {

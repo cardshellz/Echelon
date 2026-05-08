@@ -65,6 +65,99 @@ describe("PgDropshipOrderOpsRepository", () => {
     ]);
   });
 
+  it("loads shipment line items with marketplace tracking pushes for order detail", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("LEFT JOIN dropship.dropship_order_economics_snapshots econ")) {
+        expect(sqlText).toContain("WHERE oi.id = $1");
+        expect(params).toEqual([42]);
+        return { rows: [makeDetailRow()] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_audit_events") && sqlText.includes("LIMIT 20")) {
+        expect(params).toEqual(["42"]);
+        return { rows: [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_marketplace_tracking_pushes tp")) {
+        expect(sqlText).toContain("wms.outbound_shipment_items");
+        expect(sqlText).toContain("oms.oms_order_lines");
+        expect(params).toEqual([42, 10, 22]);
+        return {
+          rows: [
+            makeTrackingPushRow({
+              line_items: [
+                {
+                  externalLineItemId: "line-a",
+                  sku: "SKU-A",
+                  title: "Product A",
+                  productVariantId: 101,
+                  quantity: 1,
+                },
+                {
+                  externalLineItemId: "line-b",
+                  sku: "SKU-B",
+                  title: "Product B",
+                  productVariantId: null,
+                  quantity: "2",
+                },
+              ],
+            }),
+            makeTrackingPushRow({
+              id: 302,
+              wms_shipment_id: 889,
+              tracking_number: "1Z999",
+              line_items: JSON.stringify([
+                {
+                  external_line_item_id: "line-c",
+                  sku: "SKU-C",
+                  title: "Product C",
+                  product_variant_id: "202",
+                  quantity: "1",
+                },
+              ]),
+            }),
+          ],
+        };
+      }
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const repository = new PgDropshipOrderOpsRepository(makePool(makeClient(query)));
+
+    const detail = await repository.getIntakeDetail({ intakeId: 42 });
+
+    expect(detail?.trackingPushes).toHaveLength(2);
+    expect(detail?.trackingPushes[0]).toMatchObject({
+      pushId: 301,
+      wmsShipmentId: 888,
+      platform: "ebay",
+      trackingNumber: "1Z123",
+      lineItems: [
+        {
+          externalLineItemId: "line-a",
+          sku: "SKU-A",
+          title: "Product A",
+          productVariantId: 101,
+          quantity: 1,
+        },
+        {
+          externalLineItemId: "line-b",
+          sku: "SKU-B",
+          title: "Product B",
+          productVariantId: null,
+          quantity: 2,
+        },
+      ],
+    });
+    expect(detail?.trackingPushes[1].lineItems).toEqual([
+      {
+        externalLineItemId: "line-c",
+        sku: "SKU-C",
+        title: "Product C",
+        productVariantId: 202,
+        quantity: 1,
+      },
+    ]);
+  });
+
   it("rejects non-stale processing intake retries without updating the row", async () => {
     const query = vi.fn(async (sql: string) => {
       const sqlText = String(sql);
@@ -359,6 +452,95 @@ function makeListRow(overrides: Record<string, unknown> = {}) {
     latest_event_created_at: now,
     latest_event_payload: { errorCode: "CONFIG_MISSING" },
     total_count: "1",
+    ...overrides,
+  };
+}
+
+function makeDetailRow(overrides: Record<string, unknown> = {}) {
+  return {
+    ...makeListRow({
+      oms_order_id: 9001,
+      normalized_payload: {
+        orderedAt: "2026-05-03T10:00:00.000Z",
+        marketplaceStatus: "paid",
+        lines: [
+          {
+            externalLineItemId: "line-a",
+            sku: "SKU-A",
+            productVariantId: 101,
+            quantity: 3,
+            unitRetailPriceCents: 1200,
+            title: "Product A",
+          },
+        ],
+        shipTo: { country: "US", postalCode: "10001" },
+        totals: {
+          retailSubtotalCents: 3600,
+          shippingPaidCents: 500,
+          taxCents: 0,
+          discountCents: 0,
+          grandTotalCents: 4100,
+          currency: "USD",
+        },
+      },
+    }),
+    source_order_id: "source-42",
+    economics_snapshot_id: null,
+    economics_shipping_quote_snapshot_id: null,
+    economics_warehouse_id: null,
+    economics_currency: null,
+    retail_subtotal_cents: null,
+    wholesale_subtotal_cents: null,
+    shipping_cents: null,
+    economics_insurance_pool_cents: null,
+    fees_cents: null,
+    total_debit_cents: null,
+    pricing_snapshot: null,
+    economics_created_at: null,
+    quote_snapshot_id: null,
+    quote_warehouse_id: null,
+    quote_currency: null,
+    quote_destination_country: null,
+    quote_destination_postal_code: null,
+    quote_package_count: null,
+    base_rate_cents: null,
+    markup_cents: null,
+    quote_insurance_pool_cents: null,
+    dunnage_cents: null,
+    total_shipping_cents: null,
+    quote_payload: null,
+    quote_created_at: null,
+    wallet_ledger_entry_id: null,
+    wallet_ledger_type: null,
+    wallet_ledger_status: null,
+    wallet_ledger_amount_cents: null,
+    wallet_ledger_currency: null,
+    available_balance_after_cents: null,
+    pending_balance_after_cents: null,
+    wallet_ledger_created_at: null,
+    wallet_ledger_settled_at: null,
+    ...overrides,
+  };
+}
+
+function makeTrackingPushRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 301,
+    wms_shipment_id: 888,
+    platform: "ebay",
+    status: "succeeded",
+    carrier: "UPS",
+    tracking_number: "1Z123",
+    shipped_at: now,
+    external_fulfillment_id: "fulfillment-1",
+    attempt_count: "1",
+    retryable: true,
+    last_error_code: null,
+    last_error_message: null,
+    line_items: [],
+    created_at: now,
+    updated_at: now,
+    completed_at: now,
     ...overrides,
   };
 }
