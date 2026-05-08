@@ -97,6 +97,45 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     });
   });
 
+  it("surfaces marketplace cancellation failures in the admin ops overview", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const text = String(sql);
+      if (text.includes("cancellation_status AS key")) {
+        expect(text).toContain("cancellation_status IS NOT NULL");
+        expect(params).toEqual([10]);
+        return {
+          rows: [
+            { key: "marketplace_cancellation_failed", count: "2" },
+            { key: "marketplace_cancelled", count: "1" },
+          ],
+        };
+      }
+      if (text.includes("dropship.dropship_marketplace_tracking_pushes")) {
+        return { rows: [{ key: "failed", count: "1" }] };
+      }
+      return { rows: [] };
+    });
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.getAdminOpsOverview({
+      generatedAt: now,
+      vendorId: 10,
+    });
+
+    expect(result.orderCancellationStatusCounts).toEqual([
+      { key: "marketplace_cancellation_failed", count: 2 },
+      { key: "marketplace_cancelled", count: 1 },
+    ]);
+    expect(result.riskBuckets.find((bucket) => bucket.key === "marketplace_cancellation_failures")).toMatchObject({
+      count: 2,
+      severity: "error",
+    });
+    expect(result.riskBuckets.find((bucket) => bucket.key === "tracking_push_failures")).toMatchObject({
+      count: 1,
+      severity: "error",
+    });
+  });
+
   it("surfaces shipping setup gaps in dogfood readiness", async () => {
     const query = vi.fn(async () => ({
       rows: [makeDogfoodReadinessRow({

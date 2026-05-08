@@ -5995,7 +5995,7 @@ function storeConnectionStatusTone(status: DropshipStoreConnectionLifecycleStatu
 function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
   return (
     <>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <MetricTile
           icon={<Store className="h-4 w-4" />}
           label="Store connections needing attention"
@@ -6015,6 +6015,11 @@ function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
           icon={<Bell className="h-4 w-4" />}
           label="Notification failures"
           value={String(riskCount(overview.riskBuckets, "notification_delivery_failures"))}
+        />
+        <MetricTile
+          icon={<RotateCcw className="h-4 w-4" />}
+          label="Cancellation failures"
+          value={String(riskCount(overview.riskBuckets, "marketplace_cancellation_failures"))}
         />
       </div>
 
@@ -6045,6 +6050,7 @@ function OverviewTab({ overview }: { overview: DropshipAdminOpsOverview }) {
             <StatusCountGroup title="Vendors" counts={overview.vendorStatusCounts} icon={<ShieldAlert className="h-4 w-4" />} />
             <StatusCountGroup title="Store connections" counts={overview.storeConnectionStatusCounts} icon={<Store className="h-4 w-4" />} />
             <StatusCountGroup title="Order intake" counts={overview.orderIntakeStatusCounts} icon={<ClipboardList className="h-4 w-4" />} />
+            <StatusCountGroup title="Marketplace cancellations" counts={overview.orderCancellationStatusCounts} icon={<RotateCcw className="h-4 w-4" />} />
             <StatusCountGroup title="Listing push jobs" counts={overview.listingPushJobStatusCounts} icon={<RefreshCw className="h-4 w-4" />} />
             <StatusCountGroup title="Tracking pushes" counts={overview.trackingPushStatusCounts} icon={<Truck className="h-4 w-4" />} />
             <StatusCountGroup title="Returns" counts={overview.rmaStatusCounts} icon={<RotateCcw className="h-4 w-4" />} />

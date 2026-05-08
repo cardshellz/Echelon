@@ -137,6 +137,7 @@ export interface DropshipAdminOpsOverview {
   vendorStatusCounts: DropshipOpsCount[];
   storeConnectionStatusCounts: DropshipOpsCount[];
   orderIntakeStatusCounts: DropshipOpsCount[];
+  orderCancellationStatusCounts: DropshipOpsCount[];
   listingPushJobStatusCounts: DropshipOpsCount[];
   trackingPushStatusCounts: DropshipOpsCount[];
   rmaStatusCounts: DropshipOpsCount[];
