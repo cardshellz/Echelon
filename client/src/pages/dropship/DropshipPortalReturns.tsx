@@ -118,6 +118,7 @@ export default function DropshipPortalReturns() {
     limit: 50,
   }), [applied]);
   const orderPickerUrl = useMemo(() => buildQueryUrl("/api/dropship/orders", {
+    statuses: "accepted",
     page: 1,
     limit: 50,
   }), []);

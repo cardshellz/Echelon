@@ -97,6 +97,7 @@ interface RmaStatusUpdateRow {
 interface RmaOrderReferenceRow {
   id: number;
   store_connection_id: number;
+  status: DropshipRmaOrderReference["status"];
   oms_order_id: string | number | null;
   normalized_payload: Record<string, unknown> | null;
 }
@@ -205,7 +206,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
 
   async getOrderReference(input: { vendorId: number; intakeId: number }): Promise<DropshipRmaOrderReference | null> {
     const result = await this.dbPool.query<RmaOrderReferenceRow>(
-      `SELECT id, store_connection_id, oms_order_id, normalized_payload
+      `SELECT id, store_connection_id, status, oms_order_id, normalized_payload
        FROM dropship.dropship_order_intake
        WHERE id = $1
          AND vendor_id = $2
@@ -1199,6 +1200,7 @@ function mapRmaOrderReferenceRow(row: RmaOrderReferenceRow): DropshipRmaOrderRef
   return {
     intakeId: row.id,
     storeConnectionId: row.store_connection_id,
+    status: row.status,
     omsOrderId: row.oms_order_id === null ? null : safeInteger(row.oms_order_id, "oms_order_id"),
     lines: mapRmaOrderReferenceLines(row.normalized_payload),
   };

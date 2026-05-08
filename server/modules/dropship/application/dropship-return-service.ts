@@ -7,6 +7,7 @@ import {
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
+import type { DropshipOrderIntakeStatus } from "./dropship-order-intake-service";
 import type {
   DropshipClock,
   DropshipLogEvent,
@@ -239,6 +240,7 @@ export interface DropshipRmaOrderLineReference {
 export interface DropshipRmaOrderReference {
   intakeId: number;
   storeConnectionId: number;
+  status: DropshipOrderIntakeStatus;
   omsOrderId: number | null;
   lines: DropshipRmaOrderLineReference[];
 }
@@ -308,6 +310,7 @@ export class DropshipReturnService {
         intakeId: parsed.intakeId,
       });
     }
+    assertMemberRmaOrderIsAccepted(parsed, orderReference);
     assertMemberRmaItemsMatchOrder(parsed, orderReference);
     return this.createRma({
       ...parsed,
@@ -537,6 +540,23 @@ function parseReturnInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input:
     });
   }
   return result.data;
+}
+
+function assertMemberRmaOrderIsAccepted(
+  input: CreateDropshipMemberRmaInput,
+  orderReference: DropshipRmaOrderReference | null,
+): void {
+  if (!input.intakeId || !orderReference) return;
+  if (orderReference.status === "accepted" && orderReference.omsOrderId !== null) return;
+  throw new DropshipError(
+    "DROPSHIP_RETURN_CREATE_INVALID_INPUT",
+    "RMA intake references must point to an accepted dropship order.",
+    {
+      intakeId: input.intakeId,
+      status: orderReference.status,
+      omsOrderId: orderReference.omsOrderId,
+    },
+  );
 }
 
 function assertMemberRmaItemsMatchOrder(
