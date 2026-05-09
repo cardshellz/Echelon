@@ -57,6 +57,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
       platform: "ebay",
     });
     const environment = resolveEbayEnvironment(credential.config);
+    const marketplaceId = resolveMarketplaceId(credential.config);
     credential = await this.ensureFreshAccessToken(credential, environment);
 
     const lineItems = input.lineItems
@@ -88,6 +89,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
     const response = await this.requestEbay({
       environment,
       credential,
+      marketplaceId,
       path,
       body: payload,
     });
@@ -97,6 +99,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
       rawResult: {
         provider: "ebay",
         environment,
+        marketplaceId,
         externalFulfillmentId: response.fulfillmentId,
         requestPath: path,
       },
@@ -187,6 +190,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
   private async requestEbay(input: {
     environment: EbayEnvironment;
     credential: DropshipMarketplaceStoreCredentials;
+    marketplaceId: string;
     path: string;
     body: unknown;
   }): Promise<{ fulfillmentId: string | null }> {
@@ -200,7 +204,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
             "Content-Type": "application/json",
             Accept: "application/json",
             "Content-Language": "en-US",
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+            "X-EBAY-C-MARKETPLACE-ID": input.marketplaceId,
           },
           body: JSON.stringify(input.body),
         });
@@ -283,6 +287,12 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
 
 function resolveEbayEnvironment(config: Record<string, unknown>): EbayEnvironment {
   return config.environment === "sandbox" ? "sandbox" : "production";
+}
+
+function resolveMarketplaceId(config: Record<string, unknown>): string {
+  return typeof config.marketplaceId === "string" && config.marketplaceId.trim()
+    ? config.marketplaceId.trim()
+    : "EBAY_US";
 }
 
 function isPermanentAuthFailureStatus(status: number): boolean {
