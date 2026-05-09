@@ -108,6 +108,7 @@ interface DogfoodReadinessRow {
   selected_variant_missing_package_profile_count: string | number;
   active_shipping_markup_policy_count: string | number;
   active_shipping_insurance_policy_count: string | number;
+  active_return_policy_count: string | number;
   setup_open_blocker_count: string | number;
   setup_check_open_blocker_count: string | number;
   wallet_status: string | null;
@@ -431,6 +432,7 @@ function dogfoodReadinessSql(): string {
       COALESCE(package_readiness.selected_variant_missing_package_profile_count, 0) AS selected_variant_missing_package_profile_count,
       COALESCE(shipping_policies.active_markup_policy_count, 0) AS active_shipping_markup_policy_count,
       COALESCE(shipping_policies.active_insurance_policy_count, 0) AS active_shipping_insurance_policy_count,
+      COALESCE(return_policies.active_return_policy_count, 0) AS active_return_policy_count,
       COALESCE(setup_blockers.open_blocker_count, 0) AS setup_open_blocker_count,
       COALESCE(setup_checks.open_blocker_count, 0) AS setup_check_open_blocker_count,
       wa.status AS wallet_status,
@@ -594,6 +596,13 @@ function dogfoodReadinessSql(): string {
             AND (ipc.effective_to IS NULL OR ipc.effective_to > now())
         ) AS active_insurance_policy_count
     ) shipping_policies ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS active_return_policy_count
+      FROM dropship.dropship_return_policy_config rpc
+      WHERE rpc.is_active = true
+        AND rpc.effective_from <= now()
+        AND (rpc.effective_to IS NULL OR rpc.effective_to > now())
+    ) return_policies ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS open_blocker_count
       FROM dropship.dropship_setup_blockers sb
@@ -771,6 +780,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
   const selectedVariantMissingPackageProfileCount = toNumber(row.selected_variant_missing_package_profile_count);
   const activeShippingMarkupPolicyCount = toNumber(row.active_shipping_markup_policy_count);
   const activeShippingInsurancePolicyCount = toNumber(row.active_shipping_insurance_policy_count);
+  const activeReturnPolicyCount = toNumber(row.active_return_policy_count);
   const setupOpenBlockerCount = toNumber(row.setup_open_blocker_count) + toNumber(row.setup_check_open_blocker_count);
   const walletAvailableBalanceCents = toNumber(row.available_balance_cents ?? 0);
   const activeFundingMethodCount = toNumber(row.active_funding_method_count);
@@ -798,6 +808,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     selectedVariantMissingPackageProfileCount,
     activeShippingMarkupPolicyCount,
     activeShippingInsurancePolicyCount,
+    activeReturnPolicyCount,
     listingConfigActive,
     setupOpenBlockerCount,
     walletAvailableBalanceCents,
@@ -847,6 +858,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
       selectedVariantMissingPackageProfileCount,
       activeShippingMarkupPolicyCount,
       activeShippingInsurancePolicyCount,
+      activeReturnPolicyCount,
       listingConfigActive,
       setupOpenBlockerCount,
       walletAvailableBalanceCents,
@@ -876,6 +888,7 @@ function buildDogfoodChecks(input: {
   selectedVariantMissingPackageProfileCount: number;
   activeShippingMarkupPolicyCount: number;
   activeShippingInsurancePolicyCount: number;
+  activeReturnPolicyCount: number;
   listingConfigActive: boolean;
   setupOpenBlockerCount: number;
   walletAvailableBalanceCents: number;
@@ -981,6 +994,14 @@ function buildDogfoodChecks(input: {
       message: input.activeShippingInsurancePolicyCount > 0
         ? `${input.activeShippingInsurancePolicyCount} active insurance policy record(s).`
         : "No active insurance policy is configured; quotes cannot use implicit insurance-pool defaults.",
+    },
+    {
+      key: "return_policy",
+      label: "Return policy",
+      status: input.activeReturnPolicyCount > 0 ? "ready" : "blocked",
+      message: input.activeReturnPolicyCount > 0
+        ? `${input.activeReturnPolicyCount} active return policy record(s).`
+        : "No active return policy is configured; RMA windows cannot use implicit defaults.",
     },
     {
       key: "listing_config",

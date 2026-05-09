@@ -197,6 +197,7 @@ export interface DropshipDogfoodReadinessItem {
     selectedVariantMissingPackageProfileCount: number;
     activeShippingMarkupPolicyCount: number;
     activeShippingInsurancePolicyCount: number;
+    activeReturnPolicyCount: number;
     listingConfigActive: boolean;
     setupOpenBlockerCount: number;
     walletAvailableBalanceCents: number;

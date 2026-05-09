@@ -144,6 +144,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
         selected_variant_missing_package_profile_count: "1",
         active_shipping_markup_policy_count: "0",
         active_shipping_insurance_policy_count: "0",
+        active_return_policy_count: "0",
       })],
     }));
     const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
@@ -160,6 +161,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(String(query.mock.calls[0]?.[0])).toContain("c.shipping_config #>> '{dropship,role}'");
     expect(String(query.mock.calls[0]?.[0])).toContain("cc.metadata #>> '{features,dropshipOms}'");
     expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_return_policy_config");
     expect(result.total).toBe(1);
     expect(result.items[0]?.metrics).toMatchObject({
       dropshipOmsChannelId: 7,
@@ -173,6 +175,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       selectedVariantMissingPackageProfileCount: 1,
       activeShippingMarkupPolicyCount: 0,
       activeShippingInsurancePolicyCount: 0,
+      activeReturnPolicyCount: 0,
       activeStripeFundingMethodCount: 1,
       activeUsdcBaseFundingMethodCount: 1,
       autoReloadFundingMethodReady: true,
@@ -196,6 +199,10 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(result.items[0]?.checks.find((check) => check.key === "shipping_insurance_policy")).toMatchObject({
       status: "blocked",
       message: "No active insurance policy is configured; quotes cannot use implicit insurance-pool defaults.",
+    });
+    expect(result.items[0]?.checks.find((check) => check.key === "return_policy")).toMatchObject({
+      status: "blocked",
+      message: "No active return policy is configured; RMA windows cannot use implicit defaults.",
     });
   });
 
@@ -450,6 +457,7 @@ function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
     selected_variant_missing_package_profile_count: "0",
     active_shipping_markup_policy_count: "1",
     active_shipping_insurance_policy_count: "1",
+    active_return_policy_count: "1",
     setup_open_blocker_count: "0",
     setup_check_open_blocker_count: "0",
     wallet_status: "active",

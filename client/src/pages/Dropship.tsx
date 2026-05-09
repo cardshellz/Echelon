@@ -4079,6 +4079,8 @@ function DogfoodReadinessTable({
                   </div>
                   <div className="text-xs text-muted-foreground">
                     Markup {item.metrics.activeShippingMarkupPolicyCount} / Insurance {item.metrics.activeShippingInsurancePolicyCount}
+                    {" / "}
+                    Returns {item.metrics.activeReturnPolicyCount}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     OMS {item.metrics.dropshipOmsChannelCount === 1 ? item.metrics.dropshipOmsChannelId : `${item.metrics.dropshipOmsChannelCount} marked`}
