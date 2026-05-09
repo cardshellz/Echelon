@@ -285,7 +285,11 @@ describe("DropshipOpsSurfaceService", () => {
     expect(checks.find((check) => check.key === "oauth_state_signing")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "ebay_oauth")).toMatchObject({
       status: "blocked",
-      requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+      requiredEnv: [
+        "DROPSHIP_EBAY_CLIENT_ID or EBAY_CLIENT_ID",
+        "DROPSHIP_EBAY_CLIENT_SECRET or EBAY_CLIENT_SECRET",
+        "EBAY_VENDOR_RUNAME or EBAY_RUNAME",
+      ],
     });
     expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({ status: "blocked" });
@@ -324,6 +328,39 @@ describe("DropshipOpsSurfaceService", () => {
       requiredEnv: ["SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM recommended"],
     });
     expect(JSON.stringify(checks)).not.toContain("smtp-secret");
+  });
+
+  it("accepts dropship-specific marketplace OAuth environment aliases for launch readiness", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      ...launchReadyEnv,
+      DROPSHIP_EBAY_CLIENT_ID: "dropship-ebay-client-id",
+      DROPSHIP_EBAY_CLIENT_SECRET: "dropship-ebay-client-secret",
+      DROPSHIP_SHOPIFY_API_KEY: "dropship-shopify-api-key",
+      DROPSHIP_SHOPIFY_API_SECRET: "dropship-shopify-api-secret",
+      EBAY_CLIENT_ID: undefined,
+      EBAY_CLIENT_SECRET: undefined,
+      SHOPIFY_API_KEY: undefined,
+      SHOPIFY_API_SECRET: undefined,
+    });
+
+    expect(checks.find((check) => check.key === "ebay_oauth")).toMatchObject({
+      status: "ready",
+      requiredEnv: [
+        "DROPSHIP_EBAY_CLIENT_ID or EBAY_CLIENT_ID",
+        "DROPSHIP_EBAY_CLIENT_SECRET or EBAY_CLIENT_SECRET",
+        "EBAY_VENDOR_RUNAME or EBAY_RUNAME",
+      ],
+    });
+    expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({
+      status: "ready",
+      requiredEnv: [
+        "DROPSHIP_SHOPIFY_API_KEY or SHOPIFY_API_KEY",
+        "DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
+        "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI",
+      ],
+    });
+    expect(JSON.stringify(checks)).not.toContain("dropship-ebay-client-secret");
+    expect(JSON.stringify(checks)).not.toContain("dropship-shopify-api-secret");
   });
 
   it("builds an explicit launch gate from system and vendor readiness", () => {
