@@ -663,7 +663,7 @@ function buildShopifyOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadiness
 }
 
 function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const configured = firstConfiguredEnv(env, [
+  const baseUrlConfigured = firstConfiguredEnv(env, [
     "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL",
     "DROPSHIP_PUBLIC_BASE_URL",
     "DROPSHIP_API_BASE_URL",
@@ -672,8 +672,9 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
   ]);
   const requiredEnv = [
     "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL or DROPSHIP_PUBLIC_BASE_URL or DROPSHIP_API_BASE_URL or APP_BASE_URL or PUBLIC_APP_URL",
+    "DROPSHIP_SHOPIFY_WEBHOOK_SECRET or SHOPIFY_WEBHOOK_SECRET or DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
   ];
-  if (!configured) {
+  if (!baseUrlConfigured) {
     return {
       key: "shopify_webhook_subscriptions",
       label: "Shopify webhook subscriptions",
@@ -683,13 +684,29 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
     };
   }
 
-  const value = env[configured]?.trim() ?? "";
+  const value = env[baseUrlConfigured]?.trim() ?? "";
   if (!isValidHttpsUrl(value)) {
     return {
       key: "shopify_webhook_subscriptions",
       label: "Shopify webhook subscriptions",
       status: "blocked",
-      message: `${configured} must be a valid HTTPS URL.`,
+      message: `${baseUrlConfigured} must be a valid HTTPS URL.`,
+      requiredEnv,
+    };
+  }
+
+  const secretConfigured = firstConfiguredEnv(env, [
+    "DROPSHIP_SHOPIFY_WEBHOOK_SECRET",
+    "SHOPIFY_WEBHOOK_SECRET",
+    "DROPSHIP_SHOPIFY_API_SECRET",
+    "SHOPIFY_API_SECRET",
+  ]);
+  if (!secretConfigured) {
+    return {
+      key: "shopify_webhook_subscriptions",
+      label: "Shopify webhook subscriptions",
+      status: "blocked",
+      message: "Shopify order intake webhooks require an HMAC verification secret.",
       requiredEnv,
     };
   }
@@ -698,7 +715,7 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
     key: "shopify_webhook_subscriptions",
     label: "Shopify webhook subscriptions",
     status: "ready",
-    message: `Shopify order intake webhooks will be registered against ${configured}.`,
+    message: `Shopify order intake webhooks will be registered against ${baseUrlConfigured}; HMAC verification is configured through ${secretConfigured}.`,
     requiredEnv,
   };
 }

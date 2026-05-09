@@ -21,6 +21,7 @@ export function resolveShopifyDropshipWebhookSecrets(env: NodeJS.ProcessEnv = pr
   const candidates = [
     env.DROPSHIP_SHOPIFY_WEBHOOK_SECRET,
     env.SHOPIFY_WEBHOOK_SECRET,
+    env.DROPSHIP_SHOPIFY_API_SECRET,
     env.SHOPIFY_API_SECRET,
   ];
   return Array.from(new Set(
