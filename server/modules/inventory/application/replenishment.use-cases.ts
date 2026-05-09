@@ -507,6 +507,24 @@ export class ReplenishmentUseCases {
     }
 
     const movedBaseUnits = await this.db.transaction(async (tx: any) => {
+      const lockedTaskResult = await tx.execute(sql`
+        SELECT *
+        FROM inventory.replen_tasks
+        WHERE id = ${taskId}
+        FOR UPDATE
+      `);
+
+      const lockedTask = lockedTaskResult.rows?.[0];
+      if (!lockedTask) {
+        throw new Error(`Replen task ${taskId} not found`);
+      }
+
+      if (!["pending", "assigned", "in_progress"].includes(lockedTask.status)) {
+        throw new Error(
+          `Replen task ${taskId} cannot be executed (status: ${lockedTask.status})`,
+        );
+      }
+
       let moved = 0;
       const invTx = this.inventoryUseCases.withTx(tx);
 

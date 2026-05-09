@@ -1105,9 +1105,30 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     const touchedChildIds: number[] = [];
     for (const item of parsedItems) {
       const source: any = await db.execute(sql`
-        SELECT id, order_item_id, product_variant_id, from_location_id, box_id, weight_oz
-        FROM wms.outbound_shipment_items
-        WHERE id = ${item.sourceShipmentItemId}
+        SELECT
+          osi.id,
+          osi.order_item_id,
+          osi.product_variant_id,
+          -- Planned shipment items may predate picking, so older rows can
+          -- legitimately have no source bin. The pick ledger is the source of
+          -- truth once the picker has selected physical stock.
+          COALESCE(
+            osi.from_location_id,
+            (
+              SELECT it.from_location_id
+              FROM inventory.inventory_transactions it
+              WHERE it.order_item_id = osi.order_item_id
+                AND it.product_variant_id = osi.product_variant_id
+                AND it.transaction_type = 'pick'
+                AND it.from_location_id IS NOT NULL
+              ORDER BY it.created_at DESC
+              LIMIT 1
+            )
+          ) AS from_location_id,
+          osi.box_id,
+          osi.weight_oz
+        FROM wms.outbound_shipment_items osi
+        WHERE osi.id = ${item.sourceShipmentItemId}
         LIMIT 1
       `);
       const sourceRow = source?.rows?.[0];
@@ -1128,6 +1149,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         await db.execute(sql`
           UPDATE wms.outbound_shipment_items
           SET qty = ${item.qty},
+              from_location_id = COALESCE(from_location_id, ${sourceRow.from_location_id}),
               tracking_id = ${String(shipment.shipmentId)}
           WHERE id = ${item.sourceShipmentItemId}
         `);
@@ -1203,9 +1225,29 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     shipmentId: number,
   ): Promise<any[]> {
     const itemsResult = await db.execute(sql`
-      SELECT id, order_item_id, product_variant_id, qty, from_location_id
-      FROM wms.outbound_shipment_items
-      WHERE shipment_id = ${shipmentId}
+      SELECT
+        osi.id,
+        osi.order_item_id,
+        osi.product_variant_id,
+        osi.qty,
+        -- Re-read through the pick ledger as a backstop for legacy planned
+        -- rows that were created before source-bin backfill existed.
+        COALESCE(
+          osi.from_location_id,
+          (
+            SELECT it.from_location_id
+            FROM inventory.inventory_transactions it
+            WHERE it.order_item_id = osi.order_item_id
+              AND it.product_variant_id = osi.product_variant_id
+              AND it.transaction_type = 'pick'
+              AND it.from_location_id IS NOT NULL
+            ORDER BY it.created_at DESC
+            LIMIT 1
+          )
+        ) AS from_location_id
+      FROM wms.outbound_shipment_items osi
+      WHERE osi.shipment_id = ${shipmentId}
+        AND osi.qty > 0
     `);
     const rows = itemsResult.rows as any[];
     const invalidItems = rows.filter((item) =>

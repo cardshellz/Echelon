@@ -51,6 +51,7 @@ type InventoryCore = {
     orderItemId?: number;
     userId?: string;
   }) => Promise<boolean>;
+  withTx?: (tx: any) => InventoryCore;
 };
 
 type ReplenishmentService = {
@@ -216,10 +217,97 @@ export class PickingUseCases {
       }
     }
 
-    // Atomic status update with WHERE guard on expectedCurrentStatus
-    const item = await this.storage.updateOrderItemStatus(
-      itemId, status as ItemStatus, pickedQuantity, shortReason, beforeItem.status as ItemStatus,
-    );
+    let completedDeductResult:
+      | Awaited<ReturnType<PickingUseCases["_deductInventory"]>>
+      | null = null;
+
+    let item: OrderItem | null = null;
+
+    if (status === "completed" && beforeItem.status !== "completed") {
+      const atomicResult = await this.db.transaction(async (tx: any) => {
+        // Lock the item row before moving inventory so concurrent scanner taps
+        // cannot both deduct the same physical stock. The inventory use case is
+        // bound to this same transaction below, so the item update and ledgered
+        // inventory movement commit or roll back together.
+        const locked = await tx.execute(sql`
+          SELECT status
+          FROM wms.order_items
+          WHERE id = ${itemId}
+          FOR UPDATE
+        `);
+
+        if (!locked.rows?.length) {
+          throw new IntegrityError(`Item ${itemId} not found`);
+        }
+
+        if (locked.rows[0].status === "completed") {
+          return {
+            item: beforeItem,
+            deductResult: null,
+            alreadyCompleted: true,
+          };
+        }
+
+        const txInventoryCore =
+          typeof this.inventoryCore.withTx === "function"
+            ? this.inventoryCore.withTx(tx)
+            : this.inventoryCore;
+
+        const pickedQtyForCompletion = pickedQuantity ?? beforeItem.quantity;
+        const provisionalItem = {
+          ...beforeItem,
+          status: "completed",
+          pickedQuantity: pickedQtyForCompletion,
+          shortReason: shortReason ?? beforeItem.shortReason,
+        } as OrderItem;
+
+        const deductResult = await this._deductInventory(provisionalItem, beforeItem, {
+          warehouseLocationId,
+          userId,
+          inventoryCore: txInventoryCore,
+        });
+
+        if (deductResult.success && !deductResult.noVariant) {
+          await this.backfillPlannedShipmentItemPickLocation(tx, {
+            orderItemId: itemId,
+            productVariantId: deductResult.productVariantId,
+            locationId: deductResult.locationId,
+          });
+        }
+
+        const updates: Record<string, any> = {
+          status,
+          pickedAt: new Date(),
+        };
+        if (pickedQuantity !== undefined) updates.pickedQuantity = pickedQuantity;
+        if (shortReason !== undefined) updates.shortReason = shortReason;
+
+        const [updatedItem] = await tx
+          .update(orderItems)
+          .set(updates)
+          .where(eq(orderItems.id, itemId))
+          .returning();
+
+        return {
+          item: updatedItem as OrderItem,
+          deductResult,
+          alreadyCompleted: false,
+        };
+      });
+
+      if (atomicResult.alreadyCompleted) {
+        console.log(`[Pick] Item ${itemId} completed while waiting for lock - returning success (idempotent)`);
+        return { success: true, item: atomicResult.item as any, inventory: { deducted: false, systemQtyAfter: 0, locationId: null, locationCode: null, sku: beforeItem.sku, binCountNeeded: false, replen: { triggered: false, taskId: null, taskStatus: null, autoExecuted: false, autoExecutedMoved: null, autoExecutedFailed: false, autoExecuteFailReason: null, stockout: false, sourceLocationCode: null, sourceVariantSku: null, sourceVariantName: null, qtyToMove: null } } };
+      }
+
+      item = atomicResult.item;
+      completedDeductResult = atomicResult.deductResult;
+    } else {
+      // Atomic status update with WHERE guard on expectedCurrentStatus
+      item = await this.storage.updateOrderItemStatus(
+        itemId, status as ItemStatus, pickedQuantity, shortReason, beforeItem.status as ItemStatus,
+      );
+    }
 
     if (!item) {
       // With no status guard on completed transitions, this should only happen
@@ -287,7 +375,7 @@ export class PickingUseCases {
 
     // If item was just completed, deduct inventory
     if (status === "completed" && beforeItem.status !== "completed") {
-      const deductResult = await this._deductInventory(item, beforeItem, {
+      const deductResult = completedDeductResult ?? await this._deductInventory(item, beforeItem, {
         warehouseLocationId,
         userId,
       });
@@ -427,11 +515,33 @@ export class PickingUseCases {
     return { success: true, item, inventory: inventoryCtx };
   }
 
+  /**
+   * Planned shipment rows can be created before a picker has chosen the real
+   * source bin. Once the pick ledger records the actual location, carry that
+   * location onto any still-unresolved shipment items so downstream package /
+   * ShipStation processing does not treat the early placeholder as final truth.
+   */
+  private async backfillPlannedShipmentItemPickLocation(
+    db: Pick<DrizzleDb, "execute">,
+    params: { orderItemId: number; productVariantId: number; locationId: number },
+  ): Promise<void> {
+    await db.execute(sql`
+      UPDATE wms.outbound_shipment_items osi
+      SET from_location_id = ${params.locationId}
+      FROM wms.outbound_shipments os
+      WHERE osi.shipment_id = os.id
+        AND osi.order_item_id = ${params.orderItemId}
+        AND osi.product_variant_id = ${params.productVariantId}
+        AND osi.from_location_id IS NULL
+        AND os.status IN ('planned', 'queued')
+    `);
+  }
+
   /** Internal: resolve pick location and deduct inventory via inventoryCore. */
   private async _deductInventory(
     item: OrderItem,
     beforeItem: OrderItem,
-    opts: { warehouseLocationId?: number; userId?: string },
+    opts: { warehouseLocationId?: number; userId?: string; inventoryCore?: InventoryCore },
   ): Promise<
     | { success: true; noVariant?: undefined; productVariantId: number; locationId: number; locationCode: string; systemQtyAfter: number }
     | { success: false; error: string; message: string; productVariantId: number; locationId: number | null; locationCode: string | null; systemQty: number }
@@ -527,7 +637,9 @@ export class PickingUseCases {
       console.log(`[Inventory] Partial pick: ${actualPickQty} of ${pickedQty} requested for ${productVariant.sku} at location ${pickLocationId}`);
     }
 
-    const picked = await this.inventoryCore.pickItem({
+    const inventoryCore = opts.inventoryCore ?? this.inventoryCore;
+
+    const picked = await inventoryCore.pickItem({
       productVariantId: productVariant.id,
       warehouseLocationId: pickLocationId,
       qty: actualPickQty,
@@ -551,7 +663,7 @@ export class PickingUseCases {
     }
 
     // Read back updated level for accurate systemQtyAfter
-    const updatedLevel = await this.inventoryCore.getLevel(productVariant.id, pickLocationId);
+    const updatedLevel = await inventoryCore.getLevel(productVariant.id, pickLocationId);
     const loc = allLocations.find(l => l.id === pickLocationId);
 
     console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
