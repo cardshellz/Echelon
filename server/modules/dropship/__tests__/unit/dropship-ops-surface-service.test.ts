@@ -359,8 +359,30 @@ describe("DropshipOpsSurfaceService", () => {
         "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI",
       ],
     });
+    expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({
+      status: "ready",
+      requiredEnv: [
+        "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL or DROPSHIP_PUBLIC_BASE_URL or DROPSHIP_API_BASE_URL or APP_BASE_URL or PUBLIC_APP_URL",
+        "DROPSHIP_SHOPIFY_WEBHOOK_SECRET or SHOPIFY_WEBHOOK_SECRET or DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
+      ],
+    });
     expect(JSON.stringify(checks)).not.toContain("dropship-ebay-client-secret");
     expect(JSON.stringify(checks)).not.toContain("dropship-shopify-api-secret");
+  });
+
+  it("blocks Shopify webhook readiness when a public URL exists without an HMAC secret", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      DROPSHIP_PUBLIC_BASE_URL: "https://cardshellz.test",
+    });
+
+    expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({
+      status: "blocked",
+      message: "Shopify order intake webhooks require an HMAC verification secret.",
+      requiredEnv: [
+        "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL or DROPSHIP_PUBLIC_BASE_URL or DROPSHIP_API_BASE_URL or APP_BASE_URL or PUBLIC_APP_URL",
+        "DROPSHIP_SHOPIFY_WEBHOOK_SECRET or SHOPIFY_WEBHOOK_SECRET or DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
+      ],
+    });
   });
 
   it("builds an explicit launch gate from system and vendor readiness", () => {
