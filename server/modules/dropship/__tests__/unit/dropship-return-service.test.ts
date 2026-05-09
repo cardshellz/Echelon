@@ -42,6 +42,7 @@ describe("DropshipReturnService", () => {
 
   it("creates member-scoped RMAs without trusting vendor or policy fields from the portal", async () => {
     const repository = new FakeReturnRepository();
+    repository.activePolicy = makeReturnPolicy();
     const logs: DropshipLogEvent[] = [];
     const service = makeService(repository, logs);
 
@@ -104,8 +105,30 @@ describe("DropshipReturnService", () => {
     });
   });
 
+  it("rejects member RMAs when no active return policy is configured", async () => {
+    const repository = new FakeReturnRepository();
+    const service = makeService(repository, []);
+
+    await expect(service.createRmaForMember("member-1", {
+      rmaNumber: "RMA-NO-POLICY",
+      intakeId: 44,
+      items: [{ productVariantId: 20, quantity: 1 }],
+      idempotencyKey: "vendor-rma-no-policy",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_RETURN_POLICY_REQUIRED",
+      context: {
+        vendorId: 10,
+        intakeId: 44,
+        at: now.toISOString(),
+      },
+    });
+    expect(repository.lastPolicyLookupAt).toEqual(now);
+    expect(repository.lastCreateInput?.rmaNumber).not.toBe("RMA-NO-POLICY");
+  });
+
   it("rejects vendor RMA item variants that are not proven by the linked order", async () => {
     const repository = new FakeReturnRepository();
+    repository.activePolicy = makeReturnPolicy();
     const service = makeService(repository, []);
 
     await expect(service.createRmaForMember("member-1", {
@@ -170,6 +193,7 @@ describe("DropshipReturnService", () => {
 
   it("rejects member RMA references outside the return window", async () => {
     const repository = new FakeReturnRepository();
+    repository.activePolicy = makeReturnPolicy();
     repository.orderReference = makeOrderReference({
       acceptedAt: new Date("2026-04-01T18:59:59.999Z"),
     });

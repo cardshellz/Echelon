@@ -1804,7 +1804,7 @@ function ReturnOpsTab() {
         <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Visible open" value={String(rmas.filter((rma) => !returnOpsTerminalStatuses.has(rma.status)).length)} />
         <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Awaiting inspection" value={String(rmas.filter((rma) => rma.status === "received" || rma.status === "inspecting").length)} />
         <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible credited" value={String(rmas.filter((rma) => rma.status === "credited").length)} />
-        <CatalogMetric icon={<History className="h-4 w-4" />} label="Return window" value={`${activeReturnPolicy?.returnWindowDays ?? 30}d`} />
+        <CatalogMetric icon={<History className="h-4 w-4" />} label="Return window" value={activeReturnPolicy ? `${activeReturnPolicy.returnWindowDays}d` : "Not set"} />
       </section>
 
       <ReturnPolicyPanel
@@ -4548,7 +4548,7 @@ function ReturnPolicyPanel({
             <p className="text-sm text-muted-foreground">
               {activePolicy
                 ? `${activePolicy.name}: ${activePolicy.returnWindowDays} days from accepted order. Effective ${formatDateTime(activePolicy.effectiveFrom)}.`
-                : "No active policy. Vendor RMAs use the 30-day fallback."}
+                : "No active policy. Vendor RMA submission is blocked until a policy is configured."}
             </p>
           )}
         </div>
