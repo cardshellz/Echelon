@@ -106,6 +106,97 @@ describe("PgDropshipStoreConnectionRepository", () => {
     ]);
   });
 
+  it("preserves admin order-processing config when reconnecting an unhealthy store", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const release = () => undefined;
+    const existingConfig = {
+      orderProcessing: { defaultWarehouseId: 3 },
+      previousMetadata: { scope: "old" },
+    };
+    const nextConfig = {
+      ...existingConfig,
+      tokenMetadata: { scope: "new" },
+      connectedByMemberId: "member-1",
+    };
+    const query = async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      const sqlText = String(sql);
+
+      if (sqlText.includes("FROM dropship.dropship_store_connections") && sqlText.includes("FOR UPDATE")) {
+        return {
+          rows: [makeStoreConnectionRow({
+            id: 21,
+            status: "needs_reauth",
+            setup_status: "attention_required",
+            config: existingConfig,
+          })],
+        };
+      }
+      if (sqlText.includes("SELECT COUNT(*) AS count")) {
+        return { rows: [{ count: "1" }] };
+      }
+      if (sqlText.includes("UPDATE dropship.dropship_store_connections")) {
+        return {
+          rows: [makeStoreConnectionRow({
+            id: 21,
+            status: "connected",
+            setup_status: "pending",
+            access_token_ref: "new-access-ref",
+            refresh_token_ref: "new-refresh-ref",
+            config: nextConfig,
+          })],
+        };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_store_listing_configs")) {
+        return {
+          rows: [{
+            id: 31,
+            store_connection_id: 21,
+            platform: "ebay",
+            listing_mode: "draft_first",
+            inventory_mode: "managed_quantity_sync",
+            price_mode: "vendor_defined",
+            marketplace_config: {},
+            required_config_keys: [],
+            required_product_fields: [],
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+          }],
+        };
+      }
+      return { rows: [] };
+    };
+    const connect = async () => ({ query, release });
+    const repository = new PgDropshipStoreConnectionRepository({ connect } as unknown as Pool);
+
+    const result = await repository.connectStore({
+      vendorId: 10,
+      platform: "ebay",
+      externalAccountId: "external-ebay",
+      externalDisplayName: "External ebay",
+      shopDomain: null,
+      accessTokenRef: "new-access-ref",
+      refreshTokenRef: "new-refresh-ref",
+      tokenExpiresAt: new Date(now.getTime() + 3600000),
+      tokenRecords: [],
+      config: {
+        tokenMetadata: { scope: "new" },
+        connectedByMemberId: "member-1",
+      },
+      connectedAt: now,
+    });
+
+    const updateCall = queries.find((entry) => entry.sql.includes("UPDATE dropship.dropship_store_connections"));
+    expect(updateCall?.sql).toContain("config = COALESCE(config, '{}'::jsonb) || $9::jsonb");
+    expect(updateCall?.params[8]).toBe(JSON.stringify({
+      tokenMetadata: { scope: "new" },
+      connectedByMemberId: "member-1",
+    }));
+    expect(result.storeConnectionId).toBe(21);
+    expect(result.orderProcessingConfig.defaultWarehouseId).toBe(3);
+  });
+
   it("maps launch readiness from stored platform credentials and setup status", async () => {
     const release = () => undefined;
     const query = async () => ({
