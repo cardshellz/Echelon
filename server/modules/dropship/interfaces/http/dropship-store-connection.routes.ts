@@ -124,6 +124,7 @@ function statusForDropshipStoreConnectionError(code: string): number {
     case "DROPSHIP_STORE_OAUTH_CODE_REQUIRED":
     case "DROPSHIP_INVALID_OAUTH_STATE":
     case "DROPSHIP_STORE_OAUTH_STATE_MISMATCH":
+    case "DROPSHIP_SHOPIFY_HMAC_REQUIRED":
     case "DROPSHIP_SHOPIFY_HMAC_INVALID":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":

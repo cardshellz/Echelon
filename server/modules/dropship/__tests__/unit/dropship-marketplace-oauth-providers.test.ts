@@ -90,4 +90,45 @@ describe("ShopifyDropshipOAuthProvider", () => {
     expect(() => ShopifyDropshipOAuthProvider.fromEnv()).toThrowError(DropshipError);
     expect(() => ShopifyDropshipOAuthProvider.fromEnv()).toThrowError("Shopify OAuth environment variables are missing.");
   });
+
+  it("rejects Shopify OAuth callbacks without an HMAC before exchanging tokens", async () => {
+    const provider = new ShopifyDropshipOAuthProvider({
+      apiKey: "shopify-key",
+      apiSecret: "shopify-secret",
+      redirectUri: "https://cardshellz.io/api/dropship/store-connections/oauth/callback",
+    });
+
+    await expect(provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: "vendor.myshopify.com",
+      query: {
+        code: "auth-code",
+        shop: "vendor.myshopify.com",
+        state: "signed-state",
+      },
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_SHOPIFY_HMAC_REQUIRED",
+    });
+  });
+
+  it("rejects Shopify OAuth callbacks with an invalid HMAC before exchanging tokens", async () => {
+    const provider = new ShopifyDropshipOAuthProvider({
+      apiKey: "shopify-key",
+      apiSecret: "shopify-secret",
+      redirectUri: "https://cardshellz.io/api/dropship/store-connections/oauth/callback",
+    });
+
+    await expect(provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: "vendor.myshopify.com",
+      query: {
+        code: "auth-code",
+        hmac: "bad-signature",
+        shop: "vendor.myshopify.com",
+        state: "signed-state",
+      },
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_SHOPIFY_HMAC_INVALID",
+    });
+  });
 });

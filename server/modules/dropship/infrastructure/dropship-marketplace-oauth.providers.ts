@@ -202,9 +202,7 @@ export class ShopifyDropshipOAuthProvider implements DropshipMarketplaceOAuthPro
         callbackShopDomain: shopDomain,
       });
     }
-    if (input.query.hmac) {
-      verifyShopifyHmac(input.query, this.config.apiSecret);
-    }
+    verifyShopifyHmac(input.query, this.config.apiSecret);
 
     const response = await fetch(`https://${shopDomain}/admin/oauth/access_token`, {
       method: "POST",
@@ -269,7 +267,9 @@ function firstConfiguredProcessEnv(keys: string[]): string | undefined {
 
 function verifyShopifyHmac(query: CompleteOAuthQuery, apiSecret: string): void {
   const hmac = query.hmac;
-  if (!hmac) return;
+  if (!hmac) {
+    throw new DropshipError("DROPSHIP_SHOPIFY_HMAC_REQUIRED", "Shopify OAuth callback signature is required.");
+  }
 
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
