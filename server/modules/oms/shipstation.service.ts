@@ -2487,14 +2487,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       shipping_cents: wmsOrders.shippingCents,
       discount_cents: wmsOrders.discountCents,
       total_cents: wmsOrders.totalCents,
-      non_shipping_total_cents: sql<number>`
-        COALESCE((
-          SELECT SUM(oi.total_price_cents)
-          FROM wms.order_items oi
-          WHERE oi.order_id = ${wmsOrders.id}
-            AND COALESCE(oi.requires_shipping, 1) = 0
-        ), 0)
-      `,
       currency: wmsOrders.currency,
       order_placed_at: wmsOrders.orderPlacedAt,
     })
@@ -2513,6 +2505,22 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     // ─── 3. Load items (WMS only, joined to order_items for pricing) ─
+    // Keep this as a separate raw query instead of an inline drizzle select
+    // expression. Production diagnostics on #57215 showed the inline aggregate
+    // arriving as 0 even while direct SQL returned the correct non-shipping
+    // donation total. The validator needs this value to reconcile ShipStation
+    // shipments that only push shippable lines while the WMS order total also
+    // includes donations, memberships, or other non-shipping items.
+    const nonShippingRows: any = await db.execute(sql`
+      SELECT COALESCE(SUM(oi.total_price_cents), 0)::int AS non_shipping_total_cents
+      FROM wms.order_items oi
+      WHERE oi.order_id = ${orderRow.id}
+        AND COALESCE(oi.requires_shipping, 1) = 0
+    `);
+    orderRow.non_shipping_total_cents = Number(
+      nonShippingRows?.rows?.[0]?.non_shipping_total_cents ?? 0,
+    );
+
     const itemRows = await db.select({
       id: outboundShipmentItems.id,
       order_item_id: outboundShipmentItems.orderItemId,
