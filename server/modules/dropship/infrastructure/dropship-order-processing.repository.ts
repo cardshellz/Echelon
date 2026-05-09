@@ -330,11 +330,10 @@ async function loadIntakeForUpdate(
   return result.rows[0] ?? null;
 }
 
-function claimSkipReason(row: ProcessingIntakeRow, now: Date): string | null {
+function claimSkipReason(row: ProcessingIntakeRow, _now: Date): string | null {
   if (row.status === "payment_hold") {
-    if (row.payment_hold_expires_at && row.payment_hold_expires_at <= now) {
-      return "Payment hold has expired and requires cancellation/ops exception handling.";
-    }
+    // Expired holds must still be claimed so order acceptance can classify the
+    // expiry and mark the intake cancelled through the audited processing path.
     return null;
   }
   if (row.status === "received" || row.status === "retrying") {

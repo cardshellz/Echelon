@@ -452,8 +452,13 @@ export class InventoryLotService {
     productVariantId: number;
     warehouseLocationId: number;
     qtyDelta: number;
+    reservedQtyDelta?: number;
     notes?: string;
   }): Promise<void> {
+    if (params.reservedQtyDelta !== undefined && params.reservedQtyDelta > 0) {
+      throw new Error("adjustLots only supports releasing reserved quantity during adjustments");
+    }
+
     if (params.qtyDelta > 0) {
       // Positive adjustment: create a new lot with zero cost (unknown source)
       await this.createLot({
@@ -471,26 +476,35 @@ export class InventoryLotService {
       );
 
       let remaining = Math.abs(params.qtyDelta);
-      const adjustUpdates: Array<{ lotId: number; take: number }> = [];
+      let reservedReleaseRemaining = Math.abs(params.reservedQtyDelta ?? 0);
+      const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
       for (const lot of lots) {
         if (remaining <= 0) break;
 
-        const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
-        if (available <= 0) continue;
+        const unreservedAvailable = Math.max(0, lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked);
+        const unreservedTake = Math.min(unreservedAvailable, remaining);
+        const reservedTake = Math.min(
+          Math.max(0, lot.qtyReserved),
+          remaining - unreservedTake,
+          reservedReleaseRemaining,
+        );
+        const take = unreservedTake + reservedTake;
+        if (take <= 0) continue;
 
-        const take = Math.min(available, remaining);
-        adjustUpdates.push({ lotId: lot.id, take });
+        adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
         remaining -= take;
+        reservedReleaseRemaining -= reservedTake;
       }
 
       if (adjustUpdates.length > 0) {
         await this.db.execute(sql`
           WITH updates AS (
-            SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int)
+            SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
           )
           UPDATE inventory.inventory_lots AS il
           SET qty_on_hand = il.qty_on_hand - u.take,
-              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+              qty_reserved = il.qty_reserved - u."reservedRelease",
+              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
           FROM updates u
           WHERE il.id = u."lotId"
         `);
