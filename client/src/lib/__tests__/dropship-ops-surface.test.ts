@@ -24,6 +24,8 @@ import {
   buildAdminWalletManualCreditInput,
   buildAdminReturnCreateInput,
   buildAdminReturnInspectionInput,
+  buildAdminReturnPolicyInput,
+  buildAdminReturnPolicyUrl,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
@@ -419,6 +421,33 @@ describe("dropship ops surface client helpers", () => {
       search: "",
       status: "all",
     })).toBe("/api/dropship/admin/returns?statuses=requested%2Cin_transit%2Creceived%2Cinspecting%2Capproved%2Crejected%2Ccredited%2Cclosed&page=1&limit=50");
+    expect(buildAdminReturnPolicyUrl()).toBe("/api/dropship/admin/returns/policy");
+  });
+
+  it("builds admin return policy bodies with bounded return windows", () => {
+    expect(buildAdminReturnPolicyInput({
+      name: " Ops returns ",
+      returnWindowDays: "45",
+      isActive: true,
+      effectiveFrom: "2026-05-01T00:00:00.000Z",
+      effectiveTo: " ",
+      idempotencyKey: "return-policy-45-days",
+    })).toEqual({
+      name: "Ops returns",
+      returnWindowDays: 45,
+      isActive: true,
+      effectiveFrom: "2026-05-01T00:00:00.000Z",
+      effectiveTo: null,
+      idempotencyKey: "return-policy-45-days",
+    });
+    expect(() => buildAdminReturnPolicyInput({
+      name: "Too long",
+      returnWindowDays: "366",
+      isActive: true,
+      effectiveFrom: "",
+      effectiveTo: "",
+      idempotencyKey: "return-policy-too-long",
+    })).toThrow("returnWindowDays must be 365 or fewer.");
   });
 
   it("builds admin return status update bodies with optional audit notes", () => {
