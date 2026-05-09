@@ -445,6 +445,7 @@ function dogfoodReadinessSql(): string {
       COALESCE(notification_prefs.preference_count, 0) AS notification_preference_count
     FROM dropship.dropship_vendors v
     LEFT JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
+      AND sc.status IN ('connected', 'needs_reauth', 'refresh_failed', 'grace_period', 'paused')
     LEFT JOIN dropship.dropship_store_listing_configs slc ON slc.store_connection_id = sc.id
     LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = v.id
     LEFT JOIN dropship.dropship_auto_reload_settings ars ON ars.vendor_id = v.id
