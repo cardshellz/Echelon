@@ -444,18 +444,28 @@ export function validateShipmentForPush(
   
   const expectedTotalExclusive = linesSumCents + nonShippingTotalCents + order.tax_cents + order.shipping_cents;
   const expectedTotalInclusive = linesSumCents + nonShippingTotalCents + order.shipping_cents;
+  const totalMismatchContext = {
+    linesSumCents,
+    nonShippingTotalCents,
+    shippedUnitCount,
+    tax: order.tax_cents,
+    shipping: order.shipping_cents,
+    expectedTotalExclusive,
+    expectedTotalInclusive,
+    actualTotalCents: order.total_cents,
+  };
 
   const matchesExclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, roundingToleranceUnits, 5);
   const matchesInclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, roundingToleranceUnits, 5);
 
   if (!matchesExclusive && !matchesInclusive) {
     throw new ShipStationPushError(
-      "expected total_cents (lines + shipping + optional tax) does not match actual order.total_cents within tolerance",
+      `expected total_cents (lines + shipping + optional tax) does not match actual order.total_cents within tolerance ${JSON.stringify(totalMismatchContext)}`,
       {
         code: SS_PUSH_INVALID_SHIPMENT,
         shipmentId,
         field: "order.total_cents",
-        value: { linesSumCents, nonShippingTotalCents, shippedUnitCount, tax: order.tax_cents, shipping: order.shipping_cents, expectedTotalExclusive, expectedTotalInclusive, actualTotalCents: order.total_cents },
+        value: totalMismatchContext,
       },
     );
   }

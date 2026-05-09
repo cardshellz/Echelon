@@ -148,6 +148,23 @@ describe("validateShipmentForPush :: happy path", () => {
     ).not.toThrow();
   });
 
+  it("accepts #57215 after donation discount allocations are corrected", () => {
+    expect(() =>
+      validateShipmentForPush(
+        okShipment({ id: 734 }),
+        okOrder({
+          total_cents: 47378,
+          shipping_cents: 0,
+          tax_cents: 0,
+          non_shipping_total_cents: 100,
+        }),
+        [
+          okItem({ id: 304098, unit_price_cents: 7880, qty: 6 }),
+        ],
+      ),
+    ).not.toThrow();
+  });
+
   it("accepts multiple valid lines with sum matching total_cents", () => {
     expect(() =>
       validateShipmentForPush(
