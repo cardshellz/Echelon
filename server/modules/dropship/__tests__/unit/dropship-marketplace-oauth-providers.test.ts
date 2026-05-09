@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { createHmac } from "crypto";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import {
   EbayDropshipOAuthProvider,
@@ -10,6 +11,7 @@ const ORIGINAL_ENV = { ...process.env };
 describe("EbayDropshipOAuthProvider", () => {
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
+    vi.restoreAllMocks();
   });
 
   it("uses dropship-specific OAuth client aliases when building eBay consent URLs", () => {
@@ -52,6 +54,7 @@ describe("EbayDropshipOAuthProvider", () => {
 describe("ShopifyDropshipOAuthProvider", () => {
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
+    vi.restoreAllMocks();
   });
 
   it("uses dropship-specific OAuth client aliases when building Shopify consent URLs", () => {
@@ -131,4 +134,58 @@ describe("ShopifyDropshipOAuthProvider", () => {
       code: "DROPSHIP_SHOPIFY_HMAC_INVALID",
     });
   });
+
+  it("accepts Shopify OAuth callbacks signed over the complete provider query", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({
+        access_token: "shopify-access-token",
+        scope: "read_orders,write_orders",
+      }), { status: 200 }),
+    );
+    const provider = new ShopifyDropshipOAuthProvider({
+      apiKey: "shopify-key",
+      apiSecret: "shopify-secret",
+      redirectUri: "https://cardshellz.io/api/dropship/store-connections/oauth/callback",
+    });
+    const signedQuery = {
+      code: "auth-code",
+      host: "admin.shopify.com/store/vendor",
+      shop: "vendor.myshopify.com",
+      state: "signed-state",
+      timestamp: "1777982400",
+    };
+    const hmac = signShopifyOAuthQuery(signedQuery, "shopify-secret");
+
+    const result = await provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: "vendor.myshopify.com",
+      query: {
+        ...signedQuery,
+        hmac,
+      },
+    });
+
+    expect(result).toMatchObject({
+      accessToken: "shopify-access-token",
+      refreshToken: null,
+      externalAccountId: "vendor.myshopify.com",
+      externalDisplayName: "vendor.myshopify.com",
+      tokenMetadata: {
+        provider: "shopify",
+        scope: "read_orders,write_orders",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://vendor.myshopify.com/admin/oauth/access_token",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 });
+
+function signShopifyOAuthQuery(query: Record<string, string>, apiSecret: string): string {
+  const message = Object.entries(query)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  return createHmac("sha256", apiSecret).update(message).digest("hex");
+}
