@@ -269,6 +269,23 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(result.total).toBe(1);
   });
 
+  it("excludes disconnected historical store connections from dogfood readiness rows", async () => {
+    const query = vi.fn(async () => ({
+      rows: [makeDogfoodReadinessRow()],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    await repository.listDogfoodReadiness({
+      generatedAt: now,
+      page: 1,
+      limit: 50,
+    });
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("LEFT JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id");
+    expect(sql).toContain("AND sc.status IN ('connected', 'needs_reauth', 'refresh_failed', 'grace_period', 'paused')");
+  });
+
   it("blocks dogfood readiness when launch wallet and auto-reload funding are not usable", async () => {
     const query = vi.fn(async () => ({
       rows: [makeDogfoodReadinessRow({
