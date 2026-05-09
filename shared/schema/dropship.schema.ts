@@ -1039,6 +1039,20 @@ export const dropshipOrderEconomicsSnapshots = dropshipSchema.table("dropship_or
   check("dropship_order_econ_nonnegative_chk", sql`${table.retailSubtotalCents} >= 0 AND ${table.wholesaleSubtotalCents} >= 0 AND ${table.shippingCents} >= 0 AND ${table.totalDebitCents} >= 0`),
 ]);
 
+export const dropshipReturnPolicyConfig = dropshipSchema.table("dropship_return_policy_config", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  name: varchar("name", { length: 120 }).notNull(),
+  returnWindowDays: integer("return_window_days").notNull().default(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS),
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: timestamp("effective_from", { withTimezone: true }).defaultNow().notNull(),
+  effectiveTo: timestamp("effective_to", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index("dropship_return_policy_active_idx").on(table.isActive, table.effectiveFrom),
+  check("dropship_return_policy_window_chk", sql`${table.returnWindowDays} > 0 AND ${table.returnWindowDays} <= 365`),
+  check("dropship_return_policy_effective_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
+]);
+
 export const dropshipRmas = dropshipSchema.table("dropship_rmas", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   rmaNumber: varchar("rma_number", { length: 80 }).notNull(),
@@ -1393,6 +1407,10 @@ export type DropshipOrderIntake = typeof dropshipOrderIntake.$inferSelect;
 export const insertDropshipOrderEconomicsSnapshotSchema = createInsertSchema(dropshipOrderEconomicsSnapshots).omit(omitIdCreated);
 export type InsertDropshipOrderEconomicsSnapshot = z.infer<typeof insertDropshipOrderEconomicsSnapshotSchema>;
 export type DropshipOrderEconomicsSnapshot = typeof dropshipOrderEconomicsSnapshots.$inferSelect;
+
+export const insertDropshipReturnPolicyConfigSchema = createInsertSchema(dropshipReturnPolicyConfig).omit(omitIdCreated);
+export type InsertDropshipReturnPolicyConfig = z.infer<typeof insertDropshipReturnPolicyConfigSchema>;
+export type DropshipReturnPolicyConfig = typeof dropshipReturnPolicyConfig.$inferSelect;
 
 export const insertDropshipRmaSchema = createInsertSchema(dropshipRmas).omit({
   id: true,

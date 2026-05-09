@@ -66,6 +66,32 @@ export function registerDropshipReturnRoutes(
     }
   });
 
+  app.get("/api/dropship/admin/returns/policy", requirePermission("dropship", "view"), async (_req, res) => {
+    try {
+      const policy = await service.getActiveReturnPolicy();
+      return res.json({ policy });
+    } catch (error) {
+      return sendDropshipReturnError(res, error);
+    }
+  });
+
+  app.post(
+    "/api/dropship/admin/returns/policies",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.createReturnPolicy({
+          ...req.body,
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.status(result.idempotentReplay ? 200 : 201).json(result);
+      } catch (error) {
+        return sendDropshipReturnError(res, error);
+      }
+    },
+  );
+
   app.post("/api/dropship/admin/returns", requirePermission("dropship", "manage_operations"), async (req, res) => {
     try {
       const result = await service.createRma({
@@ -153,6 +179,7 @@ function statusForDropshipReturnError(code: string): number {
     case "DROPSHIP_RETURN_STATUS_INVALID_INPUT":
     case "DROPSHIP_RETURN_INSPECTION_INVALID_INPUT":
     case "DROPSHIP_RETURN_INVALID_REQUEST":
+    case "DROPSHIP_RETURN_POLICY_INVALID_INPUT":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
@@ -163,10 +190,14 @@ function statusForDropshipReturnError(code: string): number {
     case "DROPSHIP_STORE_CONNECTION_NOT_FOUND":
     case "DROPSHIP_ORDER_INTAKE_NOT_FOUND":
     case "DROPSHIP_RMA_ITEM_NOT_FOUND":
+    case "DROPSHIP_RETURN_POLICY_NOT_FOUND":
       return 404;
     case "DROPSHIP_RMA_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_RMA_STATUS_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_RMA_ALREADY_INSPECTED":
+    case "DROPSHIP_RETURN_WINDOW_EXPIRED":
+    case "DROPSHIP_RETURN_POLICY_IDEMPOTENCY_CONFLICT":
+    case "DROPSHIP_RETURN_POLICY_COMMAND_INCOMPLETE":
       return 409;
     case "DROPSHIP_WALLET_INSUFFICIENT_FUNDS":
       return 402;

@@ -24,6 +24,7 @@ import {
   dropshipWalletLedger,
   dropshipNotificationEvents,
   dropshipRmaInspections,
+  dropshipReturnPolicyConfig,
   dropshipRmas,
   dropshipAuditEvents,
 } from "../schema/dropship.schema";
@@ -68,6 +69,10 @@ const fundingMethodIdentityMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0099_dropship_funding_method_identity.sql"),
   "utf8",
 );
+const returnPolicyConfigMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0105_dropship_return_policy_config.sql"),
+  "utf8",
+);
 const releaseScript = readFileSync(
   resolve(process.cwd(), "scripts/release.sh"),
   "utf8",
@@ -81,6 +86,7 @@ describe("Dropship V2 schema contract", () => {
     expect(DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS).toBe(0);
     expect(migrationSql).toContain("payment_hold_timeout_minutes integer NOT NULL DEFAULT 2880");
     expect(migrationSql).toContain("return_window_days integer NOT NULL DEFAULT 30");
+    expect(returnPolicyConfigMigrationSql).toContain("return_window_days integer NOT NULL DEFAULT 30");
     expect(migrationSql).toContain("fee_bps integer NOT NULL DEFAULT 200");
     expect(migrationSql).not.toMatch(/\b(double precision|real)\b/i);
     expect(migrationSql).toContain("amount_atomic_units numeric(78,0) NOT NULL");
@@ -146,6 +152,9 @@ describe("Dropship V2 schema contract", () => {
     expect(migrationSql).toContain("dropship_rma_fault_chk");
     expect(migrationSql).toContain("dropship_notification_pref_critical_chk");
     expect(migrationSql).toContain("dropship_insurance_bps_chk");
+    expect((dropshipReturnPolicyConfig as any).returnWindowDays.name).toBe("return_window_days");
+    expect(returnPolicyConfigMigrationSql).toContain("dropship_return_policy_config");
+    expect(returnPolicyConfigMigrationSql).toContain("dropship_return_policy_window_chk");
   });
 
   it("keeps return inspection and notification retries idempotent", () => {
