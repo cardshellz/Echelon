@@ -57,6 +57,8 @@ import {
   buildAdminOrderOpsActionInput,
   buildAdminReturnCreateInput,
   buildAdminReturnInspectionInput,
+  buildAdminReturnPolicyInput,
+  buildAdminReturnPolicyUrl,
   buildAdminReturnStatusUpdateInput,
   buildAdminReturnsUrl,
   buildAdminShippingConfigUrl,
@@ -116,6 +118,8 @@ import {
   type DropshipAdminOmsChannelConfigureResponse,
   type DropshipAdminReturnCreateResponse,
   type DropshipAdminReturnInspectionResponse,
+  type DropshipAdminReturnPolicyCreateResponse,
+  type DropshipAdminReturnPolicyResponse,
   type DropshipAdminReturnStatusUpdateResponse,
   type DropshipAdminShippingConfigResponse,
   type DropshipAdminStoreConnectionListItem,
@@ -147,6 +151,7 @@ import {
   type DropshipReturnDetail,
   type DropshipReturnDetailResponse,
   type DropshipReturnFaultCategory,
+  type DropshipReturnPolicyConfig,
   type DropshipRmaInspectionOutcome,
   type DropshipRmaStatus,
   type DropshipTrackingPushStatus,
@@ -236,6 +241,14 @@ interface ReturnCreateFormState {
   returnTrackingNumber: string;
   vendorNotes: string;
   items: ReturnCreateItemFormState[];
+}
+
+interface ReturnPolicyFormState {
+  name: string;
+  returnWindowDays: string;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string;
 }
 
 interface ShippingBoxFormState {
@@ -350,6 +363,14 @@ const emptyReturnCreateForm: ReturnCreateFormState = {
   returnTrackingNumber: "",
   vendorNotes: "",
   items: [{ ...emptyReturnCreateItemForm }],
+};
+
+const emptyReturnPolicyForm: ReturnPolicyFormState = {
+  name: "",
+  returnWindowDays: "30",
+  isActive: true,
+  effectiveFrom: "",
+  effectiveTo: "",
 };
 
 function makeEmptyReturnCreateForm(): ReturnCreateFormState {
@@ -1475,7 +1496,9 @@ function ReturnOpsTab() {
     status: "default" as ReturnOpsStatusFilter,
   });
   const [createForm, setCreateForm] = useState<ReturnCreateFormState>(() => makeEmptyReturnCreateForm());
+  const [policyForm, setPolicyForm] = useState<ReturnPolicyFormState>(emptyReturnPolicyForm);
   const [creatingRma, setCreatingRma] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
   const [statusInputs, setStatusInputs] = useState<Record<number, DropshipRmaStatus>>({});
   const [statusNotes, setStatusNotes] = useState<Record<number, string>>({});
   const [pendingRmaId, setPendingRmaId] = useState<number | null>(null);
@@ -1489,10 +1512,15 @@ function ReturnOpsTab() {
     search: appliedFilters.search,
     status: appliedFilters.status,
   }), [appliedFilters]);
+  const returnPolicyUrl = useMemo(() => buildAdminReturnPolicyUrl(), []);
 
   const returnsQuery = useQuery<DropshipReturnListResponse>({
     queryKey: [returnsUrl],
     queryFn: () => fetchJson<DropshipReturnListResponse>(returnsUrl),
+  });
+  const returnPolicyQuery = useQuery<DropshipAdminReturnPolicyResponse>({
+    queryKey: [returnPolicyUrl],
+    queryFn: () => fetchJson<DropshipAdminReturnPolicyResponse>(returnPolicyUrl),
   });
   const returnDetailQuery = useQuery<DropshipReturnDetailResponse>({
     queryKey: ["dropship-admin-return-detail", selectedInspectionRmaId],
@@ -1504,6 +1532,7 @@ function ReturnOpsTab() {
   });
 
   const rmas = returnsQuery.data?.items ?? [];
+  const activeReturnPolicy = returnPolicyQuery.data?.policy ?? null;
 
   useEffect(() => {
     const rma = returnDetailQuery.data?.rma;
@@ -1520,6 +1549,10 @@ function ReturnOpsTab() {
 
   function updateCreateForm(patch: Partial<ReturnCreateFormState>) {
     setCreateForm((current) => ({ ...current, ...patch }));
+  }
+
+  function updateReturnPolicyForm(patch: Partial<ReturnPolicyFormState>) {
+    setPolicyForm((current) => ({ ...current, ...patch }));
   }
 
   function updateCreateItem(index: number, patch: Partial<ReturnCreateItemFormState>) {
@@ -1640,6 +1673,32 @@ function ReturnOpsTab() {
     }
   }
 
+  async function saveReturnPolicy() {
+    setSavingPolicy(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await postJson<DropshipAdminReturnPolicyCreateResponse>(
+        "/api/dropship/admin/returns/policies",
+        buildAdminReturnPolicyInput({
+          ...policyForm,
+          idempotencyKey: createDropshipIdempotencyKey(`admin-return-policy-${policyForm.returnWindowDays || "window"}`),
+        }),
+      );
+      setMessage(`Return policy ${response.policy.name} set to ${response.policy.returnWindowDays} days.`);
+      setPolicyForm(emptyReturnPolicyForm);
+      await Promise.all([
+        returnPolicyQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+      ]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Dropship return policy save failed.");
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
+
   async function saveReturnInspection() {
     if (!inspectionForm) return;
     const rma = returnDetailQuery.data?.rma;
@@ -1684,11 +1743,14 @@ function ReturnOpsTab() {
 
   return (
     <div className="space-y-5">
-      {(returnsQuery.error || error) && (
+      {(returnsQuery.error || returnPolicyQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")}
+            {error
+              || (returnsQuery.error
+                ? queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")
+                : queryErrorMessage(returnPolicyQuery.error, "Unable to load dropship return policy."))}
           </AlertDescription>
         </Alert>
       )}
@@ -1737,12 +1799,22 @@ function ReturnOpsTab() {
         </div>
       </section>
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <CatalogMetric icon={<RotateCcw className="h-4 w-4" />} label="Matching RMAs" value={String(returnsQuery.data?.total ?? 0)} />
         <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Visible open" value={String(rmas.filter((rma) => !returnOpsTerminalStatuses.has(rma.status)).length)} />
         <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Awaiting inspection" value={String(rmas.filter((rma) => rma.status === "received" || rma.status === "inspecting").length)} />
         <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible credited" value={String(rmas.filter((rma) => rma.status === "credited").length)} />
+        <CatalogMetric icon={<History className="h-4 w-4" />} label="Return window" value={`${activeReturnPolicy?.returnWindowDays ?? 30}d`} />
       </section>
+
+      <ReturnPolicyPanel
+        activePolicy={activeReturnPolicy}
+        form={policyForm}
+        isLoading={returnPolicyQuery.isLoading || returnPolicyQuery.isFetching}
+        isSaving={savingPolicy}
+        onChange={updateReturnPolicyForm}
+        onSave={saveReturnPolicy}
+      />
 
       <ReturnCreatePanel
         form={createForm}
@@ -4437,6 +4509,102 @@ function NotificationEventsTable({
           })}
         </TableBody>
       </Table>
+    </section>
+  );
+}
+
+function ReturnPolicyPanel({
+  activePolicy,
+  form,
+  isLoading,
+  isSaving,
+  onChange,
+  onSave,
+}: {
+  activePolicy: DropshipReturnPolicyConfig | null;
+  form: ReturnPolicyFormState;
+  isLoading: boolean;
+  isSaving: boolean;
+  onChange: (patch: Partial<ReturnPolicyFormState>) => void;
+  onSave: () => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">Return policy</h2>
+            {activePolicy && (
+              <Badge variant="outline" className={activePolicy.isActive ? "border-emerald-200 bg-emerald-50 text-emerald-900" : ""}>
+                {activePolicy.isActive ? "Active" : "Inactive"}
+              </Badge>
+            )}
+          </div>
+          {isLoading ? (
+            <Skeleton className="mt-2 h-4 w-72" />
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {activePolicy
+                ? `${activePolicy.name}: ${activePolicy.returnWindowDays} days from accepted order. Effective ${formatDateTime(activePolicy.effectiveFrom)}.`
+                : "No active policy. Vendor RMAs use the 30-day fallback."}
+            </p>
+          )}
+        </div>
+        <Button
+          type="button"
+          className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+          disabled={isSaving}
+          onClick={onSave}
+        >
+          <Save className={isSaving ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+          Create policy
+        </Button>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <AdminReturnInput
+          label="Policy name"
+          value={form.name}
+          disabled={isSaving}
+          onChange={(value) => onChange({ name: value })}
+        />
+        <AdminReturnInput
+          label="Window days"
+          value={form.returnWindowDays}
+          disabled={isSaving}
+          onChange={(value) => onChange({ returnWindowDays: value })}
+        />
+        <AdminReturnInput
+          label="Effective from"
+          value={form.effectiveFrom}
+          placeholder="Optional ISO date"
+          disabled={isSaving}
+          onChange={(value) => onChange({ effectiveFrom: value })}
+        />
+        <AdminReturnInput
+          label="Effective to"
+          value={form.effectiveTo}
+          placeholder="Optional ISO date"
+          disabled={isSaving}
+          onChange={(value) => onChange({ effectiveTo: value })}
+        />
+        <div>
+          <label className="text-sm font-medium">Status</label>
+          <Select
+            value={form.isActive ? "active" : "inactive"}
+            onValueChange={(value) => onChange({ isActive: value === "active" })}
+            disabled={isSaving}
+          >
+            <SelectTrigger className="mt-2">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="inactive">Inactive</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
     </section>
   );
 }

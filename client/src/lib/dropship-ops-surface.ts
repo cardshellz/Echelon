@@ -1779,6 +1779,34 @@ export interface DropshipReturnListResponse {
   limit: number;
 }
 
+export interface DropshipReturnPolicyConfig {
+  policyId: number;
+  name: string;
+  returnWindowDays: number;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  createdAt: string;
+}
+
+export interface DropshipAdminReturnPolicyResponse {
+  policy: DropshipReturnPolicyConfig | null;
+}
+
+export interface DropshipAdminReturnPolicyInput {
+  name: string;
+  returnWindowDays: number;
+  isActive: boolean;
+  effectiveFrom?: string;
+  effectiveTo: string | null;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminReturnPolicyCreateResponse {
+  policy: DropshipReturnPolicyConfig;
+  idempotentReplay: boolean;
+}
+
 export interface DropshipReturnItem {
   rmaItemId: number;
   rmaId: number;
@@ -2228,6 +2256,10 @@ export function buildAdminReturnsUrl(input: {
   });
 }
 
+export function buildAdminReturnPolicyUrl(): string {
+  return "/api/dropship/admin/returns/policy";
+}
+
 export function buildAdminDogfoodReadinessUrl(input: {
   search: string;
   status: DropshipDogfoodReadinessStatus | "all";
@@ -2615,6 +2647,28 @@ export function buildAdminReturnCreateInput(input: {
     vendorNotes: vendorNotes || null,
     items,
     idempotencyKey,
+  };
+}
+
+export function buildAdminReturnPolicyInput(input: {
+  name: string;
+  returnWindowDays: string;
+  isActive: boolean;
+  effectiveFrom: string;
+  effectiveTo: string;
+  idempotencyKey: string;
+}): DropshipAdminReturnPolicyInput {
+  const returnWindowDays = parsePositiveInteger(input.returnWindowDays, "returnWindowDays");
+  if (returnWindowDays > 365) {
+    throw new Error("returnWindowDays must be 365 or fewer.");
+  }
+  return {
+    name: requiredTrimmedString(input.name, "name", 120),
+    returnWindowDays,
+    isActive: input.isActive,
+    effectiveFrom: input.effectiveFrom.trim() || undefined,
+    effectiveTo: input.effectiveTo.trim() || null,
+    idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
 }
 
