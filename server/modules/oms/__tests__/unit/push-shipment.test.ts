@@ -326,8 +326,9 @@ describe("validateShipmentForPush :: structural violations", () => {
 // responses in the order the code reads them:
 //   1. shipment header
 //   2. order row
-//   3. items list
-//   4. UPDATE wms.outbound_shipments (not awaited for rows, returns empty)
+//   3. non-shipping total aggregate
+//   4. items list
+//   5. UPDATE wms.outbound_shipments (not awaited for rows, returns empty)
 
 interface DbCall {
   kind: "execute";
@@ -409,8 +410,9 @@ describe("pushShipment :: happy path", () => {
     const mock = makeDb([
       { rows: [shipmentRow] }, // 1. shipment
       { rows: [orderRow] }, // 2. order
-      { rows: items }, // 3. items
-      { rows: [] }, // 4. UPDATE
+      { rows: [{ non_shipping_total_cents: 0 }] }, // 3. non-shipping aggregate
+      { rows: items }, // 4. items
+      { rows: [] }, // 5. UPDATE
     ]);
 
     const fetchMock = mockFetchOnceOk({
@@ -427,8 +429,8 @@ describe("pushShipment :: happy path", () => {
     expect(result.shipstationOrderId).toBe(555000);
     expect(result.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
 
-    // 5 db calls: shipment, order, items, channel config, UPDATE.
-    expect(mock.getCallCount()).toBe(5);
+    // 6 db calls: shipment, order, non-shipping aggregate, items, channel config, UPDATE.
+    expect(mock.getCallCount()).toBe(6);
 
     // One fetch call to /orders/createorder.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -468,6 +470,7 @@ describe("pushShipment :: happy path", () => {
     const mock = makeDb([
       { rows: [shipmentRow] },
       { rows: [orderRow] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: items },
       { rows: [] },
     ]);
@@ -499,6 +502,7 @@ describe("pushShipment :: happy path", () => {
     const mock = makeDb([
       { rows: [shipmentRow] },
       { rows: [orderRow] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: [okItem()] },
       { rows: [] },
       { rows: [] },
@@ -533,8 +537,9 @@ describe("pushShipment :: happy path", () => {
     const mock = makeDb([
       { rows: [shipmentRow] }, // 1. shipment (status=voided)
       { rows: [orderRow] },     // 2. order
-      { rows: items },          // 3. items
-      { rows: [] },             // 4. UPDATE
+      { rows: [{ non_shipping_total_cents: 0 }] }, // 3. non-shipping aggregate
+      { rows: items },          // 4. items
+      { rows: [] },             // 5. UPDATE
     ]);
 
     const fetchMock = mockFetchOnceOk({
@@ -554,7 +559,7 @@ describe("pushShipment :: happy path", () => {
     // Same 4-call sequence as a fresh push — voided re-push doesn't
     // add any reads/writes; the single UPDATE simply also NULLs the
     // void columns.
-    expect(mock.getCallCount()).toBe(5);
+    expect(mock.getCallCount()).toBe(6);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Inspect the UPDATE's SQL text: must set status='queued' and must
@@ -562,7 +567,7 @@ describe("pushShipment :: happy path", () => {
     // survive a successful re-label push.
     // The mock stores execute calls in order; index 1 is the UPDATE because
     // index 0 is the channel config SELECT inside resolveShipStationIds.
-    const updateQuery = mock.execute.mock.calls[1][0] as any;
+    const updateQuery = mock.execute.mock.calls[2][0] as any;
     const chunks: unknown[] = updateQuery?.queryChunks ?? [];
     const sqlText = chunks
       .map((c) => {
@@ -591,6 +596,7 @@ describe("pushShipment :: happy path", () => {
     const mock = makeDb([
       { rows: [shipmentRow] },
       { rows: [orderRow] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: items },
       { rows: [] },
     ]);
@@ -666,6 +672,7 @@ describe("pushShipment :: error cases", () => {
     const mock = makeDb([
       { rows: [shipmentRow] },
       { rows: [okOrder()] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: [okItem()] },
       { rows: [] }, // UPDATE
     ]);
@@ -680,7 +687,7 @@ describe("pushShipment :: error cases", () => {
       shipstationOrderId: 42,
     });
     // Five calls fired: we went past the status gate.
-    expect(mock.getCallCount()).toBe(5);
+    expect(mock.getCallCount()).toBe(6);
   });
 
   it("throws when the wms order is not found", async () => {
@@ -703,6 +710,7 @@ describe("pushShipment :: error cases", () => {
     const mock = makeDb([
       { rows: [okShipment()] },
       { rows: [okOrder()] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: [] }, // items missing
     ]);
     const svc = createShipStationService(mock.db);
@@ -720,6 +728,7 @@ describe("pushShipment :: error cases", () => {
     const mock = makeDb([
       { rows: [okShipment()] },
       { rows: [okOrder()] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
       { rows: [okItem()] },
     ]);
     globalThis.fetch = mockFetchOnce500() as any;
@@ -731,7 +740,7 @@ describe("pushShipment :: error cases", () => {
 
     // UPDATE must NOT be called on API failure.
     // Assert exactly 4 database calls occurred (shipment, order, items, channel config).
-    expect(mock.getCallCount()).toBe(4);
+    expect(mock.getCallCount()).toBe(5);
   });
 
   it("rejects invalid shipmentId (zero / negative / float) up front", async () => {
