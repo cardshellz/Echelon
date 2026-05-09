@@ -198,6 +198,10 @@ export interface DropshipStoreConnectionRepository {
   listByVendorId(vendorId: number): Promise<DropshipStoreConnectionProfile[]>;
   listForAdmin(input: ListDropshipAdminStoreConnectionsInput): Promise<DropshipAdminStoreConnectionListResult>;
   countActiveByVendorId(vendorId: number): Promise<number>;
+  hasRepairableConnection(input: {
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+  }): Promise<boolean>;
   connectStore(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
@@ -278,16 +282,14 @@ export class DropshipStoreConnectionService {
   }): Promise<DropshipStoreConnectionOAuthStart> {
     const platform = assertDropshipStorePlatform(input.platform);
     const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
-    const activeConnectionCount = await this.deps.repository.countActiveByVendorId(vendor.vendorId);
-    assertVendorCanConnectStore({
-      vendorStatus: vendor.status,
-      activeConnectionCount,
-      includedConnectionLimit: vendor.includedStoreConnections,
-    });
-
     const shopDomain = platform === "shopify"
       ? normalizeShopifyShopDomain(input.shopDomain ?? "")
       : null;
+    await this.assertCanStartOAuth({
+      vendor,
+      platform,
+    });
+
     const now = this.deps.clock.now();
     const expiresAt = new Date(now.getTime() + DROPSHIP_OAUTH_STATE_TTL_MINUTES * 60 * 1000);
     const state = this.deps.stateSigner.sign({
@@ -336,11 +338,9 @@ export class DropshipStoreConnectionService {
       throw new DropshipError("DROPSHIP_STORE_OAUTH_VENDOR_MISMATCH", "Store authorization state does not match vendor.");
     }
 
-    const activeConnectionCount = await this.deps.repository.countActiveByVendorId(vendor.vendorId);
-    assertVendorCanConnectStore({
-      vendorStatus: vendor.status,
-      activeConnectionCount,
-      includedConnectionLimit: vendor.includedStoreConnections,
+    await this.assertCanStartOAuth({
+      vendor,
+      platform,
     });
 
     const grant = await this.deps.oauthProviders[platform].exchangeCode({
@@ -474,6 +474,39 @@ export class DropshipStoreConnectionService {
     });
 
     return connection;
+  }
+
+  private async assertCanStartOAuth(input: {
+    vendor: DropshipProvisionedVendorProfile;
+    platform: DropshipSupportedStorePlatform;
+  }): Promise<void> {
+    const activeConnectionCount = await this.deps.repository.countActiveByVendorId(input.vendor.vendorId);
+    try {
+      assertVendorCanConnectStore({
+        vendorStatus: input.vendor.status,
+        activeConnectionCount,
+        includedConnectionLimit: input.vendor.includedStoreConnections,
+      });
+    } catch (error) {
+      if (
+        !(error instanceof DropshipError)
+        || error.code !== "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED"
+      ) {
+        throw error;
+      }
+
+      if (activeConnectionCount > input.vendor.includedStoreConnections) {
+        throw error;
+      }
+
+      const canRepairExistingConnection = await this.deps.repository.hasRepairableConnection({
+        vendorId: input.vendor.vendorId,
+        platform: input.platform,
+      });
+      if (!canRepairExistingConnection) {
+        throw error;
+      }
+    }
   }
 
   private async runPostConnectSetup(input: Parameters<DropshipStoreConnectionPostConnectProvider["afterStoreConnected"]>[0]): Promise<void> {
