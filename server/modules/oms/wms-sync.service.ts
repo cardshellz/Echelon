@@ -12,7 +12,14 @@
 import { db } from "../../db";
 import { sql, eq, and } from "drizzle-orm";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
-import { outboundShipmentItems, outboundShipments, wmsOrders, wmsOrderItems } from "@shared/schema";
+import {
+  outboundShipmentItems,
+  outboundShipments,
+  productLocations,
+  warehouseLocations,
+  wmsOrders,
+  wmsOrderItems,
+} from "@shared/schema";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, type ShippingServiceLevel } from "../orders/sort-rank";
@@ -45,6 +52,39 @@ const WMS_SHIPMENT_AT_SYNC = process.env.WMS_SHIPMENT_AT_SYNC === "true";
 // Default false. Requires WMS_SHIPMENT_AT_SYNC=true to work, because
 // pushShipment needs a shipment row to exist.
 const PUSH_FROM_WMS = process.env.PUSH_FROM_WMS === "true";
+
+type WmsBinLocation = { location: string; zone: string };
+
+async function resolvePrimaryBinLocation(
+  database: typeof db,
+  variantId: number,
+): Promise<WmsBinLocation | null> {
+  const [row] = await database
+    .select({
+      code: warehouseLocations.code,
+      warehouseZone: warehouseLocations.zone,
+      productZone: productLocations.zone,
+    })
+    .from(productLocations)
+    .innerJoin(
+      warehouseLocations,
+      eq(productLocations.warehouseLocationId, warehouseLocations.id),
+    )
+    .where(
+      and(
+        eq(productLocations.productVariantId, variantId),
+        eq(productLocations.isPrimary, 1),
+      ),
+    )
+    .limit(1);
+
+  return row
+    ? {
+        location: String(row.code),
+        zone: row.warehouseZone || row.productZone || "U",
+      }
+    : null;
+}
 
 interface WmsSyncServices {
   inventoryCore: any;
@@ -208,18 +248,9 @@ export class WmsSyncService {
 
         if (variantId) {
           try {
-            const res = await db.execute<{ code: string; zone_id: number | null }>(sql`
-              SELECT wl.code, wl.zone_id
-              FROM product_locations pl
-              JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
-              WHERE pl.product_variant_id = ${variantId} AND pl.is_primary = 1
-              LIMIT 1
-            `);
-            if (res.rows.length > 0) {
-              binLocation = { location: String(res.rows[0].code), zone: res.rows[0].zone_id ? String(res.rows[0].zone_id) : "U" };
-            }
-          } catch (err) {
-            console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}`);
+            binLocation = await resolvePrimaryBinLocation(db, variantId);
+          } catch (err: any) {
+            console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
           }
         }
 
@@ -547,21 +578,9 @@ export class WmsSyncService {
       let binLocation: { location: string; zone: string } | null = null;
       if (variantId) {
         try {
-          const res = await db.execute<{ code: string; zone_id: number | null }>(sql`
-            SELECT wl.code, wl.zone_id
-            FROM product_locations pl
-            JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
-            WHERE pl.product_variant_id = ${variantId} AND pl.is_primary = 1
-            LIMIT 1
-          `);
-          if (res.rows.length > 0) {
-            binLocation = {
-              location: String(res.rows[0].code),
-              zone: res.rows[0].zone_id ? String(res.rows[0].zone_id) : "U",
-            };
-          }
-        } catch {
-          console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}`);
+          binLocation = await resolvePrimaryBinLocation(db, variantId);
+        } catch (err: any) {
+          console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
         }
       }
 
@@ -770,17 +789,10 @@ export class WmsSyncService {
         let binLocation: { location: string; zone: string } | null = null;
         if (variantId) {
           try {
-            const res = await db.execute<{ code: string; zone_id: number | null }>(sql`
-              SELECT wl.code, wl.zone_id
-              FROM product_locations pl
-              JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
-              WHERE pl.product_variant_id = ${variantId} AND pl.is_primary = 1
-              LIMIT 1
-            `);
-            if (res.rows.length > 0) {
-              binLocation = { location: String(res.rows[0].code), zone: res.rows[0].zone_id ? String(res.rows[0].zone_id) : "U" };
-            }
-          } catch {}
+            binLocation = await resolvePrimaryBinLocation(db, variantId);
+          } catch (err: any) {
+            console.warn(`[WMS Resync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
+          }
         }
         const itemRequiresShipping = line.requiresShipping !== false;
         newItems.push({

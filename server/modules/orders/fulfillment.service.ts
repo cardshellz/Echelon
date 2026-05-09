@@ -46,6 +46,7 @@ interface InventoryCore {
     shipmentId?: string;
     userId?: string;
   }): Promise<void>;
+  withTx?: (tx: any) => InventoryCore;
 }
 
 interface ChannelSync {
@@ -722,7 +723,12 @@ class FulfillmentService {
    * can share a single transaction boundary.
    */
   private withTx(tx: any): FulfillmentService {
-    return new FulfillmentService(tx, this.inventoryCore, this.channelSync);
+    const inventoryCore =
+      this.inventoryCore && typeof this.inventoryCore.withTx === "function"
+        ? this.inventoryCore.withTx(tx)
+        : this.inventoryCore;
+
+    return new FulfillmentService(tx, inventoryCore, this.channelSync);
   }
 }
 

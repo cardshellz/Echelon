@@ -317,8 +317,10 @@ export class InventoryUseCases {
     cycleCountId?: number;
     userId?: string;
     allowNegative?: boolean;
-  }): Promise<void> {
+  }): Promise<{ orphanedQty: number }> {
     if (params.qtyDelta === 0) throw new Error("qtyDelta must be non-zero");
+
+    let orphanedQty = 0;
 
     await this.db.transaction(async (tx) => {
       const level = await this.storage.upsertInventoryLevel({
@@ -332,7 +334,20 @@ export class InventoryUseCases {
         }
       }
 
-      await this.storage.adjustInventoryLevel(level.id, { variantQty: params.qtyDelta }, tx);
+      // Handle the case where the adjustment reduces on-hand below reserved.
+      // This violates the chk_reserved_lte_onhand database constraint, so we must
+      // explicitly reduce reservedQty and return the orphaned amount for reallocation.
+      const expectedNewQty = level.variantQty + params.qtyDelta;
+      let adjustReserved = 0;
+      if (params.qtyDelta < 0 && expectedNewQty < level.reservedQty) {
+        orphanedQty = level.reservedQty - expectedNewQty;
+        adjustReserved = -orphanedQty;
+      }
+
+      await this.storage.adjustInventoryLevel(level.id, { 
+        variantQty: params.qtyDelta,
+        reservedQty: adjustReserved !== 0 ? adjustReserved : undefined
+      }, tx);
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
@@ -340,6 +355,7 @@ export class InventoryUseCases {
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
           qtyDelta: params.qtyDelta,
+          reservedQtyDelta: adjustReserved !== 0 ? adjustReserved : undefined,
           notes: params.reason,
         });
       }
@@ -364,6 +380,7 @@ export class InventoryUseCases {
     });
 
     this.triggerNotifyChange(params.productVariantId, "adjustment");
+    return { orphanedQty };
   }
 
   // ---------------------------------------------------------------------------
@@ -840,8 +857,23 @@ export class InventoryUseCases {
   // ---------------------------------------------------------------------------
 
   withTx(tx: any): InventoryUseCases {
+    // Drizzle transaction handles do not expose their own `.transaction()`
+    // method. Inventory operations are intentionally written to always enter
+    // `this.db.transaction(...)`, so a transaction-scoped clone needs a small
+    // adapter that reuses the caller's open transaction instead of opening a
+    // nested/independent one. This keeps compound flows such as replenishment
+    // task completion and shipment confirmation atomic with their inventory
+    // movement and ledger rows.
+    const txDb: DrizzleDb = {
+      select: (...args: any[]) => tx.select(...args),
+      update: (...args: any[]) => tx.update(...args),
+      insert: (...args: any[]) => tx.insert(...args),
+      execute: (query: any) => tx.execute(query),
+      transaction: async <T>(fn: (innerTx: any) => Promise<T>) => fn(tx),
+    };
+
     return new InventoryUseCases(
-      tx as DrizzleDb,
+      txDb,
       this.storage,
       this.lotService,
       this.cogsService
