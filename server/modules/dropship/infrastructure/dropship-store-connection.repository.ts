@@ -234,6 +234,149 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     }
   }
 
+  async recordPostConnectSetupSucceeded(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+    completedAt: Date;
+  }): Promise<DropshipStoreConnectionProfile> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await findConnectionByIdForUpdate(client, input.vendorId, input.storeConnectionId);
+      if (!existing) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_FOUND", "Dropship store connection was not found.", {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+        });
+      }
+      if (existing.platform !== input.platform) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_PLATFORM_MISMATCH", "Dropship store connection platform did not match.", {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          expectedPlatform: input.platform,
+          actualPlatform: existing.platform,
+        });
+      }
+
+      await upsertPostConnectSetupCheck(client, {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        status: "passed",
+        severity: "info",
+        message: "Store post-connect setup completed.",
+        details: { platform: input.platform },
+        checkedAt: input.completedAt,
+        resolvedAt: input.completedAt,
+      });
+      const hasOpenBlockers = await hasOpenStoreSetupBlockers(client, input.storeConnectionId);
+      const nextSetupStatus = existing.status !== "connected"
+        ? existing.setup_status
+        : hasOpenBlockers ? "attention_required" : "ready";
+      const updated = await updateStoreSetupStatus(client, {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        setupStatus: nextSetupStatus,
+        updatedAt: input.completedAt,
+      });
+      await recordAuditEvent(client, {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        eventType: "store_post_connect_setup_completed",
+        actor: { actorType: "system", actorId: "dropship_store_connection" },
+        payload: {
+          platform: input.platform,
+          setupStatus: nextSetupStatus,
+        },
+        occurredAt: input.completedAt,
+      });
+
+      await client.query("COMMIT");
+      return mapStoreConnectionRow(updated);
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordPostConnectSetupFailed(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+    errorCode: string;
+    message: string;
+    retryable: boolean;
+    failedAt: Date;
+  }): Promise<DropshipStoreConnectionProfile> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await findConnectionByIdForUpdate(client, input.vendorId, input.storeConnectionId);
+      if (!existing) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_FOUND", "Dropship store connection was not found.", {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+        });
+      }
+      if (existing.platform !== input.platform) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_PLATFORM_MISMATCH", "Dropship store connection platform did not match.", {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          expectedPlatform: input.platform,
+          actualPlatform: existing.platform,
+        });
+      }
+
+      await upsertPostConnectSetupCheck(client, {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        status: "failed",
+        severity: "blocker",
+        message: input.message,
+        details: {
+          platform: input.platform,
+          errorCode: input.errorCode,
+          retryable: input.retryable,
+        },
+        checkedAt: input.failedAt,
+        resolvedAt: null,
+      });
+      const nextSetupStatus = existing.status === "connected"
+        ? "attention_required"
+        : existing.setup_status;
+      const updated = await updateStoreSetupStatus(client, {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        setupStatus: nextSetupStatus,
+        updatedAt: input.failedAt,
+      });
+      await recordAuditEvent(client, {
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        eventType: "store_post_connect_setup_failed",
+        actor: { actorType: "system", actorId: "dropship_store_connection" },
+        severity: "warning",
+        payload: {
+          platform: input.platform,
+          setupStatus: nextSetupStatus,
+          errorCode: input.errorCode,
+          retryable: input.retryable,
+        },
+        occurredAt: input.failedAt,
+      });
+
+      await client.query("COMMIT");
+      return mapStoreConnectionRow(updated);
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async disconnectStore(input: {
     vendorId: number;
     storeConnectionId: number;
@@ -619,6 +762,89 @@ async function updateConnection(
   return mapStoreConnectionRow(requiredRow(result.rows[0], "Dropship store connection update did not return a row."));
 }
 
+async function updateStoreSetupStatus(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    storeConnectionId: number;
+    setupStatus: string;
+    updatedAt: Date;
+  },
+): Promise<StoreConnectionRow> {
+  const result = await client.query<StoreConnectionRow>(
+    `UPDATE dropship.dropship_store_connections
+     SET setup_status = $3,
+         updated_at = $4
+     WHERE id = $1 AND vendor_id = $2
+     RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+               access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
+               disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
+               last_inventory_sync_at, config, created_at, updated_at`,
+    [
+      input.storeConnectionId,
+      input.vendorId,
+      input.setupStatus,
+      input.updatedAt,
+    ],
+  );
+  return requiredRow(result.rows[0], "Dropship store setup status update did not return a row.");
+}
+
+async function upsertPostConnectSetupCheck(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    storeConnectionId: number;
+    status: "passed" | "failed";
+    severity: "info" | "blocker";
+    message: string;
+    details: Record<string, unknown>;
+    checkedAt: Date;
+    resolvedAt: Date | null;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_store_setup_checks
+      (vendor_id, store_connection_id, check_key, status, severity, message, details,
+       last_checked_at, resolved_at, created_at, updated_at)
+     VALUES ($1, $2, 'post_connect_setup', $3, $4, $5, $6::jsonb, $7, $8, $7, $7)
+     ON CONFLICT (store_connection_id, check_key) WHERE store_connection_id IS NOT NULL
+     DO UPDATE SET status = EXCLUDED.status,
+                   severity = EXCLUDED.severity,
+                   message = EXCLUDED.message,
+                   details = EXCLUDED.details,
+                   last_checked_at = EXCLUDED.last_checked_at,
+                   resolved_at = EXCLUDED.resolved_at,
+                   updated_at = EXCLUDED.updated_at`,
+    [
+      input.vendorId,
+      input.storeConnectionId,
+      input.status,
+      input.severity,
+      input.message,
+      JSON.stringify(input.details),
+      input.checkedAt,
+      input.resolvedAt,
+    ],
+  );
+}
+
+async function hasOpenStoreSetupBlockers(
+  client: PoolClient,
+  storeConnectionId: number,
+): Promise<boolean> {
+  const result = await client.query<CountRow>(
+    `SELECT COUNT(*) AS count
+     FROM dropship.dropship_store_setup_checks
+     WHERE store_connection_id = $1
+       AND resolved_at IS NULL
+       AND status <> 'passed'
+       AND severity IN ('blocker','error')`,
+    [storeConnectionId],
+  );
+  return Number(result.rows[0]?.count ?? 0) > 0;
+}
+
 async function replaceTokenRecords(
   client: PoolClient,
   storeConnectionId: number,
@@ -658,6 +884,7 @@ async function recordAuditEvent(
       actorType: "vendor" | "admin" | "system";
       actorId?: string;
     };
+    severity?: "info" | "warning" | "error";
     payload: Record<string, unknown>;
     occurredAt: Date;
   },
@@ -665,7 +892,7 @@ async function recordAuditEvent(
   await client.query(
     `INSERT INTO dropship.dropship_audit_events
       (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
-     VALUES ($1, $2, 'dropship_store_connection', $3, $4, $5, $6, 'info', $7::jsonb, $8)`,
+     VALUES ($1, $2, 'dropship_store_connection', $3, $4, $5, $6, $7, $8::jsonb, $9)`,
     [
       input.vendorId,
       input.storeConnectionId,
@@ -673,6 +900,7 @@ async function recordAuditEvent(
       input.eventType,
       input.actor?.actorType ?? "vendor",
       input.actor?.actorId ?? String(input.vendorId),
+      input.severity ?? "info",
       JSON.stringify(input.payload),
       input.occurredAt,
     ],

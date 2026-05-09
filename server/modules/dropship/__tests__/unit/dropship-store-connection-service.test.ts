@@ -386,6 +386,8 @@ describe("DropshipStoreConnectionService", () => {
     });
 
     expect(result.connection.storeConnectionId).toBe(20);
+    expect(result.connection.setupStatus).toBe("ready");
+    expect(result.connection.launchReady).toBe(true);
     expect(postConnectProvider.calls).toEqual([{
       vendorId: 10,
       storeConnectionId: 20,
@@ -422,6 +424,8 @@ describe("DropshipStoreConnectionService", () => {
     });
 
     expect(result.connection.status).toBe("connected");
+    expect(result.connection.setupStatus).toBe("attention_required");
+    expect(result.connection.launchReady).toBe(false);
     expect(logs).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "DROPSHIP_STORE_CONNECTED" }),
       expect.objectContaining({
@@ -741,6 +745,18 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     return connection;
   }
 
+  async recordPostConnectSetupSucceeded(
+    input: Parameters<DropshipStoreConnectionRepository["recordPostConnectSetupSucceeded"]>[0],
+  ): Promise<DropshipStoreConnectionProfile> {
+    return this.updateSetupStatus(input.storeConnectionId, "ready", input.completedAt);
+  }
+
+  async recordPostConnectSetupFailed(
+    input: Parameters<DropshipStoreConnectionRepository["recordPostConnectSetupFailed"]>[0],
+  ): Promise<DropshipStoreConnectionProfile> {
+    return this.updateSetupStatus(input.storeConnectionId, "attention_required", input.failedAt);
+  }
+
   async disconnectStore(input: Parameters<DropshipStoreConnectionRepository["disconnectStore"]>[0]): Promise<DropshipStoreConnectionProfile> {
     const connection = this.connections.find((item) => item.storeConnectionId === input.storeConnectionId);
     if (!connection) throw new Error("missing fake connection");
@@ -777,6 +793,33 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
 
   async listSetupChecks(): Promise<Record<number, DropshipStoreConnectionSetupCheck[]>> {
     return {};
+  }
+
+  private updateSetupStatus(
+    storeConnectionId: number,
+    setupStatus: DropshipStoreConnectionProfile["setupStatus"],
+    updatedAt: Date,
+  ): DropshipStoreConnectionProfile {
+    const connection = this.connections.find((item) => item.storeConnectionId === storeConnectionId);
+    if (!connection) throw new Error("missing fake connection");
+    const updated = {
+      ...connection,
+      setupStatus,
+      updatedAt,
+    };
+    const launchReady = isDropshipStoreConnectionLaunchReady({
+      platform: updated.platform,
+      status: updated.status,
+      setupStatus: updated.setupStatus,
+      hasAccessToken: updated.hasAccessToken,
+      hasRefreshToken: updated.hasRefreshToken,
+    });
+    const withLaunchReady = {
+      ...updated,
+      launchReady,
+    };
+    this.connections = [withLaunchReady];
+    return withLaunchReady;
   }
 }
 
