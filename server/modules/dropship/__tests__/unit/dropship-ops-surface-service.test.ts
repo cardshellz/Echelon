@@ -705,6 +705,7 @@ function makeDogfoodReadinessItem(
       selectedVariantMissingPackageProfileCount: 0,
       activeShippingMarkupPolicyCount: 1,
       activeShippingInsurancePolicyCount: 1,
+      activeReturnPolicyCount: 1,
       listingConfigActive: true,
       setupOpenBlockerCount: 0,
       walletAvailableBalanceCents: 1000,
