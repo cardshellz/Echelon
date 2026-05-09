@@ -185,6 +185,7 @@ export interface DropshipStoreConnectionPostConnectProvider {
 }
 
 export interface CompleteOAuthQuery {
+  [key: string]: string | undefined;
   platform?: DropshipSupportedStorePlatform;
   code?: string;
   state: string;
