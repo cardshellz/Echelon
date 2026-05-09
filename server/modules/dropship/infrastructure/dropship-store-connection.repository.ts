@@ -739,7 +739,7 @@ async function updateConnection(
          disconnect_reason = NULL,
          disconnected_at = NULL,
          grace_ends_at = NULL,
-         config = $9::jsonb,
+         config = COALESCE(config, '{}'::jsonb) || $9::jsonb,
          updated_at = $10
      WHERE id = $1 AND vendor_id = $2
      RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
