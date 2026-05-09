@@ -67,9 +67,22 @@ describe("PgDropshipStoreWebhookRepairRepository", () => {
     expect(credentialLoader.loadForStoreConnection).not.toHaveBeenCalled();
   });
 
-  it("records a successful webhook repair audit event", async () => {
-    const query = vi.fn(async () => ({ rows: [] }));
-    const pool = { query } as unknown as Pool;
+  it("records a successful webhook repair, clears the setup blocker, and promotes readiness", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      if (sql.includes("SELECT COUNT(*) AS count")) {
+        return { rows: [{ count: "0" }] };
+      }
+      if (sql.includes("UPDATE dropship.dropship_store_connections")) {
+        return { rows: [{ id: 22 }] };
+      }
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const pool = {
+      connect: vi.fn(async () => ({ query, release })),
+    } as unknown as Pool;
     const repository = new PgDropshipStoreWebhookRepairRepository(pool, {
       loadForStoreConnection: vi.fn(),
     });
@@ -84,8 +97,23 @@ describe("PgDropshipStoreWebhookRepairRepository", () => {
       repairedAt,
     });
 
-    expect(String(query.mock.calls[0]?.[0])).toContain("shopify_webhook_subscriptions_repaired");
-    expect(query.mock.calls[0]?.[1]).toEqual([
+    expect(queries.map((entry) => entry.sql)).toEqual(expect.arrayContaining([
+      "BEGIN",
+      expect.stringContaining("dropship.dropship_store_setup_checks"),
+      expect.stringContaining("SELECT COUNT(*) AS count"),
+      expect.stringContaining("UPDATE dropship.dropship_store_connections"),
+      expect.stringContaining("shopify_webhook_subscriptions_repaired"),
+      "COMMIT",
+    ]));
+    const readinessUpdate = queries.find((entry) => entry.sql.includes("UPDATE dropship.dropship_store_connections"));
+    expect(readinessUpdate?.params).toEqual([
+      22,
+      10,
+      "ready",
+      repairedAt,
+    ]);
+    const audit = queries.find((entry) => entry.sql.includes("shopify_webhook_subscriptions_repaired"));
+    expect(audit?.params).toEqual([
       10,
       22,
       "22",
@@ -95,6 +123,45 @@ describe("PgDropshipStoreWebhookRepairRepository", () => {
         shopDomain: "vendor-shop.myshopify.com",
         idempotencyKey: "repair-webhooks-1",
       }),
+      repairedAt,
+    ]);
+    expect(release).toHaveBeenCalled();
+  });
+
+  it("keeps the store attention-required when other blocker checks remain after webhook repair", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      if (sql.includes("SELECT COUNT(*) AS count")) {
+        return { rows: [{ count: "1" }] };
+      }
+      if (sql.includes("UPDATE dropship.dropship_store_connections")) {
+        return { rows: [{ id: 22 }] };
+      }
+      return { rows: [] };
+    });
+    const pool = {
+      connect: vi.fn(async () => ({ query, release: vi.fn() })),
+    } as unknown as Pool;
+    const repository = new PgDropshipStoreWebhookRepairRepository(pool, {
+      loadForStoreConnection: vi.fn(),
+    });
+    const repairedAt = new Date("2026-05-03T23:30:00.000Z");
+
+    await repository.recordShopifyWebhookRepair({
+      vendorId: 10,
+      storeConnectionId: 22,
+      shopDomain: "vendor-shop.myshopify.com",
+      idempotencyKey: "repair-webhooks-1",
+      actor: { actorType: "system" },
+      repairedAt,
+    });
+
+    const readinessUpdate = queries.find((entry) => entry.sql.includes("UPDATE dropship.dropship_store_connections"));
+    expect(readinessUpdate?.params).toEqual([
+      22,
+      10,
+      "attention_required",
       repairedAt,
     ]);
   });
