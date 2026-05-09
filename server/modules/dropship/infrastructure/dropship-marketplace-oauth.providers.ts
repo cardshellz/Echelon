@@ -51,9 +51,9 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
   }) {}
 
   static fromEnv(): EbayDropshipOAuthProvider {
-    const clientId = process.env.EBAY_CLIENT_ID;
-    const clientSecret = process.env.EBAY_CLIENT_SECRET;
-    const ruName = process.env.EBAY_VENDOR_RUNAME || process.env.EBAY_RUNAME;
+    const clientId = firstConfiguredProcessEnv(["DROPSHIP_EBAY_CLIENT_ID", "EBAY_CLIENT_ID"]);
+    const clientSecret = firstConfiguredProcessEnv(["DROPSHIP_EBAY_CLIENT_SECRET", "EBAY_CLIENT_SECRET"]);
+    const ruName = firstConfiguredProcessEnv(["EBAY_VENDOR_RUNAME", "EBAY_RUNAME"]);
     if (!clientId || !clientSecret || !ruName) {
       throw new DropshipError("DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED", "eBay OAuth environment variables are missing.");
     }
@@ -155,9 +155,12 @@ export class ShopifyDropshipOAuthProvider implements DropshipMarketplaceOAuthPro
   }) {}
 
   static fromEnv(): ShopifyDropshipOAuthProvider {
-    const apiKey = process.env.SHOPIFY_API_KEY;
-    const apiSecret = process.env.SHOPIFY_API_SECRET;
-    const redirectUri = process.env.DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI || process.env.SHOPIFY_OAUTH_REDIRECT_URI;
+    const apiKey = firstConfiguredProcessEnv(["DROPSHIP_SHOPIFY_API_KEY", "SHOPIFY_API_KEY"]);
+    const apiSecret = firstConfiguredProcessEnv(["DROPSHIP_SHOPIFY_API_SECRET", "SHOPIFY_API_SECRET"]);
+    const redirectUri = firstConfiguredProcessEnv([
+      "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI",
+      "SHOPIFY_OAUTH_REDIRECT_URI",
+    ]);
     if (!apiKey || !apiSecret || !redirectUri) {
       throw new DropshipError("DROPSHIP_SHOPIFY_OAUTH_NOT_CONFIGURED", "Shopify OAuth environment variables are missing.");
     }
@@ -254,6 +257,14 @@ function requiredString(value: unknown, errorCode: string, field: string): strin
 
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
+}
+
+function firstConfiguredProcessEnv(keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = process.env[key]?.trim();
+    if (value) return value;
+  }
+  return undefined;
 }
 
 function verifyShopifyHmac(query: CompleteOAuthQuery, apiSecret: string): void {

@@ -611,18 +611,19 @@ function buildOAuthStateCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCh
 }
 
 function buildEbayOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const missing = missingEnv(env, ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET"]);
-  const hasRuName = hasEnv(env, "EBAY_VENDOR_RUNAME") || hasEnv(env, "EBAY_RUNAME");
-  if (!hasRuName) {
-    missing.push("EBAY_VENDOR_RUNAME or EBAY_RUNAME");
-  }
+  const requiredEnv = [
+    ["DROPSHIP_EBAY_CLIENT_ID", "EBAY_CLIENT_ID"],
+    ["DROPSHIP_EBAY_CLIENT_SECRET", "EBAY_CLIENT_SECRET"],
+    ["EBAY_VENDOR_RUNAME", "EBAY_RUNAME"],
+  ];
+  const missing = missingEnvGroups(env, requiredEnv);
   if (missing.length > 0) {
     return {
       key: "ebay_oauth",
       label: "eBay OAuth",
       status: "blocked",
       message: `eBay vendor store OAuth is missing ${missing.join(", ")}.`,
-      requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+      requiredEnv: formatEnvGroups(requiredEnv),
     };
   }
 
@@ -631,23 +632,24 @@ function buildEbayOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessChe
     label: "eBay OAuth",
     status: "ready",
     message: `eBay vendor OAuth is configured for ${env.EBAY_ENVIRONMENT === "sandbox" ? "sandbox" : "production"}.`,
-    requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+    requiredEnv: formatEnvGroups(requiredEnv),
   };
 }
 
 function buildShopifyOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const missing = missingEnv(env, ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET"]);
-  const hasRedirectUri = hasEnv(env, "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI") || hasEnv(env, "SHOPIFY_OAUTH_REDIRECT_URI");
-  if (!hasRedirectUri) {
-    missing.push("DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI");
-  }
+  const requiredEnv = [
+    ["DROPSHIP_SHOPIFY_API_KEY", "SHOPIFY_API_KEY"],
+    ["DROPSHIP_SHOPIFY_API_SECRET", "SHOPIFY_API_SECRET"],
+    ["DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI", "SHOPIFY_OAUTH_REDIRECT_URI"],
+  ];
+  const missing = missingEnvGroups(env, requiredEnv);
   if (missing.length > 0) {
     return {
       key: "shopify_oauth",
       label: "Shopify OAuth",
       status: "blocked",
       message: `Shopify vendor store OAuth is missing ${missing.join(", ")}.`,
-      requiredEnv: ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI"],
+      requiredEnv: formatEnvGroups(requiredEnv),
     };
   }
 
@@ -656,7 +658,7 @@ function buildShopifyOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadiness
     label: "Shopify OAuth",
     status: "ready",
     message: "Shopify vendor OAuth is configured.",
-    requiredEnv: ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI"],
+    requiredEnv: formatEnvGroups(requiredEnv),
   };
 }
 
@@ -855,6 +857,20 @@ function firstConfiguredEnv(env: NodeJS.ProcessEnv, keys: string[]): string | nu
 
 function missingEnv(env: NodeJS.ProcessEnv, keys: string[]): string[] {
   return keys.filter((key) => !hasEnv(env, key));
+}
+
+function missingEnvGroups(env: NodeJS.ProcessEnv, groups: string[][]): string[] {
+  return groups
+    .filter((keys) => !keys.some((key) => hasEnv(env, key)))
+    .map(formatEnvGroup);
+}
+
+function formatEnvGroups(groups: string[][]): string[] {
+  return groups.map(formatEnvGroup);
+}
+
+function formatEnvGroup(keys: string[]): string {
+  return keys.join(" or ");
 }
 
 function hasEnv(env: NodeJS.ProcessEnv, key: string): boolean {
