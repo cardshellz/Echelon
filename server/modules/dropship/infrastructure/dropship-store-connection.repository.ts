@@ -9,6 +9,7 @@ import type {
   DropshipStoreConnectionTokenRecord,
 } from "../application/dropship-store-connection-service";
 import {
+  dropshipActiveStoreConnectionStatuses,
   isDropshipStoreConnectionLaunchReady,
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipSupportedStorePlatform,
@@ -72,6 +73,8 @@ interface SetupCheckRow {
 interface CountRow {
   count: string | number;
 }
+
+const ACTIVE_STORE_CONNECTION_STATUSES = [...dropshipActiveStoreConnectionStatuses];
 
 export class PgDropshipStoreConnectionRepository implements DropshipStoreConnectionRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -155,6 +158,18 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     }
   }
 
+  async hasRepairableConnection(input: {
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+  }): Promise<boolean> {
+    const client = await this.dbPool.connect();
+    try {
+      return await hasRepairableConnectionWithClient(client, input.vendorId, input.platform);
+    } finally {
+      client.release();
+    }
+  }
+
   async connectStore(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
@@ -173,8 +188,9 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
       await client.query("BEGIN");
       await lockVendorConnections(client, input.vendorId);
 
+      const existing = await findReusableConnection(client, input.vendorId, input.platform, input.shopDomain);
       const activeCount = await countActiveByVendorIdWithClient(client, input.vendorId);
-      if (activeCount > 0) {
+      if (activeCount > 0 && (activeCount > 1 || !isRepairableActiveConnection(existing))) {
         throw new DropshipError(
           "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
           "Dropship store connection limit has been reached.",
@@ -182,7 +198,6 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
         );
       }
 
-      const existing = await findReusableConnection(client, input.vendorId, input.platform, input.shopDomain);
       const connection = existing
         ? await updateConnection(client, existing.id, input)
         : await insertConnection(client, input);
@@ -401,10 +416,26 @@ async function countActiveByVendorIdWithClient(client: PoolClient, vendorId: num
     `SELECT COUNT(*) AS count
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
-       AND status IN ('connected','grace_period','paused')`,
-    [vendorId],
+       AND status = ANY($2::text[])`,
+    [vendorId, ACTIVE_STORE_CONNECTION_STATUSES],
   );
   return Number(result.rows[0]?.count ?? 0);
+}
+
+async function hasRepairableConnectionWithClient(
+  client: PoolClient,
+  vendorId: number,
+  platform: DropshipSupportedStorePlatform,
+): Promise<boolean> {
+  const result = await client.query<CountRow>(
+    `SELECT COUNT(*) AS count
+     FROM dropship.dropship_store_connections
+     WHERE vendor_id = $1
+       AND platform = $2
+       AND status IN ('needs_reauth','refresh_failed')`,
+    [vendorId, platform],
+  );
+  return Number(result.rows[0]?.count ?? 0) > 0;
 }
 
 function buildAdminStoreConnectionFilters(input: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0]): {
@@ -475,6 +506,10 @@ async function findReusableConnection(
     [vendorId, platform, shopDomain],
   );
   return result.rows[0] ?? null;
+}
+
+function isRepairableActiveConnection(connection: StoreConnectionRow | null): boolean {
+  return connection?.status === "needs_reauth" || connection?.status === "refresh_failed";
 }
 
 async function findConnectionByIdForUpdate(
