@@ -131,6 +131,23 @@ describe("validateShipmentForPush :: happy path", () => {
     ).not.toThrow();
   });
 
+  it("accepts non-shipping totals returned as strings from SQL aggregates", () => {
+    expect(() =>
+      validateShipmentForPush(
+        okShipment(),
+        okOrder({
+          total_cents: 47378,
+          shipping_cents: 0,
+          tax_cents: 0,
+          non_shipping_total_cents: "78" as any,
+        }),
+        [
+          okItem({ id: 1, unit_price_cents: 7883, qty: 6 }),
+        ],
+      ),
+    ).not.toThrow();
+  });
+
   it("accepts multiple valid lines with sum matching total_cents", () => {
     expect(() =>
       validateShipmentForPush(

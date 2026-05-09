@@ -437,8 +437,9 @@ export function validateShipmentForPush(
   );
   const shippedUnitCount = items.reduce((sum, line) => sum + line.qty, 0);
   const roundingToleranceUnits = Math.max(items.length, shippedUnitCount);
-  const nonShippingTotalCents = Number.isInteger(order.non_shipping_total_cents)
-    ? order.non_shipping_total_cents
+  const parsedNonShippingTotalCents = Number(order.non_shipping_total_cents ?? 0);
+  const nonShippingTotalCents = Number.isInteger(parsedNonShippingTotalCents)
+    ? parsedNonShippingTotalCents
     : 0;
   
   const expectedTotalExclusive = linesSumCents + nonShippingTotalCents + order.tax_cents + order.shipping_cents;
