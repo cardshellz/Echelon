@@ -240,6 +240,12 @@ function shopifyTrackingCompany(carrier: string): string {
   return carrier.trim();
 }
 
+type DropshipMarketplaceTrackingPushStatus =
+  | "not_dropship"
+  | "already_succeeded"
+  | "already_processing"
+  | "succeeded";
+
 interface DropshipMarketplaceTrackingServiceHandle {
   pushForOmsOrder(input: {
     omsOrderId: number;
@@ -248,7 +254,7 @@ interface DropshipMarketplaceTrackingServiceHandle {
     trackingNumber: string;
     shippedAt: Date;
     idempotencyKey?: string;
-  }): Promise<{ status: string }>;
+  }): Promise<{ status: DropshipMarketplaceTrackingPushStatus }>;
 }
 
 function isDropshipOmsOrder(order: any): boolean {
@@ -410,7 +416,14 @@ export function createFulfillmentPushService(
     if (result.status === "not_dropship") {
       return null;
     }
-    return result.status === "succeeded" || result.status === "already_succeeded";
+    if (
+      result.status === "succeeded" ||
+      result.status === "already_succeeded" ||
+      result.status === "already_processing"
+    ) {
+      return true;
+    }
+    throw new Error(`Unexpected dropship marketplace tracking status: ${result.status}`);
   }
 
   /**
