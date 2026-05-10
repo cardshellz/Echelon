@@ -289,6 +289,32 @@ describe("eBay tracking push regression (2026-04-14)", () => {
     expect(mockEbayClient.createShippingFulfillment).not.toHaveBeenCalled();
   });
 
+  it("treats an in-flight dropship marketplace tracking push as idempotent", async () => {
+    const dropshipTracking = {
+      pushForOmsOrder: vi.fn(async () => ({ status: "already_processing" })),
+    };
+    const { db } = makeMockDb({
+      order: {
+        ...mockOrder,
+        rawPayload: { dropship: { intakeId: 12, storeConnectionId: 40 } },
+      },
+      channel: { id: CHANNEL_ID, provider: "manual" },
+      lines: mockLines,
+    });
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+    svc.setDropshipMarketplaceTrackingService(dropshipTracking);
+
+    const result = await svc.pushTracking(ORDER_ID);
+
+    expect(result).toBe(true);
+    expect(dropshipTracking.pushForOmsOrder).toHaveBeenCalledWith(expect.objectContaining({
+      omsOrderId: ORDER_ID,
+      carrier: "usps",
+      trackingNumber: TRACKING,
+    }));
+    expect(mockEbayClient.createShippingFulfillment).not.toHaveBeenCalled();
+  });
+
   it("does not invent shippedAt for dropship marketplace tracking", async () => {
     const dropshipTracking = {
       pushForOmsOrder: vi.fn(async () => ({ status: "succeeded" })),
