@@ -19,12 +19,15 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     vi.restoreAllMocks();
   });
 
-  it("posts eBay fulfillment tracking with store-connection credentials", async () => {
-    const credential = makeCredential();
+  it("posts eBay fulfillment tracking with store-connection credentials and marketplace", async () => {
+    const credential = makeCredential({ marketplaceId: "EBAY_GB" });
     const repo = makeCredentialRepo(credential);
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe("https://api.ebay.com/sell/fulfillment/v1/order/ORDER!1/shipping_fulfillment");
-      expect(init.headers).toMatchObject({ Authorization: "Bearer access-token" });
+      expect(init.headers).toMatchObject({
+        Authorization: "Bearer access-token",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB",
+      });
       expect(JSON.parse(String(init.body))).toEqual({
         lineItems: [{ lineItemId: "LINE-1", quantity: 1 }],
         shippedDate: "2026-05-02T10:00:00.000Z",
@@ -58,6 +61,9 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     expect(result).toMatchObject({
       status: "succeeded",
       externalFulfillmentId: "FT-1",
+      rawResult: {
+        marketplaceId: "EBAY_GB",
+      },
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
@@ -384,7 +390,7 @@ describe("ShopifyDropshipMarketplaceTrackingProvider", () => {
   });
 });
 
-function makeCredential(): DropshipMarketplaceStoreCredentials {
+function makeCredential(config: Record<string, unknown> = {}): DropshipMarketplaceStoreCredentials {
   return {
     vendorId: 30,
     storeConnectionId: 40,
@@ -393,7 +399,7 @@ function makeCredential(): DropshipMarketplaceStoreCredentials {
     shopDomain: null,
     externalAccountId: "seller-1",
     externalDisplayName: "Seller One",
-    config: { environment: "production" },
+    config: { environment: "production", ...config },
     accessToken: "access-token",
     accessTokenRef: "access-ref",
     accessTokenExpiresAt: new Date("2099-01-01T00:00:00.000Z"),
