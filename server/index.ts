@@ -122,6 +122,10 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+function schedulersDisabled(): boolean {
+  return process.env.DISABLE_SCHEDULERS === "true";
+}
+
 let warnedMissingShipStationWebhookSecret = false;
 
 function safeCompareSecret(actual: string, expected: string): boolean {
@@ -266,6 +270,11 @@ app.use((req, res, next) => {
  * Replaces the old channelSync.syncAllProducts() scheduled interval.
  */
 function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, dbInstance: any) {
+  if (schedulersDisabled()) {
+    log("Disabled (DISABLE_SCHEDULERS=true)", "echelon-sync");
+    return;
+  }
+
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
 
   async function runSweep() {
@@ -477,7 +486,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       reingestEbayOrder,
     };
 
-    startEbayOrderPolling(services.oms, ebayApiClient);
+    if (!schedulersDisabled()) {
+      startEbayOrderPolling(services.oms, ebayApiClient);
+    } else {
+      log("eBay order polling disabled (DISABLE_SCHEDULERS=true)", "oms");
+    }
 
     // Register eBay order webhook
     const webhookHandler = createEbayOrderWebhookHandler(services.oms, ebayApiClient);
@@ -590,34 +603,44 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     }
   }
 
-  // Start after 2 minutes (let server settle), then every 30 min
-  setTimeout(() => {
-    runEbayReconciliation();
-    setInterval(runEbayReconciliation, RECONCILE_INTERVAL_MS);
-    log("[eBay Reconcile] Scheduled reconciliation started (every 30 min)", "ebay-reconcile");
-  }, 2 * 60 * 1000);
+  if (!schedulersDisabled()) {
+    // Start after 2 minutes (let server settle), then every 30 min
+    setTimeout(() => {
+      runEbayReconciliation();
+      setInterval(runEbayReconciliation, RECONCILE_INTERVAL_MS);
+      log("[eBay Reconcile] Scheduled reconciliation started (every 30 min)", "ebay-reconcile");
+    }, 2 * 60 * 1000);
+  } else {
+    log("[eBay Reconcile] Scheduled reconciliation disabled (DISABLE_SCHEDULERS=true)", "ebay-reconcile");
+  }
 
   // Register ShipStation SHIP_NOTIFY webhook if environment variables are configured (idempotent, non-blocking)
-  setTimeout(async () => {
-    try {
-      const webhookUrl = process.env.SHIPSTATION_WEBHOOK_URL;
-      if (services.shipStation.isConfigured() && webhookUrl) {
-        await services.shipStation.registerWebhook(
-          buildShipStationWebhookTargetUrl(webhookUrl),
-        );
-      } else if (services.shipStation.isConfigured() && !webhookUrl) {
-        console.log(`[ShipStation] Skipping webhook registration - SHIPSTATION_WEBHOOK_URL unset.`);
+  if (!schedulersDisabled()) {
+    setTimeout(async () => {
+      try {
+        const webhookUrl = process.env.SHIPSTATION_WEBHOOK_URL;
+        if (services.shipStation.isConfigured() && webhookUrl) {
+          await services.shipStation.registerWebhook(
+            buildShipStationWebhookTargetUrl(webhookUrl),
+          );
+        } else if (services.shipStation.isConfigured() && !webhookUrl) {
+          console.log(`[ShipStation] Skipping webhook registration - SHIPSTATION_WEBHOOK_URL unset.`);
+        }
+      } catch (err: any) {
+        console.error(`[ShipStation] Webhook registration error: ${err.message}`);
       }
-    } catch (err: any) {
-      console.error(`[ShipStation] Webhook registration error: ${err.message}`);
-    }
-  }, 15_000);
+    }, 15_000);
+  } else {
+    console.log("[ShipStation] Webhook registration disabled (DISABLE_SCHEDULERS=true).");
+  }
 
   // Sync Recovery — unified gap-recovery orchestrator. Runs every 10 min and
   // closes the full pipeline Shopify → shopify_orders → OMS → WMS. Replaces the
   // old one-shot boot-time backfill.
-  if (services.syncRecovery) {
+  if (!schedulersDisabled() && services.syncRecovery) {
     services.syncRecovery.startScheduled(10, 30_000);
+  } else if (schedulersDisabled()) {
+    console.log("[SyncRecovery] Scheduled recovery disabled (DISABLE_SCHEDULERS=true).");
   }
 
   await registerRoutes(httpServer, app);
@@ -670,16 +693,20 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
       initReconciliation(services.oms);
-      startShopifyReconciliation();
-      
-      // Hook up continuous Shopify Bridge listener (M18)
-      startShopifyBridgeListener(db, services.oms);
+      if (!schedulersDisabled()) {
+        startShopifyReconciliation();
 
-      // Start subscription billing scheduler (runs hourly)
-      startBillingScheduler();
+        // Hook up continuous Shopify Bridge listener (M18)
+        startShopifyBridgeListener(db, services.oms);
+
+        // Start subscription billing scheduler (runs hourly)
+        startBillingScheduler();
+      } else {
+        log("Shopify reconciliation, Shopify bridge listener, and billing scheduler disabled (DISABLE_SCHEDULERS=true)", "scheduler");
+      }
 
       // Start webhook DLQ recovery worker
-      if (process.env.DISABLE_SCHEDULERS !== 'true') {
+      if (!schedulersDisabled()) {
         startWebhookRetryWorker();
         startFulfillmentSweeper(db);
         startOmsFlowReconciliationScheduler(db);
@@ -692,7 +719,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   );
 
   // eBay order reconciliation — check for stuck orders every 4 hours
-  if (process.env.DISABLE_SCHEDULERS !== 'true') {
+  if (!schedulersDisabled()) {
     const runEbayReconcile = async () => {
       try {
         // Find eBay OMS orders stuck in "confirmed" for > 2 hours
@@ -764,7 +791,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // OMS<->WMS reconciliation — catches webhook delivery failures where
   // an OMS order got cancelled/shipped/refunded but the WMS row is
   // still sitting in ready/in_progress. Hourly sweep.
-  if (process.env.DISABLE_SCHEDULERS !== 'true') {
+  if (!schedulersDisabled()) {
     const runOmsWmsReconcile = async () => {
       try {
         const result = await db.execute(sql`
@@ -809,7 +836,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // V1 (default, RECONCILE_V2 unset/false): legacy path joins wms.orders →
   // oms.oms_orders and calls ss.markAsShipped / ss.cancelOrder directly.
   // Retained for rollback safety; remove after V2 soak.
-  if (process.env.DISABLE_SCHEDULERS !== 'true') {
+  if (!schedulersDisabled()) {
 
     // ── V2: shipment-based reconcile ────────────────────────────────────
     const runShipStationReconcileV2 = async () => {
