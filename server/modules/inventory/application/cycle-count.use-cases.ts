@@ -457,6 +457,44 @@ export class CycleCountUseCases {
     `);
   }
 
+  /**
+   * Source-empty replen reports create a shipment-blocking placeholder task and
+   * a linked spot count. Once the count is completed, that placeholder should no
+   * longer be the order-level blocker; the remaining short/allocation exception
+   * path owns shipment release.
+   */
+  private async closeLinkedSourceEmptyReplenBlockers(cycleCountId: number): Promise<number> {
+    const note = `Closed by completed linked source-empty cycle count #${cycleCountId}`;
+    const result = await this.db.execute(sql`
+      UPDATE inventory.replen_tasks
+      SET
+        status = 'cancelled',
+        blocks_shipment = FALSE,
+        notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END, ${note})
+      WHERE linked_cycle_count_id = ${cycleCountId}
+        AND exception_reason = 'source_empty'
+        AND blocks_shipment = TRUE
+        AND status NOT IN ('completed', 'cancelled')
+      RETURNING id, to_location_id
+    `);
+
+    const targetLocationIds = new Set<number>();
+    for (const row of result.rows ?? []) {
+      const targetLocationId = Number(row.to_location_id);
+      if (Number.isFinite(targetLocationId)) targetLocationIds.add(targetLocationId);
+    }
+
+    for (const locationId of targetLocationIds) {
+      try {
+        await this.replenishment.checkReplenForLocation(locationId);
+      } catch (err: any) {
+        console.warn(`[Replen] Source-empty cycle count close recheck failed for loc ${locationId}:`, err?.message);
+      }
+    }
+
+    return result.rows?.length ?? 0;
+  }
+
   // =========================================================================
   // Public methods
   // =========================================================================
@@ -1774,7 +1812,9 @@ export class CycleCountUseCases {
     // Unfreeze all locations that were frozen by this cycle count
     await this.unfreezeLocations(id);
 
-    return { success: true };
+    const linkedReplenBlockersClosed = await this.closeLinkedSourceEmptyReplenBlockers(id);
+
+    return { success: true, linkedReplenBlockersClosed };
   }
 
   async delete(id: number) {
