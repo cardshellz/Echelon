@@ -2573,7 +2573,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     })
       .from(outboundShipmentItems)
       .innerJoin(wmsOrderItems, eq(wmsOrderItems.id, outboundShipmentItems.orderItemId))
-      .where(eq(outboundShipmentItems.shipmentId, shipmentId))
+      .where(and(
+        eq(outboundShipmentItems.shipmentId, shipmentId),
+        sql`COALESCE(${wmsOrderItems.requiresShipping}, 1) = 1`,
+      ))
       .orderBy(outboundShipmentItems.id) as WmsShipmentItemRow[];
 
     if (itemRows.length === 0) {
