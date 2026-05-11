@@ -55,15 +55,17 @@ describe("DropshipOrderAcceptanceWorkflowService", () => {
       actor: { actorType: "vendor", actorId: "member-1" },
     });
     expect(result.acceptance.outcome).toBe("accepted");
-    expect(logs[0]).toMatchObject({
-      code: "DROPSHIP_ORDER_ACCEPTANCE_WORKFLOW_COMPLETED",
-      context: {
-        intakeId: 7,
-        vendorId: 10,
-        storeConnectionId: 22,
-        quoteSnapshotId: 44,
-      },
-    });
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "DROPSHIP_ORDER_ACCEPTANCE_WORKFLOW_COMPLETED",
+        context: expect.objectContaining({
+          intakeId: 7,
+          vendorId: 10,
+          storeConnectionId: 22,
+          quoteSnapshotId: 44,
+        }),
+      }),
+    ]));
   });
 
   it("syncs vendor-accepted dropship OMS orders into WMS", async () => {

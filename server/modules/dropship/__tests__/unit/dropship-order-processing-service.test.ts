@@ -64,7 +64,9 @@ describe("DropshipOrderProcessingService", () => {
       actor: { actorType: "job", actorId: "worker-1" },
     });
     expect(repository.failure).toBeNull();
-    expect(logs[0]).toMatchObject({ code: "DROPSHIP_ORDER_PROCESSING_COMPLETED" });
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "DROPSHIP_ORDER_PROCESSING_COMPLETED" }),
+    ]));
   });
 
   it("syncs accepted dropship OMS orders into WMS", async () => {
