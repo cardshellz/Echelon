@@ -80,6 +80,7 @@ export function registerDropshipOpsSurfaceRoutes(
           : parseOptionalStringQuery(req.query.platform),
         search: parseOptionalStringQuery(req.query.search),
         limit: parsePositiveIntegerQuery(req.query.limit, "limit", 10),
+        staleAfterHours: parseOptionalPositiveIntegerQuery(req.query.staleAfterHours, "staleAfterHours"),
       });
       return res.json(result);
     } catch (error) {

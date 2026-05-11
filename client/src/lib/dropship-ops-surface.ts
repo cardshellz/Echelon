@@ -523,6 +523,10 @@ export interface DropshipDogfoodSmokeStage {
   message: string;
   evidence: string[];
   latestAt: string | null;
+  freshness: {
+    status: "fresh" | "stale" | "missing";
+    staleAfterHours: number;
+  };
 }
 
 export interface DropshipDogfoodSmokeCandidate {
@@ -549,6 +553,7 @@ export interface DropshipDogfoodSmokeCandidate {
 
 export interface DropshipDogfoodSmokeResponse {
   generatedAt: string;
+  staleAfterHours: number;
   candidates: DropshipDogfoodSmokeCandidate[];
   total: number;
   readyCandidateCount: number;
@@ -2335,11 +2340,13 @@ export function buildAdminDogfoodSmokeUrl(input: {
   search: string;
   platform: DropshipStorePlatform | "all";
   limit?: number;
+  staleAfterHours?: number;
 }): string {
   return buildQueryUrl("/api/dropship/admin/dogfood-smoke", {
     search: input.search.trim(),
     platform: input.platform === "all" ? undefined : input.platform,
     limit: input.limit ?? 10,
+    staleAfterHours: input.staleAfterHours,
   });
 }
 
