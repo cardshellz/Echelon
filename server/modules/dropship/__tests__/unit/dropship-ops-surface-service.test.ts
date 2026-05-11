@@ -732,7 +732,14 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(result).toMatchObject({
       status: "ready",
-      message: "1 store(s) have fresh complete dogfood smoke evidence.",
+      message: "1 vendor/store row(s) are dogfood-ready with fresh complete smoke evidence.",
+      launchCandidates: [{
+        vendor: { vendorId: 10 },
+        storeConnection: { storeConnectionId: 20, platform: "ebay" },
+        readinessStatus: "ready",
+        smokeStatus: "ready",
+        smokeReferences: { latestListingId: 30 },
+      }],
       launchGate: {
         status: "ready",
         readyVendorStoreCount: 1,
@@ -744,7 +751,11 @@ describe("DropshipOpsSurfaceService", () => {
     });
     expect(result.runbookSteps).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: "run_live_smoke", status: "ready" }),
-      expect.objectContaining({ key: "confirm_fresh_smoke", status: "ready" }),
+      expect.objectContaining({
+        key: "confirm_fresh_smoke",
+        status: "ready",
+        evidence: ["vendor 10, ebay store 20: readiness ready; smoke ready."],
+      }),
     ]));
     expect(repository.lastDogfoodInput).toMatchObject({
       platform: "ebay",
@@ -805,13 +816,57 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(result).toMatchObject({
       status: "warning",
-      message: "Readiness is sufficient to run dogfood smoke, but no store has fresh complete end-to-end smoke evidence yet.",
+      message: "No vendor/store row is both readiness-ready and fresh smoke-ready yet.",
+      launchCandidates: [],
     });
     expect(result.runbookSteps).toEqual(expect.arrayContaining([
       expect.objectContaining({
         key: "complete_fresh_smoke",
         status: "warning",
         evidence: ["vendor 10, ebay store 20: Marketplace tracking - No marketplace tracking evidence exists yet."],
+      }),
+    ]));
+  });
+
+  it("does not mark launch ready when readiness and smoke belong to different stores", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      launchGateItems: [makeDogfoodReadinessItem()],
+      summary: [{ status: "ready", count: 1 }],
+      total: 1,
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 1,
+      warningCandidateCount: 0,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store with full smoke evidence; 0 blocked and 0 incomplete.",
+      candidates: [makeDogfoodSmokeCandidate({
+        status: "ready",
+        storeConnection: {
+          storeConnectionId: 21,
+          platform: "ebay",
+          status: "connected",
+          setupStatus: "ready",
+          externalDisplayName: "Other eBay",
+          shopDomain: null,
+          updatedAt: now,
+        },
+      })],
+    });
+    const service = makeService(repository, [], launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus();
+
+    expect(result).toMatchObject({
+      status: "warning",
+      message: "No vendor/store row is both readiness-ready and fresh smoke-ready yet.",
+      launchCandidates: [],
+    });
+    expect(result.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "complete_fresh_smoke",
+        status: "warning",
+        message: "Fresh smoke evidence exists, but not for a readiness-ready vendor/store row.",
       }),
     ]));
   });
