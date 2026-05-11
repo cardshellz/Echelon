@@ -210,6 +210,15 @@ function buildShipStationWebhookTargetUrl(targetUrl: string): string {
   return parsed.toString();
 }
 
+async function enqueueEbayReconcileTrackingRetry(orderId: number, reason: string): Promise<void> {
+  try {
+    await enqueueDelayedTrackingPush(db, orderId);
+    console.warn(`[eBay Reconcile] ${reason} for ${orderId}; delayed retry enqueued`);
+  } catch (enqueueErr: any) {
+    console.error(`[eBay Reconcile] Failed to enqueue tracking retry for ${orderId}: ${enqueueErr.message}`);
+  }
+}
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
@@ -723,9 +732,13 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               // Push tracking to eBay
               try {
                 // @ts-ignore
-                await services.fulfillmentPush.pushTracking(order.id);
+                const pushed = await services.fulfillmentPush.pushTracking(order.id);
+                if (pushed === false) {
+                  await enqueueEbayReconcileTrackingRetry(Number(order.id), "Tracking push returned false");
+                }
               } catch (e: any) {
                 console.warn(`[eBay Reconcile] Tracking push failed for ${order.id}: ${e.message}`);
+                await enqueueEbayReconcileTrackingRetry(Number(order.id), "Tracking push failed");
               }
             }
           } catch (e: any) {

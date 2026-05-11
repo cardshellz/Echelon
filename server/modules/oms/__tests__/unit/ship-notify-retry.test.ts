@@ -1586,4 +1586,12 @@ describe("ship-notify retry :: wiring in server/index.ts", () => {
   it("stashes the ShipStation service on db for the retry worker to find", () => {
     expect(SRC).toMatch(/__shipStationService\s*=\s*services\.shipStation/);
   });
+
+  it("enqueues delayed tracking retry from the eBay startup reconcile path", () => {
+    expect(SRC).toMatch(/async function enqueueEbayReconcileTrackingRetry\(orderId: number, reason: string\)/);
+    expect(SRC).toMatch(/enqueueEbayReconcileTrackingRetry[\s\S]*enqueueDelayedTrackingPush\s*\(\s*db\s*,\s*orderId\s*\)/);
+    expect(SRC).toMatch(/const pushed\s*=\s*await services\.fulfillmentPush\.pushTracking\(order\.id\)/);
+    expect(SRC).toMatch(/pushed === false[\s\S]*enqueueEbayReconcileTrackingRetry\s*\(\s*Number\(order\.id\)\s*,\s*"Tracking push returned false"\s*\)/);
+    expect(SRC).toMatch(/Tracking push failed for \$\{order\.id\}[\s\S]*enqueueEbayReconcileTrackingRetry\s*\(\s*Number\(order\.id\)\s*,\s*"Tracking push failed"\s*\)/);
+  });
 });
