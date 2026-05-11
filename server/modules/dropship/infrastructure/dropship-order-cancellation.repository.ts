@@ -64,7 +64,7 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
                 OR (
                   oi.status IN ('cancelled', 'rejected')
                   AND oi.cancellation_status = $3
-                  AND oi.updated_at <= $1 - ($4::text)::interval
+                  AND oi.updated_at <= $1::timestamptz - ($4::text)::interval
                 )
               )
             ORDER BY oi.updated_at ASC, oi.id ASC
