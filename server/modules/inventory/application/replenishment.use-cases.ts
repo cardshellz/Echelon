@@ -56,6 +56,13 @@ export type ReplenGuidance = {
   skipReason?: string | null;
 };
 
+export type ReplenOrderContext = {
+  orderId?: number | null;
+  orderItemId?: number | null;
+  orderNumber?: string | null;
+  blocksShipment?: boolean;
+};
+
 type ResolvedReplenParams = {
   triggerValue: number | null;
   maxQty: number | null;
@@ -137,6 +144,23 @@ export class ReplenishmentUseCases {
     private readonly db: DrizzleDb,
     private readonly inventoryUseCases: InventoryUseCases,
   ) {}
+
+  private replenOrderTaskFields(context?: ReplenOrderContext): Pick<InsertReplenTask, "orderId" | "orderItemId" | "blocksShipment"> {
+    return {
+      orderId: context?.orderId ?? null,
+      orderItemId: context?.orderItemId ?? null,
+      blocksShipment: context?.blocksShipment === true,
+    };
+  }
+
+  private appendOrderContextNote(notes: string, context?: ReplenOrderContext): string {
+    if (!context?.orderId && !context?.orderItemId && !context?.orderNumber) {
+      return notes;
+    }
+    const orderRef = context.orderNumber || (context.orderId ? `order #${context.orderId}` : "order");
+    const itemRef = context.orderItemId ? ` item #${context.orderItemId}` : "";
+    return `${notes}\nOrder link: ${orderRef}${itemRef}`;
+  }
 
   // ---------------------------------------------------------------------------
   // SHARED RESOLUTION HELPERS
@@ -731,6 +755,7 @@ export class ReplenishmentUseCases {
     productVariantId: number,
     warehouseLocationId: number,
     triggeredBy: string = "inline_pick",
+    context?: ReplenOrderContext,
   ): Promise<ReplenTask | null> {
     const _tag = `[Replen checkAndTrigger] variant=${productVariantId} loc=${warehouseLocationId}`;
 
@@ -766,11 +791,12 @@ export class ReplenishmentUseCases {
           triggeredBy,
           priority,
           autoReplen,
+          context,
         });
         if (cascadeResult) return cascadeResult;
       }
 
-      await this.db
+      const [blockedTask] = await this.db
         .insert(replenTasks)
         .values({
           replenRuleId: rule?.id ?? null,
@@ -788,8 +814,12 @@ export class ReplenishmentUseCases {
           executionMode: eval_.executionMode,
           replenMethod,
           autoReplen,
+          ...this.replenOrderTaskFields(context),
           warehouseId: location.warehouseId ?? undefined,
-          notes: `${taskNotes}\nBlocked: no source stock found in ${sourceLocationType} locations`,
+          notes: this.appendOrderContextNote(
+            `${taskNotes}\nBlocked: no source stock found in ${sourceLocationType} locations`,
+            context,
+          ),
         } satisfies InsertReplenTask)
         .returning();
       console.log(`${_tag} EXIT: created BLOCKED task — no source stock in ${sourceLocationType} locations`);
@@ -798,7 +828,7 @@ export class ReplenishmentUseCases {
         message: `No source stock found in ${sourceLocationType} locations for ${location.code}`,
         data: { productVariantId, locationId: warehouseLocationId, locationCode: location.code },
       }).catch(() => {});
-      return null;
+      return context?.blocksShipment ? blockedTask as ReplenTask : null;
     }
 
     const { sourceLocation, sourceVariant, qtySourceUnits, qtyTargetUnits, executionMode } = eval_;
@@ -822,8 +852,9 @@ export class ReplenishmentUseCases {
         executionMode,
         replenMethod,
         autoReplen,
+        ...this.replenOrderTaskFields(context),
         warehouseId: location.warehouseId ?? undefined,
-        notes: taskNotes,
+        notes: this.appendOrderContextNote(taskNotes, context),
       } satisfies InsertReplenTask)
       .returning();
 
@@ -903,11 +934,21 @@ export class ReplenishmentUseCases {
     pickVariantId: number,
     toLocationId: number,
     userId?: string,
+    context?: ReplenOrderContext,
   ): Promise<{ task: ReplenTask; moved: number } | null> {
     const _tag = `[Replen createAndExecute] variant=${pickVariantId} loc=${toLocationId}`;
 
     // Re-derive guidance from current DB state (fresh, not stale)
     const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId);
+    if (guidance.needed && guidance.stockout && context?.blocksShipment) {
+      const blockedTask = await this.checkAndTriggerAfterPick(
+        pickVariantId,
+        toLocationId,
+        "inline_pick",
+        context,
+      );
+      return blockedTask ? { task: blockedTask, moved: 0 } : null;
+    }
     if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
       console.log(`${_tag} guidance says no replen needed or stockout — skipping`);
       return null;
@@ -945,8 +986,12 @@ export class ReplenishmentUseCases {
       executionMode: guidance.executionMode,
       replenMethod: guidance.replenMethod,
       autoReplen,
+      ...this.replenOrderTaskFields(context),
       warehouseId: location.warehouseId ?? undefined,
-      notes: `${guidance.taskNotes}\nConfirmed by picker, executing atomically`,
+      notes: this.appendOrderContextNote(
+        `${guidance.taskNotes}\nConfirmed by picker, executing atomically`,
+        context,
+      ),
     } satisfies InsertReplenTask).returning();
 
     let moved = 0;
@@ -961,6 +1006,7 @@ export class ReplenishmentUseCases {
         // Mark as blocked so it's visible in the queue for manual resolution
         await this.db.update(replenTasks).set({
           status: "blocked",
+          exceptionReason: "execute_failed",
           notes: `${task.notes}\nExecute failed: ${err?.message}`,
         }).where(eq(replenTasks.id, task.id));
         throw err;
@@ -1524,6 +1570,7 @@ export class ReplenishmentUseCases {
     triggeredBy: string;
     priority: number;
     autoReplen: number;
+    context?: ReplenOrderContext;
   }): Promise<ReplenTask | null> {
     // Load the intermediate variant (the source we couldn't find stock for)
     const [intermediateVariant] = await this.db
@@ -1605,8 +1652,12 @@ export class ReplenishmentUseCases {
         executionMode: cascadeExec.executionMode,
         replenMethod: cascadeReplenMethod,
         autoReplen: cascadeAutoReplen,
+        ...this.replenOrderTaskFields(opts.context ? { ...opts.context, blocksShipment: false } : undefined),
         warehouseId: opts.warehouseId,
-        notes: `Cascade: break ${grandparentVariant.sku || grandparentVariant.name} into ${intermediateVariant.sku || intermediateVariant.name}`,
+        notes: this.appendOrderContextNote(
+          `Cascade: break ${grandparentVariant.sku || grandparentVariant.name} into ${intermediateVariant.sku || intermediateVariant.name}`,
+          opts.context,
+        ),
       } satisfies InsertReplenTask)
       .returning();
 
@@ -1640,6 +1691,7 @@ export class ReplenishmentUseCases {
         executionMode: downstreamExec.executionMode,
         replenMethod: downstreamReplenMethod,
         autoReplen: opts.autoReplen,
+        ...this.replenOrderTaskFields(opts.context),
         warehouseId: opts.warehouseId,
         dependsOnTaskId: upstreamTask.id,
         notes: `${opts.taskNotes}\nBlocked: waiting on cascade task #${upstreamTask.id} (${grandparentVariant.sku} → ${intermediateVariant.sku})`,

@@ -422,6 +422,8 @@ export const replenTasks = inventorySchema.table("replen_tasks", {
   fromLocationId: integer("from_location_id").notNull().references(() => warehouseLocations.id),
   toLocationId: integer("to_location_id").notNull().references(() => warehouseLocations.id),
   productId: integer("product_id").references(() => products.id),
+  orderId: integer("order_id").references(() => orders.id, { onDelete: "set null" }),
+  orderItemId: integer("order_item_id").references(() => orderItems.id, { onDelete: "set null" }),
   sourceProductVariantId: integer("source_product_variant_id").references(() => productVariants.id),
   pickProductVariantId: integer("pick_product_variant_id").references(() => productVariants.id),
   qtySourceUnits: integer("qty_source_units").notNull().default(1), // How many cases to pick
@@ -433,6 +435,7 @@ export const replenTasks = inventorySchema.table("replen_tasks", {
   executionMode: varchar("execution_mode", { length: 20 }).notNull().default("queue"), // queue, inline - based on warehouse settings
   replenMethod: varchar("replen_method", { length: 30 }).notNull().default("full_case"), // case_break, full_case, pallet_drop — persisted so executeTask knows how to run
   autoReplen: integer("auto_replen").notNull().default(0), // 1 = picker handles inline (auto-complete), 0 = worker queue
+  blocksShipment: boolean("blocks_shipment").notNull().default(false),
   warehouseId: integer("warehouse_id").references(() => warehouses.id), // Which warehouse this task belongs to
   createdBy: varchar("created_by", { length: 100 }),
   assignedTo: varchar("assigned_to", { length: 100 }),
