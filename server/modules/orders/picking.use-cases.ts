@@ -100,6 +100,14 @@ export type PickInventoryContext = {
   locationCode: string | null;
   sku: string;
   binCountNeeded: boolean;
+  resolution: {
+    autoResolved: boolean;
+    code: string | null;
+    reviewRequired: boolean;
+    pickerBlocking: boolean;
+    shipmentBlocking: boolean;
+    message: string | null;
+  };
   replen: {
     triggered: boolean;
     taskId: number | null;
@@ -136,6 +144,44 @@ export type BinCountResult = {
   inferredReplenMoved: number | null; // units attributed to inferred replen
 };
 
+type ScanAutoResolvedInventory = {
+  code: "picker_scan_bin_shortage";
+  adjustment: number;
+  systemQtyBefore: number;
+  pickedQty: number;
+  message: string;
+};
+
+type DeductInventoryResult =
+  | {
+      success: true;
+      noVariant?: undefined;
+      productVariantId: number;
+      locationId: number;
+      locationCode: string;
+      systemQtyAfter: number;
+      autoResolved?: ScanAutoResolvedInventory;
+    }
+  | {
+      success: false;
+      error: string;
+      message: string;
+      productVariantId: number;
+      locationId: number | null;
+      locationCode: string | null;
+      systemQty: number;
+      pickerBlocking?: boolean;
+      shipmentBlocking?: boolean;
+    }
+  | {
+      success: true;
+      noVariant: true;
+      productVariantId: 0;
+      locationId: 0;
+      locationCode: null;
+      systemQtyAfter: 0;
+    };
+
 export type ResolveAllocationResult =
   | {
       success: true;
@@ -153,6 +199,39 @@ export type ResolveAllocationResult =
     };
 
 export type PickQueueOrder = any; // Pass-through type from storage
+
+function emptyPickInventoryContext(sku: string): PickInventoryContext {
+  return {
+    deducted: false,
+    systemQtyAfter: 0,
+    locationId: null,
+    locationCode: null,
+    sku,
+    binCountNeeded: false,
+    resolution: {
+      autoResolved: false,
+      code: null,
+      reviewRequired: false,
+      pickerBlocking: false,
+      shipmentBlocking: false,
+      message: null,
+    },
+    replen: {
+      triggered: false,
+      taskId: null,
+      taskStatus: null,
+      autoExecuted: false,
+      autoExecutedMoved: null,
+      autoExecutedFailed: false,
+      autoExecuteFailReason: null,
+      stockout: false,
+      sourceLocationCode: null,
+      sourceVariantSku: null,
+      sourceVariantName: null,
+      qtyToMove: null,
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Service
@@ -541,7 +620,7 @@ export class PickingUseCases {
     // Prevent double-pick — if already completed, treat as success (idempotent)
     if (status === "completed" && beforeItem.status === "completed") {
       console.log(`[Pick] Item ${itemId} already completed — returning success (idempotent)`);
-      return { success: true, item: beforeItem as any, inventory: { deducted: false, systemQtyAfter: 0, locationId: null, locationCode: null, sku: beforeItem.sku, binCountNeeded: false, replen: { triggered: false, taskId: null, taskStatus: null, autoExecuted: false, autoExecutedMoved: null, autoExecutedFailed: false, autoExecuteFailReason: null, stockout: false, sourceLocationCode: null, sourceVariantSku: null, sourceVariantName: null, qtyToMove: null } } };
+      return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
     }
 
     // Validate pickedQuantity bounds
@@ -557,6 +636,7 @@ export class PickingUseCases {
       | null = null;
 
     let item: OrderItem | null = null;
+    let forcePostPickStatus: string | null = null;
 
     if (status === "completed" && beforeItem.status !== "completed") {
       const atomicResult = await this.db.transaction(async (tx: any) => {
@@ -600,6 +680,7 @@ export class PickingUseCases {
           warehouseLocationId,
           userId,
           inventoryCore: txInventoryCore,
+          pickMethod,
         });
 
         if (deductResult.success && !deductResult.noVariant) {
@@ -632,7 +713,7 @@ export class PickingUseCases {
 
       if (atomicResult.alreadyCompleted) {
         console.log(`[Pick] Item ${itemId} completed while waiting for lock - returning success (idempotent)`);
-        return { success: true, item: atomicResult.item as any, inventory: { deducted: false, systemQtyAfter: 0, locationId: null, locationCode: null, sku: beforeItem.sku, binCountNeeded: false, replen: { triggered: false, taskId: null, taskStatus: null, autoExecuted: false, autoExecutedMoved: null, autoExecutedFailed: false, autoExecuteFailReason: null, stockout: false, sourceLocationCode: null, sourceVariantSku: null, sourceVariantName: null, qtyToMove: null } } };
+        return { success: true, item: atomicResult.item as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
       }
 
       item = atomicResult.item;
@@ -685,34 +766,14 @@ export class PickingUseCases {
     });
 
     // Build inventory context for picker UI
-    const inventoryCtx: PickInventoryContext = {
-      deducted: false,
-      systemQtyAfter: 0,
-      locationId: null,
-      locationCode: null,
-      sku: item.sku,
-      binCountNeeded: false,
-      replen: {
-        triggered: false,
-        taskId: null,
-        taskStatus: null,
-        autoExecuted: false,
-        autoExecutedMoved: null,
-        autoExecutedFailed: false,
-        autoExecuteFailReason: null,
-        stockout: false,
-        sourceLocationCode: null,
-        sourceVariantSku: null,
-        sourceVariantName: null,
-        qtyToMove: null,
-      },
-    };
+    const inventoryCtx: PickInventoryContext = emptyPickInventoryContext(item.sku);
 
     // If item was just completed, deduct inventory
     if (status === "completed" && beforeItem.status !== "completed") {
       const deductResult = completedDeductResult ?? await this._deductInventory(item, beforeItem, {
         warehouseLocationId,
         userId,
+        pickMethod,
       });
 
       if (deductResult.success && !deductResult.noVariant) {
@@ -721,6 +782,31 @@ export class PickingUseCases {
         inventoryCtx.systemQtyAfter = deductResult.systemQtyAfter;
         inventoryCtx.locationId = deductResult.locationId;
         inventoryCtx.locationCode = deductResult.locationCode;
+
+        if (deductResult.autoResolved) {
+          inventoryCtx.resolution = {
+            autoResolved: true,
+            code: deductResult.autoResolved.code,
+            reviewRequired: true,
+            pickerBlocking: false,
+            shipmentBlocking: false,
+            message: deductResult.autoResolved.message,
+          };
+
+          this.recordInlineInventoryReview({
+            item,
+            order,
+            productVariantId: deductResult.productVariantId,
+            locationId: deductResult.locationId,
+            locationCode: deductResult.locationCode,
+            resolution: deductResult.autoResolved,
+            userId,
+            deviceType,
+            sessionId,
+          }).catch((err: any) =>
+            console.warn("[Pick] failed to record inline inventory review:", err?.message || err),
+          );
+        }
 
         // Auto-execute replen in background — no picker confirmation needed.
         // Fire-and-forget: returns result to caller so UI can show dismissible notification.
@@ -795,6 +881,31 @@ export class PickingUseCases {
         inventoryCtx.locationId = deductResult.locationId;
         inventoryCtx.locationCode = deductResult.locationCode;
         inventoryCtx.binCountNeeded = false; // No bin count modal — picker shouldn't count inventory
+        inventoryCtx.resolution = {
+          autoResolved: false,
+          code: deductResult.error,
+          reviewRequired: true,
+          pickerBlocking: deductResult.pickerBlocking ?? false,
+          shipmentBlocking: deductResult.shipmentBlocking ?? true,
+          message: deductResult.message,
+        };
+        if (inventoryCtx.resolution.shipmentBlocking) {
+          forcePostPickStatus = "exception";
+          await this.recordShipmentBlockingInventoryException({
+            item,
+            order,
+            productVariantId: deductResult.productVariantId,
+            locationId: deductResult.locationId,
+            locationCode: deductResult.locationCode,
+            systemQty: deductResult.systemQty,
+            requestedQty: item.pickedQuantity || item.quantity,
+            error: deductResult.error,
+            message: deductResult.message,
+            userId,
+            deviceType,
+            sessionId,
+          });
+        }
 
         // Run the SAME replen check as the success path — picker needs full
         // guidance (source location, qty, method), not just a "no stock" boolean.
@@ -845,7 +956,9 @@ export class PickingUseCases {
 
     // ALWAYS update order progress (regardless of deduction result)
     const settings = await this.getPickSettings();
-    await this.storage.updateOrderProgress(item.orderId, settings.postPickStatus);
+    const postPickStatus = forcePostPickStatus
+      ?? await this.resolvePostPickStatusForOrder(item.orderId, settings.postPickStatus);
+    await this.storage.updateOrderProgress(item.orderId, postPickStatus);
 
     return { success: true, item, inventory: inventoryCtx };
   }
@@ -872,16 +985,168 @@ export class PickingUseCases {
     `);
   }
 
+  private async recordInlineInventoryReview(params: {
+    item: OrderItem;
+    order: Order | undefined;
+    productVariantId: number;
+    locationId: number;
+    locationCode: string;
+    resolution: ScanAutoResolvedInventory;
+    userId?: string;
+    deviceType?: string;
+    sessionId?: string;
+  }): Promise<void> {
+    const [exception] = await this.db.insert(allocationExceptions).values({
+      orderId: params.item.orderId,
+      orderItemId: params.item.id,
+      orderNumber: params.order?.orderNumber ?? null,
+      sku: params.item.sku,
+      productVariantId: params.productVariantId,
+      exceptionType: "inventory_auto_resolved",
+      status: "needs_review",
+      requestedQty: params.resolution.pickedQty,
+      selectedLocationId: params.locationId,
+      selectedLocationCode: params.locationCode,
+      resolution: "picker_scan_count_correction",
+      autoFixedSetup: false,
+      reviewReason: params.resolution.message,
+      resolvedBy: params.userId || null,
+      resolvedAt: new Date(),
+      metadata: {
+        pickerNonBlocking: true,
+        shipmentBlocking: false,
+        observation: "validated_item_scan",
+        adjustment: params.resolution.adjustment,
+        systemQtyBefore: params.resolution.systemQtyBefore,
+        pickedQty: params.resolution.pickedQty,
+        deviceType: params.deviceType || null,
+        sessionId: params.sessionId || null,
+      },
+    }).returning();
+
+    await this.storage.createPickingLog({
+      actionType: "inventory_auto_resolved",
+      pickerId: params.userId || undefined,
+      orderId: params.item.orderId,
+      orderNumber: params.order?.orderNumber,
+      orderItemId: params.item.id,
+      productId: params.item.productId,
+      sku: params.item.sku,
+      itemName: params.item.name,
+      locationCode: params.locationCode,
+      qtyRequested: params.resolution.pickedQty,
+      qtyBefore: params.resolution.systemQtyBefore,
+      qtyAfter: Math.max(0, params.resolution.systemQtyBefore + params.resolution.adjustment - params.resolution.pickedQty),
+      qtyDelta: params.resolution.adjustment,
+      reason: params.resolution.message,
+      deviceType: params.deviceType || "desktop",
+      sessionId: params.sessionId,
+      pickMethod: "scan",
+      itemStatusBefore: params.item.status,
+      itemStatusAfter: params.item.status,
+      metadata: {
+        exceptionId: exception.id,
+        pickerNonBlocking: true,
+        shipmentBlocking: false,
+      },
+    });
+
+    try {
+      const { notify } = await import("../notifications/notifications.service");
+      await notify("allocation_review_needed", {
+        title: `Inventory review needed: ${params.item.sku}`,
+        message: params.resolution.message,
+        data: {
+          orderId: params.item.orderId,
+          orderNumber: params.order?.orderNumber,
+          orderItemId: params.item.id,
+          sku: params.item.sku,
+          selectedLocationId: params.locationId,
+          selectedLocationCode: params.locationCode,
+          exceptionId: exception.id,
+          pickerNonBlocking: true,
+        },
+      });
+    } catch (notifyErr: any) {
+      console.warn(`[Pick] inline inventory review notification failed: ${notifyErr.message}`);
+    }
+  }
+
+  private async recordShipmentBlockingInventoryException(params: {
+    item: OrderItem;
+    order: Order | undefined;
+    productVariantId: number;
+    locationId: number | null;
+    locationCode: string | null;
+    systemQty: number;
+    requestedQty: number;
+    error: string;
+    message: string;
+    userId?: string;
+    deviceType?: string;
+    sessionId?: string;
+  }): Promise<void> {
+    const [exception] = await this.db.insert(allocationExceptions).values({
+      orderId: params.item.orderId,
+      orderItemId: params.item.id,
+      orderNumber: params.order?.orderNumber ?? null,
+      sku: params.item.sku,
+      productVariantId: params.productVariantId,
+      exceptionType: "inventory_deduction_failed",
+      status: "blocked",
+      requestedQty: params.requestedQty,
+      selectedLocationId: params.locationId,
+      selectedLocationCode: params.locationCode,
+      resolution: null,
+      autoFixedSetup: false,
+      reviewReason: params.message,
+      resolvedBy: null,
+      resolvedAt: null,
+      metadata: {
+        pickerNonBlocking: true,
+        shipmentBlocking: true,
+        error: params.error,
+        systemQty: params.systemQty,
+        requestedQty: params.requestedQty,
+        deviceType: params.deviceType || null,
+        sessionId: params.sessionId || null,
+        observedBy: params.userId || null,
+      },
+    }).returning();
+
+    await this.storage.createPickingLog({
+      actionType: "inventory_shipment_blocked",
+      pickerId: params.userId || undefined,
+      orderId: params.item.orderId,
+      orderNumber: params.order?.orderNumber,
+      orderItemId: params.item.id,
+      productId: params.item.productId,
+      sku: params.item.sku,
+      itemName: params.item.name,
+      locationCode: params.locationCode || params.item.location,
+      qtyRequested: params.requestedQty,
+      qtyBefore: params.systemQty,
+      qtyAfter: params.systemQty,
+      qtyDelta: 0,
+      reason: params.message,
+      deviceType: params.deviceType || "desktop",
+      sessionId: params.sessionId,
+      itemStatusBefore: params.item.status,
+      itemStatusAfter: params.item.status,
+      metadata: {
+        exceptionId: exception.id,
+        pickerNonBlocking: true,
+        shipmentBlocking: true,
+      },
+    });
+  }
+
   /** Internal: resolve pick location and deduct inventory via inventoryCore. */
   private async _deductInventory(
     item: OrderItem,
     beforeItem: OrderItem,
-    opts: { warehouseLocationId?: number; userId?: string; inventoryCore?: InventoryCore },
-  ): Promise<
-    | { success: true; noVariant?: undefined; productVariantId: number; locationId: number; locationCode: string; systemQtyAfter: number }
-    | { success: false; error: string; message: string; productVariantId: number; locationId: number | null; locationCode: string | null; systemQty: number }
-    | { success: true; noVariant: true; productVariantId: 0; locationId: 0; locationCode: null; systemQtyAfter: 0 }
-  > {
+    opts: { warehouseLocationId?: number; userId?: string; inventoryCore?: InventoryCore; pickMethod?: string },
+  ): Promise<DeductInventoryResult> {
     const pickedQty = item.pickedQuantity || item.quantity;
     const productVariant = await this.storage.getProductVariantBySku(item.sku);
     if (!productVariant) {
@@ -905,9 +1170,11 @@ export class PickingUseCases {
       }
     }
 
-    // Resolve pick location: explicit ID > assigned bin > auto-select
+    // Resolve pick location: explicit ID > assigned bin > auto-select only when
+    // there is no picker-facing assignment. A valid item scan proves the SKU,
+    // not that a different fallback bin was physically used.
     let pickLocationId: number | null = opts.warehouseLocationId ? Number(opts.warehouseLocationId) : null;
-    let actualPickQty = pickedQty;
+    let locationResolution: "explicit" | "assigned" | "fallback" | null = pickLocationId ? "explicit" : null;
 
     const pickablePriority: Record<string, number> = { pick: 0, pallet: 1 };
     const pickableLevels = levels
@@ -918,37 +1185,19 @@ export class PickingUseCases {
       .filter(({ loc }) => loc?.isPickable === 1 && !loc.cycleCountFreezeId)
       .sort((a, b) => (pickablePriority[a.loc?.locationType as string] ?? 99) - (pickablePriority[b.loc?.locationType as string] ?? 99));
 
-    // Try the location already assigned to this order item (full qty)
+    // Try the location already assigned to this order item.
     if (!pickLocationId && assignedLocationId) {
-      const assignedLevel = levels.find((l: any) => l.warehouseLocationId === assignedLocationId);
-      if (assignedLevel && assignedLevel.variantQty >= pickedQty) {
-        pickLocationId = assignedLocationId;
-      }
+      pickLocationId = assignedLocationId;
+      locationResolution = "assigned";
     }
 
-    // Fallback: any pickable location with full qty
+    // Fallback: any pickable location with full qty, but only if the order line
+    // did not already carry a picker-facing bin.
     if (!pickLocationId) {
       const fullMatch = pickableLevels.find(({ level: l }) => l.variantQty >= pickedQty);
-      if (fullMatch) pickLocationId = fullMatch.level.warehouseLocationId;
-    }
-
-    // Partial pick: no location has full qty — take what's available
-    if (!pickLocationId) {
-      // Prefer assigned bin if it has anything
-      if (assignedLocationId) {
-        const assignedLevel = levels.find((l: any) => l.warehouseLocationId === assignedLocationId);
-        if (assignedLevel && assignedLevel.variantQty > 0) {
-          pickLocationId = assignedLocationId;
-          actualPickQty = assignedLevel.variantQty;
-        }
-      }
-      // Otherwise take the best pickable bin with any stock
-      if (!pickLocationId) {
-        const partial = pickableLevels.find(({ level: l }) => l.variantQty > 0);
-        if (partial) {
-          pickLocationId = partial.level.warehouseLocationId;
-          actualPickQty = partial.level.variantQty;
-        }
+      if (fullMatch) {
+        pickLocationId = fullMatch.level.warehouseLocationId;
+        locationResolution = "fallback";
       }
     }
 
@@ -965,19 +1214,68 @@ export class PickingUseCases {
         locationId: assignedLocationId,
         locationCode: assignedLocationCode,
         systemQty: assignedLevel?.variantQty ?? 0,
+        pickerBlocking: false,
+        shipmentBlocking: true,
       };
-    }
-
-    if (actualPickQty < pickedQty) {
-      console.log(`[Inventory] Partial pick: ${actualPickQty} of ${pickedQty} requested for ${productVariant.sku} at location ${pickLocationId}`);
     }
 
     const inventoryCore = opts.inventoryCore ?? this.inventoryCore;
 
+    const pickLocation = allLocations.find(l => l.id === pickLocationId);
+    const currentLevel = levels.find((l: any) => l.warehouseLocationId === pickLocationId);
+    const systemQtyBeforePick = currentLevel?.variantQty ?? 0;
+    let scanAutoResolved: ScanAutoResolvedInventory | undefined;
+
+    if (systemQtyBeforePick < pickedQty) {
+      const isScanVerified = opts.pickMethod === "scan";
+      const canTrustLocation = locationResolution === "assigned" || locationResolution === "explicit";
+      const locationIsPickerSafe =
+        pickLocation?.isPickable === 1 &&
+        pickLocation?.isActive === 1 &&
+        !pickLocation?.cycleCountFreezeId;
+
+      if (isScanVerified && canTrustLocation && locationIsPickerSafe) {
+        const adjustment = pickedQty - systemQtyBeforePick;
+        const locationCode = pickLocation?.code || assignedLocationCode || String(pickLocationId);
+        const message =
+          `Picker scan found ${pickedQty} ${productVariant.sku} at ${locationCode}; ` +
+          `system had ${systemQtyBeforePick}. Added ${adjustment} before pick and queued review.`;
+
+        await inventoryCore.adjustInventory({
+          productVariantId: productVariant.id,
+          warehouseLocationId: pickLocationId,
+          qtyDelta: adjustment,
+          reason: message,
+          userId: opts.userId,
+        });
+
+        scanAutoResolved = {
+          code: "picker_scan_bin_shortage",
+          adjustment,
+          systemQtyBefore: systemQtyBeforePick,
+          pickedQty,
+          message,
+        };
+      } else {
+        const locationCode = pickLocation?.code || assignedLocationCode || null;
+        return {
+          success: false,
+          error: "insufficient_inventory",
+          message: `Bin ${locationCode || pickLocationId} has ${systemQtyBeforePick} for ${item.sku}, but ${pickedQty} is needed`,
+          productVariantId: productVariant.id,
+          locationId: pickLocationId,
+          locationCode,
+          systemQty: systemQtyBeforePick,
+          pickerBlocking: false,
+          shipmentBlocking: true,
+        };
+      }
+    }
+
     const picked = await inventoryCore.pickItem({
       productVariantId: productVariant.id,
       warehouseLocationId: pickLocationId,
-      qty: actualPickQty,
+      qty: pickedQty,
       orderId: item.orderId,
       orderItemId: item.id,
       userId: opts.userId,
@@ -994,6 +1292,8 @@ export class PickingUseCases {
         locationId: pickLocationId,
         locationCode: loc?.code || assignedLocationCode,
         systemQty: level?.variantQty ?? 0,
+        pickerBlocking: false,
+        shipmentBlocking: true,
       };
     }
 
@@ -1016,6 +1316,7 @@ export class PickingUseCases {
       locationId: pickLocationId,
       locationCode: loc?.code || assignedLocationCode || "",
       systemQtyAfter: updatedLevel?.variantQty ?? 0,
+      autoResolved: scanAutoResolved,
     };
   }
 
@@ -1118,6 +1419,13 @@ export class PickingUseCases {
 
   async markReadyToShip(orderId: number, userId?: string, deviceType?: string, sessionId?: string): Promise<Order | null> {
     const orderBefore = await this.storage.getOrderById(orderId);
+    if (!orderBefore) return null;
+
+    const blockers = await this.getReadyToShipBlockers(orderId);
+    if (blockers.length > 0) {
+      throw new ValidationError(`Order cannot be marked ready to ship: ${blockers.join("; ")}`);
+    }
+
     const order = await this.storage.updateOrderStatus(orderId, "ready_to_ship");
     if (!order) return null;
 
@@ -1137,6 +1445,58 @@ export class PickingUseCases {
     });
 
     return order;
+  }
+
+  private async resolvePostPickStatusForOrder(orderId: number, desiredStatus: string): Promise<string> {
+    if (desiredStatus !== "ready_to_ship") return desiredStatus;
+    const blockers = await this.getReadyToShipBlockers(orderId);
+    return blockers.length > 0 ? "exception" : desiredStatus;
+  }
+
+  private async getReadyToShipBlockers(orderId: number): Promise<string[]> {
+    const blockers: string[] = [];
+    const items = await this.storage.getOrderItems(orderId);
+    const shippableItems = items.filter(item => item.requiresShipping === 1);
+
+    if (shippableItems.length === 0) {
+      blockers.push("order has no shippable items");
+    }
+
+    for (const item of shippableItems) {
+      if (item.status === "short") {
+        blockers.push(`${item.sku} is short-picked`);
+        continue;
+      }
+      if (item.status !== "completed") {
+        blockers.push(`${item.sku} is ${item.status}`);
+      }
+      if ((item.pickedQuantity || 0) !== item.quantity) {
+        blockers.push(`${item.sku} picked ${item.pickedQuantity || 0}/${item.quantity}`);
+      }
+      if (!item.location || item.location === "UNASSIGNED") {
+        blockers.push(`${item.sku} has no pick bin`);
+      }
+    }
+
+    const exceptionRows = await this.db.execute(sql`
+      SELECT id, sku, exception_type, status, review_reason
+      FROM wms.allocation_exceptions
+      WHERE order_id = ${orderId}
+        AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+        AND (
+          status = 'blocked'
+          OR COALESCE(metadata->>'shipmentBlocking', 'false') = 'true'
+        )
+      ORDER BY created_at DESC
+    `);
+
+    for (const row of exceptionRows.rows ?? []) {
+      blockers.push(
+        `${row.sku || "item"} has ${row.exception_type || "exception"} #${row.id}: ${row.review_reason || row.status}`,
+      );
+    }
+
+    return blockers;
   }
 
   // -------------------------------------------------------------------------
@@ -1330,9 +1690,10 @@ export class PickingUseCases {
     locationId: number;
     binCount: number;
     didReplen: boolean;
+    replenAlreadyRecorded?: boolean;
     userId?: string;
   }): Promise<BinCountResult> {
-    const { sku, locationId, binCount, didReplen, userId } = params;
+    const { sku, locationId, binCount, didReplen, replenAlreadyRecorded = false, userId } = params;
 
     // Guard: reject obviously wrong counts (e.g. barcode scanned into number field)
     const MAX_BIN_COUNT = 10_000;
@@ -1352,7 +1713,11 @@ export class PickingUseCases {
     let replenFailReason: string | null = null;
 
     // Step 1: If picker confirmed replen, create+execute the task atomically
-    if (didReplen) {
+    // unless the pick flow already executed and recorded the replen movement.
+    if (didReplen && replenAlreadyRecorded) {
+      replenResult = { task: null, moved: null, alreadyRecorded: true };
+      console.log(`[BinCount] verifying already-recorded replen for ${sku} at location ${locationId}`);
+    } else if (didReplen) {
       try {
         replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
         if (replenResult) {
@@ -1404,7 +1769,7 @@ export class PickingUseCases {
       // Use adjustInventory for bin count corrections — handles sync triggers,
       // audit trail, negative guards, and lot tracking automatically
       const reason = didReplen
-        ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
+        ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.alreadyRecorded ? 'already_recorded' : replenResult?.moved ?? 'failed'}`
         : inferredReplen
           ? `Bin count with inferred replen: system before=${systemQty}, after inferred replen=${postSystemQty}, actual=${binCount}, remaining variance=${adjustment}`
           : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`;
@@ -1460,7 +1825,7 @@ export class PickingUseCases {
     }
 
     // Step 5: If picker said NO replen (and no inferred replen), cancel orphaned pending tasks
-    if (!didReplen && !inferredReplen) {
+    if (!didReplen && !inferredReplen && !replenAlreadyRecorded) {
       const existingTasks = await this.storage.getPendingReplenTasksForLocation(locationId);
       for (const task of existingTasks) {
         if (task.pickProductVariantId === variant.id && (task.status === "pending" || task.status === "blocked")) {

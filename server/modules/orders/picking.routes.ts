@@ -234,7 +234,7 @@ export function registerPickingRoutes(app: Express) {
   app.post("/api/picking/bin-count", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
-      const { sku, locationId, binCount, didReplen } = req.body;
+      const { sku, locationId, binCount, didReplen, replenAlreadyRecorded } = req.body;
       if (!sku || !locationId || binCount == null || didReplen == null) {
         return res.status(400).json({ error: "sku, locationId, binCount, and didReplen are required" });
       }
@@ -243,6 +243,7 @@ export function registerPickingRoutes(app: Express) {
         locationId,
         binCount: Number(binCount),
         didReplen: Boolean(didReplen),
+        replenAlreadyRecorded: Boolean(replenAlreadyRecorded),
         userId: req.session.user?.id,
       });
       res.json(result);
@@ -368,7 +369,8 @@ export function registerPickingRoutes(app: Express) {
       res.json(order);
     } catch (error: any) {
       console.error("Error updating order:", error);
-      res.status(500).json({ error: "Failed to update order" });
+      const status = error?.name === "ValidationError" ? 409 : 500;
+      res.status(status).json({ error: error.message || "Failed to update order" });
     }
   });
 
