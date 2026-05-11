@@ -970,8 +970,8 @@ export function registerOmsWebhooks(
     }
   }
 
-  function acknowledgeProcessed(req: Request, res: Response): void {
-    if (isInternalRetry(req) && !res.headersSent) {
+  function acknowledgeProcessed(_req: Request, res: Response): void {
+    if (!res.headersSent) {
       res.status(200).send("ok");
     }
   }

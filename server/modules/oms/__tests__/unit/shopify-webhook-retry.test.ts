@@ -208,9 +208,15 @@ describe("oms-webhooks.ts :: internal retry loopback semantics", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/isInternalRetry\(req\)[\s\S]*res\.status\(500\)/);
   });
 
-  it("acks internal retries only after successful processing or idempotent no-op", () => {
+  it("acks completed processing and idempotent no-ops when no response was sent yet", () => {
     expect(OMS_WEBHOOKS_SRC).toContain("function acknowledgeProcessed");
     expect(OMS_WEBHOOKS_SRC).toMatch(/acknowledgeProcessed\(req, res\)/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(
+      /function acknowledgeProcessed\(_req: Request, res: Response\): void \{[\s\S]*if \(!res\.headersSent\)/,
+    );
+    expect(OMS_WEBHOOKS_SRC).not.toMatch(
+      /function acknowledgeProcessed[\s\S]*isInternalRetry\(req\)[\s\S]*res\.status\(200\)/,
+    );
   });
 
   it("persists Shopify OMS webhooks to an inbox before acknowledging", () => {
