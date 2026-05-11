@@ -47,17 +47,18 @@ export async function syncDropshipAcceptedOrderToWmsSafely(
   }
 
   if (!deps.fulfillmentSync) {
-    if (!deps.fulfillmentSyncRetryQueue) {
-      return;
-    }
     deps.logger.warn({
       code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNC_UNAVAILABLE",
       message: "Accepted dropship order could not be synced to WMS because the sync service is unavailable.",
       context: {
         ...context,
         reason: "wms_sync_service_unavailable",
+        retryQueued: Boolean(deps.fulfillmentSyncRetryQueue),
       },
     });
+    if (!deps.fulfillmentSyncRetryQueue) {
+      return;
+    }
     await enqueueWmsSyncRetrySafely(deps, input.acceptance.omsOrderId, "WMS sync service unavailable");
     return;
   }
