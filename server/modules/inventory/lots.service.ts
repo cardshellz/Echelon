@@ -452,6 +452,7 @@ export class InventoryLotService {
     productVariantId: number;
     warehouseLocationId: number;
     qtyDelta: number;
+    reservedQtyDelta?: number;
     notes?: string;
   }): Promise<void> {
     if (params.qtyDelta > 0) {
@@ -470,27 +471,33 @@ export class InventoryLotService {
         params.warehouseLocationId,
       );
 
-      let remaining = Math.abs(params.qtyDelta);
-      const adjustUpdates: Array<{ lotId: number; take: number }> = [];
+      let remainingDelta = Math.abs(params.qtyDelta);
+      let remainingReserved = Math.abs(params.reservedQtyDelta || 0);
+
+      const adjustUpdates: Array<{ lotId: number; takeOnHand: number; takeReserved: number }> = [];
       for (const lot of lots) {
-        if (remaining <= 0) break;
+        if (remainingDelta <= 0 && remainingReserved <= 0) break;
 
-        const available = lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked;
-        if (available <= 0) continue;
+        const takeReserved = Math.min(lot.qtyReserved, remainingReserved);
+        const available = lot.qtyOnHand - (lot.qtyReserved - takeReserved) - lot.qtyPicked;
+        const takeOnHand = Math.min(Math.max(0, available), remainingDelta);
 
-        const take = Math.min(available, remaining);
-        adjustUpdates.push({ lotId: lot.id, take });
-        remaining -= take;
+        if (takeOnHand > 0 || takeReserved > 0) {
+          adjustUpdates.push({ lotId: lot.id, takeOnHand, takeReserved });
+          remainingDelta -= takeOnHand;
+          remainingReserved -= takeReserved;
+        }
       }
 
       if (adjustUpdates.length > 0) {
         await this.db.execute(sql`
           WITH updates AS (
-            SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int)
+            SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, "takeOnHand" int, "takeReserved" int)
           )
           UPDATE inventory.inventory_lots AS il
-          SET qty_on_hand = il.qty_on_hand - u.take,
-              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+          SET qty_on_hand = il.qty_on_hand - u."takeOnHand",
+              qty_reserved = il.qty_reserved - u."takeReserved",
+              status = CASE WHEN (il.qty_on_hand - u."takeOnHand") = 0 AND (il.qty_reserved - u."takeReserved") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
           FROM updates u
           WHERE il.id = u."lotId"
         `);

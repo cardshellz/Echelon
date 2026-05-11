@@ -433,6 +433,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const mock = makeDb([
       // V2 lookup by shipstation_order_id.
       { rows: [{ id: 501, order_id: 42, status: "planned", shipstation_order_id: 555000 }] },
+      // Combined-shipment source item order grouping.
+      { rows: [{ source_shipment_item_id: 10001, wms_order_id: 42 }] },
       // Existing shipment item row belongs to the original shipment.
       { rows: [{ id: 10001, order_item_id: 30001 }] },
       // Source item copied from the original shipment row.

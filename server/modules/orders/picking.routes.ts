@@ -182,6 +182,35 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
+  app.post("/api/picking/items/:id/resolve-allocation", requireAuth, async (req, res) => {
+    try {
+      const { picking } = req.app.locals.services;
+      const locationCode = req.body.locationCode ?? req.body.binCode ?? req.body.scanCode;
+      const warehouseLocationId = req.body.warehouseLocationId == null ? undefined : Number(req.body.warehouseLocationId);
+      if (!locationCode && !warehouseLocationId) {
+        return res.status(400).json({ error: "locationCode or warehouseLocationId is required" });
+      }
+
+      const result = await picking.resolveAllocationWithBin(parseInt(req.params.id), {
+        locationCode,
+        warehouseLocationId,
+        userId: req.session.user?.id,
+        deviceType: req.headers["x-device-type"] as string,
+        sessionId: req.sessionID,
+      });
+
+      if (!result.success) {
+        return res.status(409).json(result);
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error resolving allocation:", error);
+      const status = error?.name === "ValidationError" ? 400 : 500;
+      res.status(status).json({ error: error.message || "Failed to resolve allocation" });
+    }
+  });
+
   app.post("/api/picking/case-break", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;

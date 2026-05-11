@@ -43,7 +43,7 @@ type Replenishment = {
 };
 
 type Reservation = {
-  reallocateOrphaned(productVariantId: number, warehouseLocationId: number, userId?: string): Promise<any>;
+  reallocateOrphaned(productVariantId: number, warehouseLocationId: number, userId?: string, orphanedQty?: number): Promise<any>;
 };
 
 type Storage = {
@@ -315,6 +315,8 @@ export class CycleCountUseCases {
       // Compute REAL-TIME variance
       const realTimeVariance = item.countedQty - currentQty;
 
+      let orphanedQty = 0;
+
       if (realTimeVariance !== 0) {
         // NEGATIVE GUARD: never allow adjustment that would result in negative inventory
         if (realTimeVariance < 0 && currentQty + realTimeVariance < 0) {
@@ -338,7 +340,7 @@ export class CycleCountUseCases {
         );
 
         const invUseCases = tx ? this.inventoryUseCases.withTx(tx) : this.inventoryUseCases;
-        await invUseCases.adjustInventory({
+        const result = await invUseCases.adjustInventory({
           productVariantId: item.productVariantId,
           warehouseLocationId: item.warehouseLocationId,
           qtyDelta: realTimeVariance,
@@ -347,6 +349,8 @@ export class CycleCountUseCases {
           userId: approvedBy,
           // NEVER allowNegative — the guard above already prevents it
         });
+        orphanedQty = result.orphanedQty || 0;
+        
         console.log(`[CYCLE COUNT] Real-time adjustment applied successfully`);
         adjustment = {
           sku: item.expectedSku || item.countedSku,
@@ -362,12 +366,13 @@ export class CycleCountUseCases {
       }
 
       // After negative adjustments, check for orphaned reservations and re-allocate
-      if (realTimeVariance < 0 && this.reservation) {
+      if (orphanedQty > 0 && this.reservation) {
         try {
           const realloc = await this.reservation.reallocateOrphaned(
             item.productVariantId,
             item.warehouseLocationId,
             approvedBy,
+            orphanedQty
           );
           if (realloc.released > 0) {
             console.log(

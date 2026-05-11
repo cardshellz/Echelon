@@ -203,8 +203,9 @@ export class COGSService {
 
       const take = Math.min(available, remaining);
 
-      // Get full cost from COGS columns
-      const [lotCost] = await db.execute(sql`
+      // Get full cost from COGS columns. Use the provided transaction handle;
+      // Drizzle execute returns a result object, not an iterable tuple.
+      const lotCost = await db.execute(sql`
         SELECT total_unit_cost_cents FROM inventory.inventory_lots WHERE id = ${lot.id}
       `);
       const unitCost = lotCost?.rows?.[0]?.total_unit_cost_cents ?? lot.unitCostCents ?? 0;

@@ -26,6 +26,7 @@ import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-s
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
 const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
+const SHIPSTATION_COMBINED_CHILD_SOURCE = "shipstation_combined_child";
 
 class ShipStationWebhookProcessingError extends Error {
   constructor(
@@ -1012,6 +1013,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   async function syncShipmentItemsFromShipStation(
     targetShipmentId: number,
     shipment: ShipStationShipment,
+    allowedSourceShipmentItemIds?: Set<number>,
   ): Promise<void> {
     const ssItems = Array.isArray(shipment.shipmentItems)
       ? shipment.shipmentItems
@@ -1084,6 +1086,16 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         );
       }
     }
+    if (allowedSourceShipmentItemIds && allowedSourceShipmentItemIds.size > 0) {
+      parsedItems = parsedItems.filter((item) =>
+        allowedSourceShipmentItemIds.has(item.sourceShipmentItemId),
+      );
+    }
+
+    if (parsedItems.length === 0) {
+      return;
+    }
+
     const targetItemIds = new Set(
       (targetItems?.rows ?? []).map((row: any) => Number(row.id)),
     );
@@ -1219,6 +1231,148 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         }
       }
     }
+  }
+
+  async function resolveCombinedShipmentGroupsFromShipStationItems(
+    resolvedShipmentRow: any,
+    shipment: ShipStationShipment,
+  ): Promise<Array<{ row: any; sourceShipmentItemIds: Set<number> }>> {
+    const ssItems = Array.isArray(shipment.shipmentItems)
+      ? shipment.shipmentItems
+      : [];
+    const sourceShipmentItemIds = Array.from(
+      new Set(
+        ssItems
+          .map((item) => parseWmsShipmentItemLineKey(item.lineItemKey))
+          .filter((id): id is number =>
+            id !== null && Number.isInteger(id) && id > 0
+          ),
+      ),
+    );
+
+    if (sourceShipmentItemIds.length === 0) {
+      return [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }];
+    }
+
+    const sourceItemList = sql.join(
+      sourceShipmentItemIds.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const sourceRowsResult: any = await db.execute(sql`
+      SELECT
+        osi.id AS source_shipment_item_id,
+        oi.order_id AS wms_order_id
+      FROM wms.outbound_shipment_items osi
+      JOIN wms.order_items oi ON oi.id = osi.order_item_id
+      WHERE osi.id IN (${sourceItemList})
+    `);
+    const sourceRows: Array<{
+      source_shipment_item_id: number;
+      wms_order_id: number;
+    }> = sourceRowsResult?.rows ?? [];
+
+    if (sourceRows.length === 0) {
+      return [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }];
+    }
+
+    const sourceIdsByOrder = new Map<number, Set<number>>();
+    for (const row of sourceRows) {
+      const wmsOrderId = Number(row.wms_order_id);
+      const sourceShipmentItemId = Number(row.source_shipment_item_id);
+      if (
+        !Number.isInteger(wmsOrderId) ||
+        wmsOrderId <= 0 ||
+        !Number.isInteger(sourceShipmentItemId) ||
+        sourceShipmentItemId <= 0
+      ) {
+        continue;
+      }
+      if (!sourceIdsByOrder.has(wmsOrderId)) {
+        sourceIdsByOrder.set(wmsOrderId, new Set());
+      }
+      sourceIdsByOrder.get(wmsOrderId)!.add(sourceShipmentItemId);
+    }
+
+    if (sourceIdsByOrder.size <= 1) {
+      return [{
+        row: resolvedShipmentRow,
+        sourceShipmentItemIds:
+          sourceIdsByOrder.get(Number(resolvedShipmentRow.order_id)) ??
+          new Set(sourceShipmentItemIds),
+      }];
+    }
+
+    const groups: Array<{ row: any; sourceShipmentItemIds: Set<number> }> = [];
+    for (const [wmsOrderId, groupSourceIds] of sourceIdsByOrder.entries()) {
+      let shipmentRow: any | null = null;
+
+      const existing: any = await db.execute(sql`
+        SELECT id, order_id, status, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE order_id = ${wmsOrderId}
+        ORDER BY
+          CASE WHEN id = ${Number(resolvedShipmentRow.id)} THEN 0 ELSE 1 END,
+          CASE WHEN source = ${SHIPSTATION_COMBINED_CHILD_SOURCE} THEN 0 ELSE 1 END,
+          id ASC
+        LIMIT 1
+      `);
+      shipmentRow = existing?.rows?.[0] ?? null;
+
+      if (!shipmentRow) {
+        const wmsOrderResult: any = await db.execute(sql`
+          SELECT id, channel_id
+          FROM wms.orders
+          WHERE id = ${wmsOrderId}
+          LIMIT 1
+        `);
+        const wmsOrder = wmsOrderResult?.rows?.[0];
+        if (!wmsOrder) {
+          throw new Error(
+            `ShipStation combined shipment ${shipment.shipmentId} references WMS order ${wmsOrderId}, but that order was not found`,
+          );
+        }
+
+        const externalFulfillmentId =
+          `shipstation_combined:${shipment.shipmentId}:order:${wmsOrderId}`;
+        const existingSynthetic: any = await db.execute(sql`
+          SELECT id, order_id, status, shipstation_order_id
+          FROM wms.outbound_shipments
+          WHERE external_fulfillment_id = ${externalFulfillmentId}
+          LIMIT 1
+        `);
+        shipmentRow = existingSynthetic?.rows?.[0] ?? null;
+        if (shipmentRow) {
+          groups.push({ row: shipmentRow, sourceShipmentItemIds: groupSourceIds });
+          continue;
+        }
+
+        const inserted: any = await db.execute(sql`
+          INSERT INTO wms.outbound_shipments
+            (order_id, channel_id, external_fulfillment_id, source, status,
+             shipstation_order_id, shipstation_order_key, created_at, updated_at)
+          VALUES
+            (${wmsOrderId}, ${wmsOrder.channel_id}, ${externalFulfillmentId},
+             ${SHIPSTATION_COMBINED_CHILD_SOURCE}, 'queued',
+             ${shipment.orderId}, ${shipment.orderKey}, NOW(), NOW())
+          RETURNING id, order_id, status, shipstation_order_id
+        `);
+        shipmentRow = inserted?.rows?.[0] ?? null;
+      }
+
+      if (shipmentRow) {
+        groups.push({ row: shipmentRow, sourceShipmentItemIds: groupSourceIds });
+      }
+    }
+
+    if (groups.length > 1) {
+      console.warn(
+        `[ShipStation Webhook V2] ShipStation shipment ${shipment.shipmentId} spans ${groups.length} WMS order(s); applying shared tracking to each order shipment.`,
+      );
+    }
+
+    return groups.length > 0
+      ? groups
+      : [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set(sourceShipmentItemIds) }];
   }
 
   async function loadValidatedInventoryShipmentItems(
@@ -1514,7 +1668,52 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     if (event.kind === "shipped") {
-      await syncShipmentItemsFromShipStation(wmsShipmentRow.id, shipment);
+      const shipmentGroups =
+        await resolveCombinedShipmentGroupsFromShipStationItems(
+          wmsShipmentRow,
+          shipment,
+        );
+      if (shipmentGroups.length > 1) {
+        let processedAny = false;
+        for (const group of shipmentGroups) {
+          const result = await applyShipNotifyV2EventToResolvedShipment(
+            group.row,
+            shipment,
+            event,
+            group.sourceShipmentItemIds,
+          );
+          processedAny = processedAny || result.processed;
+        }
+        return { processed: processedAny, fallback: false };
+      }
+      const [singleGroup] = shipmentGroups;
+      return applyShipNotifyV2EventToResolvedShipment(
+        singleGroup?.row ?? wmsShipmentRow,
+        shipment,
+        event,
+        singleGroup?.sourceShipmentItemIds,
+      );
+    }
+
+    return applyShipNotifyV2EventToResolvedShipment(
+      wmsShipmentRow,
+      shipment,
+      event,
+    );
+  }
+
+  async function applyShipNotifyV2EventToResolvedShipment(
+    wmsShipmentRow: any,
+    shipment: ShipStationShipment,
+    event: ShipmentEvent,
+    allowedSourceShipmentItemIds?: Set<number>,
+  ): Promise<{ processed: boolean; fallback: boolean }> {
+    if (event.kind === "shipped") {
+      await syncShipmentItemsFromShipStation(
+        wmsShipmentRow.id,
+        shipment,
+        allowedSourceShipmentItemIds,
+      );
     }
     const inventoryItemsToRecord = event.kind === "shipped" && inventoryCore
       ? await loadValidatedInventoryShipmentItems(wmsShipmentRow.id)
@@ -2573,7 +2772,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     })
       .from(outboundShipmentItems)
       .innerJoin(wmsOrderItems, eq(wmsOrderItems.id, outboundShipmentItems.orderItemId))
-      .where(eq(outboundShipmentItems.shipmentId, shipmentId))
+      .where(and(
+        eq(outboundShipmentItems.shipmentId, shipmentId),
+        sql`COALESCE(${wmsOrderItems.requiresShipping}, 1) = 1`,
+      ))
       .orderBy(outboundShipmentItems.id) as WmsShipmentItemRow[];
 
     if (itemRows.length === 0) {
