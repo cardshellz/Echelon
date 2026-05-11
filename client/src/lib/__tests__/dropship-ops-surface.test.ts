@@ -12,6 +12,7 @@ import {
   buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
+  buildAdminDogfoodLaunchStatusUrl,
   buildAdminDogfoodSmokeUrl,
   buildAdminOmsChannelConfigUrl,
   buildAdminOmsChannelConfigureInput,
@@ -211,6 +212,18 @@ describe("dropship ops surface client helpers", () => {
       search: "",
       platform: "all",
     })).toBe("/api/dropship/admin/dogfood-smoke?limit=10");
+  });
+
+  it("builds admin dogfood launch status URLs with shared filters", () => {
+    expect(buildAdminDogfoodLaunchStatusUrl({
+      search: " vendor ",
+      platform: "ebay",
+      staleAfterHours: 24,
+    })).toBe("/api/dropship/admin/dogfood-launch-status?search=vendor&platform=ebay&staleAfterHours=24");
+    expect(buildAdminDogfoodLaunchStatusUrl({
+      search: "",
+      platform: "all",
+    })).toBe("/api/dropship/admin/dogfood-launch-status");
   });
 
   it("builds admin OMS channel config requests", () => {

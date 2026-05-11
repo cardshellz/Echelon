@@ -47,12 +47,18 @@ const dogfoodSmokeInputSchema = z.object({
   limit: z.number().int().positive().max(25).default(10),
   staleAfterHours: z.number().int().positive().max(MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS).optional(),
 }).strict();
+const dogfoodLaunchStatusInputSchema = z.object({
+  platform: z.enum(["ebay", "shopify"]).optional(),
+  search: optionalStringSchema,
+  staleAfterHours: z.number().int().positive().max(MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS).optional(),
+}).strict();
 
 export type SearchDropshipAuditEventsInput = z.infer<typeof searchAuditEventsInputSchema>;
 export type GetDropshipAdminOpsOverviewInput = z.infer<typeof adminOpsOverviewInputSchema>;
 export type DropshipDogfoodReadinessStatus = z.infer<typeof dogfoodReadinessStatusSchema>;
 export type ListDropshipDogfoodReadinessInput = z.infer<typeof dogfoodReadinessInputSchema>;
 export type ListDropshipDogfoodSmokeInput = z.infer<typeof dogfoodSmokeInputSchema>;
+export type GetDropshipDogfoodLaunchStatusInput = z.infer<typeof dogfoodLaunchStatusInputSchema>;
 
 export interface DropshipOpsSettingsSection {
   key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
@@ -319,6 +325,16 @@ export interface DropshipDogfoodSmokeResult {
   message: string;
 }
 
+export interface DropshipDogfoodLaunchStatusResult {
+  generatedAt: Date;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  launchGate: DropshipDogfoodLaunchGate;
+  readiness: DropshipDogfoodReadinessResult;
+  smoke: DropshipDogfoodSmokeResult;
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
+}
+
 export interface DropshipOpsSurfaceRepository {
   getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview>;
   getAdminOpsOverview(
@@ -440,6 +456,62 @@ export class DropshipOpsSurfaceService {
     });
     return result;
   }
+
+  async getDogfoodLaunchStatus(input: unknown = {}): Promise<DropshipDogfoodLaunchStatusResult> {
+    const parsed = parseOpsSurfaceInput(
+      dogfoodLaunchStatusInputSchema,
+      input,
+      "DROPSHIP_DOGFOOD_LAUNCH_STATUS_INVALID_INPUT",
+    );
+    const generatedAt = this.deps.clock.now();
+    const staleAfterHours = resolveDogfoodSmokeStaleAfterHours(parsed.staleAfterHours, this.deps.env ?? process.env);
+    const [readinessResult, smoke] = await Promise.all([
+      this.deps.repository.listDogfoodReadiness({
+        platform: parsed.platform,
+        search: parsed.search,
+        page: 1,
+        limit: 100,
+        generatedAt,
+      }),
+      this.deps.repository.listDogfoodSmokeCandidates({
+        platform: parsed.platform,
+        search: parsed.search,
+        limit: 25,
+        staleAfterHours,
+        generatedAt,
+      }),
+    ]);
+    const { launchGateItems, ...publicReadiness } = readinessResult;
+    const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env);
+    const launchGate = buildDropshipDogfoodLaunchGate({
+      summary: publicReadiness.summary,
+      items: launchGateItems ?? publicReadiness.items,
+      systemChecks,
+    });
+    const readiness: DropshipDogfoodReadinessResult = {
+      ...publicReadiness,
+      systemChecks,
+      launchGate,
+    };
+    const result = buildDogfoodLaunchStatusResult({
+      generatedAt,
+      launchGate,
+      readiness,
+      smoke,
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_DOGFOOD_LAUNCH_STATUS_VIEWED",
+      message: "Dropship dogfood launch status was loaded.",
+      context: {
+        status: result.status,
+        platform: parsed.platform ?? null,
+        staleAfterHours,
+        readinessTotal: readiness.total,
+        smokeTotal: smoke.total,
+      },
+    });
+    return result;
+  }
 }
 
 export function buildDropshipDogfoodLaunchGate(input: {
@@ -521,6 +593,128 @@ export function buildDropshipDogfoodLaunchGate(input: {
     firstBlockers,
     runbookSteps,
   };
+}
+
+function buildDogfoodLaunchStatusResult(input: {
+  generatedAt: Date;
+  launchGate: DropshipDogfoodLaunchGate;
+  readiness: DropshipDogfoodReadinessResult;
+  smoke: DropshipDogfoodSmokeResult;
+}): DropshipDogfoodLaunchStatusResult {
+  const smokeStatus = summarizeSmokeLaunchStatus(input.smoke);
+  const status = summarizeLaunchStatus(input.launchGate.status, smokeStatus);
+  const smokeStep = buildDogfoodLaunchSmokeRunbookStep(input.smoke);
+  const runbookSteps = smokeStep
+    ? [...input.launchGate.runbookSteps, smokeStep]
+    : input.launchGate.runbookSteps;
+
+  return {
+    generatedAt: input.generatedAt,
+    status,
+    message: buildDogfoodLaunchStatusMessage({
+      status,
+      launchGate: input.launchGate,
+      smoke: input.smoke,
+    }),
+    launchGate: input.launchGate,
+    readiness: input.readiness,
+    smoke: input.smoke,
+    runbookSteps,
+  };
+}
+
+function summarizeSmokeLaunchStatus(smoke: DropshipDogfoodSmokeResult): DropshipDogfoodReadinessStatus {
+  if (smoke.readyCandidateCount > 0 && smoke.blockedCandidateCount === 0 && smoke.warningCandidateCount === 0) {
+    return "ready";
+  }
+  if (smoke.blockedCandidateCount > 0) {
+    return "blocked";
+  }
+  return "warning";
+}
+
+function summarizeLaunchStatus(
+  readinessStatus: DropshipDogfoodReadinessStatus,
+  smokeStatus: DropshipDogfoodReadinessStatus,
+): DropshipDogfoodReadinessStatus {
+  if (readinessStatus === "blocked") return "blocked";
+  if (readinessStatus === "warning" || smokeStatus !== "ready") return "warning";
+  return "ready";
+}
+
+function buildDogfoodLaunchStatusMessage(input: {
+  status: DropshipDogfoodReadinessStatus;
+  launchGate: DropshipDogfoodLaunchGate;
+  smoke: DropshipDogfoodSmokeResult;
+}): string {
+  if (input.launchGate.status === "blocked") {
+    return input.launchGate.message;
+  }
+  if (input.smoke.readyCandidateCount === 0) {
+    return "Readiness is sufficient to run dogfood smoke, but no store has fresh complete end-to-end smoke evidence yet.";
+  }
+  if (input.status === "warning") {
+    return `${input.smoke.readyCandidateCount} store(s) have fresh smoke evidence; remaining readiness or smoke warnings need review.`;
+  }
+  return `${input.smoke.readyCandidateCount} store(s) have fresh complete dogfood smoke evidence.`;
+}
+
+function buildDogfoodLaunchSmokeRunbookStep(
+  smoke: DropshipDogfoodSmokeResult,
+): DropshipDogfoodLaunchRunbookStep | null {
+  if (smoke.readyCandidateCount > 0 && smoke.blockedCandidateCount === 0 && smoke.warningCandidateCount === 0) {
+    return {
+      key: "confirm_fresh_smoke",
+      label: "Confirm fresh smoke evidence",
+      status: "ready",
+      scope: "ops",
+      message: `${smoke.readyCandidateCount} store(s) have fresh complete smoke evidence.`,
+      action: "Use a ready smoke candidate for internal dogfood and continue monitoring order intake, WMS shipment, and tracking push health.",
+      evidence: smoke.candidates
+        .filter((candidate) => candidate.status === "ready")
+        .slice(0, 3)
+        .map(formatSmokeCandidateRunbookEvidence),
+    };
+  }
+
+  const firstCandidate = smoke.candidates[0];
+  if (smoke.blockedCandidateCount > 0) {
+    return {
+      key: "resolve_smoke_handoffs",
+      label: "Resolve smoke handoffs",
+      status: "warning",
+      scope: "ops",
+      message: `${smoke.blockedCandidateCount} smoke candidate(s) have blocking handoff evidence.`,
+      action: "Fix the blocked smoke stage before treating dogfood as internally launch-ready.",
+      evidence: firstCandidate ? formatSmokeStageIssues(firstCandidate) : [smoke.message],
+    };
+  }
+
+  return {
+    key: "complete_fresh_smoke",
+    label: "Complete fresh smoke evidence",
+    status: "warning",
+    scope: "ops",
+    message: "No store has fresh complete listing, intake, fulfillment, and tracking proof yet.",
+    action: "Run one selected SKU through listing, order intake, WMS/ShipStation shipment, and marketplace tracking within the configured freshness window.",
+    evidence: firstCandidate ? formatSmokeStageIssues(firstCandidate) : [smoke.message],
+  };
+}
+
+function formatSmokeCandidateRunbookEvidence(candidate: DropshipDogfoodSmokeCandidate): string {
+  const storeLabel = `${candidate.storeConnection.platform} store ${candidate.storeConnection.storeConnectionId}`;
+  return `vendor ${candidate.vendor.vendorId}, ${storeLabel}: ${candidate.message}`;
+}
+
+function formatSmokeStageIssues(candidate: DropshipDogfoodSmokeCandidate): string[] {
+  const storeLabel = `${candidate.storeConnection.platform} store ${candidate.storeConnection.storeConnectionId}`;
+  const issues = candidate.stages.filter((stage) => stage.status !== "ready");
+  if (issues.length === 0) {
+    return [`vendor ${candidate.vendor.vendorId}, ${storeLabel}: ${candidate.message}`];
+  }
+  return issues.slice(0, 4).map((stage) =>
+    `vendor ${candidate.vendor.vendorId}, ${storeLabel}: ${stage.label} - ${stage.message}`,
+  );
 }
 
 function buildDogfoodLaunchRunbookSteps(input: {

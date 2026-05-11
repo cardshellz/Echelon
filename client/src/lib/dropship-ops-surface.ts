@@ -562,6 +562,16 @@ export interface DropshipDogfoodSmokeResponse {
   message: string;
 }
 
+export interface DropshipDogfoodLaunchStatusResponse {
+  generatedAt: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  launchGate: DropshipDogfoodLaunchGate;
+  readiness: DropshipDogfoodReadinessResponse;
+  smoke: DropshipDogfoodSmokeResponse;
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
+}
+
 export interface DropshipOmsChannelOption {
   channelId: number;
   name: string;
@@ -2346,6 +2356,18 @@ export function buildAdminDogfoodSmokeUrl(input: {
     search: input.search.trim(),
     platform: input.platform === "all" ? undefined : input.platform,
     limit: input.limit ?? 10,
+    staleAfterHours: input.staleAfterHours,
+  });
+}
+
+export function buildAdminDogfoodLaunchStatusUrl(input: {
+  search: string;
+  platform: DropshipStorePlatform | "all";
+  staleAfterHours?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/admin/dogfood-launch-status", {
+    search: input.search.trim(),
+    platform: input.platform === "all" ? undefined : input.platform,
     staleAfterHours: input.staleAfterHours,
   });
 }
