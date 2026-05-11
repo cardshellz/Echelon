@@ -389,6 +389,7 @@ export interface DropshipAdminOpsOverview {
   orderCancellationStatusCounts: DropshipOpsCount[];
   listingPushJobStatusCounts: DropshipOpsCount[];
   trackingPushStatusCounts: DropshipOpsCount[];
+  wmsSyncRetryStatusCounts: DropshipOpsCount[];
   rmaStatusCounts: DropshipOpsCount[];
   notificationStatusCounts: DropshipOpsCount[];
   recentAuditEvents: DropshipAuditEventRecord[];
