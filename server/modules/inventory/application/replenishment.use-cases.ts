@@ -63,6 +63,17 @@ export type ReplenOrderContext = {
   blocksShipment?: boolean;
 };
 
+export type ReplenSourceEmptyReport = {
+  pickVariantId: number;
+  pickLocationId: number;
+  orderId: number;
+  orderItemId: number;
+  orderNumber?: string | null;
+  sku?: string | null;
+  sourceLocationCode?: string | null;
+  userId?: string;
+};
+
 type ResolvedReplenParams = {
   triggerValue: number | null;
   maxQty: number | null;
@@ -1367,6 +1378,116 @@ export class ReplenishmentUseCases {
     }
 
     return { action: "short_pick_with_replen" };
+  }
+
+  async recordSourceEmptyBlocker(params: ReplenSourceEmptyReport): Promise<ReplenTask> {
+    const [existing] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(and(
+        eq(replenTasks.orderItemId, params.orderItemId),
+        eq(replenTasks.blocksShipment, true),
+        eq(replenTasks.exceptionReason, "source_empty"),
+        inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]),
+      ))
+      .limit(1);
+
+    if (existing) return existing as ReplenTask;
+
+    const [variant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, params.pickVariantId))
+      .limit(1);
+    if (!variant) {
+      throw new Error(`Product variant ${params.pickVariantId} not found`);
+    }
+
+    const [pickLocation] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, params.pickLocationId))
+      .limit(1);
+    if (!pickLocation) {
+      throw new Error(`Pick location ${params.pickLocationId} not found`);
+    }
+
+    const locConfig = await this.loadLocationConfig(params.pickLocationId, params.pickVariantId);
+    const resolved = await this.resolveReplenParams(
+      params.pickVariantId,
+      variant,
+      pickLocation.warehouseId ?? undefined,
+      locConfig,
+    );
+    const rule = await this.findRuleForVariant(params.pickVariantId);
+
+    const sourceVariantId = resolved.sourceVariantId ?? params.pickVariantId;
+    const sourceLocationFromReport = params.sourceLocationCode
+      ? (await this.db
+          .select()
+          .from(warehouseLocations)
+          .where(eq(warehouseLocations.code, params.sourceLocationCode))
+          .limit(1))[0] ?? null
+      : null;
+    const sourceLocation = sourceLocationFromReport ?? await this.findSourceLocation(
+      sourceVariantId,
+      pickLocation.warehouseId ?? undefined,
+      resolved.sourceLocationType,
+      pickLocation.parentLocationId,
+      resolved.sourcePriority,
+    );
+
+    const sourceLabel = sourceLocation?.code ?? params.sourceLocationCode ?? "unknown source";
+    const context: ReplenOrderContext = {
+      orderId: params.orderId,
+      orderItemId: params.orderItemId,
+      orderNumber: params.orderNumber ?? null,
+      blocksShipment: true,
+    };
+
+    const [task] = await this.db
+      .insert(replenTasks)
+      .values({
+        replenRuleId: rule?.id ?? null,
+        fromLocationId: sourceLocation?.id ?? params.pickLocationId,
+        toLocationId: params.pickLocationId,
+        productId: rule?.productId ?? variant.productId ?? null,
+        sourceProductVariantId: sourceVariantId,
+        pickProductVariantId: params.pickVariantId,
+        qtySourceUnits: 0,
+        qtyTargetUnits: 0,
+        qtyCompleted: 0,
+        status: "blocked",
+        priority: resolved.priority,
+        triggeredBy: "inline_pick",
+        executionMode: "inline",
+        replenMethod: resolved.replenMethod,
+        autoReplen: resolved.autoReplen,
+        ...this.replenOrderTaskFields(context),
+        warehouseId: pickLocation.warehouseId ?? undefined,
+        createdBy: params.userId ?? undefined,
+        exceptionReason: "source_empty",
+        notes: this.appendOrderContextNote(
+          `Picker reported replen source empty at ${sourceLabel}; target pick bin ${pickLocation.code}`,
+          context,
+        ),
+      } satisfies InsertReplenTask)
+      .returning();
+
+    notify("stockout", {
+      title: `Replen source empty: ${params.sku ?? variant.sku ?? `variant #${params.pickVariantId}`}`,
+      message: `Picker reported ${sourceLabel} empty while replenishing ${pickLocation.code}`,
+      data: {
+        taskId: task.id,
+        orderId: params.orderId,
+        orderItemId: params.orderItemId,
+        productVariantId: params.pickVariantId,
+        pickLocationCode: pickLocation.code,
+        sourceLocationCode: sourceLocation?.code ?? params.sourceLocationCode ?? null,
+      },
+    }).catch(() => {});
+
+    return task as ReplenTask;
   }
 
 

@@ -60,6 +60,16 @@ type ReplenishmentService = {
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
   createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number } | null>;
+  recordSourceEmptyBlocker: (params: {
+    pickVariantId: number;
+    pickLocationId: number;
+    orderId: number;
+    orderItemId: number;
+    orderNumber?: string | null;
+    sku?: string | null;
+    sourceLocationCode?: string | null;
+    userId?: string;
+  }) => Promise<any>;
 };
 
 type ReplenOrderContext = {
@@ -204,6 +214,13 @@ export type ResolveAllocationResult =
       message: string;
       exception?: any;
     };
+
+export type ReplenSourceEmptyResult = {
+  success: true;
+  orderItemId: number;
+  taskId: number;
+  status: string;
+};
 
 export type PickQueueOrder = any; // Pass-through type from storage
 
@@ -572,6 +589,77 @@ export class PickingUseCases {
       selectedLocation: { id: location.id, code: location.code, zone },
       autoFixedSetup,
       reviewNeeded,
+    };
+  }
+
+  async reportReplenSourceEmpty(orderItemId: number, params: {
+    sourceLocationCode?: string | null;
+    userId?: string;
+    deviceType?: string;
+    sessionId?: string;
+  }): Promise<ReplenSourceEmptyResult> {
+    const item = await this.storage.getOrderItemById(orderItemId);
+    if (!item) {
+      throw new IntegrityError(`Item ${orderItemId} not found`);
+    }
+    if (!item.location || item.location === "UNASSIGNED") {
+      throw new ValidationError(`Item ${orderItemId} has no pick bin`);
+    }
+
+    const variant = await this.storage.getProductVariantBySku(item.sku);
+    if (!variant) {
+      throw new ValidationError(`No variant found for SKU ${item.sku}`);
+    }
+
+    const [pickLocation] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.code, item.location))
+      .limit(1);
+    if (!pickLocation) {
+      throw new ValidationError(`Pick bin ${item.location} was not found`);
+    }
+
+    const order = await this.storage.getOrderById(item.orderId);
+    const pickerId = order?.assignedPickerId || params.userId;
+    const picker = pickerId ? await this.storage.getUser(pickerId) : null;
+
+    const task = await this.replenishment.recordSourceEmptyBlocker({
+      pickVariantId: variant.id,
+      pickLocationId: pickLocation.id,
+      orderId: item.orderId,
+      orderItemId: item.id,
+      orderNumber: order?.orderNumber ?? null,
+      sku: item.sku,
+      sourceLocationCode: params.sourceLocationCode ?? null,
+      userId: params.userId,
+    });
+
+    await this.storage.createPickingLog({
+      actionType: "replen_source_empty_reported",
+      pickerId: pickerId || undefined,
+      pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+      pickerRole: picker?.role,
+      orderId: item.orderId,
+      orderNumber: order?.orderNumber,
+      orderItemId: item.id,
+      sku: item.sku,
+      itemName: item.name,
+      locationCode: item.location,
+      reason: "source_empty",
+      notes: `Picker reported replen source empty${params.sourceLocationCode ? ` at ${params.sourceLocationCode}` : ""}; replen task #${task.id} blocks shipment`,
+      itemStatusBefore: item.status,
+      itemStatusAfter: item.status,
+      deviceType: params.deviceType || "desktop",
+      sessionId: params.sessionId,
+      pickMethod: "short",
+    });
+
+    return {
+      success: true,
+      orderItemId: item.id,
+      taskId: task.id,
+      status: task.status,
     };
   }
 

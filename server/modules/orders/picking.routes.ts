@@ -211,6 +211,23 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
+  app.post("/api/picking/items/:id/replen-source-empty", requireAuth, async (req, res) => {
+    try {
+      const { picking } = req.app.locals.services;
+      const result = await picking.reportReplenSourceEmpty(parseInt(req.params.id), {
+        sourceLocationCode: req.body?.sourceLocationCode ?? null,
+        userId: req.session.user?.id,
+        deviceType: req.headers["x-device-type"] as string,
+        sessionId: req.sessionID,
+      });
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error reporting replen source empty:", error);
+      const status = error?.name === "ValidationError" ? 400 : 500;
+      res.status(status).json({ error: error.message || "Failed to report replen source empty" });
+    }
+  });
+
   app.post("/api/picking/case-break", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;

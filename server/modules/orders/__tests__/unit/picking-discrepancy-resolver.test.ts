@@ -251,3 +251,60 @@ describe("PickingUseCases ready-to-ship guard", () => {
     expect(storage.updateOrderStatus).not.toHaveBeenCalled();
   });
 });
+
+describe("PickingUseCases replen source-empty reporting", () => {
+  it("records an order-linked shipment-blocking replen task without changing the item", async () => {
+    const pickLocation = { id: 1, code: "A-01" };
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => [pickLocation]),
+          })),
+        })),
+      })),
+    };
+    const storage = {
+      getOrderItemById: vi.fn(async () => makeItem({ status: "pending" })),
+      getProductVariantBySku: vi.fn(async () => ({ id: 100, sku: "SKU-1" })),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        assignedPickerId: "picker-1",
+      })),
+      getUser: vi.fn(async () => ({ id: "picker-1", username: "picker" })),
+      createPickingLog: vi.fn(async () => ({})),
+    };
+    const replenishment = {
+      recordSourceEmptyBlocker: vi.fn(async () => ({ id: 121, status: "blocked" })),
+    };
+    const service = new PickingUseCases(db as any, {} as any, replenishment as any, storage as any);
+
+    const result = await service.reportReplenSourceEmpty(500, {
+      sourceLocationCode: "B-01",
+      userId: "picker-1",
+      deviceType: "scanner",
+      sessionId: "sess-1",
+    });
+
+    expect(result).toMatchObject({ success: true, orderItemId: 500, taskId: 121, status: "blocked" });
+    expect(replenishment.recordSourceEmptyBlocker).toHaveBeenCalledWith(expect.objectContaining({
+      pickVariantId: 100,
+      pickLocationId: 1,
+      orderId: 900,
+      orderItemId: 500,
+      orderNumber: "#900",
+      sku: "SKU-1",
+      sourceLocationCode: "B-01",
+      userId: "picker-1",
+    }));
+    expect(storage.createPickingLog).toHaveBeenCalledWith(expect.objectContaining({
+      actionType: "replen_source_empty_reported",
+      orderItemId: 500,
+      locationCode: "A-01",
+      reason: "source_empty",
+      itemStatusBefore: "pending",
+      itemStatusAfter: "pending",
+    }));
+  });
+});
