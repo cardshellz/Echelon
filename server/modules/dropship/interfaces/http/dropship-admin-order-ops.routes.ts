@@ -107,6 +107,24 @@ export function registerDropshipAdminOrderOpsRoutes(
   );
 
   app.post(
+    "/api/dropship/admin/order-intake/:intakeId/retry-wms-sync",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.retryWmsSync({
+          intakeId: parsePositiveInteger(req.params.intakeId, "intakeId"),
+          reason: parseOptionalBodyString(req.body?.reason),
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.json(result);
+      } catch (error) {
+        return sendDropshipOrderOpsError(res, error);
+      }
+    },
+  );
+
+  app.post(
     "/api/dropship/admin/order-intake/:intakeId/exception",
     requirePermission("dropship", "manage_operations"),
     async (req, res) => {
@@ -151,6 +169,7 @@ function statusForDropshipOrderOpsError(code: string): number {
     case "DROPSHIP_ORDER_OPS_DETAIL_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_RETRY_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_CANCELLATION_RETRY_INVALID_INPUT":
+    case "DROPSHIP_ORDER_OPS_WMS_SYNC_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_EXCEPTION_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_PROCESS_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_INVALID_REQUEST":
@@ -164,6 +183,8 @@ function statusForDropshipOrderOpsError(code: string): number {
     case "DROPSHIP_ORDER_OPS_STATUS_NOT_ACTIONABLE":
       return 409;
     case "DROPSHIP_ORDER_OPS_PROCESSOR_NOT_CONFIGURED":
+    case "DROPSHIP_ORDER_OPS_WMS_SYNC_NOT_CONFIGURED":
+    case "DROPSHIP_ORDER_OPS_WMS_SYNC_RETRY_ENQUEUE_FAILED":
       return 503;
     default:
       return 500;

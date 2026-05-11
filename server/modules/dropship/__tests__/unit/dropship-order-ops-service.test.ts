@@ -7,8 +7,12 @@ import {
   type DropshipOrderOpsActionResult,
   type DropshipOrderOpsCancellationActionResult,
   type DropshipOrderOpsIntakeListResult,
+  type DropshipOmsFulfillmentSync,
+  type DropshipOmsFulfillmentSyncRetryQueue,
   type DropshipOrderOpsProcessor,
   type DropshipOrderOpsRepository,
+  type DropshipOrderOpsWmsSyncActionResult,
+  type DropshipOrderOpsWmsSyncActionTarget,
 } from "../../application";
 
 const now = new Date("2026-05-02T12:00:00.000Z");
@@ -270,6 +274,110 @@ describe("DropshipOrderOpsService", () => {
     });
   });
 
+  it("retries accepted intake WMS sync immediately when the sync service is configured", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const fulfillmentSync = new FakeFulfillmentSync();
+    const retryQueue = new FakeFulfillmentSyncRetryQueue();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderOpsService({
+      repository,
+      fulfillmentSync,
+      fulfillmentSyncRetryQueue: retryQueue,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.retryWmsSync({
+      intakeId: 12,
+      reason: "retry dead WMS sync",
+      idempotencyKey: "retry-wms-12",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result).toMatchObject({
+      intakeId: 12,
+      omsOrderId: 9001,
+      outcome: "synced",
+      wmsOrderId: 7001,
+      retryQueued: false,
+      failureMessage: null,
+    });
+    expect(fulfillmentSync.syncedOmsOrderIds).toEqual([9001]);
+    expect(retryQueue.enqueuedOmsOrderIds).toEqual([]);
+    expect(repository.lastWmsSyncAuditInput).toMatchObject({
+      intakeId: 12,
+      reason: "retry dead WMS sync",
+      idempotencyKey: "retry-wms-12",
+      outcome: "synced",
+      wmsOrderId: 7001,
+      retryQueued: false,
+      now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_ORDER_OPS_WMS_SYNC_RETRY_REQUESTED",
+      context: {
+        intakeId: 12,
+        omsOrderId: 9001,
+        outcome: "synced",
+        idempotencyKey: "retry-wms-12",
+      },
+    });
+  });
+
+  it("queues accepted intake WMS sync repair when immediate sync fails", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const fulfillmentSync = new FakeFulfillmentSync();
+    fulfillmentSync.error = new Error("WMS unavailable");
+    const retryQueue = new FakeFulfillmentSyncRetryQueue();
+    const service = new DropshipOrderOpsService({
+      repository,
+      fulfillmentSync,
+      fulfillmentSyncRetryQueue: retryQueue,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.retryWmsSync({
+      intakeId: 12,
+      idempotencyKey: "retry-wms-12",
+      actor: { actorType: "admin" },
+    });
+
+    expect(result).toMatchObject({
+      outcome: "queued",
+      omsOrderId: 9001,
+      retryQueued: true,
+      failureMessage: "WMS unavailable",
+    });
+    expect(retryQueue.enqueuedOmsOrderIds).toEqual([9001]);
+    expect(repository.lastWmsSyncAuditInput).toMatchObject({
+      outcome: "queued",
+      retryQueued: true,
+      failureMessage: "WMS unavailable",
+    });
+  });
+
+  it("rejects WMS sync repair for intakes that are not accepted", async () => {
+    const repository = new FakeOrderOpsRepository();
+    repository.wmsSyncTarget = makeWmsSyncTarget({ status: "failed" });
+    const service = new DropshipOrderOpsService({
+      repository,
+      fulfillmentSyncRetryQueue: new FakeFulfillmentSyncRetryQueue(),
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    await expect(service.retryWmsSync({
+      intakeId: 12,
+      idempotencyKey: "retry-wms-12",
+      actor: { actorType: "admin" },
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_OPS_STATUS_NOT_ACTIONABLE",
+      context: { status: "failed" },
+    });
+    expect(repository.lastWmsSyncAuditInput).toBeNull();
+  });
+
   it("rejects process requests when the ops processor is not configured", async () => {
     const service = new DropshipOrderOpsService({
       repository: new FakeOrderOpsRepository(),
@@ -307,6 +415,8 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
   lastRetryInput: Parameters<DropshipOrderOpsRepository["retryIntake"]>[0] | null = null;
   lastCancellationRetryInput: Parameters<DropshipOrderOpsRepository["retryMarketplaceCancellation"]>[0] | null = null;
   lastExceptionInput: Parameters<DropshipOrderOpsRepository["markException"]>[0] | null = null;
+  lastWmsSyncAuditInput: Parameters<DropshipOrderOpsRepository["recordWmsSyncAction"]>[0] | null = null;
+  wmsSyncTarget: DropshipOrderOpsWmsSyncActionTarget | null = makeWmsSyncTarget();
 
   async listIntakes(
     input: Parameters<DropshipOrderOpsRepository["listIntakes"]>[0],
@@ -416,6 +526,16 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
       updatedAt: input.now,
     };
   }
+
+  async getWmsSyncActionTarget(): Promise<DropshipOrderOpsWmsSyncActionTarget | null> {
+    return this.wmsSyncTarget;
+  }
+
+  async recordWmsSyncAction(
+    input: Parameters<DropshipOrderOpsRepository["recordWmsSyncAction"]>[0],
+  ): Promise<void> {
+    this.lastWmsSyncAuditInput = input;
+  }
 }
 
 class FakeOrderOpsProcessor implements DropshipOrderOpsProcessor {
@@ -438,6 +558,28 @@ class FakeOrderOpsProcessor implements DropshipOrderOpsProcessor {
       failureMessage: null,
       retryable: false,
     };
+  }
+}
+
+class FakeFulfillmentSync implements DropshipOmsFulfillmentSync {
+  syncedOmsOrderIds: number[] = [];
+  error: Error | null = null;
+  wmsOrderId: number | null = 7001;
+
+  async syncOmsOrderToWms(omsOrderId: number): Promise<number | null> {
+    this.syncedOmsOrderIds.push(omsOrderId);
+    if (this.error) {
+      throw this.error;
+    }
+    return this.wmsOrderId;
+  }
+}
+
+class FakeFulfillmentSyncRetryQueue implements DropshipOmsFulfillmentSyncRetryQueue {
+  enqueuedOmsOrderIds: number[] = [];
+
+  async enqueueOmsWmsSyncRetry(input: { omsOrderId: number }): Promise<void> {
+    this.enqueuedOmsOrderIds.push(input.omsOrderId);
   }
 }
 
@@ -476,6 +618,21 @@ function makeListItem(): DropshipOrderOpsIntakeListResult["items"][number] {
     totalQuantity: 2,
     shipTo: { country: "US", postalCode: "10001" },
     latestAuditEvent: null,
+  };
+}
+
+function makeWmsSyncTarget(
+  overrides: Partial<DropshipOrderOpsWmsSyncActionTarget> = {},
+): DropshipOrderOpsWmsSyncActionTarget {
+  return {
+    intakeId: 12,
+    vendorId: 10,
+    storeConnectionId: 22,
+    externalOrderId: "EXT-12",
+    status: "accepted",
+    omsOrderId: 9001,
+    updatedAt: now,
+    ...overrides,
   };
 }
 

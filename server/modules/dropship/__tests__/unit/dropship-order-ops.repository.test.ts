@@ -158,6 +158,83 @@ describe("PgDropshipOrderOpsRepository", () => {
     ]);
   });
 
+  it("loads accepted intake target for WMS sync repair", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      expect(sqlText).toContain("SELECT id, vendor_id, store_connection_id, external_order_id, status, oms_order_id, updated_at");
+      expect(sqlText).toContain("FROM dropship.dropship_order_intake");
+      expect(params).toEqual([42]);
+      return {
+        rows: [{
+          id: 42,
+          vendor_id: 10,
+          store_connection_id: 22,
+          external_order_id: "ORDER-42",
+          status: "accepted",
+          oms_order_id: "9001",
+          updated_at: now,
+        }],
+      };
+    });
+    const repository = new PgDropshipOrderOpsRepository({ query } as unknown as Pool);
+
+    const target = await repository.getWmsSyncActionTarget({ intakeId: 42 });
+
+    expect(target).toEqual({
+      intakeId: 42,
+      vendorId: 10,
+      storeConnectionId: 22,
+      externalOrderId: "ORDER-42",
+      status: "accepted",
+      omsOrderId: 9001,
+      updatedAt: now,
+    });
+  });
+
+  it("records WMS sync repair audit context", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      expect(sqlText).toContain("INSERT INTO dropship.dropship_audit_events");
+      expect(sqlText).toContain("order_wms_sync_retry_requested");
+      expect(params?.slice(0, 6)).toEqual([10, 22, "42", "admin", "ops-user", "warning"]);
+      expect(JSON.parse(String(params?.[6]))).toMatchObject({
+        externalOrderId: "ORDER-42",
+        idempotencyKey: "retry-wms-42",
+        reason: "dogfood repair",
+        previousStatus: "accepted",
+        omsOrderId: 9001,
+        outcome: "queued",
+        wmsOrderId: null,
+        retryQueued: true,
+        failureMessage: "WMS unavailable",
+      });
+      expect(params?.[7]).toBe(now);
+      return { rows: [] };
+    });
+    const repository = new PgDropshipOrderOpsRepository({ query } as unknown as Pool);
+
+    await repository.recordWmsSyncAction({
+      intakeId: 42,
+      idempotencyKey: "retry-wms-42",
+      reason: "dogfood repair",
+      actor: { actorType: "admin", actorId: "ops-user" },
+      target: {
+        intakeId: 42,
+        vendorId: 10,
+        storeConnectionId: 22,
+        externalOrderId: "ORDER-42",
+        status: "accepted",
+        omsOrderId: 9001,
+        updatedAt: now,
+      },
+      now,
+      outcome: "queued",
+      wmsOrderId: null,
+      retryQueued: true,
+      failureMessage: "WMS unavailable",
+    });
+  });
+
   it("rejects non-stale processing intake retries without updating the row", async () => {
     const query = vi.fn(async (sql: string) => {
       const sqlText = String(sql);

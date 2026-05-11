@@ -1176,6 +1176,18 @@ export interface DropshipAdminOrderOpsCancellationRetryResponse extends Dropship
   cancellationStatus: string | null;
 }
 
+export interface DropshipAdminOrderOpsWmsSyncResponse {
+  intakeId: number;
+  vendorId: number | null;
+  storeConnectionId: number | null;
+  omsOrderId: number;
+  outcome: "synced" | "queued";
+  wmsOrderId: number | null;
+  retryQueued: boolean;
+  failureMessage: string | null;
+  updatedAt: string;
+}
+
 export type DropshipOrderCancellationRetryEligibilityReason =
   | "failed_cancellation"
   | "already_retrying"
