@@ -467,6 +467,52 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     ]);
   });
 
+  it("warns when complete dogfood smoke evidence is older than the configured freshness window", async () => {
+    const staleAt = new Date("2026-04-30T15:00:00.000Z");
+    const query = vi.fn(async () => ({
+      rows: [makeDogfoodSmokeRow({
+        latest_listing_pushed_at: staleAt,
+        latest_listing_updated_at: staleAt,
+        latest_listing_job_completed_at: staleAt,
+        latest_listing_job_updated_at: staleAt,
+        latest_intake_received_at: staleAt,
+        latest_intake_accepted_at: staleAt,
+        latest_intake_updated_at: staleAt,
+        latest_shipment_shipped_at: staleAt,
+        latest_shipment_updated_at: staleAt,
+        latest_tracking_push_completed_at: staleAt,
+        latest_tracking_push_updated_at: staleAt,
+      })],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodSmokeCandidates({
+      generatedAt: now,
+      staleAfterHours: 24,
+      limit: 10,
+    });
+
+    expect(result).toMatchObject({
+      staleAfterHours: 24,
+      readyCandidateCount: 0,
+      warningCandidateCount: 1,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store waiting on smoke evidence.",
+    });
+    expect(result.candidates[0]?.status).toBe("warning");
+    expect(result.candidates[0]?.stages.every((stage) => stage.status === "warning")).toBe(true);
+    expect(result.candidates[0]?.stages[0]).toMatchObject({
+      freshness: {
+        status: "stale",
+        staleAfterHours: 24,
+      },
+      message: "Listing push evidence is older than 24 hour(s); rerun this smoke step before dogfood.",
+      evidence: expect.arrayContaining([
+        "Freshness threshold: 24 hour(s); latest evidence 2026-04-30T15:00:00.000Z.",
+      ]),
+    });
+  });
+
   it("blocks dogfood smoke when a shipped WMS shipment has no marketplace tracking push", async () => {
     const query = vi.fn(async () => ({
       rows: [makeDogfoodSmokeRow({

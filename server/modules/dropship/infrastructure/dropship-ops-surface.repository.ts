@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES } from "../application/dropship-notification-service";
 import {
+  DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS,
   buildDropshipSettingsSections,
   type DropshipAdminOpsOverview,
   type DropshipAuditEventRecord,
@@ -22,6 +23,8 @@ import {
 } from "../application/dropship-ops-surface-service";
 import { DropshipError } from "../domain/errors";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
+
+const HOUR_IN_MS = 60 * 60 * 1000;
 
 interface VendorSettingsRow {
   id: number;
@@ -175,6 +178,8 @@ interface DogfoodSmokeRow {
   latest_tracking_push_updated_at: Date | null;
   total_count: string | number;
 }
+
+type DogfoodSmokeStageWithoutFreshness = Omit<DropshipDogfoodSmokeStage, "freshness">;
 
 export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -442,13 +447,18 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
        LIMIT $${filters.params.length + 1}`,
       [...filters.params, input.limit],
     );
-    const candidates = result.rows.map(mapDogfoodSmokeRow);
+    const staleAfterHours = input.staleAfterHours ?? DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS;
+    const candidates = result.rows.map((row) => mapDogfoodSmokeRow(row, {
+      generatedAt: input.generatedAt,
+      staleAfterHours,
+    }));
     const readyCandidateCount = candidates.filter((candidate) => candidate.status === "ready").length;
     const warningCandidateCount = candidates.filter((candidate) => candidate.status === "warning").length;
     const blockedCandidateCount = candidates.filter((candidate) => candidate.status === "blocked").length;
 
     return {
       generatedAt: input.generatedAt,
+      staleAfterHours,
       candidates,
       total: toNumber(result.rows[0]?.total_count ?? 0),
       readyCandidateCount,
@@ -1130,13 +1140,16 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
   };
 }
 
-function mapDogfoodSmokeRow(row: DogfoodSmokeRow): DropshipDogfoodSmokeCandidate {
+function mapDogfoodSmokeRow(
+  row: DogfoodSmokeRow,
+  freshnessInput: { generatedAt: Date; staleAfterHours: number },
+): DropshipDogfoodSmokeCandidate {
   const stages = [
     buildListingSmokeStage(row),
     buildOrderIntakeSmokeStage(row),
     buildFulfillmentSmokeStage(row),
     buildTrackingSmokeStage(row),
-  ];
+  ].map((stage) => applyDogfoodSmokeStageFreshness(stage, freshnessInput));
   const status = summarizeStageStatus(stages);
   return {
     vendor: {
@@ -1177,7 +1190,7 @@ function mapDogfoodSmokeRow(row: DogfoodSmokeRow): DropshipDogfoodSmokeCandidate
   };
 }
 
-function buildListingSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+function buildListingSmokeStage(row: DogfoodSmokeRow): DogfoodSmokeStageWithoutFreshness {
   const activeListingCount = toNumber(row.active_listing_count);
   const itemFailed = toNumber(row.latest_listing_job_item_failed ?? 0);
   const itemCompleted = toNumber(row.latest_listing_job_item_completed ?? 0);
@@ -1232,7 +1245,7 @@ function buildListingSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage
   };
 }
 
-function buildOrderIntakeSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+function buildOrderIntakeSmokeStage(row: DogfoodSmokeRow): DogfoodSmokeStageWithoutFreshness {
   const status = row.latest_intake_status;
   const evidence = row.latest_intake_id
     ? [
@@ -1276,7 +1289,7 @@ function buildOrderIntakeSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeS
   };
 }
 
-function buildFulfillmentSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+function buildFulfillmentSmokeStage(row: DogfoodSmokeRow): DogfoodSmokeStageWithoutFreshness {
   const evidence = row.latest_shipment_id
     ? [
         `Latest WMS shipment ${row.latest_shipment_id}: ${row.latest_shipment_status}.`,
@@ -1319,7 +1332,7 @@ function buildFulfillmentSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeS
   };
 }
 
-function buildTrackingSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+function buildTrackingSmokeStage(row: DogfoodSmokeRow): DogfoodSmokeStageWithoutFreshness {
   const evidence = row.latest_tracking_push_id
     ? [
         `Latest tracking push ${row.latest_tracking_push_id}: ${row.latest_tracking_push_status}.`,
@@ -1371,6 +1384,49 @@ function buildTrackingSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStag
       : "No marketplace tracking evidence exists yet.",
     evidence,
     latestAt: row.latest_tracking_push_updated_at,
+  };
+}
+
+function applyDogfoodSmokeStageFreshness(
+  stage: DogfoodSmokeStageWithoutFreshness,
+  input: { generatedAt: Date; staleAfterHours: number },
+): DropshipDogfoodSmokeStage {
+  const freshness = calculateDogfoodSmokeFreshness(stage.latestAt, input);
+  if (stage.status !== "ready" || freshness.status === "fresh") {
+    return { ...stage, freshness };
+  }
+
+  const staleMessage = freshness.status === "missing"
+    ? `${stage.label} evidence has no timestamp; rerun this smoke step before dogfood.`
+    : `${stage.label} evidence is older than ${input.staleAfterHours} hour(s); rerun this smoke step before dogfood.`;
+  const evidence = freshness.status === "missing"
+    ? [...stage.evidence, `Freshness threshold: ${input.staleAfterHours} hour(s); latest evidence timestamp missing.`]
+    : [...stage.evidence, `Freshness threshold: ${input.staleAfterHours} hour(s); latest evidence ${stage.latestAt!.toISOString()}.`];
+
+  return {
+    ...stage,
+    status: "warning",
+    message: staleMessage,
+    evidence,
+    freshness,
+  };
+}
+
+function calculateDogfoodSmokeFreshness(
+  latestAt: Date | null,
+  input: { generatedAt: Date; staleAfterHours: number },
+): DropshipDogfoodSmokeStage["freshness"] {
+  if (latestAt === null) {
+    return {
+      status: "missing",
+      staleAfterHours: input.staleAfterHours,
+    };
+  }
+
+  const staleBefore = input.generatedAt.getTime() - input.staleAfterHours * HOUR_IN_MS;
+  return {
+    status: latestAt.getTime() < staleBefore ? "stale" : "fresh",
+    staleAfterHours: input.staleAfterHours,
   };
 }
 

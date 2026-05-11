@@ -9,6 +9,8 @@ const pageSchema = z.number().int().positive().default(1);
 const limitSchema = z.number().int().positive().max(100).default(50);
 const optionalStringSchema = z.string().trim().min(1).max(255).optional();
 const severitySchema = z.enum(["info", "warning", "error"]);
+export const DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS = 72;
+export const MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS = 720;
 
 const searchAuditEventsInputSchema = z.object({
   vendorId: positiveIdSchema.optional(),
@@ -43,6 +45,7 @@ const dogfoodSmokeInputSchema = z.object({
   platform: z.enum(["ebay", "shopify"]).optional(),
   search: optionalStringSchema,
   limit: z.number().int().positive().max(25).default(10),
+  staleAfterHours: z.number().int().positive().max(MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS).optional(),
 }).strict();
 
 export type SearchDropshipAuditEventsInput = z.infer<typeof searchAuditEventsInputSchema>;
@@ -277,6 +280,10 @@ export interface DropshipDogfoodSmokeStage {
   message: string;
   evidence: string[];
   latestAt: Date | null;
+  freshness: {
+    status: "fresh" | "stale" | "missing";
+    staleAfterHours: number;
+  };
 }
 
 export interface DropshipDogfoodSmokeCandidate {
@@ -303,6 +310,7 @@ export interface DropshipDogfoodSmokeCandidate {
 
 export interface DropshipDogfoodSmokeResult {
   generatedAt: Date;
+  staleAfterHours: number;
   candidates: DropshipDogfoodSmokeCandidate[];
   total: number;
   readyCandidateCount: number;
@@ -412,8 +420,10 @@ export class DropshipOpsSurfaceService {
       input,
       "DROPSHIP_DOGFOOD_SMOKE_INVALID_INPUT",
     );
+    const staleAfterHours = resolveDogfoodSmokeStaleAfterHours(parsed.staleAfterHours, this.deps.env ?? process.env);
     const result = await this.deps.repository.listDogfoodSmokeCandidates({
       ...parsed,
+      staleAfterHours,
       generatedAt: this.deps.clock.now(),
     });
     this.deps.logger.info({
@@ -425,6 +435,7 @@ export class DropshipOpsSurfaceService {
         vendorId: parsed.vendorId ?? null,
         storeConnectionId: parsed.storeConnectionId ?? null,
         platform: parsed.platform ?? null,
+        staleAfterHours,
       },
     });
     return result;
@@ -630,6 +641,7 @@ export function buildDropshipSystemReadinessChecks(
     buildShipStationCredentialsCheck(env),
     buildShipStationWebhookSecurityCheck(env),
     buildSplitShipmentHandoffCheck(env),
+    buildDogfoodSmokeFreshnessCheck(env),
     buildStripeFundingCheck(env),
     buildUsdcBaseFundingCheck(),
   ];
@@ -1000,6 +1012,39 @@ function buildSplitShipmentHandoffCheck(env: NodeJS.ProcessEnv): DropshipSystemR
   };
 }
 
+function buildDogfoodSmokeFreshnessCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const rawValue = env.DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS?.trim();
+  const requiredEnv = [`DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS optional 1-${MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS}`];
+  if (!rawValue) {
+    return {
+      key: "dogfood_smoke_freshness",
+      label: "Dogfood smoke freshness",
+      status: "ready",
+      message: `Dogfood smoke evidence expires after the default ${DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS} hour window.`,
+      requiredEnv,
+    };
+  }
+
+  const parsed = Number(rawValue);
+  if (!isValidDogfoodSmokeStaleAfterHours(parsed)) {
+    return {
+      key: "dogfood_smoke_freshness",
+      label: "Dogfood smoke freshness",
+      status: "blocked",
+      message: `DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS must be a whole number from 1 to ${MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS}.`,
+      requiredEnv,
+    };
+  }
+
+  return {
+    key: "dogfood_smoke_freshness",
+    label: "Dogfood smoke freshness",
+    status: "ready",
+    message: `Dogfood smoke evidence expires after ${parsed} hour(s).`,
+    requiredEnv,
+  };
+}
+
 function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
   const missing = missingEnv(env, ["STRIPE_SECRET_KEY"]);
   const hasWebhookSecret = hasEnv(env, "DROPSHIP_STRIPE_WEBHOOK_SECRET")
@@ -1035,6 +1080,37 @@ function buildUsdcBaseFundingCheck(): DropshipSystemReadinessCheck {
     message: "USDC Base confirmed-transfer funding method registration, ledger capture, and admin confirmed-credit flow are available.",
     requiredEnv: [],
   };
+}
+
+function resolveDogfoodSmokeStaleAfterHours(inputValue: number | undefined, env: NodeJS.ProcessEnv): number {
+  if (inputValue !== undefined) {
+    return inputValue;
+  }
+
+  const rawValue = env.DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS?.trim();
+  if (!rawValue) {
+    return DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS;
+  }
+
+  const parsed = Number(rawValue);
+  if (!isValidDogfoodSmokeStaleAfterHours(parsed)) {
+    throw new DropshipError(
+      "DROPSHIP_DOGFOOD_SMOKE_INVALID_INPUT",
+      "Dogfood smoke freshness configuration is invalid.",
+      {
+        env: "DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS",
+        value: rawValue,
+        min: 1,
+        max: MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS,
+      },
+    );
+  }
+
+  return parsed;
+}
+
+function isValidDogfoodSmokeStaleAfterHours(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && value <= MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS;
 }
 
 function isValidTokenEncryptionKey(rawKey: string): boolean {

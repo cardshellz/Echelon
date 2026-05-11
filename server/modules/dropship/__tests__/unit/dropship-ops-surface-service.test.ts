@@ -657,6 +657,7 @@ describe("DropshipOpsSurfaceService", () => {
       platform: "ebay",
       search: "smoke",
       limit: 5,
+      staleAfterHours: 72,
       generatedAt: now,
     });
     expect(logs[0]).toMatchObject({
@@ -667,6 +668,42 @@ describe("DropshipOpsSurfaceService", () => {
         platform: "ebay",
         total: 1,
       },
+    });
+  });
+
+  it("uses configured dogfood smoke freshness windows without exposing invalid config as ready", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const service = makeService(repository, [], {
+      DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS: "24",
+    });
+
+    await service.listDogfoodSmokeCandidates({ limit: 5 });
+
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      staleAfterHours: 24,
+      limit: 5,
+      generatedAt: now,
+    });
+    expect(buildDropshipSystemReadinessChecks({
+      DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS: "invalid",
+    }).find((check) => check.key === "dogfood_smoke_freshness")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS optional 1-720"],
+    });
+  });
+
+  it("lets dogfood smoke requests override the default freshness window", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const service = makeService(repository, [], {
+      DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS: "24",
+    });
+
+    await service.listDogfoodSmokeCandidates({ limit: 5, staleAfterHours: 12 });
+
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      staleAfterHours: 12,
+      limit: 5,
+      generatedAt: now,
     });
   });
 });
@@ -740,6 +777,7 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
     this.lastDogfoodSmokeInput = input;
     return {
       generatedAt: input.generatedAt,
+      staleAfterHours: input.staleAfterHours ?? 72,
       total: 1,
       readyCandidateCount: 0,
       warningCandidateCount: 1,
@@ -772,6 +810,10 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
           message: "At least one active marketplace listing exists for this store.",
           evidence: ["1 active marketplace listing(s)."],
           latestAt: now,
+          freshness: {
+            status: "fresh",
+            staleAfterHours: input.staleAfterHours ?? 72,
+          },
         }],
         references: {
           latestListingId: 30,
