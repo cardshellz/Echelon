@@ -44,14 +44,15 @@ function makeService(options?: {
 }
 
 describe("CycleCountUseCases replenishment feedback", () => {
-  it("closes linked source-empty replen blockers when the linked count is completed", async () => {
+  it("closes linked replen exception tasks when the linked count is completed", async () => {
     const { db, replenishment, service, storage } = makeService({
       executeResults: [
         { rows: [] },
         {
           rows: [
-            { id: 121, to_location_id: 1 },
-            { id: 122, to_location_id: 1 },
+            { id: 121, to_location_id: 1, exception_reason: "source_empty" },
+            { id: 122, to_location_id: 1, exception_reason: "empty" },
+            { id: 123, to_location_id: 2, exception_reason: "wrong_product" },
           ],
         },
       ],
@@ -59,7 +60,7 @@ describe("CycleCountUseCases replenishment feedback", () => {
 
     await expect(service.complete(333)).resolves.toEqual({
       success: true,
-      linkedReplenBlockersClosed: 2,
+      linkedReplenBlockersClosed: 3,
     });
 
     expect(storage.updateCycleCount).toHaveBeenCalledWith(333, expect.objectContaining({
@@ -67,8 +68,9 @@ describe("CycleCountUseCases replenishment feedback", () => {
       completedAt: expect.any(Date),
     }));
     expect(db.execute).toHaveBeenCalledTimes(2);
-    expect(replenishment.checkReplenForLocation).toHaveBeenCalledTimes(1);
+    expect(replenishment.checkReplenForLocation).toHaveBeenCalledTimes(2);
     expect(replenishment.checkReplenForLocation).toHaveBeenCalledWith(1);
+    expect(replenishment.checkReplenForLocation).toHaveBeenCalledWith(2);
   });
 
   it("does not close replen blockers if the count still has unresolved items", async () => {
