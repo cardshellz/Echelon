@@ -416,6 +416,78 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       message: "Store connection is launch-ready with an access token reference.",
     });
   });
+
+  it("maps dogfood smoke evidence across listing, intake, shipment, and tracking handoffs", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      expect(String(sql)).toContain("dropship.dropship_vendor_listings");
+      expect(String(sql)).toContain("dropship.dropship_listing_push_jobs");
+      expect(String(sql)).toContain("dropship.dropship_order_intake");
+      expect(String(sql)).toContain("wms.outbound_shipments");
+      expect(String(sql)).toContain("dropship.dropship_marketplace_tracking_pushes");
+      expect(params).toEqual([10, "ebay", 5]);
+      return {
+        rows: [makeDogfoodSmokeRow({
+          latest_tracking_push_status: "succeeded",
+          latest_tracking_push_external_fulfillment_id: "fulfillment-1",
+        })],
+      };
+    });
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodSmokeCandidates({
+      generatedAt: now,
+      vendorId: 10,
+      platform: "ebay",
+      limit: 5,
+    });
+
+    expect(result).toMatchObject({
+      total: 1,
+      readyCandidateCount: 1,
+      warningCandidateCount: 0,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store with full smoke evidence; 0 blocked and 0 incomplete.",
+    });
+    expect(result.candidates[0]).toMatchObject({
+      status: "ready",
+      references: {
+        latestListingId: 30,
+        latestListingJobId: 40,
+        latestIntakeId: 50,
+        latestOmsOrderId: 60,
+        latestWmsShipmentId: 70,
+        latestTrackingPushId: 80,
+      },
+    });
+    expect(result.candidates[0]?.stages.map((stage) => [stage.key, stage.status])).toEqual([
+      ["listing", "ready"],
+      ["order_intake", "ready"],
+      ["fulfillment", "ready"],
+      ["tracking", "ready"],
+    ]);
+  });
+
+  it("blocks dogfood smoke when a shipped WMS shipment has no marketplace tracking push", async () => {
+    const query = vi.fn(async () => ({
+      rows: [makeDogfoodSmokeRow({
+        latest_tracking_push_id: null,
+        latest_tracking_push_status: null,
+        latest_tracking_push_external_fulfillment_id: null,
+      })],
+    }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodSmokeCandidates({
+      generatedAt: now,
+      limit: 10,
+    });
+
+    expect(result.blockedCandidateCount).toBe(1);
+    expect(result.candidates[0]?.stages.find((stage) => stage.key === "tracking")).toMatchObject({
+      status: "blocked",
+      message: "Shipment has tracking, but no marketplace tracking push exists.",
+    });
+  });
 });
 
 function makeVendorSettingsRow(overrides: Record<string, unknown> = {}) {
@@ -485,6 +557,61 @@ function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
     auto_reload_enabled: true,
     auto_reload_funding_method_ready: true,
     notification_preference_count: "1",
+    ...overrides,
+  };
+}
+
+function makeDogfoodSmokeRow(overrides: Record<string, unknown> = {}) {
+  return {
+    vendor_id: 10,
+    member_id: "member-1",
+    business_name: "Vendor Test",
+    email: "vendor@cardshellz.test",
+    vendor_status: "active",
+    entitlement_status: "active",
+    store_connection_id: 20,
+    platform: "ebay",
+    store_status: "connected",
+    setup_status: "ready",
+    external_display_name: "Vendor eBay",
+    shop_domain: null,
+    updated_at: now,
+    active_listing_count: "1",
+    latest_listing_id: 30,
+    latest_listing_status: "active",
+    latest_listing_external_id: "listing-1",
+    latest_listing_pushed_at: now,
+    latest_listing_updated_at: now,
+    latest_listing_job_id: 40,
+    latest_listing_job_status: "completed",
+    latest_listing_job_completed_at: now,
+    latest_listing_job_updated_at: now,
+    latest_listing_job_item_total: "1",
+    latest_listing_job_item_completed: "1",
+    latest_listing_job_item_failed: "0",
+    latest_intake_id: 50,
+    latest_intake_status: "accepted",
+    latest_intake_external_order_id: "order-1",
+    latest_intake_external_order_number: "1001",
+    latest_intake_oms_order_id: "60",
+    latest_intake_received_at: now,
+    latest_intake_accepted_at: now,
+    latest_intake_updated_at: now,
+    latest_shipment_id: 70,
+    latest_shipment_status: "shipped",
+    latest_shipment_tracking_number: "94001111",
+    latest_shipment_carrier: "usps",
+    latest_shipment_shipstation_order_id: 7001,
+    latest_shipment_shipped_at: now,
+    latest_shipment_updated_at: now,
+    latest_tracking_push_id: 80,
+    latest_tracking_push_status: "succeeded",
+    latest_tracking_push_external_fulfillment_id: "fulfillment-1",
+    latest_tracking_push_last_error_code: null,
+    latest_tracking_push_last_error_message: null,
+    latest_tracking_push_completed_at: now,
+    latest_tracking_push_updated_at: now,
+    total_count: "1",
     ...overrides,
   };
 }

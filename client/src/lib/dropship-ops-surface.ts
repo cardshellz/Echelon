@@ -514,6 +514,49 @@ export interface DropshipDogfoodReadinessResponse {
   launchGate: DropshipDogfoodLaunchGate;
 }
 
+export type DropshipDogfoodSmokeStageKey = "listing" | "order_intake" | "fulfillment" | "tracking";
+
+export interface DropshipDogfoodSmokeStage {
+  key: DropshipDogfoodSmokeStageKey;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  evidence: string[];
+  latestAt: string | null;
+}
+
+export interface DropshipDogfoodSmokeCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: DropshipDogfoodReadinessItem["storeConnection"] & {
+    storeConnectionId: number;
+    platform: string;
+    status: string;
+    setupStatus: string;
+  };
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  stages: DropshipDogfoodSmokeStage[];
+  references: {
+    latestListingId: number | null;
+    latestListingJobId: number | null;
+    latestIntakeId: number | null;
+    latestOmsOrderId: number | null;
+    latestWmsShipmentId: number | null;
+    latestTrackingPushId: number | null;
+  };
+  lastActivityAt: string | null;
+}
+
+export interface DropshipDogfoodSmokeResponse {
+  generatedAt: string;
+  candidates: DropshipDogfoodSmokeCandidate[];
+  total: number;
+  readyCandidateCount: number;
+  warningCandidateCount: number;
+  blockedCandidateCount: number;
+  message: string;
+}
+
 export interface DropshipOmsChannelOption {
   channelId: number;
   name: string;
@@ -2285,6 +2328,18 @@ export function buildAdminDogfoodReadinessUrl(input: {
     platform: input.platform === "all" ? undefined : input.platform,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
+  });
+}
+
+export function buildAdminDogfoodSmokeUrl(input: {
+  search: string;
+  platform: DropshipStorePlatform | "all";
+  limit?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/admin/dogfood-smoke", {
+    search: input.search.trim(),
+    platform: input.platform === "all" ? undefined : input.platform,
+    limit: input.limit ?? 10,
   });
 }
 

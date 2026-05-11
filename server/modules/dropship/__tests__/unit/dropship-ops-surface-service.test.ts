@@ -7,6 +7,7 @@ import {
   DropshipOpsSurfaceService,
   type DropshipAdminOpsOverview,
   type DropshipAuditEventSearchResult,
+  type DropshipDogfoodSmokeResult,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResult,
   type DropshipOpsSurfaceRepository,
@@ -632,6 +633,42 @@ describe("DropshipOpsSurfaceService", () => {
     });
     expect(repository.lastDogfoodInput).toBeNull();
   });
+
+  it("lists dogfood smoke candidates with scoped filters and generated timestamp", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs);
+
+    const result = await service.listDogfoodSmokeCandidates({
+      vendorId: 10,
+      storeConnectionId: 20,
+      platform: "ebay",
+      search: " smoke ",
+      limit: 5,
+    });
+
+    expect(result.candidates[0]).toMatchObject({
+      status: "warning",
+      references: { latestListingId: 30 },
+    });
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      vendorId: 10,
+      storeConnectionId: 20,
+      platform: "ebay",
+      search: "smoke",
+      limit: 5,
+      generatedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_DOGFOOD_SMOKE_VIEWED",
+      context: {
+        vendorId: 10,
+        storeConnectionId: 20,
+        platform: "ebay",
+        total: 1,
+      },
+    });
+  });
 });
 
 class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
@@ -639,6 +676,7 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
   lastOverviewInput: Parameters<DropshipOpsSurfaceRepository["getAdminOpsOverview"]>[0] | null = null;
   lastAuditSearch: Parameters<DropshipOpsSurfaceRepository["searchAuditEvents"]>[0] | null = null;
   lastDogfoodInput: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0] | null = null;
+  lastDogfoodSmokeInput: Parameters<DropshipOpsSurfaceRepository["listDogfoodSmokeCandidates"]>[0] | null = null;
 
   async getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview> {
     this.lastSettingsVendorId = vendorId;
@@ -693,6 +731,58 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
       limit: input.limit,
       summary: [{ status: "blocked", count: 1 }],
       systemChecks: [],
+    };
+  }
+
+  async listDogfoodSmokeCandidates(
+    input: Parameters<DropshipOpsSurfaceRepository["listDogfoodSmokeCandidates"]>[0],
+  ): Promise<DropshipDogfoodSmokeResult> {
+    this.lastDogfoodSmokeInput = input;
+    return {
+      generatedAt: input.generatedAt,
+      total: 1,
+      readyCandidateCount: 0,
+      warningCandidateCount: 1,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store waiting on smoke evidence.",
+      candidates: [{
+        vendor: {
+          vendorId: 10,
+          memberId: "member-1",
+          businessName: "Vendor Test",
+          email: "vendor@cardshellz.test",
+          status: "active",
+          entitlementStatus: "active",
+        },
+        storeConnection: {
+          storeConnectionId: 20,
+          platform: "ebay",
+          status: "connected",
+          setupStatus: "ready",
+          externalDisplayName: "Vendor eBay",
+          shopDomain: null,
+          updatedAt: now,
+        },
+        status: "warning",
+        message: "Dogfood smoke evidence is incomplete but not blocked.",
+        stages: [{
+          key: "listing",
+          label: "Listing push",
+          status: "ready",
+          message: "At least one active marketplace listing exists for this store.",
+          evidence: ["1 active marketplace listing(s)."],
+          latestAt: now,
+        }],
+        references: {
+          latestListingId: 30,
+          latestListingJobId: 40,
+          latestIntakeId: null,
+          latestOmsOrderId: null,
+          latestWmsShipmentId: null,
+          latestTrackingPushId: null,
+        },
+        lastActivityAt: now,
+      }],
     };
   }
 }

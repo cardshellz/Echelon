@@ -6,10 +6,13 @@ import {
   type DropshipAdminOpsOverview,
   type DropshipAuditEventRecord,
   type DropshipAuditEventSearchResult,
+  type DropshipDogfoodSmokeCandidate,
   type DropshipDogfoodReadinessCheck,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResult,
   type DropshipDogfoodReadinessStatus,
+  type DropshipDogfoodSmokeResult,
+  type DropshipDogfoodSmokeStage,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
   type DropshipOpsSurfaceRepository,
@@ -119,6 +122,58 @@ interface DogfoodReadinessRow {
   auto_reload_enabled: boolean | null;
   auto_reload_funding_method_ready: boolean | null;
   notification_preference_count: string | number;
+}
+
+interface DogfoodSmokeRow {
+  vendor_id: number;
+  member_id: string;
+  business_name: string | null;
+  email: string | null;
+  vendor_status: string;
+  entitlement_status: string;
+  store_connection_id: number;
+  platform: string;
+  store_status: string;
+  setup_status: string;
+  external_display_name: string | null;
+  shop_domain: string | null;
+  updated_at: Date;
+  active_listing_count: string | number;
+  latest_listing_id: number | null;
+  latest_listing_status: string | null;
+  latest_listing_external_id: string | null;
+  latest_listing_pushed_at: Date | null;
+  latest_listing_updated_at: Date | null;
+  latest_listing_job_id: number | null;
+  latest_listing_job_status: string | null;
+  latest_listing_job_completed_at: Date | null;
+  latest_listing_job_updated_at: Date | null;
+  latest_listing_job_item_total: string | number | null;
+  latest_listing_job_item_completed: string | number | null;
+  latest_listing_job_item_failed: string | number | null;
+  latest_intake_id: number | null;
+  latest_intake_status: string | null;
+  latest_intake_external_order_id: string | null;
+  latest_intake_external_order_number: string | null;
+  latest_intake_oms_order_id: string | number | null;
+  latest_intake_received_at: Date | null;
+  latest_intake_accepted_at: Date | null;
+  latest_intake_updated_at: Date | null;
+  latest_shipment_id: number | null;
+  latest_shipment_status: string | null;
+  latest_shipment_tracking_number: string | null;
+  latest_shipment_carrier: string | null;
+  latest_shipment_shipstation_order_id: number | null;
+  latest_shipment_shipped_at: Date | null;
+  latest_shipment_updated_at: Date | null;
+  latest_tracking_push_id: number | null;
+  latest_tracking_push_status: string | null;
+  latest_tracking_push_external_fulfillment_id: string | null;
+  latest_tracking_push_last_error_code: string | null;
+  latest_tracking_push_last_error_message: string | null;
+  latest_tracking_push_completed_at: Date | null;
+  latest_tracking_push_updated_at: Date | null;
+  total_count: string | number;
 }
 
 export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
@@ -373,6 +428,37 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       limit: input.limit,
       summary: summarizeDogfoodReadiness(allItems),
       systemChecks: [],
+    };
+  }
+
+  async listDogfoodSmokeCandidates(
+    input: Parameters<DropshipOpsSurfaceRepository["listDogfoodSmokeCandidates"]>[0],
+  ): Promise<DropshipDogfoodSmokeResult> {
+    const filters = buildDogfoodSmokeFilters(input);
+    const result = await this.dbPool.query<DogfoodSmokeRow>(
+      `${dogfoodSmokeSql()}
+       ${filters.whereSql}
+       ORDER BY latest_activity_at DESC NULLS LAST, sc.updated_at DESC, sc.id DESC
+       LIMIT $${filters.params.length + 1}`,
+      [...filters.params, input.limit],
+    );
+    const candidates = result.rows.map(mapDogfoodSmokeRow);
+    const readyCandidateCount = candidates.filter((candidate) => candidate.status === "ready").length;
+    const warningCandidateCount = candidates.filter((candidate) => candidate.status === "warning").length;
+    const blockedCandidateCount = candidates.filter((candidate) => candidate.status === "blocked").length;
+
+    return {
+      generatedAt: input.generatedAt,
+      candidates,
+      total: toNumber(result.rows[0]?.total_count ?? 0),
+      readyCandidateCount,
+      warningCandidateCount,
+      blockedCandidateCount,
+      message: buildDogfoodSmokeMessage({
+        readyCandidateCount,
+        warningCandidateCount,
+        blockedCandidateCount,
+      }),
     };
   }
 
@@ -657,6 +743,137 @@ function dogfoodReadinessSql(): string {
   `;
 }
 
+function dogfoodSmokeSql(): string {
+  return `
+    SELECT
+      v.id AS vendor_id,
+      v.member_id,
+      v.business_name,
+      v.email,
+      v.status AS vendor_status,
+      v.entitlement_status,
+      sc.id AS store_connection_id,
+      sc.platform,
+      sc.status AS store_status,
+      sc.setup_status,
+      sc.external_display_name,
+      sc.shop_domain,
+      sc.updated_at,
+      COALESCE(listing_counts.active_listing_count, 0) AS active_listing_count,
+      latest_listing.id AS latest_listing_id,
+      latest_listing.status AS latest_listing_status,
+      latest_listing.external_listing_id AS latest_listing_external_id,
+      latest_listing.last_pushed_at AS latest_listing_pushed_at,
+      latest_listing.updated_at AS latest_listing_updated_at,
+      latest_listing_job.id AS latest_listing_job_id,
+      latest_listing_job.status AS latest_listing_job_status,
+      latest_listing_job.completed_at AS latest_listing_job_completed_at,
+      latest_listing_job.updated_at AS latest_listing_job_updated_at,
+      COALESCE(latest_listing_job.item_total, 0) AS latest_listing_job_item_total,
+      COALESCE(latest_listing_job.item_completed, 0) AS latest_listing_job_item_completed,
+      COALESCE(latest_listing_job.item_failed, 0) AS latest_listing_job_item_failed,
+      latest_intake.id AS latest_intake_id,
+      latest_intake.status AS latest_intake_status,
+      latest_intake.external_order_id AS latest_intake_external_order_id,
+      latest_intake.external_order_number AS latest_intake_external_order_number,
+      latest_intake.oms_order_id AS latest_intake_oms_order_id,
+      latest_intake.received_at AS latest_intake_received_at,
+      latest_intake.accepted_at AS latest_intake_accepted_at,
+      latest_intake.updated_at AS latest_intake_updated_at,
+      latest_shipment.id AS latest_shipment_id,
+      latest_shipment.status AS latest_shipment_status,
+      latest_shipment.tracking_number AS latest_shipment_tracking_number,
+      latest_shipment.carrier AS latest_shipment_carrier,
+      latest_shipment.shipstation_order_id AS latest_shipment_shipstation_order_id,
+      latest_shipment.shipped_at AS latest_shipment_shipped_at,
+      latest_shipment.updated_at AS latest_shipment_updated_at,
+      latest_tracking_push.id AS latest_tracking_push_id,
+      latest_tracking_push.status AS latest_tracking_push_status,
+      latest_tracking_push.external_fulfillment_id AS latest_tracking_push_external_fulfillment_id,
+      latest_tracking_push.last_error_code AS latest_tracking_push_last_error_code,
+      latest_tracking_push.last_error_message AS latest_tracking_push_last_error_message,
+      latest_tracking_push.completed_at AS latest_tracking_push_completed_at,
+      latest_tracking_push.updated_at AS latest_tracking_push_updated_at,
+      GREATEST(
+        latest_listing.updated_at,
+        latest_listing_job.updated_at,
+        latest_intake.updated_at,
+        latest_shipment.updated_at,
+        latest_tracking_push.updated_at
+      ) AS latest_activity_at,
+      COUNT(*) OVER() AS total_count
+    FROM dropship.dropship_vendors v
+    INNER JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
+      AND sc.status IN ('connected', 'needs_reauth', 'refresh_failed', 'grace_period', 'paused')
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS active_listing_count
+      FROM dropship.dropship_vendor_listings l
+      WHERE l.vendor_id = v.id
+        AND l.store_connection_id = sc.id
+        AND l.status = 'active'
+    ) listing_counts ON true
+    LEFT JOIN LATERAL (
+      SELECT l.id, l.status, l.external_listing_id, l.last_pushed_at, l.updated_at
+      FROM dropship.dropship_vendor_listings l
+      WHERE l.vendor_id = v.id
+        AND l.store_connection_id = sc.id
+      ORDER BY l.updated_at DESC, l.id DESC
+      LIMIT 1
+    ) latest_listing ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        j.id,
+        j.status,
+        j.completed_at,
+        j.updated_at,
+        COALESCE(items.item_total, 0) AS item_total,
+        COALESCE(items.item_completed, 0) AS item_completed,
+        COALESCE(items.item_failed, 0) AS item_failed
+      FROM dropship.dropship_listing_push_jobs j
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) AS item_total,
+          COUNT(*) FILTER (WHERE i.status = 'completed') AS item_completed,
+          COUNT(*) FILTER (WHERE i.status IN ('failed', 'blocked')) AS item_failed
+        FROM dropship.dropship_listing_push_job_items i
+        WHERE i.job_id = j.id
+      ) items ON true
+      WHERE j.vendor_id = v.id
+        AND j.store_connection_id = sc.id
+      ORDER BY j.updated_at DESC, j.id DESC
+      LIMIT 1
+    ) latest_listing_job ON true
+    LEFT JOIN LATERAL (
+      SELECT oi.id, oi.status, oi.external_order_id, oi.external_order_number,
+             oi.oms_order_id, oi.received_at, oi.accepted_at, oi.updated_at
+      FROM dropship.dropship_order_intake oi
+      WHERE oi.vendor_id = v.id
+        AND oi.store_connection_id = sc.id
+      ORDER BY oi.updated_at DESC, oi.id DESC
+      LIMIT 1
+    ) latest_intake ON true
+    LEFT JOIN LATERAL (
+      SELECT os.id, os.status, os.tracking_number, os.carrier,
+             os.shipstation_order_id, os.shipped_at, os.updated_at
+      FROM wms.outbound_shipments os
+      WHERE latest_intake.oms_order_id IS NOT NULL
+        AND os.order_id = latest_intake.oms_order_id
+      ORDER BY os.updated_at DESC, os.id DESC
+      LIMIT 1
+    ) latest_shipment ON true
+    LEFT JOIN LATERAL (
+      SELECT tp.id, tp.status, tp.external_fulfillment_id, tp.last_error_code,
+             tp.last_error_message, tp.completed_at, tp.updated_at
+      FROM dropship.dropship_marketplace_tracking_pushes tp
+      WHERE tp.vendor_id = v.id
+        AND tp.store_connection_id = sc.id
+        AND (latest_intake.id IS NULL OR tp.intake_id = latest_intake.id)
+      ORDER BY tp.updated_at DESC, tp.id DESC
+      LIMIT 1
+    ) latest_tracking_push ON true
+  `;
+}
+
 function buildDogfoodReadinessFilters(input: {
   platform?: string;
   search?: string;
@@ -676,6 +893,46 @@ function buildDogfoodReadinessFilters(input: {
       OR sc.external_display_name ILIKE $${params.length}
       OR sc.shop_domain ILIKE $${params.length}
       OR sc.platform ILIKE $${params.length}
+    )`);
+  }
+  return {
+    whereSql: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
+    params,
+  };
+}
+
+function buildDogfoodSmokeFilters(input: {
+  vendorId?: number;
+  storeConnectionId?: number;
+  platform?: string;
+  search?: string;
+}): { whereSql: string; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (input.vendorId) {
+    params.push(input.vendorId);
+    clauses.push(`v.id = $${params.length}`);
+  }
+  if (input.storeConnectionId) {
+    params.push(input.storeConnectionId);
+    clauses.push(`sc.id = $${params.length}`);
+  }
+  if (input.platform) {
+    params.push(input.platform);
+    clauses.push(`sc.platform = $${params.length}`);
+  }
+  if (input.search) {
+    params.push(`%${input.search.trim()}%`);
+    clauses.push(`(
+      v.member_id ILIKE $${params.length}
+      OR v.business_name ILIKE $${params.length}
+      OR v.email ILIKE $${params.length}
+      OR sc.external_display_name ILIKE $${params.length}
+      OR sc.shop_domain ILIKE $${params.length}
+      OR sc.platform ILIKE $${params.length}
+      OR latest_intake.external_order_id ILIKE $${params.length}
+      OR latest_intake.external_order_number ILIKE $${params.length}
+      OR latest_shipment.tracking_number ILIKE $${params.length}
     )`);
   }
   return {
@@ -871,6 +1128,280 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
       notificationPreferenceCount,
     },
   };
+}
+
+function mapDogfoodSmokeRow(row: DogfoodSmokeRow): DropshipDogfoodSmokeCandidate {
+  const stages = [
+    buildListingSmokeStage(row),
+    buildOrderIntakeSmokeStage(row),
+    buildFulfillmentSmokeStage(row),
+    buildTrackingSmokeStage(row),
+  ];
+  const status = summarizeStageStatus(stages);
+  return {
+    vendor: {
+      vendorId: row.vendor_id,
+      memberId: row.member_id,
+      businessName: row.business_name,
+      email: row.email,
+      status: row.vendor_status,
+      entitlementStatus: row.entitlement_status,
+    },
+    storeConnection: {
+      storeConnectionId: row.store_connection_id,
+      platform: row.platform,
+      status: row.store_status,
+      setupStatus: row.setup_status,
+      externalDisplayName: row.external_display_name,
+      shopDomain: row.shop_domain,
+      updatedAt: row.updated_at,
+    },
+    status,
+    message: buildDogfoodSmokeCandidateMessage(status),
+    stages,
+    references: {
+      latestListingId: row.latest_listing_id,
+      latestListingJobId: row.latest_listing_job_id,
+      latestIntakeId: row.latest_intake_id,
+      latestOmsOrderId: parsePositiveIntegerOrNull(row.latest_intake_oms_order_id),
+      latestWmsShipmentId: row.latest_shipment_id,
+      latestTrackingPushId: row.latest_tracking_push_id,
+    },
+    lastActivityAt: maxDate([
+      row.latest_listing_updated_at,
+      row.latest_listing_job_updated_at,
+      row.latest_intake_updated_at,
+      row.latest_shipment_updated_at,
+      row.latest_tracking_push_updated_at,
+    ]),
+  };
+}
+
+function buildListingSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+  const activeListingCount = toNumber(row.active_listing_count);
+  const itemFailed = toNumber(row.latest_listing_job_item_failed ?? 0);
+  const itemCompleted = toNumber(row.latest_listing_job_item_completed ?? 0);
+  const itemTotal = toNumber(row.latest_listing_job_item_total ?? 0);
+  const evidence = [
+    `${activeListingCount} active marketplace listing(s).`,
+    row.latest_listing_id
+      ? `Latest listing ${row.latest_listing_id}: ${row.latest_listing_status}.`
+      : null,
+    row.latest_listing_job_id
+      ? `Latest push job ${row.latest_listing_job_id}: ${row.latest_listing_job_status}; ${itemCompleted}/${itemTotal} item(s) completed, ${itemFailed} failed or blocked.`
+      : null,
+  ].filter((entry): entry is string => Boolean(entry));
+
+  if (row.latest_listing_job_status === "failed" || itemFailed > 0 || row.latest_listing_status === "failed" || row.latest_listing_status === "blocked") {
+    return {
+      key: "listing",
+      label: "Listing push",
+      status: "blocked",
+      message: "Latest listing evidence has failed or blocked work.",
+      evidence,
+      latestAt: maxDate([row.latest_listing_updated_at, row.latest_listing_job_updated_at]),
+    };
+  }
+  if (activeListingCount > 0) {
+    return {
+      key: "listing",
+      label: "Listing push",
+      status: "ready",
+      message: "At least one active marketplace listing exists for this store.",
+      evidence,
+      latestAt: maxDate([row.latest_listing_pushed_at, row.latest_listing_updated_at, row.latest_listing_job_completed_at]),
+    };
+  }
+  if (row.latest_listing_job_status === "queued" || row.latest_listing_job_status === "processing") {
+    return {
+      key: "listing",
+      label: "Listing push",
+      status: "warning",
+      message: "Listing push work is still queued or processing.",
+      evidence,
+      latestAt: row.latest_listing_job_updated_at,
+    };
+  }
+  return {
+    key: "listing",
+    label: "Listing push",
+    status: "warning",
+    message: "No active listing evidence exists yet.",
+    evidence: evidence.length > 0 ? evidence : ["No listing or listing push job has been recorded for this store."],
+    latestAt: maxDate([row.latest_listing_updated_at, row.latest_listing_job_updated_at]),
+  };
+}
+
+function buildOrderIntakeSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+  const status = row.latest_intake_status;
+  const evidence = row.latest_intake_id
+    ? [
+        `Latest intake ${row.latest_intake_id}: ${status}.`,
+        row.latest_intake_external_order_number
+          ? `Marketplace order ${row.latest_intake_external_order_number}.`
+          : `Marketplace order ${row.latest_intake_external_order_id}.`,
+        row.latest_intake_oms_order_id ? `OMS order ${row.latest_intake_oms_order_id}.` : "No OMS order linked yet.",
+      ]
+    : ["No marketplace order intake has been recorded for this store."];
+
+  if (status === "accepted" && row.latest_intake_oms_order_id !== null) {
+    return {
+      key: "order_intake",
+      label: "Order intake",
+      status: "ready",
+      message: "Latest marketplace order intake accepted and linked to OMS.",
+      evidence,
+      latestAt: maxDate([row.latest_intake_accepted_at, row.latest_intake_updated_at]),
+    };
+  }
+  if (status === "failed" || status === "exception" || status === "rejected" || status === "cancelled") {
+    return {
+      key: "order_intake",
+      label: "Order intake",
+      status: "blocked",
+      message: "Latest marketplace order intake is not usable for dogfood smoke.",
+      evidence,
+      latestAt: row.latest_intake_updated_at,
+    };
+  }
+  return {
+    key: "order_intake",
+    label: "Order intake",
+    status: "warning",
+    message: row.latest_intake_id
+      ? "Latest marketplace order intake has not reached accepted OMS state."
+      : "No order intake evidence exists yet.",
+    evidence,
+    latestAt: row.latest_intake_updated_at,
+  };
+}
+
+function buildFulfillmentSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+  const evidence = row.latest_shipment_id
+    ? [
+        `Latest WMS shipment ${row.latest_shipment_id}: ${row.latest_shipment_status}.`,
+        row.latest_shipment_shipstation_order_id ? `ShipStation order ${row.latest_shipment_shipstation_order_id}.` : "No ShipStation order id linked.",
+        row.latest_shipment_tracking_number
+          ? `Tracking ${row.latest_shipment_carrier ?? "carrier"} ${row.latest_shipment_tracking_number}.`
+          : "No shipment tracking number recorded.",
+      ]
+    : ["No WMS shipment has been recorded for the latest intake."];
+
+  if (row.latest_shipment_status === "shipped" && row.latest_shipment_tracking_number) {
+    return {
+      key: "fulfillment",
+      label: "WMS shipment",
+      status: "ready",
+      message: "Latest WMS shipment is shipped with tracking.",
+      evidence,
+      latestAt: maxDate([row.latest_shipment_shipped_at, row.latest_shipment_updated_at]),
+    };
+  }
+  if (row.latest_shipment_status === "cancelled" || row.latest_shipment_status === "voided" || row.latest_shipment_status === "lost" || row.latest_shipment_status === "returned") {
+    return {
+      key: "fulfillment",
+      label: "WMS shipment",
+      status: "blocked",
+      message: "Latest WMS shipment ended in a terminal exception state.",
+      evidence,
+      latestAt: row.latest_shipment_updated_at,
+    };
+  }
+  return {
+    key: "fulfillment",
+    label: "WMS shipment",
+    status: "warning",
+    message: row.latest_shipment_id
+      ? "Latest WMS shipment has not shipped with tracking yet."
+      : "No shipment evidence exists yet.",
+    evidence,
+    latestAt: row.latest_shipment_updated_at,
+  };
+}
+
+function buildTrackingSmokeStage(row: DogfoodSmokeRow): DropshipDogfoodSmokeStage {
+  const evidence = row.latest_tracking_push_id
+    ? [
+        `Latest tracking push ${row.latest_tracking_push_id}: ${row.latest_tracking_push_status}.`,
+        row.latest_tracking_push_external_fulfillment_id
+          ? `External fulfillment ${row.latest_tracking_push_external_fulfillment_id}.`
+          : "No external fulfillment id recorded.",
+        row.latest_tracking_push_last_error_code
+          ? `${row.latest_tracking_push_last_error_code}: ${row.latest_tracking_push_last_error_message ?? "No error message."}`
+          : null,
+      ].filter((entry): entry is string => Boolean(entry))
+    : ["No marketplace tracking push has been recorded for the latest intake."];
+
+  if (row.latest_tracking_push_status === "succeeded") {
+    return {
+      key: "tracking",
+      label: "Marketplace tracking",
+      status: "ready",
+      message: "Latest marketplace tracking push succeeded.",
+      evidence,
+      latestAt: maxDate([row.latest_tracking_push_completed_at, row.latest_tracking_push_updated_at]),
+    };
+  }
+  if (row.latest_tracking_push_status === "failed") {
+    return {
+      key: "tracking",
+      label: "Marketplace tracking",
+      status: "blocked",
+      message: "Latest marketplace tracking push failed.",
+      evidence,
+      latestAt: row.latest_tracking_push_updated_at,
+    };
+  }
+  if (!row.latest_tracking_push_id && row.latest_shipment_status === "shipped" && row.latest_shipment_tracking_number) {
+    return {
+      key: "tracking",
+      label: "Marketplace tracking",
+      status: "blocked",
+      message: "Shipment has tracking, but no marketplace tracking push exists.",
+      evidence,
+      latestAt: row.latest_shipment_updated_at,
+    };
+  }
+  return {
+    key: "tracking",
+    label: "Marketplace tracking",
+    status: "warning",
+    message: row.latest_tracking_push_id
+      ? "Marketplace tracking push has not completed yet."
+      : "No marketplace tracking evidence exists yet.",
+    evidence,
+    latestAt: row.latest_tracking_push_updated_at,
+  };
+}
+
+function summarizeStageStatus(stages: readonly DropshipDogfoodSmokeStage[]): DropshipDogfoodReadinessStatus {
+  if (stages.some((stage) => stage.status === "blocked")) return "blocked";
+  if (stages.every((stage) => stage.status === "ready")) return "ready";
+  return "warning";
+}
+
+function buildDogfoodSmokeCandidateMessage(status: DropshipDogfoodReadinessStatus): string {
+  if (status === "ready") return "Listing, intake, fulfillment, and tracking evidence are all present.";
+  if (status === "blocked") return "At least one dogfood smoke handoff needs ops attention.";
+  return "Dogfood smoke evidence is incomplete but not blocked.";
+}
+
+function buildDogfoodSmokeMessage(input: {
+  readyCandidateCount: number;
+  warningCandidateCount: number;
+  blockedCandidateCount: number;
+}): string {
+  if (input.readyCandidateCount > 0) {
+    return `Loaded ${formatStoreCount(input.readyCandidateCount)} with full smoke evidence; ${input.blockedCandidateCount} blocked and ${input.warningCandidateCount} incomplete.`;
+  }
+  if (input.blockedCandidateCount > 0) {
+    return `Loaded ${formatStoreCount(input.blockedCandidateCount)} with blocking smoke handoff evidence.`;
+  }
+  return `Loaded ${formatStoreCount(input.warningCandidateCount)} waiting on smoke evidence.`;
+}
+
+function formatStoreCount(count: number): string {
+  return `${count} store${count === 1 ? "" : "s"}`;
 }
 
 function buildDogfoodChecks(input: {
@@ -1126,12 +1657,21 @@ function summarizeDogfoodReadiness(
   ];
 }
 
-function parsePositiveIntegerOrNull(value: string | null): number | null {
+function parsePositiveIntegerOrNull(value: string | number | null): number | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
   if (!value || !/^[1-9]\d*$/.test(value)) {
     return null;
   }
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function maxDate(values: Array<Date | null>): Date | null {
+  const dates = values.filter((value): value is Date => value instanceof Date);
+  if (dates.length === 0) return null;
+  return dates.reduce((latest, value) => value.getTime() > latest.getTime() ? value : latest);
 }
 
 function buildScopeFilters(
