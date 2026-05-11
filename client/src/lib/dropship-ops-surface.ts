@@ -429,6 +429,16 @@ export interface DropshipDogfoodLaunchGateBlocker {
   storeConnectionId?: number | null;
 }
 
+export interface DropshipDogfoodLaunchRunbookStep {
+  key: string;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  action: string;
+  scope: "system" | "vendor_store" | "ops";
+  evidence: string[];
+}
+
 export interface DropshipDogfoodLaunchGate {
   status: DropshipDogfoodReadinessStatus;
   readyVendorStoreCount: number;
@@ -440,6 +450,7 @@ export interface DropshipDogfoodLaunchGate {
   warningCount: number;
   message: string;
   firstBlockers: DropshipDogfoodLaunchGateBlocker[];
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
 }
 
 export interface DropshipDogfoodReadinessItem {

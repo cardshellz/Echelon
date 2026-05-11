@@ -224,6 +224,16 @@ export interface DropshipDogfoodLaunchGateBlocker {
   storeConnectionId?: number | null;
 }
 
+export interface DropshipDogfoodLaunchRunbookStep {
+  key: string;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  action: string;
+  scope: "system" | "vendor_store" | "ops";
+  evidence: string[];
+}
+
 export interface DropshipDogfoodLaunchGate {
   status: DropshipDogfoodReadinessStatus;
   readyVendorStoreCount: number;
@@ -235,6 +245,7 @@ export interface DropshipDogfoodLaunchGate {
   warningCount: number;
   message: string;
   firstBlockers: DropshipDogfoodLaunchGateBlocker[];
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
 }
 
 export interface DropshipDogfoodReadinessResult {
@@ -394,6 +405,14 @@ export function buildDropshipDogfoodLaunchGate(input: {
       ? "warning"
       : "ready";
 
+  const runbookSteps = buildDogfoodLaunchRunbookSteps({
+    readyVendorStoreCount,
+    systemBlocked,
+    systemWarnings,
+    vendorBlockers,
+    vendorWarnings,
+  });
+
   return {
     status,
     readyVendorStoreCount,
@@ -411,7 +430,90 @@ export function buildDropshipDogfoodLaunchGate(input: {
       warningCount,
     }),
     firstBlockers,
+    runbookSteps,
   };
+}
+
+function buildDogfoodLaunchRunbookSteps(input: {
+  readyVendorStoreCount: number;
+  systemBlocked: readonly DropshipSystemReadinessCheck[];
+  systemWarnings: readonly DropshipSystemReadinessCheck[];
+  vendorBlockers: readonly DropshipDogfoodLaunchGateBlocker[];
+  vendorWarnings: readonly DropshipDogfoodLaunchGateBlocker[];
+}): DropshipDogfoodLaunchRunbookStep[] {
+  const steps: DropshipDogfoodLaunchRunbookStep[] = [];
+
+  if (input.systemBlocked.length > 0) {
+    const requiredEnv = Array.from(new Set(input.systemBlocked.flatMap((check) => check.requiredEnv))).slice(0, 8);
+    steps.push({
+      key: "resolve_system_blockers",
+      label: "Resolve system blockers",
+      status: "blocked",
+      scope: "system",
+      message: `${input.systemBlocked.length} system prerequisite(s) must be ready before dogfood.`,
+      action: requiredEnv.length > 0
+        ? `Set or repair: ${requiredEnv.join(", ")}.`
+        : "Repair the blocking system prerequisite(s), then refresh readiness.",
+      evidence: input.systemBlocked.slice(0, 5).map(formatSystemRunbookEvidence),
+    });
+  }
+
+  if (input.readyVendorStoreCount === 0) {
+    steps.push({
+      key: "prepare_vendor_store",
+      label: "Prepare one vendor/store row",
+      status: "blocked",
+      scope: "vendor_store",
+      message: "At least one vendor/store row must be ready before dogfood.",
+      action: "Clear the highest-priority readiness blockers in the table, then refresh readiness.",
+      evidence: input.vendorBlockers.length > 0
+        ? input.vendorBlockers.slice(0, 5).map(formatVendorRunbookEvidence)
+        : ["No ready vendor/store row was returned by the readiness query."],
+    });
+  }
+
+  if (input.systemBlocked.length === 0 && input.readyVendorStoreCount > 0) {
+    const remainingIssues = [
+      ...input.systemWarnings.map(formatSystemRunbookEvidence),
+      ...input.vendorBlockers.map(formatVendorRunbookEvidence),
+      ...input.vendorWarnings.map(formatVendorRunbookEvidence),
+    ];
+    if (remainingIssues.length > 0) {
+      steps.push({
+        key: "review_remaining_readiness_issues",
+        label: "Review remaining readiness issues",
+        status: "warning",
+        scope: "ops",
+        message: `${remainingIssues.length} non-blocking dogfood issue(s) remain outside the ready path.`,
+        action: "Proceed only with a ready vendor/store row; keep blocked rows out of dogfood until fixed.",
+        evidence: remainingIssues.slice(0, 5),
+      });
+    }
+
+    steps.push({
+      key: "run_live_smoke",
+      label: "Run live dogfood smoke",
+      status: "ready",
+      scope: "ops",
+      message: `${input.readyVendorStoreCount} vendor/store row(s) are eligible for dogfood.`,
+      action: "Run one selected SKU through listing, order intake, funding, WMS/ShipStation shipment, and marketplace tracking.",
+      evidence: [`${input.readyVendorStoreCount} ready vendor/store row(s) found.`],
+    });
+  }
+
+  return steps;
+}
+
+function formatSystemRunbookEvidence(check: DropshipSystemReadinessCheck): string {
+  return `${check.label}: ${check.message}`;
+}
+
+function formatVendorRunbookEvidence(blocker: DropshipDogfoodLaunchGateBlocker): string {
+  const storeLabel = blocker.storeConnectionId === null || blocker.storeConnectionId === undefined
+    ? "no store"
+    : `store ${blocker.storeConnectionId}`;
+  const vendorLabel = blocker.vendorId === undefined ? "unknown vendor" : `vendor ${blocker.vendorId}`;
+  return `${vendorLabel}, ${storeLabel}: ${blocker.label} - ${blocker.message}`;
 }
 
 function buildDogfoodLaunchGateMessage(input: {
