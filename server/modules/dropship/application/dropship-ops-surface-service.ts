@@ -493,9 +493,12 @@ export class DropshipOpsSurfaceService {
     ]);
     const { launchGateItems, ...publicReadiness } = readinessResult;
     const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env);
+    const launchGateReadinessItems = isDogfoodLaunchStatusScoped(parsed)
+      ? publicReadiness.items
+      : launchGateItems ?? publicReadiness.items;
     const launchGate = buildDropshipDogfoodLaunchGate({
       summary: publicReadiness.summary,
-      items: launchGateItems ?? publicReadiness.items,
+      items: launchGateReadinessItems,
       systemChecks,
     });
     const readiness: DropshipDogfoodReadinessResult = {
@@ -523,6 +526,10 @@ export class DropshipOpsSurfaceService {
     });
     return result;
   }
+}
+
+function isDogfoodLaunchStatusScoped(input: GetDropshipDogfoodLaunchStatusInput): boolean {
+  return input.platform !== undefined || input.search !== undefined;
 }
 
 export function buildDropshipDogfoodLaunchGate(input: {

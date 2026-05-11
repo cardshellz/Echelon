@@ -783,6 +783,72 @@ describe("DropshipOpsSurfaceService", () => {
     });
   });
 
+  it("scopes dogfood launch gate readiness to launch status filters", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      items: [makeDogfoodReadinessItem({
+        readinessStatus: "blocked",
+        blockerCount: 1,
+        checks: [{
+          key: "store_connection",
+          label: "Store connection",
+          status: "blocked",
+          message: "eBay store is not launch-ready.",
+        }],
+      })],
+      launchGateItems: [makeDogfoodReadinessItem({
+        vendor: {
+          vendorId: 11,
+          memberId: "member-2",
+          businessName: "Shopify Vendor",
+          email: "shopify-vendor@cardshellz.test",
+          status: "active",
+          entitlementStatus: "active",
+        },
+        storeConnection: {
+          storeConnectionId: 21,
+          platform: "shopify",
+          status: "connected",
+          setupStatus: "ready",
+          externalDisplayName: "Shopify Store",
+          shopDomain: "vendor.myshopify.com",
+          updatedAt: now,
+        },
+      })],
+      total: 1,
+      summary: [
+        { status: "ready", count: 0 },
+        { status: "warning", count: 0 },
+        { status: "blocked", count: 1 },
+      ],
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 1,
+      warningCandidateCount: 0,
+      blockedCandidateCount: 0,
+      candidates: [makeDogfoodSmokeCandidate({ status: "ready" })],
+    });
+    const service = makeService(repository, [], launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus({ platform: "ebay" });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      launchGate: {
+        status: "blocked",
+        readyVendorStoreCount: 0,
+        blockedVendorStoreCount: 1,
+        firstBlockers: [{
+          scope: "vendor_store",
+          key: "store_connection",
+          vendorId: 10,
+          storeConnectionId: 20,
+        }],
+      },
+      launchCandidates: [],
+    });
+  });
+
   it("keeps dogfood launch status warning until fresh complete smoke evidence exists", async () => {
     const repository = new FakeOpsSurfaceRepository();
     repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
