@@ -56,10 +56,17 @@ type InventoryCore = {
 };
 
 type ReplenishmentService = {
-  checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number) => Promise<any>;
+  checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number, triggeredBy?: string, context?: ReplenOrderContext) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
-  createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
+  createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number } | null>;
+};
+
+type ReplenOrderContext = {
+  orderId?: number | null;
+  orderItemId?: number | null;
+  orderNumber?: string | null;
+  blocksShipment?: boolean;
 };
 
 /** Minimal storage interface — only the methods picking needs. */
@@ -815,6 +822,12 @@ export class PickingUseCases {
             deductResult.productVariantId,
             deductResult.locationId,
             userId,
+            {
+              orderId: item.orderId,
+              orderItemId: item.id,
+              orderNumber: order?.orderNumber ?? null,
+              blocksShipment: false,
+            },
           );
 
           if (replenResult) {
@@ -822,11 +835,13 @@ export class PickingUseCases {
             console.log(`[Replen] Auto-executed replen for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: moved ${replenResult.moved} units`);
             inventoryCtx.replen.triggered = true;
             inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
-            inventoryCtx.replen.taskStatus = "completed";
-            inventoryCtx.replen.autoExecuted = true;
+            inventoryCtx.replen.taskStatus = replenResult.task?.status ?? null;
+            inventoryCtx.replen.autoExecuted = replenResult.task?.status === "completed";
             inventoryCtx.replen.autoExecutedMoved = replenResult.moved;
-            inventoryCtx.replen.autoExecutedFailed = false;
-            inventoryCtx.replen.autoExecuteFailReason = null;
+            inventoryCtx.replen.autoExecutedFailed = replenResult.task?.status === "blocked";
+            inventoryCtx.replen.autoExecuteFailReason = replenResult.task?.status === "blocked"
+              ? replenResult.task?.exceptionReason || "blocked"
+              : null;
             // Source info from the completed task for UI display
             inventoryCtx.replen.qtyToMove = replenResult.moved;
             
@@ -1493,6 +1508,28 @@ export class PickingUseCases {
     for (const row of exceptionRows.rows ?? []) {
       blockers.push(
         `${row.sku || "item"} has ${row.exception_type || "exception"} #${row.id}: ${row.review_reason || row.status}`,
+      );
+    }
+
+    const replenRows = await this.db.execute(sql`
+      SELECT
+        rt.id,
+        rt.status,
+        rt.exception_reason,
+        rt.notes,
+        pv.sku
+      FROM inventory.replen_tasks rt
+      LEFT JOIN catalog.product_variants pv
+        ON pv.id = rt.pick_product_variant_id
+      WHERE rt.order_id = ${orderId}
+        AND rt.blocks_shipment = TRUE
+        AND rt.status NOT IN ('completed', 'cancelled')
+      ORDER BY rt.created_at DESC
+    `);
+
+    for (const row of replenRows.rows ?? []) {
+      blockers.push(
+        `${row.sku || "item"} has replen task #${row.id}: ${row.exception_reason || row.status}`,
       );
     }
 

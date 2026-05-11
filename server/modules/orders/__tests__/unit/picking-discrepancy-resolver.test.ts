@@ -55,6 +55,17 @@ function makeItem(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+function makeReadyToShipDb(params: {
+  exceptions?: Array<Record<string, unknown>>;
+  replenTasks?: Array<Record<string, unknown>>;
+} = {}) {
+  return {
+    execute: vi.fn()
+      .mockResolvedValueOnce({ rows: params.exceptions ?? [] })
+      .mockResolvedValueOnce({ rows: params.replenTasks ?? [] }),
+  };
+}
+
 describe("PickingUseCases inventory discrepancy resolution", () => {
   it("auto-corrects an assigned bin shortage only when the pick was scan-verified", async () => {
     const { service, inventoryCore } = makeService([
@@ -114,17 +125,15 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
 
 describe("PickingUseCases ready-to-ship guard", () => {
   it("blocks ready-to-ship when a shipment-blocking exception is open", async () => {
-    const db = {
-      execute: vi.fn(async () => ({
-        rows: [{
-          id: 77,
-          sku: "SKU-1",
-          exception_type: "inventory_deduction_failed",
-          status: "blocked",
-          review_reason: "System inventory did not match picker observation",
-        }],
-      })),
-    };
+    const db = makeReadyToShipDb({
+      exceptions: [{
+        id: 77,
+        sku: "SKU-1",
+        exception_type: "inventory_deduction_failed",
+        status: "blocked",
+        review_reason: "System inventory did not match picker observation",
+      }],
+    });
     const storage = {
       getOrderById: vi.fn(async () => ({ id: 900, orderNumber: "#900", warehouseStatus: "completed" })),
       getOrderItems: vi.fn(async () => [{
@@ -151,9 +160,7 @@ describe("PickingUseCases ready-to-ship guard", () => {
   });
 
   it("allows ready-to-ship when completed shippable items have no shipment blockers", async () => {
-    const db = {
-      execute: vi.fn(async () => ({ rows: [] })),
-    };
+    const db = makeReadyToShipDb();
     const storage = {
       getOrderById: vi.fn(async () => ({ id: 900, orderNumber: "#900", warehouseStatus: "completed", assignedPickerId: "picker-1" })),
       getOrderItems: vi.fn(async () => [{
@@ -183,17 +190,15 @@ describe("PickingUseCases ready-to-ship guard", () => {
   });
 
   it("forces auto progress to exception when a shipment-blocking review exists", async () => {
-    const db = {
-      execute: vi.fn(async () => ({
-        rows: [{
-          id: 88,
-          sku: "SKU-1",
-          exception_type: "inventory_deduction_failed",
-          status: "blocked",
-          review_reason: "Inventory deduction failed",
-        }],
-      })),
-    };
+    const db = makeReadyToShipDb({
+      exceptions: [{
+        id: 88,
+        sku: "SKU-1",
+        exception_type: "inventory_deduction_failed",
+        status: "blocked",
+        review_reason: "Inventory deduction failed",
+      }],
+    });
     const storage = {
       getOrderItems: vi.fn(async () => [{
         id: 500,
@@ -209,5 +214,40 @@ describe("PickingUseCases ready-to-ship guard", () => {
 
     const service = new PickingUseCases(db as any, {} as any, {} as any, storage as any);
     await expect((service as any).resolvePostPickStatusForOrder(900, "ready_to_ship")).resolves.toBe("exception");
+  });
+
+  it("blocks ready-to-ship when an order-linked replen task blocks shipment", async () => {
+    const db = makeReadyToShipDb({
+      replenTasks: [{
+        id: 121,
+        sku: "SKU-1",
+        status: "blocked",
+        exception_reason: "source_empty",
+        notes: "No source stock",
+      }],
+    });
+    const storage = {
+      getOrderById: vi.fn(async () => ({ id: 900, orderNumber: "#900", warehouseStatus: "completed" })),
+      getOrderItems: vi.fn(async () => [{
+        id: 500,
+        orderId: 900,
+        sku: "SKU-1",
+        quantity: 1,
+        pickedQuantity: 1,
+        status: "completed",
+        requiresShipping: 1,
+        location: "A-01",
+      }]),
+      updateOrderStatus: vi.fn(),
+      getUser: vi.fn(),
+      createPickingLog: vi.fn(),
+    };
+
+    const service = new PickingUseCases(db as any, {} as any, {} as any, storage as any);
+
+    await expect(service.markReadyToShip(900, "lead-1")).rejects.toMatchObject({
+      name: "ValidationError",
+    });
+    expect(storage.updateOrderStatus).not.toHaveBeenCalled();
   });
 });
