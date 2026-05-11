@@ -583,6 +583,23 @@ export interface DropshipDogfoodLaunchStatusResponse {
   runbookSteps: DropshipDogfoodLaunchRunbookStep[];
 }
 
+export type DropshipAdminWorkerSweepName = "listing_push" | "order_processing" | "ebay_order_intake";
+
+export interface DropshipAdminWorkerSweepInput {
+  batchSize?: number;
+  reason?: string;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminWorkerSweepResponse {
+  worker: DropshipAdminWorkerSweepName;
+  workerId: string;
+  batchSize: number | null;
+  metrics: Record<string, number>;
+  status: "completed";
+  requestedAt: string;
+}
+
 export interface DropshipOmsChannelOption {
   channelId: number;
   name: string;
@@ -2393,6 +2410,37 @@ export function buildAdminDogfoodLaunchStatusUrl(input: {
     platform: input.platform === "all" ? undefined : input.platform,
     staleAfterHours: input.staleAfterHours,
   });
+}
+
+export function buildAdminWorkerSweepRunUrl(worker: DropshipAdminWorkerSweepName): string {
+  return `/api/dropship/admin/worker-sweeps/${worker}/run`;
+}
+
+export function buildAdminWorkerSweepInput(input: {
+  idempotencyKey: string;
+  batchSize: string | number;
+  reason?: string;
+}): DropshipAdminWorkerSweepInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  const batchSize = input.batchSize === "" ? undefined : Number(input.batchSize);
+  if (batchSize !== undefined && (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > 100)) {
+    throw new Error("batchSize must be a positive integer no greater than 100.");
+  }
+
+  const reason = input.reason?.trim() ?? "";
+  if (reason.length > 1000) {
+    throw new Error("Reason must be 1000 characters or fewer.");
+  }
+
+  return {
+    idempotencyKey,
+    ...(batchSize === undefined ? {} : { batchSize }),
+    ...(reason ? { reason } : {}),
+  };
 }
 
 export function buildAdminOmsChannelConfigUrl(): string {
