@@ -458,13 +458,13 @@ export class CycleCountUseCases {
   }
 
   /**
-   * Source-empty replen reports create a shipment-blocking placeholder task and
-   * a linked spot count. Once the count is completed, that placeholder should no
-   * longer be the order-level blocker; the remaining short/allocation exception
-   * path owns shipment release.
+   * Replen exceptions create a blocked task plus a linked spot count. Once that
+   * count is completed, the original task is stale by definition: either the
+   * source bin was corrected, or the count proved the task's source premise was
+   * wrong. Close it and let replenishment re-evaluate from current inventory.
    */
-  private async closeLinkedSourceEmptyReplenBlockers(cycleCountId: number): Promise<number> {
-    const note = `Closed by completed linked source-empty cycle count #${cycleCountId}`;
+  private async closeLinkedReplenExceptionTasks(cycleCountId: number): Promise<number> {
+    const note = `Closed by completed linked replen exception cycle count #${cycleCountId}; replen re-evaluated from current inventory`;
     const result = await this.db.execute(sql`
       UPDATE inventory.replen_tasks
       SET
@@ -472,10 +472,12 @@ export class CycleCountUseCases {
         blocks_shipment = FALSE,
         notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END, ${note})
       WHERE linked_cycle_count_id = ${cycleCountId}
-        AND exception_reason = 'source_empty'
-        AND blocks_shipment = TRUE
+        AND (
+          exception_reason IN ('source_empty', 'empty', 'short', 'wrong_product', 'other')
+          OR blocks_shipment = TRUE
+        )
         AND status NOT IN ('completed', 'cancelled')
-      RETURNING id, to_location_id
+      RETURNING id, to_location_id, exception_reason
     `);
 
     const targetLocationIds = new Set<number>();
@@ -488,7 +490,7 @@ export class CycleCountUseCases {
       try {
         await this.replenishment.checkReplenForLocation(locationId);
       } catch (err: any) {
-        console.warn(`[Replen] Source-empty cycle count close recheck failed for loc ${locationId}:`, err?.message);
+        console.warn(`[Replen] Linked replen exception close recheck failed for loc ${locationId}:`, err?.message);
       }
     }
 
@@ -1812,7 +1814,7 @@ export class CycleCountUseCases {
     // Unfreeze all locations that were frozen by this cycle count
     await this.unfreezeLocations(id);
 
-    const linkedReplenBlockersClosed = await this.closeLinkedSourceEmptyReplenBlockers(id);
+    const linkedReplenBlockersClosed = await this.closeLinkedReplenExceptionTasks(id);
 
     return { success: true, linkedReplenBlockersClosed };
   }
