@@ -27,6 +27,7 @@ const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
 const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
 const SHIPSTATION_COMBINED_CHILD_SOURCE = "shipstation_combined_child";
+const SENSITIVE_URL_QUERY_PARAMS = new Set(["secret", "token", "signature", "key"]);
 
 class ShipStationWebhookProcessingError extends Error {
   constructor(
@@ -595,6 +596,20 @@ const SHIPSTATION_TO_EBAY_CARRIER: Record<string, string> = {
 
 export function mapShipStationCarrier(shipStationCarrier: string): string {
   return SHIPSTATION_TO_EBAY_CARRIER[shipStationCarrier.toLowerCase()] || shipStationCarrier.toUpperCase();
+}
+
+export function redactSensitiveUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (SENSITIVE_URL_QUERY_PARAMS.has(key.toLowerCase())) {
+        url.searchParams.set(key, "[redacted]");
+      }
+    }
+    return url.toString();
+  } catch {
+    return rawUrl.replace(/([?&](?:secret|token|signature|key)=)[^&]+/gi, "$1[redacted]");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2450,7 +2465,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         friendly_name: "Echelon OMS Tracking",
       });
 
-      console.log(`[ShipStation] Registered SHIP_NOTIFY webhook → ${targetUrl}`);
+      console.log(`[ShipStation] Registered SHIP_NOTIFY webhook -> ${redactSensitiveUrl(targetUrl)}`);
     } catch (err: any) {
       console.error(`[ShipStation] Failed to register webhook: ${err.message}`);
     }
