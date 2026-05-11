@@ -130,6 +130,14 @@ type PickInventoryContext = {
   locationCode: string | null;
   sku: string;
   binCountNeeded: boolean;
+  resolution?: {
+    autoResolved: boolean;
+    code: string | null;
+    reviewRequired: boolean;
+    pickerBlocking: boolean;
+    shipmentBlocking: boolean;
+    message: string | null;
+  };
   replen: {
     triggered: boolean;
     taskId: number | null;
@@ -211,7 +219,10 @@ async function markOrderReadyToShip(orderId: number): Promise<Order> {
   const res = await fetch(`/api/picking/orders/${orderId}/ready-to-ship`, {
     method: "POST",
   });
-  if (!res.ok) throw new Error("Failed to mark ready to ship");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Failed to mark ready to ship" }));
+    throw new Error(err.error || "Failed to mark ready to ship");
+  }
   return res.json();
 }
 
@@ -923,6 +934,11 @@ export default function Picking() {
       if (inventory?.replen.triggered) {
         binCountPendingRef.current = true;
         setBinCountContext(inventory);
+        const expectedQty =
+          inventory.locationId && inventory.replen.autoExecutedMoved != null
+            ? Math.max(0, inventory.systemQtyAfter + inventory.replen.autoExecutedMoved)
+            : null;
+        setBinCountQty(expectedQty == null ? "" : String(expectedQty));
         setReplenConfirmOpen(true);
       } else {
         binCountPendingRef.current = false;
@@ -999,11 +1015,11 @@ export default function Picking() {
 
   // Consolidated bin count + replen mutation (single API call)
   const binCountMutation = useMutation({
-    mutationFn: async ({ sku, locationId, binCount, didReplen: replenDone }: { sku: string; locationId: number; binCount: number; didReplen: boolean }) => {
+    mutationFn: async ({ sku, locationId, binCount, didReplen: replenDone, replenAlreadyRecorded }: { sku: string; locationId: number; binCount: number; didReplen: boolean; replenAlreadyRecorded?: boolean }) => {
       const res = await fetch("/api/picking/bin-count", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sku, locationId, binCount, didReplen: replenDone }),
+        body: JSON.stringify({ sku, locationId, binCount, didReplen: replenDone, replenAlreadyRecorded }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed to submit bin count" }));
@@ -1014,7 +1030,9 @@ export default function Picking() {
     onSuccess: (result: BinCountResponse) => {
       binCountPendingRef.current = false;
       setBinCountOpen(false);
+      setReplenConfirmOpen(false);
       setBinCountContext(null);
+      setBinCountQty("");
       setDidReplen(false);
 
       if (result.adjustment !== 0) {
@@ -1090,6 +1108,7 @@ export default function Picking() {
       binCountPendingRef.current = false;
       setReplenConfirmOpen(false);
       setBinCountContext(null);
+      setBinCountQty("");
 
       if (result.action === "confirmed") {
         toast({ title: "Replen confirmed ✓", description: "Case break verified — inventory updated" });
@@ -1122,6 +1141,7 @@ export default function Picking() {
       binCountPendingRef.current = false;
       setReplenConfirmOpen(false);
       setBinCountContext(null);
+      setBinCountQty("");
       toast({ title: "Failed", description: error.message, variant: "destructive" });
       playSound("error");
     },
@@ -4646,7 +4666,7 @@ export default function Picking() {
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2 text-blue-700">
               <PackageCheck className="h-5 w-5" />
-              Case Break Completed
+              Confirm Replen Count
             </DialogTitle>
             {binCountContext && (
               <DialogDescription className="text-center space-y-1">
@@ -4662,30 +4682,68 @@ export default function Picking() {
             )}
           </DialogHeader>
 
-          <div className="py-4 grid grid-cols-2 gap-3">
+          <div className="py-3 space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="replen-bin-count" className="text-sm font-medium">
+                Units in pick bin now
+              </Label>
+              <Input
+                id="replen-bin-count"
+                type="number"
+                inputMode="numeric"
+                value={binCountQty}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val.length > 5) return;
+                  setBinCountQty(val);
+                }}
+                onKeyDown={(e) => {
+                  const qty = parseInt(binCountQty);
+                  if (e.key === "Enter" && !isNaN(qty) && qty >= 0 && qty <= 10000 && binCountContext?.locationId) {
+                    binCountMutation.mutate({
+                      sku: binCountContext.sku,
+                      locationId: binCountContext.locationId,
+                      binCount: qty,
+                      didReplen: true,
+                      replenAlreadyRecorded: true,
+                    });
+                  }
+                }}
+                max={10000}
+                min={0}
+                className="w-full h-14 text-xl text-center font-bold"
+                autoFocus
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
             <Button
               size="lg"
               className="h-16 text-base bg-emerald-600 hover:bg-emerald-700 flex flex-col gap-1"
-              disabled={replenConfirmMutation.isPending}
+              disabled={binCountQty === "" || parseInt(binCountQty) > 10000 || !binCountContext?.locationId || binCountMutation.isPending}
               onClick={() => {
-                if (binCountContext?.locationId) {
-                  replenConfirmMutation.mutate({
+                const qty = parseInt(binCountQty);
+                if (binCountContext?.locationId && !isNaN(qty) && qty >= 0 && qty <= 10000) {
+                  binCountMutation.mutate({
                     sku: binCountContext.sku,
                     locationId: binCountContext.locationId,
-                    confirmed: true,
+                    binCount: qty,
+                    didReplen: true,
+                    replenAlreadyRecorded: true,
                   });
                 }
               }}
               data-testid="button-replen-confirmed"
             >
               <CheckCircle2 className="h-5 w-5" />
-              <span>✓ I replenished</span>
+              <span>Confirm</span>
             </Button>
             <Button
               size="lg"
               variant="outline"
               className="h-16 text-base border-amber-400 text-amber-700 hover:bg-amber-50 flex flex-col gap-1"
-              disabled={replenConfirmMutation.isPending}
+              disabled={replenConfirmMutation.isPending || binCountMutation.isPending}
               onClick={() => {
                 if (binCountContext?.locationId) {
                   replenConfirmMutation.mutate({
@@ -4698,7 +4756,7 @@ export default function Picking() {
               data-testid="button-replen-flag-issue"
             >
               <AlertTriangle className="h-5 w-5" />
-              <span>✗ Flag issue</span>
+              <span>Flag issue</span>
             </Button>
           </div>
         </DialogContent>
