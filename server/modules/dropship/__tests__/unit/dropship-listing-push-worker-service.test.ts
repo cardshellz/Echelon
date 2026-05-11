@@ -8,6 +8,7 @@ import type { DropshipMarketplaceListingPushProvider } from "../../application/d
 import {
   DropshipListingPushWorkerService,
   type DropshipListingPushWorkerClaim,
+  type DropshipListingPushWorkerEligibility,
   type DropshipListingPushWorkerItemRecord,
   type DropshipListingPushWorkerJobRecord,
   type DropshipListingPushWorkerRepository,
@@ -123,6 +124,65 @@ describe("DropshipListingPushWorkerService", () => {
           status: "blocked",
           errorCode: "DROPSHIP_LISTING_PREVIEW_DRIFT",
           errorMessage: "Listing preview hash no longer matches the vendor listing.",
+          externalListingId: null,
+        }],
+        omittedFailureItemCount: 0,
+      },
+    });
+  });
+
+  it("blocks queued items when entitlement changes after the job is queued", async () => {
+    repository.eligibility = {
+      ...repository.eligibility,
+      entitlementStatus: "lapsed",
+    };
+
+    const result = await service.processJob({
+      jobId: 30,
+      workerId: "worker-1",
+      idempotencyKey: "process-005",
+    });
+
+    expect(marketplacePush.requests).toHaveLength(0);
+    expect(result.job.status).toBe("failed");
+    expect(result.summary).toEqual({
+      total: 1,
+      completed: 0,
+      failed: 0,
+      blocked: 1,
+      skipped: 0,
+    });
+    expect(result.items[0]).toMatchObject({
+      status: "blocked",
+      errorCode: "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
+      errorMessage: "Dropship vendor entitlement no longer allows listing push.",
+    });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_listing_push_failed",
+      critical: true,
+      channels: ["email", "in_app"],
+      idempotencyKey: "listing-push:30:failed",
+      payload: {
+        jobId: 30,
+        vendorId: 10,
+        storeConnectionId: 22,
+        platform: "shopify",
+        status: "failed",
+        summary: {
+          total: 1,
+          completed: 0,
+          failed: 0,
+          blocked: 1,
+          skipped: 0,
+        },
+        failedItems: [{
+          itemId: 1,
+          listingId: 100,
+          productVariantId: 101,
+          status: "blocked",
+          errorCode: "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
+          errorMessage: "Dropship vendor entitlement no longer allows listing push.",
           externalListingId: null,
         }],
         omittedFailureItemCount: 0,
@@ -266,12 +326,20 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
     isActive: true,
   };
   items: DropshipListingPushWorkerItemRecord[] = [makeQueuedItem()];
+  eligibility: DropshipListingPushWorkerEligibility = {
+    vendorStatus: "active",
+    entitlementStatus: "active",
+    storeStatus: "connected",
+    setupStatus: "ready",
+    storeLaunchReady: true,
+  };
 
   async claimJob(): Promise<DropshipListingPushWorkerClaim> {
     if (this.job.status !== "queued") {
       return {
         job: this.job,
         config: this.config,
+        eligibility: this.eligibility,
         items: this.items,
         claimed: false,
       };
@@ -280,6 +348,7 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
     return {
       job: this.job,
       config: this.config,
+      eligibility: this.eligibility,
       items: this.items,
       claimed: true,
     };

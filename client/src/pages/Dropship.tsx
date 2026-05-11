@@ -47,6 +47,7 @@ import {
   allDropshipOrderCancellationStatuses,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
+  buildAdminDogfoodLaunchStatusUrl,
   buildAdminOmsChannelConfigUrl,
   buildAdminOmsChannelConfigureInput,
   buildAdminListingPushJobsUrl,
@@ -68,6 +69,8 @@ import {
   buildAdminStoreConnectionsUrl,
   buildAdminStoreWebhookRepairInput,
   buildAdminTrackingPushesUrl,
+  buildAdminWorkerSweepInput,
+  buildAdminWorkerSweepRunUrl,
   buildCatalogExposureRuleFromPreviewRow,
   buildCatalogExposureRuleInput,
   buildShippingBoxInput,
@@ -112,6 +115,7 @@ import {
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOrderOpsProcessResponse,
+  type DropshipAdminOrderOpsWmsSyncResponse,
   type DropshipOrderDetail,
   type DropshipOrderDetailResponse,
   type DropshipAdminOmsChannelConfigResponse,
@@ -132,12 +136,20 @@ import {
   type DropshipAdminTrackingPushListItem,
   type DropshipAdminTrackingPushListResponse,
   type DropshipAdminTrackingPushRetryResponse,
+  type DropshipAdminWorkerSweepName,
+  type DropshipAdminWorkerSweepResponse,
   type DropshipAdminWalletConfirmedUsdcCreditResponse,
   type DropshipAdminWalletManualCreditResponse,
   type DropshipDogfoodLaunchGate,
+  type DropshipDogfoodLaunchCandidate,
+  type DropshipDogfoodLaunchStatusResponse,
+  type DropshipDogfoodLaunchRunbookStep,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
   type DropshipDogfoodReadinessStatus,
+  type DropshipDogfoodSmokeCandidate,
+  type DropshipDogfoodSmokeResponse,
+  type DropshipDogfoodSmokeStage,
   type DropshipOmsChannelConfigOverview,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
@@ -179,8 +191,30 @@ type NotificationOpsCriticalFilter = "all" | "critical" | "noncritical";
 type ReturnOpsStatusFilter = DropshipRmaStatus | "default" | "all";
 type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
 type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
+type DropshipOpsSearchableTab = "listing-pushes" | "order-intake" | "tracking-pushes";
+type OrderIntakeAdminAction = "retry" | "exception" | "process" | "retry-cancellation" | "retry-wms-sync";
+type DropshipOpsTabValue =
+  | "overview"
+  | "dogfood"
+  | "catalog"
+  | "shipping"
+  | "order-intake"
+  | "wallet-ops"
+  | "stores"
+  | "listing-pushes"
+  | "tracking-pushes"
+  | "notifications"
+  | "returns"
+  | "audit";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
+
+interface DropshipOpsSearchSignal {
+  tab: DropshipOpsSearchableTab;
+  search: string;
+  platform?: StoreConnectionPlatformFilter;
+  nonce: number;
+}
 
 interface ListingConfigFormState {
   storeConnectionId: number;
@@ -544,7 +578,31 @@ const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
   "ready",
 ];
 
+const adminWorkerSweepOptions: Array<{
+  worker: DropshipAdminWorkerSweepName;
+  label: string;
+  description: string;
+}> = [
+  {
+    worker: "listing_push",
+    label: "Listing push",
+    description: "Claims pending or stale listing push jobs and sends marketplace updates.",
+  },
+  {
+    worker: "order_processing",
+    label: "Order processing",
+    description: "Processes received dropship orders, payment holds, cancellations, and stale intakes.",
+  },
+  {
+    worker: "ebay_order_intake",
+    label: "eBay intake",
+    description: "Polls connected eBay stores for paid marketplace orders.",
+  },
+];
+
 export default function Dropship() {
+  const [activeTab, setActiveTab] = useState<DropshipOpsTabValue>("overview");
+  const [opsSearchSignal, setOpsSearchSignal] = useState<DropshipOpsSearchSignal | null>(null);
   const [auditSearch, setAuditSearch] = useState("");
   const [auditSeverity, setAuditSeverity] = useState<AuditSeverityFilter>("all");
   const [appliedAuditFilters, setAppliedAuditFilters] = useState({
@@ -580,6 +638,11 @@ export default function Dropship() {
 function refreshAll() {
     void overviewQuery.refetch();
     void auditQuery.refetch();
+  }
+
+  function openSmokeOpsSearch(input: Omit<DropshipOpsSearchSignal, "nonce">) {
+    setOpsSearchSignal({ ...input, nonce: Date.now() });
+    setActiveTab(input.tab);
   }
 
   return (
@@ -624,7 +687,7 @@ function refreshAll() {
       </div>
 
       <div className="flex-1 overflow-auto p-4 md:p-6">
-        <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col">
+        <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as DropshipOpsTabValue)} className="flex min-h-0 flex-1 flex-col">
           <TabsList className="mb-5 h-auto w-full justify-start overflow-x-auto rounded-none border-b bg-transparent p-0">
             <TabsTrigger
               value="overview"
@@ -711,7 +774,7 @@ function refreshAll() {
           </TabsContent>
 
           <TabsContent value="dogfood" className="m-0">
-            <DogfoodReadinessTab />
+            <DogfoodReadinessTab onOpenSmokeOpsSearch={openSmokeOpsSearch} />
           </TabsContent>
 
           <TabsContent value="catalog" className="m-0">
@@ -723,7 +786,7 @@ function refreshAll() {
           </TabsContent>
 
           <TabsContent value="order-intake" className="m-0">
-            <OrderIntakeOpsTab />
+            <OrderIntakeOpsTab searchSignal={opsSearchSignal?.tab === "order-intake" ? opsSearchSignal : null} />
           </TabsContent>
 
           <TabsContent value="wallet-ops" className="m-0">
@@ -735,11 +798,11 @@ function refreshAll() {
           </TabsContent>
 
           <TabsContent value="listing-pushes" className="m-0">
-            <ListingPushOpsTab />
+            <ListingPushOpsTab searchSignal={opsSearchSignal?.tab === "listing-pushes" ? opsSearchSignal : null} />
           </TabsContent>
 
           <TabsContent value="tracking-pushes" className="m-0">
-            <TrackingPushOpsTab />
+            <TrackingPushOpsTab searchSignal={opsSearchSignal?.tab === "tracking-pushes" ? opsSearchSignal : null} />
           </TabsContent>
 
           <TabsContent value="notifications" className="m-0">
@@ -803,7 +866,11 @@ function refreshAll() {
   );
 }
 
-function DogfoodReadinessTab() {
+function DogfoodReadinessTab({
+  onOpenSmokeOpsSearch,
+}: {
+  onOpenSmokeOpsSearch: (input: Omit<DropshipOpsSearchSignal, "nonce">) => void;
+}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<DogfoodReadinessStatusFilter>("all");
@@ -812,6 +879,11 @@ function DogfoodReadinessTab() {
   const [omsMessage, setOmsMessage] = useState("");
   const [omsError, setOmsError] = useState("");
   const [isSavingOmsChannel, setIsSavingOmsChannel] = useState(false);
+  const [workerBatchSize, setWorkerBatchSize] = useState("10");
+  const [workerReason, setWorkerReason] = useState("Dogfood manual sweep");
+  const [pendingWorkerSweep, setPendingWorkerSweep] = useState<DropshipAdminWorkerSweepName | null>(null);
+  const [workerSweepMessage, setWorkerSweepMessage] = useState("");
+  const [workerSweepError, setWorkerSweepError] = useState("");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "all" as DogfoodReadinessStatusFilter,
@@ -823,10 +895,18 @@ function DogfoodReadinessTab() {
     status: appliedFilters.status,
     platform: appliedFilters.platform,
   }), [appliedFilters]);
+  const launchStatusUrl = useMemo(() => buildAdminDogfoodLaunchStatusUrl({
+    search: appliedFilters.search,
+    platform: appliedFilters.platform,
+  }), [appliedFilters]);
 
   const readinessQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [readinessUrl],
     queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(readinessUrl),
+  });
+  const launchStatusQuery = useQuery<DropshipDogfoodLaunchStatusResponse>({
+    queryKey: [launchStatusUrl],
+    queryFn: () => fetchJson<DropshipDogfoodLaunchStatusResponse>(launchStatusUrl),
   });
   const omsChannelConfigUrl = buildAdminOmsChannelConfigUrl();
   const omsChannelConfigQuery = useQuery<DropshipAdminOmsChannelConfigResponse>({
@@ -836,8 +916,9 @@ function DogfoodReadinessTab() {
 
   const items = readinessQuery.data?.items ?? [];
   const summary = readinessQuery.data?.summary ?? [];
-  const systemChecks = readinessQuery.data?.systemChecks ?? [];
-  const launchGate = readinessQuery.data?.launchGate ?? null;
+  const launchStatus = launchStatusQuery.data ?? null;
+  const systemChecks = readinessQuery.data?.systemChecks ?? launchStatus?.readiness.systemChecks ?? [];
+  const launchGate = launchStatus?.launchGate ?? readinessQuery.data?.launchGate ?? null;
   const omsConfig = omsChannelConfigQuery.data?.config ?? null;
 
   useEffect(() => {
@@ -872,6 +953,7 @@ function DogfoodReadinessTab() {
       await Promise.all([
         omsChannelConfigQuery.refetch(),
         readinessQuery.refetch(),
+        launchStatusQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
@@ -882,14 +964,42 @@ function DogfoodReadinessTab() {
     }
   }
 
+  async function runWorkerSweep(worker: DropshipAdminWorkerSweepName) {
+    setPendingWorkerSweep(worker);
+    setWorkerSweepError("");
+    setWorkerSweepMessage("");
+    try {
+      const input = buildAdminWorkerSweepInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-worker-sweep-${worker}`),
+        batchSize: workerBatchSize,
+        reason: workerReason,
+      });
+      const response = await postJson<DropshipAdminWorkerSweepResponse>(
+        buildAdminWorkerSweepRunUrl(worker),
+        input,
+      );
+      setWorkerSweepMessage(workerSweepMessageForResponse(response));
+      await Promise.all([
+        readinessQuery.refetch(),
+        launchStatusQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setWorkerSweepError(caught instanceof Error ? caught.message : "Dropship worker sweep failed.");
+    } finally {
+      setPendingWorkerSweep(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      {(readinessQuery.error || omsChannelConfigQuery.error || omsError) && (
+      {(readinessQuery.error || launchStatusQuery.error || omsChannelConfigQuery.error || omsError || workerSweepError) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {omsError || queryErrorMessage(
-              readinessQuery.error ?? omsChannelConfigQuery.error,
+            {omsError || workerSweepError || queryErrorMessage(
+              readinessQuery.error ?? launchStatusQuery.error ?? omsChannelConfigQuery.error,
               "Unable to load dropship dogfood readiness.",
             )}
           </AlertDescription>
@@ -899,6 +1009,12 @@ function DogfoodReadinessTab() {
         <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
           <CheckCircle2 className="h-4 w-4" />
           <AlertDescription>{omsMessage}</AlertDescription>
+        </Alert>
+      )}
+      {workerSweepMessage && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{workerSweepMessage}</AlertDescription>
         </Alert>
       )}
 
@@ -916,9 +1032,28 @@ function DogfoodReadinessTab() {
         isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
       />
 
+      <WorkerSweepPanel
+        batchSize={workerBatchSize}
+        pendingWorker={pendingWorkerSweep}
+        reason={workerReason}
+        onBatchSizeChange={setWorkerBatchSize}
+        onReasonChange={setWorkerReason}
+        onRunSweep={runWorkerSweep}
+      />
+
       <DogfoodLaunchGatePanel
         gate={launchGate}
-        isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
+        isLoading={launchStatusQuery.isLoading || launchStatusQuery.isFetching}
+        launchCandidates={launchStatus?.launchCandidates ?? []}
+        message={launchStatus?.message}
+        runbookSteps={launchStatus?.runbookSteps}
+        status={launchStatus?.status}
+      />
+
+      <DogfoodSmokePanel
+        smoke={launchStatus?.smoke ?? null}
+        isLoading={launchStatusQuery.isLoading || launchStatusQuery.isFetching}
+        onOpenSmokeOpsSearch={onOpenSmokeOpsSearch}
       />
 
       <section className="rounded-md border bg-card p-4">
@@ -985,7 +1120,11 @@ function DogfoodReadinessTab() {
   );
 }
 
-function ListingPushOpsTab() {
+function ListingPushOpsTab({
+  searchSignal,
+}: {
+  searchSignal: DropshipOpsSearchSignal | null;
+}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ListingPushStatusFilter>("default");
@@ -1016,6 +1155,18 @@ function ListingPushOpsTab() {
   const recoverableJobCount = jobs.filter((job) =>
     listingPushJobRetryEligibility(job, listingPushRetryNow).canRetry
   ).length;
+
+  useEffect(() => {
+    if (!searchSignal) return;
+    setSearch(searchSignal.search);
+    setPlatform(searchSignal.platform ?? "all");
+    setStatus("all");
+    setAppliedFilters({
+      search: searchSignal.search,
+      status: "all",
+      platform: searchSignal.platform ?? "all",
+    });
+  }, [searchSignal]);
 
   function applyListingPushFilters() {
     setAppliedFilters({ search, status, platform });
@@ -1151,7 +1302,11 @@ function ListingPushOpsTab() {
   );
 }
 
-function TrackingPushOpsTab() {
+function TrackingPushOpsTab({
+  searchSignal,
+}: {
+  searchSignal: DropshipOpsSearchSignal | null;
+}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<TrackingPushStatusFilter>("default");
@@ -1182,6 +1337,18 @@ function TrackingPushOpsTab() {
   const recoverablePushCount = pushes.filter((push) =>
     trackingPushRetryEligibility(push, trackingPushRetryNow).canRetry
   ).length;
+
+  useEffect(() => {
+    if (!searchSignal) return;
+    setSearch(searchSignal.search);
+    setPlatform(searchSignal.platform ?? "all");
+    setStatus("all");
+    setAppliedFilters({
+      search: searchSignal.search,
+      status: "all",
+      platform: searchSignal.platform ?? "all",
+    });
+  }, [searchSignal]);
 
   function applyTrackingPushFilters() {
     setAppliedFilters({ search, status, platform });
@@ -2258,7 +2425,11 @@ function ListingConfigSelect({
   );
 }
 
-function OrderIntakeOpsTab() {
+function OrderIntakeOpsTab({
+  searchSignal,
+}: {
+  searchSignal: DropshipOpsSearchSignal | null;
+}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<OrderOpsStatusFilter>("default");
@@ -2271,7 +2442,7 @@ function OrderIntakeOpsTab() {
   const [actionReason, setActionReason] = useState("");
   const [pendingAction, setPendingAction] = useState<{
     intakeId: number;
-    action: "retry" | "exception" | "process" | "retry-cancellation";
+    action: OrderIntakeAdminAction;
   } | null>(null);
   const [selectedIntakeId, setSelectedIntakeId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
@@ -2298,13 +2469,25 @@ function OrderIntakeOpsTab() {
   const orderIntakes = orderIntakeQuery.data?.items ?? [];
   const orderRetryEligibilityNow = useMemo(() => new Date(), [orderIntakeQuery.dataUpdatedAt]);
 
+  useEffect(() => {
+    if (!searchSignal) return;
+    setSearch(searchSignal.search);
+    setStatus("all");
+    setCancellationStatus("all");
+    setAppliedFilters({
+      search: searchSignal.search,
+      status: "all",
+      cancellationStatus: "all",
+    });
+  }, [searchSignal]);
+
   function applyOrderFilters() {
     setAppliedFilters({ search, status, cancellationStatus });
   }
 
   async function runOrderAction(
     intake: DropshipAdminOrderOpsIntakeListItem,
-    action: "retry" | "exception" | "process" | "retry-cancellation",
+    action: OrderIntakeAdminAction,
   ) {
     setPendingAction({ intakeId: intake.intakeId, action });
     setError("");
@@ -2319,6 +2502,7 @@ function OrderIntakeOpsTab() {
         DropshipAdminOrderOpsActionResponse
         | DropshipAdminOrderOpsCancellationRetryResponse
         | DropshipAdminOrderOpsProcessResponse
+        | DropshipAdminOrderOpsWmsSyncResponse
       >(
         `/api/dropship/admin/order-intake/${intake.intakeId}/${action}`,
         input,
@@ -3885,12 +4069,95 @@ function SystemReadinessPanel({
   );
 }
 
+function WorkerSweepPanel({
+  batchSize,
+  pendingWorker,
+  reason,
+  onBatchSizeChange,
+  onReasonChange,
+  onRunSweep,
+}: {
+  batchSize: string;
+  pendingWorker: DropshipAdminWorkerSweepName | null;
+  reason: string;
+  onBatchSizeChange: Dispatch<SetStateAction<string>>;
+  onReasonChange: Dispatch<SetStateAction<string>>;
+  onRunSweep: (worker: DropshipAdminWorkerSweepName) => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold">Manual worker sweeps</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Run the same dropship worker paths used by schedulers without waiting for the next interval.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-[120px_minmax(220px,1fr)] xl:w-[520px]">
+          <label className="space-y-1">
+            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Batch</span>
+            <Input
+              inputMode="numeric"
+              value={batchSize}
+              onChange={(event) => onBatchSizeChange(event.target.value)}
+              placeholder="10"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Reason</span>
+            <Input
+              value={reason}
+              onChange={(event) => onReasonChange(event.target.value)}
+              placeholder="Dogfood manual sweep"
+            />
+          </label>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        {adminWorkerSweepOptions.map((option) => {
+          const isPending = pendingWorker === option.worker;
+          return (
+            <div key={option.worker} className="flex min-h-36 flex-col justify-between rounded-md border p-3">
+              <div>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="font-medium">{option.label}</div>
+                  <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+                    {option.worker}
+                  </Badge>
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">{option.description}</p>
+              </div>
+              <Button
+                className="mt-4 gap-2"
+                disabled={pendingWorker !== null}
+                variant="outline"
+                onClick={() => onRunSweep(option.worker)}
+              >
+                {isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+                {isPending ? "Running" : "Run sweep"}
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function DogfoodLaunchGatePanel({
   gate,
   isLoading,
+  launchCandidates,
+  message,
+  runbookSteps,
+  status,
 }: {
   gate: DropshipDogfoodLaunchGate | null;
   isLoading: boolean;
+  launchCandidates?: DropshipDogfoodLaunchCandidate[];
+  message?: string;
+  runbookSteps?: DropshipDogfoodLaunchRunbookStep[];
+  status?: DropshipDogfoodReadinessStatus;
 }) {
   if (isLoading && !gate) {
     return (
@@ -3909,17 +4176,22 @@ function DogfoodLaunchGatePanel({
     return null;
   }
 
+  const displayStatus = status ?? gate.status;
+  const displayMessage = message ?? gate.message;
+  const steps = runbookSteps ?? gate.runbookSteps;
+  const candidates = launchCandidates ?? [];
+
   return (
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">Dogfood launch gate</h2>
-            <Badge variant="outline" className={dogfoodReadinessStatusTone(gate.status)}>
-              {formatStatus(gate.status)}
+            <Badge variant="outline" className={dogfoodReadinessStatusTone(displayStatus)}>
+              {formatStatus(displayStatus)}
             </Badge>
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">{gate.message}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{displayMessage}</p>
         </div>
         <div className="grid w-full gap-2 sm:grid-cols-2 lg:w-auto lg:min-w-[520px] lg:grid-cols-4">
           <LaunchGateMetric label="Ready" value={gate.readyVendorStoreCount} />
@@ -3945,7 +4217,125 @@ function DogfoodLaunchGatePanel({
           ))}
         </div>
       )}
+      {candidates.length > 0 && (
+        <div className="mt-4 border-t pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">Ready dogfood candidates</h3>
+            <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800">
+              {candidates.length} ready
+            </Badge>
+          </div>
+          <div className="mt-3 grid gap-2 lg:grid-cols-2">
+            {candidates.slice(0, 4).map((candidate) => (
+              <DogfoodLaunchCandidateCard
+                key={`${candidate.vendor.vendorId}:${candidate.storeConnection.storeConnectionId}`}
+                candidate={candidate}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {steps.length > 0 && (
+        <div className="mt-4 border-t pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">Launch runbook</h3>
+            <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+              {steps.length} step{steps.length === 1 ? "" : "s"}
+            </Badge>
+          </div>
+          <div className="mt-3 grid gap-2 lg:grid-cols-2">
+            {steps.map((step, index) => (
+              <LaunchRunbookStepCard key={step.key} step={step} index={index} />
+            ))}
+          </div>
+        </div>
+      )}
     </section>
+  );
+}
+
+function DogfoodLaunchCandidateCard({
+  candidate,
+}: {
+  candidate: DropshipDogfoodLaunchCandidate;
+}) {
+  const storeName = candidate.storeConnection.externalDisplayName
+    || candidate.storeConnection.shopDomain
+    || `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
+  const references = [
+    candidate.smokeReferences.latestListingId ? `Listing ${candidate.smokeReferences.latestListingId}` : null,
+    candidate.smokeReferences.latestIntakeId ? `Intake ${candidate.smokeReferences.latestIntakeId}` : null,
+    candidate.smokeReferences.latestOmsOrderId ? `OMS ${candidate.smokeReferences.latestOmsOrderId}` : null,
+    candidate.smokeReferences.latestWmsShipmentId ? `Shipment ${candidate.smokeReferences.latestWmsShipmentId}` : null,
+    candidate.smokeReferences.latestTrackingPushId ? `Tracking ${candidate.smokeReferences.latestTrackingPushId}` : null,
+  ].filter((reference): reference is string => Boolean(reference));
+
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate font-medium">
+            {candidate.vendor.businessName || candidate.vendor.email || `Vendor ${candidate.vendor.vendorId}`}
+          </div>
+          <div className="mt-1 truncate text-xs text-muted-foreground">{storeName}</div>
+        </div>
+        <Badge variant="outline" className="shrink-0 border-emerald-200 bg-emerald-50 text-emerald-800">
+          Ready
+        </Badge>
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">
+        Latest smoke {candidate.lastSmokeActivityAt ? formatDateTime(candidate.lastSmokeActivityAt) : "missing"}
+      </div>
+      {references.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {references.map((reference) => (
+            <Badge key={reference} variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+              {reference}
+            </Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LaunchRunbookStepCard({
+  step,
+  index,
+}: {
+  step: DropshipDogfoodLaunchRunbookStep;
+  index: number;
+}) {
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+              {index + 1}
+            </Badge>
+            <div className="font-medium">{step.label}</div>
+          </div>
+          <div className="mt-1 text-sm text-muted-foreground">{step.message}</div>
+        </div>
+        <Badge variant="outline" className={dogfoodReadinessStatusTone(step.status)}>
+          {formatStatus(step.status)}
+        </Badge>
+      </div>
+      <div className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-sm">{step.action}</div>
+      {step.evidence.length > 0 && (
+        <div className="mt-3 space-y-1">
+          {step.evidence.slice(0, 3).map((entry, entryIndex) => (
+            <div key={`${step.key}:evidence:${entryIndex}`} className="truncate text-xs text-muted-foreground">
+              {entry}
+            </div>
+          ))}
+          {step.evidence.length > 3 && (
+            <div className="text-xs text-muted-foreground">+{step.evidence.length - 3} more</div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3962,6 +4352,207 @@ function LaunchGateMetric({
       <div className="mt-1 font-mono text-lg font-semibold">{value}</div>
     </div>
   );
+}
+
+function DogfoodSmokePanel({
+  smoke,
+  isLoading,
+  onOpenSmokeOpsSearch,
+}: {
+  smoke: DropshipDogfoodSmokeResponse | null;
+  isLoading: boolean;
+  onOpenSmokeOpsSearch: (input: Omit<DropshipOpsSearchSignal, "nonce">) => void;
+}) {
+  if (isLoading && !smoke) {
+    return (
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-6 w-56" />
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          <Skeleton className="h-36 w-full" />
+          <Skeleton className="h-36 w-full" />
+        </div>
+      </section>
+    );
+  }
+
+  if (!smoke) return null;
+
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold">Dogfood smoke evidence</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{smoke.message}</p>
+        </div>
+        <div className="grid w-full gap-2 sm:grid-cols-3 lg:w-auto lg:min-w-[420px]">
+          <LaunchGateMetric label="Ready" value={smoke.readyCandidateCount} />
+          <LaunchGateMetric label="Incomplete" value={smoke.warningCandidateCount} />
+          <LaunchGateMetric label="Blocked" value={smoke.blockedCandidateCount} />
+        </div>
+      </div>
+      {smoke.candidates.length === 0 ? (
+        <div className="mt-4 rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+          No store connections match the current smoke filters.
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-3 xl:grid-cols-2">
+          {smoke.candidates.map((candidate) => (
+            <DogfoodSmokeCandidateCard
+              key={`${candidate.vendor.vendorId}:${candidate.storeConnection.storeConnectionId}`}
+              candidate={candidate}
+              onOpenSmokeOpsSearch={onOpenSmokeOpsSearch}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DogfoodSmokeCandidateCard({
+  candidate,
+  onOpenSmokeOpsSearch,
+}: {
+  candidate: DropshipDogfoodSmokeCandidate;
+  onOpenSmokeOpsSearch: (input: Omit<DropshipOpsSearchSignal, "nonce">) => void;
+}) {
+  const storeName = candidate.storeConnection.externalDisplayName
+    || candidate.storeConnection.shopDomain
+    || `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-medium">{candidate.vendor.businessName || candidate.vendor.email || `Vendor ${candidate.vendor.vendorId}`}</div>
+          <div className="mt-1 truncate text-sm text-muted-foreground">
+            {storeName} / {candidate.lastActivityAt ? formatDateTime(candidate.lastActivityAt) : "No activity"}
+          </div>
+        </div>
+        <Badge variant="outline" className={dogfoodReadinessStatusTone(candidate.status)}>
+          {formatStatus(candidate.status)}
+        </Badge>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        {candidate.stages.map((stage) => (
+          <DogfoodSmokeStageCard
+            key={stage.key}
+            candidate={candidate}
+            stage={stage}
+            onOpenSmokeOpsSearch={onOpenSmokeOpsSearch}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DogfoodSmokeStageCard({
+  candidate,
+  stage,
+  onOpenSmokeOpsSearch,
+}: {
+  candidate: DropshipDogfoodSmokeCandidate;
+  stage: DropshipDogfoodSmokeStage;
+  onOpenSmokeOpsSearch: (input: Omit<DropshipOpsSearchSignal, "nonce">) => void;
+}) {
+  const action = buildSmokeStageAction(candidate, stage);
+  return (
+    <div className="rounded-md border px-3 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{stage.label}</div>
+          <div className="mt-1 text-xs text-muted-foreground">{stage.message}</div>
+        </div>
+        <Badge variant="outline" className={dogfoodReadinessStatusTone(stage.status)}>
+          {formatStatus(stage.status)}
+        </Badge>
+      </div>
+      {stage.evidence.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {stage.evidence.slice(0, 2).map((entry, index) => (
+            <div key={`${stage.key}:${index}`} className="truncate text-xs text-muted-foreground">
+              {entry}
+            </div>
+          ))}
+        </div>
+      )}
+      {action && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3 h-8 gap-2"
+          onClick={() => onOpenSmokeOpsSearch(action)}
+        >
+          <FileSearch className="h-3.5 w-3.5" />
+          {actionLabelForTab(action.tab)}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function buildSmokeStageAction(
+  candidate: DropshipDogfoodSmokeCandidate,
+  stage: DropshipDogfoodSmokeStage,
+): Omit<DropshipOpsSearchSignal, "nonce"> | null {
+  const platform = candidate.storeConnection.platform === "ebay" || candidate.storeConnection.platform === "shopify"
+    ? candidate.storeConnection.platform
+    : "all";
+  if (stage.key === "listing") {
+    return {
+      tab: "listing-pushes",
+      platform,
+      search: smokeSearchValue([
+        candidate.references.latestListingJobId,
+        candidate.references.latestListingId,
+        candidate.storeConnection.externalDisplayName,
+        candidate.storeConnection.shopDomain,
+        candidate.vendor.email,
+      ]),
+    };
+  }
+  if (stage.key === "order_intake" || stage.key === "fulfillment") {
+    return {
+      tab: "order-intake",
+      search: smokeSearchValue([
+        candidate.references.latestIntakeId,
+        candidate.references.latestOmsOrderId,
+        candidate.storeConnection.externalDisplayName,
+        candidate.storeConnection.shopDomain,
+        candidate.vendor.email,
+      ]),
+    };
+  }
+  if (stage.key === "tracking") {
+    return {
+      tab: "tracking-pushes",
+      platform,
+      search: smokeSearchValue([
+        candidate.references.latestTrackingPushId,
+        candidate.references.latestWmsShipmentId,
+        candidate.references.latestOmsOrderId,
+        candidate.storeConnection.externalDisplayName,
+        candidate.storeConnection.shopDomain,
+        candidate.vendor.email,
+      ]),
+    };
+  }
+  return null;
+}
+
+function smokeSearchValue(values: Array<string | number | null | undefined>): string {
+  const value = values.find((entry) => {
+    if (typeof entry === "number") return Number.isSafeInteger(entry) && entry > 0;
+    return Boolean(entry?.trim());
+  });
+  return typeof value === "number" ? String(value) : value?.trim() ?? "";
+}
+
+function actionLabelForTab(tab: DropshipOpsSearchableTab): string {
+  if (tab === "listing-pushes") return "Open listings";
+  if (tab === "tracking-pushes") return "Open tracking";
+  return "Open intake";
 }
 
 function DogfoodReadinessTable({
@@ -5478,9 +6069,9 @@ function OrderIntakeOpsTable({
   onSelectDetail: (intake: DropshipAdminOrderOpsIntakeListItem) => void;
   onRunAction: (
     intake: DropshipAdminOrderOpsIntakeListItem,
-    action: "retry" | "exception" | "process" | "retry-cancellation",
+    action: OrderIntakeAdminAction,
   ) => void;
-  pendingAction: { intakeId: number; action: "retry" | "exception" | "process" | "retry-cancellation" } | null;
+  pendingAction: { intakeId: number; action: OrderIntakeAdminAction } | null;
   retryEligibilityNow: Date;
   selectedIntakeId: number | null;
   total: number;
@@ -5529,6 +6120,7 @@ function OrderIntakeOpsTable({
             const retryEligibility = orderIntakeRetryEligibility(intake, retryEligibilityNow);
             const cancellationRetryEligibility = orderCancellationRetryEligibility(intake);
             const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            const canRetryWmsSync = orderIntakeCanRetryWmsSync(intake);
             return (
               <TableRow key={intake.intakeId}>
                 <TableCell>
@@ -5619,6 +6211,17 @@ function OrderIntakeOpsTable({
                     >
                       <RotateCcw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry-cancellation" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
                       Retry cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2"
+                      disabled={pendingAction !== null || !canRetryWmsSync}
+                      onClick={() => onRunAction(intake, "retry-wms-sync")}
+                    >
+                      <Truck className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry-wms-sync" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      Sync WMS
                     </Button>
                     <Button
                       type="button"
@@ -6269,10 +6872,19 @@ function orderActionMessage(
   response:
     | DropshipAdminOrderOpsActionResponse
     | DropshipAdminOrderOpsCancellationRetryResponse
-    | DropshipAdminOrderOpsProcessResponse,
-  action: "retry" | "exception" | "process" | "retry-cancellation",
+    | DropshipAdminOrderOpsProcessResponse
+    | DropshipAdminOrderOpsWmsSyncResponse,
+  action: OrderIntakeAdminAction,
 ): string {
-  if (action === "process" && "outcome" in response) {
+  if (action === "retry-wms-sync" && "retryQueued" in response) {
+    if (response.outcome === "synced") {
+      const wmsOrderLabel = response.wmsOrderId ? ` WMS order ${response.wmsOrderId}` : " WMS";
+      return `Order intake ${response.intakeId} synced to${wmsOrderLabel}.`;
+    }
+    const suffix = response.failureMessage ? `: ${response.failureMessage}` : ".";
+    return `Order intake ${response.intakeId} WMS sync retry queued${suffix}`;
+  }
+  if (action === "process" && "failureCode" in response) {
     const suffix = response.failureCode ? ` (${formatStatus(response.failureCode)})` : "";
     return `Order intake ${response.intakeId} processing returned ${formatStatus(response.outcome)}${suffix}.`;
   }
@@ -6287,6 +6899,10 @@ function orderActionMessage(
 
 function orderIntakeCanProcessNow(status: DropshipOpsOrderIntakeStatus): boolean {
   return status === "received" || status === "retrying" || status === "payment_hold";
+}
+
+function orderIntakeCanRetryWmsSync(intake: DropshipAdminOrderOpsIntakeListItem): boolean {
+  return intake.status === "accepted" && intake.omsOrderId !== null;
 }
 
 function readinessSummaryCount(
@@ -6426,6 +7042,18 @@ function dogfoodReadinessStatusTone(status: DropshipDogfoodReadinessStatus): str
   if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function workerSweepMessageForResponse(response: DropshipAdminWorkerSweepResponse): string {
+  const metrics = Object.entries(response.metrics)
+    .filter(([, value]) => value !== 0)
+    .map(([key, value]) => `${formatStatus(key)} ${value}`);
+  const suffix = metrics.length > 0 ? `: ${metrics.join(" / ")}.` : ".";
+  return `${workerSweepLabel(response.worker)} sweep completed${suffix}`;
+}
+
+function workerSweepLabel(worker: DropshipAdminWorkerSweepName): string {
+  return adminWorkerSweepOptions.find((option) => option.worker === worker)?.label ?? formatStatus(worker);
 }
 
 function omsChannelConfigLabel(config: DropshipOmsChannelConfigOverview | null): string {

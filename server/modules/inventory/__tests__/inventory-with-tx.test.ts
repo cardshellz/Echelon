@@ -77,4 +77,72 @@ describe("InventoryUseCases.withTx", () => {
     );
     expect(storage.createInventoryTransaction).toHaveBeenCalledTimes(1);
   });
+
+  it("passes orphaned reservation releases to lot adjustments", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryUseCases } = await import("../application/inventory.use-cases");
+
+    const tx = {};
+    const rootDb = {
+      select: vi.fn(),
+      update: vi.fn(),
+      insert: vi.fn(),
+      execute: vi.fn(),
+      transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>) => fn(tx)),
+    };
+
+    const storage = {
+      upsertInventoryLevel: vi.fn(async (_input: any, activeTx: any) => {
+        expect(activeTx).toBe(tx);
+        return {
+          id: 10,
+          warehouseLocationId: 20,
+          productVariantId: 30,
+          variantQty: 10,
+          reservedQty: 8,
+          pickedQty: 0,
+          packedQty: 0,
+          backorderQty: 0,
+          updatedAt: new Date(),
+        };
+      }),
+      adjustInventoryLevel: vi.fn(async (_levelId: number, _deltas: any, activeTx: any) => {
+        expect(activeTx).toBe(tx);
+        return null;
+      }),
+      createInventoryTransaction: vi.fn(async (_txn: any, activeTx: any) => {
+        expect(activeTx).toBe(tx);
+      }),
+    } as any;
+    const adjustLots = vi.fn(async () => undefined);
+    const lotService = {
+      withTx: vi.fn((activeTx: any) => {
+        expect(activeTx).toBe(tx);
+        return { adjustLots };
+      }),
+    };
+
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any);
+
+    const result = await inventory.adjustInventory({
+      productVariantId: 30,
+      warehouseLocationId: 20,
+      qtyDelta: -5,
+      reason: "cycle count correction",
+    });
+
+    expect(result).toEqual({ orphanedQty: 3 });
+    expect(storage.adjustInventoryLevel).toHaveBeenCalledWith(
+      10,
+      { variantQty: -5, reservedQty: -3 },
+      tx,
+    );
+    expect(adjustLots).toHaveBeenCalledWith({
+      productVariantId: 30,
+      warehouseLocationId: 20,
+      qtyDelta: -5,
+      reservedQtyDelta: -3,
+      notes: "cycle count correction",
+    });
+  });
 });

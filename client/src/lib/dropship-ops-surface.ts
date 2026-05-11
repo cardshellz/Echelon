@@ -389,6 +389,7 @@ export interface DropshipAdminOpsOverview {
   orderCancellationStatusCounts: DropshipOpsCount[];
   listingPushJobStatusCounts: DropshipOpsCount[];
   trackingPushStatusCounts: DropshipOpsCount[];
+  wmsSyncRetryStatusCounts: DropshipOpsCount[];
   rmaStatusCounts: DropshipOpsCount[];
   notificationStatusCounts: DropshipOpsCount[];
   recentAuditEvents: DropshipAuditEventRecord[];
@@ -429,6 +430,16 @@ export interface DropshipDogfoodLaunchGateBlocker {
   storeConnectionId?: number | null;
 }
 
+export interface DropshipDogfoodLaunchRunbookStep {
+  key: string;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  action: string;
+  scope: "system" | "vendor_store" | "ops";
+  evidence: string[];
+}
+
 export interface DropshipDogfoodLaunchGate {
   status: DropshipDogfoodReadinessStatus;
   readyVendorStoreCount: number;
@@ -440,6 +451,7 @@ export interface DropshipDogfoodLaunchGate {
   warningCount: number;
   message: string;
   firstBlockers: DropshipDogfoodLaunchGateBlocker[];
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
 }
 
 export interface DropshipDogfoodReadinessItem {
@@ -501,6 +513,91 @@ export interface DropshipDogfoodReadinessResponse {
   summary: Array<{ status: DropshipDogfoodReadinessStatus; count: number }>;
   systemChecks: DropshipSystemReadinessCheck[];
   launchGate: DropshipDogfoodLaunchGate;
+}
+
+export type DropshipDogfoodSmokeStageKey = "listing" | "order_intake" | "fulfillment" | "tracking";
+
+export interface DropshipDogfoodSmokeStage {
+  key: DropshipDogfoodSmokeStageKey;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  evidence: string[];
+  latestAt: string | null;
+  freshness: {
+    status: "fresh" | "stale" | "missing";
+    staleAfterHours: number;
+  };
+}
+
+export interface DropshipDogfoodSmokeCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: DropshipDogfoodReadinessItem["storeConnection"] & {
+    storeConnectionId: number;
+    platform: string;
+    status: string;
+    setupStatus: string;
+  };
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  stages: DropshipDogfoodSmokeStage[];
+  references: {
+    latestListingId: number | null;
+    latestListingJobId: number | null;
+    latestIntakeId: number | null;
+    latestOmsOrderId: number | null;
+    latestWmsShipmentId: number | null;
+    latestTrackingPushId: number | null;
+  };
+  lastActivityAt: string | null;
+}
+
+export interface DropshipDogfoodSmokeResponse {
+  generatedAt: string;
+  staleAfterHours: number;
+  candidates: DropshipDogfoodSmokeCandidate[];
+  total: number;
+  readyCandidateCount: number;
+  warningCandidateCount: number;
+  blockedCandidateCount: number;
+  message: string;
+}
+
+export interface DropshipDogfoodLaunchCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: DropshipDogfoodSmokeCandidate["storeConnection"];
+  readinessStatus: DropshipDogfoodReadinessStatus;
+  smokeStatus: DropshipDogfoodReadinessStatus;
+  lastSmokeActivityAt: string | null;
+  smokeReferences: DropshipDogfoodSmokeCandidate["references"];
+}
+
+export interface DropshipDogfoodLaunchStatusResponse {
+  generatedAt: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  launchCandidates: DropshipDogfoodLaunchCandidate[];
+  launchGate: DropshipDogfoodLaunchGate;
+  readiness: DropshipDogfoodReadinessResponse;
+  smoke: DropshipDogfoodSmokeResponse;
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
+}
+
+export type DropshipAdminWorkerSweepName = "listing_push" | "order_processing" | "ebay_order_intake";
+
+export interface DropshipAdminWorkerSweepInput {
+  batchSize?: number;
+  reason?: string;
+  idempotencyKey: string;
+}
+
+export interface DropshipAdminWorkerSweepResponse {
+  worker: DropshipAdminWorkerSweepName;
+  workerId: string;
+  batchSize: number | null;
+  metrics: Record<string, number>;
+  status: "completed";
+  requestedAt: string;
 }
 
 export interface DropshipOmsChannelOption {
@@ -1094,6 +1191,18 @@ export interface DropshipAdminOrderOpsActionResponse {
 export interface DropshipAdminOrderOpsCancellationRetryResponse extends DropshipAdminOrderOpsActionResponse {
   previousCancellationStatus: string | null;
   cancellationStatus: string | null;
+}
+
+export interface DropshipAdminOrderOpsWmsSyncResponse {
+  intakeId: number;
+  vendorId: number | null;
+  storeConnectionId: number | null;
+  omsOrderId: number;
+  outcome: "synced" | "queued";
+  wmsOrderId: number | null;
+  retryQueued: boolean;
+  failureMessage: string | null;
+  updatedAt: string;
 }
 
 export type DropshipOrderCancellationRetryEligibilityReason =
@@ -2275,6 +2384,63 @@ export function buildAdminDogfoodReadinessUrl(input: {
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
+}
+
+export function buildAdminDogfoodSmokeUrl(input: {
+  search: string;
+  platform: DropshipStorePlatform | "all";
+  limit?: number;
+  staleAfterHours?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/admin/dogfood-smoke", {
+    search: input.search.trim(),
+    platform: input.platform === "all" ? undefined : input.platform,
+    limit: input.limit ?? 10,
+    staleAfterHours: input.staleAfterHours,
+  });
+}
+
+export function buildAdminDogfoodLaunchStatusUrl(input: {
+  search: string;
+  platform: DropshipStorePlatform | "all";
+  staleAfterHours?: number;
+}): string {
+  return buildQueryUrl("/api/dropship/admin/dogfood-launch-status", {
+    search: input.search.trim(),
+    platform: input.platform === "all" ? undefined : input.platform,
+    staleAfterHours: input.staleAfterHours,
+  });
+}
+
+export function buildAdminWorkerSweepRunUrl(worker: DropshipAdminWorkerSweepName): string {
+  return `/api/dropship/admin/worker-sweeps/${worker}/run`;
+}
+
+export function buildAdminWorkerSweepInput(input: {
+  idempotencyKey: string;
+  batchSize: string | number;
+  reason?: string;
+}): DropshipAdminWorkerSweepInput {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  const batchSize = input.batchSize === "" ? undefined : Number(input.batchSize);
+  if (batchSize !== undefined && (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > 100)) {
+    throw new Error("batchSize must be a positive integer no greater than 100.");
+  }
+
+  const reason = input.reason?.trim() ?? "";
+  if (reason.length > 1000) {
+    throw new Error("Reason must be 1000 characters or fewer.");
+  }
+
+  return {
+    idempotencyKey,
+    ...(batchSize === undefined ? {} : { batchSize }),
+    ...(reason ? { reason } : {}),
+  };
 }
 
 export function buildAdminOmsChannelConfigUrl(): string {

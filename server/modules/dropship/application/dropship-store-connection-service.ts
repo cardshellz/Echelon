@@ -185,6 +185,7 @@ export interface DropshipStoreConnectionPostConnectProvider {
 }
 
 export interface CompleteOAuthQuery {
+  [key: string]: string | undefined;
   platform?: DropshipSupportedStorePlatform;
   code?: string;
   state: string;
@@ -197,6 +198,10 @@ export interface DropshipStoreConnectionRepository {
   listByVendorId(vendorId: number): Promise<DropshipStoreConnectionProfile[]>;
   listForAdmin(input: ListDropshipAdminStoreConnectionsInput): Promise<DropshipAdminStoreConnectionListResult>;
   countActiveByVendorId(vendorId: number): Promise<number>;
+  hasRepairableConnection(input: {
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+  }): Promise<boolean>;
   connectStore(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
@@ -209,6 +214,21 @@ export interface DropshipStoreConnectionRepository {
     tokenRecords: DropshipStoreConnectionTokenRecord[];
     config: Record<string, unknown>;
     connectedAt: Date;
+  }): Promise<DropshipStoreConnectionProfile>;
+  recordPostConnectSetupSucceeded(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+    completedAt: Date;
+  }): Promise<DropshipStoreConnectionProfile>;
+  recordPostConnectSetupFailed(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+    errorCode: string;
+    message: string;
+    retryable: boolean;
+    failedAt: Date;
   }): Promise<DropshipStoreConnectionProfile>;
   disconnectStore(input: {
     vendorId: number;
@@ -277,16 +297,14 @@ export class DropshipStoreConnectionService {
   }): Promise<DropshipStoreConnectionOAuthStart> {
     const platform = assertDropshipStorePlatform(input.platform);
     const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
-    const activeConnectionCount = await this.deps.repository.countActiveByVendorId(vendor.vendorId);
-    assertVendorCanConnectStore({
-      vendorStatus: vendor.status,
-      activeConnectionCount,
-      includedConnectionLimit: vendor.includedStoreConnections,
-    });
-
     const shopDomain = platform === "shopify"
       ? normalizeShopifyShopDomain(input.shopDomain ?? "")
       : null;
+    await this.assertCanStartOAuth({
+      vendor,
+      platform,
+    });
+
     const now = this.deps.clock.now();
     const expiresAt = new Date(now.getTime() + DROPSHIP_OAUTH_STATE_TTL_MINUTES * 60 * 1000);
     const state = this.deps.stateSigner.sign({
@@ -335,11 +353,9 @@ export class DropshipStoreConnectionService {
       throw new DropshipError("DROPSHIP_STORE_OAUTH_VENDOR_MISMATCH", "Store authorization state does not match vendor.");
     }
 
-    const activeConnectionCount = await this.deps.repository.countActiveByVendorId(vendor.vendorId);
-    assertVendorCanConnectStore({
-      vendorStatus: vendor.status,
-      activeConnectionCount,
-      includedConnectionLimit: vendor.includedStoreConnections,
+    await this.assertCanStartOAuth({
+      vendor,
+      platform,
     });
 
     const grant = await this.deps.oauthProviders[platform].exchangeCode({
@@ -366,7 +382,7 @@ export class DropshipStoreConnectionService {
         : []),
     ];
 
-    const connection = await this.deps.repository.connectStore({
+    let connection = await this.deps.repository.connectStore({
       vendorId: vendor.vendorId,
       platform,
       externalAccountId: grant.externalAccountId,
@@ -393,7 +409,8 @@ export class DropshipStoreConnectionService {
       },
     });
 
-    await this.runPostConnectSetup({
+    connection = await this.runPostConnectSetup({
+      connection,
       vendorId: vendor.vendorId,
       storeConnectionId: connection.storeConnectionId,
       platform,
@@ -475,13 +492,58 @@ export class DropshipStoreConnectionService {
     return connection;
   }
 
-  private async runPostConnectSetup(input: Parameters<DropshipStoreConnectionPostConnectProvider["afterStoreConnected"]>[0]): Promise<void> {
+  private async assertCanStartOAuth(input: {
+    vendor: DropshipProvisionedVendorProfile;
+    platform: DropshipSupportedStorePlatform;
+  }): Promise<void> {
+    const activeConnectionCount = await this.deps.repository.countActiveByVendorId(input.vendor.vendorId);
+    try {
+      assertVendorCanConnectStore({
+        vendorStatus: input.vendor.status,
+        activeConnectionCount,
+        includedConnectionLimit: input.vendor.includedStoreConnections,
+      });
+    } catch (error) {
+      if (
+        !(error instanceof DropshipError)
+        || error.code !== "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED"
+      ) {
+        throw error;
+      }
+
+      if (activeConnectionCount > input.vendor.includedStoreConnections) {
+        throw error;
+      }
+
+      const canRepairExistingConnection = await this.deps.repository.hasRepairableConnection({
+        vendorId: input.vendor.vendorId,
+        platform: input.platform,
+      });
+      if (!canRepairExistingConnection) {
+        throw error;
+      }
+    }
+  }
+
+  private async runPostConnectSetup(
+    input: Parameters<DropshipStoreConnectionPostConnectProvider["afterStoreConnected"]>[0] & {
+      connection: DropshipStoreConnectionProfile;
+    },
+  ): Promise<DropshipStoreConnectionProfile> {
     if (!this.deps.postConnectProvider) {
-      return;
+      return this.recordPostConnectSetupSucceededSafely(input);
     }
 
     try {
-      await this.deps.postConnectProvider.afterStoreConnected(input);
+      await this.deps.postConnectProvider.afterStoreConnected({
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        platform: input.platform,
+        shopDomain: input.shopDomain,
+        accessToken: input.accessToken,
+        connectedAt: input.connectedAt,
+      });
+      const connection = await this.recordPostConnectSetupSucceededSafely(input);
       this.deps.logger.info({
         code: "DROPSHIP_STORE_POST_CONNECT_SETUP_COMPLETED",
         message: "Dropship store post-connect setup completed.",
@@ -491,7 +553,9 @@ export class DropshipStoreConnectionService {
           platform: input.platform,
         },
       });
+      return connection;
     } catch (error) {
+      const connection = await this.recordPostConnectSetupFailedSafely(input, error);
       this.deps.logger.warn({
         code: "DROPSHIP_STORE_POST_CONNECT_SETUP_FAILED",
         message: "Dropship store post-connect setup failed after the connection was persisted.",
@@ -502,6 +566,70 @@ export class DropshipStoreConnectionService {
           cause: formatDropshipStoreConnectionSetupError(error),
         },
       });
+      return connection;
+    }
+  }
+
+  private async recordPostConnectSetupSucceededSafely(input: {
+    connection: DropshipStoreConnectionProfile;
+    vendorId: number;
+    storeConnectionId: number;
+    platform: DropshipSupportedStorePlatform;
+  }): Promise<DropshipStoreConnectionProfile> {
+    try {
+      return await this.deps.repository.recordPostConnectSetupSucceeded({
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        platform: input.platform,
+        completedAt: this.deps.clock.now(),
+      });
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_STORE_POST_CONNECT_SETUP_STATUS_UPDATE_FAILED",
+        message: "Dropship store post-connect setup completed but readiness status could not be persisted.",
+        context: {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          platform: input.platform,
+          cause: formatDropshipStoreConnectionSetupError(error),
+        },
+      });
+      return input.connection;
+    }
+  }
+
+  private async recordPostConnectSetupFailedSafely(
+    input: {
+      connection: DropshipStoreConnectionProfile;
+      vendorId: number;
+      storeConnectionId: number;
+      platform: DropshipSupportedStorePlatform;
+    },
+    error: unknown,
+  ): Promise<DropshipStoreConnectionProfile> {
+    try {
+      return await this.deps.repository.recordPostConnectSetupFailed({
+        vendorId: input.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        platform: input.platform,
+        errorCode: resolveDropshipStoreConnectionSetupErrorCode(error),
+        message: resolveDropshipStoreConnectionSetupErrorMessage(error),
+        retryable: resolveDropshipStoreConnectionSetupRetryable(error),
+        failedAt: this.deps.clock.now(),
+      });
+    } catch (recordError) {
+      this.deps.logger.error({
+        code: "DROPSHIP_STORE_POST_CONNECT_SETUP_FAILURE_STATUS_UPDATE_FAILED",
+        message: "Dropship store post-connect setup failed and the failure status could not be persisted.",
+        context: {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          platform: input.platform,
+          setupFailure: formatDropshipStoreConnectionSetupError(error),
+          persistenceFailure: formatDropshipStoreConnectionSetupError(recordError),
+        },
+      });
+      return input.connection;
     }
   }
 
@@ -585,6 +713,24 @@ function formatDropshipStoreConnectionSetupError(error: unknown): Record<string,
   return {
     message: String(error),
   };
+}
+
+function resolveDropshipStoreConnectionSetupErrorCode(error: unknown): string {
+  if (error instanceof DropshipError) {
+    return error.code;
+  }
+  return "DROPSHIP_STORE_POST_CONNECT_SETUP_ERROR";
+}
+
+function resolveDropshipStoreConnectionSetupErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function resolveDropshipStoreConnectionSetupRetryable(error: unknown): boolean {
+  return error instanceof DropshipError && error.context?.retryable === true;
 }
 
 function isFreshDisconnect(connection: DropshipStoreConnectionProfile, disconnectedAt: Date): boolean {

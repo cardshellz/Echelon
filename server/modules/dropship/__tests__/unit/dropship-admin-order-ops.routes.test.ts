@@ -63,20 +63,68 @@ describe("dropship admin order ops routes", () => {
     });
     expect(service.lastDetailInput).toBeNull();
   });
+
+  it("routes admin WMS sync retry with idempotency and actor context", async () => {
+    const response = await jsonRequest(
+      `${server.url}/api/dropship/admin/order-intake/42/retry-wms-sync`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "retry-wms-route-42",
+        },
+        body: JSON.stringify({ reason: "dogfood repair" }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      intakeId: 42,
+      omsOrderId: 9001,
+      outcome: "queued",
+      retryQueued: true,
+    });
+    expect(service.lastWmsSyncInput).toMatchObject({
+      intakeId: 42,
+      reason: "dogfood repair",
+      idempotencyKey: "retry-wms-route-42",
+      actor: { actorType: "admin" },
+    });
+  });
 });
 
 class FakeDropshipOrderOpsService {
   lastDetailInput: unknown = null;
+  lastWmsSyncInput: unknown = null;
 
   async getIntakeDetail(input: unknown) {
     this.lastDetailInput = input;
     return makeOrderDetail();
+  }
+
+  async retryWmsSync(input: unknown) {
+    this.lastWmsSyncInput = input;
+    return {
+      intakeId: 42,
+      vendorId: 10,
+      storeConnectionId: 22,
+      omsOrderId: 9001,
+      outcome: "queued",
+      wmsOrderId: null,
+      retryQueued: true,
+      failureMessage: "WMS sync service unavailable",
+      updatedAt: new Date("2026-05-02T12:00:00.000Z"),
+    };
   }
 }
 
 function buildApp(service: DropshipOrderOpsService): express.Express {
   const app = express();
   app.use(express.json());
+  app.use((req: Request & { session?: { user?: { id: string } } }, _res, next) => {
+    req.session = { user: { id: "admin-1" } };
+    next();
+  });
   registerDropshipAdminOrderOpsRoutes(app, service);
   return app;
 }
@@ -93,8 +141,8 @@ async function startServer(app: express.Express): Promise<{ url: string; close: 
   };
 }
 
-async function jsonRequest(url: string): Promise<{ status: number; body: any }> {
-  const response = await fetch(url);
+async function jsonRequest(url: string, init?: RequestInit): Promise<{ status: number; body: any }> {
+  const response = await fetch(url, init);
   return {
     status: response.status,
     body: await response.json(),

@@ -7,6 +7,7 @@ import {
   DropshipOpsSurfaceService,
   type DropshipAdminOpsOverview,
   type DropshipAuditEventSearchResult,
+  type DropshipDogfoodSmokeResult,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResult,
   type DropshipOpsSurfaceRepository,
@@ -285,7 +286,11 @@ describe("DropshipOpsSurfaceService", () => {
     expect(checks.find((check) => check.key === "oauth_state_signing")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "ebay_oauth")).toMatchObject({
       status: "blocked",
-      requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+      requiredEnv: [
+        "DROPSHIP_EBAY_CLIENT_ID or EBAY_CLIENT_ID",
+        "DROPSHIP_EBAY_CLIENT_SECRET or EBAY_CLIENT_SECRET",
+        "EBAY_VENDOR_RUNAME or EBAY_RUNAME",
+      ],
     });
     expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({ status: "blocked" });
@@ -324,6 +329,61 @@ describe("DropshipOpsSurfaceService", () => {
       requiredEnv: ["SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM recommended"],
     });
     expect(JSON.stringify(checks)).not.toContain("smtp-secret");
+  });
+
+  it("accepts dropship-specific marketplace OAuth environment aliases for launch readiness", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      ...launchReadyEnv,
+      DROPSHIP_EBAY_CLIENT_ID: "dropship-ebay-client-id",
+      DROPSHIP_EBAY_CLIENT_SECRET: "dropship-ebay-client-secret",
+      DROPSHIP_SHOPIFY_API_KEY: "dropship-shopify-api-key",
+      DROPSHIP_SHOPIFY_API_SECRET: "dropship-shopify-api-secret",
+      EBAY_CLIENT_ID: undefined,
+      EBAY_CLIENT_SECRET: undefined,
+      SHOPIFY_API_KEY: undefined,
+      SHOPIFY_API_SECRET: undefined,
+    });
+
+    expect(checks.find((check) => check.key === "ebay_oauth")).toMatchObject({
+      status: "ready",
+      requiredEnv: [
+        "DROPSHIP_EBAY_CLIENT_ID or EBAY_CLIENT_ID",
+        "DROPSHIP_EBAY_CLIENT_SECRET or EBAY_CLIENT_SECRET",
+        "EBAY_VENDOR_RUNAME or EBAY_RUNAME",
+      ],
+    });
+    expect(checks.find((check) => check.key === "shopify_oauth")).toMatchObject({
+      status: "ready",
+      requiredEnv: [
+        "DROPSHIP_SHOPIFY_API_KEY or SHOPIFY_API_KEY",
+        "DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
+        "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI",
+      ],
+    });
+    expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({
+      status: "ready",
+      requiredEnv: [
+        "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL or DROPSHIP_PUBLIC_BASE_URL or DROPSHIP_API_BASE_URL or APP_BASE_URL or PUBLIC_APP_URL",
+        "DROPSHIP_SHOPIFY_WEBHOOK_SECRET or SHOPIFY_WEBHOOK_SECRET or DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
+      ],
+    });
+    expect(JSON.stringify(checks)).not.toContain("dropship-ebay-client-secret");
+    expect(JSON.stringify(checks)).not.toContain("dropship-shopify-api-secret");
+  });
+
+  it("blocks Shopify webhook readiness when a public URL exists without an HMAC secret", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      DROPSHIP_PUBLIC_BASE_URL: "https://cardshellz.test",
+    });
+
+    expect(checks.find((check) => check.key === "shopify_webhook_subscriptions")).toMatchObject({
+      status: "blocked",
+      message: "Shopify order intake webhooks require an HMAC verification secret.",
+      requiredEnv: [
+        "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL or DROPSHIP_PUBLIC_BASE_URL or DROPSHIP_API_BASE_URL or APP_BASE_URL or PUBLIC_APP_URL",
+        "DROPSHIP_SHOPIFY_WEBHOOK_SECRET or SHOPIFY_WEBHOOK_SECRET or DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
+      ],
+    });
   });
 
   it("builds an explicit launch gate from system and vendor readiness", () => {
@@ -402,10 +462,23 @@ describe("DropshipOpsSurfaceService", () => {
       vendorId: 10,
       storeConnectionId: 20,
     });
+    expect(gate.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "review_remaining_readiness_issues",
+        status: "warning",
+        scope: "ops",
+      }),
+      expect.objectContaining({
+        key: "run_live_smoke",
+        status: "ready",
+        scope: "ops",
+        evidence: ["1 ready vendor/store row(s) found."],
+      }),
+    ]));
   });
 
   it("blocks the launch gate when system prerequisites block or no vendor store is ready", () => {
-    expect(buildDropshipDogfoodLaunchGate({
+    const systemBlockedGate = buildDropshipDogfoodLaunchGate({
       summary: [
         { status: "ready", count: 1 },
         { status: "warning", count: 0 },
@@ -419,13 +492,22 @@ describe("DropshipOpsSurfaceService", () => {
         requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
       }],
       items: [],
-    })).toMatchObject({
+    });
+
+    expect(systemBlockedGate).toMatchObject({
       status: "blocked",
       systemBlockedCount: 1,
       message: "1 system prerequisite(s) block dogfood.",
     });
+    expect(systemBlockedGate.runbookSteps[0]).toMatchObject({
+      key: "resolve_system_blockers",
+      status: "blocked",
+      scope: "system",
+      action: "Set or repair: SHIPSTATION_WEBHOOK_SECRET.",
+      evidence: ["ShipStation webhook security: SHIPSTATION_WEBHOOK_SECRET is missing."],
+    });
 
-    expect(buildDropshipDogfoodLaunchGate({
+    const noReadyGate = buildDropshipDogfoodLaunchGate({
       summary: [
         { status: "ready", count: 0 },
         { status: "warning", count: 0 },
@@ -433,10 +515,17 @@ describe("DropshipOpsSurfaceService", () => {
       ],
       systemChecks: [],
       items: [],
-    })).toMatchObject({
+    });
+
+    expect(noReadyGate).toMatchObject({
       status: "blocked",
       readyVendorStoreCount: 0,
       message: "No vendor/store row is ready for dogfood.",
+    });
+    expect(noReadyGate.runbookSteps[0]).toMatchObject({
+      key: "prepare_vendor_store",
+      status: "blocked",
+      evidence: ["No ready vendor/store row was returned by the readiness query."],
     });
   });
 
@@ -503,6 +592,12 @@ describe("DropshipOpsSurfaceService", () => {
         storeConnectionId: 20,
       }),
     ]));
+    expect(result.launchGate?.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "prepare_vendor_store",
+        status: "blocked",
+      }),
+    ]));
     expect(result.systemChecks).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: "token_vault" }),
       expect.objectContaining({ key: "order_processing_worker" }),
@@ -538,6 +633,309 @@ describe("DropshipOpsSurfaceService", () => {
     });
     expect(repository.lastDogfoodInput).toBeNull();
   });
+
+  it("lists dogfood smoke candidates with scoped filters and generated timestamp", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs);
+
+    const result = await service.listDogfoodSmokeCandidates({
+      vendorId: 10,
+      storeConnectionId: 20,
+      platform: "ebay",
+      search: " smoke ",
+      limit: 5,
+    });
+
+    expect(result.candidates[0]).toMatchObject({
+      status: "warning",
+      references: { latestListingId: 30 },
+    });
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      vendorId: 10,
+      storeConnectionId: 20,
+      platform: "ebay",
+      search: "smoke",
+      limit: 5,
+      staleAfterHours: 72,
+      generatedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_DOGFOOD_SMOKE_VIEWED",
+      context: {
+        vendorId: 10,
+        storeConnectionId: 20,
+        platform: "ebay",
+        total: 1,
+      },
+    });
+  });
+
+  it("uses configured dogfood smoke freshness windows without exposing invalid config as ready", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const service = makeService(repository, [], {
+      DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS: "24",
+    });
+
+    await service.listDogfoodSmokeCandidates({ limit: 5 });
+
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      staleAfterHours: 24,
+      limit: 5,
+      generatedAt: now,
+    });
+    expect(buildDropshipSystemReadinessChecks({
+      DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS: "invalid",
+    }).find((check) => check.key === "dogfood_smoke_freshness")).toMatchObject({
+      status: "blocked",
+      requiredEnv: ["DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS optional 1-720"],
+    });
+  });
+
+  it("lets dogfood smoke requests override the default freshness window", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    const service = makeService(repository, [], {
+      DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS: "24",
+    });
+
+    await service.listDogfoodSmokeCandidates({ limit: 5, staleAfterHours: 12 });
+
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      staleAfterHours: 12,
+      limit: 5,
+      generatedAt: now,
+    });
+  });
+
+  it("builds dogfood launch status from readiness and fresh smoke evidence", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      launchGateItems: [makeDogfoodReadinessItem()],
+      summary: [{ status: "ready", count: 1 }],
+      total: 1,
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 1,
+      warningCandidateCount: 0,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store with full smoke evidence; 0 blocked and 0 incomplete.",
+      candidates: [makeDogfoodSmokeCandidate({ status: "ready" })],
+    });
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs, launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus({
+      platform: "ebay",
+      search: " vendor ",
+      staleAfterHours: 24,
+    });
+
+    expect(result).toMatchObject({
+      status: "ready",
+      message: "1 vendor/store row(s) are dogfood-ready with fresh complete smoke evidence.",
+      launchCandidates: [{
+        vendor: { vendorId: 10 },
+        storeConnection: { storeConnectionId: 20, platform: "ebay" },
+        readinessStatus: "ready",
+        smokeStatus: "ready",
+        smokeReferences: { latestListingId: 30 },
+      }],
+      launchGate: {
+        status: "ready",
+        readyVendorStoreCount: 1,
+      },
+      smoke: {
+        staleAfterHours: 24,
+        readyCandidateCount: 1,
+      },
+    });
+    expect(result.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "run_live_smoke", status: "ready" }),
+      expect.objectContaining({
+        key: "confirm_fresh_smoke",
+        status: "ready",
+        evidence: ["vendor 10, ebay store 20: readiness ready; smoke ready."],
+      }),
+    ]));
+    expect(repository.lastDogfoodInput).toMatchObject({
+      platform: "ebay",
+      search: "vendor",
+      page: 1,
+      limit: 100,
+      generatedAt: now,
+    });
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      platform: "ebay",
+      search: "vendor",
+      limit: 100,
+      staleAfterHours: 24,
+      generatedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_DOGFOOD_LAUNCH_STATUS_VIEWED",
+      context: {
+        status: "ready",
+        platform: "ebay",
+        staleAfterHours: 24,
+        readinessTotal: 1,
+        smokeTotal: 1,
+      },
+    });
+  });
+
+  it("scopes dogfood launch gate readiness to launch status filters", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      items: [makeDogfoodReadinessItem({
+        readinessStatus: "blocked",
+        blockerCount: 1,
+        checks: [{
+          key: "store_connection",
+          label: "Store connection",
+          status: "blocked",
+          message: "eBay store is not launch-ready.",
+        }],
+      })],
+      launchGateItems: [makeDogfoodReadinessItem({
+        vendor: {
+          vendorId: 11,
+          memberId: "member-2",
+          businessName: "Shopify Vendor",
+          email: "shopify-vendor@cardshellz.test",
+          status: "active",
+          entitlementStatus: "active",
+        },
+        storeConnection: {
+          storeConnectionId: 21,
+          platform: "shopify",
+          status: "connected",
+          setupStatus: "ready",
+          externalDisplayName: "Shopify Store",
+          shopDomain: "vendor.myshopify.com",
+          updatedAt: now,
+        },
+      })],
+      total: 1,
+      summary: [
+        { status: "ready", count: 0 },
+        { status: "warning", count: 0 },
+        { status: "blocked", count: 1 },
+      ],
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 1,
+      warningCandidateCount: 0,
+      blockedCandidateCount: 0,
+      candidates: [makeDogfoodSmokeCandidate({ status: "ready" })],
+    });
+    const service = makeService(repository, [], launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus({ platform: "ebay" });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      launchGate: {
+        status: "blocked",
+        readyVendorStoreCount: 0,
+        blockedVendorStoreCount: 1,
+        firstBlockers: [{
+          scope: "vendor_store",
+          key: "store_connection",
+          vendorId: 10,
+          storeConnectionId: 20,
+        }],
+      },
+      launchCandidates: [],
+    });
+  });
+
+  it("keeps dogfood launch status warning until fresh complete smoke evidence exists", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      launchGateItems: [makeDogfoodReadinessItem()],
+      summary: [{ status: "ready", count: 1 }],
+      total: 1,
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 0,
+      warningCandidateCount: 1,
+      blockedCandidateCount: 0,
+      candidates: [makeDogfoodSmokeCandidate({
+        status: "warning",
+        stages: [{
+          key: "tracking",
+          label: "Marketplace tracking",
+          status: "warning",
+          message: "No marketplace tracking evidence exists yet.",
+          evidence: ["No marketplace tracking push has been recorded for the latest intake."],
+          latestAt: null,
+          freshness: {
+            status: "missing",
+            staleAfterHours: 72,
+          },
+        }],
+      })],
+    });
+    const service = makeService(repository, [], launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus();
+
+    expect(result).toMatchObject({
+      status: "warning",
+      message: "No vendor/store row is both readiness-ready and fresh smoke-ready yet.",
+      launchCandidates: [],
+    });
+    expect(result.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "complete_fresh_smoke",
+        status: "warning",
+        evidence: ["vendor 10, ebay store 20: Marketplace tracking - No marketplace tracking evidence exists yet."],
+      }),
+    ]));
+  });
+
+  it("does not mark launch ready when readiness and smoke belong to different stores", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      launchGateItems: [makeDogfoodReadinessItem()],
+      summary: [{ status: "ready", count: 1 }],
+      total: 1,
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 1,
+      warningCandidateCount: 0,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store with full smoke evidence; 0 blocked and 0 incomplete.",
+      candidates: [makeDogfoodSmokeCandidate({
+        status: "ready",
+        storeConnection: {
+          storeConnectionId: 21,
+          platform: "ebay",
+          status: "connected",
+          setupStatus: "ready",
+          externalDisplayName: "Other eBay",
+          shopDomain: null,
+          updatedAt: now,
+        },
+      })],
+    });
+    const service = makeService(repository, [], launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus();
+
+    expect(result).toMatchObject({
+      status: "warning",
+      message: "No vendor/store row is both readiness-ready and fresh smoke-ready yet.",
+      launchCandidates: [],
+    });
+    expect(result.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "complete_fresh_smoke",
+        status: "warning",
+        message: "Fresh smoke evidence exists, but not for a readiness-ready vendor/store row.",
+      }),
+    ]));
+  });
 });
 
 class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
@@ -545,6 +943,9 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
   lastOverviewInput: Parameters<DropshipOpsSurfaceRepository["getAdminOpsOverview"]>[0] | null = null;
   lastAuditSearch: Parameters<DropshipOpsSurfaceRepository["searchAuditEvents"]>[0] | null = null;
   lastDogfoodInput: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0] | null = null;
+  lastDogfoodSmokeInput: Parameters<DropshipOpsSurfaceRepository["listDogfoodSmokeCandidates"]>[0] | null = null;
+  dogfoodReadinessResult: DropshipDogfoodReadinessResult | null = null;
+  dogfoodSmokeResult: DropshipDogfoodSmokeResult | null = null;
 
   async getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview> {
     this.lastSettingsVendorId = vendorId;
@@ -564,6 +965,7 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
       orderCancellationStatusCounts: [],
       listingPushJobStatusCounts: [],
       trackingPushStatusCounts: [{ key: "failed", count: 2 }],
+      wmsSyncRetryStatusCounts: [],
       rmaStatusCounts: [],
       notificationStatusCounts: [],
       recentAuditEvents: [],
@@ -581,6 +983,14 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
     input: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0],
   ): Promise<DropshipDogfoodReadinessResult> {
     this.lastDogfoodInput = input;
+    if (this.dogfoodReadinessResult) {
+      return {
+        ...this.dogfoodReadinessResult,
+        generatedAt: input.generatedAt,
+        page: input.page,
+        limit: input.limit,
+      };
+    }
     return {
       generatedAt: input.generatedAt,
       items: [],
@@ -599,6 +1009,70 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
       limit: input.limit,
       summary: [{ status: "blocked", count: 1 }],
       systemChecks: [],
+    };
+  }
+
+  async listDogfoodSmokeCandidates(
+    input: Parameters<DropshipOpsSurfaceRepository["listDogfoodSmokeCandidates"]>[0],
+  ): Promise<DropshipDogfoodSmokeResult> {
+    this.lastDogfoodSmokeInput = input;
+    if (this.dogfoodSmokeResult) {
+      return {
+        ...this.dogfoodSmokeResult,
+        generatedAt: input.generatedAt,
+        staleAfterHours: input.staleAfterHours ?? 72,
+      };
+    }
+    return {
+      generatedAt: input.generatedAt,
+      staleAfterHours: input.staleAfterHours ?? 72,
+      total: 1,
+      readyCandidateCount: 0,
+      warningCandidateCount: 1,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store waiting on smoke evidence.",
+      candidates: [{
+        vendor: {
+          vendorId: 10,
+          memberId: "member-1",
+          businessName: "Vendor Test",
+          email: "vendor@cardshellz.test",
+          status: "active",
+          entitlementStatus: "active",
+        },
+        storeConnection: {
+          storeConnectionId: 20,
+          platform: "ebay",
+          status: "connected",
+          setupStatus: "ready",
+          externalDisplayName: "Vendor eBay",
+          shopDomain: null,
+          updatedAt: now,
+        },
+        status: "warning",
+        message: "Dogfood smoke evidence is incomplete but not blocked.",
+        stages: [{
+          key: "listing",
+          label: "Listing push",
+          status: "ready",
+          message: "At least one active marketplace listing exists for this store.",
+          evidence: ["1 active marketplace listing(s)."],
+          latestAt: now,
+          freshness: {
+            status: "fresh",
+            staleAfterHours: input.staleAfterHours ?? 72,
+          },
+        }],
+        references: {
+          latestListingId: 30,
+          latestListingJobId: 40,
+          latestIntakeId: null,
+          latestOmsOrderId: null,
+          latestWmsShipmentId: null,
+          latestTrackingPushId: null,
+        },
+        lastActivityAt: now,
+      }],
     };
   }
 }
@@ -665,6 +1139,22 @@ function makeSettingsOverview(overrides: Partial<DropshipVendorSettingsOverview>
   };
 }
 
+function makeDogfoodReadinessResult(
+  overrides: Partial<DropshipDogfoodReadinessResult> = {},
+): DropshipDogfoodReadinessResult {
+  return {
+    generatedAt: now,
+    items: [makeDogfoodReadinessItem()],
+    launchGateItems: [makeDogfoodReadinessItem()],
+    total: 1,
+    page: 1,
+    limit: 100,
+    summary: [{ status: "ready", count: 1 }],
+    systemChecks: [],
+    ...overrides,
+  };
+}
+
 function makeDogfoodReadinessItem(
   overrides: Partial<DropshipDogfoodReadinessItem> = {},
 ): DropshipDogfoodReadinessItem {
@@ -716,6 +1206,70 @@ function makeDogfoodReadinessItem(
       autoReloadFundingMethodReady: true,
       notificationPreferenceCount: 0,
     },
+    ...overrides,
+  };
+}
+
+function makeDogfoodSmokeResult(
+  overrides: Partial<DropshipDogfoodSmokeResult> = {},
+): DropshipDogfoodSmokeResult {
+  return {
+    generatedAt: now,
+    staleAfterHours: 72,
+    total: 1,
+    readyCandidateCount: 0,
+    warningCandidateCount: 1,
+    blockedCandidateCount: 0,
+    message: "Loaded 1 store waiting on smoke evidence.",
+    candidates: [makeDogfoodSmokeCandidate()],
+    ...overrides,
+  };
+}
+
+function makeDogfoodSmokeCandidate(
+  overrides: Partial<DropshipDogfoodSmokeResult["candidates"][number]> = {},
+): DropshipDogfoodSmokeResult["candidates"][number] {
+  return {
+    vendor: {
+      vendorId: 10,
+      memberId: "member-1",
+      businessName: "Vendor Test",
+      email: "vendor@cardshellz.test",
+      status: "active",
+      entitlementStatus: "active",
+    },
+    storeConnection: {
+      storeConnectionId: 20,
+      platform: "ebay",
+      status: "connected",
+      setupStatus: "ready",
+      externalDisplayName: "Vendor eBay",
+      shopDomain: null,
+      updatedAt: now,
+    },
+    status: "warning",
+    message: "Dogfood smoke evidence is incomplete but not blocked.",
+    stages: [{
+      key: "listing",
+      label: "Listing push",
+      status: "ready",
+      message: "At least one active marketplace listing exists for this store.",
+      evidence: ["1 active marketplace listing(s)."],
+      latestAt: now,
+      freshness: {
+        status: "fresh",
+        staleAfterHours: 72,
+      },
+    }],
+    references: {
+      latestListingId: 30,
+      latestListingJobId: 40,
+      latestIntakeId: null,
+      latestOmsOrderId: null,
+      latestWmsShipmentId: null,
+      latestTrackingPushId: null,
+    },
+    lastActivityAt: now,
     ...overrides,
   };
 }

@@ -28,6 +28,13 @@ describe("PgDropshipListingPushWorkerRepository", () => {
       status: "processing",
       updatedAt: now,
     });
+    expect(result.eligibility).toEqual({
+      vendorStatus: "active",
+      entitlementStatus: "active",
+      storeStatus: "connected",
+      setupStatus: "ready",
+      storeLaunchReady: true,
+    });
     expect(result.items[0]).toMatchObject({
       itemId: 1,
       status: "queued",
@@ -137,6 +144,12 @@ function makeJobRow(overrides: Record<string, unknown> = {}) {
     created_at: new Date("2026-05-07T16:00:00.000Z"),
     updated_at: staleUpdatedAt,
     completed_at: null,
+    vendor_status: "active",
+    entitlement_status: "active",
+    store_status: "connected",
+    setup_status: "ready",
+    access_token_ref: "access-token-ref",
+    refresh_token_ref: "refresh-token-ref",
     ...overrides,
   };
 }

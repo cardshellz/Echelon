@@ -27,7 +27,7 @@ export const completeDropshipStoreConnectionOAuthInputSchema = z.object({
   error: z.string().trim().max(500).optional(),
   shop: z.string().trim().max(255).optional(),
   hmac: z.string().trim().max(255).optional(),
-});
+}).catchall(z.string().trim().min(1).max(4096));
 
 export type CompleteDropshipStoreConnectionOAuthInput = z.infer<
   typeof completeDropshipStoreConnectionOAuthInputSchema

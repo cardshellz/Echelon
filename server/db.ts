@@ -23,6 +23,10 @@ export const pool = new Pool({
   connectionTimeoutMillis: 10000,
 });
 
+pool.on("error", (error) => {
+  console.error("[DatabasePool] Unexpected idle client error:", error);
+});
+
 pool.on("connect", (client) => {
   client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms, dropship').catch(console.error);
 });

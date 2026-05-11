@@ -7,6 +7,26 @@ import {
 } from "../../application";
 
 describe("syncDropshipAcceptedOrderToWmsSafely", () => {
+  it("logs when both WMS sync and retry queue are unavailable", async () => {
+    const logs: DropshipLogEvent[] = [];
+
+    await syncDropshipAcceptedOrderToWmsSafely({
+      logger: captureLogger(logs),
+    }, {
+      acceptance: makeAcceptedOrder(),
+      source: "order_processing",
+    });
+
+    expect(logs).toEqual([expect.objectContaining({
+      code: "DROPSHIP_ACCEPTED_ORDER_WMS_SYNC_UNAVAILABLE",
+      context: expect.objectContaining({
+        omsOrderId: 9001,
+        reason: "wms_sync_service_unavailable",
+        retryQueued: false,
+      }),
+    })]);
+  });
+
   it("enqueues an OMS/WMS sync retry when the WMS sync service is unavailable", async () => {
     const retryQueue = new FakeRetryQueue();
     const logs: DropshipLogEvent[] = [];

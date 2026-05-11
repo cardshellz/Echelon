@@ -1,4 +1,4 @@
-import type { Express, Response } from "express";
+import type { Express, Request, Response } from "express";
 import type { z } from "zod";
 import {
   type DropshipStoreConnectionService,
@@ -47,14 +47,7 @@ export function registerDropshipStoreConnectionRoutes(
 
   app.get("/api/dropship/store-connections/oauth/callback", async (req, res) => {
     try {
-      const input = completeDropshipStoreConnectionOAuthInputSchema.parse({
-        platform: optionalQueryString(req.query.platform),
-        code: optionalQueryString(req.query.code),
-        state: requiredQueryString(req.query.state, "state"),
-        error: optionalQueryString(req.query.error),
-        shop: optionalQueryString(req.query.shop),
-        hmac: optionalQueryString(req.query.hmac),
-      });
+      const input = parseDropshipOAuthCallbackQuery(req.query);
       const result = await service.completeOAuthCallback(input);
       return res.redirect(buildPortalRedirect("connected", result.returnTo));
     } catch (error) {
@@ -94,6 +87,34 @@ function parseBody<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, body: unknown
   return result.data;
 }
 
+export function parseDropshipOAuthCallbackQuery(
+  query: Request["query"],
+): z.infer<typeof completeDropshipStoreConnectionOAuthInputSchema> {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw new DropshipError(
+        "DROPSHIP_INVALID_STORE_CONNECTION_REQUEST",
+        "Dropship OAuth callback query parameters must be single string values.",
+        { key },
+      );
+    }
+    const trimmed = value.trim();
+    if (trimmed) {
+      normalized[key] = trimmed;
+    }
+  }
+  if (!normalized.state) {
+    throw new DropshipError("DROPSHIP_INVALID_STORE_CONNECTION_REQUEST", "Required query parameter is missing.", {
+      key: "state",
+    });
+  }
+  return parseBody(completeDropshipStoreConnectionOAuthInputSchema, normalized);
+}
+
 function sendDropshipStoreConnectionError(res: Response, error: unknown): Response {
   if (error instanceof DropshipError) {
     return res.status(statusForDropshipStoreConnectionError(error.code)).json({
@@ -124,6 +145,7 @@ function statusForDropshipStoreConnectionError(code: string): number {
     case "DROPSHIP_STORE_OAUTH_CODE_REQUIRED":
     case "DROPSHIP_INVALID_OAUTH_STATE":
     case "DROPSHIP_STORE_OAUTH_STATE_MISMATCH":
+    case "DROPSHIP_SHOPIFY_HMAC_REQUIRED":
     case "DROPSHIP_SHOPIFY_HMAC_INVALID":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":
@@ -148,18 +170,6 @@ function statusForDropshipStoreConnectionError(code: string): number {
     default:
       return 500;
   }
-}
-
-function requiredQueryString(value: unknown, key: string): string {
-  const normalized = optionalQueryString(value);
-  if (!normalized) {
-    throw new DropshipError("DROPSHIP_INVALID_STORE_CONNECTION_REQUEST", "Required query parameter is missing.", { key });
-  }
-  return normalized;
-}
-
-function optionalQueryString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function parsePositiveInteger(value: string | undefined, key: string): number {

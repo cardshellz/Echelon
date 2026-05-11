@@ -86,6 +86,117 @@ describe("dropship store connection domain", () => {
 });
 
 describe("PgDropshipStoreConnectionRepository", () => {
+  it("counts unhealthy launch-blocking connections as active store slots", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const release = () => undefined;
+    const query = async (sql: string, params: unknown[]) => {
+      queries.push({ sql, params });
+      return { rows: [{ count: "2" }] };
+    };
+    const connect = async () => ({ query, release });
+    const repository = new PgDropshipStoreConnectionRepository({ connect } as unknown as Pool);
+
+    const count = await repository.countActiveByVendorId(10);
+
+    expect(count).toBe(2);
+    expect(queries[0]?.sql).toContain("status = ANY($2::text[])");
+    expect(queries[0]?.params).toEqual([
+      10,
+      ["connected", "needs_reauth", "refresh_failed", "grace_period", "paused"],
+    ]);
+  });
+
+  it("preserves admin order-processing config when reconnecting an unhealthy store", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const release = () => undefined;
+    const existingConfig = {
+      orderProcessing: { defaultWarehouseId: 3 },
+      previousMetadata: { scope: "old" },
+    };
+    const nextConfig = {
+      ...existingConfig,
+      tokenMetadata: { scope: "new" },
+      connectedByMemberId: "member-1",
+    };
+    const query = async (sql: string, params: unknown[] = []) => {
+      queries.push({ sql, params });
+      const sqlText = String(sql);
+
+      if (sqlText.includes("FROM dropship.dropship_store_connections") && sqlText.includes("FOR UPDATE")) {
+        return {
+          rows: [makeStoreConnectionRow({
+            id: 21,
+            status: "needs_reauth",
+            setup_status: "attention_required",
+            config: existingConfig,
+          })],
+        };
+      }
+      if (sqlText.includes("SELECT COUNT(*) AS count")) {
+        return { rows: [{ count: "1" }] };
+      }
+      if (sqlText.includes("UPDATE dropship.dropship_store_connections")) {
+        return {
+          rows: [makeStoreConnectionRow({
+            id: 21,
+            status: "connected",
+            setup_status: "pending",
+            access_token_ref: "new-access-ref",
+            refresh_token_ref: "new-refresh-ref",
+            config: nextConfig,
+          })],
+        };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_store_listing_configs")) {
+        return {
+          rows: [{
+            id: 31,
+            store_connection_id: 21,
+            platform: "ebay",
+            listing_mode: "draft_first",
+            inventory_mode: "managed_quantity_sync",
+            price_mode: "vendor_defined",
+            marketplace_config: {},
+            required_config_keys: [],
+            required_product_fields: [],
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+          }],
+        };
+      }
+      return { rows: [] };
+    };
+    const connect = async () => ({ query, release });
+    const repository = new PgDropshipStoreConnectionRepository({ connect } as unknown as Pool);
+
+    const result = await repository.connectStore({
+      vendorId: 10,
+      platform: "ebay",
+      externalAccountId: "external-ebay",
+      externalDisplayName: "External ebay",
+      shopDomain: null,
+      accessTokenRef: "new-access-ref",
+      refreshTokenRef: "new-refresh-ref",
+      tokenExpiresAt: new Date(now.getTime() + 3600000),
+      tokenRecords: [],
+      config: {
+        tokenMetadata: { scope: "new" },
+        connectedByMemberId: "member-1",
+      },
+      connectedAt: now,
+    });
+
+    const updateCall = queries.find((entry) => entry.sql.includes("UPDATE dropship.dropship_store_connections"));
+    expect(updateCall?.sql).toContain("config = COALESCE(config, '{}'::jsonb) || $9::jsonb");
+    expect(updateCall?.params[8]).toBe(JSON.stringify({
+      tokenMetadata: { scope: "new" },
+      connectedByMemberId: "member-1",
+    }));
+    expect(result.storeConnectionId).toBe(21);
+    expect(result.orderProcessingConfig.defaultWarehouseId).toBe(3);
+  });
+
   it("maps launch readiness from stored platform credentials and setup status", async () => {
     const release = () => undefined;
     const query = async () => ({
@@ -160,6 +271,8 @@ describe("DropshipStoreConnectionService", () => {
   let stateSigner: FakeStateSigner;
   let postConnectProvider: FakePostConnectProvider;
   let notificationSender: FakeNotificationSender;
+  let ebayOAuthProvider: FakeOAuthProvider;
+  let shopifyOAuthProvider: FakeOAuthProvider;
   let logs: DropshipLogEvent[];
   let service: DropshipStoreConnectionService;
 
@@ -169,13 +282,15 @@ describe("DropshipStoreConnectionService", () => {
     stateSigner = new FakeStateSigner();
     postConnectProvider = new FakePostConnectProvider();
     notificationSender = new FakeNotificationSender();
+    ebayOAuthProvider = new FakeOAuthProvider("ebay");
+    shopifyOAuthProvider = new FakeOAuthProvider("shopify");
     logs = [];
     service = new DropshipStoreConnectionService({
       vendorProvisioning: vendorProvisioning as unknown as DropshipVendorProvisioningService,
       repository,
       oauthProviders: {
-        ebay: new FakeOAuthProvider("ebay"),
-        shopify: new FakeOAuthProvider("shopify"),
+        ebay: ebayOAuthProvider,
+        shopify: shopifyOAuthProvider,
       },
       stateSigner,
       tokenCipher: new FakeTokenCipher(),
@@ -229,6 +344,19 @@ describe("DropshipStoreConnectionService", () => {
       memberId: "member-1",
       platform: "ebay",
     });
+  });
+
+  it("blocks a different platform when an unhealthy connection owns the launch store slot", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "needs_reauth" })];
+
+    await expect(service.startOAuth("member-1", {
+      platform: "shopify",
+      shopDomain: "Vendor-Test",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
+    });
+
+    expect(stateSigner.lastPayload).toBeNull();
   });
 
   it("rejects external OAuth return targets before signing state", async () => {
@@ -301,6 +429,33 @@ describe("DropshipStoreConnectionService", () => {
     });
   });
 
+  it("rejects OAuth completion for a different platform when an unhealthy connection owns the launch store slot", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "needs_reauth" })];
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "shopify",
+      shopDomain: "vendor-test.myshopify.com",
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "shopify",
+      shop: "vendor-test.myshopify.com",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
+    });
+
+    expect(shopifyOAuthProvider.exchangeCalls).toHaveLength(0);
+    expect(repository.lastConnectInput).toBeNull();
+  });
+
   it("runs post-connect setup with the live access token after the store is persisted", async () => {
     stateSigner.payload = {
       version: 1,
@@ -322,6 +477,8 @@ describe("DropshipStoreConnectionService", () => {
     });
 
     expect(result.connection.storeConnectionId).toBe(20);
+    expect(result.connection.setupStatus).toBe("ready");
+    expect(result.connection.launchReady).toBe(true);
     expect(postConnectProvider.calls).toEqual([{
       vendorId: 10,
       storeConnectionId: 20,
@@ -358,6 +515,8 @@ describe("DropshipStoreConnectionService", () => {
     });
 
     expect(result.connection.status).toBe("connected");
+    expect(result.connection.setupStatus).toBe("attention_required");
+    expect(result.connection.launchReady).toBe(false);
     expect(logs).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "DROPSHIP_STORE_CONNECTED" }),
       expect.objectContaining({
@@ -519,6 +678,12 @@ class FakeStateSigner implements DropshipOAuthStateSigner {
 }
 
 class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
+  exchangeCalls: Array<{
+    code: string;
+    shopDomain: string | null;
+    query: CompleteOAuthQuery;
+  }> = [];
+
   constructor(readonly platform: "ebay" | "shopify") {}
 
   createAuthorizationUrl(input: { state: string; shopDomain: string | null }): DropshipStoreConnectionOAuthStart {
@@ -532,11 +697,12 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
     };
   }
 
-  async exchangeCode(_input: {
+  async exchangeCode(input: {
     code: string;
     shopDomain: string | null;
     query: CompleteOAuthQuery;
   }): Promise<DropshipStoreConnectionTokenGrant> {
+    this.exchangeCalls.push(input);
     return {
       accessToken: "access-token",
       refreshToken: this.platform === "ebay" ? "refresh-token" : null,
@@ -632,8 +798,18 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
 
   async countActiveByVendorId(): Promise<number> {
     return this.connections.filter((connection) => (
-      ["connected", "grace_period", "paused"].includes(connection.status)
+      ["connected", "needs_reauth", "refresh_failed", "grace_period", "paused"].includes(connection.status)
     )).length;
+  }
+
+  async hasRepairableConnection(
+    input: Parameters<DropshipStoreConnectionRepository["hasRepairableConnection"]>[0],
+  ): Promise<boolean> {
+    return this.connections.some((connection) => (
+      connection.vendorId === input.vendorId
+      && connection.platform === input.platform
+      && ["needs_reauth", "refresh_failed"].includes(connection.status)
+    ));
   }
 
   async connectStore(input: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0]): Promise<DropshipStoreConnectionProfile> {
@@ -658,6 +834,18 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     });
     this.connections = [connection];
     return connection;
+  }
+
+  async recordPostConnectSetupSucceeded(
+    input: Parameters<DropshipStoreConnectionRepository["recordPostConnectSetupSucceeded"]>[0],
+  ): Promise<DropshipStoreConnectionProfile> {
+    return this.updateSetupStatus(input.storeConnectionId, "ready", input.completedAt);
+  }
+
+  async recordPostConnectSetupFailed(
+    input: Parameters<DropshipStoreConnectionRepository["recordPostConnectSetupFailed"]>[0],
+  ): Promise<DropshipStoreConnectionProfile> {
+    return this.updateSetupStatus(input.storeConnectionId, "attention_required", input.failedAt);
   }
 
   async disconnectStore(input: Parameters<DropshipStoreConnectionRepository["disconnectStore"]>[0]): Promise<DropshipStoreConnectionProfile> {
@@ -696,6 +884,33 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
 
   async listSetupChecks(): Promise<Record<number, DropshipStoreConnectionSetupCheck[]>> {
     return {};
+  }
+
+  private updateSetupStatus(
+    storeConnectionId: number,
+    setupStatus: DropshipStoreConnectionProfile["setupStatus"],
+    updatedAt: Date,
+  ): DropshipStoreConnectionProfile {
+    const connection = this.connections.find((item) => item.storeConnectionId === storeConnectionId);
+    if (!connection) throw new Error("missing fake connection");
+    const updated = {
+      ...connection,
+      setupStatus,
+      updatedAt,
+    };
+    const launchReady = isDropshipStoreConnectionLaunchReady({
+      platform: updated.platform,
+      status: updated.status,
+      setupStatus: updated.setupStatus,
+      hasAccessToken: updated.hasAccessToken,
+      hasRefreshToken: updated.hasRefreshToken,
+    });
+    const withLaunchReady = {
+      ...updated,
+      launchReady,
+    };
+    this.connections = [withLaunchReady];
+    return withLaunchReady;
   }
 }
 

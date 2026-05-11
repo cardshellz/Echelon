@@ -9,6 +9,9 @@ const pageSchema = z.number().int().positive().default(1);
 const limitSchema = z.number().int().positive().max(100).default(50);
 const optionalStringSchema = z.string().trim().min(1).max(255).optional();
 const severitySchema = z.enum(["info", "warning", "error"]);
+export const DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS = 72;
+export const MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS = 720;
+const DOGFOOD_LAUNCH_STATUS_QUERY_LIMIT = 100;
 
 const searchAuditEventsInputSchema = z.object({
   vendorId: positiveIdSchema.optional(),
@@ -37,11 +40,26 @@ const dogfoodReadinessInputSchema = z.object({
   page: pageSchema,
   limit: limitSchema,
 }).strict();
+const dogfoodSmokeInputSchema = z.object({
+  vendorId: positiveIdSchema.optional(),
+  storeConnectionId: positiveIdSchema.optional(),
+  platform: z.enum(["ebay", "shopify"]).optional(),
+  search: optionalStringSchema,
+  limit: z.number().int().positive().max(25).default(10),
+  staleAfterHours: z.number().int().positive().max(MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS).optional(),
+}).strict();
+const dogfoodLaunchStatusInputSchema = z.object({
+  platform: z.enum(["ebay", "shopify"]).optional(),
+  search: optionalStringSchema,
+  staleAfterHours: z.number().int().positive().max(MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS).optional(),
+}).strict();
 
 export type SearchDropshipAuditEventsInput = z.infer<typeof searchAuditEventsInputSchema>;
 export type GetDropshipAdminOpsOverviewInput = z.infer<typeof adminOpsOverviewInputSchema>;
 export type DropshipDogfoodReadinessStatus = z.infer<typeof dogfoodReadinessStatusSchema>;
 export type ListDropshipDogfoodReadinessInput = z.infer<typeof dogfoodReadinessInputSchema>;
+export type ListDropshipDogfoodSmokeInput = z.infer<typeof dogfoodSmokeInputSchema>;
+export type GetDropshipDogfoodLaunchStatusInput = z.infer<typeof dogfoodLaunchStatusInputSchema>;
 
 export interface DropshipOpsSettingsSection {
   key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
@@ -140,6 +158,7 @@ export interface DropshipAdminOpsOverview {
   orderCancellationStatusCounts: DropshipOpsCount[];
   listingPushJobStatusCounts: DropshipOpsCount[];
   trackingPushStatusCounts: DropshipOpsCount[];
+  wmsSyncRetryStatusCounts: DropshipOpsCount[];
   rmaStatusCounts: DropshipOpsCount[];
   notificationStatusCounts: DropshipOpsCount[];
   recentAuditEvents: DropshipAuditEventRecord[];
@@ -224,6 +243,16 @@ export interface DropshipDogfoodLaunchGateBlocker {
   storeConnectionId?: number | null;
 }
 
+export interface DropshipDogfoodLaunchRunbookStep {
+  key: string;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  action: string;
+  scope: "system" | "vendor_store" | "ops";
+  evidence: string[];
+}
+
 export interface DropshipDogfoodLaunchGate {
   status: DropshipDogfoodReadinessStatus;
   readyVendorStoreCount: number;
@@ -235,6 +264,7 @@ export interface DropshipDogfoodLaunchGate {
   warningCount: number;
   message: string;
   firstBlockers: DropshipDogfoodLaunchGateBlocker[];
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
 }
 
 export interface DropshipDogfoodReadinessResult {
@@ -249,6 +279,74 @@ export interface DropshipDogfoodReadinessResult {
   launchGate?: DropshipDogfoodLaunchGate;
 }
 
+export type DropshipDogfoodSmokeStageKey = "listing" | "order_intake" | "fulfillment" | "tracking";
+
+export interface DropshipDogfoodSmokeStage {
+  key: DropshipDogfoodSmokeStageKey;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  evidence: string[];
+  latestAt: Date | null;
+  freshness: {
+    status: "fresh" | "stale" | "missing";
+    staleAfterHours: number;
+  };
+}
+
+export interface DropshipDogfoodSmokeCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: NonNullable<DropshipDogfoodReadinessItem["storeConnection"]> & {
+    storeConnectionId: number;
+    platform: string;
+    status: string;
+    setupStatus: string;
+  };
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  stages: DropshipDogfoodSmokeStage[];
+  references: {
+    latestListingId: number | null;
+    latestListingJobId: number | null;
+    latestIntakeId: number | null;
+    latestOmsOrderId: number | null;
+    latestWmsShipmentId: number | null;
+    latestTrackingPushId: number | null;
+  };
+  lastActivityAt: Date | null;
+}
+
+export interface DropshipDogfoodSmokeResult {
+  generatedAt: Date;
+  staleAfterHours: number;
+  candidates: DropshipDogfoodSmokeCandidate[];
+  total: number;
+  readyCandidateCount: number;
+  warningCandidateCount: number;
+  blockedCandidateCount: number;
+  message: string;
+}
+
+export interface DropshipDogfoodLaunchCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: DropshipDogfoodSmokeCandidate["storeConnection"];
+  readinessStatus: DropshipDogfoodReadinessStatus;
+  smokeStatus: DropshipDogfoodReadinessStatus;
+  lastSmokeActivityAt: Date | null;
+  smokeReferences: DropshipDogfoodSmokeCandidate["references"];
+}
+
+export interface DropshipDogfoodLaunchStatusResult {
+  generatedAt: Date;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  launchCandidates: DropshipDogfoodLaunchCandidate[];
+  launchGate: DropshipDogfoodLaunchGate;
+  readiness: DropshipDogfoodReadinessResult;
+  smoke: DropshipDogfoodSmokeResult;
+  runbookSteps: DropshipDogfoodLaunchRunbookStep[];
+}
+
 export interface DropshipOpsSurfaceRepository {
   getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview>;
   getAdminOpsOverview(
@@ -258,6 +356,9 @@ export interface DropshipOpsSurfaceRepository {
   listDogfoodReadiness(
     input: ListDropshipDogfoodReadinessInput & { generatedAt: Date },
   ): Promise<DropshipDogfoodReadinessResult>;
+  listDogfoodSmokeCandidates(
+    input: ListDropshipDogfoodSmokeInput & { generatedAt: Date },
+  ): Promise<DropshipDogfoodSmokeResult>;
 }
 
 export class DropshipOpsSurfaceService {
@@ -340,6 +441,97 @@ export class DropshipOpsSurfaceService {
       }),
     };
   }
+
+  async listDogfoodSmokeCandidates(input: unknown = {}): Promise<DropshipDogfoodSmokeResult> {
+    const parsed = parseOpsSurfaceInput(
+      dogfoodSmokeInputSchema,
+      input,
+      "DROPSHIP_DOGFOOD_SMOKE_INVALID_INPUT",
+    );
+    const staleAfterHours = resolveDogfoodSmokeStaleAfterHours(parsed.staleAfterHours, this.deps.env ?? process.env);
+    const result = await this.deps.repository.listDogfoodSmokeCandidates({
+      ...parsed,
+      staleAfterHours,
+      generatedAt: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_DOGFOOD_SMOKE_VIEWED",
+      message: "Dropship dogfood smoke evidence was loaded.",
+      context: {
+        total: result.total,
+        limit: parsed.limit,
+        vendorId: parsed.vendorId ?? null,
+        storeConnectionId: parsed.storeConnectionId ?? null,
+        platform: parsed.platform ?? null,
+        staleAfterHours,
+      },
+    });
+    return result;
+  }
+
+  async getDogfoodLaunchStatus(input: unknown = {}): Promise<DropshipDogfoodLaunchStatusResult> {
+    const parsed = parseOpsSurfaceInput(
+      dogfoodLaunchStatusInputSchema,
+      input,
+      "DROPSHIP_DOGFOOD_LAUNCH_STATUS_INVALID_INPUT",
+    );
+    const generatedAt = this.deps.clock.now();
+    const staleAfterHours = resolveDogfoodSmokeStaleAfterHours(parsed.staleAfterHours, this.deps.env ?? process.env);
+    const [readinessResult, smoke] = await Promise.all([
+      this.deps.repository.listDogfoodReadiness({
+        platform: parsed.platform,
+        search: parsed.search,
+        page: 1,
+        limit: DOGFOOD_LAUNCH_STATUS_QUERY_LIMIT,
+        generatedAt,
+      }),
+      this.deps.repository.listDogfoodSmokeCandidates({
+        platform: parsed.platform,
+        search: parsed.search,
+        limit: DOGFOOD_LAUNCH_STATUS_QUERY_LIMIT,
+        staleAfterHours,
+        generatedAt,
+      }),
+    ]);
+    const { launchGateItems, ...publicReadiness } = readinessResult;
+    const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env);
+    const launchGateReadinessItems = isDogfoodLaunchStatusScoped(parsed)
+      ? publicReadiness.items
+      : launchGateItems ?? publicReadiness.items;
+    const launchGate = buildDropshipDogfoodLaunchGate({
+      summary: publicReadiness.summary,
+      items: launchGateReadinessItems,
+      systemChecks,
+    });
+    const readiness: DropshipDogfoodReadinessResult = {
+      ...publicReadiness,
+      systemChecks,
+      launchGate,
+    };
+    const result = buildDogfoodLaunchStatusResult({
+      generatedAt,
+      launchGate,
+      readiness,
+      smoke,
+      launchCandidates: buildDogfoodLaunchCandidates(readiness.items, smoke.candidates),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_DOGFOOD_LAUNCH_STATUS_VIEWED",
+      message: "Dropship dogfood launch status was loaded.",
+      context: {
+        status: result.status,
+        platform: parsed.platform ?? null,
+        staleAfterHours,
+        readinessTotal: readiness.total,
+        smokeTotal: smoke.total,
+      },
+    });
+    return result;
+  }
+}
+
+function isDogfoodLaunchStatusScoped(input: GetDropshipDogfoodLaunchStatusInput): boolean {
+  return input.platform !== undefined || input.search !== undefined;
 }
 
 export function buildDropshipDogfoodLaunchGate(input: {
@@ -394,6 +586,14 @@ export function buildDropshipDogfoodLaunchGate(input: {
       ? "warning"
       : "ready";
 
+  const runbookSteps = buildDogfoodLaunchRunbookSteps({
+    readyVendorStoreCount,
+    systemBlocked,
+    systemWarnings,
+    vendorBlockers,
+    vendorWarnings,
+  });
+
   return {
     status,
     readyVendorStoreCount,
@@ -411,7 +611,253 @@ export function buildDropshipDogfoodLaunchGate(input: {
       warningCount,
     }),
     firstBlockers,
+    runbookSteps,
   };
+}
+
+function buildDogfoodLaunchStatusResult(input: {
+  generatedAt: Date;
+  launchGate: DropshipDogfoodLaunchGate;
+  readiness: DropshipDogfoodReadinessResult;
+  smoke: DropshipDogfoodSmokeResult;
+  launchCandidates: DropshipDogfoodLaunchCandidate[];
+}): DropshipDogfoodLaunchStatusResult {
+  const smokeStatus = summarizeSmokeLaunchStatus(input.smoke);
+  const status = summarizeLaunchStatus(input.launchGate.status, smokeStatus, input.launchCandidates);
+  const smokeStep = buildDogfoodLaunchSmokeRunbookStep(input.smoke, input.launchCandidates);
+  const runbookSteps = smokeStep
+    ? [...input.launchGate.runbookSteps, smokeStep]
+    : input.launchGate.runbookSteps;
+
+  return {
+    generatedAt: input.generatedAt,
+    status,
+    message: buildDogfoodLaunchStatusMessage({
+      status,
+      launchGate: input.launchGate,
+      smoke: input.smoke,
+      launchCandidates: input.launchCandidates,
+    }),
+    launchCandidates: input.launchCandidates,
+    launchGate: input.launchGate,
+    readiness: input.readiness,
+    smoke: input.smoke,
+    runbookSteps,
+  };
+}
+
+function summarizeSmokeLaunchStatus(smoke: DropshipDogfoodSmokeResult): DropshipDogfoodReadinessStatus {
+  if (smoke.readyCandidateCount > 0 && smoke.blockedCandidateCount === 0 && smoke.warningCandidateCount === 0) {
+    return "ready";
+  }
+  if (smoke.blockedCandidateCount > 0) {
+    return "blocked";
+  }
+  return "warning";
+}
+
+function summarizeLaunchStatus(
+  readinessStatus: DropshipDogfoodReadinessStatus,
+  smokeStatus: DropshipDogfoodReadinessStatus,
+  launchCandidates: readonly DropshipDogfoodLaunchCandidate[],
+): DropshipDogfoodReadinessStatus {
+  if (readinessStatus === "blocked") return "blocked";
+  if (launchCandidates.length === 0) return "warning";
+  if (readinessStatus === "warning" || smokeStatus !== "ready") return "warning";
+  return "ready";
+}
+
+function buildDogfoodLaunchStatusMessage(input: {
+  status: DropshipDogfoodReadinessStatus;
+  launchGate: DropshipDogfoodLaunchGate;
+  smoke: DropshipDogfoodSmokeResult;
+  launchCandidates: readonly DropshipDogfoodLaunchCandidate[];
+}): string {
+  if (input.launchGate.status === "blocked") {
+    return input.launchGate.message;
+  }
+  if (input.launchCandidates.length === 0) {
+    return "No vendor/store row is both readiness-ready and fresh smoke-ready yet.";
+  }
+  if (input.status === "warning") {
+    return `${input.launchCandidates.length} vendor/store row(s) are dogfood-ready; remaining readiness or smoke warnings need review.`;
+  }
+  return `${input.launchCandidates.length} vendor/store row(s) are dogfood-ready with fresh complete smoke evidence.`;
+}
+
+function buildDogfoodLaunchSmokeRunbookStep(
+  smoke: DropshipDogfoodSmokeResult,
+  launchCandidates: readonly DropshipDogfoodLaunchCandidate[],
+): DropshipDogfoodLaunchRunbookStep | null {
+  if (launchCandidates.length > 0 && smoke.blockedCandidateCount === 0 && smoke.warningCandidateCount === 0) {
+    return {
+      key: "confirm_fresh_smoke",
+      label: "Confirm fresh smoke evidence",
+      status: "ready",
+      scope: "ops",
+      message: `${launchCandidates.length} vendor/store row(s) have matching readiness and fresh smoke evidence.`,
+      action: "Use a ready smoke candidate for internal dogfood and continue monitoring order intake, WMS shipment, and tracking push health.",
+      evidence: launchCandidates
+        .slice(0, 3)
+        .map(formatLaunchCandidateRunbookEvidence),
+    };
+  }
+
+  const firstCandidate = smoke.candidates[0];
+  if (smoke.blockedCandidateCount > 0) {
+    return {
+      key: "resolve_smoke_handoffs",
+      label: "Resolve smoke handoffs",
+      status: "warning",
+      scope: "ops",
+      message: `${smoke.blockedCandidateCount} smoke candidate(s) have blocking handoff evidence.`,
+      action: "Fix the blocked smoke stage before treating dogfood as internally launch-ready.",
+      evidence: firstCandidate ? formatSmokeStageIssues(firstCandidate) : [smoke.message],
+    };
+  }
+
+  return {
+    key: "complete_fresh_smoke",
+    label: "Complete fresh smoke evidence",
+    status: "warning",
+    scope: "ops",
+    message: launchCandidates.length === 0 && smoke.readyCandidateCount > 0
+      ? "Fresh smoke evidence exists, but not for a readiness-ready vendor/store row."
+      : "No readiness-ready store has fresh complete listing, intake, fulfillment, and tracking proof yet.",
+    action: "Use the same readiness-ready vendor/store row for listing, order intake, WMS/ShipStation shipment, and marketplace tracking within the configured freshness window.",
+    evidence: firstCandidate ? formatSmokeStageIssues(firstCandidate) : [smoke.message],
+  };
+}
+
+function buildDogfoodLaunchCandidates(
+  readinessItems: readonly DropshipDogfoodReadinessItem[],
+  smokeCandidates: readonly DropshipDogfoodSmokeCandidate[],
+): DropshipDogfoodLaunchCandidate[] {
+  const readyReadinessByStore = new Map<string, DropshipDogfoodReadinessItem>();
+  readinessItems.forEach((item) => {
+    const key = dogfoodVendorStoreKey(item.vendor.vendorId, item.storeConnection.storeConnectionId);
+    if (key && item.readinessStatus === "ready") {
+      readyReadinessByStore.set(key, item);
+    }
+  });
+
+  return smokeCandidates
+    .filter((candidate) => candidate.status === "ready")
+    .flatMap((candidate) => {
+      const key = dogfoodVendorStoreKey(candidate.vendor.vendorId, candidate.storeConnection.storeConnectionId);
+      const readiness = key ? readyReadinessByStore.get(key) : undefined;
+      if (!readiness) return [];
+      return [{
+        vendor: readiness.vendor,
+        storeConnection: candidate.storeConnection,
+        readinessStatus: readiness.readinessStatus,
+        smokeStatus: candidate.status,
+        lastSmokeActivityAt: candidate.lastActivityAt,
+        smokeReferences: candidate.references,
+      }];
+    });
+}
+
+function dogfoodVendorStoreKey(vendorId: number, storeConnectionId: number | null): string | null {
+  return storeConnectionId === null ? null : `${vendorId}:${storeConnectionId}`;
+}
+
+function formatLaunchCandidateRunbookEvidence(candidate: DropshipDogfoodLaunchCandidate): string {
+  const storeLabel = `${candidate.storeConnection.platform} store ${candidate.storeConnection.storeConnectionId}`;
+  return `vendor ${candidate.vendor.vendorId}, ${storeLabel}: readiness ${candidate.readinessStatus}; smoke ${candidate.smokeStatus}.`;
+}
+
+function formatSmokeStageIssues(candidate: DropshipDogfoodSmokeCandidate): string[] {
+  const storeLabel = `${candidate.storeConnection.platform} store ${candidate.storeConnection.storeConnectionId}`;
+  const issues = candidate.stages.filter((stage) => stage.status !== "ready");
+  if (issues.length === 0) {
+    return [`vendor ${candidate.vendor.vendorId}, ${storeLabel}: ${candidate.message}`];
+  }
+  return issues.slice(0, 4).map((stage) =>
+    `vendor ${candidate.vendor.vendorId}, ${storeLabel}: ${stage.label} - ${stage.message}`,
+  );
+}
+
+function buildDogfoodLaunchRunbookSteps(input: {
+  readyVendorStoreCount: number;
+  systemBlocked: readonly DropshipSystemReadinessCheck[];
+  systemWarnings: readonly DropshipSystemReadinessCheck[];
+  vendorBlockers: readonly DropshipDogfoodLaunchGateBlocker[];
+  vendorWarnings: readonly DropshipDogfoodLaunchGateBlocker[];
+}): DropshipDogfoodLaunchRunbookStep[] {
+  const steps: DropshipDogfoodLaunchRunbookStep[] = [];
+
+  if (input.systemBlocked.length > 0) {
+    const requiredEnv = Array.from(new Set(input.systemBlocked.flatMap((check) => check.requiredEnv))).slice(0, 8);
+    steps.push({
+      key: "resolve_system_blockers",
+      label: "Resolve system blockers",
+      status: "blocked",
+      scope: "system",
+      message: `${input.systemBlocked.length} system prerequisite(s) must be ready before dogfood.`,
+      action: requiredEnv.length > 0
+        ? `Set or repair: ${requiredEnv.join(", ")}.`
+        : "Repair the blocking system prerequisite(s), then refresh readiness.",
+      evidence: input.systemBlocked.slice(0, 5).map(formatSystemRunbookEvidence),
+    });
+  }
+
+  if (input.readyVendorStoreCount === 0) {
+    steps.push({
+      key: "prepare_vendor_store",
+      label: "Prepare one vendor/store row",
+      status: "blocked",
+      scope: "vendor_store",
+      message: "At least one vendor/store row must be ready before dogfood.",
+      action: "Clear the highest-priority readiness blockers in the table, then refresh readiness.",
+      evidence: input.vendorBlockers.length > 0
+        ? input.vendorBlockers.slice(0, 5).map(formatVendorRunbookEvidence)
+        : ["No ready vendor/store row was returned by the readiness query."],
+    });
+  }
+
+  if (input.systemBlocked.length === 0 && input.readyVendorStoreCount > 0) {
+    const remainingIssues = [
+      ...input.systemWarnings.map(formatSystemRunbookEvidence),
+      ...input.vendorBlockers.map(formatVendorRunbookEvidence),
+      ...input.vendorWarnings.map(formatVendorRunbookEvidence),
+    ];
+    if (remainingIssues.length > 0) {
+      steps.push({
+        key: "review_remaining_readiness_issues",
+        label: "Review remaining readiness issues",
+        status: "warning",
+        scope: "ops",
+        message: `${remainingIssues.length} non-blocking dogfood issue(s) remain outside the ready path.`,
+        action: "Proceed only with a ready vendor/store row; keep blocked rows out of dogfood until fixed.",
+        evidence: remainingIssues.slice(0, 5),
+      });
+    }
+
+    steps.push({
+      key: "run_live_smoke",
+      label: "Run live dogfood smoke",
+      status: "ready",
+      scope: "ops",
+      message: `${input.readyVendorStoreCount} vendor/store row(s) are eligible for dogfood.`,
+      action: "Run one selected SKU through listing, order intake, funding, WMS/ShipStation shipment, and marketplace tracking.",
+      evidence: [`${input.readyVendorStoreCount} ready vendor/store row(s) found.`],
+    });
+  }
+
+  return steps;
+}
+
+function formatSystemRunbookEvidence(check: DropshipSystemReadinessCheck): string {
+  return `${check.label}: ${check.message}`;
+}
+
+function formatVendorRunbookEvidence(blocker: DropshipDogfoodLaunchGateBlocker): string {
+  const storeLabel = blocker.storeConnectionId === null || blocker.storeConnectionId === undefined
+    ? "no store"
+    : `store ${blocker.storeConnectionId}`;
+  const vendorLabel = blocker.vendorId === undefined ? "unknown vendor" : `vendor ${blocker.vendorId}`;
+  return `${vendorLabel}, ${storeLabel}: ${blocker.label} - ${blocker.message}`;
 }
 
 function buildDogfoodLaunchGateMessage(input: {
@@ -450,6 +896,7 @@ export function buildDropshipSystemReadinessChecks(
     buildShipStationCredentialsCheck(env),
     buildShipStationWebhookSecurityCheck(env),
     buildSplitShipmentHandoffCheck(env),
+    buildDogfoodSmokeFreshnessCheck(env),
     buildStripeFundingCheck(env),
     buildUsdcBaseFundingCheck(),
   ];
@@ -611,18 +1058,19 @@ function buildOAuthStateCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCh
 }
 
 function buildEbayOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const missing = missingEnv(env, ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET"]);
-  const hasRuName = hasEnv(env, "EBAY_VENDOR_RUNAME") || hasEnv(env, "EBAY_RUNAME");
-  if (!hasRuName) {
-    missing.push("EBAY_VENDOR_RUNAME or EBAY_RUNAME");
-  }
+  const requiredEnv = [
+    ["DROPSHIP_EBAY_CLIENT_ID", "EBAY_CLIENT_ID"],
+    ["DROPSHIP_EBAY_CLIENT_SECRET", "EBAY_CLIENT_SECRET"],
+    ["EBAY_VENDOR_RUNAME", "EBAY_RUNAME"],
+  ];
+  const missing = missingEnvGroups(env, requiredEnv);
   if (missing.length > 0) {
     return {
       key: "ebay_oauth",
       label: "eBay OAuth",
       status: "blocked",
       message: `eBay vendor store OAuth is missing ${missing.join(", ")}.`,
-      requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+      requiredEnv: formatEnvGroups(requiredEnv),
     };
   }
 
@@ -631,23 +1079,24 @@ function buildEbayOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessChe
     label: "eBay OAuth",
     status: "ready",
     message: `eBay vendor OAuth is configured for ${env.EBAY_ENVIRONMENT === "sandbox" ? "sandbox" : "production"}.`,
-    requiredEnv: ["EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "EBAY_VENDOR_RUNAME or EBAY_RUNAME"],
+    requiredEnv: formatEnvGroups(requiredEnv),
   };
 }
 
 function buildShopifyOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const missing = missingEnv(env, ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET"]);
-  const hasRedirectUri = hasEnv(env, "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI") || hasEnv(env, "SHOPIFY_OAUTH_REDIRECT_URI");
-  if (!hasRedirectUri) {
-    missing.push("DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI");
-  }
+  const requiredEnv = [
+    ["DROPSHIP_SHOPIFY_API_KEY", "SHOPIFY_API_KEY"],
+    ["DROPSHIP_SHOPIFY_API_SECRET", "SHOPIFY_API_SECRET"],
+    ["DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI", "SHOPIFY_OAUTH_REDIRECT_URI"],
+  ];
+  const missing = missingEnvGroups(env, requiredEnv);
   if (missing.length > 0) {
     return {
       key: "shopify_oauth",
       label: "Shopify OAuth",
       status: "blocked",
       message: `Shopify vendor store OAuth is missing ${missing.join(", ")}.`,
-      requiredEnv: ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI"],
+      requiredEnv: formatEnvGroups(requiredEnv),
     };
   }
 
@@ -656,12 +1105,12 @@ function buildShopifyOAuthCheck(env: NodeJS.ProcessEnv): DropshipSystemReadiness
     label: "Shopify OAuth",
     status: "ready",
     message: "Shopify vendor OAuth is configured.",
-    requiredEnv: ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "DROPSHIP_SHOPIFY_OAUTH_REDIRECT_URI or SHOPIFY_OAUTH_REDIRECT_URI"],
+    requiredEnv: formatEnvGroups(requiredEnv),
   };
 }
 
 function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const configured = firstConfiguredEnv(env, [
+  const baseUrlConfigured = firstConfiguredEnv(env, [
     "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL",
     "DROPSHIP_PUBLIC_BASE_URL",
     "DROPSHIP_API_BASE_URL",
@@ -670,8 +1119,9 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
   ]);
   const requiredEnv = [
     "DROPSHIP_SHOPIFY_WEBHOOK_BASE_URL or DROPSHIP_PUBLIC_BASE_URL or DROPSHIP_API_BASE_URL or APP_BASE_URL or PUBLIC_APP_URL",
+    "DROPSHIP_SHOPIFY_WEBHOOK_SECRET or SHOPIFY_WEBHOOK_SECRET or DROPSHIP_SHOPIFY_API_SECRET or SHOPIFY_API_SECRET",
   ];
-  if (!configured) {
+  if (!baseUrlConfigured) {
     return {
       key: "shopify_webhook_subscriptions",
       label: "Shopify webhook subscriptions",
@@ -681,13 +1131,29 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
     };
   }
 
-  const value = env[configured]?.trim() ?? "";
+  const value = env[baseUrlConfigured]?.trim() ?? "";
   if (!isValidHttpsUrl(value)) {
     return {
       key: "shopify_webhook_subscriptions",
       label: "Shopify webhook subscriptions",
       status: "blocked",
-      message: `${configured} must be a valid HTTPS URL.`,
+      message: `${baseUrlConfigured} must be a valid HTTPS URL.`,
+      requiredEnv,
+    };
+  }
+
+  const secretConfigured = firstConfiguredEnv(env, [
+    "DROPSHIP_SHOPIFY_WEBHOOK_SECRET",
+    "SHOPIFY_WEBHOOK_SECRET",
+    "DROPSHIP_SHOPIFY_API_SECRET",
+    "SHOPIFY_API_SECRET",
+  ]);
+  if (!secretConfigured) {
+    return {
+      key: "shopify_webhook_subscriptions",
+      label: "Shopify webhook subscriptions",
+      status: "blocked",
+      message: "Shopify order intake webhooks require an HMAC verification secret.",
       requiredEnv,
     };
   }
@@ -696,7 +1162,7 @@ function buildShopifyWebhookSubscriptionCheck(env: NodeJS.ProcessEnv): DropshipS
     key: "shopify_webhook_subscriptions",
     label: "Shopify webhook subscriptions",
     status: "ready",
-    message: `Shopify order intake webhooks will be registered against ${configured}.`,
+    message: `Shopify order intake webhooks will be registered against ${baseUrlConfigured}; HMAC verification is configured through ${secretConfigured}.`,
     requiredEnv,
   };
 }
@@ -801,6 +1267,39 @@ function buildSplitShipmentHandoffCheck(env: NodeJS.ProcessEnv): DropshipSystemR
   };
 }
 
+function buildDogfoodSmokeFreshnessCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const rawValue = env.DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS?.trim();
+  const requiredEnv = [`DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS optional 1-${MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS}`];
+  if (!rawValue) {
+    return {
+      key: "dogfood_smoke_freshness",
+      label: "Dogfood smoke freshness",
+      status: "ready",
+      message: `Dogfood smoke evidence expires after the default ${DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS} hour window.`,
+      requiredEnv,
+    };
+  }
+
+  const parsed = Number(rawValue);
+  if (!isValidDogfoodSmokeStaleAfterHours(parsed)) {
+    return {
+      key: "dogfood_smoke_freshness",
+      label: "Dogfood smoke freshness",
+      status: "blocked",
+      message: `DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS must be a whole number from 1 to ${MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS}.`,
+      requiredEnv,
+    };
+  }
+
+  return {
+    key: "dogfood_smoke_freshness",
+    label: "Dogfood smoke freshness",
+    status: "ready",
+    message: `Dogfood smoke evidence expires after ${parsed} hour(s).`,
+    requiredEnv,
+  };
+}
+
 function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
   const missing = missingEnv(env, ["STRIPE_SECRET_KEY"]);
   const hasWebhookSecret = hasEnv(env, "DROPSHIP_STRIPE_WEBHOOK_SECRET")
@@ -838,6 +1337,37 @@ function buildUsdcBaseFundingCheck(): DropshipSystemReadinessCheck {
   };
 }
 
+function resolveDogfoodSmokeStaleAfterHours(inputValue: number | undefined, env: NodeJS.ProcessEnv): number {
+  if (inputValue !== undefined) {
+    return inputValue;
+  }
+
+  const rawValue = env.DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS?.trim();
+  if (!rawValue) {
+    return DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS;
+  }
+
+  const parsed = Number(rawValue);
+  if (!isValidDogfoodSmokeStaleAfterHours(parsed)) {
+    throw new DropshipError(
+      "DROPSHIP_DOGFOOD_SMOKE_INVALID_INPUT",
+      "Dogfood smoke freshness configuration is invalid.",
+      {
+        env: "DROPSHIP_DOGFOOD_SMOKE_STALE_AFTER_HOURS",
+        value: rawValue,
+        min: 1,
+        max: MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS,
+      },
+    );
+  }
+
+  return parsed;
+}
+
+function isValidDogfoodSmokeStaleAfterHours(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && value <= MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS;
+}
+
 function isValidTokenEncryptionKey(rawKey: string): boolean {
   if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
     return Buffer.from(rawKey, "hex").length === 32;
@@ -855,6 +1385,20 @@ function firstConfiguredEnv(env: NodeJS.ProcessEnv, keys: string[]): string | nu
 
 function missingEnv(env: NodeJS.ProcessEnv, keys: string[]): string[] {
   return keys.filter((key) => !hasEnv(env, key));
+}
+
+function missingEnvGroups(env: NodeJS.ProcessEnv, groups: string[][]): string[] {
+  return groups
+    .filter((keys) => !keys.some((key) => hasEnv(env, key)))
+    .map(formatEnvGroup);
+}
+
+function formatEnvGroups(groups: string[][]): string[] {
+  return groups.map(formatEnvGroup);
+}
+
+function formatEnvGroup(keys: string[]): string {
+  return keys.join(" or ");
 }
 
 function hasEnv(env: NodeJS.ProcessEnv, key: string): boolean {

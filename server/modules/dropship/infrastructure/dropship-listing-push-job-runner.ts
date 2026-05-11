@@ -34,7 +34,7 @@ export class PgDropshipListingPushJobQueueRepository implements DropshipListingP
        WHERE status = 'queued'
           OR (
             status = 'processing'
-            AND updated_at <= $2 - ($3::text)::interval
+            AND updated_at <= $2::timestamptz - ($3::text)::interval
           )
        ORDER BY created_at ASC, id ASC
        LIMIT $1`,

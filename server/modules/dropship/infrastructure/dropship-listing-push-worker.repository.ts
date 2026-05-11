@@ -1,8 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipStoreListingConfig } from "../application/dropship-marketplace-listing-provider";
 import type {
+  DropshipListingPushWorkerEligibility,
   DropshipListingPushWorkerClaim,
   DropshipListingPushWorkerItemRecord,
   DropshipListingPushWorkerJobRecord,
@@ -22,6 +24,12 @@ interface JobRow {
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
+  vendor_status: string;
+  entitlement_status: string;
+  store_status: string;
+  setup_status: string;
+  access_token_ref: string | null;
+  refresh_token_ref: string | null;
 }
 
 interface StoreListingConfigRow {
@@ -116,7 +124,13 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
            WHERE j.id = $1
            RETURNING j.id, j.vendor_id, j.store_connection_id,
                      (SELECT sc.platform FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS platform,
-                     j.status, j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at`,
+                     j.status, j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at,
+                     (SELECT v.status FROM dropship.dropship_vendors v WHERE v.id = j.vendor_id) AS vendor_status,
+                     (SELECT v.entitlement_status FROM dropship.dropship_vendors v WHERE v.id = j.vendor_id) AS entitlement_status,
+                     (SELECT sc.status FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS store_status,
+                     (SELECT sc.setup_status FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS setup_status,
+                     (SELECT sc.access_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS access_token_ref,
+                     (SELECT sc.refresh_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS refresh_token_ref`,
           [input.jobId, input.now],
         );
         currentJob = requiredRow(updated.rows[0], "Dropship listing push job claim did not return a row.");
@@ -138,6 +152,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
       return {
         job: mapJobRow(currentJob),
         config,
+        eligibility: mapJobEligibility(currentJob),
         items,
         claimed,
       };
@@ -311,7 +326,13 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
          WHERE j.id = $1
          RETURNING j.id, j.vendor_id, j.store_connection_id,
                    (SELECT sc.platform FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS platform,
-                   j.status, j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at`,
+                   j.status, j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at,
+                   (SELECT v.status FROM dropship.dropship_vendors v WHERE v.id = j.vendor_id) AS vendor_status,
+                   (SELECT v.entitlement_status FROM dropship.dropship_vendors v WHERE v.id = j.vendor_id) AS entitlement_status,
+                   (SELECT sc.status FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS store_status,
+                   (SELECT sc.setup_status FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS setup_status,
+                   (SELECT sc.access_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS access_token_ref,
+                   (SELECT sc.refresh_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS refresh_token_ref`,
         [
           input.jobId,
           nextStatus,
@@ -445,9 +466,16 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
 async function findJobForUpdate(client: PoolClient, jobId: number): Promise<JobRow | null> {
   const result = await client.query<JobRow>(
     `SELECT j.id, j.vendor_id, j.store_connection_id, sc.platform, j.status,
-            j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at
+            j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at,
+            v.status AS vendor_status,
+            v.entitlement_status,
+            sc.status AS store_status,
+            sc.setup_status,
+            sc.access_token_ref,
+            sc.refresh_token_ref
      FROM dropship.dropship_listing_push_jobs j
      INNER JOIN dropship.dropship_store_connections sc ON sc.id = j.store_connection_id
+     INNER JOIN dropship.dropship_vendors v ON v.id = j.vendor_id
      WHERE j.id = $1
      FOR UPDATE OF j`,
     [jobId],
@@ -498,7 +526,13 @@ async function recoverStaleProcessingJob(
        AND j.status = 'processing'
      RETURNING j.id, j.vendor_id, j.store_connection_id,
                (SELECT sc.platform FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS platform,
-               j.status, j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at`,
+               j.status, j.idempotency_key, j.request_hash, j.created_at, j.updated_at, j.completed_at,
+               (SELECT v.status FROM dropship.dropship_vendors v WHERE v.id = j.vendor_id) AS vendor_status,
+               (SELECT v.entitlement_status FROM dropship.dropship_vendors v WHERE v.id = j.vendor_id) AS entitlement_status,
+               (SELECT sc.status FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS store_status,
+               (SELECT sc.setup_status FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS setup_status,
+               (SELECT sc.access_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS access_token_ref,
+               (SELECT sc.refresh_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS refresh_token_ref`,
     [input.job.id, input.now],
   );
   const currentJob = requiredRow(updated.rows[0], "Dropship stale listing push job recovery did not return a row.");
@@ -680,6 +714,22 @@ function mapJobRow(row: JobRow): DropshipListingPushWorkerJobRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
+  };
+}
+
+function mapJobEligibility(row: JobRow): DropshipListingPushWorkerEligibility {
+  return {
+    vendorStatus: row.vendor_status,
+    entitlementStatus: row.entitlement_status,
+    storeStatus: row.store_status,
+    setupStatus: row.setup_status,
+    storeLaunchReady: isDropshipStoreConnectionLaunchReady({
+      platform: row.platform,
+      status: row.store_status,
+      setupStatus: row.setup_status,
+      hasAccessToken: row.access_token_ref !== null,
+      hasRefreshToken: row.refresh_token_ref !== null,
+    }),
   };
 }
 

@@ -240,6 +240,12 @@ function shopifyTrackingCompany(carrier: string): string {
   return carrier.trim();
 }
 
+type DropshipMarketplaceTrackingPushStatus =
+  | "not_dropship"
+  | "already_succeeded"
+  | "already_processing"
+  | "succeeded";
+
 interface DropshipMarketplaceTrackingServiceHandle {
   pushForOmsOrder(input: {
     omsOrderId: number;
@@ -248,7 +254,7 @@ interface DropshipMarketplaceTrackingServiceHandle {
     trackingNumber: string;
     shippedAt: Date;
     idempotencyKey?: string;
-  }): Promise<{ status: string }>;
+  }): Promise<{ status: DropshipMarketplaceTrackingPushStatus }>;
 }
 
 function isDropshipOmsOrder(order: any): boolean {
@@ -410,7 +416,14 @@ export function createFulfillmentPushService(
     if (result.status === "not_dropship") {
       return null;
     }
-    return result.status === "succeeded" || result.status === "already_succeeded";
+    if (
+      result.status === "succeeded" ||
+      result.status === "already_succeeded" ||
+      result.status === "already_processing"
+    ) {
+      return true;
+    }
+    throw new Error(`Unexpected dropship marketplace tracking status: ${result.status}`);
   }
 
   /**
@@ -428,11 +441,6 @@ export function createFulfillmentPushService(
       return false;
     }
 
-    if (!order.trackingNumber || !order.trackingCarrier) {
-      console.warn(`[FulfillmentPush] Order ${orderId} has no tracking info`);
-      return false;
-    }
-
     // Get channel info
     const [channel] = await db
       .select()
@@ -446,6 +454,16 @@ export function createFulfillmentPushService(
     }
 
     try {
+      const shipmentScopedPush = await pushShipmentScopedTrackingIfAvailable(orderId);
+      if (shipmentScopedPush !== null) {
+        return shipmentScopedPush;
+      }
+
+      if (!order.trackingNumber || !order.trackingCarrier) {
+        console.warn(`[FulfillmentPush] Order ${orderId} has no tracking info`);
+        return false;
+      }
+
       const dropshipPushed = await pushDropshipMarketplaceTrackingIfNeeded(order, orderId);
       if (dropshipPushed !== null) {
         return dropshipPushed;
@@ -474,6 +492,55 @@ export function createFulfillmentPushService(
 
       return false;
     }
+  }
+
+  async function pushShipmentScopedTrackingIfAvailable(orderId: number): Promise<boolean | null> {
+    const shipmentIds = await findShippedWmsShipmentIdsForOmsOrder(orderId);
+    if (shipmentIds.length === 0) {
+      return null;
+    }
+
+    const failures: string[] = [];
+    for (const shipmentId of shipmentIds) {
+      try {
+        const pushed = await pushTrackingForShipment(shipmentId);
+        if (!pushed) {
+          failures.push(`shipment ${shipmentId}: tracking push returned false`);
+        }
+      } catch (error: any) {
+        failures.push(`shipment ${shipmentId}: ${error?.message ?? String(error)}`);
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`Shipment-scoped tracking push failed for order ${orderId}: ${failures.join("; ")}`);
+    }
+    return true;
+  }
+
+  async function findShippedWmsShipmentIdsForOmsOrder(orderId: number): Promise<number[]> {
+    const result: any = await db.execute(sql`
+      SELECT os.id AS shipment_id
+      FROM wms.outbound_shipments os
+      JOIN wms.orders w ON w.id = os.order_id
+      WHERE w.oms_fulfillment_order_id ~ '^[0-9]+$'
+        AND (w.oms_fulfillment_order_id)::bigint = ${orderId}
+        AND os.status = 'shipped'
+        AND os.tracking_number IS NOT NULL
+        AND btrim(os.tracking_number) <> ''
+        AND os.carrier IS NOT NULL
+        AND btrim(os.carrier) <> ''
+      ORDER BY os.id ASC
+    `);
+    const rows: any[] = Array.isArray(result) ? result : result?.rows ?? [];
+    const uniqueShipmentIds = new Set<number>();
+    for (const row of rows) {
+      const shipmentId = Number(row?.shipment_id);
+      if (Number.isInteger(shipmentId) && shipmentId > 0) {
+        uniqueShipmentIds.add(shipmentId);
+      }
+    }
+    return [...uniqueShipmentIds];
   }
 
   async function pushToEbay(order: any, orderId: number): Promise<boolean> {

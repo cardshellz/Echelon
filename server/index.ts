@@ -84,6 +84,10 @@ const sessionPool = new Pool({
   max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 
+sessionPool.on("error", (error) => {
+  console.error("[SessionDatabasePool] Unexpected idle client error:", error);
+});
+
 const sessionMiddleware = session({
   store: new PgSession({
     pool: sessionPool,
@@ -208,6 +212,15 @@ function buildShipStationWebhookTargetUrl(targetUrl: string): string {
     parsed.searchParams.set("secret", secret);
   }
   return parsed.toString();
+}
+
+async function enqueueEbayReconcileTrackingRetry(orderId: number, reason: string): Promise<void> {
+  try {
+    await enqueueDelayedTrackingPush(db, orderId);
+    console.warn(`[eBay Reconcile] ${reason} for ${orderId}; delayed retry enqueued`);
+  } catch (enqueueErr: any) {
+    console.error(`[eBay Reconcile] Failed to enqueue tracking retry for ${orderId}: ${enqueueErr.message}`);
+  }
 }
 
 app.use((req, res, next) => {
@@ -684,7 +697,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       try {
         // Find eBay OMS orders stuck in "confirmed" for > 2 hours
         const stuckOrders = await db.execute(sql`
-          SELECT o.id, o.external_order_id, o.order_number, o.shipstation_order_id
+          SELECT o.id, o.external_order_id, o.external_order_number, o.shipstation_order_id
           FROM oms.oms_orders o
           WHERE o.channel_id = 67
             AND o.status = 'confirmed'
@@ -705,7 +718,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             if (order.shipstation_order_id) {
               ssOrder = await ss.getOrderById(Number(order.shipstation_order_id));
             } else {
-              const searchNumber = `EB-${order.order_number || order.external_order_id}`;
+              const searchNumber = `EB-${order.external_order_number || order.external_order_id}`;
               ssOrder = await ss.getOrderByNumber(searchNumber);
             }
             if (ssOrder && ssOrder.orderStatus === "shipped") {
@@ -723,9 +736,13 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               // Push tracking to eBay
               try {
                 // @ts-ignore
-                await services.fulfillmentPush.pushTracking(order.id);
+                const pushed = await services.fulfillmentPush.pushTracking(order.id);
+                if (pushed === false) {
+                  await enqueueEbayReconcileTrackingRetry(Number(order.id), "Tracking push returned false");
+                }
               } catch (e: any) {
                 console.warn(`[eBay Reconcile] Tracking push failed for ${order.id}: ${e.message}`);
+                await enqueueEbayReconcileTrackingRetry(Number(order.id), "Tracking push failed");
               }
             }
           } catch (e: any) {

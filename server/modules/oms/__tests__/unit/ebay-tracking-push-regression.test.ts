@@ -41,6 +41,9 @@ function makeMockDb(opts: {
   order?: any;
   channel?: any;
   lines?: any[];
+  shippedShipmentIds?: number[];
+  shipment?: any;
+  shipmentLines?: Array<{ external_line_item_id: string | null; quantity: number }>;
 }) {
   const insertedEvents: any[] = [];
 
@@ -78,6 +81,30 @@ function makeMockDb(opts: {
 
   const db = {
     select: vi.fn().mockReturnValue(selectBuilder),
+    execute: vi.fn().mockImplementation(async (query: any) => {
+      const queryText = sqlText(query);
+      if (
+        queryText.includes("FROM wms.outbound_shipments os") &&
+        queryText.includes("JOIN wms.orders w ON w.id = os.order_id") &&
+        queryText.includes("ORDER BY os.id ASC")
+      ) {
+        return { rows: (opts.shippedShipmentIds ?? []).map((shipmentId) => ({ shipment_id: shipmentId })) };
+      }
+      if (
+        queryText.includes("FROM wms.outbound_shipments os") &&
+        queryText.includes("JOIN oms.oms_orders o") &&
+        queryText.includes("LIMIT 1")
+      ) {
+        return { rows: opts.shipment ? [opts.shipment] : [] };
+      }
+      if (queryText.includes("FROM oms.oms_order_events")) {
+        return { rows: [] };
+      }
+      if (queryText.includes("FROM wms.outbound_shipment_items si")) {
+        return { rows: opts.shipmentLines ?? [] };
+      }
+      return { rows: [] };
+    }),
     insert: vi.fn().mockImplementation((_table: any) => ({
       values: vi.fn().mockImplementation((row: any) => {
         insertedEvents.push(row);
@@ -87,6 +114,16 @@ function makeMockDb(opts: {
   };
 
   return { db, insertedEvents };
+}
+
+function sqlText(query: any): string {
+  const chunks = query?.queryChunks ?? query?.chunks ?? [];
+  if (Array.isArray(chunks) && chunks.length > 0) {
+    return chunks
+      .flatMap((chunk: any) => chunk?.value ?? [String(chunk)])
+      .join(" ");
+  }
+  return String(query ?? "");
 }
 
 // Schema table stubs — these just need a `tableName` or `_` property
@@ -251,6 +288,59 @@ describe("eBay tracking push regression (2026-04-14)", () => {
     );
   });
 
+  it("fans out order-level tracking through shipped WMS shipments when they exist", async () => {
+    mockEbayClient.createShippingFulfillment.mockResolvedValue({ fulfillmentId: "fulfillment-501" });
+    const shippedAt = new Date("2026-04-14T16:00:00Z");
+    const { db, insertedEvents } = makeMockDb({
+      order: {
+        ...mockOrder,
+        trackingNumber: null,
+        trackingCarrier: null,
+      },
+      channel: mockChannel,
+      shippedShipmentIds: [501],
+      shipment: {
+        shipment_id: 501,
+        shipment_status: "shipped",
+        carrier: "usps",
+        tracking_number: TRACKING,
+        shipped_at: shippedAt,
+        wms_order_id: 9001,
+        oms_order_id: ORDER_ID,
+        external_order_id: EBAY_ORDER_ID,
+        ordered_at: new Date("2026-04-14T12:00:00Z"),
+        oms_created_at: new Date("2026-04-14T12:05:00Z"),
+        raw_payload: {},
+        tags: null,
+        provider: "ebay",
+      },
+      shipmentLines: [{ external_line_item_id: "12345", quantity: 1 }],
+    });
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+
+    const result = await svc.pushTracking(ORDER_ID);
+
+    expect(result).toBe(true);
+    expect(mockEbayClient.createShippingFulfillment).toHaveBeenCalledTimes(1);
+    expect(mockEbayClient.createShippingFulfillment).toHaveBeenCalledWith(
+      EBAY_ORDER_ID,
+      expect.objectContaining({
+        lineItems: [{ lineItemId: "12345", quantity: 1 }],
+        shippingCarrierCode: "USPS",
+        trackingNumber: TRACKING,
+      }),
+    );
+    expect(insertedEvents).toContainEqual(expect.objectContaining({
+      orderId: ORDER_ID,
+      eventType: "tracking_pushed",
+      details: expect.objectContaining({
+        provider: "ebay",
+        wmsShipmentId: 501,
+        trackingNumber: TRACKING,
+      }),
+    }));
+  });
+
   it("does not send eBay a shippedDate before the eBay order exists", async () => {
     const fallbackNow = new Date("2026-05-02T18:49:25.469Z");
     const shippedDate = __test__.resolveEbayFulfillmentShippedDate(
@@ -285,6 +375,32 @@ describe("eBay tracking push regression (2026-04-14)", () => {
       carrier: "usps",
       trackingNumber: TRACKING,
       shippedAt: mockOrder.shippedAt,
+    }));
+    expect(mockEbayClient.createShippingFulfillment).not.toHaveBeenCalled();
+  });
+
+  it("treats an in-flight dropship marketplace tracking push as idempotent", async () => {
+    const dropshipTracking = {
+      pushForOmsOrder: vi.fn(async () => ({ status: "already_processing" })),
+    };
+    const { db } = makeMockDb({
+      order: {
+        ...mockOrder,
+        rawPayload: { dropship: { intakeId: 12, storeConnectionId: 40 } },
+      },
+      channel: { id: CHANNEL_ID, provider: "manual" },
+      lines: mockLines,
+    });
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+    svc.setDropshipMarketplaceTrackingService(dropshipTracking);
+
+    const result = await svc.pushTracking(ORDER_ID);
+
+    expect(result).toBe(true);
+    expect(dropshipTracking.pushForOmsOrder).toHaveBeenCalledWith(expect.objectContaining({
+      omsOrderId: ORDER_ID,
+      carrier: "usps",
+      trackingNumber: TRACKING,
     }));
     expect(mockEbayClient.createShippingFulfillment).not.toHaveBeenCalled();
   });
