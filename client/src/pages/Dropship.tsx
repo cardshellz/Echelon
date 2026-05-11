@@ -47,6 +47,7 @@ import {
   allDropshipOrderCancellationStatuses,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
+  buildAdminDogfoodSmokeUrl,
   buildAdminOmsChannelConfigUrl,
   buildAdminOmsChannelConfigureInput,
   buildAdminListingPushJobsUrl,
@@ -139,6 +140,8 @@ import {
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
   type DropshipDogfoodReadinessStatus,
+  type DropshipDogfoodSmokeCandidate,
+  type DropshipDogfoodSmokeResponse,
   type DropshipOmsChannelConfigOverview,
   type DropshipOpsCount,
   type DropshipOpsRiskBucket,
@@ -824,10 +827,19 @@ function DogfoodReadinessTab() {
     status: appliedFilters.status,
     platform: appliedFilters.platform,
   }), [appliedFilters]);
+  const smokeUrl = useMemo(() => buildAdminDogfoodSmokeUrl({
+    search: appliedFilters.search,
+    platform: appliedFilters.platform,
+    limit: 10,
+  }), [appliedFilters]);
 
   const readinessQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [readinessUrl],
     queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(readinessUrl),
+  });
+  const smokeQuery = useQuery<DropshipDogfoodSmokeResponse>({
+    queryKey: [smokeUrl],
+    queryFn: () => fetchJson<DropshipDogfoodSmokeResponse>(smokeUrl),
   });
   const omsChannelConfigUrl = buildAdminOmsChannelConfigUrl();
   const omsChannelConfigQuery = useQuery<DropshipAdminOmsChannelConfigResponse>({
@@ -873,6 +885,7 @@ function DogfoodReadinessTab() {
       await Promise.all([
         omsChannelConfigQuery.refetch(),
         readinessQuery.refetch(),
+        smokeQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
@@ -885,12 +898,12 @@ function DogfoodReadinessTab() {
 
   return (
     <div className="space-y-5">
-      {(readinessQuery.error || omsChannelConfigQuery.error || omsError) && (
+      {(readinessQuery.error || smokeQuery.error || omsChannelConfigQuery.error || omsError) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
             {omsError || queryErrorMessage(
-              readinessQuery.error ?? omsChannelConfigQuery.error,
+              readinessQuery.error ?? smokeQuery.error ?? omsChannelConfigQuery.error,
               "Unable to load dropship dogfood readiness.",
             )}
           </AlertDescription>
@@ -920,6 +933,11 @@ function DogfoodReadinessTab() {
       <DogfoodLaunchGatePanel
         gate={launchGate}
         isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
+      />
+
+      <DogfoodSmokePanel
+        smoke={smokeQuery.data ?? null}
+        isLoading={smokeQuery.isLoading || smokeQuery.isFetching}
       />
 
       <section className="rounded-md border bg-card p-4">
@@ -4016,6 +4034,107 @@ function LaunchGateMetric({
     <div className="rounded-md border px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 font-mono text-lg font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function DogfoodSmokePanel({
+  smoke,
+  isLoading,
+}: {
+  smoke: DropshipDogfoodSmokeResponse | null;
+  isLoading: boolean;
+}) {
+  if (isLoading && !smoke) {
+    return (
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-6 w-56" />
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          <Skeleton className="h-36 w-full" />
+          <Skeleton className="h-36 w-full" />
+        </div>
+      </section>
+    );
+  }
+
+  if (!smoke) return null;
+
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold">Dogfood smoke evidence</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{smoke.message}</p>
+        </div>
+        <div className="grid w-full gap-2 sm:grid-cols-3 lg:w-auto lg:min-w-[420px]">
+          <LaunchGateMetric label="Ready" value={smoke.readyCandidateCount} />
+          <LaunchGateMetric label="Incomplete" value={smoke.warningCandidateCount} />
+          <LaunchGateMetric label="Blocked" value={smoke.blockedCandidateCount} />
+        </div>
+      </div>
+      {smoke.candidates.length === 0 ? (
+        <div className="mt-4 rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+          No store connections match the current smoke filters.
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-3 xl:grid-cols-2">
+          {smoke.candidates.map((candidate) => (
+            <DogfoodSmokeCandidateCard
+              key={`${candidate.vendor.vendorId}:${candidate.storeConnection.storeConnectionId}`}
+              candidate={candidate}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DogfoodSmokeCandidateCard({
+  candidate,
+}: {
+  candidate: DropshipDogfoodSmokeCandidate;
+}) {
+  const storeName = candidate.storeConnection.externalDisplayName
+    || candidate.storeConnection.shopDomain
+    || `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-medium">{candidate.vendor.businessName || candidate.vendor.email || `Vendor ${candidate.vendor.vendorId}`}</div>
+          <div className="mt-1 truncate text-sm text-muted-foreground">
+            {storeName} / {candidate.lastActivityAt ? formatDateTime(candidate.lastActivityAt) : "No activity"}
+          </div>
+        </div>
+        <Badge variant="outline" className={dogfoodReadinessStatusTone(candidate.status)}>
+          {formatStatus(candidate.status)}
+        </Badge>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        {candidate.stages.map((stage) => (
+          <div key={stage.key} className="rounded-md border px-3 py-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{stage.label}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{stage.message}</div>
+              </div>
+              <Badge variant="outline" className={dogfoodReadinessStatusTone(stage.status)}>
+                {formatStatus(stage.status)}
+              </Badge>
+            </div>
+            {stage.evidence.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {stage.evidence.slice(0, 2).map((entry, index) => (
+                  <div key={`${stage.key}:${index}`} className="truncate text-xs text-muted-foreground">
+                    {entry}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

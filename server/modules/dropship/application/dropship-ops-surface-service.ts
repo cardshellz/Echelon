@@ -37,11 +37,19 @@ const dogfoodReadinessInputSchema = z.object({
   page: pageSchema,
   limit: limitSchema,
 }).strict();
+const dogfoodSmokeInputSchema = z.object({
+  vendorId: positiveIdSchema.optional(),
+  storeConnectionId: positiveIdSchema.optional(),
+  platform: z.enum(["ebay", "shopify"]).optional(),
+  search: optionalStringSchema,
+  limit: z.number().int().positive().max(25).default(10),
+}).strict();
 
 export type SearchDropshipAuditEventsInput = z.infer<typeof searchAuditEventsInputSchema>;
 export type GetDropshipAdminOpsOverviewInput = z.infer<typeof adminOpsOverviewInputSchema>;
 export type DropshipDogfoodReadinessStatus = z.infer<typeof dogfoodReadinessStatusSchema>;
 export type ListDropshipDogfoodReadinessInput = z.infer<typeof dogfoodReadinessInputSchema>;
+export type ListDropshipDogfoodSmokeInput = z.infer<typeof dogfoodSmokeInputSchema>;
 
 export interface DropshipOpsSettingsSection {
   key: "account" | "store_connection" | "wallet_payment" | "notifications" | "api_keys" | "webhooks" | "return_contact";
@@ -260,6 +268,49 @@ export interface DropshipDogfoodReadinessResult {
   launchGate?: DropshipDogfoodLaunchGate;
 }
 
+export type DropshipDogfoodSmokeStageKey = "listing" | "order_intake" | "fulfillment" | "tracking";
+
+export interface DropshipDogfoodSmokeStage {
+  key: DropshipDogfoodSmokeStageKey;
+  label: string;
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  evidence: string[];
+  latestAt: Date | null;
+}
+
+export interface DropshipDogfoodSmokeCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: NonNullable<DropshipDogfoodReadinessItem["storeConnection"]> & {
+    storeConnectionId: number;
+    platform: string;
+    status: string;
+    setupStatus: string;
+  };
+  status: DropshipDogfoodReadinessStatus;
+  message: string;
+  stages: DropshipDogfoodSmokeStage[];
+  references: {
+    latestListingId: number | null;
+    latestListingJobId: number | null;
+    latestIntakeId: number | null;
+    latestOmsOrderId: number | null;
+    latestWmsShipmentId: number | null;
+    latestTrackingPushId: number | null;
+  };
+  lastActivityAt: Date | null;
+}
+
+export interface DropshipDogfoodSmokeResult {
+  generatedAt: Date;
+  candidates: DropshipDogfoodSmokeCandidate[];
+  total: number;
+  readyCandidateCount: number;
+  warningCandidateCount: number;
+  blockedCandidateCount: number;
+  message: string;
+}
+
 export interface DropshipOpsSurfaceRepository {
   getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview>;
   getAdminOpsOverview(
@@ -269,6 +320,9 @@ export interface DropshipOpsSurfaceRepository {
   listDogfoodReadiness(
     input: ListDropshipDogfoodReadinessInput & { generatedAt: Date },
   ): Promise<DropshipDogfoodReadinessResult>;
+  listDogfoodSmokeCandidates(
+    input: ListDropshipDogfoodSmokeInput & { generatedAt: Date },
+  ): Promise<DropshipDogfoodSmokeResult>;
 }
 
 export class DropshipOpsSurfaceService {
@@ -350,6 +404,30 @@ export class DropshipOpsSurfaceService {
         systemChecks,
       }),
     };
+  }
+
+  async listDogfoodSmokeCandidates(input: unknown = {}): Promise<DropshipDogfoodSmokeResult> {
+    const parsed = parseOpsSurfaceInput(
+      dogfoodSmokeInputSchema,
+      input,
+      "DROPSHIP_DOGFOOD_SMOKE_INVALID_INPUT",
+    );
+    const result = await this.deps.repository.listDogfoodSmokeCandidates({
+      ...parsed,
+      generatedAt: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_DOGFOOD_SMOKE_VIEWED",
+      message: "Dropship dogfood smoke evidence was loaded.",
+      context: {
+        total: result.total,
+        limit: parsed.limit,
+        vendorId: parsed.vendorId ?? null,
+        storeConnectionId: parsed.storeConnectionId ?? null,
+        platform: parsed.platform ?? null,
+      },
+    });
+    return result;
   }
 }
 
