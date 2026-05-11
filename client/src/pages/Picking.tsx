@@ -151,6 +151,16 @@ type PickResponse = {
   inventory: PickInventoryContext;
 };
 
+type ResolveAllocationResponse = {
+  success: boolean;
+  item?: OrderItem;
+  selectedLocation?: { id: number; code: string; zone: string | null };
+  autoFixedSetup?: boolean;
+  reviewNeeded?: boolean;
+  error?: string;
+  message?: string;
+};
+
 type BinCountResponse = {
   success: boolean;
   systemQtyBefore: number;
@@ -180,6 +190,20 @@ async function updateOrderItem(
     throw new Error(err.message || err.error || `Failed to update item (${res.status})`);
   }
   return res.json();
+}
+
+async function resolveAllocationBin(itemId: number, locationCode: string): Promise<ResolveAllocationResponse> {
+  const res = await fetch(`/api/picking/items/${itemId}/resolve-allocation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ locationCode }),
+  });
+  const data = await res.json().catch(() => ({ error: "Unknown error" }));
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `Failed to resolve allocation (${res.status})`);
+  }
+  return data;
 }
 
 
@@ -944,6 +968,35 @@ export default function Picking() {
     },
   });
 
+  const resolveAllocationMutation = useMutation({
+    mutationFn: ({ itemId, locationCode }: { itemId: number; locationCode: string }) =>
+      resolveAllocationBin(itemId, locationCode),
+    onSuccess: (data) => {
+      if (data.item) {
+        applyResolvedAllocation(data.item);
+      }
+      setAllocationDialogOpen(false);
+      setAllocationTargetIndex(null);
+      setAllocationBinCode("");
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      toast({
+        title: data.reviewNeeded ? "Bin accepted for review" : "Bin assigned",
+        description: data.selectedLocation?.code
+          ? `${data.item?.sku || "Item"} assigned to ${data.selectedLocation.code}`
+          : undefined,
+      });
+      playSound("success");
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Could not assign bin",
+        description: error.message,
+        variant: "destructive",
+      });
+      playSound("error");
+    },
+  });
+
   // Consolidated bin count + replen mutation (single API call)
   const binCountMutation = useMutation({
     mutationFn: async ({ sku, locationId, binCount, didReplen: replenDone }: { sku: string; locationId: number; binCount: number; didReplen: boolean }) => {
@@ -1122,6 +1175,9 @@ export default function Picking() {
   const [replenGuidanceLoading, setReplenGuidanceLoading] = useState(false);
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
   const [pickQty, setPickQty] = useState(1);
+  const [allocationDialogOpen, setAllocationDialogOpen] = useState(false);
+  const [allocationTargetIndex, setAllocationTargetIndex] = useState<number | null>(null);
+  const [allocationBinCode, setAllocationBinCode] = useState("");
   const [releaseDialogOpen, setReleaseDialogOpen] = useState(false);
   const [releaseOrderId, setReleaseOrderId] = useState<string | null>(null);
   
@@ -1160,14 +1216,56 @@ export default function Picking() {
   const completedItems = activeWork?.items.filter(i => i.status === "completed" || i.status === "short").length || 0;
   const totalItems = activeWork?.items.length || 0;
   const progressPercent = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
+
+  function applyResolvedAllocation(updatedItem: OrderItem) {
+    const patchPickItem = (item: PickItem): PickItem =>
+      item.id === updatedItem.id
+        ? { ...item, location: updatedItem.location }
+        : item;
+
+    setQueue(prev => prev.map(batch => ({
+      ...batch,
+      items: batch.items.map(patchPickItem),
+    })));
+
+    setLocalSingleQueue(prev => prev.map(order => ({
+      ...order,
+      items: order.items.map(patchPickItem),
+    })));
+
+    queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
+      if (!oldData) return oldData;
+      return oldData.map(order => ({
+        ...order,
+        items: order.items.map(item =>
+          item.id === updatedItem.id ? { ...item, ...updatedItem } : item
+        ),
+      }));
+    });
+  }
+
+  function openAllocationDialog(itemIndex: number | null) {
+    const item = itemIndex === null ? currentItem : activeWork?.items[itemIndex];
+    if (!item) return;
+    setAllocationTargetIndex(itemIndex);
+    setAllocationBinCode(item.location && item.location !== "UNASSIGNED" ? item.location : "");
+    setAllocationDialogOpen(true);
+  }
+
+  function submitAllocationDialog() {
+    const item = allocationTargetIndex === null ? currentItem : activeWork?.items[allocationTargetIndex];
+    const locationCode = allocationBinCode.trim().toUpperCase();
+    if (!item || !locationCode) return;
+    resolveAllocationMutation.mutate({ itemId: item.id, locationCode });
+  }
   
   // Keep focus on scan input - aggressive refocus for scanner devices
   const maintainFocus = useCallback(() => {
     // Don't steal focus when any dialog is open — let dialogs own their focus
-    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen) {
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen && !allocationDialogOpen) {
       if (hiddenScannerRef.current) hiddenScannerRef.current.focus();
     }
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, allocationDialogOpen]);
 
   // Focus scan input on mount only — do NOT re-focus on every click/touch.
   // The global window keydown handler captures scanner input regardless of focus,
@@ -1184,10 +1282,10 @@ export default function Picking() {
 
   // Refocus after dialogs close (but not bin count — it has its own focus)
   useEffect(() => {
-    if (!shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen) {
+    if (!shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen && !allocationDialogOpen) {
       setTimeout(maintainFocus, 100);
     }
-  }, [shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, maintainFocus]);
+  }, [shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, allocationDialogOpen, maintainFocus]);
 
   // Prevent other inputs from stealing focus — but allow dialog inputs when a dialog is open
   useEffect(() => {
@@ -1195,7 +1293,7 @@ export default function Picking() {
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as HTMLElement;
         // If a dialog is open, let its inputs have focus normally
-        if (shortPickOpen || multiQtyOpen || binCountOpen || replenConfirmOpen) return;
+        if (shortPickOpen || multiQtyOpen || binCountOpen || replenConfirmOpen || allocationDialogOpen) return;
         // Otherwise redirect any stray input focus back to the scan input
         if (target !== manualInputRef.current && target.tagName === "INPUT") {
           e.preventDefault();
@@ -3743,6 +3841,18 @@ export default function Picking() {
                 <div className="text-4xl md:text-5xl font-black font-mono text-primary tracking-wide">
                   {currentItem.location}
                 </div>
+                {(currentItem.location === "UNASSIGNED" || currentItem.location === "U") && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 h-9"
+                    onClick={() => openAllocationDialog(null)}
+                    data-testid="button-set-bin-focus"
+                  >
+                    <MapPin className="h-4 w-4 mr-2" />
+                    Set Bin
+                  </Button>
+                )}
                 <div className="flex items-center justify-center gap-2 mt-2">
                   {activeWork?.items.map((item, idx) => (
                     <div 
@@ -3941,6 +4051,17 @@ export default function Picking() {
                           <span className={cn("text-base md:text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
                             {item.location}
                           </span>
+                          {(item.location === "UNASSIGNED" || item.location === "U") && !isCompleted && (
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              className="h-8 w-8 flex-shrink-0 border-amber-300 text-amber-700"
+                              onClick={() => openAllocationDialog(idx)}
+                              data-testid={`button-set-bin-${item.id}`}
+                            >
+                              <MapPin className="h-4 w-4" />
+                            </Button>
+                          )}
                           <button
                             onClick={() => openEditQtyDialog(idx)}
                             className={cn(
@@ -4672,6 +4793,61 @@ export default function Picking() {
               disabled={binCountQty === "" || parseInt(binCountQty) > 10000 || !binCountContext?.locationId || binCountMutation.isPending}
             >
               {binCountMutation.isPending ? "Saving..." : "Confirm"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={allocationDialogOpen} onOpenChange={setAllocationDialogOpen}>
+        <DialogContent className="w-[95vw] max-w-sm p-4">
+          <DialogHeader>
+            <DialogTitle className="text-center text-xl">Set Pick Bin</DialogTitle>
+            <DialogDescription className="text-center">
+              {(() => {
+                const item = allocationTargetIndex === null ? currentItem : activeWork?.items[allocationTargetIndex];
+                return item ? `${item.sku} needs ${item.qty - item.picked}` : "Enter the bin for this item";
+              })()}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="py-4 space-y-3">
+            <Label htmlFor="allocation-bin-code">Bin</Label>
+            <Input
+              id="allocation-bin-code"
+              value={allocationBinCode}
+              onChange={(e) => setAllocationBinCode(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && allocationBinCode.trim() && !resolveAllocationMutation.isPending) {
+                  submitAllocationDialog();
+                }
+              }}
+              autoFocus
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              className="h-14 text-xl text-center font-mono font-bold uppercase"
+              placeholder="A-01"
+              data-testid="input-allocation-bin"
+            />
+          </div>
+
+          <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <Button
+              className="w-full h-12"
+              onClick={submitAllocationDialog}
+              disabled={!allocationBinCode.trim() || resolveAllocationMutation.isPending}
+              data-testid="button-submit-allocation-bin"
+            >
+              {resolveAllocationMutation.isPending ? "Assigning..." : "Assign Bin"}
+            </Button>
+            <Button
+              variant="outline"
+              className="w-full h-12"
+              onClick={() => setAllocationDialogOpen(false)}
+              disabled={resolveAllocationMutation.isPending}
+            >
+              Cancel
             </Button>
           </DialogFooter>
         </DialogContent>
