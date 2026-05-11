@@ -24,6 +24,7 @@ function makeDb() {
   const inserts: Array<{ table: unknown; value: any }> = [];
   const updates: Array<{ table: unknown; value: any }> = [];
   const selectCounts = new Map<unknown, number>();
+  const state: { insertedReplenTask?: any } = {};
 
   const pickVariant = {
     id: 100,
@@ -40,7 +41,7 @@ function makeDb() {
   const selectRows = (table: unknown) => {
     const count = selectCounts.get(table) ?? 0;
     selectCounts.set(table, count + 1);
-    if (table === replenTasks) return [];
+    if (table === replenTasks) return state.insertedReplenTask ? [state.insertedReplenTask] : [];
     if (table === productVariants) return [pickVariant];
     if (table === warehouseLocations) return count === 0 ? [pickLocation] : [sourceLocation];
     if (table === locationReplenConfig) return [];
@@ -66,6 +67,7 @@ function makeDb() {
           : table === cycleCounts
             ? { id: 333, ...value }
             : { id: 444, ...value };
+        if (table === replenTasks) state.insertedReplenTask = inserted;
         return {
           returning: vi.fn(async () => [inserted]),
           then: (resolve: (value: any) => void) => Promise.resolve([inserted]).then(resolve),
@@ -83,7 +85,7 @@ function makeDb() {
     transaction: vi.fn(),
   };
 
-  return { db, inserts, updates };
+  return { db, inserts, updates, state };
 }
 
 describe("ReplenishmentUseCases source-empty blockers", () => {
@@ -131,6 +133,52 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
     expect(updates.find(update => update.table === replenTasks)?.value).toMatchObject({
       linkedCycleCountId: 333,
+    });
+  });
+
+  it("executes picker-confirmed replen when guidance is inline", async () => {
+    const { db, inserts, state } = makeDb();
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceLocationCode: "B-01",
+      sourceVariantId: null,
+      sourceVariantSku: "SKU-1",
+      sourceVariantName: "Each",
+      pickVariantId: 100,
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      replenMethod: "full_case",
+      executionMode: "inline",
+      taskNotes: "Below threshold",
+    });
+    const executeTask = vi.spyOn(service, "executeTask").mockImplementation(async () => {
+      state.insertedReplenTask = {
+        ...state.insertedReplenTask,
+        status: "completed",
+        qtyCompleted: 4,
+      };
+      return { moved: 4 };
+    });
+
+    const result = await service.createAndExecuteReplen(100, 1, "picker-1");
+
+    expect(executeTask).toHaveBeenCalledWith(121, "picker-1");
+    expect(result).toMatchObject({
+      moved: 4,
+      task: {
+        id: 121,
+        status: "completed",
+        qtyCompleted: 4,
+      },
+    });
+    expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
+      status: "pending",
+      executionMode: "inline",
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
     });
   });
 });
