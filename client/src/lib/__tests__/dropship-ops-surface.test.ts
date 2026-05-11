@@ -35,6 +35,8 @@ import {
   buildAdminStoreWebhookRepairInput,
   buildAdminTrackingPushRetryInput,
   buildAdminTrackingPushesUrl,
+  buildAdminWorkerSweepInput,
+  buildAdminWorkerSweepRunUrl,
   buildShippingBoxInput,
   buildShippingInsurancePolicyInput,
   buildShippingMarkupPolicyInput,
@@ -224,6 +226,29 @@ describe("dropship ops surface client helpers", () => {
       search: "",
       platform: "all",
     })).toBe("/api/dropship/admin/dogfood-launch-status");
+  });
+
+  it("builds admin worker sweep requests with bounded manual controls", () => {
+    expect(buildAdminWorkerSweepRunUrl("listing_push")).toBe("/api/dropship/admin/worker-sweeps/listing_push/run");
+    expect(buildAdminWorkerSweepInput({
+      idempotencyKey: " worker-sweep-1 ",
+      batchSize: " 25 ",
+      reason: " Dogfood catch-up ",
+    })).toEqual({
+      idempotencyKey: "worker-sweep-1",
+      batchSize: 25,
+      reason: "Dogfood catch-up",
+    });
+    expect(buildAdminWorkerSweepInput({
+      idempotencyKey: "worker-sweep-2",
+      batchSize: "",
+    })).toEqual({
+      idempotencyKey: "worker-sweep-2",
+    });
+    expect(() => buildAdminWorkerSweepInput({
+      idempotencyKey: "worker-sweep-3",
+      batchSize: "101",
+    })).toThrow("batchSize must be a positive integer no greater than 100.");
   });
 
   it("builds admin OMS channel config requests", () => {

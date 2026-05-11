@@ -69,6 +69,8 @@ import {
   buildAdminStoreConnectionsUrl,
   buildAdminStoreWebhookRepairInput,
   buildAdminTrackingPushesUrl,
+  buildAdminWorkerSweepInput,
+  buildAdminWorkerSweepRunUrl,
   buildCatalogExposureRuleFromPreviewRow,
   buildCatalogExposureRuleInput,
   buildShippingBoxInput,
@@ -134,6 +136,8 @@ import {
   type DropshipAdminTrackingPushListItem,
   type DropshipAdminTrackingPushListResponse,
   type DropshipAdminTrackingPushRetryResponse,
+  type DropshipAdminWorkerSweepName,
+  type DropshipAdminWorkerSweepResponse,
   type DropshipAdminWalletConfirmedUsdcCreditResponse,
   type DropshipAdminWalletManualCreditResponse,
   type DropshipDogfoodLaunchGate,
@@ -574,6 +578,28 @@ const dogfoodReadinessStatusFilters: DogfoodReadinessStatusFilter[] = [
   "ready",
 ];
 
+const adminWorkerSweepOptions: Array<{
+  worker: DropshipAdminWorkerSweepName;
+  label: string;
+  description: string;
+}> = [
+  {
+    worker: "listing_push",
+    label: "Listing push",
+    description: "Claims pending or stale listing push jobs and sends marketplace updates.",
+  },
+  {
+    worker: "order_processing",
+    label: "Order processing",
+    description: "Processes received dropship orders, payment holds, cancellations, and stale intakes.",
+  },
+  {
+    worker: "ebay_order_intake",
+    label: "eBay intake",
+    description: "Polls connected eBay stores for paid marketplace orders.",
+  },
+];
+
 export default function Dropship() {
   const [activeTab, setActiveTab] = useState<DropshipOpsTabValue>("overview");
   const [opsSearchSignal, setOpsSearchSignal] = useState<DropshipOpsSearchSignal | null>(null);
@@ -853,6 +879,11 @@ function DogfoodReadinessTab({
   const [omsMessage, setOmsMessage] = useState("");
   const [omsError, setOmsError] = useState("");
   const [isSavingOmsChannel, setIsSavingOmsChannel] = useState(false);
+  const [workerBatchSize, setWorkerBatchSize] = useState("10");
+  const [workerReason, setWorkerReason] = useState("Dogfood manual sweep");
+  const [pendingWorkerSweep, setPendingWorkerSweep] = useState<DropshipAdminWorkerSweepName | null>(null);
+  const [workerSweepMessage, setWorkerSweepMessage] = useState("");
+  const [workerSweepError, setWorkerSweepError] = useState("");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
     status: "all" as DogfoodReadinessStatusFilter,
@@ -933,13 +964,41 @@ function DogfoodReadinessTab({
     }
   }
 
+  async function runWorkerSweep(worker: DropshipAdminWorkerSweepName) {
+    setPendingWorkerSweep(worker);
+    setWorkerSweepError("");
+    setWorkerSweepMessage("");
+    try {
+      const input = buildAdminWorkerSweepInput({
+        idempotencyKey: createDropshipIdempotencyKey(`admin-worker-sweep-${worker}`),
+        batchSize: workerBatchSize,
+        reason: workerReason,
+      });
+      const response = await postJson<DropshipAdminWorkerSweepResponse>(
+        buildAdminWorkerSweepRunUrl(worker),
+        input,
+      );
+      setWorkerSweepMessage(workerSweepMessageForResponse(response));
+      await Promise.all([
+        readinessQuery.refetch(),
+        launchStatusQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+    } catch (caught) {
+      setWorkerSweepError(caught instanceof Error ? caught.message : "Dropship worker sweep failed.");
+    } finally {
+      setPendingWorkerSweep(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
-      {(readinessQuery.error || launchStatusQuery.error || omsChannelConfigQuery.error || omsError) && (
+      {(readinessQuery.error || launchStatusQuery.error || omsChannelConfigQuery.error || omsError || workerSweepError) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {omsError || queryErrorMessage(
+            {omsError || workerSweepError || queryErrorMessage(
               readinessQuery.error ?? launchStatusQuery.error ?? omsChannelConfigQuery.error,
               "Unable to load dropship dogfood readiness.",
             )}
@@ -950,6 +1009,12 @@ function DogfoodReadinessTab({
         <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
           <CheckCircle2 className="h-4 w-4" />
           <AlertDescription>{omsMessage}</AlertDescription>
+        </Alert>
+      )}
+      {workerSweepMessage && (
+        <Alert className="border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{workerSweepMessage}</AlertDescription>
         </Alert>
       )}
 
@@ -965,6 +1030,15 @@ function DogfoodReadinessTab({
       <SystemReadinessPanel
         checks={systemChecks}
         isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
+      />
+
+      <WorkerSweepPanel
+        batchSize={workerBatchSize}
+        pendingWorker={pendingWorkerSweep}
+        reason={workerReason}
+        onBatchSizeChange={setWorkerBatchSize}
+        onReasonChange={setWorkerReason}
+        onRunSweep={runWorkerSweep}
       />
 
       <DogfoodLaunchGatePanel
@@ -3995,6 +4069,81 @@ function SystemReadinessPanel({
   );
 }
 
+function WorkerSweepPanel({
+  batchSize,
+  pendingWorker,
+  reason,
+  onBatchSizeChange,
+  onReasonChange,
+  onRunSweep,
+}: {
+  batchSize: string;
+  pendingWorker: DropshipAdminWorkerSweepName | null;
+  reason: string;
+  onBatchSizeChange: Dispatch<SetStateAction<string>>;
+  onReasonChange: Dispatch<SetStateAction<string>>;
+  onRunSweep: (worker: DropshipAdminWorkerSweepName) => void;
+}) {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold">Manual worker sweeps</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Run the same dropship worker paths used by schedulers without waiting for the next interval.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-[120px_minmax(220px,1fr)] xl:w-[520px]">
+          <label className="space-y-1">
+            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Batch</span>
+            <Input
+              inputMode="numeric"
+              value={batchSize}
+              onChange={(event) => onBatchSizeChange(event.target.value)}
+              placeholder="10"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Reason</span>
+            <Input
+              value={reason}
+              onChange={(event) => onReasonChange(event.target.value)}
+              placeholder="Dogfood manual sweep"
+            />
+          </label>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        {adminWorkerSweepOptions.map((option) => {
+          const isPending = pendingWorker === option.worker;
+          return (
+            <div key={option.worker} className="flex min-h-36 flex-col justify-between rounded-md border p-3">
+              <div>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="font-medium">{option.label}</div>
+                  <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+                    {option.worker}
+                  </Badge>
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">{option.description}</p>
+              </div>
+              <Button
+                className="mt-4 gap-2"
+                disabled={pendingWorker !== null}
+                variant="outline"
+                onClick={() => onRunSweep(option.worker)}
+              >
+                {isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+                {isPending ? "Running" : "Run sweep"}
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function DogfoodLaunchGatePanel({
   gate,
   isLoading,
@@ -6893,6 +7042,18 @@ function dogfoodReadinessStatusTone(status: DropshipDogfoodReadinessStatus): str
   if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function workerSweepMessageForResponse(response: DropshipAdminWorkerSweepResponse): string {
+  const metrics = Object.entries(response.metrics)
+    .filter(([, value]) => value !== 0)
+    .map(([key, value]) => `${formatStatus(key)} ${value}`);
+  const suffix = metrics.length > 0 ? `: ${metrics.join(" / ")}.` : ".";
+  return `${workerSweepLabel(response.worker)} sweep completed${suffix}`;
+}
+
+function workerSweepLabel(worker: DropshipAdminWorkerSweepName): string {
+  return adminWorkerSweepOptions.find((option) => option.worker === worker)?.label ?? formatStatus(worker);
 }
 
 function omsChannelConfigLabel(config: DropshipOmsChannelConfigOverview | null): string {
