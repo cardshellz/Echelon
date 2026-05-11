@@ -325,10 +325,20 @@ export interface DropshipDogfoodSmokeResult {
   message: string;
 }
 
+export interface DropshipDogfoodLaunchCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: DropshipDogfoodSmokeCandidate["storeConnection"];
+  readinessStatus: DropshipDogfoodReadinessStatus;
+  smokeStatus: DropshipDogfoodReadinessStatus;
+  lastSmokeActivityAt: Date | null;
+  smokeReferences: DropshipDogfoodSmokeCandidate["references"];
+}
+
 export interface DropshipDogfoodLaunchStatusResult {
   generatedAt: Date;
   status: DropshipDogfoodReadinessStatus;
   message: string;
+  launchCandidates: DropshipDogfoodLaunchCandidate[];
   launchGate: DropshipDogfoodLaunchGate;
   readiness: DropshipDogfoodReadinessResult;
   smoke: DropshipDogfoodSmokeResult;
@@ -498,6 +508,7 @@ export class DropshipOpsSurfaceService {
       launchGate,
       readiness,
       smoke,
+      launchCandidates: buildDogfoodLaunchCandidates(readiness.items, smoke.candidates),
     });
     this.deps.logger.info({
       code: "DROPSHIP_DOGFOOD_LAUNCH_STATUS_VIEWED",
@@ -600,10 +611,11 @@ function buildDogfoodLaunchStatusResult(input: {
   launchGate: DropshipDogfoodLaunchGate;
   readiness: DropshipDogfoodReadinessResult;
   smoke: DropshipDogfoodSmokeResult;
+  launchCandidates: DropshipDogfoodLaunchCandidate[];
 }): DropshipDogfoodLaunchStatusResult {
   const smokeStatus = summarizeSmokeLaunchStatus(input.smoke);
-  const status = summarizeLaunchStatus(input.launchGate.status, smokeStatus);
-  const smokeStep = buildDogfoodLaunchSmokeRunbookStep(input.smoke);
+  const status = summarizeLaunchStatus(input.launchGate.status, smokeStatus, input.launchCandidates);
+  const smokeStep = buildDogfoodLaunchSmokeRunbookStep(input.smoke, input.launchCandidates);
   const runbookSteps = smokeStep
     ? [...input.launchGate.runbookSteps, smokeStep]
     : input.launchGate.runbookSteps;
@@ -615,7 +627,9 @@ function buildDogfoodLaunchStatusResult(input: {
       status,
       launchGate: input.launchGate,
       smoke: input.smoke,
+      launchCandidates: input.launchCandidates,
     }),
+    launchCandidates: input.launchCandidates,
     launchGate: input.launchGate,
     readiness: input.readiness,
     smoke: input.smoke,
@@ -636,8 +650,10 @@ function summarizeSmokeLaunchStatus(smoke: DropshipDogfoodSmokeResult): Dropship
 function summarizeLaunchStatus(
   readinessStatus: DropshipDogfoodReadinessStatus,
   smokeStatus: DropshipDogfoodReadinessStatus,
+  launchCandidates: readonly DropshipDogfoodLaunchCandidate[],
 ): DropshipDogfoodReadinessStatus {
   if (readinessStatus === "blocked") return "blocked";
+  if (launchCandidates.length === 0) return "warning";
   if (readinessStatus === "warning" || smokeStatus !== "ready") return "warning";
   return "ready";
 }
@@ -646,34 +662,35 @@ function buildDogfoodLaunchStatusMessage(input: {
   status: DropshipDogfoodReadinessStatus;
   launchGate: DropshipDogfoodLaunchGate;
   smoke: DropshipDogfoodSmokeResult;
+  launchCandidates: readonly DropshipDogfoodLaunchCandidate[];
 }): string {
   if (input.launchGate.status === "blocked") {
     return input.launchGate.message;
   }
-  if (input.smoke.readyCandidateCount === 0) {
-    return "Readiness is sufficient to run dogfood smoke, but no store has fresh complete end-to-end smoke evidence yet.";
+  if (input.launchCandidates.length === 0) {
+    return "No vendor/store row is both readiness-ready and fresh smoke-ready yet.";
   }
   if (input.status === "warning") {
-    return `${input.smoke.readyCandidateCount} store(s) have fresh smoke evidence; remaining readiness or smoke warnings need review.`;
+    return `${input.launchCandidates.length} vendor/store row(s) are dogfood-ready; remaining readiness or smoke warnings need review.`;
   }
-  return `${input.smoke.readyCandidateCount} store(s) have fresh complete dogfood smoke evidence.`;
+  return `${input.launchCandidates.length} vendor/store row(s) are dogfood-ready with fresh complete smoke evidence.`;
 }
 
 function buildDogfoodLaunchSmokeRunbookStep(
   smoke: DropshipDogfoodSmokeResult,
+  launchCandidates: readonly DropshipDogfoodLaunchCandidate[],
 ): DropshipDogfoodLaunchRunbookStep | null {
-  if (smoke.readyCandidateCount > 0 && smoke.blockedCandidateCount === 0 && smoke.warningCandidateCount === 0) {
+  if (launchCandidates.length > 0 && smoke.blockedCandidateCount === 0 && smoke.warningCandidateCount === 0) {
     return {
       key: "confirm_fresh_smoke",
       label: "Confirm fresh smoke evidence",
       status: "ready",
       scope: "ops",
-      message: `${smoke.readyCandidateCount} store(s) have fresh complete smoke evidence.`,
+      message: `${launchCandidates.length} vendor/store row(s) have matching readiness and fresh smoke evidence.`,
       action: "Use a ready smoke candidate for internal dogfood and continue monitoring order intake, WMS shipment, and tracking push health.",
-      evidence: smoke.candidates
-        .filter((candidate) => candidate.status === "ready")
+      evidence: launchCandidates
         .slice(0, 3)
-        .map(formatSmokeCandidateRunbookEvidence),
+        .map(formatLaunchCandidateRunbookEvidence),
     };
   }
 
@@ -695,15 +712,50 @@ function buildDogfoodLaunchSmokeRunbookStep(
     label: "Complete fresh smoke evidence",
     status: "warning",
     scope: "ops",
-    message: "No store has fresh complete listing, intake, fulfillment, and tracking proof yet.",
-    action: "Run one selected SKU through listing, order intake, WMS/ShipStation shipment, and marketplace tracking within the configured freshness window.",
+    message: launchCandidates.length === 0 && smoke.readyCandidateCount > 0
+      ? "Fresh smoke evidence exists, but not for a readiness-ready vendor/store row."
+      : "No readiness-ready store has fresh complete listing, intake, fulfillment, and tracking proof yet.",
+    action: "Use the same readiness-ready vendor/store row for listing, order intake, WMS/ShipStation shipment, and marketplace tracking within the configured freshness window.",
     evidence: firstCandidate ? formatSmokeStageIssues(firstCandidate) : [smoke.message],
   };
 }
 
-function formatSmokeCandidateRunbookEvidence(candidate: DropshipDogfoodSmokeCandidate): string {
+function buildDogfoodLaunchCandidates(
+  readinessItems: readonly DropshipDogfoodReadinessItem[],
+  smokeCandidates: readonly DropshipDogfoodSmokeCandidate[],
+): DropshipDogfoodLaunchCandidate[] {
+  const readyReadinessByStore = new Map<string, DropshipDogfoodReadinessItem>();
+  readinessItems.forEach((item) => {
+    const key = dogfoodVendorStoreKey(item.vendor.vendorId, item.storeConnection.storeConnectionId);
+    if (key && item.readinessStatus === "ready") {
+      readyReadinessByStore.set(key, item);
+    }
+  });
+
+  return smokeCandidates
+    .filter((candidate) => candidate.status === "ready")
+    .flatMap((candidate) => {
+      const key = dogfoodVendorStoreKey(candidate.vendor.vendorId, candidate.storeConnection.storeConnectionId);
+      const readiness = key ? readyReadinessByStore.get(key) : undefined;
+      if (!readiness) return [];
+      return [{
+        vendor: readiness.vendor,
+        storeConnection: candidate.storeConnection,
+        readinessStatus: readiness.readinessStatus,
+        smokeStatus: candidate.status,
+        lastSmokeActivityAt: candidate.lastActivityAt,
+        smokeReferences: candidate.references,
+      }];
+    });
+}
+
+function dogfoodVendorStoreKey(vendorId: number, storeConnectionId: number | null): string | null {
+  return storeConnectionId === null ? null : `${vendorId}:${storeConnectionId}`;
+}
+
+function formatLaunchCandidateRunbookEvidence(candidate: DropshipDogfoodLaunchCandidate): string {
   const storeLabel = `${candidate.storeConnection.platform} store ${candidate.storeConnection.storeConnectionId}`;
-  return `vendor ${candidate.vendor.vendorId}, ${storeLabel}: ${candidate.message}`;
+  return `vendor ${candidate.vendor.vendorId}, ${storeLabel}: readiness ${candidate.readinessStatus}; smoke ${candidate.smokeStatus}.`;
 }
 
 function formatSmokeStageIssues(candidate: DropshipDogfoodSmokeCandidate): string[] {

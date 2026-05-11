@@ -562,10 +562,20 @@ export interface DropshipDogfoodSmokeResponse {
   message: string;
 }
 
+export interface DropshipDogfoodLaunchCandidate {
+  vendor: DropshipDogfoodReadinessItem["vendor"];
+  storeConnection: DropshipDogfoodSmokeCandidate["storeConnection"];
+  readinessStatus: DropshipDogfoodReadinessStatus;
+  smokeStatus: DropshipDogfoodReadinessStatus;
+  lastSmokeActivityAt: string | null;
+  smokeReferences: DropshipDogfoodSmokeCandidate["references"];
+}
+
 export interface DropshipDogfoodLaunchStatusResponse {
   generatedAt: string;
   status: DropshipDogfoodReadinessStatus;
   message: string;
+  launchCandidates: DropshipDogfoodLaunchCandidate[];
   launchGate: DropshipDogfoodLaunchGate;
   readiness: DropshipDogfoodReadinessResponse;
   smoke: DropshipDogfoodSmokeResponse;
