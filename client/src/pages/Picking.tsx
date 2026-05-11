@@ -214,6 +214,20 @@ async function resolveAllocationBin(itemId: number, locationCode: string): Promi
   return data;
 }
 
+async function reportReplenSourceEmpty(itemId: number, sourceLocationCode?: string | null): Promise<{ success: boolean; taskId: number }> {
+  const res = await fetch(`/api/picking/items/${itemId}/replen-source-empty`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ sourceLocationCode }),
+  });
+  const data = await res.json().catch(() => ({ error: "Unknown error" }));
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `Failed to report replen source empty (${res.status})`);
+  }
+  return data;
+}
+
 
 async function markOrderReadyToShip(orderId: number): Promise<Order> {
   const res = await fetch(`/api/picking/orders/${orderId}/ready-to-ship`, {
@@ -1013,6 +1027,19 @@ export default function Picking() {
     },
   });
 
+  const reportReplenSourceEmptyMutation = useMutation({
+    mutationFn: ({ itemId, sourceLocationCode }: { itemId: number; sourceLocationCode?: string | null }) =>
+      reportReplenSourceEmpty(itemId, sourceLocationCode),
+    onError: (error: Error) => {
+      console.error("[Replen] failed to record source-empty report:", error);
+      toast({
+        title: "Source-empty report not saved",
+        description: error.message || "The short pick can continue, but lead review may need manual follow-up.",
+        variant: "destructive",
+      });
+    },
+  });
+
   // Consolidated bin count + replen mutation (single API call)
   const binCountMutation = useMutation({
     mutationFn: async ({ sku, locationId, binCount, didReplen: replenDone, replenAlreadyRecorded }: { sku: string; locationId: number; binCount: number; didReplen: boolean; replenAlreadyRecorded?: boolean }) => {
@@ -1190,7 +1217,7 @@ export default function Picking() {
   const [replenGuidanceData, setReplenGuidanceData] = useState<{
     action: "replen_inline" | "short_pick_with_replen" | "true_short_pick";
     source?: { locationCode: string; availableQty: number; variantSku: string; variantName: string };
-    targetItem?: { sku: string; location: string };
+    targetItem?: { id: number; sku: string; location: string };
   } | null>(null);
   const [replenGuidanceLoading, setReplenGuidanceLoading] = useState(false);
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
@@ -1716,7 +1743,7 @@ export default function Picking() {
 
       if (guidance.action === "replen_inline" && guidance.source) {
         // Pickable source has stock — show replen guidance dialog first
-        setReplenGuidanceData({ ...guidance, targetItem: { sku: item.sku, location: item.location } });
+        setReplenGuidanceData({ ...guidance, targetItem: { id: item.id, sku: item.sku, location: item.location } });
         setShortPickListIndex(listIndex);
         setReplenGuidanceOpen(true);
       } else {
@@ -4475,11 +4502,17 @@ export default function Picking() {
               className="h-12 text-base text-amber-600 border-amber-300"
               onClick={() => {
                 // Source is also empty — allow short pick (escape hatch)
-                setReplenGuidanceOpen(false);
-                setReplenGuidanceData(null);
                 const targetItem = shortPickListIndex !== null
                   ? activeWork?.items[shortPickListIndex]
                   : currentItem;
+                if (targetItem?.id) {
+                  reportReplenSourceEmptyMutation.mutate({
+                    itemId: targetItem.id,
+                    sourceLocationCode: replenGuidanceData?.source?.locationCode ?? null,
+                  });
+                }
+                setReplenGuidanceOpen(false);
+                setReplenGuidanceData(null);
                 setShortPickQty(String(targetItem?.picked || 0));
                 setShortPickReason("");
                 setShortPickOpen(true);
