@@ -11,6 +11,7 @@ const optionalStringSchema = z.string().trim().min(1).max(255).optional();
 const severitySchema = z.enum(["info", "warning", "error"]);
 export const DEFAULT_DOGFOOD_SMOKE_STALE_AFTER_HOURS = 72;
 export const MAX_DOGFOOD_SMOKE_STALE_AFTER_HOURS = 720;
+const DOGFOOD_LAUNCH_STATUS_QUERY_LIMIT = 100;
 
 const searchAuditEventsInputSchema = z.object({
   vendorId: positiveIdSchema.optional(),
@@ -480,13 +481,13 @@ export class DropshipOpsSurfaceService {
         platform: parsed.platform,
         search: parsed.search,
         page: 1,
-        limit: 100,
+        limit: DOGFOOD_LAUNCH_STATUS_QUERY_LIMIT,
         generatedAt,
       }),
       this.deps.repository.listDogfoodSmokeCandidates({
         platform: parsed.platform,
         search: parsed.search,
-        limit: 25,
+        limit: DOGFOOD_LAUNCH_STATUS_QUERY_LIMIT,
         staleAfterHours,
         generatedAt,
       }),
