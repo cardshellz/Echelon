@@ -222,6 +222,11 @@ export type ReplenSourceEmptyResult = {
   status: string;
 };
 
+export type CloseShipmentBlockersResult = {
+  allocationExceptionsClosed: number;
+  replenTasksClosed: number;
+};
+
 export type PickQueueOrder = any; // Pass-through type from storage
 
 function emptyPickInventoryContext(sku: string): PickInventoryContext {
@@ -1548,6 +1553,54 @@ export class PickingUseCases {
     });
 
     return order;
+  }
+
+  async closeResolvedShipmentBlockers(orderId: number, params: {
+    resolution: string;
+    userId?: string;
+    notes?: string;
+  }): Promise<CloseShipmentBlockersResult> {
+    if (params.resolution === "hold") {
+      return { allocationExceptionsClosed: 0, replenTasksClosed: 0 };
+    }
+
+    const closedStatus = params.resolution === "cancelled" ? "cancelled" : "resolved";
+    const resolutionLabel = `order_exception_${params.resolution}`;
+    const blockerNote = `Closed by order exception resolution '${params.resolution}'${params.userId ? ` by ${params.userId}` : ""}${params.notes ? `: ${params.notes}` : ""}`;
+
+    const allocationResult = await this.db.execute(sql`
+      UPDATE wms.allocation_exceptions
+      SET
+        status = ${closedStatus},
+        resolution = ${resolutionLabel},
+        resolved_by = ${params.userId ?? null},
+        resolved_at = NOW(),
+        updated_at = NOW()
+      WHERE order_id = ${orderId}
+        AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+        AND (
+          status = 'blocked'
+          OR COALESCE(metadata->>'shipmentBlocking', 'false') = 'true'
+        )
+      RETURNING id
+    `);
+
+    const replenResult = await this.db.execute(sql`
+      UPDATE inventory.replen_tasks
+      SET
+        status = 'cancelled',
+        blocks_shipment = FALSE,
+        notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END, ${blockerNote})
+      WHERE order_id = ${orderId}
+        AND blocks_shipment = TRUE
+        AND status NOT IN ('completed', 'cancelled')
+      RETURNING id
+    `);
+
+    return {
+      allocationExceptionsClosed: allocationResult.rows?.length ?? 0,
+      replenTasksClosed: replenResult.rows?.length ?? 0,
+    };
   }
 
   private async resolvePostPickStatusForOrder(orderId: number, desiredStatus: string): Promise<string> {
