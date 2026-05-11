@@ -87,6 +87,21 @@ export function registerDropshipOpsSurfaceRoutes(
       return sendDropshipOpsSurfaceError(res, error);
     }
   });
+
+  app.get("/api/dropship/admin/dogfood-launch-status", requirePermission("dropship", "view"), async (req, res) => {
+    try {
+      const result = await service.getDogfoodLaunchStatus({
+        platform: parseOptionalStringQuery(req.query.platform) === "all"
+          ? undefined
+          : parseOptionalStringQuery(req.query.platform),
+        search: parseOptionalStringQuery(req.query.search),
+        staleAfterHours: parseOptionalPositiveIntegerQuery(req.query.staleAfterHours, "staleAfterHours"),
+      });
+      return res.json(result);
+    } catch (error) {
+      return sendDropshipOpsSurfaceError(res, error);
+    }
+  });
 }
 
 function sendDropshipOpsSurfaceError(res: Response, error: unknown): Response {
@@ -115,6 +130,7 @@ function statusForDropshipOpsSurfaceError(code: string): number {
     case "DROPSHIP_AUDIT_SEARCH_INVALID_INPUT":
     case "DROPSHIP_DOGFOOD_READINESS_INVALID_INPUT":
     case "DROPSHIP_DOGFOOD_SMOKE_INVALID_INPUT":
+    case "DROPSHIP_DOGFOOD_LAUNCH_STATUS_INVALID_INPUT":
     case "DROPSHIP_OPS_SURFACE_INVALID_REQUEST":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":

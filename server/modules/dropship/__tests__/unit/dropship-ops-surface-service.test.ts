@@ -706,6 +706,115 @@ describe("DropshipOpsSurfaceService", () => {
       generatedAt: now,
     });
   });
+
+  it("builds dogfood launch status from readiness and fresh smoke evidence", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      launchGateItems: [makeDogfoodReadinessItem()],
+      summary: [{ status: "ready", count: 1 }],
+      total: 1,
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 1,
+      warningCandidateCount: 0,
+      blockedCandidateCount: 0,
+      message: "Loaded 1 store with full smoke evidence; 0 blocked and 0 incomplete.",
+      candidates: [makeDogfoodSmokeCandidate({ status: "ready" })],
+    });
+    const logs: DropshipLogEvent[] = [];
+    const service = makeService(repository, logs, launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus({
+      platform: "ebay",
+      search: " vendor ",
+      staleAfterHours: 24,
+    });
+
+    expect(result).toMatchObject({
+      status: "ready",
+      message: "1 store(s) have fresh complete dogfood smoke evidence.",
+      launchGate: {
+        status: "ready",
+        readyVendorStoreCount: 1,
+      },
+      smoke: {
+        staleAfterHours: 24,
+        readyCandidateCount: 1,
+      },
+    });
+    expect(result.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "run_live_smoke", status: "ready" }),
+      expect.objectContaining({ key: "confirm_fresh_smoke", status: "ready" }),
+    ]));
+    expect(repository.lastDogfoodInput).toMatchObject({
+      platform: "ebay",
+      search: "vendor",
+      page: 1,
+      limit: 100,
+      generatedAt: now,
+    });
+    expect(repository.lastDogfoodSmokeInput).toMatchObject({
+      platform: "ebay",
+      search: "vendor",
+      limit: 25,
+      staleAfterHours: 24,
+      generatedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_DOGFOOD_LAUNCH_STATUS_VIEWED",
+      context: {
+        status: "ready",
+        platform: "ebay",
+        staleAfterHours: 24,
+        readinessTotal: 1,
+        smokeTotal: 1,
+      },
+    });
+  });
+
+  it("keeps dogfood launch status warning until fresh complete smoke evidence exists", async () => {
+    const repository = new FakeOpsSurfaceRepository();
+    repository.dogfoodReadinessResult = makeDogfoodReadinessResult({
+      launchGateItems: [makeDogfoodReadinessItem()],
+      summary: [{ status: "ready", count: 1 }],
+      total: 1,
+    });
+    repository.dogfoodSmokeResult = makeDogfoodSmokeResult({
+      readyCandidateCount: 0,
+      warningCandidateCount: 1,
+      blockedCandidateCount: 0,
+      candidates: [makeDogfoodSmokeCandidate({
+        status: "warning",
+        stages: [{
+          key: "tracking",
+          label: "Marketplace tracking",
+          status: "warning",
+          message: "No marketplace tracking evidence exists yet.",
+          evidence: ["No marketplace tracking push has been recorded for the latest intake."],
+          latestAt: null,
+          freshness: {
+            status: "missing",
+            staleAfterHours: 72,
+          },
+        }],
+      })],
+    });
+    const service = makeService(repository, [], launchReadyEnv);
+
+    const result = await service.getDogfoodLaunchStatus();
+
+    expect(result).toMatchObject({
+      status: "warning",
+      message: "Readiness is sufficient to run dogfood smoke, but no store has fresh complete end-to-end smoke evidence yet.",
+    });
+    expect(result.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "complete_fresh_smoke",
+        status: "warning",
+        evidence: ["vendor 10, ebay store 20: Marketplace tracking - No marketplace tracking evidence exists yet."],
+      }),
+    ]));
+  });
 });
 
 class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
@@ -714,6 +823,8 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
   lastAuditSearch: Parameters<DropshipOpsSurfaceRepository["searchAuditEvents"]>[0] | null = null;
   lastDogfoodInput: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0] | null = null;
   lastDogfoodSmokeInput: Parameters<DropshipOpsSurfaceRepository["listDogfoodSmokeCandidates"]>[0] | null = null;
+  dogfoodReadinessResult: DropshipDogfoodReadinessResult | null = null;
+  dogfoodSmokeResult: DropshipDogfoodSmokeResult | null = null;
 
   async getVendorSettingsOverview(vendorId: number, generatedAt: Date): Promise<DropshipVendorSettingsOverview> {
     this.lastSettingsVendorId = vendorId;
@@ -750,6 +861,14 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
     input: Parameters<DropshipOpsSurfaceRepository["listDogfoodReadiness"]>[0],
   ): Promise<DropshipDogfoodReadinessResult> {
     this.lastDogfoodInput = input;
+    if (this.dogfoodReadinessResult) {
+      return {
+        ...this.dogfoodReadinessResult,
+        generatedAt: input.generatedAt,
+        page: input.page,
+        limit: input.limit,
+      };
+    }
     return {
       generatedAt: input.generatedAt,
       items: [],
@@ -775,6 +894,13 @@ class FakeOpsSurfaceRepository implements DropshipOpsSurfaceRepository {
     input: Parameters<DropshipOpsSurfaceRepository["listDogfoodSmokeCandidates"]>[0],
   ): Promise<DropshipDogfoodSmokeResult> {
     this.lastDogfoodSmokeInput = input;
+    if (this.dogfoodSmokeResult) {
+      return {
+        ...this.dogfoodSmokeResult,
+        generatedAt: input.generatedAt,
+        staleAfterHours: input.staleAfterHours ?? 72,
+      };
+    }
     return {
       generatedAt: input.generatedAt,
       staleAfterHours: input.staleAfterHours ?? 72,
@@ -891,6 +1017,22 @@ function makeSettingsOverview(overrides: Partial<DropshipVendorSettingsOverview>
   };
 }
 
+function makeDogfoodReadinessResult(
+  overrides: Partial<DropshipDogfoodReadinessResult> = {},
+): DropshipDogfoodReadinessResult {
+  return {
+    generatedAt: now,
+    items: [makeDogfoodReadinessItem()],
+    launchGateItems: [makeDogfoodReadinessItem()],
+    total: 1,
+    page: 1,
+    limit: 100,
+    summary: [{ status: "ready", count: 1 }],
+    systemChecks: [],
+    ...overrides,
+  };
+}
+
 function makeDogfoodReadinessItem(
   overrides: Partial<DropshipDogfoodReadinessItem> = {},
 ): DropshipDogfoodReadinessItem {
@@ -942,6 +1084,70 @@ function makeDogfoodReadinessItem(
       autoReloadFundingMethodReady: true,
       notificationPreferenceCount: 0,
     },
+    ...overrides,
+  };
+}
+
+function makeDogfoodSmokeResult(
+  overrides: Partial<DropshipDogfoodSmokeResult> = {},
+): DropshipDogfoodSmokeResult {
+  return {
+    generatedAt: now,
+    staleAfterHours: 72,
+    total: 1,
+    readyCandidateCount: 0,
+    warningCandidateCount: 1,
+    blockedCandidateCount: 0,
+    message: "Loaded 1 store waiting on smoke evidence.",
+    candidates: [makeDogfoodSmokeCandidate()],
+    ...overrides,
+  };
+}
+
+function makeDogfoodSmokeCandidate(
+  overrides: Partial<DropshipDogfoodSmokeResult["candidates"][number]> = {},
+): DropshipDogfoodSmokeResult["candidates"][number] {
+  return {
+    vendor: {
+      vendorId: 10,
+      memberId: "member-1",
+      businessName: "Vendor Test",
+      email: "vendor@cardshellz.test",
+      status: "active",
+      entitlementStatus: "active",
+    },
+    storeConnection: {
+      storeConnectionId: 20,
+      platform: "ebay",
+      status: "connected",
+      setupStatus: "ready",
+      externalDisplayName: "Vendor eBay",
+      shopDomain: null,
+      updatedAt: now,
+    },
+    status: "warning",
+    message: "Dogfood smoke evidence is incomplete but not blocked.",
+    stages: [{
+      key: "listing",
+      label: "Listing push",
+      status: "ready",
+      message: "At least one active marketplace listing exists for this store.",
+      evidence: ["1 active marketplace listing(s)."],
+      latestAt: now,
+      freshness: {
+        status: "fresh",
+        staleAfterHours: 72,
+      },
+    }],
+    references: {
+      latestListingId: 30,
+      latestListingJobId: 40,
+      latestIntakeId: null,
+      latestOmsOrderId: null,
+      latestWmsShipmentId: null,
+      latestTrackingPushId: null,
+    },
+    lastActivityAt: now,
     ...overrides,
   };
 }
