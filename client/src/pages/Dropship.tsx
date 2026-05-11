@@ -47,7 +47,7 @@ import {
   allDropshipOrderCancellationStatuses,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
-  buildAdminDogfoodSmokeUrl,
+  buildAdminDogfoodLaunchStatusUrl,
   buildAdminOmsChannelConfigUrl,
   buildAdminOmsChannelConfigureInput,
   buildAdminListingPushJobsUrl,
@@ -137,6 +137,8 @@ import {
   type DropshipAdminWalletConfirmedUsdcCreditResponse,
   type DropshipAdminWalletManualCreditResponse,
   type DropshipDogfoodLaunchGate,
+  type DropshipDogfoodLaunchCandidate,
+  type DropshipDogfoodLaunchStatusResponse,
   type DropshipDogfoodLaunchRunbookStep,
   type DropshipDogfoodReadinessItem,
   type DropshipDogfoodReadinessResponse,
@@ -862,19 +864,18 @@ function DogfoodReadinessTab({
     status: appliedFilters.status,
     platform: appliedFilters.platform,
   }), [appliedFilters]);
-  const smokeUrl = useMemo(() => buildAdminDogfoodSmokeUrl({
+  const launchStatusUrl = useMemo(() => buildAdminDogfoodLaunchStatusUrl({
     search: appliedFilters.search,
     platform: appliedFilters.platform,
-    limit: 10,
   }), [appliedFilters]);
 
   const readinessQuery = useQuery<DropshipDogfoodReadinessResponse>({
     queryKey: [readinessUrl],
     queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(readinessUrl),
   });
-  const smokeQuery = useQuery<DropshipDogfoodSmokeResponse>({
-    queryKey: [smokeUrl],
-    queryFn: () => fetchJson<DropshipDogfoodSmokeResponse>(smokeUrl),
+  const launchStatusQuery = useQuery<DropshipDogfoodLaunchStatusResponse>({
+    queryKey: [launchStatusUrl],
+    queryFn: () => fetchJson<DropshipDogfoodLaunchStatusResponse>(launchStatusUrl),
   });
   const omsChannelConfigUrl = buildAdminOmsChannelConfigUrl();
   const omsChannelConfigQuery = useQuery<DropshipAdminOmsChannelConfigResponse>({
@@ -884,8 +885,9 @@ function DogfoodReadinessTab({
 
   const items = readinessQuery.data?.items ?? [];
   const summary = readinessQuery.data?.summary ?? [];
-  const systemChecks = readinessQuery.data?.systemChecks ?? [];
-  const launchGate = readinessQuery.data?.launchGate ?? null;
+  const launchStatus = launchStatusQuery.data ?? null;
+  const systemChecks = readinessQuery.data?.systemChecks ?? launchStatus?.readiness.systemChecks ?? [];
+  const launchGate = launchStatus?.launchGate ?? readinessQuery.data?.launchGate ?? null;
   const omsConfig = omsChannelConfigQuery.data?.config ?? null;
 
   useEffect(() => {
@@ -920,7 +922,7 @@ function DogfoodReadinessTab({
       await Promise.all([
         omsChannelConfigQuery.refetch(),
         readinessQuery.refetch(),
-        smokeQuery.refetch(),
+        launchStatusQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
@@ -933,12 +935,12 @@ function DogfoodReadinessTab({
 
   return (
     <div className="space-y-5">
-      {(readinessQuery.error || smokeQuery.error || omsChannelConfigQuery.error || omsError) && (
+      {(readinessQuery.error || launchStatusQuery.error || omsChannelConfigQuery.error || omsError) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
             {omsError || queryErrorMessage(
-              readinessQuery.error ?? smokeQuery.error ?? omsChannelConfigQuery.error,
+              readinessQuery.error ?? launchStatusQuery.error ?? omsChannelConfigQuery.error,
               "Unable to load dropship dogfood readiness.",
             )}
           </AlertDescription>
@@ -967,12 +969,16 @@ function DogfoodReadinessTab({
 
       <DogfoodLaunchGatePanel
         gate={launchGate}
-        isLoading={readinessQuery.isLoading || readinessQuery.isFetching}
+        isLoading={launchStatusQuery.isLoading || launchStatusQuery.isFetching}
+        launchCandidates={launchStatus?.launchCandidates ?? []}
+        message={launchStatus?.message}
+        runbookSteps={launchStatus?.runbookSteps}
+        status={launchStatus?.status}
       />
 
       <DogfoodSmokePanel
-        smoke={smokeQuery.data ?? null}
-        isLoading={smokeQuery.isLoading || smokeQuery.isFetching}
+        smoke={launchStatus?.smoke ?? null}
+        isLoading={launchStatusQuery.isLoading || launchStatusQuery.isFetching}
         onOpenSmokeOpsSearch={onOpenSmokeOpsSearch}
       />
 
@@ -3992,9 +3998,17 @@ function SystemReadinessPanel({
 function DogfoodLaunchGatePanel({
   gate,
   isLoading,
+  launchCandidates,
+  message,
+  runbookSteps,
+  status,
 }: {
   gate: DropshipDogfoodLaunchGate | null;
   isLoading: boolean;
+  launchCandidates?: DropshipDogfoodLaunchCandidate[];
+  message?: string;
+  runbookSteps?: DropshipDogfoodLaunchRunbookStep[];
+  status?: DropshipDogfoodReadinessStatus;
 }) {
   if (isLoading && !gate) {
     return (
@@ -4013,17 +4027,22 @@ function DogfoodLaunchGatePanel({
     return null;
   }
 
+  const displayStatus = status ?? gate.status;
+  const displayMessage = message ?? gate.message;
+  const steps = runbookSteps ?? gate.runbookSteps;
+  const candidates = launchCandidates ?? [];
+
   return (
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">Dogfood launch gate</h2>
-            <Badge variant="outline" className={dogfoodReadinessStatusTone(gate.status)}>
-              {formatStatus(gate.status)}
+            <Badge variant="outline" className={dogfoodReadinessStatusTone(displayStatus)}>
+              {formatStatus(displayStatus)}
             </Badge>
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">{gate.message}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{displayMessage}</p>
         </div>
         <div className="grid w-full gap-2 sm:grid-cols-2 lg:w-auto lg:min-w-[520px] lg:grid-cols-4">
           <LaunchGateMetric label="Ready" value={gate.readyVendorStoreCount} />
@@ -4049,22 +4068,85 @@ function DogfoodLaunchGatePanel({
           ))}
         </div>
       )}
-      {gate.runbookSteps.length > 0 && (
+      {candidates.length > 0 && (
+        <div className="mt-4 border-t pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">Ready dogfood candidates</h3>
+            <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800">
+              {candidates.length} ready
+            </Badge>
+          </div>
+          <div className="mt-3 grid gap-2 lg:grid-cols-2">
+            {candidates.slice(0, 4).map((candidate) => (
+              <DogfoodLaunchCandidateCard
+                key={`${candidate.vendor.vendorId}:${candidate.storeConnection.storeConnectionId}`}
+                candidate={candidate}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {steps.length > 0 && (
         <div className="mt-4 border-t pt-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">Launch runbook</h3>
             <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
-              {gate.runbookSteps.length} step{gate.runbookSteps.length === 1 ? "" : "s"}
+              {steps.length} step{steps.length === 1 ? "" : "s"}
             </Badge>
           </div>
           <div className="mt-3 grid gap-2 lg:grid-cols-2">
-            {gate.runbookSteps.map((step, index) => (
+            {steps.map((step, index) => (
               <LaunchRunbookStepCard key={step.key} step={step} index={index} />
             ))}
           </div>
         </div>
       )}
     </section>
+  );
+}
+
+function DogfoodLaunchCandidateCard({
+  candidate,
+}: {
+  candidate: DropshipDogfoodLaunchCandidate;
+}) {
+  const storeName = candidate.storeConnection.externalDisplayName
+    || candidate.storeConnection.shopDomain
+    || `${formatStatus(candidate.storeConnection.platform)} store ${candidate.storeConnection.storeConnectionId}`;
+  const references = [
+    candidate.smokeReferences.latestListingId ? `Listing ${candidate.smokeReferences.latestListingId}` : null,
+    candidate.smokeReferences.latestIntakeId ? `Intake ${candidate.smokeReferences.latestIntakeId}` : null,
+    candidate.smokeReferences.latestOmsOrderId ? `OMS ${candidate.smokeReferences.latestOmsOrderId}` : null,
+    candidate.smokeReferences.latestWmsShipmentId ? `Shipment ${candidate.smokeReferences.latestWmsShipmentId}` : null,
+    candidate.smokeReferences.latestTrackingPushId ? `Tracking ${candidate.smokeReferences.latestTrackingPushId}` : null,
+  ].filter((reference): reference is string => Boolean(reference));
+
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate font-medium">
+            {candidate.vendor.businessName || candidate.vendor.email || `Vendor ${candidate.vendor.vendorId}`}
+          </div>
+          <div className="mt-1 truncate text-xs text-muted-foreground">{storeName}</div>
+        </div>
+        <Badge variant="outline" className="shrink-0 border-emerald-200 bg-emerald-50 text-emerald-800">
+          Ready
+        </Badge>
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">
+        Latest smoke {candidate.lastSmokeActivityAt ? formatDateTime(candidate.lastSmokeActivityAt) : "missing"}
+      </div>
+      {references.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {references.map((reference) => (
+            <Badge key={reference} variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+              {reference}
+            </Badge>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
