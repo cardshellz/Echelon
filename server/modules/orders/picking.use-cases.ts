@@ -9,6 +9,7 @@ import {
   productLocations,
   orderItems,
   orders,
+  allocationExceptions,
   itemStatusEnum,
 } from "@shared/schema";
 import type {
@@ -135,6 +136,22 @@ export type BinCountResult = {
   inferredReplenMoved: number | null; // units attributed to inferred replen
 };
 
+export type ResolveAllocationResult =
+  | {
+      success: true;
+      item: OrderItem;
+      exception: any;
+      selectedLocation: { id: number; code: string; zone: string | null };
+      autoFixedSetup: boolean;
+      reviewNeeded: boolean;
+    }
+  | {
+      success: false;
+      error: string;
+      message: string;
+      exception?: any;
+    };
+
 export type PickQueueOrder = any; // Pass-through type from storage
 
 // ---------------------------------------------------------------------------
@@ -153,6 +170,324 @@ export class PickingUseCases {
     private readonly storage: Storage,
     private readonly channelSync?: ChannelSyncLike,
   ) {}
+
+  /**
+   * Resolve an allocation/setup miss by accepting the bin the picker scanned or
+   * typed. This deliberately does not pick inventory. It only turns a physical
+   * bin confirmation into a picker-facing assignment and a durable exception
+   * trail, with a narrowly scoped auto-fix when product-location setup is
+   * clearly missing.
+   */
+  async resolveAllocationWithBin(orderItemId: number, params: {
+    locationCode?: string;
+    warehouseLocationId?: number;
+    userId?: string;
+    deviceType?: string;
+    sessionId?: string;
+  }): Promise<ResolveAllocationResult> {
+    const [row] = await this.db
+      .select({
+        item: orderItems,
+        order: orders,
+      })
+      .from(orderItems)
+      .innerJoin(orders, eq(orderItems.orderId, orders.id))
+      .where(eq(orderItems.id, orderItemId))
+      .limit(1);
+
+    if (!row) {
+      throw new ValidationError(`Order item ${orderItemId} was not found`);
+    }
+
+    const item = row.item as OrderItem;
+    const order = row.order as Order;
+    if (item.requiresShipping !== 1) {
+      throw new ValidationError(`Order item ${orderItemId} does not require picking`);
+    }
+
+    const typedCode = (params.locationCode || "").trim().toUpperCase();
+    if (!typedCode && !params.warehouseLocationId) {
+      throw new ValidationError("locationCode or warehouseLocationId is required");
+    }
+
+    const variant = await this.storage.getProductVariantBySku(item.sku);
+    const requestedQty = Math.max(0, (item.quantity || 0) - (item.pickedQuantity || 0)) || item.quantity || 0;
+
+    const createBlockedException = async (exceptionType: string, message: string, metadata: Record<string, any> = {}) => {
+      const [exception] = await this.db.insert(allocationExceptions).values({
+        orderId: item.orderId,
+        orderItemId: item.id,
+        orderNumber: order.orderNumber,
+        sku: item.sku,
+        productVariantId: variant?.id ?? null,
+        exceptionType,
+        status: "blocked",
+        requestedQty,
+        selectedLocationId: metadata.selectedLocationId ?? null,
+        selectedLocationCode: metadata.selectedLocationCode ?? null,
+        reviewReason: message,
+        metadata: {
+          ...metadata,
+          locationCode: typedCode || null,
+          warehouseLocationId: params.warehouseLocationId ?? null,
+        },
+      }).returning();
+
+      try {
+        const { notify } = await import("../notifications/notifications.service");
+        await notify("allocation_blocked", {
+          title: `Allocation blocked: ${item.sku}`,
+          message,
+          data: {
+            orderId: item.orderId,
+            orderNumber: order.orderNumber,
+            orderItemId: item.id,
+            sku: item.sku,
+            exceptionId: exception.id,
+          },
+        });
+      } catch (notifyErr: any) {
+        console.warn(`[Allocation] blocked notification failed: ${notifyErr.message}`);
+      }
+
+      return exception;
+    };
+
+    if (!variant) {
+      const message = `No catalog variant found for SKU ${item.sku}`;
+      const exception = await createBlockedException("missing_variant", message);
+      return { success: false, error: "missing_variant", message, exception };
+    }
+
+    const locationWhere = params.warehouseLocationId
+      ? eq(warehouseLocations.id, Number(params.warehouseLocationId))
+      : order.warehouseId
+        ? and(
+            sql`upper(${warehouseLocations.code}) = ${typedCode}`,
+            eq(warehouseLocations.warehouseId, order.warehouseId),
+          )
+        : sql`upper(${warehouseLocations.code}) = ${typedCode}`;
+
+    const [location] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(locationWhere)
+      .limit(1);
+
+    if (!location) {
+      const message = params.warehouseLocationId
+        ? `Warehouse location ${params.warehouseLocationId} was not found`
+        : `Warehouse location ${typedCode} was not found`;
+      const exception = await createBlockedException("unknown_location", message);
+      return { success: false, error: "unknown_location", message, exception };
+    }
+
+    if (order.warehouseId && location.warehouseId && Number(location.warehouseId) !== Number(order.warehouseId)) {
+      const message = `Bin ${location.code} belongs to warehouse ${location.warehouseId}, not order warehouse ${order.warehouseId}`;
+      const exception = await createBlockedException("wrong_warehouse", message, {
+        selectedLocationId: location.id,
+        selectedLocationCode: location.code,
+      });
+      return { success: false, error: "wrong_warehouse", message, exception };
+    }
+
+    if (location.isActive !== 1 || location.isPickable !== 1 || location.cycleCountFreezeId) {
+      const message = `Bin ${location.code} is not an active pickable bin`;
+      const exception = await createBlockedException("not_pickable", message, {
+        selectedLocationId: location.id,
+        selectedLocationCode: location.code,
+        isActive: location.isActive,
+        isPickable: location.isPickable,
+        cycleCountFreezeId: location.cycleCountFreezeId,
+      });
+      return { success: false, error: "not_pickable", message, exception };
+    }
+
+    const level = await this.inventoryCore.getLevel(variant.id, location.id);
+    const availableQty = level?.variantQty ?? 0;
+    if (requestedQty > 0 && availableQty < requestedQty) {
+      const message = `Bin ${location.code} has ${availableQty} available for ${item.sku}, but ${requestedQty} is needed`;
+      const exception = await createBlockedException("insufficient_bin_qty", message, {
+        selectedLocationId: location.id,
+        selectedLocationCode: location.code,
+        availableQty,
+        requestedQty,
+      });
+      return { success: false, error: "insufficient_bin_qty", message, exception };
+    }
+
+    const activePrimaryRows = await this.db
+      .select()
+      .from(productLocations)
+      .where(and(
+        sql`(${productLocations.productVariantId} = ${variant.id} OR upper(${productLocations.sku}) = ${item.sku.toUpperCase()})`,
+        eq(productLocations.status, "active"),
+        eq(productLocations.isPrimary, 1),
+      ));
+
+    const primaryAtSelectedBin = activePrimaryRows.some((pl: any) =>
+      Number(pl.warehouseLocationId) === Number(location.id) || pl.location?.toUpperCase() === location.code.toUpperCase()
+    );
+    const hasNoPrimary = activePrimaryRows.length === 0;
+    const hasCompetingPrimary = activePrimaryRows.length > 0 && !primaryAtSelectedBin;
+    const hasMultiplePrimaries = activePrimaryRows.length > 1;
+    const autoFixedSetup = hasNoPrimary;
+    const reviewNeeded = hasCompetingPrimary || hasMultiplePrimaries;
+    const reviewReason = reviewNeeded
+      ? `Picker selected ${location.code}, but active primary setup is ${activePrimaryRows.map((pl: any) => pl.location).join(", ")}`
+      : autoFixedSetup
+        ? `No active primary pick bin existed for ${item.sku}; setup auto-created from picker bin confirmation`
+        : null;
+
+    const zone = location.zone || location.code.split("-")[0] || "U";
+
+    const result = await this.db.transaction(async (tx) => {
+      if (autoFixedSetup) {
+        const [existingAtBin] = await tx
+          .select()
+          .from(productLocations)
+          .where(and(
+            sql`(${productLocations.productVariantId} = ${variant.id} OR upper(${productLocations.sku}) = ${item.sku.toUpperCase()})`,
+            eq(productLocations.warehouseLocationId, location.id),
+          ))
+          .limit(1);
+
+        if (existingAtBin) {
+          await tx
+            .update(productLocations)
+            .set({
+              productVariantId: variant.id,
+              productId: variant.productId,
+              sku: item.sku,
+              name: variant.name || item.name,
+              location: location.code,
+              zone,
+              isPrimary: 1,
+              status: "active",
+              updatedAt: new Date(),
+            })
+            .where(eq(productLocations.id, existingAtBin.id));
+        } else {
+          await tx.insert(productLocations).values({
+            productId: variant.productId,
+            productVariantId: variant.id,
+            sku: item.sku,
+            name: variant.name || item.name,
+            location: location.code,
+            zone,
+            warehouseLocationId: location.id,
+            isPrimary: 1,
+            status: "active",
+            imageUrl: item.imageUrl || null,
+            barcode: item.barcode || variant.barcode || null,
+          });
+        }
+      }
+
+      const [updatedItem] = await tx
+        .update(orderItems)
+        .set({
+          location: location.code,
+          zone,
+        })
+        .where(eq(orderItems.id, item.id))
+        .returning();
+
+      const [exception] = await tx.insert(allocationExceptions).values({
+        orderId: item.orderId,
+        orderItemId: item.id,
+        orderNumber: order.orderNumber,
+        sku: item.sku,
+        productVariantId: variant.id,
+        exceptionType: "manual_bin_override",
+        status: reviewNeeded ? "needs_review" : "resolved_inline",
+        requestedQty,
+        selectedLocationId: location.id,
+        selectedLocationCode: location.code,
+        resolution: autoFixedSetup ? "auto_fixed_product_location" : "accepted_picker_bin",
+        autoFixedSetup,
+        reviewReason,
+        resolvedBy: params.userId || null,
+        resolvedAt: new Date(),
+        metadata: {
+          previousLocation: item.location,
+          previousZone: item.zone,
+          availableQty,
+          activePrimaryLocations: activePrimaryRows.map((pl: any) => ({
+            id: pl.id,
+            location: pl.location,
+            warehouseLocationId: pl.warehouseLocationId,
+          })),
+          enteredLocationCode: typedCode || null,
+        },
+      }).returning();
+
+      return { updatedItem, exception };
+    });
+
+    await this.storage.createPickingLog({
+      actionType: "allocation_bin_override",
+      pickerId: params.userId || undefined,
+      orderId: item.orderId,
+      orderNumber: order.orderNumber,
+      orderItemId: item.id,
+      productId: item.productId || variant.productId,
+      sku: item.sku,
+      itemName: item.name,
+      locationCode: location.code,
+      qtyRequested: item.quantity,
+      qtyBefore: item.pickedQuantity || 0,
+      qtyAfter: item.pickedQuantity || 0,
+      qtyDelta: 0,
+      reason: reviewReason || "Picker confirmed bin assignment",
+      deviceType: params.deviceType || "desktop",
+      sessionId: params.sessionId,
+      pickMethod: typedCode ? "manual" : "button",
+      itemStatusBefore: item.status,
+      itemStatusAfter: item.status,
+      metadata: {
+        exceptionId: result.exception.id,
+        autoFixedSetup,
+        reviewNeeded,
+        selectedLocationId: location.id,
+      },
+    });
+
+    try {
+      const { notify } = await import("../notifications/notifications.service");
+      const notificationType = autoFixedSetup
+        ? "allocation_auto_fixed"
+        : reviewNeeded
+          ? "allocation_review_needed"
+          : null;
+      if (notificationType) {
+        await notify(notificationType, {
+          title: autoFixedSetup ? `Allocation setup fixed: ${item.sku}` : `Allocation review needed: ${item.sku}`,
+          message: reviewReason || `Picker assigned ${item.sku} to ${location.code}`,
+          data: {
+            orderId: item.orderId,
+            orderNumber: order.orderNumber,
+            orderItemId: item.id,
+            sku: item.sku,
+            selectedLocationId: location.id,
+            selectedLocationCode: location.code,
+            exceptionId: result.exception.id,
+          },
+        });
+      }
+    } catch (notifyErr: any) {
+      console.warn(`[Allocation] notification failed: ${notifyErr.message}`);
+    }
+
+    return {
+      success: true,
+      item: result.updatedItem as OrderItem,
+      exception: result.exception,
+      selectedLocation: { id: location.id, code: location.code, zone },
+      autoFixedSetup,
+      reviewNeeded,
+    };
+  }
 
   // -------------------------------------------------------------------------
   // Settings

@@ -241,6 +241,46 @@ export type InsertWmsOrderItem = InsertOrderItem;
 export type WmsOrderItem = OrderItem;
 
 // ============================================
+// ALLOCATION EXCEPTIONS
+// ============================================
+
+// Durable trail for cases where the system could not confidently assign a pick
+// bin from setup data, but the warehouse can still resolve the physical truth.
+// This is intentionally lighter than a full allocation engine: order_items still
+// carries the picker-facing location today, while this table captures why a
+// picker/lead had to override or repair the assignment.
+export const allocationExceptions = wmsSchema.table("allocation_exceptions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
+  orderNumber: varchar("order_number", { length: 50 }),
+  sku: varchar("sku", { length: 100 }).notNull(),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  exceptionType: varchar("exception_type", { length: 50 }).notNull(),
+  status: varchar("status", { length: 30 }).notNull().default("open"),
+  requestedQty: integer("requested_qty").notNull().default(0),
+  selectedLocationId: integer("selected_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
+  selectedLocationCode: varchar("selected_location_code", { length: 50 }),
+  resolution: varchar("resolution", { length: 50 }),
+  autoFixedSetup: boolean("auto_fixed_setup").notNull().default(false),
+  reviewReason: text("review_reason"),
+  resolvedBy: varchar("resolved_by", { length: 100 }).references(() => users.id, { onDelete: "set null" }),
+  resolvedAt: timestamp("resolved_at"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertAllocationExceptionSchema = createInsertSchema(allocationExceptions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertAllocationException = z.infer<typeof insertAllocationExceptionSchema>;
+export type AllocationException = typeof allocationExceptions.$inferSelect;
+
+// ============================================
 // PICKING LOGS (Audit Trail)
 // ============================================
 
