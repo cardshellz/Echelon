@@ -113,6 +113,7 @@ import {
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOrderOpsProcessResponse,
+  type DropshipAdminOrderOpsWmsSyncResponse,
   type DropshipOrderDetail,
   type DropshipOrderDetailResponse,
   type DropshipAdminOmsChannelConfigResponse,
@@ -185,6 +186,7 @@ type ReturnOpsStatusFilter = DropshipRmaStatus | "default" | "all";
 type StoreConnectionStatusFilter = DropshipStoreConnectionLifecycleStatus | "all";
 type StoreConnectionPlatformFilter = DropshipStorePlatform | "all";
 type DropshipOpsSearchableTab = "listing-pushes" | "order-intake" | "tracking-pushes";
+type OrderIntakeAdminAction = "retry" | "exception" | "process" | "retry-cancellation" | "retry-wms-sync";
 type DropshipOpsTabValue =
   | "overview"
   | "dogfood"
@@ -2360,7 +2362,7 @@ function OrderIntakeOpsTab({
   const [actionReason, setActionReason] = useState("");
   const [pendingAction, setPendingAction] = useState<{
     intakeId: number;
-    action: "retry" | "exception" | "process" | "retry-cancellation";
+    action: OrderIntakeAdminAction;
   } | null>(null);
   const [selectedIntakeId, setSelectedIntakeId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
@@ -2405,7 +2407,7 @@ function OrderIntakeOpsTab({
 
   async function runOrderAction(
     intake: DropshipAdminOrderOpsIntakeListItem,
-    action: "retry" | "exception" | "process" | "retry-cancellation",
+    action: OrderIntakeAdminAction,
   ) {
     setPendingAction({ intakeId: intake.intakeId, action });
     setError("");
@@ -2420,6 +2422,7 @@ function OrderIntakeOpsTab({
         DropshipAdminOrderOpsActionResponse
         | DropshipAdminOrderOpsCancellationRetryResponse
         | DropshipAdminOrderOpsProcessResponse
+        | DropshipAdminOrderOpsWmsSyncResponse
       >(
         `/api/dropship/admin/order-intake/${intake.intakeId}/${action}`,
         input,
@@ -5835,9 +5838,9 @@ function OrderIntakeOpsTable({
   onSelectDetail: (intake: DropshipAdminOrderOpsIntakeListItem) => void;
   onRunAction: (
     intake: DropshipAdminOrderOpsIntakeListItem,
-    action: "retry" | "exception" | "process" | "retry-cancellation",
+    action: OrderIntakeAdminAction,
   ) => void;
-  pendingAction: { intakeId: number; action: "retry" | "exception" | "process" | "retry-cancellation" } | null;
+  pendingAction: { intakeId: number; action: OrderIntakeAdminAction } | null;
   retryEligibilityNow: Date;
   selectedIntakeId: number | null;
   total: number;
@@ -5886,6 +5889,7 @@ function OrderIntakeOpsTable({
             const retryEligibility = orderIntakeRetryEligibility(intake, retryEligibilityNow);
             const cancellationRetryEligibility = orderCancellationRetryEligibility(intake);
             const retryLabel = retryEligibility.reason === "stale_processing" ? "Recover" : "Retry";
+            const canRetryWmsSync = orderIntakeCanRetryWmsSync(intake);
             return (
               <TableRow key={intake.intakeId}>
                 <TableCell>
@@ -5976,6 +5980,17 @@ function OrderIntakeOpsTable({
                     >
                       <RotateCcw className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry-cancellation" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
                       Retry cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2"
+                      disabled={pendingAction !== null || !canRetryWmsSync}
+                      onClick={() => onRunAction(intake, "retry-wms-sync")}
+                    >
+                      <Truck className={pendingAction?.intakeId === intake.intakeId && pendingAction.action === "retry-wms-sync" ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      Sync WMS
                     </Button>
                     <Button
                       type="button"
@@ -6626,10 +6641,19 @@ function orderActionMessage(
   response:
     | DropshipAdminOrderOpsActionResponse
     | DropshipAdminOrderOpsCancellationRetryResponse
-    | DropshipAdminOrderOpsProcessResponse,
-  action: "retry" | "exception" | "process" | "retry-cancellation",
+    | DropshipAdminOrderOpsProcessResponse
+    | DropshipAdminOrderOpsWmsSyncResponse,
+  action: OrderIntakeAdminAction,
 ): string {
-  if (action === "process" && "outcome" in response) {
+  if (action === "retry-wms-sync" && "retryQueued" in response) {
+    if (response.outcome === "synced") {
+      const wmsOrderLabel = response.wmsOrderId ? ` WMS order ${response.wmsOrderId}` : " WMS";
+      return `Order intake ${response.intakeId} synced to${wmsOrderLabel}.`;
+    }
+    const suffix = response.failureMessage ? `: ${response.failureMessage}` : ".";
+    return `Order intake ${response.intakeId} WMS sync retry queued${suffix}`;
+  }
+  if (action === "process" && "failureCode" in response) {
     const suffix = response.failureCode ? ` (${formatStatus(response.failureCode)})` : "";
     return `Order intake ${response.intakeId} processing returned ${formatStatus(response.outcome)}${suffix}.`;
   }
@@ -6644,6 +6668,10 @@ function orderActionMessage(
 
 function orderIntakeCanProcessNow(status: DropshipOpsOrderIntakeStatus): boolean {
   return status === "received" || status === "retrying" || status === "payment_hold";
+}
+
+function orderIntakeCanRetryWmsSync(intake: DropshipAdminOrderOpsIntakeListItem): boolean {
+  return intake.status === "accepted" && intake.omsOrderId !== null;
 }
 
 function readinessSummaryCount(

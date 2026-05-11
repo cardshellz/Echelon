@@ -19,6 +19,7 @@ import type {
   DropshipOrderOpsTrackingLineItemSummary,
   DropshipOrderOpsTrackingPushSummary,
   DropshipOrderOpsWalletLedgerEntry,
+  DropshipOrderOpsWmsSyncActionTarget,
 } from "../application/dropship-order-ops-service";
 import type { DropshipTrackingPushStatus } from "../application/dropship-tracking-push-ops-dtos";
 
@@ -152,6 +153,16 @@ interface ActionIntakeRow {
   payment_hold_expires_at: Date | null;
   rejection_reason: string | null;
   cancellation_status: string | null;
+  updated_at: Date;
+}
+
+interface WmsSyncActionTargetRow {
+  id: number;
+  vendor_id: number;
+  store_connection_id: number;
+  external_order_id: string;
+  status: DropshipOrderIntakeStatus;
+  oms_order_id: string | number | null;
   updated_at: Date;
 }
 
@@ -338,6 +349,29 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
     } finally {
       client.release();
     }
+  }
+
+  async getWmsSyncActionTarget(input: { intakeId: number }): Promise<DropshipOrderOpsWmsSyncActionTarget | null> {
+    const result = await this.dbPool.query<WmsSyncActionTargetRow>(
+      `SELECT id, vendor_id, store_connection_id, external_order_id, status, oms_order_id, updated_at
+       FROM dropship.dropship_order_intake
+       WHERE id = $1
+       LIMIT 1`,
+      [input.intakeId],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      intakeId: row.id,
+      vendorId: row.vendor_id,
+      storeConnectionId: row.store_connection_id,
+      externalOrderId: row.external_order_id,
+      status: row.status,
+      omsOrderId: row.oms_order_id === null ? null : toSafeInteger(row.oms_order_id, "oms_order_id"),
+      updatedAt: row.updated_at,
+    };
   }
 
   async retryIntake(
@@ -569,6 +603,38 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
     } finally {
       client.release();
     }
+  }
+
+  async recordWmsSyncAction(
+    input: Parameters<DropshipOrderOpsRepository["recordWmsSyncAction"]>[0],
+  ): Promise<void> {
+    await this.dbPool.query(
+      `INSERT INTO dropship.dropship_audit_events
+        (vendor_id, store_connection_id, entity_type, entity_id, event_type,
+         actor_type, actor_id, severity, payload, created_at)
+       VALUES ($1, $2, 'dropship_order_intake', $3, 'order_wms_sync_retry_requested',
+               $4, $5, $6, $7::jsonb, $8)`,
+      [
+        input.target.vendorId,
+        input.target.storeConnectionId,
+        String(input.target.intakeId),
+        input.actor.actorType,
+        input.actor.actorId ?? null,
+        input.outcome === "synced" ? "info" : "warning",
+        JSON.stringify({
+          externalOrderId: input.target.externalOrderId,
+          idempotencyKey: input.idempotencyKey,
+          reason: input.reason ?? null,
+          previousStatus: input.target.status,
+          omsOrderId: input.target.omsOrderId,
+          outcome: input.outcome,
+          wmsOrderId: input.wmsOrderId,
+          retryQueued: input.retryQueued,
+          failureMessage: input.failureMessage,
+        }),
+        input.now,
+      ],
+    );
   }
 }
 

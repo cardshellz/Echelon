@@ -6,6 +6,7 @@ import {
   listDropshipOrderOpsIntakesInputSchema,
   markDropshipOrderOpsExceptionInputSchema,
   processDropshipOrderOpsIntakeInputSchema,
+  retryDropshipOrderOpsWmsSyncInputSchema,
   retryDropshipOrderOpsCancellationInputSchema,
   retryDropshipOrderOpsIntakeInputSchema,
   type GetDropshipOrderOpsIntakeDetailInput,
@@ -15,9 +16,16 @@ import {
   type ProcessDropshipOrderOpsIntakeInput,
   type RetryDropshipOrderOpsCancellationInput,
   type RetryDropshipOrderOpsIntakeInput,
+  type RetryDropshipOrderOpsWmsSyncInput,
 } from "./dropship-order-ops-dtos";
 import type { DropshipOrderProcessingResult } from "./dropship-order-processing-service";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type {
+  DropshipClock,
+  DropshipLogEvent,
+  DropshipLogger,
+  DropshipOmsFulfillmentSync,
+  DropshipOmsFulfillmentSyncRetryQueue,
+} from "./dropship-ports";
 
 export const DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES: DropshipOrderIntakeStatus[] = [
   "payment_hold",
@@ -235,12 +243,38 @@ export interface DropshipOrderOpsCancellationActionResult extends DropshipOrderO
   cancellationStatus: string | null;
 }
 
+export interface DropshipOrderOpsWmsSyncActionTarget {
+  intakeId: number;
+  vendorId: number;
+  storeConnectionId: number;
+  externalOrderId: string;
+  status: DropshipOrderIntakeStatus;
+  omsOrderId: number | null;
+  updatedAt: Date;
+}
+
+export interface DropshipOrderOpsWmsSyncActionResult {
+  intakeId: number;
+  vendorId: number;
+  storeConnectionId: number;
+  omsOrderId: number;
+  outcome: "synced" | "queued";
+  wmsOrderId: number | null;
+  retryQueued: boolean;
+  failureMessage: string | null;
+  updatedAt: Date;
+}
+
 export interface DropshipOrderOpsRepository {
   listIntakes(input: ListDropshipOrderOpsIntakesInput & {
     statuses: DropshipOrderIntakeStatus[];
   }): Promise<DropshipOrderOpsIntakeListResult>;
 
   getIntakeDetail(input: GetDropshipOrderOpsIntakeDetailInput): Promise<DropshipOrderOpsIntakeDetail | null>;
+
+  getWmsSyncActionTarget(input: {
+    intakeId: number;
+  }): Promise<DropshipOrderOpsWmsSyncActionTarget | null>;
 
   retryIntake(input: RetryDropshipOrderOpsIntakeInput & {
     now: Date;
@@ -253,6 +287,15 @@ export interface DropshipOrderOpsRepository {
   markException(input: MarkDropshipOrderOpsExceptionInput & {
     now: Date;
   }): Promise<DropshipOrderOpsActionResult>;
+
+  recordWmsSyncAction(input: RetryDropshipOrderOpsWmsSyncInput & {
+    target: DropshipOrderOpsWmsSyncActionTarget & { omsOrderId: number };
+    now: Date;
+    outcome: DropshipOrderOpsWmsSyncActionResult["outcome"];
+    wmsOrderId: number | null;
+    retryQueued: boolean;
+    failureMessage: string | null;
+  }): Promise<void>;
 }
 
 export interface DropshipOrderOpsProcessor {
@@ -268,6 +311,8 @@ export class DropshipOrderOpsService {
     private readonly deps: {
       repository: DropshipOrderOpsRepository;
       processor?: DropshipOrderOpsProcessor;
+      fulfillmentSync?: DropshipOmsFulfillmentSync;
+      fulfillmentSyncRetryQueue?: DropshipOmsFulfillmentSyncRetryQueue;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -360,6 +405,68 @@ export class DropshipOrderOpsService {
     return result;
   }
 
+  async retryWmsSync(input: unknown): Promise<DropshipOrderOpsWmsSyncActionResult> {
+    const parsed = parseRetryWmsSyncInput(input);
+    const target = await this.deps.repository.getWmsSyncActionTarget({ intakeId: parsed.intakeId });
+    if (!target) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_INTAKE_NOT_FOUND",
+        "Dropship order intake was not found.",
+        { intakeId: parsed.intakeId },
+      );
+    }
+    if (target.status !== "accepted") {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_STATUS_NOT_ACTIONABLE",
+        "Dropship order intake is not accepted and cannot be synced to WMS.",
+        { intakeId: target.intakeId, status: target.status },
+      );
+    }
+    if (target.omsOrderId === null) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_STATUS_NOT_ACTIONABLE",
+        "Accepted dropship order intake has no OMS order id to sync to WMS.",
+        { intakeId: target.intakeId, status: target.status },
+      );
+    }
+
+    const now = this.deps.clock.now();
+    const result = await this.runWmsSyncRepair({
+      target: { ...target, omsOrderId: target.omsOrderId },
+    });
+    await this.deps.repository.recordWmsSyncAction({
+      ...parsed,
+      target: { ...target, omsOrderId: target.omsOrderId },
+      now,
+      outcome: result.outcome,
+      wmsOrderId: result.wmsOrderId,
+      retryQueued: result.retryQueued,
+      failureMessage: result.failureMessage,
+    });
+
+    this.deps.logger[result.outcome === "synced" ? "info" : "warn"]({
+      code: "DROPSHIP_ORDER_OPS_WMS_SYNC_RETRY_REQUESTED",
+      message: "Dropship order WMS sync repair was requested by ops.",
+      context: {
+        intakeId: target.intakeId,
+        vendorId: target.vendorId,
+        storeConnectionId: target.storeConnectionId,
+        omsOrderId: target.omsOrderId,
+        outcome: result.outcome,
+        wmsOrderId: result.wmsOrderId,
+        retryQueued: result.retryQueued,
+        failureMessage: result.failureMessage,
+        idempotencyKey: parsed.idempotencyKey,
+        reason: parsed.reason ?? null,
+      },
+    });
+
+    return {
+      ...result,
+      updatedAt: now,
+    };
+  }
+
   async processIntake(input: unknown): Promise<DropshipOrderProcessingResult> {
     const parsed = parseProcessInput(input);
     if (!this.deps.processor) {
@@ -389,6 +496,79 @@ export class DropshipOrderOpsService {
       },
     });
     return result;
+  }
+
+  private async runWmsSyncRepair(input: {
+    target: DropshipOrderOpsWmsSyncActionTarget & { omsOrderId: number };
+  }): Promise<Omit<DropshipOrderOpsWmsSyncActionResult, "updatedAt">> {
+    if (this.deps.fulfillmentSync) {
+      try {
+        const wmsOrderId = await this.deps.fulfillmentSync.syncOmsOrderToWms(input.target.omsOrderId);
+        if (wmsOrderId !== null) {
+          return {
+            intakeId: input.target.intakeId,
+            vendorId: input.target.vendorId,
+            storeConnectionId: input.target.storeConnectionId,
+            omsOrderId: input.target.omsOrderId,
+            outcome: "synced",
+            wmsOrderId,
+            retryQueued: false,
+            failureMessage: null,
+          };
+        }
+        return this.queueWmsSyncRepair(input.target, "WMS sync did not return a WMS order id");
+      } catch (error) {
+        return this.queueWmsSyncRepair(input.target, errorMessage(error));
+      }
+    }
+
+    return this.queueWmsSyncRepair(input.target, "WMS sync service unavailable");
+  }
+
+  private async queueWmsSyncRepair(
+    target: DropshipOrderOpsWmsSyncActionTarget & { omsOrderId: number },
+    cause: string,
+  ): Promise<Omit<DropshipOrderOpsWmsSyncActionResult, "updatedAt">> {
+    if (!this.deps.fulfillmentSyncRetryQueue) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_WMS_SYNC_NOT_CONFIGURED",
+        "Dropship WMS sync repair could not run because no sync service or retry queue is configured.",
+        {
+          intakeId: target.intakeId,
+          omsOrderId: target.omsOrderId,
+          cause,
+        },
+      );
+    }
+
+    try {
+      await this.deps.fulfillmentSyncRetryQueue.enqueueOmsWmsSyncRetry({
+        omsOrderId: target.omsOrderId,
+        cause,
+      });
+    } catch (error) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_OPS_WMS_SYNC_RETRY_ENQUEUE_FAILED",
+        "Dropship WMS sync repair failed to enqueue a retry.",
+        {
+          intakeId: target.intakeId,
+          omsOrderId: target.omsOrderId,
+          cause,
+          error: errorMessage(error),
+        },
+      );
+    }
+
+    return {
+      intakeId: target.intakeId,
+      vendorId: target.vendorId,
+      storeConnectionId: target.storeConnectionId,
+      omsOrderId: target.omsOrderId,
+      outcome: "queued",
+      wmsOrderId: null,
+      retryQueued: true,
+      failureMessage: cause,
+    };
   }
 }
 
@@ -452,9 +632,21 @@ function parseProcessInput(input: unknown): ProcessDropshipOrderOpsIntakeInput {
   return result.data;
 }
 
+function parseRetryWmsSyncInput(input: unknown): RetryDropshipOrderOpsWmsSyncInput {
+  const result = retryDropshipOrderOpsWmsSyncInputSchema.safeParse(input);
+  if (!result.success) {
+    throw validationError("DROPSHIP_ORDER_OPS_WMS_SYNC_INVALID_INPUT", result.error.issues);
+  }
+  return result.data;
+}
+
 function buildOpsProcessorWorkerId(actor: DropshipOrderOpsActor): string {
   const suffix = actor.actorId ? `:${actor.actorId}` : "";
   return `dropship-admin-process:${actor.actorType}${suffix}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function validationError(code: string, issues: Array<{

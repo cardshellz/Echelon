@@ -73,6 +73,13 @@ export const processDropshipOrderOpsIntakeInputSchema = z.object({
   actor: dropshipOpsActorSchema,
 }).strict();
 
+export const retryDropshipOrderOpsWmsSyncInputSchema = z.object({
+  intakeId: positiveIdSchema,
+  reason: z.string().trim().max(1000).optional(),
+  idempotencyKey: idempotencyKeySchema,
+  actor: dropshipOpsActorSchema,
+}).strict();
+
 export type DropshipOrderOpsCancellationStatus = z.infer<typeof dropshipOpsOrderCancellationStatusSchema>;
 export type ListDropshipOrderOpsIntakesInput = z.infer<typeof listDropshipOrderOpsIntakesInputSchema>;
 export type GetDropshipOrderOpsIntakeDetailInput = z.infer<typeof getDropshipOrderOpsIntakeDetailInputSchema>;
@@ -80,3 +87,4 @@ export type RetryDropshipOrderOpsIntakeInput = z.infer<typeof retryDropshipOrder
 export type RetryDropshipOrderOpsCancellationInput = z.infer<typeof retryDropshipOrderOpsCancellationInputSchema>;
 export type MarkDropshipOrderOpsExceptionInput = z.infer<typeof markDropshipOrderOpsExceptionInputSchema>;
 export type ProcessDropshipOrderOpsIntakeInput = z.infer<typeof processDropshipOrderOpsIntakeInputSchema>;
+export type RetryDropshipOrderOpsWmsSyncInput = z.infer<typeof retryDropshipOrderOpsWmsSyncInputSchema>;
