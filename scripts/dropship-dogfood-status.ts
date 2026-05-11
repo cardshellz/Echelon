@@ -1,11 +1,7 @@
-import * as dotenv from "dotenv";
-
 import type {
   DropshipDogfoodLaunchStatusResult,
   DropshipDogfoodReadinessStatus,
 } from "../server/modules/dropship/application/dropship-ops-surface-service";
-
-dotenv.config({ quiet: true });
 
 interface CliOptions {
   platform?: "ebay" | "shopify";
@@ -28,6 +24,8 @@ async function main(): Promise<void> {
     printHelp();
     return;
   }
+
+  await loadDotenvIfAvailable();
 
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL is required to load dropship dogfood launch status.");
@@ -63,6 +61,25 @@ async function main(): Promise<void> {
       console.error(`Failed to close database pool: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+}
+
+async function loadDotenvIfAvailable(): Promise<void> {
+  try {
+    const dotenv = await import("dotenv");
+    dotenv.config({ quiet: true });
+  } catch (error) {
+    if (isMissingOptionalDotenv(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function isMissingOptionalDotenv(error: unknown): boolean {
+  return error instanceof Error
+    && "code" in error
+    && error.code === "ERR_MODULE_NOT_FOUND"
+    && error.message.includes("dotenv");
 }
 
 function parseArgs(args: string[]): CliOptions {
