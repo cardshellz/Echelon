@@ -77,7 +77,7 @@ export class PgDropshipOrderProcessingQueueRepository implements DropshipOrderPr
            SELECT id, updated_at AS stale_updated_at
            FROM dropship.dropship_order_intake
            WHERE status = 'processing'
-             AND updated_at <= $1 - ($2::text)::interval
+             AND updated_at <= $1::timestamptz - ($2::text)::interval
            ORDER BY updated_at ASC, id ASC
            LIMIT $3
            FOR UPDATE SKIP LOCKED

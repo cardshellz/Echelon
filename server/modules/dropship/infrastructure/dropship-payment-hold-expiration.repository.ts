@@ -33,7 +33,7 @@ export class PgDropshipPaymentHoldExpirationRepository implements DropshipPaymen
        WHERE status = 'payment_hold'
          AND payment_hold_expires_at IS NOT NULL
          AND payment_hold_expires_at > $1
-         AND payment_hold_expires_at <= $1 + ($2::text)::interval
+         AND payment_hold_expires_at <= $1::timestamptz + ($2::text)::interval
        ORDER BY payment_hold_expires_at ASC, id ASC
        LIMIT $3`,
       [input.now, `${input.warningWindowMinutes} minutes`, input.limit],

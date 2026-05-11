@@ -71,7 +71,7 @@ describe("PgDropshipListingPushJobQueueRepository", () => {
     expect(result).toEqual([30]);
     expect(String(query.mock.calls[0]?.[0])).toContain("status = 'queued'");
     expect(String(query.mock.calls[0]?.[0])).toContain("status = 'processing'");
-    expect(String(query.mock.calls[0]?.[0])).toContain("updated_at <= $2 - ($3::text)::interval");
+    expect(String(query.mock.calls[0]?.[0])).toContain("updated_at <= $2::timestamptz - ($3::text)::interval");
     expect(query.mock.calls[0]?.[1]).toEqual([10, now, "30 minutes"]);
   });
 });

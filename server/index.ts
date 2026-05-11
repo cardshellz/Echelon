@@ -84,6 +84,10 @@ const sessionPool = new Pool({
   max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 
+sessionPool.on("error", (error) => {
+  console.error("[SessionDatabasePool] Unexpected idle client error:", error);
+});
+
 const sessionMiddleware = session({
   store: new PgSession({
     pool: sessionPool,
@@ -693,7 +697,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       try {
         // Find eBay OMS orders stuck in "confirmed" for > 2 hours
         const stuckOrders = await db.execute(sql`
-          SELECT o.id, o.external_order_id, o.order_number, o.shipstation_order_id
+          SELECT o.id, o.external_order_id, o.external_order_number, o.shipstation_order_id
           FROM oms.oms_orders o
           WHERE o.channel_id = 67
             AND o.status = 'confirmed'
@@ -714,7 +718,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             if (order.shipstation_order_id) {
               ssOrder = await ss.getOrderById(Number(order.shipstation_order_id));
             } else {
-              const searchNumber = `EB-${order.order_number || order.external_order_id}`;
+              const searchNumber = `EB-${order.external_order_number || order.external_order_id}`;
               ssOrder = await ss.getOrderByNumber(searchNumber);
             }
             if (ssOrder && ssOrder.orderStatus === "shipped") {

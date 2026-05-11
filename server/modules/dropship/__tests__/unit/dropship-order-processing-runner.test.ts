@@ -86,7 +86,7 @@ describe("PgDropshipOrderProcessingQueueRepository", () => {
     const recoveryQuery = client.query.mock.calls.find((call) => String(call[0]).includes("WITH candidates"));
     expect(String(recoveryQuery?.[0])).toContain("WHERE status = 'processing'");
     expect(String(recoveryQuery?.[0])).toContain("SELECT id, updated_at AS stale_updated_at");
-    expect(String(recoveryQuery?.[0])).toContain("updated_at <= $1 - ($2::text)::interval");
+    expect(String(recoveryQuery?.[0])).toContain("updated_at <= $1::timestamptz - ($2::text)::interval");
     expect(String(recoveryQuery?.[0])).toContain("FOR UPDATE SKIP LOCKED");
     expect(String(recoveryQuery?.[0])).toContain("SET status = 'retrying'");
     expect(recoveryQuery?.[1]).toEqual([now, "30 minutes", 50]);
