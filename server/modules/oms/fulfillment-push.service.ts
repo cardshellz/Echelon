@@ -1066,15 +1066,25 @@ export function createFulfillmentPushService(
 
     // ---- 6. Load shipment items ----------------------------------------
     const itemsResult: any = await db.execute(sql`
+      WITH line_adjustments AS (
+        SELECT
+          order_line_id,
+          SUM(quantity)::int AS adjusted_qty
+        FROM oms.order_line_adjustments
+        WHERE adjustment_type IN ('refund', 'cancel')
+        GROUP BY order_line_id
+      )
       SELECT
         si.id            AS shipment_item_id,
         si.order_item_id AS order_item_id,
         oi.oms_order_line_id AS oms_order_line_id,
         oi.sku           AS sku,
-        si.qty           AS qty
+        GREATEST(0, si.qty - COALESCE(la.adjusted_qty, 0))::int AS qty
       FROM wms.outbound_shipment_items si
       LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
+      LEFT JOIN line_adjustments la ON la.order_line_id = oi.oms_order_line_id
       WHERE si.shipment_id = ${shipmentId}
+        AND COALESCE(oi.status, 'pending') <> 'cancelled'
     `);
     const items: WmsShipmentItemForShopify[] = itemsResult?.rows ?? [];
     const positiveItems = items.filter((it) => Number.isInteger(it.qty) && it.qty > 0);
@@ -2116,9 +2126,17 @@ async function tryReadPathA(
   let result: any;
   try {
     result = await db.execute(sql`
+      WITH line_adjustments AS (
+        SELECT
+          order_line_id,
+          SUM(quantity)::int AS adjusted_qty
+        FROM oms.order_line_adjustments
+        WHERE adjustment_type IN ('refund', 'cancel')
+        GROUP BY order_line_id
+      )
       SELECT
         si.id  AS shipment_item_id,
-        si.qty AS quantity,
+        GREATEST(0, si.qty - COALESCE(la.adjusted_qty, 0))::int AS quantity,
         oi.oms_order_line_id AS oms_order_line_id,
         ol.shopify_fulfillment_order_id AS shopify_fulfillment_order_id,
         ol.shopify_fulfillment_order_line_item_id AS shopify_fulfillment_order_line_item_id
@@ -2126,8 +2144,10 @@ async function tryReadPathA(
       JOIN wms.order_items wi ON wi.id = si.order_item_id
       LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
       LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+      LEFT JOIN line_adjustments la ON la.order_line_id = oi.oms_order_line_id
       WHERE si.shipment_id = ${shipmentId}
-        AND si.qty > 0
+        AND GREATEST(0, si.qty - COALESCE(la.adjusted_qty, 0)) > 0
+        AND COALESCE(oi.status, 'pending') <> 'cancelled'
     `);
   } catch (err: any) {
     console.warn(
