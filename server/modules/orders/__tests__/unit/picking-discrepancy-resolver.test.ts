@@ -308,3 +308,40 @@ describe("PickingUseCases replen source-empty reporting", () => {
     }));
   });
 });
+
+describe("PickingUseCases shipment blocker cleanup", () => {
+  it("keeps shipment blockers open when the exception is held", async () => {
+    const db = {
+      execute: vi.fn(),
+    };
+    const service = new PickingUseCases(db as any, {} as any, {} as any, {} as any);
+
+    await expect(service.closeResolvedShipmentBlockers(900, {
+      resolution: "hold",
+      userId: "lead-1",
+    })).resolves.toEqual({
+      allocationExceptionsClosed: 0,
+      replenTasksClosed: 0,
+    });
+    expect(db.execute).not.toHaveBeenCalled();
+  });
+
+  it("closes order shipment blockers for non-hold exception resolutions", async () => {
+    const db = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ id: 77 }] })
+        .mockResolvedValueOnce({ rows: [{ id: 121 }, { id: 122 }] }),
+    };
+    const service = new PickingUseCases(db as any, {} as any, {} as any, {} as any);
+
+    await expect(service.closeResolvedShipmentBlockers(900, {
+      resolution: "resolved",
+      userId: "lead-1",
+      notes: "Inventory corrected",
+    })).resolves.toEqual({
+      allocationExceptionsClosed: 1,
+      replenTasksClosed: 2,
+    });
+    expect(db.execute).toHaveBeenCalledTimes(2);
+  });
+});

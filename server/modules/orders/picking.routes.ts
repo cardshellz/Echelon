@@ -761,6 +761,7 @@ export function registerPickingRoutes(app: Express) {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
+      const { picking } = req.app.locals.services;
       
       const id = parseInt(req.params.id);
       const { resolution, notes } = req.body;
@@ -775,6 +776,12 @@ export function registerPickingRoutes(app: Express) {
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+
+      const closedBlockers = await picking.closeResolvedShipmentBlockers(id, {
+        resolution,
+        userId: req.session.user.id,
+        notes,
+      });
       
       // Log the exception resolution (non-blocking)
       storage.createPickingLog({
@@ -787,13 +794,18 @@ export function registerPickingRoutes(app: Express) {
         orderStatusBefore: orderBefore?.warehouseStatus,
         orderStatusAfter: order.warehouseStatus,
         reason: resolution,
-        notes,
+        notes: [
+          notes,
+          closedBlockers.allocationExceptionsClosed || closedBlockers.replenTasksClosed
+            ? `Closed shipment blockers: allocation=${closedBlockers.allocationExceptionsClosed}, replen=${closedBlockers.replenTasksClosed}`
+            : null,
+        ].filter(Boolean).join("\n") || undefined,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log exception_resolved:", err.message));
       
       broadcastOrdersUpdated();
-      res.json(order);
+      res.json({ ...order, closedBlockers });
     } catch (error: any) {
       console.error("Error resolving exception:", error);
       res.status(500).json({ error: "Failed to resolve exception" });
