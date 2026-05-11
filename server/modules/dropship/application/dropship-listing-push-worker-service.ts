@@ -35,6 +35,14 @@ export interface DropshipListingPushWorkerJobRecord {
   completedAt: Date | null;
 }
 
+export interface DropshipListingPushWorkerEligibility {
+  vendorStatus: string;
+  entitlementStatus: string;
+  storeStatus: string;
+  setupStatus: string;
+  storeLaunchReady: boolean;
+}
+
 export interface DropshipListingPushWorkerItemRecord {
   itemId: number;
   jobId: number;
@@ -59,6 +67,7 @@ export interface DropshipListingPushWorkerItemRecord {
 export interface DropshipListingPushWorkerClaim {
   job: DropshipListingPushWorkerJobRecord;
   config: DropshipStoreListingConfig;
+  eligibility: DropshipListingPushWorkerEligibility;
   items: DropshipListingPushWorkerItemRecord[];
   claimed: boolean;
 }
@@ -187,6 +196,19 @@ export class DropshipListingPushWorkerService {
     claim: DropshipListingPushWorkerClaim,
     item: DropshipListingPushWorkerItemRecord,
   ): Promise<void> {
+    const eligibilityBlocker = validateClaimEligibility(claim);
+    if (eligibilityBlocker) {
+      await this.deps.repository.blockItem({
+        job: claim.job,
+        item,
+        code: eligibilityBlocker.code,
+        message: eligibilityBlocker.message,
+        workerId: parsed.workerId,
+        now: this.deps.clock.now(),
+      });
+      return;
+    }
+
     const intent = parseListingIntent(item.result);
     const readinessBlocker = validateWorkerItemReadiness(claim, item, intent);
     if (readinessBlocker) {
@@ -363,6 +385,30 @@ function validateWorkerItemReadiness(
     return {
       code: "DROPSHIP_LISTING_PREVIEW_DRIFT",
       message: "Listing preview hash no longer matches the vendor listing.",
+    };
+  }
+  return null;
+}
+
+function validateClaimEligibility(
+  claim: DropshipListingPushWorkerClaim,
+): { code: string; message: string } | null {
+  if (claim.eligibility.vendorStatus !== "active") {
+    return {
+      code: "DROPSHIP_LISTING_VENDOR_BLOCKED",
+      message: "Dropship vendor status no longer allows listing push.",
+    };
+  }
+  if (claim.eligibility.entitlementStatus !== "active") {
+    return {
+      code: "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
+      message: "Dropship vendor entitlement no longer allows listing push.",
+    };
+  }
+  if (!claim.eligibility.storeLaunchReady) {
+    return {
+      code: "DROPSHIP_LISTING_STORE_BLOCKED",
+      message: "Dropship store connection is no longer launch-ready for listing push.",
     };
   }
   return null;
