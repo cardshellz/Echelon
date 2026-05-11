@@ -461,10 +461,23 @@ describe("DropshipOpsSurfaceService", () => {
       vendorId: 10,
       storeConnectionId: 20,
     });
+    expect(gate.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "review_remaining_readiness_issues",
+        status: "warning",
+        scope: "ops",
+      }),
+      expect.objectContaining({
+        key: "run_live_smoke",
+        status: "ready",
+        scope: "ops",
+        evidence: ["1 ready vendor/store row(s) found."],
+      }),
+    ]));
   });
 
   it("blocks the launch gate when system prerequisites block or no vendor store is ready", () => {
-    expect(buildDropshipDogfoodLaunchGate({
+    const systemBlockedGate = buildDropshipDogfoodLaunchGate({
       summary: [
         { status: "ready", count: 1 },
         { status: "warning", count: 0 },
@@ -478,13 +491,22 @@ describe("DropshipOpsSurfaceService", () => {
         requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
       }],
       items: [],
-    })).toMatchObject({
+    });
+
+    expect(systemBlockedGate).toMatchObject({
       status: "blocked",
       systemBlockedCount: 1,
       message: "1 system prerequisite(s) block dogfood.",
     });
+    expect(systemBlockedGate.runbookSteps[0]).toMatchObject({
+      key: "resolve_system_blockers",
+      status: "blocked",
+      scope: "system",
+      action: "Set or repair: SHIPSTATION_WEBHOOK_SECRET.",
+      evidence: ["ShipStation webhook security: SHIPSTATION_WEBHOOK_SECRET is missing."],
+    });
 
-    expect(buildDropshipDogfoodLaunchGate({
+    const noReadyGate = buildDropshipDogfoodLaunchGate({
       summary: [
         { status: "ready", count: 0 },
         { status: "warning", count: 0 },
@@ -492,10 +514,17 @@ describe("DropshipOpsSurfaceService", () => {
       ],
       systemChecks: [],
       items: [],
-    })).toMatchObject({
+    });
+
+    expect(noReadyGate).toMatchObject({
       status: "blocked",
       readyVendorStoreCount: 0,
       message: "No vendor/store row is ready for dogfood.",
+    });
+    expect(noReadyGate.runbookSteps[0]).toMatchObject({
+      key: "prepare_vendor_store",
+      status: "blocked",
+      evidence: ["No ready vendor/store row was returned by the readiness query."],
     });
   });
 
@@ -560,6 +589,12 @@ describe("DropshipOpsSurfaceService", () => {
         key: "wallet",
         vendorId: 10,
         storeConnectionId: 20,
+      }),
+    ]));
+    expect(result.launchGate?.runbookSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "prepare_vendor_store",
+        status: "blocked",
       }),
     ]));
     expect(result.systemChecks).toEqual(expect.arrayContaining([
