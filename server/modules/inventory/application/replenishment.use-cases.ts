@@ -1392,7 +1392,28 @@ export class ReplenishmentUseCases {
       ))
       .limit(1);
 
-    if (existing) return existing as ReplenTask;
+    if (existing) {
+      if (!existing.linkedCycleCountId) {
+        const cycleCountId = await this.createSourceEmptyCycleCount({
+          taskId: existing.id,
+          sourceLocationId: existing.fromLocationId,
+          sourceVariantId: existing.sourceProductVariantId ?? params.pickVariantId,
+          productId: existing.productId,
+          warehouseId: existing.warehouseId,
+          orderNumber: params.orderNumber ?? null,
+          sourceLabel: params.sourceLocationCode ?? `location #${existing.fromLocationId}`,
+          userId: params.userId,
+        });
+        if (cycleCountId) {
+          await this.db.update(replenTasks).set({
+            linkedCycleCountId: cycleCountId,
+            notes: `${existing.notes || ""}\nLinked source-empty cycle count #${cycleCountId}`,
+          }).where(eq(replenTasks.id, existing.id));
+          return { ...existing, linkedCycleCountId: cycleCountId } as ReplenTask;
+        }
+      }
+      return existing as ReplenTask;
+    }
 
     const [variant] = await this.db
       .select()
@@ -1474,6 +1495,26 @@ export class ReplenishmentUseCases {
       } satisfies InsertReplenTask)
       .returning();
 
+    let linkedCycleCountId: number | null = null;
+    if (sourceLocation) {
+      linkedCycleCountId = await this.createSourceEmptyCycleCount({
+        taskId: task.id,
+        sourceLocationId: sourceLocation.id,
+        sourceVariantId,
+        productId: rule?.productId ?? variant.productId ?? null,
+        warehouseId: pickLocation.warehouseId ?? undefined,
+        orderNumber: params.orderNumber ?? null,
+        sourceLabel,
+        userId: params.userId,
+      });
+      if (linkedCycleCountId) {
+        await this.db.update(replenTasks).set({
+          linkedCycleCountId,
+          notes: `${task.notes || ""}\nLinked source-empty cycle count #${linkedCycleCountId}`,
+        }).where(eq(replenTasks.id, task.id));
+      }
+    }
+
     notify("stockout", {
       title: `Replen source empty: ${params.sku ?? variant.sku ?? `variant #${params.pickVariantId}`}`,
       message: `Picker reported ${sourceLabel} empty while replenishing ${pickLocation.code}`,
@@ -1482,12 +1523,68 @@ export class ReplenishmentUseCases {
         orderId: params.orderId,
         orderItemId: params.orderItemId,
         productVariantId: params.pickVariantId,
+        cycleCountId: linkedCycleCountId,
         pickLocationCode: pickLocation.code,
         sourceLocationCode: sourceLocation?.code ?? params.sourceLocationCode ?? null,
       },
     }).catch(() => {});
 
-    return task as ReplenTask;
+    return { ...task, linkedCycleCountId } as ReplenTask;
+  }
+
+  private async createSourceEmptyCycleCount(params: {
+    taskId: number;
+    sourceLocationId: number;
+    sourceVariantId: number;
+    productId: number | null;
+    warehouseId: number | null | undefined;
+    orderNumber?: string | null;
+    sourceLabel: string;
+    userId?: string;
+  }): Promise<number | null> {
+    const [sourceVariant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, params.sourceVariantId))
+      .limit(1);
+
+    const [inventoryLevel] = await this.db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.warehouseLocationId, params.sourceLocationId),
+        eq(inventoryLevels.productVariantId, params.sourceVariantId),
+      ))
+      .limit(1);
+
+    const [cycleCount] = await this.db.insert(cycleCounts).values({
+      name: `Replen Source Empty - Task #${params.taskId}`,
+      description: `Picker reported replen source empty at ${params.sourceLabel}${params.orderNumber ? ` for ${params.orderNumber}` : ""}`,
+      status: "in_progress",
+      warehouseId: params.warehouseId ?? null,
+      totalBins: 1,
+      countedBins: 0,
+      varianceCount: 0,
+      approvedVariances: 0,
+      createdBy: params.userId || "system",
+    }).returning();
+
+    if (!cycleCount?.id) return null;
+
+    await this.db.insert(cycleCountItems).values({
+      cycleCountId: cycleCount.id,
+      warehouseLocationId: params.sourceLocationId,
+      productVariantId: sourceVariant?.id ?? params.sourceVariantId,
+      productId: params.productId,
+      expectedSku: sourceVariant?.sku || null,
+      expectedQty: inventoryLevel?.variantQty ?? 0,
+      countedSku: sourceVariant?.sku || null,
+      countedQty: 0,
+      status: "pending",
+      countedBy: params.userId || "system",
+    });
+
+    return cycleCount.id;
   }
 
 
