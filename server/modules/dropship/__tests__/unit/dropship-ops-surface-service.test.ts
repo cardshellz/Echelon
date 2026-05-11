@@ -767,7 +767,7 @@ describe("DropshipOpsSurfaceService", () => {
     expect(repository.lastDogfoodSmokeInput).toMatchObject({
       platform: "ebay",
       search: "vendor",
-      limit: 25,
+      limit: 100,
       staleAfterHours: 24,
       generatedAt: now,
     });
