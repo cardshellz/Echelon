@@ -443,35 +443,44 @@ class ReservationService {
     productVariantId: number,
     warehouseLocationId: number,
     userId?: string,
+    orphanedQty?: number,
   ): Promise<{ released: number; reallocated: number; failed: number }> {
     const result = { released: 0, reallocated: 0, failed: 0 };
+    let excess = 0;
 
-    // 1. Get the inventory level at this location
-    const [level] = await this.db
-      .select()
-      .from(inventoryLevels)
-      .where(
-        and(
-          eq(inventoryLevels.productVariantId, productVariantId),
-          eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
-        ),
-      )
-      .limit(1);
+    if (orphanedQty !== undefined) {
+      // If orphanedQty is provided, it means the caller (e.g. adjustInventory)
+      // already performed the DB adjustment to reservedQty, so we just log it.
+      excess = orphanedQty;
+      if (excess <= 0) return result;
+    } else {
+      // Fallback: Check the DB for orphaned reservations manually
+      const [level] = await this.db
+        .select()
+        .from(inventoryLevels)
+        .where(
+          and(
+            eq(inventoryLevels.productVariantId, productVariantId),
+            eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+          ),
+        )
+        .limit(1);
 
-    if (!level) return result;
+      if (!level) return result;
 
-    // If reserved_qty <= variant_qty, nothing orphaned
-    const currentQty = Math.max(0, level.variantQty);
-    if (level.reservedQty <= currentQty) return result;
+      // If reserved_qty <= variant_qty, nothing orphaned
+      const currentQty = Math.max(0, level.variantQty);
+      if (level.reservedQty <= currentQty) return result;
 
-    const excess = level.reservedQty - currentQty;
-    console.log(
-      `[RESERVATION] Orphaned reservation detected: variant=${productVariantId} ` +
-        `loc=${warehouseLocationId} reserved=${level.reservedQty} onHand=${level.variantQty} excess=${excess}`,
-    );
+      excess = level.reservedQty - currentQty;
+      console.log(
+        `[RESERVATION] Orphaned reservation detected (fallback): variant=${productVariantId} ` +
+          `loc=${warehouseLocationId} reserved=${level.reservedQty} onHand=${level.variantQty} excess=${excess}`,
+      );
 
-    // 2. Force-release the excess reserved qty
-    await this.inventoryCore.adjustLevel(level.id, { reservedQty: -excess });
+      // Force-release the excess reserved qty
+      await this.inventoryCore.adjustLevel(level.id, { reservedQty: -excess });
+    }
 
     result.released = excess;
 
@@ -481,7 +490,7 @@ class ReservationService {
         fromLocationId: warehouseLocationId,
         transactionType: "unreserve",
         variantQtyDelta: -excess,
-        notes: `Orphaned reservation released: cycle count zeroed inventory at this location`,
+        notes: `Orphaned reservation released: inventory count dropped below reserved amount`,
         userId: userId || null,
       });
     } catch (err: any) {
