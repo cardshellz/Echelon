@@ -357,6 +357,187 @@ export interface ApplyShopifyRefundCascadeResult {
   restocked: boolean;
   restockInvoked: boolean;
   restockError?: string;
+  adjustedLines?: number;
+  heldShipments?: number;
+}
+
+type ShopifyRefundLineAdjustment = {
+  externalLineItemId: string;
+  quantity: number;
+  restockPolicy: "no_restock" | "return" | "restock" | "cancel" | "unknown";
+  raw: any;
+};
+
+function normalizeRefundRestockPolicy(line: any): ShopifyRefundLineAdjustment["restockPolicy"] {
+  const restockType = typeof line?.restock_type === "string" ? line.restock_type : null;
+  if (restockType === "return") return "return";
+  if (restockType === "restock") return "restock";
+  if (restockType === "cancel") return "cancel";
+  if (restockType === "no_restock") return "no_restock";
+  if (line?.restock === true) return "restock";
+  if (line?.restock === false) return "no_restock";
+  return "unknown";
+}
+
+function extractRefundLineAdjustments(refundLineItems: Array<any>): ShopifyRefundLineAdjustment[] {
+  const adjustments: ShopifyRefundLineAdjustment[] = [];
+  for (const line of refundLineItems) {
+    const rawExternalId = line?.line_item_id ?? line?.line_item?.id;
+    const quantity = Number(line?.quantity ?? 0);
+    if (rawExternalId === undefined || rawExternalId === null) continue;
+    if (!Number.isInteger(quantity) || quantity <= 0) continue;
+    adjustments.push({
+      externalLineItemId: String(rawExternalId),
+      quantity,
+      restockPolicy: normalizeRefundRestockPolicy(line),
+      raw: line,
+    });
+  }
+  return adjustments;
+}
+
+async function persistRefundLineAdjustments(
+  db: any,
+  args: {
+    omsOrderId: number;
+    refundExternalId: string;
+    reason: string | null;
+    adjustments: ShopifyRefundLineAdjustment[];
+  },
+): Promise<number> {
+  let inserted = 0;
+  for (const adjustment of args.adjustments) {
+    const result: any = await db.execute(sql`
+      INSERT INTO oms.order_line_adjustments (
+        order_id, order_line_id, external_line_item_id, source,
+        source_event_id, adjustment_type, restock_policy, quantity,
+        reason, raw_payload
+      )
+      SELECT
+        ${args.omsOrderId},
+        (
+          SELECT id FROM oms.oms_order_lines
+          WHERE order_id = ${args.omsOrderId}
+            AND external_line_item_id = ${adjustment.externalLineItemId}
+          LIMIT 1
+        ),
+        ${adjustment.externalLineItemId},
+        'shopify_webhook',
+        ${args.refundExternalId},
+        'refund',
+        ${adjustment.restockPolicy},
+        ${adjustment.quantity},
+        ${args.reason},
+        ${JSON.stringify(adjustment.raw)}::jsonb
+      ON CONFLICT (source, source_event_id, external_line_item_id, adjustment_type)
+      DO NOTHING
+      RETURNING id
+    `);
+    inserted += result?.rows?.length ?? 0;
+  }
+  return inserted;
+}
+
+async function applyRefundLineAdjustmentsToWms(
+  db: any,
+  args: {
+    wmsOrderId: number;
+    adjustments: ShopifyRefundLineAdjustment[];
+    now: Date;
+    shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
+  },
+): Promise<{ adjustedLines: number; heldShipments: number }> {
+  let adjustedLines = 0;
+  const affectedExternalIds = args.adjustments.map((a) => a.externalLineItemId);
+  if (affectedExternalIds.length === 0) return { adjustedLines, heldShipments: 0 };
+
+  const quantityResult: any = await db.execute(sql`
+    WITH matched_items AS (
+      SELECT
+        wi.id AS order_item_id,
+        wi.quantity AS order_item_quantity,
+        COALESCE(SUM(adj.quantity), 0)::int AS adjusted_quantity
+      FROM wms.order_items wi
+      JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+      LEFT JOIN oms.order_line_adjustments adj
+        ON adj.order_line_id = ol.id
+       AND adj.adjustment_type IN ('refund', 'cancel')
+      WHERE wi.order_id = ${args.wmsOrderId}
+        AND ol.external_line_item_id = ANY(${affectedExternalIds}::text[])
+      GROUP BY wi.id, wi.quantity
+    ),
+    updated_shipment_items AS (
+      UPDATE wms.outbound_shipment_items si
+      SET qty = GREATEST(0, mi.order_item_quantity - mi.adjusted_quantity)
+      FROM matched_items mi
+      JOIN wms.outbound_shipments os ON os.id = si.shipment_id
+      WHERE si.order_item_id = mi.order_item_id
+        AND os.order_id = ${args.wmsOrderId}
+        AND os.status = 'planned'
+      RETURNING si.id
+    )
+    UPDATE wms.order_items wi
+    SET status = CASE
+          WHEN COALESCE(wi.picked_quantity, 0) = 0
+           AND COALESCE(wi.fulfilled_quantity, 0) = 0
+           AND mi.adjusted_quantity >= wi.quantity
+          THEN 'cancelled'
+          ELSE wi.status
+        END
+    FROM matched_items mi
+    WHERE wi.id = mi.order_item_id
+    RETURNING wi.id
+  `);
+  adjustedLines = quantityResult?.rows?.length ?? 0;
+
+  const holdResult: any = await db.execute(sql`
+    WITH affected_shipments AS (
+      SELECT DISTINCT os.id, os.shipstation_order_id, os.status
+      FROM wms.outbound_shipments os
+      JOIN wms.outbound_shipment_items si ON si.shipment_id = os.id
+      JOIN wms.order_items wi ON wi.id = si.order_item_id
+      JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+      WHERE os.order_id = ${args.wmsOrderId}
+        AND ol.external_line_item_id = ANY(${affectedExternalIds}::text[])
+        AND os.status IN ('queued', 'labeled', 'shipped')
+    ),
+    held AS (
+      UPDATE wms.outbound_shipments os
+      SET status = 'on_hold',
+          requires_review = true,
+          review_reason = CASE
+            WHEN os.status = 'shipped' THEN 'refund_after_ship'
+            WHEN os.status = 'labeled' THEN 'refund_after_label'
+            ELSE 'refund_after_shipstation_push'
+          END,
+          updated_at = ${args.now}
+      FROM affected_shipments af
+      WHERE os.id = af.id
+        AND os.status IN ('queued', 'labeled', 'shipped')
+      RETURNING os.id, af.shipstation_order_id, af.status AS previous_status
+    )
+    SELECT * FROM held
+  `);
+  const heldRows: Array<{ id: number; shipstation_order_id: number | null; previous_status: string }> = holdResult?.rows ?? [];
+  for (const row of heldRows) {
+    if (
+      row.previous_status === "queued" &&
+      typeof row.shipstation_order_id === "number" &&
+      Number.isInteger(row.shipstation_order_id) &&
+      row.shipstation_order_id > 0 &&
+      args.shipstation
+    ) {
+      try {
+        await args.shipstation.cancelOrder(row.shipstation_order_id);
+      } catch (err: any) {
+        console.error(
+          `[applyRefundLineAdjustmentsToWms] ShipStation cancel failed for held shipment ${row.id}: ${err?.message ?? err}`,
+        );
+      }
+    }
+  }
+
+  return { adjustedLines, heldShipments: heldRows.length };
 }
 
 export async function applyShopifyRefundCascade(
@@ -387,6 +568,7 @@ export async function applyShopifyRefundCascade(
         refundPayload: any;
       },
     ) => Promise<void>;
+    shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
   },
   opts: {
     channelId: number;
@@ -420,6 +602,7 @@ export async function applyShopifyRefundCascade(
       (li.restock === true || li.restock_type === "return" || li.restock_type === "restock"),
   );
   const anyRestock = restockLines.length > 0;
+  const lineAdjustments = extractRefundLineAdjustments(refundLineItems);
 
   // ── 2. Resolve OMS order ───────────────────────────────────────────
   const oms = await helpers.resolveOmsOrder(db, {
@@ -455,6 +638,19 @@ export async function applyShopifyRefundCascade(
   }
   const wmsOrderId = wmsRows[0].id;
 
+  const persistedAdjustments = await persistRefundLineAdjustments(db, {
+    omsOrderId,
+    refundExternalId,
+    reason: (refundPayload.note as string | undefined) ?? "shopify_refund",
+    adjustments: lineAdjustments,
+  });
+  const wmsAdjustmentResult = await applyRefundLineAdjustmentsToWms(db, {
+    wmsOrderId,
+    adjustments: lineAdjustments,
+    now,
+    shipstation: helpers.shipstation,
+  });
+
   // ── 5. Idempotency check (do this before shipment resolution to
   //    short-circuit cleanly on retries even if the order has since
   //    been shipped) ─────────────────────────────────────────────────
@@ -472,6 +668,8 @@ export async function applyShopifyRefundCascade(
       wmsOrderId,
       restocked: false,
       restockInvoked: false,
+      adjustedLines: persistedAdjustments + wmsAdjustmentResult.adjustedLines,
+      heldShipments: wmsAdjustmentResult.heldShipments,
     };
   }
 
@@ -553,6 +751,8 @@ export async function applyShopifyRefundCascade(
     restocked: anyRestock,
     restockInvoked,
     restockError,
+    adjustedLines: persistedAdjustments + wmsAdjustmentResult.adjustedLines,
+    heldShipments: wmsAdjustmentResult.heldShipments,
   };
 }
 
@@ -560,6 +760,7 @@ export const __test__ = {
   extractShopifyRisk,
   cascadeShopifyCancelToShipments,
   applyShopifyRefundCascade,
+  extractRefundLineAdjustments,
   RefundsCreateBadPayloadError,
 };
 
@@ -1510,6 +1711,8 @@ export function registerOmsWebhooks(
       // wired in as the restock hook so behaviour parity with prior
       // commits is preserved.
       let cascadeOutcome: ApplyShopifyRefundCascadeOutcome = "order_not_tracked";
+      let cascadeAdjustedLines = 0;
+      let cascadeHeldShipments = 0;
       try {
         const cascade = await applyShopifyRefundCascade(
           db,
@@ -1528,14 +1731,24 @@ export function registerOmsWebhooks(
                   );
                 }
               : undefined,
+            shipstation: shipStationService
+              ? {
+                  cancelOrder: async (shipstationOrderId: number) => {
+                    await shipStationService.cancelOrder(shipstationOrderId);
+                  },
+                }
+              : undefined,
           },
           { channelId, now, logPrefix: LOG_PREFIX },
         );
         cascadeOutcome = cascade.outcome;
+        cascadeAdjustedLines = cascade.adjustedLines ?? 0;
+        cascadeHeldShipments = cascade.heldShipments ?? 0;
         console.log(
           `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
             `outcome=${cascade.outcome} restocked=${cascade.restocked} ` +
-            `restockInvoked=${cascade.restockInvoked} shipmentId=${cascade.shipmentId ?? "null"}`,
+            `restockInvoked=${cascade.restockInvoked} shipmentId=${cascade.shipmentId ?? "null"} ` +
+            `adjustedLines=${cascade.adjustedLines ?? 0} heldShipments=${cascade.heldShipments ?? 0}`,
         );
       } catch (cascadeErr: any) {
         // Re-throw to fall into the outer catch which queues a retry. The
@@ -1555,6 +1768,8 @@ export function registerOmsWebhooks(
           financialStatus,
           refundedLineItems: refundLineItems.length,
           restockedItems: refundLineItems.filter((li: any) => li.restock === true).length,
+          adjustedLines: cascadeAdjustedLines,
+          heldShipments: cascadeHeldShipments,
           totalRefundAmount: refundPayload.transactions?.reduce(
             (sum: number, t: any) => sum + parseFloat(t.amount || "0"), 0
           ),

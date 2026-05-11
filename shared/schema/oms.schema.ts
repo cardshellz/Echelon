@@ -174,6 +174,37 @@ export type InsertOmsOrderLine = z.infer<typeof insertOmsOrderLineSchema>;
 export type OmsOrderLine = typeof omsOrderLines.$inferSelect;
 
 // ============================================
+// OMS ORDER LINE ADJUSTMENTS - Marketplace line-level cancel/refund facts
+// ============================================
+
+export const omsOrderLineAdjustments = omsSchema.table("order_line_adjustments", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
+  orderLineId: bigint("order_line_id", { mode: "number" }).references(() => omsOrderLines.id, { onDelete: "cascade" }),
+  externalLineItemId: varchar("external_line_item_id", { length: 100 }).notNull(),
+  source: varchar("source", { length: 30 }).notNull().default("shopify_webhook"),
+  sourceEventId: varchar("source_event_id", { length: 100 }).notNull(),
+  adjustmentType: varchar("adjustment_type", { length: 30 }).notNull(),
+  restockPolicy: varchar("restock_policy", { length: 30 }).notNull().default("no_restock"),
+  quantity: integer("quantity").notNull(),
+  reason: text("reason"),
+  rawPayload: jsonb("raw_payload"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("order_line_adjustments_event_line_uidx").on(table.source, table.sourceEventId, table.externalLineItemId, table.adjustmentType),
+  index("idx_order_line_adjustments_order").on(table.orderId),
+  index("idx_order_line_adjustments_line").on(table.orderLineId),
+]);
+
+export const insertOmsOrderLineAdjustmentSchema = createInsertSchema(omsOrderLineAdjustments).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertOmsOrderLineAdjustment = z.infer<typeof insertOmsOrderLineAdjustmentSchema>;
+export type OmsOrderLineAdjustment = typeof omsOrderLineAdjustments.$inferSelect;
+
+// ============================================
 // OMS ORDER EVENTS — Audit trail
 // ============================================
 
