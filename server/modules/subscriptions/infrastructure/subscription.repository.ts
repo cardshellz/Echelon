@@ -6,7 +6,6 @@ import {
   sellingPlanMap,
   members,
   memberSubscriptions,
-  memberCurrentMembership,
   subscriptionBillingAttempts,
   subscriptionEvents,
 } from "@shared/schema";
@@ -17,6 +16,32 @@ import type {
   SubscriptionEvent,
   SubscriptionDashboardStats,
 } from "../subscription.types";
+
+let currentMembershipRelationKind: string | null | undefined;
+let warnedCurrentMembershipReadonly = false;
+
+async function currentMembershipWritesSupported(): Promise<boolean> {
+  if (currentMembershipRelationKind === undefined) {
+    const result = await db.execute(sql`
+      SELECT c.relkind
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'membership'
+        AND c.relname = 'member_current_membership'
+      LIMIT 1
+    `);
+    currentMembershipRelationKind = (result as any).rows?.[0]?.relkind ?? null;
+  }
+
+  const writable = currentMembershipRelationKind === "r" || currentMembershipRelationKind === "p";
+  if (!writable && !warnedCurrentMembershipReadonly) {
+    console.warn(
+      `[Membership] member_current_membership writes skipped: relation kind ${currentMembershipRelationKind ?? "missing"} is not a writable table`,
+    );
+    warnedCurrentMembershipReadonly = true;
+  }
+  return writable;
+}
 
 // ─── Plans ───────────────────────────────────────────────────────────
 
@@ -367,8 +392,9 @@ export async function getDueBillings(): Promise<SubscriptionRecord[]> {
 // ─── Current Membership ──────────────────────────────────────────────
 
 export async function upsertCurrentMembership(memberId: number, planId: number, planName: string): Promise<void> {
-  // Assuming raw sql for this as it's a specific materialized view pattern not natively supported in standard inserts if it's a view,
-  // but if it's a table we can do:
+  void planName;
+  if (!(await currentMembershipWritesSupported())) return;
+
   await db.execute(sql`
     INSERT INTO membership.member_current_membership (member_id, plan_id, updated_at)
     VALUES (${String(memberId)}, ${String(planId)}, NOW())
@@ -377,12 +403,18 @@ export async function upsertCurrentMembership(memberId: number, planId: number, 
 }
 
 export async function clearCurrentMembership(memberId: number): Promise<void> {
+  if (!(await currentMembershipWritesSupported())) return;
+
   await db.execute(sql`DELETE FROM membership.member_current_membership WHERE member_id = ${String(memberId)}`);
 }
 
 // ─── Reconciliation (M7) ─────────────────────────────────────────────
 
 export async function reconcileCurrentMemberships(): Promise<{ upserted: number }> {
+  if (!(await currentMembershipWritesSupported())) {
+    return { upserted: 0 };
+  }
+
   const result = await db.execute(sql`
     INSERT INTO membership.member_current_membership (member_id, plan_id, updated_at)
     SELECT ms.member_id, p.id, NOW()

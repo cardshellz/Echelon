@@ -225,6 +225,8 @@ describe("Dropship V2 schema contract", () => {
   it("does not swallow SQL migration failures during release", () => {
     expect(releaseScript).toContain("npx tsx migrations/run-migrations.ts");
     expect(releaseScript).not.toContain("SQL migration step completed with warnings");
+    expect(releaseScript).not.toContain("drizzle-kit push exited with non-zero");
+    expect(releaseScript).toContain("RUN_DRIZZLE_PUSH_ON_RELEASE");
   });
 });
 

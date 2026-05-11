@@ -8,17 +8,16 @@ set -e
 echo "Running SQL migrations from migrations/ folder..."
 npx tsx migrations/run-migrations.ts
 
-echo "Running drizzle-kit push (non-interactive)..."
-export NODE_OPTIONS="${NODE_OPTIONS:-} --use-system-ca"
-yes '' | PGSSLMODE=require npx drizzle-kit@0.31.8 push \
-  --dialect=postgresql \
-  --schema=./shared/schema.ts \
-  --url="$DATABASE_URL?sslmode=require" \
-  --force \
-  2>&1 || {
-    echo "WARNING: drizzle-kit push exited with non-zero, but this may be expected if yes pipe closed early"
-    echo "Checking database connectivity..."
-    node -e "const{Pool}=require('pg');const p=new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}});p.query('SELECT 1').then(()=>{console.log('DB OK');p.end()}).catch(e=>{console.error('DB ERROR:',e.message);p.end();process.exit(1)})"
-  }
+if [[ "${RUN_DRIZZLE_PUSH_ON_RELEASE:-false}" == "true" ]]; then
+  echo "Running drizzle-kit push (non-interactive)..."
+  export NODE_OPTIONS="${NODE_OPTIONS:-} --use-system-ca"
+  yes '' | PGSSLMODE=require npx drizzle-kit@0.31.8 push \
+    --dialect=postgresql \
+    --schema=./shared/schema.ts \
+    --url="$DATABASE_URL?sslmode=require" \
+    --force
+else
+  echo "Skipping drizzle-kit push during release (set RUN_DRIZZLE_PUSH_ON_RELEASE=true to enable)."
+fi
 
 echo "Release phase complete"

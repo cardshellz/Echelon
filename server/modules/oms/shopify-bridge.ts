@@ -12,9 +12,13 @@ import { sql, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import { getShopifyConfig } from "../integrations/shopify";
 import { channelConnections } from "@shared/schema";
+import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 
 
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
+
+let notificationBackfillRunning = false;
+let lastNotificationBackfillStartedAt = 0;
 
 /**
  * Bridge a Shopify order into the OMS.
@@ -235,11 +239,28 @@ export function startShopifyBridgeListener(db: any, omsService: OmsService): voi
 
     client.on('notification', async (msg: any) => {
       if (msg.channel === 'shopify_order_ingested') {
-        // Trigger backfill asynchronously, rate-limited by nature of single loop
+        if (notificationBackfillRunning) {
+          return;
+        }
+
+        const now = Date.now();
+        const minIntervalMs = envPositiveInteger("SHOPIFY_BRIDGE_MIN_BACKFILL_INTERVAL_MS", 10_000);
+        if (now - lastNotificationBackfillStartedAt < minIntervalMs) {
+          return;
+        }
+
+        notificationBackfillRunning = true;
+        lastNotificationBackfillStartedAt = now;
         try {
-          await backfillShopifyOrders(db, omsService, 50);
+          await backfillShopifyOrders(
+            db,
+            omsService,
+            envPositiveInteger("SHOPIFY_BRIDGE_NOTIFY_BACKFILL_LIMIT", 10),
+          );
         } catch (error: any) {
           console.error(`[Shopify Bridge] Error running continuous backfill: ${error.message}`);
+        } finally {
+          notificationBackfillRunning = false;
         }
       }
     });

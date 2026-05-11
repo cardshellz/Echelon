@@ -16,6 +16,7 @@
 import { runReconciliationNow as shopifyReconcile } from "../orders/shopify-order-reconciliation";
 import { backfillShopifyOrders } from "./shopify-bridge-wrapper";
 import { sql } from "drizzle-orm";
+import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 
 export interface StageResult {
   name: string;
@@ -127,7 +128,7 @@ export class SyncRecoveryService {
       const bridged = await backfillShopifyOrders(
         this.db,
         this.services.oms,
-        500,
+        envPositiveInteger("SYNC_RECOVERY_SHOPIFY_TO_OMS_LIMIT", 50),
       );
       return { name: "shopify_to_oms", ok: true, data: { bridged } };
     } catch (err: any) {
@@ -149,7 +150,9 @@ export class SyncRecoveryService {
           error: "wmsSync service unavailable",
         };
       }
-      const synced = await this.services.wmsSync.backfillUnsynced(500);
+      const synced = await this.services.wmsSync.backfillUnsynced(
+        envPositiveInteger("SYNC_RECOVERY_OMS_TO_WMS_LIMIT", 50),
+      );
       return { name: "oms_to_wms", ok: true, data: { synced } };
     } catch (err: any) {
       console.error("[SyncRecovery] oms_to_wms failed:", err);
@@ -171,13 +174,16 @@ export class SyncRecoveryService {
         };
       }
 
-      // Find all planned outbound shipments that do NOT have a shipstation order ID
+      const shipmentLimit = envPositiveInteger("SYNC_RECOVERY_WMS_TO_SHIPSTATION_LIMIT", 25);
+
+      // Find planned outbound shipments that do NOT have a ShipStation order ID.
       const result: any = await this.db.execute(sql`
         SELECT id
         FROM wms.outbound_shipments
         WHERE status = 'planned'
           AND shipstation_order_id IS NULL
         ORDER BY created_at ASC
+        LIMIT ${shipmentLimit}
       `);
       
       const shipmentIds = result.rows.map((r: any) => r.id);
@@ -196,8 +202,10 @@ export class SyncRecoveryService {
           console.warn(`[SyncRecovery] wms_to_shipstation failed to push shipment ${id}: ${err.message}`);
           failed++;
         }
-        // Rate limit: ~1 request per second
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(
+          r,
+          envPositiveInteger("SYNC_RECOVERY_WMS_TO_SHIPSTATION_DELAY_MS", 1000),
+        ));
       }
 
       return { name: "wms_to_shipstation", ok: true, data: { checked: shipmentIds.length, pushed, failed } };
@@ -218,7 +226,10 @@ export class SyncRecoveryService {
    * The first run fires `initialDelayMs` milliseconds after start (default
    * 30s) so we don't compete with boot startup.
    */
-  startScheduled(intervalMinutes = 10, initialDelayMs = 30_000) {
+  startScheduled(
+    intervalMinutes = envPositiveInteger("SYNC_RECOVERY_INTERVAL_MINUTES", 15),
+    initialDelayMs = envPositiveInteger("SYNC_RECOVERY_INITIAL_DELAY_MS", 120_000),
+  ) {
     const intervalMs = intervalMinutes * 60 * 1000;
     console.log(
       `[SyncRecovery] Scheduled runs every ${intervalMinutes}min (first in ${

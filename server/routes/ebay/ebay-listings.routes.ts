@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
-import { requireAuth, requireInternalApiKey, requirePermission } from "../middleware";
+import { requireAuth, requireAuthOrInternalApiKey, requirePermission } from "../middleware";
 import {
   channels,
   channelConnections,
@@ -1722,7 +1722,7 @@ export const router = express.Router();
 
 
   // -----------------------------------------------------------------------
-  router.post("/api/ebay/listings/reconcile", requireInternalApiKey, async (_req: Request, res: Response) => {
+  router.post("/api/ebay/listings/reconcile", requireAuthOrInternalApiKey, async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {

@@ -26,11 +26,24 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-export function requireInternalApiKey(req: Request, res: Response, next: NextFunction) {
+function requestHasInternalApiKey(req: Request): boolean {
+  const configuredKey = process.env.INTERNAL_API_KEY;
   const authHeader = req.headers.authorization;
-  const key = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!key || key !== process.env.INTERNAL_API_KEY) {
+  const providedKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  return Boolean(configuredKey && providedKey && providedKey === configuredKey);
+}
+
+export function requireInternalApiKey(req: Request, res: Response, next: NextFunction) {
+  if (!requestHasInternalApiKey(req)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();
+}
+
+export function requireAuthOrInternalApiKey(req: Request, res: Response, next: NextFunction) {
+  if (requestHasInternalApiKey(req) || req.session.user) {
+    return next();
+  }
+
+  return res.status(401).json({ error: "Authentication required" });
 }
