@@ -325,6 +325,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       orderCancellationStatusCounts,
       listingPushJobStatusCounts,
       trackingPushStatusCounts,
+      wmsSyncRetryStatusCounts,
       rmaStatusCounts,
       notificationStatusCounts,
       recentAuditEvents,
@@ -339,6 +340,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       }),
       this.countByStatus("dropship.dropship_listing_push_jobs", "status", input, { hasVendorId: true, hasStoreConnectionId: false }),
       this.countByStatus("dropship.dropship_marketplace_tracking_pushes", "status", input, { hasVendorId: true, hasStoreConnectionId: true }),
+      this.countDropshipOmsWmsSyncRetryStatuses(input),
       this.countByStatus("dropship.dropship_rmas", "status", input, { hasVendorId: true, hasStoreConnectionId: true }),
       this.countByStatus("dropship.dropship_notification_events", "status", input, { hasVendorId: true, hasStoreConnectionId: false }),
       this.searchAuditEvents({
@@ -357,6 +359,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
         orderCancellationStatusCounts,
         listingPushJobStatusCounts,
         trackingPushStatusCounts,
+        wmsSyncRetryStatusCounts,
         rmaStatusCounts,
         notificationStatusCounts,
       }),
@@ -366,6 +369,7 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
       orderCancellationStatusCounts,
       listingPushJobStatusCounts,
       trackingPushStatusCounts,
+      wmsSyncRetryStatusCounts,
       rmaStatusCounts,
       notificationStatusCounts,
       recentAuditEvents: recentAuditEvents.items,
@@ -487,6 +491,38 @@ export class PgDropshipOpsSurfaceRepository implements DropshipOpsSurfaceReposit
        GROUP BY ${statusColumn}
        ORDER BY ${statusColumn} ASC`,
       filters.params,
+    );
+    return result.rows.map(mapCountRow);
+  }
+
+  private async countDropshipOmsWmsSyncRetryStatuses(
+    input: { vendorId?: number; storeConnectionId?: number },
+  ): Promise<DropshipOpsCount[]> {
+    const clauses = [
+      "q.provider = 'internal'",
+      "q.topic = 'oms_wms_sync'",
+    ];
+    const params: unknown[] = [];
+    if (input.vendorId) {
+      params.push(input.vendorId);
+      clauses.push(`oi.vendor_id = $${params.length}`);
+    }
+    if (input.storeConnectionId) {
+      params.push(input.storeConnectionId);
+      clauses.push(`oi.store_connection_id = $${params.length}`);
+    }
+
+    const result = await this.dbPool.query<CountRow>(
+      `SELECT q.status AS key, COUNT(*) AS count
+       FROM oms.webhook_retry_queue q
+       INNER JOIN dropship.dropship_order_intake oi
+         ON oi.oms_order_id IS NOT NULL
+        AND oi.oms_order_id::text = q.payload->>'omsOrderId'
+       WHERE ${clauses.join(" AND ")}
+         AND (q.payload->>'omsOrderId') ~ '^[1-9][0-9]*$'
+       GROUP BY q.status
+       ORDER BY q.status ASC`,
+      params,
     );
     return result.rows.map(mapCountRow);
   }
@@ -979,6 +1015,7 @@ function buildRiskBuckets(input: {
   orderCancellationStatusCounts: DropshipOpsCount[];
   listingPushJobStatusCounts: DropshipOpsCount[];
   trackingPushStatusCounts: DropshipOpsCount[];
+  wmsSyncRetryStatusCounts: DropshipOpsCount[];
   rmaStatusCounts: DropshipOpsCount[];
   notificationStatusCounts: DropshipOpsCount[];
 }): DropshipOpsRiskBucket[] {
@@ -1018,6 +1055,18 @@ function buildRiskBuckets(input: {
       label: "Tracking push failures",
       severity: "error",
       count: sumCounts(input.trackingPushStatusCounts, ["failed"]),
+    },
+    {
+      key: "wms_sync_retries_pending",
+      label: "OMS/WMS sync retries pending",
+      severity: "warning",
+      count: sumCounts(input.wmsSyncRetryStatusCounts, ["pending"]),
+    },
+    {
+      key: "wms_sync_retries_dead",
+      label: "OMS/WMS sync retries dead-lettered",
+      severity: "error",
+      count: sumCounts(input.wmsSyncRetryStatusCounts, ["dead"]),
     },
     {
       key: "return_claim_attention",

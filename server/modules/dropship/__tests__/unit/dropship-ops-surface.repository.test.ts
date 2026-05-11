@@ -113,6 +113,22 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       if (text.includes("dropship.dropship_marketplace_tracking_pushes")) {
         return { rows: [{ key: "failed", count: "1" }] };
       }
+      if (text.includes("oms.webhook_retry_queue")) {
+        expect(text).toContain("q.topic = 'oms_wms_sync'");
+        expect(text).toContain("q.provider = 'internal'");
+        expect(text).toContain("q.payload->>'omsOrderId'");
+        expect(text).toContain("dropship.dropship_order_intake oi");
+        expect(text).toContain("oi.oms_order_id::text = q.payload->>'omsOrderId'");
+        expect(text).not.toContain("(q.payload->>'omsOrderId')::bigint");
+        expect(text).toContain("oi.vendor_id = $1");
+        expect(params).toEqual([10]);
+        return {
+          rows: [
+            { key: "dead", count: "1" },
+            { key: "pending", count: "2" },
+          ],
+        };
+      }
       return { rows: [] };
     });
     const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
@@ -131,6 +147,18 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       severity: "error",
     });
     expect(result.riskBuckets.find((bucket) => bucket.key === "tracking_push_failures")).toMatchObject({
+      count: 1,
+      severity: "error",
+    });
+    expect(result.wmsSyncRetryStatusCounts).toEqual([
+      { key: "dead", count: 1 },
+      { key: "pending", count: 2 },
+    ]);
+    expect(result.riskBuckets.find((bucket) => bucket.key === "wms_sync_retries_pending")).toMatchObject({
+      count: 2,
+      severity: "warning",
+    });
+    expect(result.riskBuckets.find((bucket) => bucket.key === "wms_sync_retries_dead")).toMatchObject({
       count: 1,
       severity: "error",
     });
