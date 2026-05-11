@@ -37,7 +37,7 @@ CREATE INDEX IF NOT EXISTS allocation_exceptions_status_created_idx
 CREATE INDEX IF NOT EXISTS allocation_exceptions_sku_status_idx
   ON wms.allocation_exceptions(sku, status);
 
-INSERT INTO notification_types (key, label, description, category) VALUES
+INSERT INTO notifications.notification_types (key, label, description, category) VALUES
   ('allocation_auto_fixed', 'Allocation Auto-Fixed', 'A picker bin override also repaired missing product-location setup', 'picking'),
   ('allocation_review_needed', 'Allocation Review Needed', 'A picker bin override needs lead review before setup should be changed', 'picking'),
   ('allocation_blocked', 'Allocation Blocked', 'A picker bin override could not be safely accepted', 'picking')
@@ -53,28 +53,28 @@ DECLARE
   picker_role_id INTEGER;
   nt RECORD;
 BEGIN
-  SELECT id INTO admin_role_id FROM auth_roles WHERE name = 'admin';
-  SELECT id INTO lead_role_id FROM auth_roles WHERE name = 'lead';
-  SELECT id INTO picker_role_id FROM auth_roles WHERE name = 'picker';
+  SELECT id INTO admin_role_id FROM public.auth_roles WHERE name = 'admin';
+  SELECT id INTO lead_role_id FROM public.auth_roles WHERE name = 'lead';
+  SELECT id INTO picker_role_id FROM public.auth_roles WHERE name = 'picker';
 
   FOR nt IN
-    SELECT id FROM notification_types
+    SELECT id FROM notifications.notification_types
     WHERE key IN ('allocation_auto_fixed', 'allocation_review_needed', 'allocation_blocked')
   LOOP
     IF admin_role_id IS NOT NULL THEN
-      INSERT INTO notification_preferences (notification_type_id, role_id, user_id, enabled)
+      INSERT INTO notifications.notification_preferences (notification_type_id, role_id, user_id, enabled)
       VALUES (nt.id, admin_role_id, NULL, 1)
       ON CONFLICT DO NOTHING;
     END IF;
 
     IF lead_role_id IS NOT NULL THEN
-      INSERT INTO notification_preferences (notification_type_id, role_id, user_id, enabled)
+      INSERT INTO notifications.notification_preferences (notification_type_id, role_id, user_id, enabled)
       VALUES (nt.id, lead_role_id, NULL, 1)
       ON CONFLICT DO NOTHING;
     END IF;
 
     IF picker_role_id IS NOT NULL THEN
-      INSERT INTO notification_preferences (notification_type_id, role_id, user_id, enabled)
+      INSERT INTO notifications.notification_preferences (notification_type_id, role_id, user_id, enabled)
       VALUES (nt.id, picker_role_id, NULL, 0)
       ON CONFLICT DO NOTHING;
     END IF;
