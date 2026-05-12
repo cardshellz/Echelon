@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { 
   Scan, 
   CheckCircle2, 
@@ -407,9 +408,11 @@ function PriorityBadges({
 function ReplenPredictionBadge({
   prediction,
   compact = false,
+  canOpenTask = false,
 }: {
   prediction?: ReplenPrediction | null;
   compact?: boolean;
+  canOpenTask?: boolean;
 }) {
   if (!prediction || (!prediction.replenNeeded && !prediction.existingTaskId)) return null;
 
@@ -431,12 +434,13 @@ function ReplenPredictionBadge({
       ? `from ${prediction.sourceLocationCode}`
       : null;
 
-  return (
+  const badge = (
     <Badge
       variant="outline"
-      title={detail ? `${label} ${detail}` : label}
+      title={hasExistingTask && canOpenTask ? `Open replen task ${detail}` : detail ? `${label} ${detail}` : label}
       className={cn(
         "inline-flex max-w-full items-center gap-1 font-semibold",
+        hasExistingTask && canOpenTask && "cursor-pointer hover:bg-blue-100 dark:hover:bg-blue-950/40",
         compact ? "text-[9px] px-1.5 py-0.5" : "text-xs px-2 py-1",
         isShipmentBlocking || hasBlockedTask
           ? "border-red-300 bg-red-50 text-red-700"
@@ -457,6 +461,14 @@ function ReplenPredictionBadge({
         {detail && <span className="font-mono font-bold"> {detail}</span>}
       </span>
     </Badge>
+  );
+
+  if (!hasExistingTask || !canOpenTask) return badge;
+
+  return (
+    <Link href={`/replenishment?taskId=${prediction.existingTaskId}&status=all`}>
+      {badge}
+    </Link>
   );
 }
 
@@ -554,8 +566,9 @@ import {
 
 export default function Picking() {
   // Get current user for role-based UI
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
+  const canViewReplenTasks = isAdminOrLead || hasPermission("inventory", "view");
   const { toast } = useToast();
   
   // Get picking mode, view mode, and sound/haptic settings from context
@@ -4066,7 +4079,7 @@ export default function Picking() {
                 )}
                 {currentItem.replenPrediction && (currentItem.replenPrediction.replenNeeded || currentItem.replenPrediction.existingTaskId) && (
                   <div className="mt-2 flex justify-center">
-                    <ReplenPredictionBadge prediction={currentItem.replenPrediction} />
+                    <ReplenPredictionBadge prediction={currentItem.replenPrediction} canOpenTask={canViewReplenTasks} />
                   </div>
                 )}
                 <div className="flex items-center justify-center gap-2 mt-2">
@@ -4299,7 +4312,7 @@ export default function Picking() {
                         </div>
                         <div className="text-[10px] md:text-xs font-mono font-semibold text-slate-500 truncate">{item.sku}</div>
                         {item.barcode && <div className="text-[9px] md:text-[10px] font-mono text-blue-500 truncate">BC: {item.barcode}</div>}
-                        <ReplenPredictionBadge prediction={item.replenPrediction} compact />
+                        <ReplenPredictionBadge prediction={item.replenPrediction} compact canOpenTask={canViewReplenTasks} />
                       </div>
                     
                       {/* Buttons - fixed width, always visible, touch-friendly */}

@@ -104,7 +104,7 @@ function makeDb() {
   return { db, inserts, updates, state, selectCounts };
 }
 
-function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSourceVariants?: boolean }) {
+function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSourceVariants?: boolean; activeTask?: any }) {
   const pickVariant = {
     id: 66,
     sku: "ARM-ENV-SGL-P50",
@@ -183,7 +183,7 @@ function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSour
     if (table === locationReplenConfig) return [];
     if (table === replenRules) return options?.explicitSourceRule ? [explicitRule] : [];
     if (table === replenTierDefaults) return [tierDefault];
-    if (table === replenTasks) return [];
+    if (table === replenTasks) return options?.activeTask ? [options.activeTask] : [];
     return [];
   };
 
@@ -275,6 +275,42 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       sourceVariantSku: "ARM-ENV-SGL-P50",
     });
     expect(guidance.taskNotes).toContain("Auto-triggered");
+  });
+
+  it("can ignore a stale active task while auditing blocked task recovery", async () => {
+    const staleTask = {
+      id: 765,
+      status: "blocked",
+      blocksShipment: false,
+      sourceProductVariantId: 438,
+      pickProductVariantId: 66,
+      toLocationId: 1,
+      fromLocationId: 1,
+      qtySourceUnits: 0,
+      qtyTargetUnits: 0,
+      replenMethod: "case_break",
+      executionMode: "queue",
+      exceptionReason: "no_source_stock",
+      notes: "Blocked: no source stock found in pick locations",
+    };
+    const { db, sourceLocation } = makeSourceResolutionDb({ activeTask: staleTask });
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service as any, "findSourceLocation")
+      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+    vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
+
+    const guidance = await service.checkReplenNeeded(66, 1, {
+      currentQtyOverride: 0,
+      ignoreTaskId: 765,
+    });
+
+    expect(guidance).toMatchObject({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceVariantId: 67,
+      sourceVariantSku: "ARM-ENV-SGL-C700",
+    });
   });
 
   it("creates a linked cycle count for picker-reported source-empty replen blockers", async () => {

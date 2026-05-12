@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import {
   AlertTriangle,
   ClipboardCheck,
@@ -9,6 +10,7 @@ import {
   RefreshCcw,
   Scissors,
   ShieldAlert,
+  ExternalLink,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -109,6 +111,30 @@ function rowSubject(item: PickReplenHealthItem) {
   if (item.exceptionId) return `Exception #${item.exceptionId}`;
   if (item.cycleCountId) return `Count #${item.cycleCountId}`;
   return "-";
+}
+
+function issueHref(item: PickReplenHealthItem) {
+  if (item.taskId) return `/replenishment?taskId=${item.taskId}&status=all`;
+  return null;
+}
+
+function IssueLink({
+  item,
+  children,
+}: {
+  item: PickReplenHealthItem;
+  children: ReactNode;
+}) {
+  const href = issueHref(item);
+  if (!href) return <>{children}</>;
+  return (
+    <Link href={href}>
+      <span className="inline-flex items-center gap-1 text-blue-700 hover:underline dark:text-blue-400">
+        {children}
+        <ExternalLink className="h-3 w-3" />
+      </span>
+    </Link>
+  );
 }
 
 export default function PickReplenHealthSection({
@@ -217,7 +243,9 @@ export default function PickReplenHealthSection({
                         {cfg.label}
                       </Badge>
                     </TableCell>
-                    <TableCell className="font-mono text-sm">{rowSubject(item)}</TableCell>
+                    <TableCell className="font-mono text-sm">
+                      <IssueLink item={item}>{rowSubject(item)}</IssueLink>
+                    </TableCell>
                     <TableCell className="font-mono text-sm">
                       {item.sourceLocationCode ? `${item.sourceLocationCode} -> ` : ""}
                       {item.locationCode || "-"}
@@ -231,7 +259,7 @@ export default function PickReplenHealthSection({
                     </TableCell>
                     <TableCell className="text-right font-mono text-sm">{formatAge(item.ageHours)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {ACTION_LABELS[item.action] || item.action}
+                      <IssueLink item={item}>{ACTION_LABELS[item.action] || item.action}</IssueLink>
                     </TableCell>
                   </TableRow>
                 );
@@ -258,7 +286,9 @@ export default function PickReplenHealthSection({
                   <div className="flex items-center gap-2">
                     <Icon className={item.priority <= 1 ? "h-4 w-4 text-red-600" : "h-4 w-4 text-muted-foreground"} />
                     <div>
-                      <div className="font-mono text-sm font-medium">{rowSubject(item)}</div>
+                      <div className="font-mono text-sm font-medium">
+                        <IssueLink item={item}>{rowSubject(item)}</IssueLink>
+                      </div>
                       <Badge variant="outline" className={`mt-1 text-[10px] ${cfg.badge}`}>
                         {cfg.label}
                       </Badge>
@@ -277,7 +307,7 @@ export default function PickReplenHealthSection({
                   <div className="mt-1">{item.detail || item.status || "-"}</div>
                 </div>
                 <div className="mt-2 pt-2 border-t text-xs font-medium">
-                  {ACTION_LABELS[item.action] || item.action}
+                  <IssueLink item={item}>{ACTION_LABELS[item.action] || item.action}</IssueLink>
                 </div>
               </div>
             );

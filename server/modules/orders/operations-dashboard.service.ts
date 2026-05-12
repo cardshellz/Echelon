@@ -566,6 +566,10 @@ export class OperationsDashboardService {
           OR location_code ILIKE ${searchPattern}
           OR source_location_code ILIKE ${searchPattern}
           OR detail ILIKE ${searchPattern}
+          OR source_id = ${searchTerm}
+          OR task_id::text = ${searchTerm}
+          OR exception_id::text = ${searchTerm}
+          OR cycle_count_id::text = ${searchTerm}
         )`
       : sql``;
     const orderWarehouseFilter = warehouseId ? sql`AND o.warehouse_id = ${warehouseId}` : sql``;
