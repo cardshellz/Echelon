@@ -43,6 +43,12 @@ import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import {
+  findMatchingScannableItemIndex,
+  normalizeScanCode,
+  scanCouldStillMatchItem,
+  scanMatchesItem,
+} from "@/lib/picking-scan";
 import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 
 // API response type
@@ -921,6 +927,8 @@ export default function Picking() {
   const [replenConfirmed, setReplenConfirmed] = useState(false);
   const binCountPendingRef = useRef(false); // Track bin count synchronously to prevent race conditions
   const orderCompletedPendingRef = useRef(false); // Defer order completion until API response confirms no binCount needed
+  const focusedScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const scanPickInFlightRef = useRef<Set<number>>(new Set());
 
   // Mutation for updating items
   const updateItemMutation = useMutation({
@@ -1015,6 +1023,9 @@ export default function Picking() {
 
       // Refetch to ensure UI is in sync with backend
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
+    onSettled: (_data, _error, variables) => {
+      scanPickInFlightRef.current.delete(variables.itemId);
     },
   });
 
@@ -1631,49 +1642,93 @@ export default function Picking() {
     }
   };
   
-  // Handle scan input (matches SKU or barcode)
+  const clearFocusedScanTimeout = () => {
+    if (focusedScanTimeoutRef.current) {
+      clearTimeout(focusedScanTimeoutRef.current);
+      focusedScanTimeoutRef.current = null;
+    }
+  };
+
+  const rejectScan = (resetDelayMs = 900) => {
+    clearFocusedScanTimeout();
+    setScanStatus("error");
+    playSound("error");
+    triggerHaptic("heavy");
+
+    setTimeout(() => {
+      setScanStatus("idle");
+      setScanInput("");
+      maintainFocus();
+    }, resetDelayMs);
+  };
+
+  const acceptFocusedScan = () => {
+    if (!currentItem) return;
+    if (scanPickInFlightRef.current.has(currentItem.id)) {
+      rejectScan(500);
+      return;
+    }
+
+    clearFocusedScanTimeout();
+    setScanStatus("success");
+    playSound("scan");
+    triggerHaptic("medium");
+
+    if (currentItem.qty > 1) {
+      setTimeout(() => {
+        setMultiQtyOpen(true);
+        setScanStatus("idle");
+        setScanInput("");
+      }, 400);
+    } else {
+      setTimeout(() => {
+        confirmPick(1);
+      }, 400);
+    }
+  };
+
+  const processFocusedScan = (value: string) => {
+    setScanInput(value);
+    if (!currentItem || !value.trim()) return;
+
+    if (scanMatchesItem(value, currentItem)) {
+      acceptFocusedScan();
+    } else {
+      rejectScan();
+    }
+  };
+
+  // Handle focus-mode scan input. Do not reject on partial input: scanner wedges
+  // often type a long barcode character by character before sending Enter.
   const handleScan = (value: string) => {
     setScanInput(value);
     if (!currentItem) return;
-    
-    const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
-    const normalizedSku = currentItem.sku.toUpperCase().replace(/-/g, "");
-    const normalizedBarcode = currentItem.barcode?.toUpperCase().replace(/-/g, "") || "";
-    
-    // Check for match (SKU or barcode)
-    if (normalizedInput === normalizedSku || normalizedInput === normalizedBarcode) {
-      setScanStatus("success");
-      playSound("scan");
-      triggerHaptic("medium");
-      
-      if (currentItem.qty > 1) {
-        setTimeout(() => {
-          setMultiQtyOpen(true);
-          setScanStatus("idle");
-          setScanInput("");
-        }, 400);
-      } else {
-        setTimeout(() => {
-          confirmPick(1);
-        }, 400);
-      }
-    } else if (normalizedInput.length >= normalizedSku.length && normalizedInput !== normalizedSku) {
-      // Wrong barcode scanned
-      setScanStatus("error");
-      playSound("error");
-      triggerHaptic("heavy");
-      
-      setTimeout(() => {
-        setScanStatus("idle");
-        setScanInput("");
-        maintainFocus();
-      }, 1000);
+
+    clearFocusedScanTimeout();
+    if (!value.trim()) return;
+
+    if (scanMatchesItem(value, currentItem)) {
+      acceptFocusedScan();
+      return;
+    }
+
+    const normalizedInput = normalizeScanCode(value);
+    if (normalizedInput.length >= 3 && !scanCouldStillMatchItem(value, currentItem)) {
+      focusedScanTimeoutRef.current = setTimeout(() => {
+        processFocusedScan(value);
+      }, 180);
     }
   };
+
+  useEffect(() => {
+    return () => clearFocusedScanTimeout();
+  }, []);
   
   // Confirm pick
   const confirmPick = (qty: number) => {
     if (!activeWork || !currentItem) return;
+    if (scanPickInFlightRef.current.has(currentItem.id)) return;
+    scanPickInFlightRef.current.add(currentItem.id);
     
     const newPicked = currentItem.picked + qty;
     const newStatus: ItemStatus = newPicked >= currentItem.qty ? "completed" : "in_progress";
@@ -1888,20 +1943,17 @@ export default function Picking() {
         return;
       }
       
-      const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
-      
       // Find matching unpicked item
-      const matchingIndex = activeWork.items.findIndex(item => {
-        if (item.status === "completed" || item.status === "short") return false;
-        const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
-        const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
-        return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
-      });
+      const matchingIndex = findMatchingScannableItemIndex(activeWork.items, value);
       
       if (matchingIndex !== -1) {
         const item = activeWork.items[matchingIndex];
         const newPicked = item.picked + 1;
-        const isItemComplete = newPicked >= item.qty;
+        if (scanPickInFlightRef.current.has(item.id)) {
+          addDebug(`DUPLICATE IGNORED: ${item.sku} is already updating`);
+          rejectScan(500);
+          return;
+        }
         addDebug(`MATCH! ${item.sku} (${newPicked}/${item.qty})`);
         setScanStatus("success");
         playSound("success");
@@ -1916,7 +1968,7 @@ export default function Picking() {
           maintainFocus();
         }, 300);
       } else {
-        addDebug(`NO MATCH: "${normalizedInput}"`);
+        addDebug(`NO MATCH: "${normalizeScanCode(value)}"`);
         setScanStatus("error");
         playSound("error");
         triggerHaptic("heavy");
@@ -1941,7 +1993,7 @@ export default function Picking() {
     processScanRef.current = (value: string) => {
       if (pickerViewMode === "focus") {
         // Card mode / focus mode logic
-        handleScan(value);
+        processFocusedScan(value);
         return;
       }
       
@@ -1951,19 +2003,17 @@ export default function Picking() {
         return;
       }
       
-      const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
-      
       // Find matching unpicked item
-      const matchingIndex = activeWork.items.findIndex(item => {
-        if (item.status === "completed" || item.status === "short") return false;
-        const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
-        const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
-        return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
-      });
+      const matchingIndex = findMatchingScannableItemIndex(activeWork.items, value);
       
       if (matchingIndex !== -1) {
         const item = activeWork.items[matchingIndex];
         const newPicked = item.picked + 1;
+        if (scanPickInFlightRef.current.has(item.id)) {
+          addDebug(`GLOBAL DUPLICATE IGNORED: ${item.sku} is already updating`);
+          rejectScan(500);
+          return;
+        }
         addDebug(`GLOBAL MATCH! ${item.sku} (${newPicked}/${item.qty})`);
         setScanStatus("success");
         playSound("success");
@@ -1977,7 +2027,7 @@ export default function Picking() {
           maintainFocus();
         }, 300);
       } else {
-        addDebug(`GLOBAL NO MATCH: "${normalizedInput}"`);
+        addDebug(`GLOBAL NO MATCH: "${normalizeScanCode(value)}"`);
         setScanStatus("error");
         playSound("error");
         triggerHaptic("heavy");
@@ -1988,7 +2038,7 @@ export default function Picking() {
         }, 1000);
       }
     };
-  }, [activeWork, playSound, triggerHaptic, maintainFocus, pickerViewMode]);
+  }, [activeWork, currentItem, playSound, triggerHaptic, maintainFocus, pickerViewMode]);
   
   // Handle picking ONE unit of an item (for scanning - increments by 1)
   const handleListItemPickOne = (idx: number) => {
@@ -1996,6 +2046,15 @@ export default function Picking() {
     
     const item = activeWork.items[idx];
     if (!item) return;
+    if (item.status === "completed" || item.status === "short" || item.picked >= item.qty) {
+      rejectScan(500);
+      return;
+    }
+    if (scanPickInFlightRef.current.has(item.id)) {
+      rejectScan(500);
+      return;
+    }
+    scanPickInFlightRef.current.add(item.id);
     
     const newPicked = item.picked + 1;
     const isItemComplete = newPicked >= item.qty;
@@ -4004,6 +4063,12 @@ export default function Picking() {
                         className="pl-14 h-14 text-xl font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-xl"
                         value={scanInput}
                         onChange={(e) => handleScan(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === "Tab") {
+                            e.preventDefault();
+                            processFocusedScan(e.currentTarget.value);
+                          }
+                        }}
                         autoComplete="off"
                         autoCorrect="off"
                         autoCapitalize="off"
