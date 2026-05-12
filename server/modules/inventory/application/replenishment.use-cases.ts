@@ -107,8 +107,27 @@ type ResolvedReplenParams = {
   sourceLocationType: string;
   autoReplen: number;
   sourceVariantId: number | null;
+  sourceHierarchyLevel: number | null;
   sourcePriority: string;
 };
+
+type SourceResolutionIssue = {
+  reason: "no_source_stock" | "no_source_variant";
+  note: string;
+};
+
+type SourceCandidateResolution =
+  | {
+      status: "found";
+      variant: ProductVariant;
+      location: WarehouseLocation;
+      candidateCount: number;
+      note: string;
+    }
+  | {
+      status: "not_found";
+      issue: SourceResolutionIssue;
+    };
 
 type ReplenEvalResult =
   | {
@@ -134,6 +153,7 @@ type ReplenEvalResult =
       whSettings: WarehouseSettings | null;
       params: ResolvedReplenParams;
       taskNotes: string;
+      sourceResolutionIssue?: SourceResolutionIssue | null;
       rule: ReplenRule | null;
       sourceLocation: WarehouseLocation | null;
       resolvedSourceVariantId: number | null;
@@ -151,6 +171,7 @@ const EXECUTABLE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress"];
 const RECOVERABLE_BLOCKED_REPLEN_REASONS = new Set<string | null>([
   null,
   "no_source_stock",
+  "no_source_variant",
   "execute_failed",
 ]);
 
@@ -411,10 +432,11 @@ export class ReplenishmentUseCases {
     const priority = rule?.priority ?? tierDefault?.priority ?? 5;
     const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
     const autoReplen = rule?.autoReplen ?? tierDefault?.autoReplen ?? 0;
-    const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault);
+    const sourceVariantId = rule?.sourceProductVariantId ?? null;
+    const sourceHierarchyLevel = tierDefault?.sourceHierarchyLevel ?? null;
     const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
 
-    return { triggerValue, maxQty, replenMethod, priority, sourceLocationType, autoReplen, sourceVariantId, sourcePriority };
+    return { triggerValue, maxQty, replenMethod, priority, sourceLocationType, autoReplen, sourceVariantId, sourceHierarchyLevel, sourcePriority };
   }
 
   calculateQtyNeeded(maxQty: number | null, triggerValue: number, currentQty: number): number {
@@ -502,31 +524,54 @@ export class ReplenishmentUseCases {
     if (!belowThreshold) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
     console.log(`${_tag} THRESHOLD MET: method=${resolvedReplenMethod}`);
 
-    let sourceLocation = await this.findSourceLocation(
-      resolvedSourceVariantId ?? productVariantId,
-      location.warehouseId ?? undefined,
-      sourceLocationType,
-      location.parentLocationId,
-      sourcePriority,
-    );
+    const qtyNeeded = this.calculateQtyNeeded(maxQty, triggerValue!, evaluatedQty);
+    let sourceResolutionIssue: SourceResolutionIssue | null = null;
+    let sourceLocation = resolvedSourceVariantId != null
+      ? await this.findSourceLocation(
+          resolvedSourceVariantId,
+          location.warehouseId ?? undefined,
+          sourceLocationType,
+          location.parentLocationId,
+          sourcePriority,
+        )
+      : null;
 
-    if (!sourceLocation && resolvedSourceVariantId == null && variant.productId) {
-      const siblings = await this.db.select().from(productVariants)
-        .where(and(eq(productVariants.productId, variant.productId), eq(productVariants.isActive, true)));
-      const higherSiblings = siblings
-        .filter((v: any) => v.id !== productVariantId && v.hierarchyLevel > variant.hierarchyLevel)
-        .sort((a: any, b: any) => a.hierarchyLevel - b.hierarchyLevel);
+    if (!sourceLocation && resolvedSourceVariantId != null) {
+      const [configuredSource] = await this.db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, resolvedSourceVariantId))
+        .limit(1);
+      sourceResolutionIssue = {
+        reason: "no_source_stock",
+        note: `Configured source variant ${configuredSource?.sku ?? `#${resolvedSourceVariantId}`} has no stock in ${sourceLocationType} locations`,
+      };
+    }
 
-      for (const sib of higherSiblings) {
-        sourceLocation = await this.findSourceLocation(
-          sib.id, location.warehouseId ?? undefined, sourceLocationType, location.parentLocationId, sourcePriority,
-        );
-        if (sourceLocation) {
-          resolvedSourceVariantId = sib.id;
-          if (resolvedReplenMethod === "full_case") resolvedReplenMethod = "case_break";
-          console.log(`${_tag} FALLBACK: found case variant ${sib.sku} (id=${sib.id}) at ${sourceLocation.code}`);
-          break;
+    if (!sourceLocation && resolvedSourceVariantId == null) {
+      const sourceResolution = await this.resolveEligibleSourceCandidate({
+        pickVariant: variant as ProductVariant,
+        pickVariantId: productVariantId,
+        warehouseId: location.warehouseId ?? undefined,
+        sourceLocationType,
+        parentLocationId: location.parentLocationId,
+        sourcePriority,
+        sourceHierarchyLevel: params.sourceHierarchyLevel,
+        qtyNeeded,
+      });
+
+      if (sourceResolution.status === "found") {
+        resolvedSourceVariantId = sourceResolution.variant.id;
+        sourceLocation = sourceResolution.location;
+        if (resolvedSourceVariantId !== productVariantId && resolvedReplenMethod === "full_case") {
+          resolvedReplenMethod = "case_break";
         }
+        console.log(
+          `${_tag} SOURCE: ${sourceResolution.note}; selected ${sourceResolution.variant.sku} ` +
+          `(id=${sourceResolution.variant.id}) at ${sourceLocation.code}`,
+        );
+      } else {
+        sourceResolutionIssue = sourceResolution.issue;
       }
     }
 
@@ -544,7 +589,8 @@ export class ReplenishmentUseCases {
         status: "needed_stockout",
         level, location: location as WarehouseLocation, variant: variant as ProductVariant,
         whSettings, params: { ...params, replenMethod: resolvedReplenMethod, sourceVariantId: resolvedSourceVariantId },
-        taskNotes, rule, sourceLocation: null,
+        taskNotes,
+        sourceResolutionIssue, rule, sourceLocation: null,
         resolvedSourceVariantId, sourceVariant: sourceVariant as ProductVariant,
         qtySourceUnits: 0, qtyTargetUnits: 0,
         executionMode, shouldAutoExecute,
@@ -552,7 +598,6 @@ export class ReplenishmentUseCases {
       };
     }
 
-    const qtyNeeded = this.calculateQtyNeeded(maxQty, triggerValue!, evaluatedQty);
     const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
@@ -1016,7 +1061,7 @@ export class ReplenishmentUseCases {
       return eval_.existingTask;
     }
 
-    const { location, variant, whSettings, params, taskNotes, rule, resolvedSourceVariantId } = eval_;
+    const { location, variant, whSettings, params, taskNotes, sourceResolutionIssue, rule, resolvedSourceVariantId } = eval_;
     const { replenMethod, priority, sourceLocationType, autoReplen, sourcePriority } = params;
 
     if (eval_.status === "needed_stockout") {
@@ -1060,11 +1105,11 @@ export class ReplenishmentUseCases {
           executionMode: eval_.executionMode,
           replenMethod,
           autoReplen,
-          exceptionReason: "no_source_stock",
+          exceptionReason: sourceResolutionIssue?.reason ?? "no_source_stock",
           ...this.replenOrderTaskFields(context),
           warehouseId: location.warehouseId ?? undefined,
           notes: this.appendOrderContextNote(
-            `${taskNotes}\nBlocked: no source stock found in ${sourceLocationType} locations`,
+            `${taskNotes}\nBlocked: ${sourceResolutionIssue?.note ?? `no source stock found in ${sourceLocationType} locations`}`,
             context,
           ),
         } satisfies InsertReplenTask)
@@ -1151,7 +1196,7 @@ export class ReplenishmentUseCases {
       return this.buildExistingTaskGuidance(productVariantId, eval_.existingTask, eval_);
     }
 
-    const { sourceLocation, sourceVariant, resolvedSourceVariantId, qtySourceUnits, qtyTargetUnits, params, taskNotes, executionMode, triggerValue, evaluatedQty } = eval_;
+    const { sourceLocation, sourceVariant, resolvedSourceVariantId, qtySourceUnits, qtyTargetUnits, params, taskNotes, sourceResolutionIssue, executionMode, triggerValue, evaluatedQty } = eval_;
 
     if (eval_.status === "needed_stockout") {
       return {
@@ -1161,10 +1206,11 @@ export class ReplenishmentUseCases {
         pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0,
         replenMethod: params.replenMethod,
         executionMode,
-        taskNotes,
+        taskNotes: sourceResolutionIssue?.note ? `${taskNotes}\n${sourceResolutionIssue.note}` : taskNotes,
         triggerValue,
         autoReplen: params.autoReplen,
         evaluatedQty,
+        skipReason: sourceResolutionIssue?.reason ?? "no_source_stock",
       };
     }
 
@@ -2310,50 +2356,222 @@ export class ReplenishmentUseCases {
     return downstreamTask as ReplenTask;
   }
 
-  /**
-   * Resolve the source variant for a pick variant.
-   * Strategy 1: Walk parentVariantId (per-product packaging hierarchy).
-   * Strategy 2: Fall back to tier default sourceHierarchyLevel (legacy).
-   *
-   * @param productVariantsCache  Optional pre-loaded map of productId → variants
-   *                              (optional pre-loaded cache to avoid N+1 queries)
-   */
-  private async resolveSourceVariant(
-    pickVariant: ProductVariant,
-    tierDefault: ReplenTierDefault | null,
-    productVariantsCache?: Map<number, ProductVariant[]>,
-  ): Promise<number | null> {
-    if (!tierDefault) return null;
-    if (tierDefault.sourceHierarchyLevel === pickVariant.hierarchyLevel) return null;
+  private isActiveVariant(variant: ProductVariant): boolean {
+    return variant.isActive === true || (variant as any).isActive === 1;
+  }
 
-    // Load siblings for this product
-    let siblings: ProductVariant[];
-    if (productVariantsCache && pickVariant.productId) {
-      siblings = productVariantsCache.get(pickVariant.productId) ?? [];
-    } else {
-      siblings = pickVariant.productId
-        ? await this.db
-            .select()
-            .from(productVariants)
-            .where(eq(productVariants.productId, pickVariant.productId))
-        : [];
-    }
+  private variantUnits(variant: ProductVariant): number {
+    return Math.max(1, Number(variant.unitsPerVariant ?? 1));
+  }
 
-    // Primary: find variant at the tier default's source hierarchy level
-    const sourceByLevel = siblings.find(
-      (v) => v.hierarchyLevel === tierDefault.sourceHierarchyLevel && v.isActive,
-    );
-    if (sourceByLevel) return sourceByLevel.id;
+  private formatSourceCandidates(candidates: ProductVariant[]): string {
+    if (candidates.length === 0) return "none";
+    return candidates
+      .map((variant) => `${variant.sku ?? variant.name ?? `#${variant.id}`}(id=${variant.id})`)
+      .join(", ");
+  }
 
-    // Fallback: use parentVariantId only if it points to a HIGHER hierarchy level
-    if (pickVariant.parentVariantId) {
-      const parentVar = siblings.find((v) => v.id === pickVariant.parentVariantId);
-      if (parentVar && parentVar.hierarchyLevel > pickVariant.hierarchyLevel) {
-        return parentVar.id;
+  private isValidCaseBreakSource(sourceVariant: ProductVariant, pickVariant: ProductVariant): boolean {
+    const sourceUnits = this.variantUnits(sourceVariant);
+    const pickUnits = this.variantUnits(pickVariant);
+    return sourceUnits > pickUnits && sourceUnits % pickUnits === 0;
+  }
+
+  private async getSourceSlotRank(sourceVariantId: number, sourceLocationId: number): Promise<number> {
+    const [slot] = await this.db
+      .select({
+        isPrimary: productLocations.isPrimary,
+        status: productLocations.status,
+      })
+      .from(productLocations)
+      .where(and(
+        eq(productLocations.productVariantId, sourceVariantId),
+        eq(productLocations.warehouseLocationId, sourceLocationId),
+      ))
+      .limit(1);
+
+    if (!slot) return 2;
+    if (slot.status === "active" && slot.isPrimary === 1) return 0;
+    if (slot.status === "active") return 1;
+    return 3;
+  }
+
+  private async resolveEligibleSourceCandidate(params: {
+    pickVariant: ProductVariant;
+    pickVariantId: number;
+    warehouseId: number | undefined;
+    sourceLocationType: string;
+    parentLocationId?: number | null;
+    sourcePriority: string;
+    sourceHierarchyLevel: number | null;
+    qtyNeeded: number;
+  }): Promise<SourceCandidateResolution> {
+    const {
+      pickVariant,
+      pickVariantId,
+      warehouseId,
+      sourceLocationType,
+      parentLocationId,
+      sourcePriority,
+      sourceHierarchyLevel,
+      qtyNeeded,
+    } = params;
+
+    if (sourceHierarchyLevel == null || sourceHierarchyLevel === pickVariant.hierarchyLevel) {
+      const location = await this.findSourceLocation(
+        pickVariantId,
+        warehouseId,
+        sourceLocationType,
+        parentLocationId,
+        sourcePriority,
+      );
+      if (location) {
+        return {
+          status: "found",
+          variant: pickVariant,
+          location,
+          candidateCount: 1,
+          note: `same-variant source stock found in ${sourceLocationType} locations`,
+        };
       }
+      return {
+        status: "not_found",
+        issue: {
+          reason: "no_source_stock",
+          note: `No source stock found for ${pickVariant.sku ?? `variant #${pickVariantId}`} in ${sourceLocationType} locations`,
+        },
+      };
     }
 
-    return null;
+    if (!pickVariant.productId) {
+      return {
+        status: "not_found",
+        issue: {
+          reason: "no_source_variant",
+          note: `Cannot resolve source variant for ${pickVariant.sku ?? `variant #${pickVariantId}`}: missing product_id`,
+        },
+      };
+    }
+
+    const siblings = await this.db
+      .select()
+      .from(productVariants)
+      .where(and(
+        eq(productVariants.productId, pickVariant.productId),
+        eq(productVariants.isActive, true),
+      ));
+
+    const sourceVariants = (siblings as ProductVariant[])
+      .filter((variant) =>
+        variant.id !== pickVariantId &&
+        variant.hierarchyLevel === sourceHierarchyLevel &&
+        this.isActiveVariant(variant) &&
+        this.isValidCaseBreakSource(variant, pickVariant)
+      )
+      .sort((a, b) => {
+        const aParent = a.id === pickVariant.parentVariantId ? 0 : 1;
+        const bParent = b.id === pickVariant.parentVariantId ? 0 : 1;
+        return (
+          aParent - bParent ||
+          this.variantUnits(a) - this.variantUnits(b) ||
+          (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER) ||
+          a.id - b.id
+        );
+      });
+
+    if (sourceVariants.length === 0) {
+      const activeAtLevel = (siblings as ProductVariant[])
+        .filter((variant) =>
+          variant.id !== pickVariantId &&
+          variant.hierarchyLevel === sourceHierarchyLevel &&
+          this.isActiveVariant(variant)
+        );
+      const sameVariantLocation = await this.findSourceLocation(
+        pickVariantId,
+        warehouseId,
+        sourceLocationType,
+        parentLocationId,
+        sourcePriority,
+      );
+      if (sameVariantLocation) {
+        return {
+          status: "found",
+          variant: pickVariant,
+          location: sameVariantLocation,
+          candidateCount: 1,
+          note:
+            `no valid level ${sourceHierarchyLevel} source variant exists; ` +
+            `falling back to same-variant source stock in ${sourceLocationType} locations`,
+        };
+      }
+      return {
+        status: "not_found",
+        issue: {
+          reason: "no_source_variant",
+          note:
+            `No valid source variant for ${pickVariant.sku ?? `variant #${pickVariantId}`} at hierarchy level ${sourceHierarchyLevel}. ` +
+            `Active level candidates: ${this.formatSourceCandidates(activeAtLevel)}`,
+        },
+      };
+    }
+
+    const eligible: Array<{
+      variant: ProductVariant;
+      location: WarehouseLocation;
+      slotRank: number;
+      overfillUnits: number;
+    }> = [];
+
+    for (const sourceVariant of sourceVariants) {
+      const location = await this.findSourceLocation(
+        sourceVariant.id,
+        warehouseId,
+        sourceLocationType,
+        parentLocationId,
+        sourcePriority,
+      );
+      if (!location) continue;
+
+      const sourceUnits = this.variantUnits(sourceVariant);
+      eligible.push({
+        variant: sourceVariant,
+        location,
+        slotRank: await this.getSourceSlotRank(sourceVariant.id, location.id),
+        overfillUnits: (Math.ceil(Math.max(1, qtyNeeded) / sourceUnits) * sourceUnits) - Math.max(1, qtyNeeded),
+      });
+    }
+
+    if (eligible.length === 0) {
+      return {
+        status: "not_found",
+        issue: {
+          reason: "no_source_stock",
+          note:
+            `No source stock found for valid level ${sourceHierarchyLevel} variants of ` +
+            `${pickVariant.sku ?? `variant #${pickVariantId}`} in ${sourceLocationType} locations. ` +
+            `Checked: ${this.formatSourceCandidates(sourceVariants)}`,
+        },
+      };
+    }
+
+    eligible.sort((a, b) => (
+      a.slotRank - b.slotRank ||
+      a.overfillUnits - b.overfillUnits ||
+      this.variantUnits(a.variant) - this.variantUnits(b.variant) ||
+      (a.location.pickSequence ?? Number.MAX_SAFE_INTEGER) - (b.location.pickSequence ?? Number.MAX_SAFE_INTEGER) ||
+      a.variant.id - b.variant.id
+    ));
+
+    const best = eligible[0];
+    return {
+      status: "found",
+      variant: best.variant,
+      location: best.location,
+      candidateCount: eligible.length,
+      note:
+        `eligibility-aware source resolution checked ${sourceVariants.length} active level ${sourceHierarchyLevel} variant(s), ` +
+        `${eligible.length} had valid ${sourceLocationType} stock`,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -2453,7 +2671,14 @@ export class ReplenishmentUseCases {
           .from(warehouseLocations)
           .where(eq(warehouseLocations.id, parentLocationId))
           .limit(1);
-        if (parentLoc) return parentLoc;
+        if (
+          parentLoc &&
+          parentLoc.locationType === sourceLocationType &&
+          parentLoc.isActive === 1 &&
+          parentLoc.cycleCountFreezeId == null
+        ) {
+          return parentLoc;
+        }
       }
     }
 
@@ -2478,6 +2703,8 @@ export class ReplenishmentUseCases {
         and(
           eq(inventoryLevels.productVariantId, productVariantId),
           eq(warehouseLocations.locationType, sourceLocationType),
+          eq(warehouseLocations.isActive, 1),
+          isNull(warehouseLocations.cycleCountFreezeId),
           sql`${inventoryLevels.variantQty} > 0`,
           ...(warehouseId != null
             ? [eq(warehouseLocations.warehouseId, warehouseId)]
