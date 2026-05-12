@@ -452,6 +452,55 @@ describe("PickingUseCases post-pick replen context", () => {
   });
 });
 
+describe("PickingUseCases pick queue replen prediction", () => {
+  it("uses the fresh pick bin and shared replen prediction resolver", async () => {
+    const storage = {
+      getAllWarehouseLocations: vi.fn(async () => [
+        { id: 1, code: "A-01", locationType: "pick", isPickable: 1 },
+        { id: 2, code: "OLD-01", locationType: "pick", isPickable: 1 },
+      ]),
+      getProductVariantBySku: vi.fn(async (sku: string) => ({
+        id: 100,
+        sku,
+        productId: 10,
+        unitsPerVariant: 1,
+      })),
+    };
+    const replenishment = {
+      predictReplenAfterPick: vi.fn(async () => ({
+        systemQty: 5,
+        postPickQty: 2,
+        triggerValue: 3,
+        replenNeeded: true,
+        replenMethod: "case_break",
+        autoReplen: 1,
+        stockout: false,
+        executionMode: "inline",
+        sourceLocationCode: "B-01",
+        sourceQty: 12,
+        sourceVariantName: "Case",
+      })),
+    };
+    const service = new PickingUseCases({} as any, {} as any, replenishment as any, storage as any);
+
+    const predictions = await (service as any)._buildReplenPredictions(
+      [{ id: 501, sku: "SKU-1", quantity: 3, location: "OLD-01" }],
+      new Map([[
+        "SKU-1",
+        { location: "A-01", zone: "A", barcode: null, imageUrl: null },
+      ]]),
+    );
+
+    expect(replenishment.predictReplenAfterPick).toHaveBeenCalledWith(100, 1, 3);
+    expect(predictions.get(501)).toMatchObject({
+      replenNeeded: true,
+      replenMethod: "case_break",
+      sourceLocationCode: "B-01",
+      sourceQty: 12,
+    });
+  });
+});
+
 describe("PickingUseCases bin count replen feedback", () => {
   it("reports queued replen as pending instead of completed", async () => {
     const { service } = makeService([
