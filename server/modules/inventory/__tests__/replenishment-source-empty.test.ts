@@ -181,4 +181,77 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       qtyTargetUnits: 4,
     });
   });
+
+  it("returns an existing queued replen task instead of creating a duplicate", async () => {
+    const { db, inserts, state } = makeDb();
+    state.insertedReplenTask = {
+      id: 222,
+      fromLocationId: 2,
+      toLocationId: 1,
+      pickProductVariantId: 100,
+      sourceProductVariantId: 100,
+      status: "pending",
+      executionMode: "queue",
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      qtyCompleted: 0,
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const guidanceSpy = vi.spyOn(service, "checkReplenNeeded");
+    const executeSpy = vi.spyOn(service, "executeTask");
+
+    const result = await service.createAndExecuteReplen(100, 1, "picker-1");
+
+    expect(result).toMatchObject({
+      moved: 0,
+      task: {
+        id: 222,
+        status: "pending",
+        executionMode: "queue",
+      },
+    });
+    expect(inserts.filter(insert => insert.table === replenTasks)).toHaveLength(0);
+    expect(guidanceSpy).not.toHaveBeenCalled();
+    expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("executes an existing inline replen task instead of creating a duplicate", async () => {
+    const { db, inserts, state } = makeDb();
+    state.insertedReplenTask = {
+      id: 223,
+      fromLocationId: 2,
+      toLocationId: 1,
+      pickProductVariantId: 100,
+      sourceProductVariantId: 100,
+      status: "pending",
+      executionMode: "inline",
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      qtyCompleted: 0,
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const guidanceSpy = vi.spyOn(service, "checkReplenNeeded");
+    const executeTask = vi.spyOn(service, "executeTask").mockImplementation(async () => {
+      state.insertedReplenTask = {
+        ...state.insertedReplenTask,
+        status: "completed",
+        qtyCompleted: 4,
+      };
+      return { moved: 4 };
+    });
+
+    const result = await service.createAndExecuteReplen(100, 1, "picker-1");
+
+    expect(executeTask).toHaveBeenCalledWith(223, "picker-1");
+    expect(result).toMatchObject({
+      moved: 4,
+      task: {
+        id: 223,
+        status: "completed",
+        qtyCompleted: 4,
+      },
+    });
+    expect(inserts.filter(insert => insert.table === replenTasks)).toHaveLength(0);
+    expect(guidanceSpy).not.toHaveBeenCalled();
+  });
 });
