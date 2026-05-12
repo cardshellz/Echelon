@@ -87,7 +87,7 @@ type ResolvedReplenParams = {
 
 type ReplenEvalResult =
   | { status: "skip"; skipReason: string }
-  | { status: "dedup"; existingTaskId: number }
+  | { status: "dedup"; existingTaskId: number; existingTask: ReplenTask }
   | {
       status: "needed_with_source" | "needed_stockout";
       level: InventoryLevel;
@@ -105,6 +105,9 @@ type ReplenEvalResult =
       executionMode: string;
       shouldAutoExecute: boolean;
     };
+
+const ACTIVE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress", "blocked"];
+const EXECUTABLE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress"];
 
 type InventoryCore = {
   getLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel | null>;
@@ -155,6 +158,59 @@ export class ReplenishmentUseCases {
     private readonly db: DrizzleDb,
     private readonly inventoryUseCases: InventoryUseCases,
   ) {}
+
+  private async findActiveTaskForPickBin(
+    pickVariantId: number,
+    toLocationId: number,
+  ): Promise<ReplenTask | null> {
+    const [task] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(and(
+        eq(replenTasks.pickProductVariantId, pickVariantId),
+        eq(replenTasks.toLocationId, toLocationId),
+        inArray(replenTasks.status, ACTIVE_REPLEN_TASK_STATUSES),
+      ))
+      .limit(1);
+
+    return (task as ReplenTask | undefined) ?? null;
+  }
+
+  private async getTaskById(taskId: number): Promise<ReplenTask | null> {
+    const [task] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(eq(replenTasks.id, taskId))
+      .limit(1);
+
+    return (task as ReplenTask | undefined) ?? null;
+  }
+
+  private async blockTaskExecutionFailure(task: ReplenTask, error: any): Promise<void> {
+    const message = error?.message || String(error || "unknown_error");
+    await this.db.update(replenTasks).set({
+      status: "blocked",
+      exceptionReason: "execute_failed",
+      notes: `${task.notes || ""}\nExecute failed: ${message}`.trim(),
+    }).where(eq(replenTasks.id, task.id));
+  }
+
+  private async executeInlineTaskForPicker(
+    task: ReplenTask,
+    userId: string | undefined,
+    tag: string,
+  ): Promise<{ task: ReplenTask; moved: number }> {
+    try {
+      const result = await this.executeTask(task.id, userId ?? "picker:confirmed");
+      const finalTask = await this.getTaskById(task.id);
+      console.log(`${tag} task ${task.id} executed, moved ${result.moved} units`);
+      return { task: finalTask ?? task, moved: result.moved };
+    } catch (err: any) {
+      console.error(`${tag} executeTask failed for task ${task.id}:`, err?.message);
+      await this.blockTaskExecutionFailure(task, err);
+      throw err;
+    }
+  }
 
   private replenOrderTaskFields(context?: ReplenOrderContext): Pick<InsertReplenTask, "orderId" | "orderItemId" | "blocksShipment"> {
     return {
@@ -302,15 +358,9 @@ export class ReplenishmentUseCases {
     if (!belowThreshold) return { status: "skip", skipReason: "above_threshold" };
     console.log(`${_tag} THRESHOLD MET: method=${resolvedReplenMethod}`);
 
-    const [existingTask] = await this.db
-      .select().from(replenTasks)
-      .where(and(
-        eq(replenTasks.pickProductVariantId, productVariantId),
-        eq(replenTasks.toLocationId, warehouseLocationId),
-        inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]),
-      )).limit(1);
+    const existingTask = await this.findActiveTaskForPickBin(productVariantId, warehouseLocationId);
     if (existingTask)
-      return { status: "dedup", existingTaskId: existingTask.id };
+      return { status: "dedup", existingTaskId: existingTask.id, existingTask };
 
     let sourceLocation = await this.findSourceLocation(
       resolvedSourceVariantId ?? productVariantId,
@@ -778,7 +828,7 @@ export class ReplenishmentUseCases {
     }
     if (eval_.status === "dedup") {
       console.log(`${_tag} EXIT: dedup — existing task #${eval_.existingTaskId}`);
-      return null;
+      return eval_.existingTask;
     }
 
     const { location, variant, whSettings, params, taskNotes, rule, resolvedSourceVariantId } = eval_;
@@ -949,6 +999,18 @@ export class ReplenishmentUseCases {
   ): Promise<{ task: ReplenTask; moved: number } | null> {
     const _tag = `[Replen createAndExecute] variant=${pickVariantId} loc=${toLocationId}`;
 
+    const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
+    if (existingTask) {
+      console.log(`${_tag} reusing active task ${existingTask.id} status=${existingTask.status}`);
+      if (
+        existingTask.executionMode === "inline" &&
+        EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
+      ) {
+        return this.executeInlineTaskForPicker(existingTask, userId, _tag);
+      }
+      return { task: existingTask, moved: 0 };
+    }
+
     // Re-derive guidance from current DB state (fresh, not stale)
     const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId);
     if (guidance.needed && guidance.stockout && context?.blocksShipment) {
@@ -1008,20 +1070,7 @@ export class ReplenishmentUseCases {
     let moved = 0;
     if (guidance.executionMode === "inline") {
       console.log(`${_tag} created task ${task.id}, executing immediately...`);
-      try {
-        const result = await this.executeTask(task.id, userId ?? "picker:confirmed");
-        moved = result.moved;
-        console.log(`${_tag} task ${task.id} executed, moved ${result.moved} units`);
-      } catch (err: any) {
-        console.error(`${_tag} executeTask failed for task ${task.id}:`, err?.message);
-        // Mark as blocked so it's visible in the queue for manual resolution
-        await this.db.update(replenTasks).set({
-          status: "blocked",
-          exceptionReason: "execute_failed",
-          notes: `${task.notes}\nExecute failed: ${err?.message}`,
-        }).where(eq(replenTasks.id, task.id));
-        throw err;
-      }
+      return this.executeInlineTaskForPicker(task as ReplenTask, userId, _tag);
     } else {
       console.log(`${_tag} created task ${task.id}, executionMode is queue. Leaving as pending.`);
     }
