@@ -5,7 +5,6 @@ import {
   inventoryLevels,
   warehouseLocations,
   warehouseSettings,
-  productVariants,
   productLocations,
   orderItems,
   orders,
@@ -58,6 +57,19 @@ type InventoryCore = {
 type ReplenishmentService = {
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number, triggeredBy?: string, context?: ReplenOrderContext) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
+  predictReplenAfterPick: (productVariantId: number, warehouseLocationId: number, pickedQty: number) => Promise<{
+    systemQty: number;
+    postPickQty: number;
+    triggerValue: number | null;
+    replenNeeded: boolean;
+    replenMethod: string;
+    autoReplen: number;
+    stockout: boolean;
+    executionMode: string;
+    sourceLocationCode: string | null;
+    sourceQty: number;
+    sourceVariantName: string | null;
+  } | null>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
   createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number } | null>;
   recordSourceEmptyBlocker: (params: {
@@ -2158,7 +2170,17 @@ export class PickingUseCases {
     }
 
     // Replen predictions
-    const replenPredictionMap = await this._buildReplenPredictions(skusNeedingLookup);
+    const pendingReplenItems = filteredOrders.flatMap((order: any) =>
+      (order.items ?? [])
+        .filter((item: any) => item.sku && item.requiresShipping === 1 && item.status === "pending")
+        .map((item: any) => ({
+          id: item.id,
+          sku: item.sku,
+          quantity: item.quantity,
+          location: item.location,
+        })),
+    );
+    const replenPredictionMap = await this._buildReplenPredictions(pendingReplenItems, freshLocationMap);
 
     // Assemble response with metadata
     return filteredOrders.map((order: any) => {
@@ -2195,20 +2217,18 @@ export class PickingUseCases {
 
         // Replen prediction
         if (item.status === "pending" && item.sku) {
-          const prediction = replenPredictionMap.get(item.sku);
+          const prediction = replenPredictionMap.get(item.id);
           if (prediction) {
-            const postPickQty = prediction.systemQty - item.quantity;
-            const replenNeeded = postPickQty <= prediction.triggerValue;
             updatedItem.replenPrediction = {
               systemQty: prediction.systemQty,
-              postPickQty: Math.max(0, postPickQty),
+              postPickQty: prediction.postPickQty,
               triggerValue: prediction.triggerValue,
-              replenNeeded,
+              replenNeeded: prediction.replenNeeded,
               replenMethod: prediction.replenMethod,
               autoReplen: prediction.autoReplen,
-              sourceLocationCode: replenNeeded ? prediction.sourceLocationCode : null,
-              sourceQty: replenNeeded ? prediction.sourceQty : 0,
-              sourceVariantName: replenNeeded ? prediction.sourceVariantName : null,
+              sourceLocationCode: prediction.replenNeeded ? prediction.sourceLocationCode : null,
+              sourceQty: prediction.replenNeeded ? prediction.sourceQty : 0,
+              sourceVariantName: prediction.replenNeeded ? prediction.sourceVariantName : null,
             };
           }
         }
@@ -2227,89 +2247,34 @@ export class PickingUseCases {
     });
   }
 
-  /** Build replen predictions for pending SKUs. Non-fatal — returns empty map on failure. */
-  private async _buildReplenPredictions(skus: Set<string>): Promise<Map<string, any>> {
-    const map = new Map<string, any>();
+  /** Build replen predictions for pending items. Non-fatal: returns empty map on failure. */
+  private async _buildReplenPredictions(
+    items: Array<{ id: number; sku: string; quantity: number; location?: string | null }>,
+    freshLocationMap: Map<string, { location: string; zone: string; barcode: string | null; imageUrl: string | null }>,
+  ): Promise<Map<number, any>> {
+    const map = new Map<number, any>();
     try {
-      const tierDefaults = await this.storage.getActiveReplenTierDefaults();
-      const allRules = await this.storage.getActiveReplenRules();
-      // Index rules by pickProductVariantId AND by productId (matching replenishment service)
-      const ruleByPickVariant = new Map<number, any>();
-      const ruleByProduct = new Map<number, any>();
-      for (const r of allRules) {
-        if (r.pickProductVariantId) ruleByPickVariant.set(r.pickProductVariantId, r);
-        if (r.productId) ruleByProduct.set(r.productId, r);
-      }
-
       const allLocs = await this.storage.getAllWarehouseLocations();
+      const locByCode = new Map(allLocs.map(loc => [loc.code, loc]));
 
-      for (const sku of Array.from(skus)) {
-        const variant = await this.storage.getProductVariantBySku(sku);
+      for (const item of items) {
+        if (!item.sku) continue;
+
+        const variant = await this.storage.getProductVariantBySku(item.sku);
         if (!variant) continue;
 
-        const levels = await this.storage.getInventoryLevelsByProductVariantId(variant.id);
-        const pickLevel = levels.find((l: any) => {
-          const loc = allLocs.find(wl => wl.id === l.warehouseLocationId);
-          return loc && loc.locationType === "pick" && loc.isPickable === 1 && !loc.cycleCountFreezeId;
-        });
+        const locationCode = freshLocationMap.get(item.sku)?.location ?? item.location ?? null;
+        if (!locationCode || locationCode === "UNASSIGNED" || locationCode === "U") continue;
 
-        const systemQty = pickLevel?.variantQty ?? 0;
+        const location = locByCode.get(locationCode);
+        if (!location) continue;
 
-        // Check variant-level rule first, then product-level rule (matches replenishment service)
-        const rule = ruleByPickVariant.get(variant.id)
-          || (variant.productId ? ruleByProduct.get(variant.productId) : undefined);
-        const tierDefault = tierDefaults.find((td: any) =>
-          td.hierarchyLevel === variant.hierarchyLevel && td.isActive === 1
+        const prediction = await this.replenishment.predictReplenAfterPick(
+          variant.id,
+          location.id,
+          Number(item.quantity ?? 0),
         );
-
-        const triggerValue = rule?.triggerValue ?? tierDefault?.triggerValue ?? null;
-        if (triggerValue == null) continue;
-
-        const replenMethod = rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
-        const autoReplen = rule?.autoReplen ?? tierDefault?.autoReplen ?? 0;
-        const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
-
-        // Find source location
-        let sourceLocationCode: string | null = null;
-        let sourceQty = 0;
-        let sourceVariantName: string | null = null;
-
-        const sourceHierarchyLevel = tierDefault?.sourceHierarchyLevel ?? variant.hierarchyLevel;
-        let sourceVariantId = rule?.sourceProductVariantId;
-        if (!sourceVariantId && sourceHierarchyLevel !== variant.hierarchyLevel) {
-          const siblings = await this.db.select().from(productVariants)
-            .where(and(
-              eq(productVariants.productId, variant.productId),
-              eq(productVariants.hierarchyLevel, sourceHierarchyLevel),
-            ));
-          if (siblings.length > 0) sourceVariantId = siblings[0].id;
-        }
-
-        const lookupVariantId = sourceVariantId ?? variant.id;
-        const sourceLevels = await this.storage.getInventoryLevelsByProductVariantId(lookupVariantId);
-        for (const sl of sourceLevels) {
-          if (sl.variantQty <= 0) continue;
-          const loc = allLocs.find(wl => wl.id === sl.warehouseLocationId);
-          if (!loc || loc.locationType !== sourceLocationType) continue;
-          sourceLocationCode = loc.code;
-          sourceQty = sl.variantQty;
-          break;
-        }
-
-        if (sourceVariantId && sourceVariantId !== variant.id) {
-          const sv = await this.storage.getProductVariantById(sourceVariantId);
-          sourceVariantName = sv ? `${sv.name || sv.sku} (${sv.unitsPerVariant} units)` : null;
-        }
-
-        map.set(sku, {
-          systemQty,
-          triggerValue,
-          replenMethod,
-          autoReplen,
-          sourceLocationCode,
-          sourceQty,
-          sourceVariantName,
-        });
+        if (prediction) map.set(item.id, prediction);
       }
     } catch (err: any) {
       console.warn("[PickQueue] Replen prediction failed (non-fatal):", err?.message);
