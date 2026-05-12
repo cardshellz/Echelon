@@ -56,6 +56,10 @@ export type ReplenGuidance = {
   triggerValue: number | null;
   autoReplen: number;
   evaluatedQty: number | null;
+  existingTaskId?: number | null;
+  existingTaskStatus?: string | null;
+  existingTaskExecutionMode?: string | null;
+  existingTaskBlocksShipment?: boolean;
   skipReason?: string | null;
 };
 
@@ -71,6 +75,10 @@ export type ReplenPickPrediction = {
   sourceLocationCode: string | null;
   sourceQty: number;
   sourceVariantName: string | null;
+  existingTaskId: number | null;
+  existingTaskStatus: string | null;
+  existingTaskExecutionMode: string | null;
+  existingTaskBlocksShipment: boolean;
 };
 
 export type ReplenOrderContext = {
@@ -110,7 +118,14 @@ type ReplenEvalResult =
       triggerValue?: number | null;
       evaluatedQty?: number | null;
     }
-  | { status: "dedup"; existingTaskId: number; existingTask: ReplenTask }
+  | {
+      status: "dedup";
+      existingTaskId: number;
+      existingTask: ReplenTask;
+      params: ResolvedReplenParams;
+      triggerValue: number;
+      evaluatedQty: number;
+    }
   | {
       status: "needed_with_source" | "needed_stockout";
       level: InventoryLevel;
@@ -209,6 +224,54 @@ export class ReplenishmentUseCases {
       .limit(1);
 
     return (task as ReplenTask | undefined) ?? null;
+  }
+
+  private async buildExistingTaskGuidance(
+    productVariantId: number,
+    task: ReplenTask,
+    eval_: Extract<ReplenEvalResult, { status: "dedup" }>,
+  ): Promise<ReplenGuidance> {
+    const sourceLocationId =
+      task.fromLocationId && task.fromLocationId !== task.toLocationId
+        ? task.fromLocationId
+        : null;
+    const [sourceLocation] = sourceLocationId
+      ? await this.db
+          .select()
+          .from(warehouseLocations)
+          .where(eq(warehouseLocations.id, sourceLocationId))
+          .limit(1)
+      : [];
+    const sourceVariantId = task.sourceProductVariantId ?? productVariantId;
+    const [sourceVariant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, sourceVariantId))
+      .limit(1);
+
+    return {
+      needed: true,
+      stockout: task.status === "blocked" && task.qtyTargetUnits === 0,
+      sourceLocationId,
+      sourceLocationCode: sourceLocation?.code ?? null,
+      sourceVariantId,
+      sourceVariantSku: sourceVariant?.sku ?? null,
+      sourceVariantName: sourceVariant?.name || sourceVariant?.sku || null,
+      pickVariantId: productVariantId,
+      qtySourceUnits: task.qtySourceUnits ?? 0,
+      qtyTargetUnits: task.qtyTargetUnits ?? 0,
+      replenMethod: task.replenMethod ?? eval_.params.replenMethod,
+      executionMode: task.executionMode ?? "queue",
+      taskNotes: task.notes ?? "",
+      triggerValue: eval_.triggerValue,
+      autoReplen: task.autoReplen ?? eval_.params.autoReplen,
+      evaluatedQty: eval_.evaluatedQty,
+      existingTaskId: task.id,
+      existingTaskStatus: task.status,
+      existingTaskExecutionMode: task.executionMode ?? null,
+      existingTaskBlocksShipment: task.blocksShipment === true,
+      skipReason: `dedup_existing_task (#${task.id})`,
+    };
   }
 
   private async blockTaskExecutionFailure(task: ReplenTask, error: any): Promise<void> {
@@ -387,7 +450,7 @@ export class ReplenishmentUseCases {
 
     const existingTask = await this.findActiveTaskForPickBin(productVariantId, warehouseLocationId);
     if (existingTask)
-      return { status: "dedup", existingTaskId: existingTask.id, existingTask };
+      return { status: "dedup", existingTaskId: existingTask.id, existingTask, params, triggerValue, evaluatedQty };
 
     let sourceLocation = await this.findSourceLocation(
       resolvedSourceVariantId ?? productVariantId,
@@ -990,7 +1053,9 @@ export class ReplenishmentUseCases {
     const eval_ = await this.evaluateReplenNeed(productVariantId, warehouseLocationId, options);
 
     if (eval_.status === "skip") return noReplen(eval_.skipReason, eval_);
-    if (eval_.status === "dedup") return noReplen(`dedup_existing_task (#${eval_.existingTaskId})`);
+    if (eval_.status === "dedup") {
+      return this.buildExistingTaskGuidance(productVariantId, eval_.existingTask, eval_);
+    }
 
     const { sourceLocation, sourceVariant, resolvedSourceVariantId, qtySourceUnits, qtyTargetUnits, params, taskNotes, executionMode, triggerValue, evaluatedQty } = eval_;
 
@@ -1073,6 +1138,10 @@ export class ReplenishmentUseCases {
       sourceLocationCode: guidance.needed ? guidance.sourceLocationCode : null,
       sourceQty: guidance.needed ? sourceQty : 0,
       sourceVariantName: guidance.needed ? guidance.sourceVariantName : null,
+      existingTaskId: guidance.existingTaskId ?? null,
+      existingTaskStatus: guidance.existingTaskStatus ?? null,
+      existingTaskExecutionMode: guidance.existingTaskExecutionMode ?? null,
+      existingTaskBlocksShipment: guidance.existingTaskBlocksShipment === true,
     };
   }
 

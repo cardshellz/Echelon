@@ -69,6 +69,10 @@ type ReplenishmentService = {
     sourceLocationCode: string | null;
     sourceQty: number;
     sourceVariantName: string | null;
+    existingTaskId: number | null;
+    existingTaskStatus: string | null;
+    existingTaskExecutionMode: string | null;
+    existingTaskBlocksShipment: boolean;
   } | null>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
   createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number } | null>;
@@ -2229,6 +2233,10 @@ export class PickingUseCases {
               sourceLocationCode: prediction.replenNeeded ? prediction.sourceLocationCode : null,
               sourceQty: prediction.replenNeeded ? prediction.sourceQty : 0,
               sourceVariantName: prediction.replenNeeded ? prediction.sourceVariantName : null,
+              existingTaskId: prediction.existingTaskId ?? null,
+              existingTaskStatus: prediction.existingTaskStatus ?? null,
+              existingTaskExecutionMode: prediction.existingTaskExecutionMode ?? null,
+              existingTaskBlocksShipment: prediction.existingTaskBlocksShipment === true,
             };
           }
         }
