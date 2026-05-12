@@ -473,7 +473,7 @@ export class ReplenishmentUseCases {
   private async evaluateReplenNeed(
     productVariantId: number,
     warehouseLocationId: number,
-    options?: { currentQtyOverride?: number },
+    options?: { currentQtyOverride?: number; ignoreTaskId?: number },
   ): Promise<ReplenEvalResult> {
     const _tag = `[Replen evaluate] variant=${productVariantId} loc=${warehouseLocationId}`;
 
@@ -514,7 +514,7 @@ export class ReplenishmentUseCases {
     let resolvedReplenMethod = replenMethod;
 
     const existingTask = await this.findActiveTaskForPickBin(productVariantId, warehouseLocationId);
-    if (existingTask)
+    if (existingTask && existingTask.id !== options?.ignoreTaskId)
       return { status: "dedup", existingTaskId: existingTask.id, existingTask, params, triggerValue, evaluatedQty };
 
     if (triggerValue == null || triggerValue < 0)
@@ -1174,7 +1174,7 @@ export class ReplenishmentUseCases {
   async checkReplenNeeded(
     productVariantId: number,
     warehouseLocationId: number,
-    options?: { currentQtyOverride?: number },
+    options?: { currentQtyOverride?: number; ignoreTaskId?: number },
   ): Promise<ReplenGuidance> {
     const noReplen = (reason: string, eval_?: Extract<ReplenEvalResult, { status: "skip" }>): ReplenGuidance => ({
       needed: false, stockout: false, sourceLocationId: null, sourceLocationCode: null,

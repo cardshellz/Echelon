@@ -1123,7 +1123,13 @@ export function registerPurchasingRoutes(app: Express) {
       const assignedTo = req.query.assignedTo as string | undefined;
       const autoReplenFilter = req.query.autoReplen as string | undefined;
 
-      let tasks = await storage.getAllReplenTasks({ status, assignedTo });
+      const openStatuses = new Set(["pending", "assigned", "in_progress", "blocked"]);
+      const statusFilter = status && !["open", "all"].includes(status) ? status : undefined;
+      let tasks = await storage.getAllReplenTasks({ status: statusFilter, assignedTo });
+
+      if (status === "open") {
+        tasks = tasks.filter((t: any) => openStatuses.has(t.status));
+      }
 
       // Filter by autoReplen if specified (0 = worker queue, 1 = picker inline)
       if (autoReplenFilter != null) {
@@ -1176,19 +1182,23 @@ export function registerPurchasingRoutes(app: Express) {
         return res.status(404).json({ error: "Replen task not found" });
       }
       
-      const [allLocations, allProducts] = await Promise.all([
+      const [allLocations, allProducts, allVariants] = await Promise.all([
         storage.getAllWarehouseLocations(),
         storage.getAllProducts(),
+        storage.getAllProductVariants(),
       ]);
 
       const locationMap = new Map(allLocations.map(l => [l.id, l]));
       const productMap = new Map(allProducts.map(p => [p.id, p]));
+      const variantMap = new Map(allVariants.map(v => [v.id, v]));
 
       const enriched = {
         ...task,
         fromLocation: locationMap.get(task.fromLocationId),
         toLocation: locationMap.get(task.toLocationId),
         product: task.productId ? productMap.get(task.productId) : null,
+        sourceVariant: task.sourceProductVariantId ? variantMap.get(task.sourceProductVariantId) : null,
+        pickVariant: task.pickProductVariantId ? variantMap.get(task.pickProductVariantId) : null,
       };
       
       res.json(enriched);

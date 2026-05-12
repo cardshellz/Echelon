@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -256,6 +257,15 @@ function methodLabel(method: string | null): string | null {
 export default function Replenishment() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [location, setLocation] = useLocation();
+  const initialUrlParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  const initialTaskId = initialUrlParams.get("taskId");
+  const initialStatus = initialUrlParams.get("status");
+  const initialTaskFilter = initialStatus && ["open", "pending", "assigned", "in_progress", "blocked", "completed", "cancelled", "all"].includes(initialStatus)
+    ? initialStatus
+    : initialTaskId
+      ? "all"
+      : "open";
   const [activeTab, setActiveTab] = useState("tasks");
   const [showTierDefaultDialog, setShowTierDefaultDialog] = useState(false);
   const [showOverrideDialog, setShowOverrideDialog] = useState(false);
@@ -270,7 +280,8 @@ export default function Replenishment() {
   const [exceptionTaskId, setExceptionTaskId] = useState<number | null>(null);
   const [exceptionForm, setExceptionForm] = useState({ reason: "", notes: "" });
   const [locConfigSearch, setLocConfigSearch] = useState("");
-  const [taskFilter, setTaskFilter] = useState("pending");
+  const [taskFilter, setTaskFilter] = useState(initialTaskFilter);
+  const [taskSearch, setTaskSearch] = useState(initialUrlParams.get("q") ?? (initialTaskId ?? ""));
   const [warehouseFilter, setWarehouseFilter] = useState("all");
   const [modeFilter, setModeFilter] = useState("all");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -357,6 +368,13 @@ export default function Replenishment() {
       return res.json();
     },
   });
+
+  const focusedTaskId = useMemo(() => {
+    const query = location.includes("?") ? location.split("?")[1] : window.location.search.replace(/^\?/, "");
+    const value = new URLSearchParams(query).get("taskId");
+    const parsed = value ? Number(value) : NaN;
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }, [location]);
 
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
     queryKey: ["/api/warehouse/locations"],
@@ -1217,6 +1235,11 @@ export default function Replenishment() {
     }
   };
 
+  const formatTaskReason = (value: string | null | undefined) => {
+    if (!value) return null;
+    return value.replace(/_/g, " ");
+  };
+
   // Apply additional client-side filters for warehouse and mode
   const filteredTasks = tasks.filter((task) => {
     // Warehouse filter
@@ -1232,11 +1255,33 @@ export default function Replenishment() {
         return false;
       }
     }
+    const search = taskSearch.trim().toLowerCase();
+    if (search) {
+      const fields = [
+        `#${task.id}`,
+        String(task.id),
+        task.status,
+        task.exceptionReason,
+        task.notes,
+        task.sourceVariant?.sku,
+        task.pickVariant?.sku,
+        task.product?.sku,
+        task.product?.title,
+        task.fromLocation?.code,
+        task.toLocation?.code,
+        task.dependsOnTaskId ? `#${task.dependsOnTaskId}` : null,
+        task.dependsOnTaskId ? String(task.dependsOnTaskId) : null,
+      ];
+      if (!fields.some((field) => field?.toLowerCase().includes(search))) {
+        return false;
+      }
+    }
     return true;
   });
   
   const pendingCount = tasks.filter(t => t.status === "pending").length;
   const inProgressCount = tasks.filter(t => t.status === "in_progress").length;
+  const blockedCount = tasks.filter(t => t.status === "blocked").length;
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6 min-w-0 max-w-full overflow-hidden">
@@ -1254,6 +1299,11 @@ export default function Replenishment() {
           {inProgressCount > 0 && (
             <Badge className="bg-blue-500 text-lg px-3 py-1">
               {inProgressCount} in progress
+            </Badge>
+          )}
+          {blockedCount > 0 && (
+            <Badge variant="destructive" className="text-lg px-3 py-1">
+              {blockedCount} blocked
             </Badge>
           )}
         </div>
@@ -1292,13 +1342,36 @@ export default function Replenishment() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="open">Open</SelectItem>
                   <SelectItem value="pending">Pending</SelectItem>
                   <SelectItem value="assigned">Assigned</SelectItem>
                   <SelectItem value="in_progress">In Progress</SelectItem>
+                  <SelectItem value="blocked">Blocked</SelectItem>
                   <SelectItem value="completed">Completed</SelectItem>
+                  <SelectItem value="cancelled">Cancelled</SelectItem>
                   <SelectItem value="all">All Tasks</SelectItem>
                 </SelectContent>
               </Select>
+              <div className="relative w-full sm:w-64">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={taskSearch}
+                  onChange={(event) => setTaskSearch(event.target.value)}
+                  placeholder="Task #, SKU, location, reason"
+                  className="h-10 pl-9 pr-9"
+                  data-testid="input-task-search"
+                />
+                {taskSearch && (
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground"
+                    onClick={() => setTaskSearch("")}
+                    aria-label="Clear task search"
+                  >
+                    <XCircle className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
               <Select value={modeFilter} onValueChange={setModeFilter}>
                 <SelectTrigger className="w-28 sm:w-32 h-10" data-testid="select-mode-filter">
                   <SelectValue placeholder="Mode" />
@@ -1350,13 +1423,14 @@ export default function Replenishment() {
               ) : filteredTasks.length === 0 ? (
                 <div className="text-center p-8 text-muted-foreground">
                   <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                  <p>No replenishment tasks{(warehouseFilter !== "all" || modeFilter !== "all") ? " matching filters" : ""}</p>
+                  <p>No replenishment tasks{(warehouseFilter !== "all" || modeFilter !== "all" || taskSearch.trim()) ? " matching filters" : ""}</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="text-xs">Task</TableHead>
                       <TableHead className="text-xs">Created</TableHead>
                       <TableHead className="text-xs hidden md:table-cell">Source</TableHead>
                       <TableHead className="text-xs hidden md:table-cell">Pick</TableHead>
@@ -1374,7 +1448,21 @@ export default function Replenishment() {
                   </TableHeader>
                   <TableBody>
                     {filteredTasks.map((task) => (
-                      <TableRow key={task.id} data-testid={`row-task-${task.id}`}>
+                      <TableRow
+                        key={task.id}
+                        data-testid={`row-task-${task.id}`}
+                        className={focusedTaskId === task.id ? "bg-amber-50/80 dark:bg-amber-950/30" : undefined}
+                      >
+                        <TableCell className="py-2">
+                          <button
+                            type="button"
+                            className="font-mono text-xs font-semibold text-blue-700 hover:underline dark:text-blue-400"
+                            onClick={() => setLocation(`/replenishment?taskId=${task.id}&status=${task.status}`)}
+                            title={`Focus replen task #${task.id}`}
+                          >
+                            #{task.id}
+                          </button>
+                        </TableCell>
                         <TableCell className="py-2 text-xs text-muted-foreground">{formatRelativeTime(task.createdAt)}</TableCell>
                         <TableCell className="hidden md:table-cell py-2">
                           <div className="text-xs sm:text-sm">
@@ -1420,6 +1508,11 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="py-2">
                           {getStatusBadge(task.status)}
+                          {task.status === "blocked" && task.exceptionReason && (
+                            <div className="mt-0.5 max-w-[150px] truncate text-[10px] font-medium text-red-700 dark:text-red-400" title={task.exceptionReason}>
+                              {formatTaskReason(task.exceptionReason)}
+                            </div>
+                          )}
                           {task.status === "blocked" && task.dependsOnTaskId && (
                             <div className="text-[10px] text-muted-foreground mt-0.5">
                               Waiting on #{task.dependsOnTaskId}

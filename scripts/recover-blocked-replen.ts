@@ -12,8 +12,10 @@
  *   2. Cancels non-shipment blocked replen tasks only when source stock now exists.
  *   3. Re-runs replen evaluation for affected pick locations so a fresh task is created.
  *   4. Marks unresolved null-reason blocked rows as no_source_stock for health queue routing.
+ *   5. Cancels blocked child tasks whose dependency is already completed/cancelled and rechecks the pick bin.
  *
- * It does not cancel shipment-blocking source-empty tasks or dependency-blocked cascade tasks.
+ * It does not cancel shipment-blocking source-empty tasks or dependency-blocked cascade tasks
+ * that are still waiting on an active parent.
  */
 
 import fs from "node:fs";
@@ -33,6 +35,8 @@ type Candidate = {
   replen_method: string | null;
   pick_product_variant_id: number | null;
   source_product_variant_id: number | null;
+  depends_on_task_id: number | null;
+  depends_on_status: string | null;
   pick_sku: string | null;
   source_sku: string | null;
   from_location: string | null;
@@ -42,6 +46,8 @@ type Candidate = {
   active_pending_lines: number;
   active_pending_units: number;
   created_at: string;
+  resolver_source_sku?: string | null;
+  resolver_source_location?: string | null;
 };
 
 function parseArgs(args: string[]): CliOptions {
@@ -125,6 +131,8 @@ async function main(): Promise<void> {
         rt.notes,
         rt.pick_product_variant_id,
         rt.source_product_variant_id,
+        rt.depends_on_task_id,
+        parent.status AS depends_on_status,
         pv_pick.sku AS pick_sku,
         pv_source.sku AS source_sku,
         wl_from.code AS from_location,
@@ -134,12 +142,15 @@ async function main(): Promise<void> {
       FROM inventory.replen_tasks rt
       LEFT JOIN catalog.product_variants pv_pick ON pv_pick.id = rt.pick_product_variant_id
       LEFT JOIN catalog.product_variants pv_source ON pv_source.id = rt.source_product_variant_id
+      LEFT JOIN inventory.replen_tasks parent ON parent.id = rt.depends_on_task_id
       LEFT JOIN warehouse.warehouse_locations wl_from ON wl_from.id = rt.from_location_id
       LEFT JOIN warehouse.warehouse_locations wl_to ON wl_to.id = rt.to_location_id
       WHERE rt.status = 'blocked'
         AND rt.blocks_shipment = false
-        AND rt.depends_on_task_id IS NULL
-        AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant', 'execute_failed')
+        AND (
+          rt.depends_on_task_id IS NOT NULL
+          OR COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant', 'execute_failed')
+        )
     ),
     source_totals AS (
       SELECT
@@ -204,17 +215,82 @@ async function main(): Promise<void> {
   `, options.limit ? [options.limit] : []);
 
   const candidates = candidatesResult.rows;
-  const recoverable = candidates.filter((row) => Number(row.source_positive_total) > 0);
-  const unresolved = candidates.filter((row) => Number(row.source_positive_total) <= 0);
+  const serviceConsoleLog = console.log;
+  if (options.json) console.log = () => undefined;
+  const services = await (async () => {
+    try {
+      const { createServices } = await import("../server/services/index");
+      return createServices(db);
+    } finally {
+      console.log = serviceConsoleLog;
+    }
+  })();
+
+  const resolverRecoverable: Candidate[] = [];
+  const originalConsoleLog = console.log;
+  console.log = () => undefined;
+  try {
+    for (const row of candidates) {
+      if (row.depends_on_task_id != null) continue;
+      if (!row.pick_product_variant_id || !row.to_location_id) continue;
+      if (Number(row.source_positive_total) > 0) continue;
+      if (Number(row.active_pending_lines ?? 0) <= 0) continue;
+
+      const guidance = await services.replenishment.checkReplenNeeded(
+        row.pick_product_variant_id,
+        row.to_location_id,
+        { currentQtyOverride: 0, ignoreTaskId: row.task_id },
+      );
+      if (guidance.needed && !guidance.stockout && guidance.sourceLocationId) {
+        resolverRecoverable.push({
+          ...row,
+          resolver_source_sku: guidance.sourceVariantSku ?? null,
+          resolver_source_location: guidance.sourceLocationCode ?? null,
+        });
+      }
+    }
+  } finally {
+    console.log = originalConsoleLog;
+  }
+
+  const orphanedDependencies = candidates.filter((row) =>
+    row.depends_on_task_id != null &&
+    (!row.depends_on_status || ["completed", "cancelled"].includes(row.depends_on_status))
+  );
+  const directSourceRecoverable = candidates.filter((row) =>
+    row.depends_on_task_id == null &&
+    Number(row.source_positive_total) > 0
+  );
+  const recoverable = Array.from(
+    new Map([...directSourceRecoverable, ...resolverRecoverable].map((row) => [row.task_id, row])).values(),
+  );
+  const unresolved = candidates.filter((row) =>
+    !recoverable.some((match) => match.task_id === row.task_id) &&
+    !orphanedDependencies.some((match) => match.task_id === row.task_id)
+  );
+  const unresolvedNoSource = unresolved.filter((row) => row.depends_on_task_id == null);
+  const waitingOnActiveDependencies = unresolved.filter((row) => row.depends_on_task_id != null);
 
   const summary: Record<string, unknown> = {
     mode: options.execute ? "execute" : "dry-run",
     scannedBlockedTasks: candidates.length,
-    recoverableWithSource: recoverable.length,
-    unresolvedNoSource: unresolved.length,
+    recoverableWithSource: directSourceRecoverable.length,
+    recoverableViaResolver: resolverRecoverable.length,
+    recoverableOrphanedDependencies: orphanedDependencies.length,
+    unresolvedNoSource: unresolvedNoSource.length,
+    waitingOnActiveDependencies: waitingOnActiveDependencies.length,
     activePickLinesImpacted: candidates.reduce((sum, row) => sum + Number(row.active_pending_lines ?? 0), 0),
     recoverableTaskIds: recoverable.map((row) => row.task_id),
-    unresolvedTaskIds: unresolved.map((row) => row.task_id),
+    resolverRecoverableSamples: resolverRecoverable.map((row) => ({
+      taskId: row.task_id,
+      pickSku: row.pick_sku,
+      staleSourceSku: row.source_sku,
+      resolvedSourceSku: row.resolver_source_sku,
+      resolvedSourceLocation: row.resolver_source_location,
+    })),
+    orphanedDependencyTaskIds: orphanedDependencies.map((row) => row.task_id),
+    unresolvedTaskIds: unresolvedNoSource.map((row) => row.task_id),
+    waitingOnActiveDependencyTaskIds: waitingOnActiveDependencies.map((row) => row.task_id),
     samples: candidates.slice(0, 20),
   };
 
@@ -225,9 +301,11 @@ async function main(): Promise<void> {
   }
 
   const recoverableIds = recoverable.map((row) => row.task_id);
-  const unresolvedIds = unresolved.map((row) => row.task_id);
+  const orphanedDependencyIds = orphanedDependencies.map((row) => row.task_id);
+  const unresolvedIds = unresolvedNoSource.map((row) => row.task_id);
   let backfilledProductIds = 0;
   let cancelledForRecheck = 0;
+  let cancelledOrphanedDependencies = 0;
   let markedNoSource = 0;
   let recheckedLocations = 0;
 
@@ -261,7 +339,7 @@ async function main(): Promise<void> {
           status = 'cancelled',
           completed_at = NOW(),
           exception_reason = COALESCE(exception_reason, 'no_source_stock'),
-          notes = TRIM(BOTH E'\n' FROM COALESCE(notes, '') || E'\nCancelled by recover-blocked-replen: source stock now exists; re-evaluating.')
+          notes = TRIM(BOTH E'\n' FROM COALESCE(notes, '') || E'\nCancelled by recover-blocked-replen: current source resolution can recover this task; re-evaluating.')
         WHERE id = ANY($1::int[])
           AND status = 'blocked'
           AND blocks_shipment = false
@@ -269,6 +347,22 @@ async function main(): Promise<void> {
         RETURNING id, to_location_id
       `, [recoverableIds]);
       cancelledForRecheck = cancelResult.rowCount ?? 0;
+    }
+
+    if (orphanedDependencyIds.length > 0) {
+      const orphanResult = await pool.query(`
+        UPDATE inventory.replen_tasks
+        SET
+          status = 'cancelled',
+          completed_at = NOW(),
+          exception_reason = COALESCE(exception_reason, 'dependency_closed'),
+          notes = TRIM(BOTH E'\n' FROM COALESCE(notes, '') || E'\nCancelled by recover-blocked-replen: dependency task is no longer active; re-evaluating pick bin.')
+        WHERE id = ANY($1::int[])
+          AND status = 'blocked'
+          AND blocks_shipment = false
+        RETURNING id, to_location_id
+      `, [orphanedDependencyIds]);
+      cancelledOrphanedDependencies = orphanResult.rowCount ?? 0;
     }
 
     if (unresolvedIds.length > 0) {
@@ -295,13 +389,18 @@ async function main(): Promise<void> {
     throw error;
   }
 
-  if (recoverable.length > 0) {
-    const { createServices } = await import("../server/services/index");
-    const services = createServices(db);
-    const locationIds = Array.from(new Set(recoverable.map((row) => row.to_location_id)));
-    for (const locationId of locationIds) {
-      await services.replenishment.checkReplenForLocation(locationId);
-      recheckedLocations++;
+  const rowsToRecheck = [...recoverable, ...orphanedDependencies];
+  if (rowsToRecheck.length > 0) {
+    const locationIds = Array.from(new Set(rowsToRecheck.map((row) => row.to_location_id)));
+    const recheckConsoleLog = console.log;
+    if (options.json) console.log = () => undefined;
+    try {
+      for (const locationId of locationIds) {
+        await services.replenishment.checkReplenForLocation(locationId);
+        recheckedLocations++;
+      }
+    } finally {
+      console.log = recheckConsoleLog;
     }
   }
 
@@ -309,6 +408,7 @@ async function main(): Promise<void> {
     ...summary,
     backfilledProductIds,
     cancelledForRecheck,
+    cancelledOrphanedDependencies,
     markedNoSource,
     recheckedLocations,
   };
