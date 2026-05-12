@@ -254,7 +254,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const service = new ReplenishmentUseCases(db as any, {} as any);
 
     const guidance = await service.checkReplenNeeded(100, 1, {
-      currentQtyOverride: 2,
+      currentQtyOverride: 20,
     });
 
     expect(guidance).toMatchObject({
@@ -270,8 +270,38 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       qtyTargetUnits: 4,
       replenMethod: "full_case",
       triggerValue: 10,
-      evaluatedQty: 2,
+      evaluatedQty: 20,
     });
+  });
+
+  it("routes short-pick replen guidance through shared replen guidance", async () => {
+    const { db } = makeDb();
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const guidanceSpy = vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceLocationCode: "B-01",
+      sourceVariantId: 100,
+      sourceVariantSku: "SKU-1",
+      sourceVariantName: "Each",
+      pickVariantId: 100,
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      replenMethod: "full_case",
+      executionMode: "queue",
+      taskNotes: "Below threshold",
+      triggerValue: 10,
+      autoReplen: 0,
+      evaluatedQty: 0,
+    });
+
+    const guidance = await service.getReplenGuidance("SKU-1", "A-01");
+
+    expect(guidanceSpy).toHaveBeenCalledWith(100, 1, {
+      currentQtyOverride: 0,
+    });
+    expect(guidance).toEqual({ action: "short_pick_with_replen" });
   });
 
   it("executes an existing inline replen task instead of creating a duplicate", async () => {
