@@ -47,6 +47,16 @@ const ACTION_QUEUE_SORT_EXPRESSIONS: Record<string, SortExpr> = {
 };
 
 const VALID_ACTION_FILTERS = ["all", "negative_inventory", "aging_receiving", "pallet_drop", "stuck_replen", "stale_bin"] as const;
+const VALID_PICK_REPLEN_HEALTH_FILTERS = [
+  "all",
+  "stuck_replen",
+  "duplicate_replen",
+  "short_pick_unresolved",
+  "open_allocation_exception",
+  "cycle_count_review",
+  "exception_order_no_blocker",
+  "pick_bin_needs_replen",
+] as const;
 
 // ── Public param types ──────────────────────────────────────────────
 
@@ -97,6 +107,14 @@ export interface ActionQueueParams {
   pageSize?: number;
   sortField?: string;
   sortDir?: "asc" | "desc";
+}
+
+export interface PickReplenHealthParams {
+  warehouseId?: number | null;
+  filter?: string;
+  search?: string;
+  page?: number;
+  pageSize?: number;
 }
 
 // ── Service class ───────────────────────────────────────────────────
@@ -527,6 +545,383 @@ export class OperationsDashboardService {
   }
 
   // ─── 7. Action Queue ───────────────────────────────────────────
+
+  async getPickReplenHealth(params: PickReplenHealthParams) {
+    const warehouseId = params.warehouseId ?? null;
+    const safeFilter = VALID_PICK_REPLEN_HEALTH_FILTERS.includes(params.filter as any)
+      ? params.filter || "all"
+      : "all";
+    const page = Math.max(1, params.page || 1);
+    const pageSize = Math.min(100, Math.max(1, params.pageSize || 50));
+    const offset = (page - 1) * pageSize;
+    const searchTerm = (params.search || "").trim();
+    const searchPattern = `%${searchTerm}%`;
+
+    const typeFilter = safeFilter !== "all" ? sql`AND type = ${safeFilter}` : sql``;
+    const searchFilter = searchTerm
+      ? sql`AND (
+          sku ILIKE ${searchPattern}
+          OR name ILIKE ${searchPattern}
+          OR order_number ILIKE ${searchPattern}
+          OR location_code ILIKE ${searchPattern}
+          OR source_location_code ILIKE ${searchPattern}
+          OR detail ILIKE ${searchPattern}
+        )`
+      : sql``;
+    const orderWarehouseFilter = warehouseId ? sql`AND o.warehouse_id = ${warehouseId}` : sql``;
+    const targetWarehouseFilter = warehouseId ? sql`AND wl_to.warehouse_id = ${warehouseId}` : sql``;
+    const locationWarehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
+    const countWarehouseFilter = warehouseId ? sql`AND cc.warehouse_id = ${warehouseId}` : sql``;
+
+    const healthCte = sql`
+      WITH health_items AS (
+        SELECT
+          'stuck_replen'::text as type,
+          CASE WHEN rt.status = 'blocked' THEN 1 WHEN rt.status = 'in_progress' THEN 2 ELSE 3 END as priority,
+          rt.id::text as source_id,
+          rt.id as task_id,
+          NULL::int as exception_id,
+          NULL::int as cycle_count_id,
+          rt.order_id,
+          o.order_number,
+          rt.order_item_id,
+          rt.pick_product_variant_id as variant_id,
+          pv.sku,
+          pv.name,
+          wl_to.id as location_id,
+          wl_to.code as location_code,
+          wl_from.code as source_location_code,
+          rt.status,
+          rt.exception_reason,
+          rt.qty_target_units as qty,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - COALESCE(rt.started_at, rt.assigned_at, rt.created_at)) / 3600)::int as age_hours,
+          rt.created_at,
+          CASE
+            WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
+            WHEN rt.status = 'in_progress' THEN 'in progress longer than 1h'
+            ELSE rt.status || ' longer than 4h'
+          END as detail,
+          CASE WHEN rt.status = 'blocked' THEN 'resolve_blocker' ELSE 'execute_or_cancel' END as action
+        FROM inventory.replen_tasks rt
+        JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
+        LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
+        LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
+        LEFT JOIN wms.orders o ON rt.order_id = o.id
+        WHERE rt.status NOT IN ('completed', 'cancelled')
+          AND (
+            rt.status = 'blocked'
+            OR (rt.status = 'in_progress' AND COALESCE(rt.started_at, rt.created_at) < NOW() - INTERVAL '1 hour')
+            OR (rt.status IN ('pending', 'assigned') AND rt.created_at < NOW() - INTERVAL '4 hours')
+          )
+          ${targetWarehouseFilter}
+
+        UNION ALL
+
+        SELECT
+          'duplicate_replen'::text,
+          2,
+          MIN(rt.id)::text,
+          MIN(rt.id),
+          NULL::int,
+          NULL::int,
+          MIN(rt.order_id),
+          MIN(o.order_number),
+          MIN(rt.order_item_id),
+          rt.pick_product_variant_id,
+          pv.sku,
+          pv.name,
+          wl_to.id,
+          wl_to.code,
+          NULL::text,
+          'duplicate_active'::text,
+          NULL::text,
+          SUM(rt.qty_target_units)::int,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - MIN(rt.created_at)) / 3600)::int,
+          MIN(rt.created_at),
+          COUNT(*)::text || ' active tasks for same pick bin/SKU',
+          'cancel_duplicate'
+        FROM inventory.replen_tasks rt
+        JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
+        LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
+        LEFT JOIN wms.orders o ON rt.order_id = o.id
+        WHERE rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+          ${targetWarehouseFilter}
+        GROUP BY rt.to_location_id, wl_to.id, wl_to.code, rt.pick_product_variant_id, pv.sku, pv.name
+        HAVING COUNT(*) > 1
+
+        UNION ALL
+
+        SELECT
+          'short_pick_unresolved'::text,
+          CASE WHEN rt.id IS NULL AND ae.id IS NULL THEN 1 ELSE 2 END,
+          oi.id::text,
+          rt.id,
+          ae.id,
+          NULL::int,
+          o.id,
+          o.order_number,
+          oi.id,
+          pv.id,
+          oi.sku,
+          oi.name,
+          wl.id,
+          oi.location,
+          NULL::text,
+          oi.status,
+          oi.short_reason,
+          oi.quantity - oi.picked_quantity,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - COALESCE(oi.picked_at, o.completed_at, o.created_at)) / 3600)::int,
+          COALESCE(oi.picked_at, o.completed_at, o.created_at),
+          CASE
+            WHEN rt.id IS NULL AND ae.id IS NULL THEN 'short pick has no active replen task or open exception'
+            WHEN rt.id IS NOT NULL THEN 'short pick linked to replen task #' || rt.id::text || ' (' || rt.status || ')'
+            ELSE 'short pick linked to allocation exception #' || ae.id::text || ' (' || ae.status || ')'
+          END,
+          CASE WHEN rt.id IS NULL AND ae.id IS NULL THEN 'create_replen_or_exception' ELSE 'review_short_pick' END
+        FROM wms.order_items oi
+        JOIN wms.orders o ON oi.order_id = o.id
+        LEFT JOIN catalog.product_variants pv ON pv.sku = oi.sku
+        LEFT JOIN warehouse.warehouse_locations wl
+          ON UPPER(wl.code) = UPPER(oi.location)
+          AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
+        LEFT JOIN LATERAL (
+          SELECT rt2.id, rt2.status
+          FROM inventory.replen_tasks rt2
+          WHERE rt2.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+            AND (
+              rt2.order_item_id = oi.id
+              OR (pv.id IS NOT NULL AND rt2.pick_product_variant_id = pv.id AND wl.id IS NOT NULL AND rt2.to_location_id = wl.id)
+            )
+          ORDER BY rt2.created_at DESC
+          LIMIT 1
+        ) rt ON true
+        LEFT JOIN LATERAL (
+          SELECT ae2.id, ae2.status
+          FROM wms.allocation_exceptions ae2
+          WHERE ae2.order_item_id = oi.id
+            AND ae2.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          ORDER BY ae2.created_at DESC
+          LIMIT 1
+        ) ae ON true
+        WHERE oi.status = 'short'
+          AND o.warehouse_status NOT IN ('shipped', 'cancelled')
+          ${orderWarehouseFilter}
+
+        UNION ALL
+
+        SELECT
+          'open_allocation_exception'::text,
+          CASE WHEN ae.status = 'blocked' THEN 1 ELSE 3 END,
+          ae.id::text,
+          NULL::int,
+          ae.id,
+          NULL::int,
+          ae.order_id,
+          ae.order_number,
+          ae.order_item_id,
+          ae.product_variant_id,
+          ae.sku,
+          NULL::text,
+          ae.selected_location_id,
+          ae.selected_location_code,
+          NULL::text,
+          ae.status,
+          ae.exception_type,
+          ae.requested_qty,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - ae.created_at) / 3600)::int,
+          ae.created_at,
+          COALESCE(ae.review_reason, ae.exception_type),
+          'resolve_exception'
+        FROM wms.allocation_exceptions ae
+        JOIN wms.orders o ON ae.order_id = o.id
+        WHERE ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          ${orderWarehouseFilter}
+
+        UNION ALL
+
+        SELECT
+          'cycle_count_review'::text,
+          CASE WHEN cc.status = 'pending_review' THEN 1 ELSE 3 END,
+          cc.id::text,
+          NULL::int,
+          NULL::int,
+          cc.id,
+          NULL::int,
+          NULL::text,
+          NULL::int,
+          NULL::int,
+          NULL::text,
+          cc.name,
+          NULL::int,
+          cc.location_codes,
+          NULL::text,
+          cc.status,
+          NULL::text,
+          cc.variance_count,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - cc.created_at) / 3600)::int,
+          cc.created_at,
+          COALESCE(cc.description, cc.name),
+          CASE WHEN cc.status = 'pending_review' THEN 'approve_or_resolve_count' ELSE 'finish_count' END
+        FROM inventory.cycle_counts cc
+        WHERE cc.status IN ('in_progress', 'pending_review')
+          AND (cc.status = 'pending_review' OR cc.created_at < NOW() - INTERVAL '24 hours')
+          ${countWarehouseFilter}
+
+        UNION ALL
+
+        SELECT
+          'exception_order_no_blocker'::text,
+          3,
+          o.id::text,
+          NULL::int,
+          NULL::int,
+          NULL::int,
+          o.id,
+          o.order_number,
+          NULL::int,
+          NULL::int,
+          NULL::text,
+          o.customer_name,
+          NULL::int,
+          NULL::text,
+          NULL::text,
+          o.warehouse_status,
+          NULL::text,
+          NULL::int,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - COALESCE(o.exception_at, o.completed_at, o.created_at)) / 3600)::int,
+          COALESCE(o.exception_at, o.completed_at, o.created_at),
+          'order is exception but no open short item, allocation blocker, or shipment-blocking replen task was found',
+          'review_order_status'
+        FROM wms.orders o
+        WHERE o.warehouse_status = 'exception'
+          ${orderWarehouseFilter}
+          AND NOT EXISTS (
+            SELECT 1 FROM wms.order_items oi
+            WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status = 'short'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM wms.allocation_exceptions ae
+            WHERE ae.order_id = o.id
+              AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM inventory.replen_tasks rt
+            WHERE rt.order_id = o.id
+              AND rt.blocks_shipment = TRUE
+              AND rt.status NOT IN ('completed', 'cancelled')
+          )
+
+        UNION ALL
+
+        SELECT
+          'pick_bin_needs_replen'::text,
+          CASE WHEN COALESCE(il.variant_qty, 0) <= 0 THEN 1 ELSE 3 END,
+          pl.id::text,
+          NULL::int,
+          NULL::int,
+          NULL::int,
+          NULL::int,
+          NULL::text,
+          NULL::int,
+          pv.id,
+          pv.sku,
+          COALESCE(pv.name, pl.name),
+          wl.id,
+          wl.code,
+          NULL::text,
+          'no_active_task'::text,
+          NULL::text,
+          COALESCE(il.variant_qty, 0)::int,
+          NULL::int,
+          COALESCE(il.updated_at, pl.updated_at),
+          'pick bin at/below zero with reserve stock and no active replen task',
+          'queue_replen'
+        FROM warehouse.product_locations pl
+        JOIN warehouse.warehouse_locations wl ON pl.warehouse_location_id = wl.id
+        JOIN catalog.product_variants pv ON pl.product_variant_id = pv.id
+        LEFT JOIN inventory.inventory_levels il
+          ON il.warehouse_location_id = wl.id AND il.product_variant_id = pv.id
+        WHERE pl.status = 'active'
+          AND pl.is_primary = 1
+          AND wl.is_pickable = 1
+          AND wl.location_type = 'pick'
+          AND COALESCE(il.variant_qty, 0) <= 0
+          ${locationWarehouseFilter}
+          AND EXISTS (
+            SELECT 1
+            FROM inventory.inventory_levels ril
+            JOIN warehouse.warehouse_locations rwl ON ril.warehouse_location_id = rwl.id
+            WHERE ril.product_variant_id = pv.id
+              AND ril.variant_qty > 0
+              AND rwl.location_type = 'reserve'
+              AND rwl.is_pickable = 0
+              AND (wl.warehouse_id IS NULL OR rwl.warehouse_id = wl.warehouse_id)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM inventory.replen_tasks rt
+            WHERE rt.to_location_id = wl.id
+              AND rt.pick_product_variant_id = pv.id
+              AND rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+          )
+      )
+    `;
+
+    const countsPromise = this.db.execute(sql`
+      ${healthCte}
+      SELECT type, COUNT(*)::int as count
+      FROM health_items
+      WHERE 1=1 ${searchFilter}
+      GROUP BY type
+    `);
+
+    const itemsPromise = this.db.execute(sql`
+      ${healthCte}
+      SELECT *
+      FROM health_items
+      WHERE 1=1 ${typeFilter} ${searchFilter}
+      ORDER BY priority ASC, age_hours DESC NULLS LAST, created_at ASC
+      LIMIT ${pageSize} OFFSET ${offset}
+    `);
+
+    const [countsResult, itemsResult] = await Promise.all([countsPromise, itemsPromise]);
+    const counts = VALID_PICK_REPLEN_HEALTH_FILTERS
+      .filter(type => type !== "all")
+      .reduce((acc, type) => ({ ...acc, [type]: 0 }), {} as Record<string, number>);
+    for (const row of countsResult.rows as any[]) {
+      counts[row.type] = parseInt(row.count) || 0;
+    }
+    const total = safeFilter === "all"
+      ? Object.values(counts).reduce((sum, count) => sum + count, 0)
+      : counts[safeFilter] || 0;
+
+    const items = (itemsResult.rows as any[]).map((r: any) => ({
+      id: `${r.type}-${r.source_id}`,
+      type: r.type,
+      priority: parseInt(r.priority) || 3,
+      taskId: r.task_id != null ? parseInt(r.task_id) : null,
+      exceptionId: r.exception_id != null ? parseInt(r.exception_id) : null,
+      cycleCountId: r.cycle_count_id != null ? parseInt(r.cycle_count_id) : null,
+      orderId: r.order_id != null ? parseInt(r.order_id) : null,
+      orderNumber: r.order_number || null,
+      orderItemId: r.order_item_id != null ? parseInt(r.order_item_id) : null,
+      variantId: r.variant_id != null ? parseInt(r.variant_id) : null,
+      sku: r.sku || null,
+      name: r.name || null,
+      locationId: r.location_id != null ? parseInt(r.location_id) : null,
+      locationCode: r.location_code || null,
+      sourceLocationCode: r.source_location_code || null,
+      status: r.status || null,
+      exceptionReason: r.exception_reason || null,
+      qty: r.qty != null ? parseInt(r.qty) : null,
+      ageHours: r.age_hours != null ? parseInt(r.age_hours) : null,
+      createdAt: r.created_at || null,
+      detail: r.detail || null,
+      action: r.action || "review",
+    }));
+
+    return { items, total, page, pageSize, counts };
+  }
 
   async getActionQueue(params: ActionQueueParams) {
     const warehouseId = params.warehouseId ?? null;

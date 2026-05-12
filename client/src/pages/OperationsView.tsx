@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import OpsKpiCards from "@/components/operations/OpsKpiCards";
 import ActionQueueSection from "@/components/operations/ActionQueueSection";
+import PickReplenHealthSection from "@/components/operations/PickReplenHealthSection";
 import BinInventorySection from "@/components/operations/BinInventorySection";
 import BinHistorySheet from "@/components/operations/BinHistorySheet";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
@@ -95,6 +96,11 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
         onTransferTo={openTransferTo}
         onAdjust={openAdjust}
         onCountsLoaded={setQueueCounts}
+      />
+
+      <PickReplenHealthSection
+        warehouseId={warehouseId}
+        searchQuery={searchQuery}
       />
 
       <BinInventorySection
