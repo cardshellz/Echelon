@@ -101,7 +101,7 @@ function makeDb() {
     transaction: vi.fn(),
   };
 
-  return { db, inserts, updates, state };
+  return { db, inserts, updates, state, selectCounts };
 }
 
 describe("ReplenishmentUseCases source-empty blockers", () => {
@@ -302,6 +302,66 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       currentQtyOverride: 0,
     });
     expect(guidance).toEqual({ action: "short_pick_with_replen" });
+  });
+
+  it("queues reserve replen from a confirmed short pick without inline execution", async () => {
+    const { db, inserts, selectCounts } = makeDb();
+    selectCounts.set(warehouseLocations, 1);
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceLocationCode: "B-01",
+      sourceVariantId: 100,
+      sourceVariantSku: "SKU-1",
+      sourceVariantName: "Each",
+      pickVariantId: 100,
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      replenMethod: "full_case",
+      executionMode: "queue",
+      taskNotes: "Below threshold",
+      triggerValue: 10,
+      autoReplen: 0,
+      evaluatedQty: 0,
+    });
+    const executeSpy = vi.spyOn(service, "executeTask");
+
+    const result = await service.ensureQueuedReplenForShortPick(100, 1, "picker-1", {
+      orderId: 900,
+      orderItemId: 500,
+      orderNumber: "#900",
+      blocksShipment: false,
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      moved: 0,
+      task: {
+        id: 121,
+        status: "pending",
+        executionMode: "queue",
+        triggeredBy: "short_pick",
+        blocksShipment: false,
+      },
+    });
+    expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
+      fromLocationId: 2,
+      toLocationId: 1,
+      pickProductVariantId: 100,
+      sourceProductVariantId: 100,
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      status: "pending",
+      triggeredBy: "short_pick",
+      executionMode: "queue",
+      orderId: 900,
+      orderItemId: 500,
+      blocksShipment: false,
+      createdBy: "picker-1",
+    });
+    expect(inserts.find(insert => insert.table === replenTasks)?.value.notes).toContain("Queued from confirmed short pick");
   });
 
   it("executes an existing inline replen task instead of creating a duplicate", async () => {

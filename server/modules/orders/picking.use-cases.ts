@@ -76,6 +76,7 @@ type ReplenishmentService = {
   } | null>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
   createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number } | null>;
+  ensureQueuedReplenForShortPick: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number; guidance?: any } | null>;
   recordSourceEmptyBlocker: (params: {
     pickVariantId: number;
     pickLocationId: number;
@@ -884,6 +885,58 @@ export class PickingUseCases {
     // Build inventory context for picker UI
     const inventoryCtx: PickInventoryContext = emptyPickInventoryContext(item.sku);
 
+    if (status === "short" && beforeItem.status !== "short") {
+      try {
+        const queued = await this.queueShortPickReplen({
+          item,
+          order,
+          warehouseLocationId,
+          userId,
+        });
+
+        if (queued) {
+          const taskStatus = queued.result.task?.status ?? null;
+          inventoryCtx.locationId = queued.location.id;
+          inventoryCtx.locationCode = queued.location.code;
+          inventoryCtx.replen.triggered = true;
+          inventoryCtx.replen.taskId = queued.result.task?.id ?? null;
+          inventoryCtx.replen.taskStatus = taskStatus;
+          inventoryCtx.replen.autoExecuted = false;
+          inventoryCtx.replen.autoExecutedMoved = null;
+          inventoryCtx.replen.autoExecutedFailed = taskStatus === "blocked";
+          inventoryCtx.replen.autoExecuteFailReason = taskStatus === "blocked"
+            ? queued.result.task?.exceptionReason || "blocked"
+            : null;
+          inventoryCtx.replen.stockout = false;
+          inventoryCtx.replen.sourceLocationCode = queued.result.guidance?.sourceLocationCode ?? null;
+          inventoryCtx.replen.sourceVariantSku = queued.result.guidance?.sourceVariantSku ?? null;
+          inventoryCtx.replen.sourceVariantName = queued.result.guidance?.sourceVariantName ?? null;
+          inventoryCtx.replen.qtyToMove = queued.result.task?.qtyTargetUnits ?? queued.result.guidance?.qtyTargetUnits ?? null;
+        }
+      } catch (replenErr: any) {
+        const failReason = replenErr?.message || "unknown_error";
+        console.warn(`[Replen] Short-pick queue failed for item=${item.id} sku=${item.sku}: ${failReason}`);
+        inventoryCtx.replen.triggered = true;
+        inventoryCtx.replen.autoExecuted = false;
+        inventoryCtx.replen.autoExecutedFailed = true;
+        inventoryCtx.replen.autoExecuteFailReason = failReason;
+        this.storage.createPickingLog({
+          actionType: "short_pick_replen_queue_failed",
+          pickerId: pickerId || undefined,
+          pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+          orderId: item.orderId,
+          orderNumber: order?.orderNumber,
+          orderItemId: item.id,
+          sku: item.sku,
+          itemName: item.name,
+          locationCode: item.location,
+          reason: failReason,
+          deviceType: deviceType || "desktop",
+          sessionId,
+        }).catch((err: any) => console.warn("[PickingLog] short-pick replen failure log failed:", err.message));
+      }
+    }
+
     // If item was just completed, deduct inventory
     if (status === "completed" && beforeItem.status !== "completed") {
       const deductResult = completedDeductResult ?? await this._deductInventory(item, beforeItem, {
@@ -1113,6 +1166,64 @@ export class PickingUseCases {
         AND osi.from_location_id IS NULL
         AND os.status IN ('planned', 'queued')
     `);
+  }
+
+  private async queueShortPickReplen(params: {
+    item: OrderItem;
+    order: Order | undefined;
+    warehouseLocationId?: number;
+    userId?: string;
+  }): Promise<{ result: { task: any; moved: number; guidance?: any }; location: WarehouseLocation } | null> {
+    const { item, order, warehouseLocationId, userId } = params;
+    if (!item.sku) return null;
+
+    const variant = await this.storage.getProductVariantBySku(item.sku);
+    if (!variant) return null;
+
+    let pickLocation: WarehouseLocation | undefined;
+    if (warehouseLocationId) {
+      [pickLocation] = await this.db
+        .select()
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, warehouseLocationId))
+        .limit(1);
+    } else {
+      const locationCode = (item.location || "").trim().toUpperCase();
+      if (!locationCode || locationCode === "U" || locationCode === "UNASSIGNED") {
+        return null;
+      }
+
+      const locationWhere = order?.warehouseId
+        ? and(
+            sql`upper(${warehouseLocations.code}) = ${locationCode}`,
+            eq(warehouseLocations.warehouseId, order.warehouseId),
+          )
+        : sql`upper(${warehouseLocations.code}) = ${locationCode}`;
+
+      [pickLocation] = await this.db
+        .select()
+        .from(warehouseLocations)
+        .where(locationWhere)
+        .limit(1);
+    }
+
+    if (!pickLocation || pickLocation.isPickable !== 1) {
+      return null;
+    }
+
+    const result = await this.replenishment.ensureQueuedReplenForShortPick(
+      variant.id,
+      pickLocation.id,
+      userId,
+      {
+        orderId: item.orderId,
+        orderItemId: item.id,
+        orderNumber: order?.orderNumber ?? null,
+        blocksShipment: false,
+      },
+    );
+
+    return result ? { result, location: pickLocation } : null;
   }
 
   private async recordInlineInventoryReview(params: {
