@@ -944,18 +944,38 @@ export default function Picking() {
       });
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
 
-      // Replen triggered → show simple replen-confirm banner (case break completed)
-      if (inventory?.replen.triggered) {
+      const replen = inventory?.replen;
+      const replenMoved = replen?.autoExecutedMoved ?? 0;
+      const shouldConfirmInlineReplen =
+        !!inventory?.locationId &&
+        replen?.triggered === true &&
+        replen.autoExecuted === true &&
+        replenMoved > 0;
+
+      if (shouldConfirmInlineReplen) {
         binCountPendingRef.current = true;
         setBinCountContext(inventory);
-        const expectedQty =
-          inventory.locationId && inventory.replen.autoExecutedMoved != null
-            ? Math.max(0, inventory.systemQtyAfter + inventory.replen.autoExecutedMoved)
-            : null;
-        setBinCountQty(expectedQty == null ? "" : String(expectedQty));
+        const expectedQty = Math.max(0, inventory.systemQtyAfter + replenMoved);
+        setBinCountQty(String(expectedQty));
         setReplenConfirmOpen(true);
       } else {
         binCountPendingRef.current = false;
+        if (replen?.triggered) {
+          if (replen.autoExecutedFailed) {
+            toast({
+              title: "Replen needs review",
+              description: replen.autoExecuteFailReason
+                ? `Replen could not complete: ${replen.autoExecuteFailReason}`
+                : "Replen could not complete.",
+              variant: "destructive",
+            });
+          } else if (replen.taskStatus && replen.taskStatus !== "completed") {
+            toast({
+              title: "Replen queued",
+              description: "A replen task was created without interrupting picking.",
+            });
+          }
+        }
       }
 
       // If the last item's pick deferred order completion, resolve it now

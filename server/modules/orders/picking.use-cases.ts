@@ -924,25 +924,31 @@ export class PickingUseCases {
           );
 
           if (replenResult) {
-            // Replen succeeded - notify picker with dismissible success banner
-            console.log(`[Replen] Auto-executed replen for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: moved ${replenResult.moved} units`);
+            const taskStatus = replenResult.task?.status ?? null;
+            const moved = Number(replenResult.moved ?? 0);
+            const autoExecuted = taskStatus === "completed";
+            console.log(
+              `[Replen] Replen task for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ` +
+              `status=${taskStatus ?? "none"} moved=${moved}`,
+            );
             inventoryCtx.replen.triggered = true;
             inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
-            inventoryCtx.replen.taskStatus = replenResult.task?.status ?? null;
-            inventoryCtx.replen.autoExecuted = replenResult.task?.status === "completed";
-            inventoryCtx.replen.autoExecutedMoved = replenResult.moved;
-            inventoryCtx.replen.autoExecutedFailed = replenResult.task?.status === "blocked";
-            inventoryCtx.replen.autoExecuteFailReason = replenResult.task?.status === "blocked"
+            inventoryCtx.replen.taskStatus = taskStatus;
+            inventoryCtx.replen.autoExecuted = autoExecuted;
+            inventoryCtx.replen.autoExecutedMoved = autoExecuted ? moved : null;
+            inventoryCtx.replen.autoExecutedFailed = taskStatus === "blocked";
+            inventoryCtx.replen.autoExecuteFailReason = taskStatus === "blocked"
               ? replenResult.task?.exceptionReason || "blocked"
               : null;
-            // Source info from the completed task for UI display
-            inventoryCtx.replen.qtyToMove = replenResult.moved;
+            inventoryCtx.replen.qtyToMove = autoExecuted
+              ? moved
+              : replenResult.task?.qtyTargetUnits ?? null;
             
             // Fix: The "Zero Collision"
             // If the bin hit zero, it initially flipped binCountNeeded to true.
             // But if auto-replenishment immediately refilled it inline, we MUST suppress the bin count,
             // otherwise the picker receives a redundant count prompt that overlaps and crashes replen!
-            if (replenResult.moved > 0) {
+            if (autoExecuted && moved > 0) {
               inventoryCtx.binCountNeeded = false;
             }
           } else {

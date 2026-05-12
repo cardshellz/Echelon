@@ -69,6 +69,88 @@ function makeReadyToShipDb(params: {
   };
 }
 
+function makePickItemHarness(replenResult: { task: any; moved: number } | null) {
+  const levels = [
+    { warehouseLocationId: 1, variantQty: 3 },
+  ];
+  const locations = [
+    { id: 1, code: "A-01", isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
+  ];
+  const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 1 });
+  const updatedItem = {
+    ...beforeItem,
+    status: "completed",
+    pickedQuantity: 1,
+    pickedAt: new Date(),
+  };
+
+  const tx = {
+    execute: vi.fn(async () => ({ rows: [{ status: "pending" }] })),
+    update: vi.fn(() => ({
+      set: vi.fn(() => ({
+        where: vi.fn(() => ({
+          returning: vi.fn(async () => [updatedItem]),
+        })),
+      })),
+    })),
+  };
+  const db = {
+    transaction: vi.fn(async (callback: (txArg: any) => Promise<any>) => callback(tx)),
+  };
+
+  const inventoryCore: any = {};
+  Object.assign(inventoryCore, {
+    withTx: vi.fn(() => inventoryCore),
+    adjustInventory: vi.fn(async () => ({})),
+    pickItem: vi.fn(async (params: { warehouseLocationId: number; qty: number }) => {
+      const level = levels.find(l => l.warehouseLocationId === params.warehouseLocationId);
+      if (!level || level.variantQty < params.qty) return false;
+      level.variantQty -= params.qty;
+      return true;
+    }),
+    getLevel: vi.fn(async (_variantId: number, warehouseLocationId: number) => {
+      const level = levels.find(l => l.warehouseLocationId === warehouseLocationId);
+      return level ? { ...level, productVariantId: 100 } : null;
+    }),
+  });
+
+  const storage = {
+    getOrderItemById: vi.fn(async () => beforeItem),
+    getProductVariantBySku: vi.fn(async (sku: string) => ({
+      id: 100,
+      sku,
+      productId: 10,
+      unitsPerVariant: 1,
+    })),
+    getInventoryLevelsByProductVariantId: vi.fn(async () => levels.map(level => ({ ...level }))),
+    getAllWarehouseLocations: vi.fn(async () => locations),
+    getOrderById: vi.fn(async () => ({
+      id: 900,
+      orderNumber: "#900",
+      assignedPickerId: "picker-1",
+    })),
+    getUser: vi.fn(async () => ({ id: "picker-1", username: "picker" })),
+    createPickingLog: vi.fn(async () => ({})),
+    getAllWarehouseSettings: vi.fn(async () => [{
+      warehouseId: 1,
+      postPickStatus: "completed",
+      pickMode: "single_order",
+      requireScanConfirm: 0,
+    }]),
+    updateOrderProgress: vi.fn(async () => ({
+      id: 900,
+      orderNumber: "#900",
+      warehouseStatus: "completed",
+    })),
+  };
+  const replenishment = {
+    createAndExecuteReplen: vi.fn(async () => replenResult),
+  };
+
+  const service = new PickingUseCases(db as any, inventoryCore as any, replenishment as any, storage as any);
+  return { service, db, tx, inventoryCore, storage, replenishment };
+}
+
 describe("PickingUseCases inventory discrepancy resolution", () => {
   it("auto-corrects an assigned bin shortage only when the pick was scan-verified", async () => {
     const { service, inventoryCore } = makeService([
@@ -309,6 +391,64 @@ describe("PickingUseCases replen source-empty reporting", () => {
       itemStatusBefore: "pending",
       itemStatusAfter: "pending",
     }));
+  });
+});
+
+describe("PickingUseCases post-pick replen context", () => {
+  it("reports queued replen without inline movement confirmation fields", async () => {
+    const { service, replenishment } = makePickItemHarness({
+      task: { id: 121, status: "pending", qtyTargetUnits: 6 },
+      moved: 0,
+    });
+
+    const result = await service.pickItem(500, {
+      status: "completed",
+      pickedQuantity: 1,
+      pickMethod: "scan",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({ success: true });
+    if (!result.success) throw new Error("pickItem should have succeeded");
+    expect(result.inventory.replen).toMatchObject({
+      triggered: true,
+      taskId: 121,
+      taskStatus: "pending",
+      autoExecuted: false,
+      autoExecutedMoved: null,
+      autoExecutedFailed: false,
+      qtyToMove: 6,
+    });
+    expect(replenishment.createAndExecuteReplen).toHaveBeenCalledWith(100, 1, "picker-1", expect.objectContaining({
+      orderId: 900,
+      orderItemId: 500,
+      blocksShipment: false,
+    }));
+  });
+
+  it("reports completed inline replen movement for picker verification", async () => {
+    const { service } = makePickItemHarness({
+      task: { id: 122, status: "completed", qtyTargetUnits: 8 },
+      moved: 8,
+    });
+
+    const result = await service.pickItem(500, {
+      status: "completed",
+      pickedQuantity: 1,
+      pickMethod: "scan",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({ success: true });
+    if (!result.success) throw new Error("pickItem should have succeeded");
+    expect(result.inventory.replen).toMatchObject({
+      triggered: true,
+      taskId: 122,
+      taskStatus: "completed",
+      autoExecuted: true,
+      autoExecutedMoved: 8,
+      qtyToMove: 8,
+    });
   });
 });
 
