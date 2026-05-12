@@ -13,6 +13,7 @@ import {
   cycleCounts,
   inventoryLevels,
   locationReplenConfig,
+  productLocations,
   productVariants,
   replenRules,
   replenTasks,
@@ -34,9 +35,23 @@ function makeDb() {
     hierarchyLevel: 1,
     unitsPerVariant: 1,
   };
-  const pickLocation = { id: 1, code: "A-01", warehouseId: 7, parentLocationId: null };
-  const sourceLocation = { id: 2, code: "B-01", warehouseId: 7, parentLocationId: null };
+  const pickLocation = { id: 1, code: "A-01", warehouseId: 7, parentLocationId: null, isPickable: 1 };
+  const sourceLocation = { id: 2, code: "B-01", warehouseId: 7, parentLocationId: null, isPickable: 0 };
   const sourceLevel = { id: 22, warehouseLocationId: 2, productVariantId: 100, variantQty: 5 };
+  const tierDefault = {
+    id: 1,
+    hierarchyLevel: 1,
+    warehouseId: null,
+    triggerValue: 10,
+    maxQty: 20,
+    replenMethod: "full_case",
+    priority: 5,
+    sourceLocationType: "reserve",
+    sourceHierarchyLevel: 1,
+    sourcePriority: "fifo",
+    autoReplen: 0,
+    isActive: 1,
+  };
 
   const selectRows = (table: unknown) => {
     const count = selectCounts.get(table) ?? 0;
@@ -44,9 +59,10 @@ function makeDb() {
     if (table === replenTasks) return state.insertedReplenTask ? [state.insertedReplenTask] : [];
     if (table === productVariants) return [pickVariant];
     if (table === warehouseLocations) return count === 0 ? [pickLocation] : [sourceLocation];
+    if (table === productLocations) return [{ id: 55 }];
     if (table === locationReplenConfig) return [];
     if (table === replenRules) return [];
-    if (table === replenTierDefaults) return [];
+    if (table === replenTierDefaults) return [tierDefault];
     if (table === inventoryLevels) return [sourceLevel];
     return [];
   };
@@ -216,6 +232,46 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     expect(inserts.filter(insert => insert.table === replenTasks)).toHaveLength(0);
     expect(guidanceSpy).not.toHaveBeenCalled();
     expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("surfaces existing active replen task details in guidance", async () => {
+    const { db, state } = makeDb();
+    state.insertedReplenTask = {
+      id: 224,
+      fromLocationId: 2,
+      toLocationId: 1,
+      pickProductVariantId: 100,
+      sourceProductVariantId: 100,
+      status: "pending",
+      executionMode: "queue",
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      qtyCompleted: 0,
+      replenMethod: "full_case",
+      autoReplen: 0,
+      blocksShipment: false,
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    const guidance = await service.checkReplenNeeded(100, 1, {
+      currentQtyOverride: 2,
+    });
+
+    expect(guidance).toMatchObject({
+      needed: true,
+      stockout: false,
+      existingTaskId: 224,
+      existingTaskStatus: "pending",
+      existingTaskExecutionMode: "queue",
+      existingTaskBlocksShipment: false,
+      sourceLocationId: 2,
+      sourceLocationCode: "B-01",
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      replenMethod: "full_case",
+      triggerValue: 10,
+      evaluatedQty: 2,
+    });
   });
 
   it("executes an existing inline replen task instead of creating a duplicate", async () => {

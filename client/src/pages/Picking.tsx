@@ -51,9 +51,31 @@ import {
 } from "@/lib/picking-scan";
 import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 
+type ReplenPrediction = {
+  systemQty: number;
+  postPickQty: number;
+  triggerValue: number | null;
+  replenNeeded: boolean;
+  replenMethod: string;
+  autoReplen: number;
+  stockout: boolean;
+  executionMode: string;
+  sourceLocationCode: string | null;
+  sourceQty: number;
+  sourceVariantName: string | null;
+  existingTaskId?: number | null;
+  existingTaskStatus?: string | null;
+  existingTaskExecutionMode?: string | null;
+  existingTaskBlocksShipment?: boolean;
+};
+
+type OrderItemWithReplen = OrderItem & {
+  replenPrediction?: ReplenPrediction | null;
+};
+
 // API response type
 interface OrderWithItems extends Order {
-  items: OrderItem[];
+  items: OrderItemWithReplen[];
   pickerName?: string | null;
   c2pMs?: number | null; // Click to Pick time in milliseconds
   channelName?: string | null; // Channel display name
@@ -382,6 +404,53 @@ function PriorityBadges({
   );
 }
 
+function ReplenPredictionBadge({
+  prediction,
+  compact = false,
+}: {
+  prediction?: ReplenPrediction | null;
+  compact?: boolean;
+}) {
+  if (!prediction || (!prediction.replenNeeded && !prediction.existingTaskId)) return null;
+
+  const hasExistingTask = !!prediction.existingTaskId;
+  const isBlocked = prediction.stockout || prediction.existingTaskStatus === "blocked";
+  const label = hasExistingTask
+    ? isBlocked ? "Replen blocked" : "Replen queued"
+    : isBlocked ? "Replen blocked" : "Replen after pick";
+  const detail = hasExistingTask
+    ? `#${prediction.existingTaskId}${prediction.sourceLocationCode ? ` from ${prediction.sourceLocationCode}` : ""}`
+    : prediction.sourceLocationCode
+      ? `from ${prediction.sourceLocationCode}`
+      : null;
+
+  return (
+    <Badge
+      variant="outline"
+      title={detail ? `${label} ${detail}` : label}
+      className={cn(
+        "inline-flex max-w-full items-center gap-1 font-semibold",
+        compact ? "text-[9px] px-1.5 py-0.5" : "text-xs px-2 py-1",
+        isBlocked
+          ? "border-red-300 bg-red-50 text-red-700"
+          : hasExistingTask
+            ? "border-blue-300 bg-blue-50 text-blue-700"
+            : "border-amber-300 bg-amber-50 text-amber-700",
+      )}
+    >
+      {isBlocked ? (
+        <AlertTriangle className={cn(compact ? "h-3 w-3" : "h-3.5 w-3.5", "shrink-0")} />
+      ) : (
+        <PackageCheck className={cn(compact ? "h-3 w-3" : "h-3.5 w-3.5", "shrink-0")} />
+      )}
+      <span className="truncate">
+        {label}
+        {detail && <span className="font-mono font-bold"> {detail}</span>}
+      </span>
+    </Badge>
+  );
+}
+
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -420,6 +489,7 @@ interface PickItem {
   orderId: string;
   image: string;
   barcode?: string;
+  replenPrediction?: ReplenPrediction | null;
 }
 
 interface PickBatch {
@@ -683,6 +753,7 @@ export default function Picking() {
           orderId: order.orderNumber,
           image: item.imageUrl || "",
           barcode: item.barcode || undefined,
+          replenPrediction: item.replenPrediction ?? null,
         };
       })
       .filter((item) => item.qty > 0 || item.status === "short"),
@@ -3594,6 +3665,7 @@ export default function Picking() {
           orderId: order.orderNumber,
           image: item.imageUrl || "",
           barcode: item.barcode || undefined,
+          replenPrediction: item.replenPrediction ?? null,
         };
       }),
     }));
@@ -3983,6 +4055,11 @@ export default function Picking() {
                     Set Bin
                   </Button>
                 )}
+                {currentItem.replenPrediction && (currentItem.replenPrediction.replenNeeded || currentItem.replenPrediction.existingTaskId) && (
+                  <div className="mt-2 flex justify-center">
+                    <ReplenPredictionBadge prediction={currentItem.replenPrediction} />
+                  </div>
+                )}
                 <div className="flex items-center justify-center gap-2 mt-2">
                   {activeWork?.items.map((item, idx) => (
                     <div 
@@ -4213,6 +4290,7 @@ export default function Picking() {
                         </div>
                         <div className="text-[10px] md:text-xs font-mono font-semibold text-slate-500 truncate">{item.sku}</div>
                         {item.barcode && <div className="text-[9px] md:text-[10px] font-mono text-blue-500 truncate">BC: {item.barcode}</div>}
+                        <ReplenPredictionBadge prediction={item.replenPrediction} compact />
                       </div>
                     
                       {/* Buttons - fixed width, always visible, touch-friendly */}
