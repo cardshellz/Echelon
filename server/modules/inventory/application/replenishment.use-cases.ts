@@ -123,7 +123,7 @@ type ReplenEvalResult =
       existingTaskId: number;
       existingTask: ReplenTask;
       params: ResolvedReplenParams;
-      triggerValue: number;
+      triggerValue: number | null;
       evaluatedQty: number;
     }
   | {
@@ -441,16 +441,16 @@ export class ReplenishmentUseCases {
     let resolvedSourceVariantId = params.sourceVariantId;
     let resolvedReplenMethod = replenMethod;
 
+    const existingTask = await this.findActiveTaskForPickBin(productVariantId, warehouseLocationId);
+    if (existingTask)
+      return { status: "dedup", existingTaskId: existingTask.id, existingTask, params, triggerValue, evaluatedQty };
+
     if (triggerValue == null || triggerValue < 0)
       return { status: "skip", skipReason: "no_trigger_value", params, triggerValue, evaluatedQty };
 
     const { belowThreshold, taskNotes } = await this.checkThreshold(resolvedReplenMethod, triggerValue, evaluatedQty, productVariantId);
     if (!belowThreshold) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
     console.log(`${_tag} THRESHOLD MET: method=${resolvedReplenMethod}`);
-
-    const existingTask = await this.findActiveTaskForPickBin(productVariantId, warehouseLocationId);
-    if (existingTask)
-      return { status: "dedup", existingTaskId: existingTask.id, existingTask, params, triggerValue, evaluatedQty };
 
     let sourceLocation = await this.findSourceLocation(
       resolvedSourceVariantId ?? productVariantId,
@@ -1557,25 +1557,25 @@ export class ReplenishmentUseCases {
       .where(eq(warehouseLocations.code, locationCode)).limit(1);
     if (!location || location.isPickable !== 1) return { action: "true_short_pick" };
 
-    const locConfig = await this.loadLocationConfig(location.id, variant.id);
-    const params = await this.resolveReplenParams(variant.id, variant, location.warehouseId ?? undefined, locConfig);
+    const guidance = await this.checkReplenNeeded(variant.id, location.id, {
+      currentQtyOverride: 0,
+    });
+    if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
+      return { action: "true_short_pick" };
+    }
 
-    const sourceLocation = await this.findSourceLocation(
-      params.sourceVariantId ?? variant.id,
-      location.warehouseId ?? undefined,
-      params.sourceLocationType,
-      location.parentLocationId,
-      params.sourcePriority,
-    );
-
+    const [sourceLocation] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, guidance.sourceLocationId))
+      .limit(1);
     if (!sourceLocation) return { action: "true_short_pick" };
 
     if (sourceLocation.isPickable === 1) {
-      const { inventoryLevels } = await import("@shared/schema");
       const [sourceLevel] = await this.db.select().from(inventoryLevels)
-        .where(and(eq(inventoryLevels.productVariantId, params.sourceVariantId ?? variant.id), eq(inventoryLevels.warehouseLocationId, sourceLocation.id))).limit(1);
-      const sourceVariant = params.sourceVariantId
-        ? (await this.db.select().from(productVariants).where(eq(productVariants.id, params.sourceVariantId)).limit(1))[0]
+        .where(and(eq(inventoryLevels.productVariantId, guidance.sourceVariantId ?? variant.id), eq(inventoryLevels.warehouseLocationId, sourceLocation.id))).limit(1);
+      const sourceVariant = guidance.sourceVariantId
+        ? (await this.db.select().from(productVariants).where(eq(productVariants.id, guidance.sourceVariantId)).limit(1))[0]
         : variant;
 
       return {
@@ -1583,8 +1583,8 @@ export class ReplenishmentUseCases {
         source: {
           locationCode: sourceLocation.code,
           availableQty: sourceLevel?.variantQty ?? 0,
-          variantSku: sourceVariant?.sku ?? variant.sku,
-          variantName: sourceVariant?.name || sourceVariant?.sku || variant.sku,
+          variantSku: guidance.sourceVariantSku ?? sourceVariant?.sku ?? variant.sku,
+          variantName: (guidance.sourceVariantName ?? sourceVariant?.name) || sourceVariant?.sku || variant.sku,
         },
       };
     }
