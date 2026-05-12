@@ -1,4 +1,4 @@
-import { eq, and, sql, inArray, isNull } from "drizzle-orm";
+import { eq, and, or, sql, inArray, isNull } from "drizzle-orm";
 import {
   replenRules,
   replenTasks,
@@ -148,6 +148,11 @@ type ReplenEvalResult =
 
 const ACTIVE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress", "blocked"];
 const EXECUTABLE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress"];
+const RECOVERABLE_BLOCKED_REPLEN_REASONS = new Set<string | null>([
+  null,
+  "no_source_stock",
+  "execute_failed",
+]);
 
 type InventoryCore = {
   getLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel | null>;
@@ -272,6 +277,51 @@ export class ReplenishmentUseCases {
       existingTaskBlocksShipment: task.blocksShipment === true,
       skipReason: `dedup_existing_task (#${task.id})`,
     };
+  }
+
+  private isRecoverableBlockedTask(task: ReplenTask): boolean {
+    if (task.status !== "blocked") return false;
+    if (task.blocksShipment === true) return false;
+    if (task.dependsOnTaskId != null) return false;
+    return RECOVERABLE_BLOCKED_REPLEN_REASONS.has(task.exceptionReason ?? null);
+  }
+
+  private blockedTaskSourceMatches(task: ReplenTask, location: { isPickable?: unknown; locationType?: unknown }): boolean {
+    const notes = (task.notes ?? "").toLowerCase();
+    const isPickable = location.isPickable === true || location.isPickable === 1 || location.isPickable === "1";
+    const locationType = String(location.locationType ?? "").toLowerCase();
+
+    if (notes.includes("reserve locations")) {
+      return !isPickable || locationType === "reserve" || locationType === "pallet";
+    }
+    if (notes.includes("pick locations")) {
+      return isPickable || locationType === "pick";
+    }
+    if (task.replenMethod === "pallet_drop") {
+      return !isPickable || locationType === "reserve" || locationType === "pallet";
+    }
+    if (task.replenMethod === "case_break") {
+      return isPickable || locationType === "pick";
+    }
+    return true;
+  }
+
+  private async hasPositiveSourceStock(task: ReplenTask): Promise<boolean> {
+    const sourceVariantId = task.sourceProductVariantId ?? task.pickProductVariantId;
+    if (!sourceVariantId) return false;
+
+    const result = await this.db.execute(sql`
+      SELECT wl.is_pickable, wl.location_type
+      FROM inventory.inventory_levels il
+      JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      WHERE il.product_variant_id = ${sourceVariantId}
+        AND il.variant_qty > 0
+    `);
+
+    return (result.rows ?? []).some((row: any) => this.blockedTaskSourceMatches(task, {
+      isPickable: row.is_pickable,
+      locationType: row.location_type,
+    }));
   }
 
   private async blockTaskExecutionFailure(task: ReplenTask, error: any): Promise<void> {
@@ -560,21 +610,69 @@ export class ReplenishmentUseCases {
    * are now eligible for auto-replenishment from this new source stock.
    */
   async reevaluateReplenForProduct(productId: number): Promise<void> {
-    // 1. Cancel any "ghost" tasks blocked specifically because no source stock was found.
+    const variants = await this.db.select({ id: productVariants.id })
+      .from(productVariants)
+      .where(eq(productVariants.productId, productId));
+
+    const variantIds = variants.map((v: any) => v.id).filter((id: unknown): id is number => typeof id === "number");
+
+    if (variantIds.length > 0) {
+      await this.db
+        .update(replenTasks)
+        .set({
+          productId,
+          notes: sql`TRIM(BOTH E'\n' FROM COALESCE(${replenTasks.notes}, '') || E'\nBackfilled product_id during replen re-evaluation.')`,
+        })
+        .where(and(
+          isNull(replenTasks.productId),
+          or(
+            inArray(replenTasks.pickProductVariantId, variantIds),
+            inArray(replenTasks.sourceProductVariantId, variantIds),
+          ),
+        ));
+    }
+
+    const productMatch = variantIds.length > 0
+      ? or(
+          eq(replenTasks.productId, productId),
+          inArray(replenTasks.pickProductVariantId, variantIds),
+          inArray(replenTasks.sourceProductVariantId, variantIds),
+        )
+      : eq(replenTasks.productId, productId);
+
     const blockedTasks = await this.db.select().from(replenTasks)
       .where(
         and(
-          eq(replenTasks.productId, productId),
+          productMatch,
           eq(replenTasks.status, "blocked"),
           isNull(replenTasks.dependsOnTaskId)
         )
       );
 
     for (const task of blockedTasks) {
+      if (!this.isRecoverableBlockedTask(task as ReplenTask)) {
+        continue;
+      }
+
+      const sourceNowAvailable = await this.hasPositiveSourceStock(task as ReplenTask);
+      if (!sourceNowAvailable) {
+        if (!task.exceptionReason) {
+          await this.db
+            .update(replenTasks)
+            .set({
+              exceptionReason: "no_source_stock",
+              notes: `${task.notes || ""}\nClassified during replen re-evaluation: still no source stock.`.trim(),
+            })
+            .where(eq(replenTasks.id, task.id));
+        }
+        continue;
+      }
+
       await this.db
         .update(replenTasks)
         .set({
           status: "cancelled",
+          exceptionReason: task.exceptionReason ?? "no_source_stock",
           notes: `${task.notes || ""}\nCancelled to re-evaluate due to inventory change.`.trim()
         })
         .where(eq(replenTasks.id, task.id));
@@ -588,12 +686,7 @@ export class ReplenishmentUseCases {
     }
 
     // 2. Find all variants of this product and their pick bins, and re-evaluate
-    const variants = await this.db.select({ id: productVariants.id })
-      .from(productVariants)
-      .where(eq(productVariants.productId, productId));
-    
-    if (variants.length === 0) return;
-    const variantIds = variants.map((v: any) => v.id);
+    if (variantIds.length === 0) return;
 
     const assignments = await this.db.select({ warehouseLocationId: productLocations.warehouseLocationId })
       .from(productLocations)
@@ -937,7 +1030,7 @@ export class ReplenishmentUseCases {
           sourceLocationType,
           sourcePriority,
           ruleId: rule?.id ?? null,
-          productId: rule?.productId ?? null,
+          productId: rule?.productId ?? variant.productId ?? null,
           replenMethod,
           whSettings,
           taskNotes,
@@ -955,7 +1048,7 @@ export class ReplenishmentUseCases {
           replenRuleId: rule?.id ?? null,
           fromLocationId: warehouseLocationId,
           toLocationId: warehouseLocationId,
-          productId: rule?.productId ?? null,
+          productId: rule?.productId ?? variant.productId ?? null,
           sourceProductVariantId: resolvedSourceVariantId ?? productVariantId,
           pickProductVariantId: productVariantId,
           qtySourceUnits: 0,
@@ -967,6 +1060,7 @@ export class ReplenishmentUseCases {
           executionMode: eval_.executionMode,
           replenMethod,
           autoReplen,
+          exceptionReason: "no_source_stock",
           ...this.replenOrderTaskFields(context),
           warehouseId: location.warehouseId ?? undefined,
           notes: this.appendOrderContextNote(
@@ -993,7 +1087,7 @@ export class ReplenishmentUseCases {
         replenRuleId: rule?.id ?? null,
         fromLocationId: sourceLocation!.id,
         toLocationId: warehouseLocationId,
-        productId: rule?.productId ?? null,
+        productId: rule?.productId ?? variant.productId ?? null,
         sourceProductVariantId: resolvedSourceVariantId ?? productVariantId,
         pickProductVariantId: productVariantId,
         qtySourceUnits,
@@ -1210,7 +1304,7 @@ export class ReplenishmentUseCases {
       replenRuleId: rule?.id ?? null,
       fromLocationId: guidance.sourceLocationId,
       toLocationId,
-      productId: rule?.productId ?? null,
+      productId: rule?.productId ?? variant.productId ?? null,
       sourceProductVariantId: guidance.sourceVariantId ?? pickVariantId,
       pickProductVariantId: pickVariantId,
       qtySourceUnits: guidance.qtySourceUnits,

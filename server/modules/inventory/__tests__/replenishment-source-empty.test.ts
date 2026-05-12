@@ -196,6 +196,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
       status: "pending",
       executionMode: "inline",
+      productId: 10,
       qtySourceUnits: 4,
       qtyTargetUnits: 4,
     });
@@ -349,6 +350,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
       fromLocationId: 2,
       toLocationId: 1,
+      productId: 10,
       pickProductVariantId: 100,
       sourceProductVariantId: 100,
       qtySourceUnits: 4,
@@ -448,5 +450,119 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       sourceLocationCode: "B-01",
       sourceQty: 9,
     });
+  });
+
+  it("backfills and rechecks historical blocked tasks without product_id", async () => {
+    const updates: Array<{ table: unknown; value: any }> = [];
+    const blockedTask = {
+      id: 765,
+      productId: null,
+      fromLocationId: 1,
+      toLocationId: 1,
+      pickProductVariantId: 100,
+      sourceProductVariantId: 101,
+      status: "blocked",
+      blocksShipment: false,
+      dependsOnTaskId: null,
+      exceptionReason: null,
+      notes: "Blocked: no source stock found in pick locations",
+    };
+    const db = {
+      select: vi.fn(() => ({
+        from: (table: unknown) => ({
+          where: vi.fn(() => {
+            const rows = table === productVariants
+              ? [{ id: 100 }, { id: 101 }]
+              : table === productLocations
+                ? [{ warehouseLocationId: 1 }]
+                : table === inventoryLevels
+                  ? [{ id: 22 }]
+                  : [blockedTask];
+            return {
+              limit: vi.fn(async () => rows),
+              then: (resolve: (value: any[]) => void, reject: (reason?: unknown) => void) =>
+                Promise.resolve(rows).then(resolve, reject),
+            };
+          }),
+        }),
+      })),
+      update: vi.fn((table: unknown) => ({
+        set: vi.fn((value: any) => {
+          updates.push({ table, value });
+          return { where: vi.fn(async () => []) };
+        }),
+      })),
+      execute: vi.fn(async () => ({ rows: [{ is_pickable: 1, location_type: "pick" }] })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const checkSpy = vi.spyOn(service, "checkReplenForLocation").mockResolvedValue(undefined);
+
+    await service.reevaluateReplenForProduct(10);
+
+    expect(updates[0]).toMatchObject({
+      table: replenTasks,
+      value: { productId: 10 },
+    });
+    expect(updates[1]).toMatchObject({
+      table: replenTasks,
+      value: {
+        status: "cancelled",
+        exceptionReason: "no_source_stock",
+      },
+    });
+    expect(checkSpy).toHaveBeenCalledWith(1);
+  });
+
+  it("does not auto-cancel shipment-blocking replen exceptions during product recheck", async () => {
+    const updates: Array<{ table: unknown; value: any }> = [];
+    const blockedTask = {
+      id: 121,
+      productId: null,
+      fromLocationId: 2,
+      toLocationId: 1,
+      pickProductVariantId: 100,
+      sourceProductVariantId: 100,
+      status: "blocked",
+      blocksShipment: true,
+      dependsOnTaskId: null,
+      exceptionReason: "source_empty",
+      notes: "Picker reported source empty",
+    };
+    const db = {
+      select: vi.fn(() => ({
+        from: (table: unknown) => ({
+          where: vi.fn(() => {
+            const rows = table === productVariants
+              ? [{ id: 100 }]
+              : table === productLocations
+                ? [{ warehouseLocationId: 1 }]
+                : [blockedTask];
+            return {
+              limit: vi.fn(async () => rows),
+              then: (resolve: (value: any[]) => void, reject: (reason?: unknown) => void) =>
+                Promise.resolve(rows).then(resolve, reject),
+            };
+          }),
+        }),
+      })),
+      update: vi.fn((table: unknown) => ({
+        set: vi.fn((value: any) => {
+          updates.push({ table, value });
+          return { where: vi.fn(async () => []) };
+        }),
+      })),
+      execute: vi.fn(async () => ({ rows: [] })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const checkSpy = vi.spyOn(service, "checkReplenForLocation").mockResolvedValue(undefined);
+
+    await service.reevaluateReplenForProduct(10);
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      table: replenTasks,
+      value: { productId: 10 },
+    });
+    expect(checkSpy).toHaveBeenCalledWith(1);
   });
 });
