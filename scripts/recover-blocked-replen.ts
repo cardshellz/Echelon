@@ -139,7 +139,7 @@ async function main(): Promise<void> {
       WHERE rt.status = 'blocked'
         AND rt.blocks_shipment = false
         AND rt.depends_on_task_id IS NULL
-        AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'execute_failed')
+        AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant', 'execute_failed')
     ),
     source_totals AS (
       SELECT

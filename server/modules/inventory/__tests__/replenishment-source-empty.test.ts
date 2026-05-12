@@ -104,7 +104,179 @@ function makeDb() {
   return { db, inserts, updates, state, selectCounts };
 }
 
+function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSourceVariants?: boolean }) {
+  const pickVariant = {
+    id: 66,
+    sku: "ARM-ENV-SGL-P50",
+    name: "Pack of 50",
+    productId: 33,
+    hierarchyLevel: 1,
+    unitsPerVariant: 50,
+    parentVariantId: null,
+    isActive: true,
+  };
+  const c700 = {
+    id: 67,
+    sku: "ARM-ENV-SGL-C700",
+    name: "Case of 700",
+    productId: 33,
+    hierarchyLevel: 3,
+    unitsPerVariant: 700,
+    parentVariantId: null,
+    position: 2,
+    isActive: true,
+  };
+  const c750 = {
+    id: 438,
+    sku: "ARM-ENV-SGL-C750",
+    name: "Case of 750",
+    productId: 33,
+    hierarchyLevel: 3,
+    unitsPerVariant: 750,
+    parentVariantId: null,
+    position: 0,
+    isActive: true,
+  };
+  const pickLocation = { id: 1, code: "RACK-03-A", warehouseId: 7, parentLocationId: null, isPickable: 1 };
+  const sourceLocation = { id: 2, code: "F-02", warehouseId: 7, parentLocationId: null, isPickable: 1, locationType: "pick", isActive: 1, cycleCountFreezeId: null };
+  const tierDefault = {
+    id: 1,
+    hierarchyLevel: 1,
+    warehouseId: null,
+    triggerValue: 0,
+    maxQty: null,
+    replenMethod: "case_break",
+    priority: 5,
+    sourceLocationType: "pick",
+    sourceHierarchyLevel: 3,
+    sourcePriority: "fifo",
+    autoReplen: 0,
+    isActive: 1,
+  };
+  const explicitRule = {
+    id: 10,
+    pickProductVariantId: 66,
+    productId: 33,
+    sourceProductVariantId: 438,
+    sourceLocationType: "pick",
+    sourcePriority: "fifo",
+    triggerValue: 0,
+    replenMethod: "case_break",
+    priority: 1,
+    autoReplen: 0,
+    isActive: 1,
+  };
+  const productVariantRows = options?.explicitSourceRule
+    ? [[pickVariant], [c750], [c750]]
+    : options?.noSourceVariants
+      ? [[pickVariant], [pickVariant], [pickVariant]]
+      : [[pickVariant], [pickVariant, c750, c700], [c700]];
+  const tableCounts = new Map<unknown, number>();
+
+  const selectRows = (table: unknown) => {
+    const count = tableCounts.get(table) ?? 0;
+    tableCounts.set(table, count + 1);
+    if (table === inventoryLevels) return [{ id: 1, warehouseLocationId: 1, productVariantId: 66, variantQty: 0 }];
+    if (table === warehouseLocations) return [pickLocation];
+    if (table === productLocations) return [{ id: 405 }];
+    if (table === productVariants) return productVariantRows.shift() ?? [];
+    if (table === locationReplenConfig) return [];
+    if (table === replenRules) return options?.explicitSourceRule ? [explicitRule] : [];
+    if (table === replenTierDefaults) return [tierDefault];
+    if (table === replenTasks) return [];
+    return [];
+  };
+
+  const db = {
+    select: vi.fn(() => ({
+      from: (table: unknown) => ({
+        where: vi.fn(() => {
+          const rows = selectRows(table);
+          return {
+            limit: vi.fn(async () => rows),
+            then: (resolve: (value: any[]) => void, reject: (reason?: unknown) => void) =>
+              Promise.resolve(rows).then(resolve, reject),
+          };
+        }),
+      }),
+    })),
+    insert: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    execute: vi.fn(),
+    transaction: vi.fn(),
+  };
+
+  return { db, sourceLocation };
+}
+
 describe("ReplenishmentUseCases source-empty blockers", () => {
+  it("selects a stocked source variant instead of an unstocked active sibling from tier defaults", async () => {
+    const { db, sourceLocation } = makeSourceResolutionDb();
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
+      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+    vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
+
+    const guidance = await service.checkReplenNeeded(66, 1, {
+      currentQtyOverride: 0,
+    });
+
+    expect(findSourceLocation).toHaveBeenCalledWith(67, 7, "pick", null, "fifo");
+    expect(findSourceLocation).toHaveBeenCalledWith(438, 7, "pick", null, "fifo");
+    expect(guidance).toMatchObject({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceLocationCode: "F-02",
+      sourceVariantId: 67,
+      sourceVariantSku: "ARM-ENV-SGL-C700",
+      replenMethod: "case_break",
+    });
+  });
+
+  it("honors an explicit source rule and reports stockout instead of falling back silently", async () => {
+    const { db, sourceLocation } = makeSourceResolutionDb({ explicitSourceRule: true });
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
+      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+
+    const guidance = await service.checkReplenNeeded(66, 1, {
+      currentQtyOverride: 0,
+    });
+
+    expect(findSourceLocation).toHaveBeenCalledTimes(1);
+    expect(findSourceLocation).toHaveBeenCalledWith(438, 7, "pick", null, "fifo");
+    expect(guidance).toMatchObject({
+      needed: true,
+      stockout: true,
+      sourceLocationId: null,
+      sourceVariantId: null,
+      skipReason: "no_source_stock",
+    });
+    expect(guidance.taskNotes).toContain("Configured source variant ARM-ENV-SGL-C750 has no stock in pick locations");
+  });
+
+  it("falls back to same-variant source stock when no higher source UOM exists", async () => {
+    const { db, sourceLocation } = makeSourceResolutionDb({ noSourceVariants: true });
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service as any, "findSourceLocation")
+      .mockImplementation(async (variantId: number) => variantId === 66 ? sourceLocation : null);
+
+    const guidance = await service.checkReplenNeeded(66, 1, {
+      currentQtyOverride: 0,
+    });
+
+    expect(guidance).toMatchObject({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceVariantId: 66,
+      sourceVariantSku: "ARM-ENV-SGL-P50",
+    });
+    expect(guidance.taskNotes).toContain("Auto-triggered");
+  });
+
   it("creates a linked cycle count for picker-reported source-empty replen blockers", async () => {
     const { db, inserts, updates } = makeDb();
     const service = new ReplenishmentUseCases(db as any, {} as any);
