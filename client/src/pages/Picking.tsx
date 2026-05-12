@@ -414,10 +414,17 @@ function ReplenPredictionBadge({
   if (!prediction || (!prediction.replenNeeded && !prediction.existingTaskId)) return null;
 
   const hasExistingTask = !!prediction.existingTaskId;
-  const isBlocked = prediction.stockout || prediction.existingTaskStatus === "blocked";
+  const hasBlockedTask = prediction.existingTaskStatus === "blocked";
+  const isShipmentBlocking = hasBlockedTask && prediction.existingTaskBlocksShipment === true;
+  const isSourceUnavailable = prediction.stockout;
+  const isBlocked = isShipmentBlocking || hasBlockedTask || isSourceUnavailable;
   const label = hasExistingTask
-    ? isBlocked ? "Replen blocked" : "Replen queued"
-    : isBlocked ? "Replen blocked" : "Replen after pick";
+    ? isShipmentBlocking
+      ? "Replen blocks shipment"
+      : hasBlockedTask
+        ? "Replen needs review"
+        : "Replen queued"
+    : isSourceUnavailable ? "No source stock" : "Replen after pick";
   const detail = hasExistingTask
     ? `#${prediction.existingTaskId}${prediction.sourceLocationCode ? ` from ${prediction.sourceLocationCode}` : ""}`
     : prediction.sourceLocationCode
@@ -431,8 +438,10 @@ function ReplenPredictionBadge({
       className={cn(
         "inline-flex max-w-full items-center gap-1 font-semibold",
         compact ? "text-[9px] px-1.5 py-0.5" : "text-xs px-2 py-1",
-        isBlocked
+        isShipmentBlocking || hasBlockedTask
           ? "border-red-300 bg-red-50 text-red-700"
+          : isSourceUnavailable
+            ? "border-amber-300 bg-amber-50 text-amber-800"
           : hasExistingTask
             ? "border-blue-300 bg-blue-50 text-blue-700"
             : "border-amber-300 bg-amber-50 text-amber-700",
