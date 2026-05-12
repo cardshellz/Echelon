@@ -395,6 +395,101 @@ describe("PickingUseCases replen source-empty reporting", () => {
 });
 
 describe("PickingUseCases post-pick replen context", () => {
+  it("queues replen after a confirmed short pick without deducting inventory", async () => {
+    const pickLocation = { id: 1, code: "A-01", warehouseId: 1, isPickable: 1 };
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 2 });
+    const updatedItem = {
+      ...beforeItem,
+      status: "short",
+      pickedQuantity: 0,
+      shortReason: "out_of_stock",
+    };
+    const db = {
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            limit: vi.fn(async () => [pickLocation]),
+          }),
+        }),
+      })),
+    };
+    const inventoryCore = {
+      pickItem: vi.fn(),
+      adjustInventory: vi.fn(),
+    };
+    const storage = {
+      getOrderItemById: vi.fn(async () => beforeItem),
+      updateOrderItemStatus: vi.fn(async () => updatedItem),
+      getProductVariantBySku: vi.fn(async (sku: string) => ({
+        id: 100,
+        sku,
+        productId: 10,
+        unitsPerVariant: 1,
+      })),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseId: 1,
+        assignedPickerId: "picker-1",
+      })),
+      getUser: vi.fn(async () => ({ id: "picker-1", username: "picker" })),
+      createPickingLog: vi.fn(async () => ({})),
+      getAllWarehouseSettings: vi.fn(async () => [{
+        warehouseId: 1,
+        postPickStatus: "completed",
+        pickMode: "single_order",
+        requireScanConfirm: 0,
+      }]),
+      updateOrderProgress: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseStatus: "completed",
+      })),
+    };
+    const replenishment = {
+      ensureQueuedReplenForShortPick: vi.fn(async () => ({
+        task: { id: 300, status: "pending", qtyTargetUnits: 4 },
+        moved: 0,
+        guidance: {
+          sourceLocationCode: "B-01",
+          sourceVariantSku: "SKU-1",
+          sourceVariantName: "Each",
+          qtyTargetUnits: 4,
+        },
+      })),
+    };
+    const service = new PickingUseCases(db as any, inventoryCore as any, replenishment as any, storage as any);
+
+    const result = await service.pickItem(500, {
+      status: "short",
+      pickedQuantity: 0,
+      shortReason: "out_of_stock",
+      pickMethod: "short",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({ success: true });
+    if (!result.success) throw new Error("pickItem should have succeeded");
+    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+    expect(inventoryCore.adjustInventory).not.toHaveBeenCalled();
+    expect(replenishment.ensureQueuedReplenForShortPick).toHaveBeenCalledWith(100, 1, "picker-1", expect.objectContaining({
+      orderId: 900,
+      orderItemId: 500,
+      orderNumber: "#900",
+      blocksShipment: false,
+    }));
+    expect(result.inventory.replen).toMatchObject({
+      triggered: true,
+      taskId: 300,
+      taskStatus: "pending",
+      autoExecuted: false,
+      autoExecutedMoved: null,
+      autoExecutedFailed: false,
+      sourceLocationCode: "B-01",
+      qtyToMove: 4,
+    });
+  });
+
   it("reports queued replen without inline movement confirmation fields", async () => {
     const { service, replenishment } = makePickItemHarness({
       task: { id: 121, status: "pending", qtyTargetUnits: 6 },

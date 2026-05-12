@@ -1243,6 +1243,82 @@ export class ReplenishmentUseCases {
     return { task: finalTask as ReplenTask, moved };
   }
 
+  async ensureQueuedReplenForShortPick(
+    pickVariantId: number,
+    toLocationId: number,
+    userId?: string,
+    context?: ReplenOrderContext,
+  ): Promise<{ task: ReplenTask; moved: number; guidance?: ReplenGuidance } | null> {
+    const _tag = `[Replen shortPickQueue] variant=${pickVariantId} loc=${toLocationId}`;
+
+    const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
+    if (existingTask) {
+      console.log(`${_tag} reusing active task ${existingTask.id} status=${existingTask.status}`);
+      return { task: existingTask, moved: 0 };
+    }
+
+    const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId, {
+      currentQtyOverride: 0,
+    });
+    if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
+      console.log(`${_tag} no queueable source found`);
+      return null;
+    }
+
+    const [sourceLocation] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, guidance.sourceLocationId))
+      .limit(1);
+    if (!sourceLocation || sourceLocation.isPickable === 1) {
+      console.log(`${_tag} source is pickable; inline/source-empty flow owns this`);
+      return null;
+    }
+
+    const [variant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, pickVariantId))
+      .limit(1);
+    if (!variant) return null;
+
+    const [location] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, toLocationId))
+      .limit(1);
+    if (!location) return null;
+
+    const rule = await this.findRuleForVariant(pickVariantId);
+    const [task] = await this.db.insert(replenTasks).values({
+      replenRuleId: rule?.id ?? null,
+      fromLocationId: guidance.sourceLocationId,
+      toLocationId,
+      productId: rule?.productId ?? variant.productId ?? null,
+      sourceProductVariantId: guidance.sourceVariantId ?? pickVariantId,
+      pickProductVariantId: pickVariantId,
+      qtySourceUnits: guidance.qtySourceUnits,
+      qtyTargetUnits: guidance.qtyTargetUnits,
+      qtyCompleted: 0,
+      status: "pending",
+      priority: rule?.priority ?? 5,
+      triggeredBy: "short_pick",
+      executionMode: "queue",
+      replenMethod: guidance.replenMethod,
+      autoReplen: guidance.autoReplen,
+      ...this.replenOrderTaskFields(context),
+      warehouseId: location.warehouseId ?? undefined,
+      createdBy: userId ?? undefined,
+      notes: this.appendOrderContextNote(
+        `${guidance.taskNotes}\nQueued from confirmed short pick; picker continues without inline replen.`,
+        context,
+      ),
+    } satisfies InsertReplenTask).returning();
+
+    console.log(`${_tag} created queued task ${task.id} from short-pick report`);
+    return { task: task as ReplenTask, moved: 0, guidance };
+  }
+
   /**
    * @deprecated Use checkReplenNeeded() + createAndExecuteReplen() instead.
    */
