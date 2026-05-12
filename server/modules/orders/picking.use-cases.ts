@@ -2021,7 +2021,13 @@ export class PickingUseCases {
       actualBinQty: binCount,
       adjustment,
       replenTriggered: !!replenResult || !!inferredReplen,
-      replenTaskStatus: replenResult ? "completed" : inferredReplen ? "completed" : null,
+      replenTaskStatus: replenResult
+        ? replenResult.alreadyRecorded
+          ? "completed"
+          : replenResult.task?.status ?? null
+        : inferredReplen
+          ? "completed"
+          : null,
       replenFailReason: didReplen && !replenResult ? replenFailReason : null,
       inferredReplen: !!inferredReplen,
       inferredReplenMoved: inferredReplen?.moved ?? null,

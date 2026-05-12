@@ -1077,7 +1077,11 @@ export default function Picking() {
         });
       }
       if (result.replenTriggered && !result.replenFailReason) {
-        toast({ title: "Replen completed", description: "Inventory moved from source to pick bin" });
+        if (result.replenTaskStatus === "completed") {
+          toast({ title: "Replen completed", description: "Inventory moved from source to pick bin" });
+        } else if (result.replenTaskStatus) {
+          toast({ title: "Replen queued", description: "A replen task was created for warehouse follow-up" });
+        }
       } else if (result.replenFailReason) {
         const reasonLabels: Record<string, string> = {
           no_source_stock: "Source bin had no available stock — replen task was not created",

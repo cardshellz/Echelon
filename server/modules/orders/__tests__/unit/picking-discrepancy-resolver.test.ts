@@ -16,6 +16,8 @@ function makeService(levels: Array<{ warehouseLocationId: number; variantQty: nu
     })),
     getInventoryLevelsByProductVariantId: vi.fn(async () => levels),
     getAllWarehouseLocations: vi.fn(async () => locations),
+    getPendingReplenTasksForLocation: vi.fn(async () => []),
+    updateReplenTask: vi.fn(async () => ({})),
   };
 
   const inventoryCore = {
@@ -34,6 +36,7 @@ function makeService(levels: Array<{ warehouseLocationId: number; variantQty: nu
       const level = levels.find(l => l.warehouseLocationId === warehouseLocationId);
       return level ? { ...level, productVariantId: 100 } : null;
     }),
+    logTransaction: vi.fn(async () => ({})),
   };
 
   const service = new PickingUseCases({} as any, inventoryCore as any, {} as any, storage as any);
@@ -306,6 +309,34 @@ describe("PickingUseCases replen source-empty reporting", () => {
       itemStatusBefore: "pending",
       itemStatusAfter: "pending",
     }));
+  });
+});
+
+describe("PickingUseCases bin count replen feedback", () => {
+  it("reports queued replen as pending instead of completed", async () => {
+    const { service } = makeService([
+      { warehouseLocationId: 1, variantQty: 5 },
+    ]);
+    (service as any).replenishment = {
+      createAndExecuteReplen: vi.fn(async () => ({
+        task: { id: 121, status: "pending" },
+        moved: 0,
+      })),
+    };
+
+    const result = await service.handleBinCount({
+      sku: "SKU-1",
+      locationId: 1,
+      binCount: 5,
+      didReplen: true,
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      replenTriggered: true,
+      replenTaskStatus: "pending",
+      replenFailReason: null,
+    });
   });
 });
 
