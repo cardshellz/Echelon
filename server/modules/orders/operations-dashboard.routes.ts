@@ -44,8 +44,10 @@ export function registerOperationsDashboardRoutes(app: Express) {
           queuedReplen: task ? 1 : 0,
           queuedTaskId: task?.id ?? null,
           cancelledStaleNoDemand: 0,
+          cancelledStaleBacklog: 0,
           cancelledDuplicates: 0,
           cancelledStaleNoDemandTaskIds: [],
+          cancelledStaleBacklogTaskIds: [],
           cancelledDuplicateTaskIds: [],
           keptDuplicateTaskIds: [],
         });

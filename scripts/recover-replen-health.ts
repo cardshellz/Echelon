@@ -10,6 +10,7 @@
  * Execute does not move inventory. By default it only:
  *   1. Cancels duplicate active non-shipment replen tasks, keeping the best task.
  *   2. Cancels blocked no-source/no-demand sentinel tasks that have no executable quantity.
+ *   3. Cancels pending/assigned no-demand tasks whose frozen source has no executable stock.
  */
 
 import fs from "node:fs";
@@ -140,6 +141,8 @@ function classify(row: ReplenRow): ClassifiedReplenRow {
     classification = "active_demand_no_source";
   } else if (row.active_pending_lines > 0) {
     classification = "active_demand_pick_has_stock";
+  } else if (row.source_qty < Math.max(1, row.qty_source_units)) {
+    classification = "queued_no_demand_source_stale";
   } else if (row.target_qty <= 0 && row.source_qty >= Math.max(1, row.qty_source_units)) {
     classification = "queued_no_demand_ready";
   } else if (row.target_qty <= 0) {
@@ -151,7 +154,10 @@ function classify(row: ReplenRow): ClassifiedReplenRow {
   return {
     ...row,
     classification,
-    recoverable: classification === "duplicate_active_task" || classification === "blocked_no_demand_sentinel",
+    recoverable: classification === "duplicate_active_task" ||
+      classification === "blocked_no_demand_sentinel" ||
+      classification === "queued_no_demand_no_source" ||
+      classification === "queued_no_demand_source_stale",
   };
 }
 
@@ -261,9 +267,13 @@ async function executeRecovery(client: pg.PoolClient, rows: ClassifiedReplenRow[
   const blockedNoDemandIds = rows
     .filter((row) => row.classification === "blocked_no_demand_sentinel")
     .map((row) => row.task_id);
+  const pendingNoDemandNoSourceIds = rows
+    .filter((row) => row.classification === "queued_no_demand_no_source" || row.classification === "queued_no_demand_source_stale")
+    .map((row) => row.task_id);
 
   let cancelledDuplicates = 0;
   let cancelledBlockedNoDemand = 0;
+  let cancelledPendingNoDemandNoSource = 0;
 
   await client.query("BEGIN");
   try {
@@ -298,6 +308,21 @@ async function executeRecovery(client: pg.PoolClient, rows: ClassifiedReplenRow[
       cancelledBlockedNoDemand = result.rowCount ?? 0;
     }
 
+    if (pendingNoDemandNoSourceIds.length > 0) {
+      const result = await client.query(`
+        UPDATE inventory.replen_tasks rt
+        SET status = 'cancelled',
+            completed_at = NOW(),
+            notes = TRIM(BOTH E'\n' FROM COALESCE(rt.notes, '') || E'\nCancelled by recover-replen-health: no active demand and frozen source has no executable stock.')
+        WHERE rt.id = ANY($1::int[])
+          AND rt.status IN ('pending', 'assigned')
+          AND rt.blocks_shipment = false
+          AND rt.depends_on_task_id IS NULL
+        RETURNING rt.id
+      `, [pendingNoDemandNoSourceIds]);
+      cancelledPendingNoDemandNoSource = result.rowCount ?? 0;
+    }
+
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
@@ -307,8 +332,10 @@ async function executeRecovery(client: pg.PoolClient, rows: ClassifiedReplenRow[
   return {
     duplicateIds,
     blockedNoDemandIds,
+    pendingNoDemandNoSourceIds,
     cancelledDuplicates,
     cancelledBlockedNoDemand,
+    cancelledPendingNoDemandNoSource,
   };
 }
 
@@ -337,20 +364,27 @@ async function main() {
       : {
           duplicateIds: rows.filter((row) => row.classification === "duplicate_active_task").map((row) => row.task_id),
           blockedNoDemandIds: rows.filter((row) => row.classification === "blocked_no_demand_sentinel").map((row) => row.task_id),
+          pendingNoDemandNoSourceIds: rows
+            .filter((row) => row.classification === "queued_no_demand_no_source" || row.classification === "queued_no_demand_source_stale")
+            .map((row) => row.task_id),
           cancelledDuplicates: 0,
           cancelledBlockedNoDemand: 0,
+          cancelledPendingNoDemandNoSource: 0,
         };
 
     const output = {
       mode: options.execute ? "execute" : "dry-run",
       scannedAgedTasks: rows.length,
-      recoverable: recovery.duplicateIds.length + recovery.blockedNoDemandIds.length,
+      recoverable: recovery.duplicateIds.length + recovery.blockedNoDemandIds.length + recovery.pendingNoDemandNoSourceIds.length,
+      recoverablePendingNoDemandNoSource: recovery.pendingNoDemandNoSourceIds.length,
       classificationCounts: countBy(rows, "classification"),
       methodCounts: countBy(rows, "replen_method"),
       duplicateTaskIds: recovery.duplicateIds,
       blockedNoDemandTaskIds: recovery.blockedNoDemandIds,
+      pendingNoDemandNoSourceTaskIds: recovery.pendingNoDemandNoSourceIds,
       cancelledDuplicates: recovery.cancelledDuplicates,
       cancelledBlockedNoDemand: recovery.cancelledBlockedNoDemand,
+      cancelledPendingNoDemandNoSource: recovery.cancelledPendingNoDemandNoSource,
       activeDemandSamples: rows.filter((row) => row.classification.startsWith("active_demand")).slice(0, 20),
       recoverableSamples: rows.filter((row) => row.recoverable).slice(0, 20),
       queueBacklogSamples: rows.filter((row) => row.classification.startsWith("queued_")).slice(0, 20),
