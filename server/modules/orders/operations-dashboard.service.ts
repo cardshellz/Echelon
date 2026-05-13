@@ -50,10 +50,12 @@ const VALID_ACTION_FILTERS = ["all", "negative_inventory", "aging_receiving", "p
 const VALID_PICK_REPLEN_HEALTH_FILTERS = [
   "all",
   "stuck_replen",
+  "replen_backlog",
   "stale_replen_no_demand",
   "duplicate_replen",
   "short_pick_unresolved",
   "open_allocation_exception",
+  "allocation_review_needed",
   "cycle_count_review",
   "exception_order_no_blocker",
   "pick_bin_needs_replen",
@@ -590,6 +592,10 @@ export class OperationsDashboardService {
               AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
               AND COALESCE(demand.active_pending_lines, 0) = 0
             THEN 'stale_replen_no_demand'
+            WHEN rt.status IN ('blocked', 'in_progress')
+            THEN 'stuck_replen'
+            WHEN rt.status IN ('pending', 'assigned')
+            THEN 'replen_backlog'
             ELSE 'stuck_replen'
           END::text as type,
           CASE
@@ -603,6 +609,7 @@ export class OperationsDashboardService {
             THEN 4
             WHEN rt.status = 'blocked' THEN 1
             WHEN rt.status = 'in_progress' THEN 2
+            WHEN COALESCE(demand.active_pending_lines, 0) > 0 THEN 2
             ELSE 3
           END as priority,
           rt.id::text as source_id,
@@ -634,6 +641,7 @@ export class OperationsDashboardService {
             THEN 'no active demand and no executable replen quantity'
             WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
             WHEN rt.status = 'in_progress' THEN 'in progress longer than 1h'
+            WHEN COALESCE(demand.active_pending_lines, 0) > 0 THEN 'active demand waiting on queued replen'
             ELSE rt.status || ' longer than 4h'
           END as detail,
           CASE
@@ -782,8 +790,16 @@ export class OperationsDashboardService {
         UNION ALL
 
         SELECT
-          'open_allocation_exception'::text,
-          CASE WHEN ae.status = 'blocked' THEN 1 ELSE 3 END,
+          CASE
+            WHEN ae.status = 'blocked' OR COALESCE(ae.metadata->>'shipmentBlocking', 'false') = 'true'
+              THEN 'open_allocation_exception'
+            ELSE 'allocation_review_needed'
+          END::text,
+          CASE
+            WHEN ae.status = 'blocked' OR COALESCE(ae.metadata->>'shipmentBlocking', 'false') = 'true'
+              THEN 1
+            ELSE 4
+          END,
           ae.id::text,
           NULL::int,
           ae.id,
@@ -803,7 +819,11 @@ export class OperationsDashboardService {
           FLOOR(EXTRACT(EPOCH FROM NOW() - ae.created_at) / 3600)::int,
           ae.created_at,
           COALESCE(ae.review_reason, ae.exception_type),
-          'resolve_exception'
+          CASE
+            WHEN ae.status = 'blocked' OR COALESCE(ae.metadata->>'shipmentBlocking', 'false') = 'true'
+              THEN 'resolve_exception'
+            ELSE 'review_exception'
+          END
         FROM wms.allocation_exceptions ae
         JOIN wms.orders o ON ae.order_id = o.id
         WHERE ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
