@@ -13,6 +13,7 @@
  *   3. Re-runs replen evaluation for affected pick locations so a fresh task is created.
  *   4. Marks unresolved null-reason blocked rows as no_source_stock for health queue routing.
  *   5. Cancels blocked child tasks whose dependency is already completed/cancelled and rechecks the pick bin.
+ *   6. Cancels no-demand, no-source sentinel rows that are not actionable replen work.
  *
  * It does not cancel shipment-blocking source-empty tasks or dependency-blocked cascade tasks
  * that are still waiting on an active parent.
@@ -35,6 +36,8 @@ type Candidate = {
   replen_method: string | null;
   pick_product_variant_id: number | null;
   source_product_variant_id: number | null;
+  qty_source_units: number;
+  qty_target_units: number;
   depends_on_task_id: number | null;
   depends_on_status: string | null;
   pick_sku: string | null;
@@ -131,6 +134,8 @@ async function main(): Promise<void> {
         rt.notes,
         rt.pick_product_variant_id,
         rt.source_product_variant_id,
+        rt.qty_source_units,
+        rt.qty_target_units,
         rt.depends_on_task_id,
         parent.status AS depends_on_status,
         pv_pick.sku AS pick_sku,
@@ -269,6 +274,12 @@ async function main(): Promise<void> {
     !orphanedDependencies.some((match) => match.task_id === row.task_id)
   );
   const unresolvedNoSource = unresolved.filter((row) => row.depends_on_task_id == null);
+  const reviewOnlyNoDemand = unresolvedNoSource.filter((row) =>
+    Number(row.active_pending_lines ?? 0) <= 0 &&
+    Number(row.qty_source_units ?? 0) === 0 &&
+    Number(row.qty_target_units ?? 0) === 0
+  );
+  const unresolvedWithDemand = unresolvedNoSource.filter((row) => Number(row.active_pending_lines ?? 0) > 0);
   const waitingOnActiveDependencies = unresolved.filter((row) => row.depends_on_task_id != null);
 
   const summary: Record<string, unknown> = {
@@ -277,7 +288,8 @@ async function main(): Promise<void> {
     recoverableWithSource: directSourceRecoverable.length,
     recoverableViaResolver: resolverRecoverable.length,
     recoverableOrphanedDependencies: orphanedDependencies.length,
-    unresolvedNoSource: unresolvedNoSource.length,
+    unresolvedNoSource: unresolvedWithDemand.length,
+    reviewOnlyNoDemand: reviewOnlyNoDemand.length,
     waitingOnActiveDependencies: waitingOnActiveDependencies.length,
     activePickLinesImpacted: candidates.reduce((sum, row) => sum + Number(row.active_pending_lines ?? 0), 0),
     recoverableTaskIds: recoverable.map((row) => row.task_id),
@@ -289,7 +301,8 @@ async function main(): Promise<void> {
       resolvedSourceLocation: row.resolver_source_location,
     })),
     orphanedDependencyTaskIds: orphanedDependencies.map((row) => row.task_id),
-    unresolvedTaskIds: unresolvedNoSource.map((row) => row.task_id),
+    unresolvedTaskIds: unresolvedWithDemand.map((row) => row.task_id),
+    reviewOnlyNoDemandTaskIds: reviewOnlyNoDemand.map((row) => row.task_id),
     waitingOnActiveDependencyTaskIds: waitingOnActiveDependencies.map((row) => row.task_id),
     samples: candidates.slice(0, 20),
   };
@@ -302,10 +315,12 @@ async function main(): Promise<void> {
 
   const recoverableIds = recoverable.map((row) => row.task_id);
   const orphanedDependencyIds = orphanedDependencies.map((row) => row.task_id);
-  const unresolvedIds = unresolvedNoSource.map((row) => row.task_id);
+  const unresolvedIds = unresolvedWithDemand.map((row) => row.task_id);
+  const reviewOnlyNoDemandIds = reviewOnlyNoDemand.map((row) => row.task_id);
   let backfilledProductIds = 0;
   let cancelledForRecheck = 0;
   let cancelledOrphanedDependencies = 0;
+  let cancelledReviewOnlyNoDemand = 0;
   let markedNoSource = 0;
   let recheckedLocations = 0;
 
@@ -383,6 +398,25 @@ async function main(): Promise<void> {
       markedNoSource = unresolvedResult.rowCount ?? 0;
     }
 
+    if (reviewOnlyNoDemandIds.length > 0) {
+      const reviewOnlyResult = await pool.query(`
+        UPDATE inventory.replen_tasks
+        SET
+          status = 'cancelled',
+          completed_at = NOW(),
+          exception_reason = COALESCE(exception_reason, 'no_source_stock'),
+          notes = TRIM(BOTH E'\n' FROM COALESCE(notes, '') || E'\nCancelled by recover-blocked-replen: no source stock, no active demand, and no executable replen work remains.')
+        WHERE id = ANY($1::int[])
+          AND status = 'blocked'
+          AND blocks_shipment = false
+          AND depends_on_task_id IS NULL
+          AND qty_source_units = 0
+          AND qty_target_units = 0
+        RETURNING id
+      `, [reviewOnlyNoDemandIds]);
+      cancelledReviewOnlyNoDemand = reviewOnlyResult.rowCount ?? 0;
+    }
+
     await pool.query("COMMIT");
   } catch (error) {
     await pool.query("ROLLBACK");
@@ -409,6 +443,7 @@ async function main(): Promise<void> {
     backfilledProductIds,
     cancelledForRecheck,
     cancelledOrphanedDependencies,
+    cancelledReviewOnlyNoDemand,
     markedNoSource,
     recheckedLocations,
   };

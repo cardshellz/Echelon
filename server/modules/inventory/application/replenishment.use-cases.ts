@@ -307,6 +307,13 @@ export class ReplenishmentUseCases {
     return RECOVERABLE_BLOCKED_REPLEN_REASONS.has(task.exceptionReason ?? null);
   }
 
+  private isNoSourceReviewOnlyTask(task: ReplenTask): boolean {
+    if (task.status !== "blocked") return false;
+    if (task.blocksShipment === true) return false;
+    if ((task.qtySourceUnits ?? 0) > 0 || (task.qtyTargetUnits ?? 0) > 0) return false;
+    return task.exceptionReason === "no_source_stock" || task.exceptionReason === "no_source_variant";
+  }
+
   private blockedTaskSourceMatches(task: ReplenTask, location: { isPickable?: unknown; locationType?: unknown }): boolean {
     const notes = (task.notes ?? "").toLowerCase();
     const isPickable = location.isPickable === true || location.isPickable === 1 || location.isPickable === "1";
@@ -1087,6 +1094,18 @@ export class ReplenishmentUseCases {
         if (cascadeResult) return cascadeResult;
       }
 
+      const notification = {
+        title: `Stockout: ${variant.sku ?? `variant #${productVariantId}`}`,
+        message: `No source stock found in ${sourceLocationType} locations for ${location.code}`,
+        data: { productVariantId, locationId: warehouseLocationId, locationCode: location.code },
+      };
+
+      if (context?.blocksShipment !== true) {
+        notify("stockout", notification).catch(() => {});
+        console.log(`${_tag} EXIT: no source stock; routed to review notification without creating a fake replen task`);
+        return null;
+      }
+
       const [blockedTask] = await this.db
         .insert(replenTasks)
         .values({
@@ -1116,11 +1135,10 @@ export class ReplenishmentUseCases {
         .returning();
       console.log(`${_tag} EXIT: created BLOCKED task — no source stock in ${sourceLocationType} locations`);
       notify("stockout", {
-        title: `Stockout: ${variant.sku ?? `variant #${productVariantId}`}`,
-        message: `No source stock found in ${sourceLocationType} locations for ${location.code}`,
-        data: { productVariantId, locationId: warehouseLocationId, locationCode: location.code },
+        ...notification,
+        data: { ...notification.data, taskId: blockedTask.id },
       }).catch(() => {});
-      return context?.blocksShipment ? blockedTask as ReplenTask : null;
+      return blockedTask as ReplenTask;
     }
 
     const { sourceLocation, sourceVariant, qtySourceUnits, qtyTargetUnits, executionMode } = eval_;
@@ -1717,6 +1735,10 @@ export class ReplenishmentUseCases {
 
     if (!["pending", "assigned", "in_progress", "blocked"].includes(task.status)) {
       throw new Error(`Task ${taskId} is ${task.status}, cannot mark done`);
+    }
+
+    if (this.isNoSourceReviewOnlyTask(task as ReplenTask)) {
+      throw new Error(`Task ${taskId} has no valid source stock and no replen quantity; cancel or resolve source stock instead of marking done`);
     }
 
     await this.db

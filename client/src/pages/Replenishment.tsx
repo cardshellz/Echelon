@@ -1240,6 +1240,13 @@ export default function Replenishment() {
     return value.replace(/_/g, " ");
   };
 
+  const isNoSourceReviewTask = (task: ReplenTask) =>
+    task.status === "blocked" &&
+    task.qtySourceUnits <= 0 &&
+    task.qtyTargetUnits <= 0 &&
+    !task.dependsOnTaskId &&
+    (task.exceptionReason === "no_source_stock" || task.exceptionReason === "no_source_variant");
+
   // Apply additional client-side filters for warehouse and mode
   const filteredTasks = tasks.filter((task) => {
     // Warehouse filter
@@ -1447,7 +1454,9 @@ export default function Replenishment() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredTasks.map((task) => (
+                    {filteredTasks.map((task) => {
+                      const noSourceReviewTask = isNoSourceReviewTask(task);
+                      return (
                       <TableRow
                         key={task.id}
                         data-testid={`row-task-${task.id}`}
@@ -1466,8 +1475,8 @@ export default function Replenishment() {
                         <TableCell className="py-2 text-xs text-muted-foreground">{formatRelativeTime(task.createdAt)}</TableCell>
                         <TableCell className="hidden md:table-cell py-2">
                           <div className="text-xs sm:text-sm">
-                            {task.sourceVariant?.sku || task.product?.sku || "-"}
-                            {task.sourceVariant && (
+                            {noSourceReviewTask ? "No valid source" : task.sourceVariant?.sku || task.product?.sku || "-"}
+                            {!noSourceReviewTask && task.sourceVariant && (
                               <div className="text-[10px] text-muted-foreground">{uomLabel(task.sourceVariant.hierarchyLevel)}</div>
                             )}
                           </div>
@@ -1482,7 +1491,7 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="py-2">
                           <div className="font-mono text-xs sm:text-sm">
-                            {task.fromLocation?.code || `LOC-${task.fromLocationId}`}
+                            {noSourceReviewTask ? "NO SOURCE" : task.fromLocation?.code || `LOC-${task.fromLocationId}`}
                           </div>
                         </TableCell>
                         <TableCell className="hidden sm:table-cell py-2">
@@ -1495,7 +1504,9 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="py-2">
                           <div className="font-medium text-xs sm:text-sm">
-                            {task.replenMethod === "case_break" && task.sourceVariant && task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId ? (
+                            {noSourceReviewTask ? (
+                              <span className="text-muted-foreground">Review</span>
+                            ) : task.replenMethod === "case_break" && task.sourceVariant && task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId ? (
                               <span>
                                 {task.qtySourceUnits} {uomLabel(task.sourceVariant.hierarchyLevel)}
                                 <span className="text-muted-foreground mx-0.5">→</span>
@@ -1577,21 +1588,27 @@ export default function Replenishment() {
                             )}
                             {["pending", "assigned", "in_progress", "blocked"].includes(task.status) && (
                               <>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="min-h-[36px] text-xs text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-950/30"
-                                  disabled={markDoneMutation.isPending}
-                                  onClick={() => markDoneMutation.mutate(task.id)}
-                                  title="Mark as done without moving inventory (already moved manually)"
-                                >
-                                  {markDoneMutation.isPending ? (
-                                    <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
-                                  ) : (
-                                    <CheckCircle className="w-3 h-3 sm:mr-1" />
-                                  )}
-                                  <span className="hidden sm:inline">Done</span>
-                                </Button>
+                                {noSourceReviewTask ? (
+                                  <Badge variant="outline" className="min-h-[36px] border-red-200 bg-red-50 px-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">
+                                    Review only
+                                  </Badge>
+                                ) : (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="min-h-[36px] text-xs text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-950/30"
+                                    disabled={markDoneMutation.isPending}
+                                    onClick={() => markDoneMutation.mutate(task.id)}
+                                    title="Mark as done without moving inventory (already moved manually)"
+                                  >
+                                    {markDoneMutation.isPending ? (
+                                      <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
+                                    ) : (
+                                      <CheckCircle className="w-3 h-3 sm:mr-1" />
+                                    )}
+                                    <span className="hidden sm:inline">Done</span>
+                                  </Button>
+                                )}
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -1609,7 +1626,8 @@ export default function Replenishment() {
                           </div>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      );
+                    })}
                   </TableBody>
                 </Table>
                 </div>
