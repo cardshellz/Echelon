@@ -48,20 +48,24 @@ export interface ActionQueueResponse {
 export type PickReplenHealthFilter =
   | "all"
   | "stuck_replen"
+  | "replen_backlog"
   | "stale_replen_no_demand"
   | "duplicate_replen"
   | "short_pick_unresolved"
   | "open_allocation_exception"
+  | "allocation_review_needed"
   | "cycle_count_review"
   | "exception_order_no_blocker"
   | "pick_bin_needs_replen";
 
 export interface PickReplenHealthCounts {
   stuck_replen: number;
+  replen_backlog: number;
   stale_replen_no_demand: number;
   duplicate_replen: number;
   short_pick_unresolved: number;
   open_allocation_exception: number;
+  allocation_review_needed: number;
   cycle_count_review: number;
   exception_order_no_blocker: number;
   pick_bin_needs_replen: number;

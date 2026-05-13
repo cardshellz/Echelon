@@ -56,9 +56,11 @@ describe("OperationsDashboardService pick/replen health", () => {
     expect(db.execute).toHaveBeenCalledTimes(2);
     expect(result.counts).toMatchObject({
       stuck_replen: 2,
+      replen_backlog: 0,
       stale_replen_no_demand: 0,
       short_pick_unresolved: 1,
       duplicate_replen: 0,
+      allocation_review_needed: 0,
     });
     expect(result.total).toBe(2);
     expect(result.pageSize).toBe(25);

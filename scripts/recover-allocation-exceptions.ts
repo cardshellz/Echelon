@@ -33,6 +33,7 @@ type ExceptionRow = {
   product_variant_id: number | null;
   exception_type: string;
   status: string;
+  shipment_blocking: boolean | null;
   requested_qty: number;
   selected_location_id: number | null;
   selected_location_code: string | null;
@@ -63,6 +64,7 @@ type ExceptionRow = {
 type ClassifiedException = ExceptionRow & {
   classification: string;
   stockClass: string;
+  shipmentBlocking: boolean;
   recoverable: boolean;
 };
 
@@ -131,6 +133,7 @@ function classify(row: ExceptionRow): ClassifiedException {
   const orderStatus = String(row.order_status || "").toLowerCase();
   const itemStatus = String(row.item_status || "").toLowerCase();
   const requiresShipping = Number(row.requires_shipping ?? 1) === 1;
+  const shipmentBlocking = row.status === "blocked" || row.shipment_blocking === true;
   let classification = "active_shipment_blocker";
 
   if (row.open_exception_count > 1 && row.item_exception_rank > 1) {
@@ -139,6 +142,8 @@ function classify(row: ExceptionRow): ClassifiedException {
     classification = "no_active_demand_order_closed";
   } else if (!requiresShipping) {
     classification = "no_active_demand_non_shipping_line";
+  } else if (!shipmentBlocking) {
+    classification = "review_only_nonblocking";
   } else if (itemStatus === "short") {
     classification = "active_short_pick_blocker";
   } else if (itemStatus !== "completed") {
@@ -167,6 +172,7 @@ function classify(row: ExceptionRow): ClassifiedException {
     ...row,
     classification,
     stockClass,
+    shipmentBlocking,
     recoverable: classification === "duplicate_open_exception" || classification.startsWith("no_active_demand"),
   };
 }
@@ -218,6 +224,7 @@ async function fetchOpenExceptions(client: pg.PoolClient, options: CliOptions): 
       ae.product_variant_id,
       ae.exception_type,
       ae.status,
+      LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true' AS shipment_blocking,
       ae.requested_qty,
       ae.selected_location_id,
       ae.selected_location_code,
@@ -384,7 +391,8 @@ async function main() {
       noActiveDemandExceptionIds: recovery.noActiveDemandIds,
       cancelledDuplicates: recovery.cancelledDuplicates,
       resolvedNoActiveDemand: recovery.resolvedNoActiveDemand,
-      activeBlockerSamples: rows.filter((row) => !row.recoverable).slice(0, 20),
+      activeBlockerSamples: rows.filter((row) => !row.recoverable && row.shipmentBlocking).slice(0, 20),
+      reviewOnlySamples: rows.filter((row) => row.classification === "review_only_nonblocking").slice(0, 20),
       recoverableSamples: rows.filter((row) => row.recoverable).slice(0, 20),
     };
 

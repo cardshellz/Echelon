@@ -60,6 +60,11 @@ const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
     badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
     icon: AlertTriangle,
   },
+  replen_backlog: {
+    label: "Replen Backlog",
+    badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
+    icon: PackagePlus,
+  },
   stale_replen_no_demand: {
     label: "Stale Replen",
     badge: "bg-slate-100 text-slate-800 dark:bg-slate-900/30 dark:text-slate-400",
@@ -78,6 +83,11 @@ const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
   open_allocation_exception: {
     label: "Allocation Exception",
     badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+    icon: ShieldAlert,
+  },
+  allocation_review_needed: {
+    label: "Allocation Review",
+    badge: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
     icon: ShieldAlert,
   },
   cycle_count_review: {
@@ -100,10 +110,12 @@ const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
 const FILTERS: Array<{ value: PickReplenHealthFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "stuck_replen", label: "Stuck" },
+  { value: "replen_backlog", label: "Backlog" },
   { value: "stale_replen_no_demand", label: "Stale" },
   { value: "duplicate_replen", label: "Duplicates" },
   { value: "short_pick_unresolved", label: "Short Picks" },
   { value: "open_allocation_exception", label: "Exceptions" },
+  { value: "allocation_review_needed", label: "Reviews" },
   { value: "cycle_count_review", label: "Counts" },
   { value: "exception_order_no_blocker", label: "Order Status" },
   { value: "pick_bin_needs_replen", label: "Pick Bins" },
@@ -117,6 +129,7 @@ const ACTION_LABELS: Record<string, string> = {
   create_replen_or_exception: "Create task/exception",
   review_short_pick: "Review short pick",
   resolve_exception: "Resolve exception",
+  review_exception: "Review exception",
   approve_or_resolve_count: "Approve count",
   finish_count: "Finish count",
   review_order_status: "Review status",
@@ -140,7 +153,11 @@ function rowSubject(item: PickReplenHealthItem) {
 function issueHref(item: PickReplenHealthItem) {
   if (item.taskId) return `/replenishment?taskId=${item.taskId}&status=all`;
   if (item.cycleCountId) return `/cycle-counts?countId=${item.cycleCountId}`;
-  if (item.type === "open_allocation_exception" || item.type === "short_pick_unresolved") {
+  if (
+    item.type === "open_allocation_exception" ||
+    item.type === "allocation_review_needed" ||
+    item.type === "short_pick_unresolved"
+  ) {
     const params = new URLSearchParams({ view: "exceptions" });
     if (item.orderId) params.set("orderId", item.orderId.toString());
     if (item.orderItemId) params.set("itemId", item.orderItemId.toString());
