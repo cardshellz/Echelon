@@ -99,6 +99,17 @@ export type ReplenSourceEmptyReport = {
   userId?: string;
 };
 
+export type ReplenHealthCleanupMode = "all" | "stale_no_demand" | "duplicates";
+
+export type ReplenHealthCleanupResult = {
+  mode: ReplenHealthCleanupMode;
+  cancelledStaleNoDemand: number;
+  cancelledDuplicates: number;
+  cancelledStaleNoDemandTaskIds: number[];
+  cancelledDuplicateTaskIds: number[];
+  keptDuplicateTaskIds: number[];
+};
+
 type ResolvedReplenParams = {
   triggerValue: number | null;
   maxQty: number | null;
@@ -1072,6 +1083,171 @@ export class ReplenishmentUseCases {
           : `Cancelled${userId ? ` by ${userId}` : ""}`,
       })
       .where(eq(replenTasks.id, taskId));
+  }
+
+  async cleanupHealthIssues(params: {
+    mode?: ReplenHealthCleanupMode;
+    taskId?: number | null;
+    limit?: number;
+    userId?: string;
+  } = {}): Promise<ReplenHealthCleanupResult> {
+    const mode = params.mode ?? "all";
+    if (!["all", "stale_no_demand", "duplicates"].includes(mode)) {
+      throw new Error(`Unsupported replen cleanup mode: ${mode}`);
+    }
+
+    const result: ReplenHealthCleanupResult = {
+      mode,
+      cancelledStaleNoDemand: 0,
+      cancelledDuplicates: 0,
+      cancelledStaleNoDemandTaskIds: [],
+      cancelledDuplicateTaskIds: [],
+      keptDuplicateTaskIds: [],
+    };
+
+    if (mode === "all" || mode === "stale_no_demand") {
+      const taskIds = await this.cancelStaleNoDemandTasks(params);
+      result.cancelledStaleNoDemand = taskIds.length;
+      result.cancelledStaleNoDemandTaskIds = taskIds;
+    }
+
+    if (mode === "all" || mode === "duplicates") {
+      const duplicateResult = await this.cancelDuplicateActiveTasks(params);
+      result.cancelledDuplicates = duplicateResult.cancelledTaskIds.length;
+      result.cancelledDuplicateTaskIds = duplicateResult.cancelledTaskIds;
+      result.keptDuplicateTaskIds = duplicateResult.keptTaskIds;
+    }
+
+    return result;
+  }
+
+  private cleanupLimit(limit?: number): number {
+    return Math.min(250, Math.max(1, Number.isFinite(limit) ? Math.floor(limit as number) : 50));
+  }
+
+  private async cancelStaleNoDemandTasks(params: {
+    taskId?: number | null;
+    limit?: number;
+    userId?: string;
+  }): Promise<number[]> {
+    const taskFilter = params.taskId ? sql`AND rt.id = ${params.taskId}` : sql``;
+    const limit = this.cleanupLimit(params.limit);
+    const auditNote = `Cancelled by replen health cleanup${params.userId ? ` by ${params.userId}` : ""}: no active demand and no executable replen work remains`;
+
+    const result = await this.db.execute(sql`
+      WITH candidates AS (
+        SELECT rt.id
+        FROM inventory.replen_tasks rt
+        LEFT JOIN catalog.product_variants pv ON pv.id = rt.pick_product_variant_id
+        WHERE rt.status = 'blocked'
+          AND rt.blocks_shipment = false
+          AND rt.depends_on_task_id IS NULL
+          AND COALESCE(rt.qty_source_units, 0) = 0
+          AND COALESCE(rt.qty_target_units, 0) = 0
+          AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+          ${taskFilter}
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.order_items oi
+            JOIN wms.orders o
+              ON o.id = oi.order_id
+             AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE oi.sku = pv.sku
+              AND oi.status = 'pending'
+              AND oi.requires_shipping = 1
+          )
+        ORDER BY rt.created_at ASC, rt.id ASC
+        LIMIT ${limit}
+      )
+      UPDATE inventory.replen_tasks rt
+      SET status = 'cancelled',
+          completed_at = NOW(),
+          notes = trim(both E'\n' from COALESCE(rt.notes, '') || E'\n' || ${auditNote})
+      FROM candidates c
+      WHERE rt.id = c.id
+      RETURNING rt.id
+    `);
+
+    return (result.rows as Array<{ id: number | string }>).map((row) => Number(row.id));
+  }
+
+  private async cancelDuplicateActiveTasks(params: {
+    taskId?: number | null;
+    limit?: number;
+    userId?: string;
+  }): Promise<{ cancelledTaskIds: number[]; keptTaskIds: number[] }> {
+    const taskJoin = params.taskId
+      ? sql`JOIN target_groups tg ON tg.pick_product_variant_id = rt.pick_product_variant_id AND tg.to_location_id = rt.to_location_id`
+      : sql``;
+    const targetGroupFilter = params.taskId ? sql`WHERE id = ${params.taskId}` : sql``;
+    const limit = this.cleanupLimit(params.limit);
+    const auditNote = `Cancelled by replen health cleanup${params.userId ? ` by ${params.userId}` : ""}: duplicate active replen task`;
+
+    const result = await this.db.execute(sql`
+      WITH target_groups AS (
+        SELECT DISTINCT pick_product_variant_id, to_location_id
+        FROM inventory.replen_tasks
+        ${targetGroupFilter}
+      ),
+      active_tasks AS (
+        SELECT
+          rt.id,
+          rt.status,
+          first_value(rt.id) OVER task_group AS kept_id,
+          row_number() OVER task_group AS row_num,
+          count(*) OVER (
+            PARTITION BY rt.pick_product_variant_id, rt.to_location_id
+          ) AS active_count
+        FROM inventory.replen_tasks rt
+        ${taskJoin}
+        WHERE rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+          AND rt.blocks_shipment = false
+          AND rt.pick_product_variant_id IS NOT NULL
+          AND rt.to_location_id IS NOT NULL
+          AND NOT (
+            rt.status = 'blocked'
+            AND rt.depends_on_task_id IS NULL
+            AND COALESCE(rt.qty_source_units, 0) = 0
+            AND COALESCE(rt.qty_target_units, 0) = 0
+            AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+          )
+        WINDOW task_group AS (
+          PARTITION BY rt.pick_product_variant_id, rt.to_location_id
+          ORDER BY
+            CASE rt.status
+              WHEN 'in_progress' THEN 1
+              WHEN 'assigned' THEN 2
+              WHEN 'pending' THEN 3
+              WHEN 'blocked' THEN 4
+              ELSE 9
+            END,
+            rt.created_at ASC,
+            rt.id ASC
+        )
+      ),
+      candidates AS (
+        SELECT id, kept_id
+        FROM active_tasks
+        WHERE active_count > 1
+          AND row_num > 1
+          AND status <> 'in_progress'
+        ORDER BY id ASC
+        LIMIT ${limit}
+      )
+      UPDATE inventory.replen_tasks rt
+      SET status = 'cancelled',
+          completed_at = NOW(),
+          notes = trim(both E'\n' from COALESCE(rt.notes, '') || E'\n' || ${auditNote} || ' kept #' || c.kept_id::text)
+      FROM candidates c
+      WHERE rt.id = c.id
+      RETURNING rt.id, c.kept_id
+    `);
+
+    const rows = result.rows as Array<{ id: number | string; kept_id: number | string }>;
+    return {
+      cancelledTaskIds: rows.map((row) => Number(row.id)),
+      keptTaskIds: Array.from(new Set(rows.map((row) => Number(row.kept_id)))),
+    };
   }
 
   // ---------------------------------------------------------------------------

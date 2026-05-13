@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
   AlertTriangle,
@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
 import {
   Table,
   TableBody,
@@ -32,6 +34,21 @@ interface PickReplenHealthSectionProps {
   warehouseId: number | null;
   searchQuery?: string;
 }
+
+type CleanupMode = "stale_no_demand" | "duplicates" | "queue_replen";
+
+type CleanupRequest = {
+  mode: CleanupMode;
+  taskId: number | null;
+  variantId?: number | null;
+  locationId?: number | null;
+};
+
+type CleanupResult = {
+  cancelledStaleNoDemand: number;
+  cancelledDuplicates: number;
+  queuedReplen?: number;
+};
 
 const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
   label: string;
@@ -125,6 +142,13 @@ function issueHref(item: PickReplenHealthItem) {
   return null;
 }
 
+function cleanupModeForAction(action: string): CleanupMode | null {
+  if (action === "cancel_no_demand") return "stale_no_demand";
+  if (action === "cancel_duplicate") return "duplicates";
+  if (action === "queue_replen") return "queue_replen";
+  return null;
+}
+
 function IssueLink({
   item,
   children,
@@ -144,10 +168,44 @@ function IssueLink({
   );
 }
 
+function HealthAction({
+  item,
+  isCleaning,
+  onCleanup,
+}: {
+  item: PickReplenHealthItem;
+  isCleaning: boolean;
+  onCleanup: (request: CleanupRequest) => void;
+}) {
+  const label = ACTION_LABELS[item.action] || item.action;
+  const cleanupMode = cleanupModeForAction(item.action);
+  if (!cleanupMode) return <IssueLink item={item}>{label}</IssueLink>;
+
+  return (
+    <Button
+      type="button"
+      variant="link"
+      size="sm"
+      className="h-auto p-0 text-xs font-medium text-blue-700 dark:text-blue-400"
+      disabled={isCleaning}
+      onClick={() => onCleanup({
+        mode: cleanupMode,
+        taskId: item.taskId,
+        variantId: item.variantId,
+        locationId: item.locationId,
+      })}
+    >
+      {isCleaning ? "Working..." : label}
+    </Button>
+  );
+}
+
 export default function PickReplenHealthSection({
   warehouseId,
   searchQuery,
 }: PickReplenHealthSectionProps) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [activeFilter, setActiveFilter] = useState<PickReplenHealthFilter>("all");
   const [page, setPage] = useState(1);
   const pageSize = 50;
@@ -163,11 +221,47 @@ export default function PickReplenHealthSection({
       if (searchQuery) params.set("search", searchQuery);
       params.set("page", page.toString());
       params.set("pageSize", pageSize.toString());
-      const res = await fetch(`/api/operations/pick-replen-health?${params}`);
+      const res = await fetch(`/api/operations/pick-replen-health?${params}`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch pick/replen health");
       return res.json();
     },
     staleTime: 30_000,
+  });
+
+  const cleanupMutation = useMutation({
+    mutationFn: async (request: CleanupRequest) => {
+      const res = await apiRequest("POST", "/api/operations/pick-replen-health/cleanup", {
+        mode: request.mode,
+        taskId: request.taskId,
+        variantId: request.variantId,
+        locationId: request.locationId,
+      });
+      return res.json() as Promise<CleanupResult>;
+    },
+    onSuccess: (result) => {
+      const cleaned = result.cancelledStaleNoDemand + result.cancelledDuplicates;
+      const queued = result.queuedReplen ?? 0;
+      toast({
+        title: queued > 0 ? "Replen queued" : "Replen cleanup complete",
+        description: queued > 0
+          ? "Queued a replen task for the pick bin"
+          : cleaned > 0
+            ? `Cleaned ${cleaned} replen task${cleaned === 1 ? "" : "s"}`
+            : "No safe cleanup was available",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/pick-replen-health"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/action-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/location-health"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Replen cleanup failed",
+        description: error?.message || "Unable to clean replen health issue",
+        variant: "destructive",
+      });
+    },
   });
 
   const totalOpen = useMemo(
@@ -266,7 +360,11 @@ export default function PickReplenHealthSection({
                     </TableCell>
                     <TableCell className="text-right font-mono text-sm">{formatAge(item.ageHours)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      <IssueLink item={item}>{ACTION_LABELS[item.action] || item.action}</IssueLink>
+                      <HealthAction
+                        item={item}
+                        isCleaning={cleanupMutation.isPending}
+                        onCleanup={(request) => cleanupMutation.mutate(request)}
+                      />
                     </TableCell>
                   </TableRow>
                 );
@@ -314,7 +412,11 @@ export default function PickReplenHealthSection({
                   <div className="mt-1">{item.detail || item.status || "-"}</div>
                 </div>
                 <div className="mt-2 pt-2 border-t text-xs font-medium">
-                  <IssueLink item={item}>{ACTION_LABELS[item.action] || item.action}</IssueLink>
+                  <HealthAction
+                    item={item}
+                    isCleaning={cleanupMutation.isPending}
+                    onCleanup={(request) => cleanupMutation.mutate(request)}
+                  />
                 </div>
               </div>
             );
