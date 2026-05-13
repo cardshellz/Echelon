@@ -105,6 +105,7 @@ function makeDb() {
 }
 
 function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSourceVariants?: boolean; activeTask?: any }) {
+  const inserts: Array<{ table: unknown; value: any }> = [];
   const pickVariant = {
     id: 66,
     sku: "ARM-ENV-SGL-P50",
@@ -200,14 +201,21 @@ function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSour
         }),
       }),
     })),
-    insert: vi.fn(),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: any) => {
+        inserts.push({ table, value });
+        return {
+          returning: vi.fn(async () => [{ id: 501, ...value }]),
+        };
+      }),
+    })),
     update: vi.fn(),
     delete: vi.fn(),
     execute: vi.fn(),
     transaction: vi.fn(),
   };
 
-  return { db, sourceLocation };
+  return { db, sourceLocation, inserts };
 }
 
 describe("ReplenishmentUseCases source-empty blockers", () => {
@@ -311,6 +319,72 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       sourceVariantId: 67,
       sourceVariantSku: "ARM-ENV-SGL-C700",
     });
+  });
+
+  it("does not create fake no-source replen tasks for non-shipment event checks", async () => {
+    const { db } = makeSourceResolutionDb({ explicitSourceRule: true });
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service as any, "findSourceLocation").mockResolvedValue(null);
+    vi.spyOn(service as any, "tryCascadeReplen").mockResolvedValue(null);
+
+    const task = await service.checkAndTriggerAfterPick(66, 1, "event_driven");
+
+    expect(task).toBeNull();
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it("keeps shipment-blocking no-source checks as blocked review tasks", async () => {
+    const { db, inserts } = makeSourceResolutionDb({ explicitSourceRule: true });
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service as any, "findSourceLocation").mockResolvedValue(null);
+    vi.spyOn(service as any, "tryCascadeReplen").mockResolvedValue(null);
+
+    const task = await service.checkAndTriggerAfterPick(66, 1, "inline_pick", {
+      orderId: 10,
+      orderItemId: 20,
+      orderNumber: "#10",
+      blocksShipment: true,
+    });
+
+    expect(task).toMatchObject({
+      id: 501,
+      status: "blocked",
+      blocksShipment: true,
+      qtySourceUnits: 0,
+      qtyTargetUnits: 0,
+      exceptionReason: "no_source_stock",
+    });
+    expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
+      fromLocationId: 1,
+      toLocationId: 1,
+      blocksShipment: true,
+    });
+  });
+
+  it("rejects manually marking no-source review tasks done", async () => {
+    const reviewTask = {
+      id: 977,
+      status: "blocked",
+      blocksShipment: false,
+      qtySourceUnits: 0,
+      qtyTargetUnits: 0,
+      exceptionReason: "no_source_stock",
+      dependsOnTaskId: null,
+    };
+    const db = {
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            limit: vi.fn(async () => [reviewTask]),
+          }),
+        }),
+      })),
+      update: vi.fn(),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    await expect(service.markTaskDone(977, "admin")).rejects.toThrow("no valid source stock");
+    expect(db.update).not.toHaveBeenCalled();
   });
 
   it("creates a linked cycle count for picker-reported source-empty replen blockers", async () => {
