@@ -579,6 +579,8 @@ export class OperationsDashboardService {
     const targetWarehouseFilter = warehouseId ? sql`AND wl_to.warehouse_id = ${warehouseId}` : sql``;
     const locationWarehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
     const countWarehouseFilter = warehouseId ? sql`AND cc.warehouse_id = ${warehouseId}` : sql``;
+    const wsRow = await getSettingsForWarehouse(warehouseId ?? null, this.db as any);
+    const lookbackDays = (wsRow?.velocityLookbackDays as number | null | undefined) ?? 14;
 
     const healthCte = sql`
       WITH health_items AS (
@@ -941,7 +943,7 @@ export class OperationsDashboardService {
 
         SELECT
           'pick_bin_needs_replen'::text,
-          CASE WHEN COALESCE(il.variant_qty, 0) <= 0 THEN 1 ELSE 3 END,
+          CASE WHEN COALESCE(missing_demand.active_pending_lines, 0) > 0 THEN 1 ELSE 3 END,
           pl.id::text,
           NULL::int,
           NULL::int,
@@ -960,18 +962,93 @@ export class OperationsDashboardService {
           COALESCE(il.variant_qty, 0)::int,
           NULL::int,
           COALESCE(il.updated_at, pl.updated_at),
-          'pick bin at/below zero with related reserve stock and no active replen task',
-          'queue_replen'
+          CASE
+            WHEN COALESCE(missing_demand.active_pending_lines, 0) > 0
+              THEN 'active demand has no queued replen task: '
+                || missing_demand.active_pending_lines::text || ' line'
+                || CASE WHEN missing_demand.active_pending_lines = 1 THEN '' ELSE 's' END
+                || ', ' || COALESCE(missing_demand.active_pending_units, 0)::text || ' unit'
+                || CASE WHEN COALESCE(missing_demand.active_pending_units, 0) = 1 THEN '' ELSE 's' END
+            WHEN missing_effective.replen_method = 'pallet_drop'
+              THEN 'pallet-drop pick bin is below coverage trigger with source stock and no active replen task'
+            ELSE 'pick bin at/below replen trigger with source stock and no active replen task'
+          END,
+          CASE
+            WHEN COALESCE(missing_demand.active_pending_lines, 0) > 0 THEN 'queue_replen'
+            ELSE 'queue_replen'
+          END
         FROM warehouse.product_locations pl
         JOIN warehouse.warehouse_locations wl ON pl.warehouse_location_id = wl.id
         JOIN catalog.product_variants pv ON pl.product_variant_id = pv.id
         LEFT JOIN inventory.inventory_levels il
           ON il.warehouse_location_id = wl.id AND il.product_variant_id = pv.id
+        LEFT JOIN LATERAL (
+          SELECT *
+          FROM inventory.location_replen_config lrc
+          WHERE lrc.warehouse_location_id = wl.id
+            AND (lrc.product_variant_id = pv.id OR lrc.product_variant_id IS NULL)
+            AND lrc.is_active = 1
+          ORDER BY CASE WHEN lrc.product_variant_id = pv.id THEN 0 ELSE 1 END
+          LIMIT 1
+        ) missing_loc_config ON true
+        LEFT JOIN LATERAL (
+          SELECT *
+          FROM inventory.replen_rules rr
+          WHERE rr.pick_product_variant_id = pv.id
+            AND rr.is_active = 1
+          LIMIT 1
+        ) missing_rule_config ON true
+        LEFT JOIN LATERAL (
+          SELECT *
+          FROM inventory.replen_tier_defaults rtd
+          WHERE rtd.hierarchy_level = pv.hierarchy_level
+            AND (rtd.warehouse_id = wl.warehouse_id OR rtd.warehouse_id IS NULL)
+            AND rtd.is_active = 1
+          ORDER BY CASE WHEN rtd.warehouse_id = wl.warehouse_id THEN 0 ELSE 1 END
+          LIMIT 1
+        ) missing_tier_config ON true
+        CROSS JOIN LATERAL (
+          SELECT
+            COALESCE(missing_loc_config.replen_method, missing_rule_config.replen_method, missing_tier_config.replen_method, 'full_case') AS replen_method,
+            COALESCE(missing_loc_config.trigger_value::numeric, missing_rule_config.trigger_value::numeric, missing_tier_config.trigger_value::numeric) AS trigger_value,
+            COALESCE(missing_rule_config.source_location_type, missing_tier_config.source_location_type, 'reserve') AS source_location_type,
+            missing_rule_config.source_product_variant_id AS source_variant_id,
+            missing_tier_config.source_hierarchy_level AS source_hierarchy_level
+        ) missing_effective
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(SUM(ABS(it.variant_qty_delta)), 0)::numeric / GREATEST(${lookbackDays}, 1) AS daily_velocity
+          FROM inventory.inventory_transactions it
+          WHERE it.product_variant_id = pv.id
+            AND it.transaction_type = 'pick'
+            AND it.created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+        ) missing_velocity ON true
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(oi.id)::int AS active_pending_lines,
+            COALESCE(SUM(GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0)), 0)::int AS active_pending_units
+          FROM wms.order_items oi
+          JOIN wms.orders o
+            ON o.id = oi.order_id
+           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+          WHERE oi.sku = pv.sku
+            AND oi.status = 'pending'
+            AND oi.requires_shipping = 1
+        ) missing_demand ON true
         WHERE pl.status = 'active'
           AND pl.is_primary = 1
           AND wl.is_pickable = 1
           AND wl.location_type = 'pick'
           AND COALESCE(il.variant_qty, 0) <= 0
+          AND missing_effective.trigger_value IS NOT NULL
+          AND (
+            missing_effective.replen_method <> 'pallet_drop'
+            OR COALESCE(missing_demand.active_pending_lines, 0) > 0
+            OR (
+              COALESCE(missing_velocity.daily_velocity, 0) > 0
+              AND (COALESCE(il.variant_qty, 0)::numeric / missing_velocity.daily_velocity) < missing_effective.trigger_value
+            )
+          )
           ${locationWarehouseFilter}
           AND EXISTS (
             SELECT 1
@@ -980,9 +1057,25 @@ export class OperationsDashboardService {
             JOIN catalog.product_variants source_pv ON source_pv.id = ril.product_variant_id
             WHERE ril.variant_qty > 0
               AND source_pv.product_id = pv.product_id
-              AND rwl.location_type = 'reserve'
-              AND rwl.is_pickable = 0
+              AND rwl.location_type = missing_effective.source_location_type
               AND (wl.warehouse_id IS NULL OR rwl.warehouse_id = wl.warehouse_id)
+              AND (
+                (missing_effective.source_variant_id IS NOT NULL AND source_pv.id = missing_effective.source_variant_id)
+                OR (
+                  missing_effective.source_variant_id IS NULL
+                  AND (
+                    source_pv.id = pv.id
+                    OR (
+                      missing_effective.source_hierarchy_level IS NOT NULL
+                      AND source_pv.hierarchy_level = missing_effective.source_hierarchy_level
+                      AND source_pv.id <> pv.id
+                      AND source_pv.is_active = true
+                      AND source_pv.units_per_variant > pv.units_per_variant
+                      AND MOD(source_pv.units_per_variant, pv.units_per_variant) = 0
+                    )
+                  )
+                )
+              )
           )
           AND NOT EXISTS (
             SELECT 1

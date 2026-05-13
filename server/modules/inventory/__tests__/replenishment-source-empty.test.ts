@@ -104,7 +104,7 @@ function makeDb() {
   return { db, inserts, updates, state, selectCounts };
 }
 
-function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSourceVariants?: boolean; activeTask?: any }) {
+function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSourceVariants?: boolean; activeTask?: any; missingPickLevel?: boolean }) {
   const inserts: Array<{ table: unknown; value: any }> = [];
   const pickVariant = {
     id: 66,
@@ -177,7 +177,7 @@ function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSour
   const selectRows = (table: unknown) => {
     const count = tableCounts.get(table) ?? 0;
     tableCounts.set(table, count + 1);
-    if (table === inventoryLevels) return [{ id: 1, warehouseLocationId: 1, productVariantId: 66, variantQty: 0 }];
+    if (table === inventoryLevels) return options?.missingPickLevel ? [] : [{ id: 1, warehouseLocationId: 1, productVariantId: 66, variantQty: 0 }];
     if (table === warehouseLocations) return [pickLocation];
     if (table === productLocations) return [{ id: 405 }];
     if (table === productVariants) return productVariantRows.shift() ?? [];
@@ -240,6 +240,26 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       sourceVariantId: 67,
       sourceVariantSku: "ARM-ENV-SGL-C700",
       replenMethod: "case_break",
+    });
+  });
+
+  it("treats an assigned pick bin without an inventory level as zero on hand", async () => {
+    const { db, sourceLocation } = makeSourceResolutionDb({ missingPickLevel: true });
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service as any, "findSourceLocation")
+      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+    vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
+
+    const guidance = await service.checkReplenNeeded(66, 1);
+
+    expect(guidance).toMatchObject({
+      needed: true,
+      stockout: false,
+      evaluatedQty: 0,
+      sourceLocationId: 2,
+      sourceLocationCode: "F-02",
+      sourceVariantId: 67,
+      sourceVariantSku: "ARM-ENV-SGL-C700",
     });
   });
 
@@ -1027,6 +1047,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
     expect(triggerSpy).toHaveBeenCalledWith(100, 1, "health_queue", {
       blocksShipment: false,
+      forceWhenAtOrBelowZero: false,
     });
     expect(result).toMatchObject({
       mode: "queue_replen",
