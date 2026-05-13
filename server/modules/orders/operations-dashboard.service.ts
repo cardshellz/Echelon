@@ -701,6 +701,14 @@ export class OperationsDashboardService {
         LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
         LEFT JOIN wms.orders o ON rt.order_id = o.id
         WHERE rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+          AND rt.blocks_shipment = false
+          AND NOT (
+            rt.status = 'blocked'
+            AND rt.depends_on_task_id IS NULL
+            AND COALESCE(rt.qty_source_units, 0) = 0
+            AND COALESCE(rt.qty_target_units, 0) = 0
+            AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+          )
           ${targetWarehouseFilter}
         GROUP BY rt.to_location_id, wl_to.id, wl_to.code, rt.pick_product_variant_id, pv.sku, pv.name
         HAVING COUNT(*) > 1
@@ -744,6 +752,14 @@ export class OperationsDashboardService {
           SELECT rt2.id, rt2.status
           FROM inventory.replen_tasks rt2
           WHERE rt2.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+            AND NOT (
+              rt2.status = 'blocked'
+              AND rt2.blocks_shipment = false
+              AND rt2.depends_on_task_id IS NULL
+              AND COALESCE(rt2.qty_source_units, 0) = 0
+              AND COALESCE(rt2.qty_target_units, 0) = 0
+              AND COALESCE(rt2.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+            )
             AND (
               rt2.order_item_id = oi.id
               OR (pv.id IS NOT NULL AND rt2.pick_product_variant_id = pv.id AND wl.id IS NOT NULL AND rt2.to_location_id = wl.id)
@@ -919,6 +935,14 @@ export class OperationsDashboardService {
             WHERE rt.to_location_id = wl.id
               AND rt.pick_product_variant_id = pv.id
               AND rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+              AND NOT (
+                rt.status = 'blocked'
+                AND rt.blocks_shipment = false
+                AND rt.depends_on_task_id IS NULL
+                AND COALESCE(rt.qty_source_units, 0) = 0
+                AND COALESCE(rt.qty_target_units, 0) = 0
+                AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+              )
           )
       )
     `;

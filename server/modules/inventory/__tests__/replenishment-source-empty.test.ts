@@ -886,4 +886,56 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
     expect(checkSpy).toHaveBeenCalledWith(1);
   });
+
+  it("cancels stale no-demand health tasks through the bounded cleanup path", async () => {
+    const db = {
+      execute: vi.fn(async () => ({ rows: [{ id: 977 }, { id: 962 }] })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    const result = await service.cleanupHealthIssues({
+      mode: "stale_no_demand",
+      limit: 10,
+      userId: "admin",
+    });
+
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      mode: "stale_no_demand",
+      cancelledStaleNoDemand: 2,
+      cancelledDuplicates: 0,
+      cancelledStaleNoDemandTaskIds: [977, 962],
+      cancelledDuplicateTaskIds: [],
+      keptDuplicateTaskIds: [],
+    });
+  });
+
+  it("cancels duplicate active tasks while reporting the task kept", async () => {
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [
+          { id: 222, kept_id: 121 },
+          { id: 223, kept_id: 121 },
+        ],
+      })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    const result = await service.cleanupHealthIssues({
+      mode: "duplicates",
+      taskId: 121,
+      limit: 10,
+      userId: "admin",
+    });
+
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      mode: "duplicates",
+      cancelledStaleNoDemand: 0,
+      cancelledDuplicates: 2,
+      cancelledStaleNoDemandTaskIds: [],
+      cancelledDuplicateTaskIds: [222, 223],
+      keptDuplicateTaskIds: [121],
+    });
+  });
 });
