@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { PickingUseCases } from "../../picking.use-cases";
 
-function makeService(levels: Array<{ warehouseLocationId: number; variantQty: number }>) {
-  const locations = [
+function makeService(
+  levels: Array<{ warehouseLocationId: number; variantQty: number }>,
+  locationOverrides?: Array<Record<string, unknown>>,
+) {
+  const locations = locationOverrides ?? [
     { id: 1, code: "A-01", isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
     { id: 2, code: "B-01", isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
   ];
@@ -213,6 +216,66 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
     });
     expect(inventoryCore.adjustInventory).not.toHaveBeenCalled();
     expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+  });
+
+  it("resolves duplicate location codes within the order warehouse", async () => {
+    const { service, inventoryCore } = makeService(
+      [
+        { warehouseLocationId: 10, variantQty: 0 },
+        { warehouseLocationId: 20, variantQty: 5 },
+      ],
+      [
+        { id: 10, code: "A-01", warehouseId: 2, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
+        { id: 20, code: "A-01", warehouseId: 1, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
+      ],
+    );
+
+    const result = await (service as any)._deductInventory(makeItem(), makeItem(), {
+      pickMethod: "manual",
+      warehouseId: 1,
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      locationId: 20,
+      locationCode: "A-01",
+      systemQtyAfter: 4,
+    });
+    expect(inventoryCore.pickItem).toHaveBeenCalledWith(expect.objectContaining({
+      warehouseLocationId: 20,
+      qty: 1,
+    }));
+  });
+
+  it("uses the stock-bearing active pick bin when duplicate codes lack order warehouse scope", async () => {
+    const { service, inventoryCore } = makeService(
+      [
+        { warehouseLocationId: 10, variantQty: 0 },
+        { warehouseLocationId: 20, variantQty: 5 },
+      ],
+      [
+        { id: 10, code: "FLOOR-01", warehouseId: 35, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "storage" },
+        { id: 20, code: "FLOOR-01", warehouseId: 1, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
+      ],
+    );
+
+    const item = makeItem({ location: "FLOOR-01" });
+    const result = await (service as any)._deductInventory(item, item, {
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      locationId: 20,
+      locationCode: "FLOOR-01",
+      systemQtyAfter: 4,
+    });
+    expect(inventoryCore.pickItem).toHaveBeenCalledWith(expect.objectContaining({
+      warehouseLocationId: 20,
+      qty: 1,
+    }));
   });
 });
 
