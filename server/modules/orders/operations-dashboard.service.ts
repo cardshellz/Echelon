@@ -659,8 +659,13 @@ export class OperationsDashboardService {
             THEN 'no active demand and task source no longer has enough stock'
             WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
             WHEN rt.status = 'in_progress' THEN 'in progress longer than 1h'
-            WHEN COALESCE(demand.active_pending_lines, 0) > 0 THEN 'active demand waiting on queued replen'
-            ELSE rt.status || ' longer than 4h'
+            WHEN COALESCE(demand.active_pending_lines, 0) > 0
+              THEN 'active demand waiting on queued replen: '
+                || demand.active_pending_lines::text || ' line'
+                || CASE WHEN demand.active_pending_lines = 1 THEN '' ELSE 's' END
+                || ', ' || COALESCE(demand.active_pending_units, 0)::text || ' unit'
+                || CASE WHEN COALESCE(demand.active_pending_units, 0) = 1 THEN '' ELSE 's' END
+            ELSE 'low-priority replen backlog; no active order demand is waiting'
           END as detail,
           CASE
             WHEN rt.status = 'blocked'
@@ -686,7 +691,9 @@ export class OperationsDashboardService {
         LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
         LEFT JOIN wms.orders o ON rt.order_id = o.id
         LEFT JOIN LATERAL (
-          SELECT COUNT(oi.id)::int AS active_pending_lines
+          SELECT
+            COUNT(oi.id)::int AS active_pending_lines,
+            COALESCE(SUM(GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0)), 0)::int AS active_pending_units
           FROM wms.order_items oi
           JOIN wms.orders demand_order
             ON demand_order.id = oi.order_id
@@ -953,7 +960,7 @@ export class OperationsDashboardService {
           COALESCE(il.variant_qty, 0)::int,
           NULL::int,
           COALESCE(il.updated_at, pl.updated_at),
-          'pick bin at/below zero with reserve stock and no active replen task',
+          'pick bin at/below zero with related reserve stock and no active replen task',
           'queue_replen'
         FROM warehouse.product_locations pl
         JOIN warehouse.warehouse_locations wl ON pl.warehouse_location_id = wl.id
@@ -970,8 +977,9 @@ export class OperationsDashboardService {
             SELECT 1
             FROM inventory.inventory_levels ril
             JOIN warehouse.warehouse_locations rwl ON ril.warehouse_location_id = rwl.id
-            WHERE ril.product_variant_id = pv.id
-              AND ril.variant_qty > 0
+            JOIN catalog.product_variants source_pv ON source_pv.id = ril.product_variant_id
+            WHERE ril.variant_qty > 0
+              AND source_pv.product_id = pv.product_id
               AND rwl.location_type = 'reserve'
               AND rwl.is_pickable = 0
               AND (wl.warehouse_id IS NULL OR rwl.warehouse_id = wl.warehouse_id)

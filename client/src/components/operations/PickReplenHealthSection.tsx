@@ -35,13 +35,14 @@ interface PickReplenHealthSectionProps {
   searchQuery?: string;
 }
 
-type CleanupMode = "stale_no_demand" | "duplicates" | "queue_replen";
+type CleanupMode = "stale_no_demand" | "duplicates" | "queue_replen" | "queue_missing_replen";
 
 type CleanupRequest = {
   mode: CleanupMode;
   taskId: number | null;
   variantId?: number | null;
   locationId?: number | null;
+  warehouseId?: number | null;
 };
 
 type CleanupResult = {
@@ -49,6 +50,8 @@ type CleanupResult = {
   cancelledStaleBacklog?: number;
   cancelledDuplicates: number;
   queuedReplen?: number;
+  queuedTaskIds?: number[];
+  skippedPickBins?: number;
 };
 
 const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
@@ -262,16 +265,18 @@ export default function PickReplenHealthSection({
         taskId: request.taskId,
         variantId: request.variantId,
         locationId: request.locationId,
+        warehouseId: request.warehouseId ?? warehouseId,
       });
       return res.json() as Promise<CleanupResult>;
     },
     onSuccess: (result) => {
       const cleaned = result.cancelledStaleNoDemand + (result.cancelledStaleBacklog ?? 0) + result.cancelledDuplicates;
       const queued = result.queuedReplen ?? 0;
+      const skipped = result.skippedPickBins ?? 0;
       toast({
         title: queued > 0 ? "Replen queued" : "Replen cleanup complete",
         description: queued > 0
-          ? "Queued a replen task for the pick bin"
+          ? `Queued ${queued} replen task${queued === 1 ? "" : "s"}${skipped > 0 ? `; ${skipped} bin${skipped === 1 ? "" : "s"} need review` : ""}`
           : cleaned > 0
             ? `Cleaned ${cleaned} replen task${cleaned === 1 ? "" : "s"}`
             : "No safe cleanup was available",
@@ -308,6 +313,23 @@ export default function PickReplenHealthSection({
           </Badge>
         </div>
         <div className="flex flex-wrap gap-2">
+          {(data?.counts?.pick_bin_needs_replen ?? 0) > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={cleanupMutation.isPending}
+              onClick={() => cleanupMutation.mutate({
+                mode: "queue_missing_replen",
+                taskId: null,
+                warehouseId,
+              })}
+            >
+              <PackagePlus className="mr-1 h-3 w-3" />
+              Queue Missing
+            </Button>
+          )}
           {FILTERS.map((filter) => {
             const count = filter.value === "all"
               ? totalOpen

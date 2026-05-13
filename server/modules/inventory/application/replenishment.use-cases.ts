@@ -112,6 +112,22 @@ export type ReplenHealthCleanupResult = {
   keptDuplicateTaskIds: number[];
 };
 
+export type MissingPickBinReplenQueueResult = {
+  mode: "queue_replen" | "queue_missing_replen";
+  scannedPickBins: number;
+  queuedReplen: number;
+  queuedTaskIds: number[];
+  existingTaskIds: number[];
+  skippedPickBins: number;
+  skipped: Array<{
+    variantId: number;
+    locationId: number;
+    sku: string | null;
+    locationCode: string | null;
+    reason: string;
+  }>;
+};
+
 type ResolvedReplenParams = {
   triggerValue: number | null;
   maxQty: number | null;
@@ -1242,6 +1258,119 @@ export class ReplenishmentUseCases {
 
   private cleanupLimit(limit?: number): number {
     return Math.min(250, Math.max(1, Number.isFinite(limit) ? Math.floor(limit as number) : 50));
+  }
+
+  async queueMissingPickBinReplen(params: {
+    mode?: MissingPickBinReplenQueueResult["mode"];
+    variantId?: number | null;
+    locationId?: number | null;
+    warehouseId?: number | null;
+    limit?: number;
+  } = {}): Promise<MissingPickBinReplenQueueResult> {
+    const limit = this.cleanupLimit(params.limit);
+    const variantFilter = params.variantId ? sql`AND pv.id = ${params.variantId}` : sql``;
+    const locationFilter = params.locationId ? sql`AND wl.id = ${params.locationId}` : sql``;
+    const warehouseFilter = params.warehouseId ? sql`AND wl.warehouse_id = ${params.warehouseId}` : sql``;
+
+    const candidatesResult = await this.db.execute(sql`
+      SELECT
+        pv.id AS variant_id,
+        pv.sku,
+        wl.id AS location_id,
+        wl.code AS location_code
+      FROM warehouse.product_locations pl
+      JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+      JOIN catalog.product_variants pv ON pv.id = pl.product_variant_id
+      LEFT JOIN inventory.inventory_levels il
+        ON il.warehouse_location_id = wl.id
+       AND il.product_variant_id = pv.id
+      WHERE pl.status = 'active'
+        AND pl.is_primary = 1
+        AND wl.is_pickable = 1
+        AND wl.location_type = 'pick'
+        AND COALESCE(il.variant_qty, 0) <= 0
+        ${variantFilter}
+        ${locationFilter}
+        ${warehouseFilter}
+        AND EXISTS (
+          SELECT 1
+          FROM inventory.inventory_levels ril
+          JOIN warehouse.warehouse_locations rwl ON rwl.id = ril.warehouse_location_id
+          JOIN catalog.product_variants source_pv ON source_pv.id = ril.product_variant_id
+          WHERE ril.variant_qty > 0
+            AND source_pv.product_id = pv.product_id
+            AND rwl.location_type = 'reserve'
+            AND rwl.is_pickable = 0
+            AND (wl.warehouse_id IS NULL OR rwl.warehouse_id = wl.warehouse_id)
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.replen_tasks rt
+          WHERE rt.to_location_id = wl.id
+            AND rt.pick_product_variant_id = pv.id
+            AND rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+            AND NOT (
+              rt.status = 'blocked'
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(rt.qty_source_units, 0) = 0
+              AND COALESCE(rt.qty_target_units, 0) = 0
+              AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+            )
+        )
+      ORDER BY COALESCE(il.variant_qty, 0) ASC, wl.code ASC, pv.sku ASC
+      LIMIT ${limit}
+    `);
+
+    const queuedTaskIds = new Set<number>();
+    const existingTaskIds = new Set<number>();
+    const skipped: MissingPickBinReplenQueueResult["skipped"] = [];
+
+    for (const row of candidatesResult.rows as Array<{
+      variant_id: number | string;
+      location_id: number | string;
+      sku: string | null;
+      location_code: string | null;
+    }>) {
+      const variantId = Number(row.variant_id);
+      const locationId = Number(row.location_id);
+      if (!Number.isInteger(variantId) || !Number.isInteger(locationId)) {
+        continue;
+      }
+
+      const existingBefore = await this.findActiveTaskForPickBin(variantId, locationId);
+      if (existingBefore) {
+        existingTaskIds.add(Number(existingBefore.id));
+        continue;
+      }
+
+      await this.checkAndTriggerAfterPick(variantId, locationId, "health_queue", {
+        blocksShipment: false,
+      });
+
+      const activeAfter = await this.findActiveTaskForPickBin(variantId, locationId);
+      if (activeAfter) {
+        queuedTaskIds.add(Number(activeAfter.id));
+      } else {
+        skipped.push({
+          variantId,
+          locationId,
+          sku: row.sku ?? null,
+          locationCode: row.location_code ?? null,
+          reason: "replen resolver did not create an active task",
+        });
+      }
+    }
+
+    return {
+      mode: params.mode ?? (params.variantId || params.locationId ? "queue_replen" : "queue_missing_replen"),
+      scannedPickBins: candidatesResult.rows.length,
+      queuedReplen: queuedTaskIds.size,
+      queuedTaskIds: Array.from(queuedTaskIds),
+      existingTaskIds: Array.from(existingTaskIds),
+      skippedPickBins: skipped.length,
+      skipped,
+    };
   }
 
   private async cancelStaleNoDemandTasks(params: {
