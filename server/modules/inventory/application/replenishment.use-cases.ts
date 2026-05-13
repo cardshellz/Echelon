@@ -196,6 +196,37 @@ type ReplenEvalResult =
       evaluatedQty: number;
     };
 
+type ReplenEvaluationOptions = {
+  currentQtyOverride?: number;
+  ignoreTaskId?: number;
+  forceWhenAtOrBelowZero?: boolean;
+};
+
+type ReplenEvaluationContext = {
+  level: InventoryLevel | null;
+  effectiveLevel: InventoryLevel;
+  implicitZeroLevel: boolean;
+  location: WarehouseLocation;
+  variant: ProductVariant;
+  evaluatedQty: number;
+};
+
+type ReplenEvaluationContextResult =
+  | { status: "ready"; context: ReplenEvaluationContext }
+  | { status: "skip"; result: Extract<ReplenEvalResult, { status: "skip" }> };
+
+type ReplenThresholdDecision = {
+  thresholdMet: boolean;
+  taskNotes: string;
+};
+
+type ReplenSourceDecision = {
+  sourceResolutionIssue: SourceResolutionIssue | null;
+  sourceLocation: WarehouseLocation | null;
+  resolvedSourceVariantId: number | null;
+  resolvedReplenMethod: string;
+};
+
 const ACTIVE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress", "blocked"];
 const EXECUTABLE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress"];
 const RECOVERABLE_BLOCKED_REPLEN_REASONS = new Set<string | null>([
@@ -615,6 +646,83 @@ export class ReplenishmentUseCases {
     return { triggerValue, maxQty, replenMethod, priority, sourceLocationType, autoReplen, sourceVariantId, sourceHierarchyLevel, sourcePriority };
   }
 
+  private buildImplicitZeroLevel(
+    productVariantId: number,
+    warehouseLocationId: number,
+  ): InventoryLevel {
+    return {
+      id: 0,
+      warehouseLocationId,
+      productVariantId,
+      variantQty: 0,
+      reservedQty: 0,
+      pickedQty: 0,
+      packedQty: 0,
+      backorderQty: 0,
+      updatedAt: new Date(0),
+    } as InventoryLevel;
+  }
+
+  private async loadReplenEvaluationContext(
+    productVariantId: number,
+    warehouseLocationId: number,
+    options?: ReplenEvaluationOptions,
+  ): Promise<ReplenEvaluationContextResult> {
+    const [level] = await this.db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.productVariantId, productVariantId),
+        eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+      ))
+      .limit(1);
+
+    const [location] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, warehouseLocationId))
+      .limit(1);
+    if (!location || location.isPickable !== 1) {
+      return { status: "skip", result: { status: "skip", skipReason: "location_not_pickable" } };
+    }
+
+    const [assignment] = await this.db
+      .select({ id: productLocations.id })
+      .from(productLocations)
+      .where(and(
+        eq(productLocations.productVariantId, productVariantId),
+        eq(productLocations.warehouseLocationId, warehouseLocationId),
+      ))
+      .limit(1);
+    if (!assignment) {
+      return { status: "skip", result: { status: "skip", skipReason: "no_bin_assignment" } };
+    }
+
+    const [variant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, productVariantId))
+      .limit(1);
+    if (!variant) {
+      return { status: "skip", result: { status: "skip", skipReason: "variant_not_found" } };
+    }
+
+    const effectiveLevel = (level ?? this.buildImplicitZeroLevel(productVariantId, warehouseLocationId)) as InventoryLevel;
+    const evaluatedQty = options?.currentQtyOverride ?? effectiveLevel.variantQty;
+
+    return {
+      status: "ready",
+      context: {
+        level: (level as InventoryLevel | undefined) ?? null,
+        effectiveLevel,
+        implicitZeroLevel: !level,
+        location: location as WarehouseLocation,
+        variant: variant as ProductVariant,
+        evaluatedQty,
+      },
+    };
+  }
+
   calculateQtyNeeded(maxQty: number | null, triggerValue: number, currentQty: number): number {
     return (maxQty ?? triggerValue * 2) - currentQty;
   }
@@ -642,6 +750,98 @@ export class ReplenishmentUseCases {
     };
   }
 
+  private async evaluateThresholdDecision(
+    replenMethod: string,
+    triggerValue: number,
+    evaluatedQty: number,
+    productVariantId: number,
+    options?: ReplenEvaluationOptions,
+  ): Promise<ReplenThresholdDecision> {
+    const threshold = await this.checkThreshold(replenMethod, triggerValue, evaluatedQty, productVariantId);
+    const forceThreshold = options?.forceWhenAtOrBelowZero === true && evaluatedQty <= 0;
+    const taskNotes = forceThreshold && !threshold.belowThreshold
+      ? `Auto-triggered: active demand exists and pick bin is empty (onHand=${evaluatedQty}, triggerValue=${triggerValue})`
+      : threshold.taskNotes;
+
+    return {
+      thresholdMet: threshold.belowThreshold || forceThreshold,
+      taskNotes,
+    };
+  }
+
+  private async resolveReplenSourceForNeed(args: {
+    tag: string;
+    pickVariant: ProductVariant;
+    pickVariantId: number;
+    warehouseId: number | undefined;
+    parentLocationId: number | null | undefined;
+    sourceLocationType: string;
+    sourcePriority: string;
+    sourceHierarchyLevel: number | null;
+    qtyNeeded: number;
+    configuredSourceVariantId: number | null;
+    replenMethod: string;
+  }): Promise<ReplenSourceDecision> {
+    let resolvedSourceVariantId = args.configuredSourceVariantId;
+    let resolvedReplenMethod = args.replenMethod;
+    let sourceResolutionIssue: SourceResolutionIssue | null = null;
+    let sourceLocation = resolvedSourceVariantId != null
+      ? await this.findSourceLocation(
+          resolvedSourceVariantId,
+          args.warehouseId,
+          args.sourceLocationType,
+          args.parentLocationId,
+          args.sourcePriority,
+        )
+      : null;
+
+    if (!sourceLocation && resolvedSourceVariantId != null) {
+      const [configuredSource] = await this.db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, resolvedSourceVariantId))
+        .limit(1);
+      sourceResolutionIssue = {
+        reason: "no_source_stock",
+        note: `Configured source variant ${configuredSource?.sku ?? `#${resolvedSourceVariantId}`} has no stock in ${args.sourceLocationType} locations`,
+      };
+    }
+
+    if (!sourceLocation && resolvedSourceVariantId == null) {
+      const sourceResolution = await this.resolveEligibleSourceCandidate({
+        pickVariant: args.pickVariant,
+        pickVariantId: args.pickVariantId,
+        warehouseId: args.warehouseId,
+        sourceLocationType: args.sourceLocationType,
+        parentLocationId: args.parentLocationId,
+        sourcePriority: args.sourcePriority,
+        sourceHierarchyLevel: args.sourceHierarchyLevel,
+        qtyNeeded: args.qtyNeeded,
+      });
+
+      if (sourceResolution.status === "found") {
+        resolvedSourceVariantId = sourceResolution.variant.id;
+        sourceLocation = sourceResolution.location;
+        if (resolvedSourceVariantId !== args.pickVariantId && resolvedReplenMethod === "full_case") {
+          resolvedReplenMethod = "case_break";
+        }
+        console.log(
+          `${args.tag} SOURCE: ${sourceResolution.note}; selected ${sourceResolution.variant.sku} ` +
+          `(id=${sourceResolution.variant.id}) at ${sourceLocation.code}`,
+        );
+      } else {
+        sourceResolutionIssue = sourceResolution.issue;
+      }
+    }
+
+    return {
+      sourceResolutionIssue,
+      sourceLocation: sourceLocation as WarehouseLocation | null,
+      resolvedSourceVariantId,
+      resolvedReplenMethod,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // CORE EVALUATION — single source of truth for "does this bin need replen?"
   // ---------------------------------------------------------------------------
@@ -649,47 +849,15 @@ export class ReplenishmentUseCases {
   private async evaluateReplenNeed(
     productVariantId: number,
     warehouseLocationId: number,
-    options?: { currentQtyOverride?: number; ignoreTaskId?: number; forceWhenAtOrBelowZero?: boolean },
+    options?: ReplenEvaluationOptions,
   ): Promise<ReplenEvalResult> {
     const _tag = `[Replen evaluate] variant=${productVariantId} loc=${warehouseLocationId}`;
 
-    // Here we query the level directly since InventoryUseCases doesn't expose getLevel anymore
-    const { inventoryLevels } = await import("@shared/schema");
-    const [level] = await this.db.select().from(inventoryLevels)
-      .where(and(eq(inventoryLevels.productVariantId, productVariantId), eq(inventoryLevels.warehouseLocationId, warehouseLocationId))).limit(1);
+    const contextResult = await this.loadReplenEvaluationContext(productVariantId, warehouseLocationId, options);
+    if (contextResult.status === "skip") return contextResult.result;
 
-    const [location] = await this.db
-      .select().from(warehouseLocations)
-      .where(eq(warehouseLocations.id, warehouseLocationId)).limit(1);
-    if (!location || location.isPickable !== 1)
-      return { status: "skip", skipReason: "location_not_pickable" };
-
-    const [assignment] = await this.db
-      .select({ id: productLocations.id }).from(productLocations)
-      .where(and(
-        eq(productLocations.productVariantId, productVariantId),
-        eq(productLocations.warehouseLocationId, warehouseLocationId),
-      )).limit(1);
-    if (!assignment) return { status: "skip", skipReason: "no_bin_assignment" };
-
-    const [variant] = await this.db
-      .select().from(productVariants)
-      .where(eq(productVariants.id, productVariantId)).limit(1);
-    if (!variant) return { status: "skip", skipReason: "variant_not_found" };
-
-    const effectiveLevel = (level ?? {
-      id: 0,
-      warehouseLocationId,
-      productVariantId,
-      variantQty: 0,
-      reservedQty: 0,
-      pickedQty: 0,
-      packedQty: 0,
-      backorderQty: 0,
-      updatedAt: new Date(0),
-    }) as InventoryLevel;
-    const evaluatedQty = options?.currentQtyOverride ?? effectiveLevel.variantQty;
-    console.log(`${_tag} variant=${variant.sku} loc=${location.code} onHand=${effectiveLevel.variantQty} evaluatedQty=${evaluatedQty} hierarchyLevel=${variant.hierarchyLevel}${level ? "" : " implicitZeroLevel=true"}`);
+    const { effectiveLevel, implicitZeroLevel, location, variant, evaluatedQty } = contextResult.context;
+    console.log(`${_tag} variant=${variant.sku} loc=${location.code} onHand=${effectiveLevel.variantQty} evaluatedQty=${evaluatedQty} hierarchyLevel=${variant.hierarchyLevel}${implicitZeroLevel ? " implicitZeroLevel=true" : ""}`);
 
     const whSettings = await this.getSettingsForWarehouse(location.warehouseId ?? undefined);
     const locConfig = await this.loadLocationConfig(warehouseLocationId, productVariantId);
@@ -706,64 +874,38 @@ export class ReplenishmentUseCases {
     if (triggerValue == null || triggerValue < 0)
       return { status: "skip", skipReason: "no_trigger_value", params, triggerValue, evaluatedQty };
 
-    const threshold = await this.checkThreshold(resolvedReplenMethod, triggerValue, evaluatedQty, productVariantId);
-    const forceThreshold = options?.forceWhenAtOrBelowZero === true && evaluatedQty <= 0;
-    const taskNotes = forceThreshold && !threshold.belowThreshold
-      ? `Auto-triggered: active demand exists and pick bin is empty (onHand=${evaluatedQty}, triggerValue=${triggerValue})`
-      : threshold.taskNotes;
-    if (!threshold.belowThreshold && !forceThreshold) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
+    const threshold = await this.evaluateThresholdDecision(
+      resolvedReplenMethod,
+      triggerValue,
+      evaluatedQty,
+      productVariantId,
+      options,
+    );
+    if (!threshold.thresholdMet) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
     console.log(`${_tag} THRESHOLD MET: method=${resolvedReplenMethod}`);
 
     const qtyNeeded = this.calculateQtyNeeded(maxQty, triggerValue!, evaluatedQty);
-    let sourceResolutionIssue: SourceResolutionIssue | null = null;
-    let sourceLocation = resolvedSourceVariantId != null
-      ? await this.findSourceLocation(
-          resolvedSourceVariantId,
-          location.warehouseId ?? undefined,
-          sourceLocationType,
-          location.parentLocationId,
-          sourcePriority,
-        )
-      : null;
-
-    if (!sourceLocation && resolvedSourceVariantId != null) {
-      const [configuredSource] = await this.db
-        .select()
-        .from(productVariants)
-        .where(eq(productVariants.id, resolvedSourceVariantId))
-        .limit(1);
-      sourceResolutionIssue = {
-        reason: "no_source_stock",
-        note: `Configured source variant ${configuredSource?.sku ?? `#${resolvedSourceVariantId}`} has no stock in ${sourceLocationType} locations`,
-      };
-    }
-
-    if (!sourceLocation && resolvedSourceVariantId == null) {
-      const sourceResolution = await this.resolveEligibleSourceCandidate({
-        pickVariant: variant as ProductVariant,
-        pickVariantId: productVariantId,
-        warehouseId: location.warehouseId ?? undefined,
-        sourceLocationType,
-        parentLocationId: location.parentLocationId,
-        sourcePriority,
-        sourceHierarchyLevel: params.sourceHierarchyLevel,
-        qtyNeeded,
-      });
-
-      if (sourceResolution.status === "found") {
-        resolvedSourceVariantId = sourceResolution.variant.id;
-        sourceLocation = sourceResolution.location;
-        if (resolvedSourceVariantId !== productVariantId && resolvedReplenMethod === "full_case") {
-          resolvedReplenMethod = "case_break";
-        }
-        console.log(
-          `${_tag} SOURCE: ${sourceResolution.note}; selected ${sourceResolution.variant.sku} ` +
-          `(id=${sourceResolution.variant.id}) at ${sourceLocation.code}`,
-        );
-      } else {
-        sourceResolutionIssue = sourceResolution.issue;
-      }
-    }
+    const sourceDecision = await this.resolveReplenSourceForNeed({
+      tag: _tag,
+      pickVariant: variant,
+      pickVariantId: productVariantId,
+      warehouseId: location.warehouseId ?? undefined,
+      parentLocationId: location.parentLocationId,
+      sourceLocationType,
+      sourcePriority,
+      sourceHierarchyLevel: params.sourceHierarchyLevel,
+      qtyNeeded,
+      configuredSourceVariantId: resolvedSourceVariantId,
+      replenMethod: resolvedReplenMethod,
+    });
+    const {
+      sourceResolutionIssue,
+      sourceLocation,
+      resolvedSourceVariantId: sourceVariantId,
+      resolvedReplenMethod: sourceReplenMethod,
+    } = sourceDecision;
+    resolvedSourceVariantId = sourceVariantId;
+    resolvedReplenMethod = sourceReplenMethod;
 
     const rule = await this.findRuleForVariant(productVariantId);
 
@@ -779,7 +921,7 @@ export class ReplenishmentUseCases {
         status: "needed_stockout",
         level: effectiveLevel, location: location as WarehouseLocation, variant: variant as ProductVariant,
         whSettings, params: { ...params, replenMethod: resolvedReplenMethod, sourceVariantId: resolvedSourceVariantId },
-        taskNotes,
+        taskNotes: threshold.taskNotes,
         sourceResolutionIssue, rule, sourceLocation: null,
         resolvedSourceVariantId, sourceVariant: sourceVariant as ProductVariant,
         qtySourceUnits: 0, qtyTargetUnits: 0,
@@ -801,7 +943,7 @@ export class ReplenishmentUseCases {
       status: "needed_with_source",
       level: effectiveLevel, location: location as WarehouseLocation, variant: variant as ProductVariant,
       whSettings, params: { ...params, replenMethod: resolvedReplenMethod, sourceVariantId: resolvedSourceVariantId },
-      taskNotes, rule, sourceLocation: sourceLocation as WarehouseLocation,
+      taskNotes: threshold.taskNotes, rule, sourceLocation: sourceLocation as WarehouseLocation,
       resolvedSourceVariantId, sourceVariant: sourceVariant as ProductVariant,
       qtySourceUnits, qtyTargetUnits,
       executionMode, shouldAutoExecute,
