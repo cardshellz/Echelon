@@ -19,6 +19,104 @@ import {
 } from "../../../storage/base";
 import { getSettingsForWarehouse } from "../../warehouse/settings.resolver";
 
+type ReplenTaskWithDemand = ReplenTask & {
+  activePendingLines: number;
+  activePendingUnits: number;
+};
+
+const OPEN_TASK_STATUSES = new Set(["pending", "assigned", "in_progress", "blocked"]);
+const OPEN_TASK_STATUS_RANK: Record<string, number> = {
+  in_progress: 0,
+  assigned: 1,
+  pending: 2,
+  blocked: 3,
+  completed: 4,
+  cancelled: 5,
+};
+
+function compareReplenTasksForQueue(a: ReplenTaskWithDemand, b: ReplenTaskWithDemand): number {
+  const aIsOpen = OPEN_TASK_STATUSES.has(a.status);
+  const bIsOpen = OPEN_TASK_STATUSES.has(b.status);
+  const aHasDemand = aIsOpen && a.activePendingLines > 0 ? 0 : 1;
+  const bHasDemand = bIsOpen && b.activePendingLines > 0 ? 0 : 1;
+  if (aHasDemand !== bHasDemand) return aHasDemand - bHasDemand;
+
+  const aDemandUnits = aHasDemand === 0 ? a.activePendingUnits : 0;
+  const bDemandUnits = bHasDemand === 0 ? b.activePendingUnits : 0;
+  if (aDemandUnits !== bDemandUnits) {
+    return bDemandUnits - aDemandUnits;
+  }
+
+  const aStatusRank = OPEN_TASK_STATUS_RANK[a.status] ?? 9;
+  const bStatusRank = OPEN_TASK_STATUS_RANK[b.status] ?? 9;
+  if (aStatusRank !== bStatusRank) return aStatusRank - bStatusRank;
+
+  if (a.priority !== b.priority) return a.priority - b.priority;
+
+  const aCreatedAt = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
+  const bCreatedAt = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
+  if (aCreatedAt !== bCreatedAt) return aCreatedAt - bCreatedAt;
+
+  return a.id - b.id;
+}
+
+async function attachActiveDemandToTasks(tasks: ReplenTask[]): Promise<ReplenTaskWithDemand[]> {
+  const pickVariantIds = [...new Set(tasks
+    .map((task) => task.pickProductVariantId)
+    .filter((id): id is number => Number.isInteger(id)))];
+
+  if (pickVariantIds.length === 0) {
+    return tasks
+      .map((task) => ({ ...task, activePendingLines: 0, activePendingUnits: 0 }))
+      .sort(compareReplenTasksForQueue);
+  }
+
+  const idList = sql.join(pickVariantIds.map((id) => sql`${id}`), sql`, `);
+  const result = await db.execute(sql`
+    SELECT
+      pv.id AS variant_id,
+      COUNT(oi.id)::int AS active_pending_lines,
+      COALESCE(SUM(GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0)), 0)::int AS active_pending_units
+    FROM catalog.product_variants pv
+    JOIN wms.order_items oi
+      ON oi.sku = pv.sku
+     AND oi.status = 'pending'
+     AND oi.requires_shipping = 1
+    JOIN wms.orders o
+      ON o.id = oi.order_id
+     AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+    WHERE pv.id IN (${idList})
+    GROUP BY pv.id
+  `);
+
+  const demandByVariantId = new Map<number, { lines: number; units: number }>();
+  for (const row of result.rows as Array<{
+    variant_id: number | string | null;
+    active_pending_lines: number | string | null;
+    active_pending_units: number | string | null;
+  }>) {
+    const variantId = Number(row.variant_id);
+    if (!Number.isInteger(variantId)) continue;
+    demandByVariantId.set(variantId, {
+      lines: Number(row.active_pending_lines ?? 0),
+      units: Number(row.active_pending_units ?? 0),
+    });
+  }
+
+  return tasks
+    .map((task) => {
+      const demand = task.pickProductVariantId
+        ? demandByVariantId.get(task.pickProductVariantId)
+        : undefined;
+      return {
+        ...task,
+        activePendingLines: demand?.lines ?? 0,
+        activePendingUnits: demand?.units ?? 0,
+      };
+    })
+    .sort(compareReplenTasksForQueue);
+}
+
 export interface IReplenishmentStorage {
   getAllReplenTierDefaults(): Promise<ReplenTierDefault[]>;
   getReplenTierDefaultById(id: number): Promise<ReplenTierDefault | undefined>;
@@ -214,7 +312,8 @@ export const replenishmentMethods: IReplenishmentStorage = {
       query = query.where(and(...conditions)) as typeof query;
     }
 
-    return await query.orderBy(asc(replenTasks.priority), desc(replenTasks.createdAt));
+    const tasks = await query.orderBy(asc(replenTasks.priority), desc(replenTasks.createdAt));
+    return await attachActiveDemandToTasks(tasks);
   },
 
   async getReplenTaskById(id: number): Promise<ReplenTask | undefined> {

@@ -172,6 +172,8 @@ interface ReplenTask {
   product?: ProductRecord;
   sourceVariant?: ProductVariant;
   pickVariant?: ProductVariant;
+  activePendingLines?: number | null;
+  activePendingUnits?: number | null;
 }
 
 interface WarehouseSettings {
@@ -232,6 +234,16 @@ const REPLEN_METHODS = [
   { value: "pallet_drop", label: "Pallet Drop" },
 ];
 
+const OPEN_REPLEN_STATUSES = new Set(["pending", "assigned", "in_progress", "blocked"]);
+const REPLEN_STATUS_SORT_RANK: Record<string, number> = {
+  in_progress: 0,
+  assigned: 1,
+  pending: 2,
+  blocked: 3,
+  completed: 4,
+  cancelled: 5,
+};
+
 const HIERARCHY_LEVELS = [
   { value: 1, label: "Level 1 (Each/Unit)" },
   { value: 2, label: "Level 2 (Pack/Inner)" },
@@ -252,6 +264,36 @@ function uomLabel(hierarchyLevel: number): string {
 function methodLabel(method: string | null): string | null {
   const m = REPLEN_METHODS.find(r => r.value === method);
   return m ? m.label : method;
+}
+
+function activeDemandLines(task: ReplenTask): number {
+  return Number(task.activePendingLines ?? 0);
+}
+
+function activeDemandUnits(task: ReplenTask): number {
+  return Number(task.activePendingUnits ?? 0);
+}
+
+function compareTaskQueuePriority(a: ReplenTask, b: ReplenTask): number {
+  const aHasDemand = OPEN_REPLEN_STATUSES.has(a.status) && activeDemandLines(a) > 0 ? 0 : 1;
+  const bHasDemand = OPEN_REPLEN_STATUSES.has(b.status) && activeDemandLines(b) > 0 ? 0 : 1;
+  if (aHasDemand !== bHasDemand) return aHasDemand - bHasDemand;
+
+  const aDemandUnits = aHasDemand === 0 ? activeDemandUnits(a) : 0;
+  const bDemandUnits = bHasDemand === 0 ? activeDemandUnits(b) : 0;
+  const unitDiff = bDemandUnits - aDemandUnits;
+  if (unitDiff !== 0) return unitDiff;
+
+  const aStatusRank = REPLEN_STATUS_SORT_RANK[a.status] ?? 9;
+  const bStatusRank = REPLEN_STATUS_SORT_RANK[b.status] ?? 9;
+  if (aStatusRank !== bStatusRank) return aStatusRank - bStatusRank;
+
+  if (a.priority !== b.priority) return a.priority - b.priority;
+
+  const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  if (createdDiff !== 0) return createdDiff;
+
+  return a.id - b.id;
 }
 
 export default function Replenishment() {
@@ -284,6 +326,7 @@ export default function Replenishment() {
   const [taskSearch, setTaskSearch] = useState(initialUrlParams.get("q") ?? (initialTaskId ?? ""));
   const [warehouseFilter, setWarehouseFilter] = useState("all");
   const [modeFilter, setModeFilter] = useState("all");
+  const [demandFilter, setDemandFilter] = useState("all");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const locCsvInputRef = useRef<HTMLInputElement>(null);
 
@@ -1247,7 +1290,7 @@ export default function Replenishment() {
     !task.dependsOnTaskId &&
     (task.exceptionReason === "no_source_stock" || task.exceptionReason === "no_source_variant");
 
-  // Apply additional client-side filters for warehouse and mode
+  // Apply additional client-side filters for warehouse, demand, and mode
   const filteredTasks = tasks.filter((task) => {
     // Warehouse filter
     if (warehouseFilter !== "all") {
@@ -1259,6 +1302,15 @@ export default function Replenishment() {
     if (modeFilter !== "all") {
       const taskMode = task.executionMode || "queue";
       if (taskMode !== modeFilter) {
+        return false;
+      }
+    }
+    if (demandFilter !== "all") {
+      const hasActiveDemand = activeDemandLines(task) > 0 && OPEN_REPLEN_STATUSES.has(task.status);
+      if (demandFilter === "active" && !hasActiveDemand) {
+        return false;
+      }
+      if (demandFilter === "routine" && hasActiveDemand) {
         return false;
       }
     }
@@ -1276,6 +1328,7 @@ export default function Replenishment() {
         task.product?.title,
         task.fromLocation?.code,
         task.toLocation?.code,
+        activeDemandLines(task) > 0 ? "active demand" : "routine",
         task.dependsOnTaskId ? `#${task.dependsOnTaskId}` : null,
         task.dependsOnTaskId ? String(task.dependsOnTaskId) : null,
       ];
@@ -1284,11 +1337,16 @@ export default function Replenishment() {
       }
     }
     return true;
-  });
+  }).sort(compareTaskQueuePriority);
   
   const pendingCount = tasks.filter(t => t.status === "pending").length;
   const inProgressCount = tasks.filter(t => t.status === "in_progress").length;
   const blockedCount = tasks.filter(t => t.status === "blocked").length;
+  const activeDemandTaskCount = tasks.filter(t => OPEN_REPLEN_STATUSES.has(t.status) && activeDemandLines(t) > 0).length;
+  const activeDemandUnitCount = tasks.reduce((sum, task) => {
+    if (!OPEN_REPLEN_STATUSES.has(task.status)) return sum;
+    return sum + activeDemandUnits(task);
+  }, 0);
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6 min-w-0 max-w-full overflow-hidden">
@@ -1297,7 +1355,15 @@ export default function Replenishment() {
           <h1 className="text-xl md:text-2xl font-bold">Replenishment</h1>
           <p className="text-sm text-muted-foreground">Manage inventory flow from bulk storage to pick locations</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          {activeDemandTaskCount > 0 && (
+            <Badge
+              className="bg-orange-600 text-lg px-3 py-1"
+              title={`${activeDemandTaskCount} open replen tasks have active order demand for ${activeDemandUnitCount} units`}
+            >
+              {activeDemandTaskCount} demand / {activeDemandUnitCount} units
+            </Badge>
+          )}
           {pendingCount > 0 && (
             <Badge variant="secondary" className="text-lg px-3 py-1">
               {pendingCount} pending
@@ -1389,6 +1455,16 @@ export default function Replenishment() {
                   <SelectItem value="inline">Auto-Complete</SelectItem>
                 </SelectContent>
               </Select>
+              <Select value={demandFilter} onValueChange={setDemandFilter}>
+                <SelectTrigger className="w-32 sm:w-40 h-10" data-testid="select-demand-filter">
+                  <SelectValue placeholder="Demand" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Demand</SelectItem>
+                  <SelectItem value="active">Active Demand</SelectItem>
+                  <SelectItem value="routine">Routine</SelectItem>
+                </SelectContent>
+              </Select>
               <Select value={warehouseFilter} onValueChange={setWarehouseFilter}>
                 <SelectTrigger className="w-32 sm:w-40 h-10" data-testid="select-warehouse-filter">
                   <SelectValue placeholder="Warehouse" />
@@ -1430,7 +1506,7 @@ export default function Replenishment() {
               ) : filteredTasks.length === 0 ? (
                 <div className="text-center p-8 text-muted-foreground">
                   <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                  <p>No replenishment tasks{(warehouseFilter !== "all" || modeFilter !== "all" || taskSearch.trim()) ? " matching filters" : ""}</p>
+                  <p>No replenishment tasks{(warehouseFilter !== "all" || modeFilter !== "all" || demandFilter !== "all" || taskSearch.trim()) ? " matching filters" : ""}</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -1456,6 +1532,8 @@ export default function Replenishment() {
                   <TableBody>
                     {filteredTasks.map((task) => {
                       const noSourceReviewTask = isNoSourceReviewTask(task);
+                      const demandLines = activeDemandLines(task);
+                      const demandUnits = activeDemandUnits(task);
                       return (
                       <TableRow
                         key={task.id}
@@ -1519,6 +1597,16 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="py-2">
                           {getStatusBadge(task.status)}
+                          {demandLines > 0 && OPEN_REPLEN_STATUSES.has(task.status) && (
+                            <div className="mt-1">
+                              <Badge
+                                className="bg-orange-600 text-[10px] px-1.5 py-0.5"
+                                title={`${demandLines} active order line${demandLines === 1 ? "" : "s"}, ${demandUnits} unit${demandUnits === 1 ? "" : "s"} pending`}
+                              >
+                                Demand {demandLines} / {demandUnits}
+                              </Badge>
+                            </div>
+                          )}
                           {task.status === "blocked" && task.exceptionReason && (
                             <div className="mt-0.5 max-w-[150px] truncate text-[10px] font-medium text-red-700 dark:text-red-400" title={task.exceptionReason}>
                               {formatTaskReason(task.exceptionReason)}
