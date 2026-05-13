@@ -162,7 +162,11 @@ interface AdjustmentReason {
 }
 
 export default function CycleCounts() {
-  const [selectedCount, setSelectedCount] = useState<number | null>(null);
+  const [selectedCount, setSelectedCount] = useState<number | null>(() => {
+    const value = new URLSearchParams(window.location.search).get("countId");
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  });
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [quickCountOpen, setQuickCountOpen] = useState(false);
   const [quickCountBin, setQuickCountBin] = useState("");

@@ -9,6 +9,7 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
+    "monitor:pick-replen-health": "tsx scripts/monitor-pick-replen-health.ts --notify --json",
     "dropship:dogfood-status": "tsx scripts/dropship-dogfood-status.ts",
     "db:push": "drizzle-kit push",
     "test": "vitest run",

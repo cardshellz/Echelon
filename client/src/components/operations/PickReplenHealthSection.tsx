@@ -139,6 +139,15 @@ function rowSubject(item: PickReplenHealthItem) {
 
 function issueHref(item: PickReplenHealthItem) {
   if (item.taskId) return `/replenishment?taskId=${item.taskId}&status=all`;
+  if (item.cycleCountId) return `/cycle-counts?countId=${item.cycleCountId}`;
+  if (item.type === "open_allocation_exception" || item.type === "short_pick_unresolved") {
+    const params = new URLSearchParams({ view: "exceptions" });
+    if (item.orderId) params.set("orderId", item.orderId.toString());
+    if (item.orderItemId) params.set("itemId", item.orderItemId.toString());
+    if (item.exceptionId) params.set("exceptionId", item.exceptionId.toString());
+    return `/picking?${params}`;
+  }
+  if (item.orderId) return `/orders?orderId=${item.orderId}`;
   return null;
 }
 

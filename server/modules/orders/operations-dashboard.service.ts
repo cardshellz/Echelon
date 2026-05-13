@@ -947,7 +947,7 @@ export class OperationsDashboardService {
       )
     `;
 
-    const countsPromise = this.db.execute(sql`
+    const countsResult = await this.db.execute(sql`
       ${healthCte}
       SELECT type, COUNT(*)::int as count
       FROM health_items
@@ -955,7 +955,7 @@ export class OperationsDashboardService {
       GROUP BY type
     `);
 
-    const itemsPromise = this.db.execute(sql`
+    const itemsResult = await this.db.execute(sql`
       ${healthCte}
       SELECT *
       FROM health_items
@@ -964,7 +964,6 @@ export class OperationsDashboardService {
       LIMIT ${pageSize} OFFSET ${offset}
     `);
 
-    const [countsResult, itemsResult] = await Promise.all([countsPromise, itemsPromise]);
     const counts = VALID_PICK_REPLEN_HEALTH_FILTERS
       .filter(type => type !== "all")
       .reduce((acc, type) => ({ ...acc, [type]: 0 }), {} as Record<string, number>);

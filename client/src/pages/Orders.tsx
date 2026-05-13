@@ -736,7 +736,11 @@ export default function Orders() {
   const [statusFilter, setStatusFilter] = useState<string>("active");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCombineOpen, setIsCombineOpen] = useState(false);
-  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(() => {
+    const value = new URLSearchParams(window.location.search).get("orderId");
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  });
   const [selectedCombineGroup, setSelectedCombineGroup] = useState<CombinableGroup | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [expandedOrderIds, setExpandedOrderIds] = useState<Set<number>>(new Set());
