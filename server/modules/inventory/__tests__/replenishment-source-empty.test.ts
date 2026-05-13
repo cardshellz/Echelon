@@ -998,4 +998,43 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       keptDuplicateTaskIds: [121],
     });
   });
+
+  it("reports a queued missing pick-bin replen even when the picker-safe trigger returns null", async () => {
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          variant_id: 100,
+          location_id: 1,
+          sku: "SKU-1",
+          location_code: "A-01",
+        }],
+      })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const serviceAny = service as any;
+    vi.spyOn(serviceAny, "findActiveTaskForPickBin")
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 888, status: "pending" });
+    const triggerSpy = vi.spyOn(service, "checkAndTriggerAfterPick")
+      .mockResolvedValue(null as any);
+
+    const result = await service.queueMissingPickBinReplen({
+      mode: "queue_replen",
+      variantId: 100,
+      locationId: 1,
+      limit: 1,
+    });
+
+    expect(triggerSpy).toHaveBeenCalledWith(100, 1, "health_queue", {
+      blocksShipment: false,
+    });
+    expect(result).toMatchObject({
+      mode: "queue_replen",
+      scannedPickBins: 1,
+      queuedReplen: 1,
+      queuedTaskIds: [888],
+      existingTaskIds: [],
+      skippedPickBins: 0,
+    });
+  });
 });

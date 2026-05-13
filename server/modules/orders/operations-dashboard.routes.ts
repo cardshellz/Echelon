@@ -36,13 +36,35 @@ export function registerOperationsDashboardRoutes(app: Express) {
           return res.status(400).json({ error: "variantId and locationId are required to queue replen" });
         }
 
-        const task = await replenishment.checkAndTriggerAfterPick(variantId, locationId, "health_queue", {
-          blocksShipment: false,
+        const result = await replenishment.queueMissingPickBinReplen({
+          mode,
+          variantId,
+          locationId,
+          warehouseId: req.body?.warehouseId ? Number(req.body.warehouseId) : null,
+          limit: 1,
         });
         return res.json({
+          ...result,
+          queuedTaskId: result.queuedTaskIds[0] ?? null,
+          cancelledStaleNoDemand: 0,
+          cancelledStaleBacklog: 0,
+          cancelledDuplicates: 0,
+          cancelledStaleNoDemandTaskIds: [],
+          cancelledStaleBacklogTaskIds: [],
+          cancelledDuplicateTaskIds: [],
+          keptDuplicateTaskIds: [],
+        });
+      }
+
+      if (mode === "queue_missing_replen") {
+        const result = await replenishment.queueMissingPickBinReplen({
           mode,
-          queuedReplen: task ? 1 : 0,
-          queuedTaskId: task?.id ?? null,
+          warehouseId: req.body?.warehouseId ? Number(req.body.warehouseId) : null,
+          limit,
+        });
+        return res.json({
+          ...result,
+          queuedTaskId: result.queuedTaskIds[0] ?? null,
           cancelledStaleNoDemand: 0,
           cancelledStaleBacklog: 0,
           cancelledDuplicates: 0,
