@@ -173,6 +173,8 @@ type PickInventoryContext = {
     taskStatus: string | null;
     autoExecuted: boolean;
     autoExecutedMoved: number | null;
+    autoExecutedMovedBaseUnits: number | null;
+    autoExecutedMovedUom: string | null;
     autoExecutedFailed: boolean;
     autoExecuteFailReason: string | null;
     stockout: boolean;
@@ -187,6 +189,16 @@ type PickResponse = {
   item: OrderItem;
   inventory: PickInventoryContext;
 };
+
+function replenCountUomLabel(uom: string | null | undefined): string {
+  const label = uom?.trim();
+  return label ? label : "units";
+}
+
+function capitalizedReplenCountUomLabel(uom: string | null | undefined): string {
+  const label = replenCountUomLabel(uom);
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+}
 
 type ResolveAllocationResponse = {
   success: boolean;
@@ -1022,6 +1034,15 @@ export default function Picking() {
   const orderCompletedPendingRef = useRef(false); // Defer order completion until API response confirms no binCount needed
   const focusedScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const scanPickInFlightRef = useRef<Set<number>>(new Set());
+  const replenCountUom = replenCountUomLabel(binCountContext?.replen.autoExecutedMovedUom);
+  const replenCountInputLabel = capitalizedReplenCountUomLabel(binCountContext?.replen.autoExecutedMovedUom);
+  const replenMovedBaseUnits = binCountContext?.replen.autoExecutedMovedBaseUnits ?? null;
+  const replenMovedPickUnits = binCountContext?.replen.autoExecutedMoved ?? null;
+  const showReplenBaseUnits =
+    replenMovedBaseUnits != null &&
+    replenMovedPickUnits != null &&
+    replenMovedBaseUnits !== replenMovedPickUnits &&
+    replenCountUom !== "units";
 
   // Mutation for updating items
   const updateItemMutation = useMutation({
@@ -4896,7 +4917,12 @@ export default function Picking() {
                   <span className="font-mono font-semibold">{binCountContext.sku}</span>
                   {binCountContext.replen.autoExecutedMoved != null && (
                     <span className="block text-sm text-blue-600 font-medium mt-1">
-                      {binCountContext.replen.autoExecutedMoved} units moved to pick bin
+                      {binCountContext.replen.autoExecutedMoved} {replenCountUom} moved to pick bin
+                      {showReplenBaseUnits && replenMovedBaseUnits != null && (
+                        <span className="block text-xs text-slate-500 font-normal">
+                          {replenMovedBaseUnits} pieces
+                        </span>
+                      )}
                     </span>
                   )}
                 </div>
@@ -4907,7 +4933,7 @@ export default function Picking() {
           <div className="py-3 space-y-3">
             <div className="space-y-2">
               <Label htmlFor="replen-bin-count" className="text-sm font-medium">
-                Units in pick bin now
+                {replenCountInputLabel} in pick bin now
               </Label>
               <Input
                 id="replen-bin-count"

@@ -148,6 +148,8 @@ export type PickInventoryContext = {
     taskStatus: string | null;
     autoExecuted: boolean;
     autoExecutedMoved: number | null;
+    autoExecutedMovedBaseUnits: number | null;
+    autoExecutedMovedUom: string | null;
     autoExecutedFailed: boolean;
     autoExecuteFailReason: string | null;
     stockout: boolean;
@@ -268,6 +270,8 @@ function emptyPickInventoryContext(sku: string): PickInventoryContext {
       taskStatus: null,
       autoExecuted: false,
       autoExecutedMoved: null,
+      autoExecutedMovedBaseUnits: null,
+      autoExecutedMovedUom: null,
       autoExecutedFailed: false,
       autoExecuteFailReason: null,
       stockout: false,
@@ -295,6 +299,47 @@ export class PickingUseCases {
     private readonly storage: Storage,
     private readonly channelSync?: ChannelSyncLike,
   ) {}
+
+  private countUomLabel(variant: any | null | undefined): string {
+    const unitsPerVariant = Math.max(1, Number(variant?.unitsPerVariant ?? variant?.units_per_variant ?? 1));
+    const hierarchyLevel = Number(variant?.hierarchyLevel ?? variant?.hierarchy_level ?? 0);
+    const text = `${variant?.sku ?? ""} ${variant?.name ?? ""}`.toLowerCase();
+
+    if (/\bpack\b/.test(text) || /(^|[-_\s])p\d+($|[-_\s])/.test(text)) return "packs";
+    if (/\bbox\b/.test(text) || /(^|[-_\s])b\d+($|[-_\s])/.test(text)) return "boxes";
+    if (/\bcase\b/.test(text) || /(^|[-_\s])c\d+($|[-_\s])/.test(text)) return "cases";
+    if (hierarchyLevel === 1 && unitsPerVariant > 1) return "packs";
+    if (hierarchyLevel === 2) return "boxes";
+    if (hierarchyLevel >= 3) return "cases";
+    return "units";
+  }
+
+  private async describeInlineReplenMove(
+    task: any,
+    fallbackPickVariantId: number,
+    movedBaseUnits: number,
+  ): Promise<{ pickQty: number; baseUnits: number; uom: string }> {
+    const pickVariantId = Number(task?.pickProductVariantId ?? task?.pick_product_variant_id ?? fallbackPickVariantId);
+    const sourceVariantId = Number(task?.sourceProductVariantId ?? task?.source_product_variant_id ?? 0);
+    const replenMethod = task?.replenMethod ?? task?.replen_method ?? null;
+    const qtySourceUnits = task?.qtySourceUnits ?? task?.qty_source_units ?? null;
+    const pickVariant = pickVariantId
+      ? await this.storage.getProductVariantById(pickVariantId).catch(() => null)
+      : null;
+    const pickUnits = Math.max(1, Number(pickVariant?.unitsPerVariant ?? pickVariant?.units_per_variant ?? 1));
+    const isCaseBreak = replenMethod === "case_break" && sourceVariantId > 0 && sourceVariantId !== pickVariantId;
+
+    const rawPickQty = isCaseBreak
+      ? Math.floor(movedBaseUnits / pickUnits)
+      : Number(qtySourceUnits ?? Math.floor(movedBaseUnits / pickUnits));
+    const pickQty = Number.isFinite(rawPickQty) && rawPickQty >= 0 ? rawPickQty : 0;
+
+    return {
+      pickQty,
+      baseUnits: movedBaseUnits,
+      uom: this.countUomLabel(pickVariant),
+    };
+  }
 
   /**
    * Resolve an allocation/setup miss by accepting the bin the picker scanned or
@@ -996,28 +1041,33 @@ export class PickingUseCases {
             const taskStatus = replenResult.task?.status ?? null;
             const moved = Number(replenResult.moved ?? 0);
             const autoExecuted = taskStatus === "completed";
+            const movedForPickBin = autoExecuted
+              ? await this.describeInlineReplenMove(replenResult.task, deductResult.productVariantId, moved)
+              : null;
             console.log(
               `[Replen] Replen task for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ` +
-              `status=${taskStatus ?? "none"} moved=${moved}`,
+              `status=${taskStatus ?? "none"} moved=${moved} base units`,
             );
             inventoryCtx.replen.triggered = true;
             inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
             inventoryCtx.replen.taskStatus = taskStatus;
             inventoryCtx.replen.autoExecuted = autoExecuted;
-            inventoryCtx.replen.autoExecutedMoved = autoExecuted ? moved : null;
+            inventoryCtx.replen.autoExecutedMoved = movedForPickBin?.pickQty ?? null;
+            inventoryCtx.replen.autoExecutedMovedBaseUnits = movedForPickBin?.baseUnits ?? null;
+            inventoryCtx.replen.autoExecutedMovedUom = movedForPickBin?.uom ?? null;
             inventoryCtx.replen.autoExecutedFailed = taskStatus === "blocked";
             inventoryCtx.replen.autoExecuteFailReason = taskStatus === "blocked"
               ? replenResult.task?.exceptionReason || "blocked"
               : null;
             inventoryCtx.replen.qtyToMove = autoExecuted
-              ? moved
+              ? movedForPickBin?.pickQty ?? null
               : replenResult.task?.qtyTargetUnits ?? null;
             
             // Fix: The "Zero Collision"
             // If the bin hit zero, it initially flipped binCountNeeded to true.
             // But if auto-replenishment immediately refilled it inline, we MUST suppress the bin count,
             // otherwise the picker receives a redundant count prompt that overlaps and crashes replen!
-            if (autoExecuted && moved > 0) {
+            if (autoExecuted && (movedForPickBin?.pickQty ?? 0) > 0) {
               inventoryCtx.binCountNeeded = false;
             }
           } else {
