@@ -86,6 +86,7 @@ export type ReplenOrderContext = {
   orderItemId?: number | null;
   orderNumber?: string | null;
   blocksShipment?: boolean;
+  forceWhenAtOrBelowZero?: boolean;
 };
 
 export type ReplenSourceEmptyReport = {
@@ -648,7 +649,7 @@ export class ReplenishmentUseCases {
   private async evaluateReplenNeed(
     productVariantId: number,
     warehouseLocationId: number,
-    options?: { currentQtyOverride?: number; ignoreTaskId?: number },
+    options?: { currentQtyOverride?: number; ignoreTaskId?: number; forceWhenAtOrBelowZero?: boolean },
   ): Promise<ReplenEvalResult> {
     const _tag = `[Replen evaluate] variant=${productVariantId} loc=${warehouseLocationId}`;
 
@@ -656,7 +657,6 @@ export class ReplenishmentUseCases {
     const { inventoryLevels } = await import("@shared/schema");
     const [level] = await this.db.select().from(inventoryLevels)
       .where(and(eq(inventoryLevels.productVariantId, productVariantId), eq(inventoryLevels.warehouseLocationId, warehouseLocationId))).limit(1);
-    if (!level) return { status: "skip", skipReason: "no_inventory_level" };
 
     const [location] = await this.db
       .select().from(warehouseLocations)
@@ -677,8 +677,19 @@ export class ReplenishmentUseCases {
       .where(eq(productVariants.id, productVariantId)).limit(1);
     if (!variant) return { status: "skip", skipReason: "variant_not_found" };
 
-    const evaluatedQty = options?.currentQtyOverride ?? level.variantQty;
-    console.log(`${_tag} variant=${variant.sku} loc=${location.code} onHand=${level.variantQty} evaluatedQty=${evaluatedQty} hierarchyLevel=${variant.hierarchyLevel}`);
+    const effectiveLevel = (level ?? {
+      id: 0,
+      warehouseLocationId,
+      productVariantId,
+      variantQty: 0,
+      reservedQty: 0,
+      pickedQty: 0,
+      packedQty: 0,
+      backorderQty: 0,
+      updatedAt: new Date(0),
+    }) as InventoryLevel;
+    const evaluatedQty = options?.currentQtyOverride ?? effectiveLevel.variantQty;
+    console.log(`${_tag} variant=${variant.sku} loc=${location.code} onHand=${effectiveLevel.variantQty} evaluatedQty=${evaluatedQty} hierarchyLevel=${variant.hierarchyLevel}${level ? "" : " implicitZeroLevel=true"}`);
 
     const whSettings = await this.getSettingsForWarehouse(location.warehouseId ?? undefined);
     const locConfig = await this.loadLocationConfig(warehouseLocationId, productVariantId);
@@ -695,8 +706,12 @@ export class ReplenishmentUseCases {
     if (triggerValue == null || triggerValue < 0)
       return { status: "skip", skipReason: "no_trigger_value", params, triggerValue, evaluatedQty };
 
-    const { belowThreshold, taskNotes } = await this.checkThreshold(resolvedReplenMethod, triggerValue, evaluatedQty, productVariantId);
-    if (!belowThreshold) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
+    const threshold = await this.checkThreshold(resolvedReplenMethod, triggerValue, evaluatedQty, productVariantId);
+    const forceThreshold = options?.forceWhenAtOrBelowZero === true && evaluatedQty <= 0;
+    const taskNotes = forceThreshold && !threshold.belowThreshold
+      ? `Auto-triggered: active demand exists and pick bin is empty (onHand=${evaluatedQty}, triggerValue=${triggerValue})`
+      : threshold.taskNotes;
+    if (!threshold.belowThreshold && !forceThreshold) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
     console.log(`${_tag} THRESHOLD MET: method=${resolvedReplenMethod}`);
 
     const qtyNeeded = this.calculateQtyNeeded(maxQty, triggerValue!, evaluatedQty);
@@ -762,7 +777,7 @@ export class ReplenishmentUseCases {
       );
       return {
         status: "needed_stockout",
-        level, location: location as WarehouseLocation, variant: variant as ProductVariant,
+        level: effectiveLevel, location: location as WarehouseLocation, variant: variant as ProductVariant,
         whSettings, params: { ...params, replenMethod: resolvedReplenMethod, sourceVariantId: resolvedSourceVariantId },
         taskNotes,
         sourceResolutionIssue, rule, sourceLocation: null,
@@ -784,7 +799,7 @@ export class ReplenishmentUseCases {
 
     return {
       status: "needed_with_source",
-      level, location: location as WarehouseLocation, variant: variant as ProductVariant,
+      level: effectiveLevel, location: location as WarehouseLocation, variant: variant as ProductVariant,
       whSettings, params: { ...params, replenMethod: resolvedReplenMethod, sourceVariantId: resolvedSourceVariantId },
       taskNotes, rule, sourceLocation: sourceLocation as WarehouseLocation,
       resolvedSourceVariantId, sourceVariant: sourceVariant as ProductVariant,
@@ -1277,18 +1292,79 @@ export class ReplenishmentUseCases {
         pv.id AS variant_id,
         pv.sku,
         wl.id AS location_id,
-        wl.code AS location_code
+        wl.code AS location_code,
+        COALESCE(demand.active_pending_lines, 0)::int AS active_pending_lines
       FROM warehouse.product_locations pl
       JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
       JOIN catalog.product_variants pv ON pv.id = pl.product_variant_id
       LEFT JOIN inventory.inventory_levels il
         ON il.warehouse_location_id = wl.id
        AND il.product_variant_id = pv.id
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM inventory.location_replen_config lrc
+        WHERE lrc.warehouse_location_id = wl.id
+          AND (lrc.product_variant_id = pv.id OR lrc.product_variant_id IS NULL)
+          AND lrc.is_active = 1
+        ORDER BY CASE WHEN lrc.product_variant_id = pv.id THEN 0 ELSE 1 END
+        LIMIT 1
+      ) loc_config ON true
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM inventory.replen_rules rr
+        WHERE rr.pick_product_variant_id = pv.id
+          AND rr.is_active = 1
+        LIMIT 1
+      ) rule_config ON true
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM inventory.replen_tier_defaults rtd
+        WHERE rtd.hierarchy_level = pv.hierarchy_level
+          AND (rtd.warehouse_id = wl.warehouse_id OR rtd.warehouse_id IS NULL)
+          AND rtd.is_active = 1
+        ORDER BY CASE WHEN rtd.warehouse_id = wl.warehouse_id THEN 0 ELSE 1 END
+        LIMIT 1
+      ) tier_config ON true
+      CROSS JOIN LATERAL (
+        SELECT
+          COALESCE(loc_config.replen_method, rule_config.replen_method, tier_config.replen_method, 'full_case') AS replen_method,
+          COALESCE(loc_config.trigger_value::numeric, rule_config.trigger_value::numeric, tier_config.trigger_value::numeric) AS trigger_value,
+          COALESCE(rule_config.source_location_type, tier_config.source_location_type, 'reserve') AS source_location_type,
+          rule_config.source_product_variant_id AS source_variant_id,
+          tier_config.source_hierarchy_level AS source_hierarchy_level
+      ) effective
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(ABS(it.variant_qty_delta)), 0)::numeric / 14 AS daily_velocity
+        FROM inventory.inventory_transactions it
+        WHERE it.product_variant_id = pv.id
+          AND it.transaction_type = 'pick'
+          AND it.created_at > NOW() - MAKE_INTERVAL(days => 14)
+      ) velocity ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(oi.id)::int AS active_pending_lines
+        FROM wms.order_items oi
+        JOIN wms.orders o
+          ON o.id = oi.order_id
+         AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+        WHERE oi.sku = pv.sku
+          AND oi.status = 'pending'
+          AND oi.requires_shipping = 1
+      ) demand ON true
       WHERE pl.status = 'active'
         AND pl.is_primary = 1
         AND wl.is_pickable = 1
         AND wl.location_type = 'pick'
         AND COALESCE(il.variant_qty, 0) <= 0
+        AND effective.trigger_value IS NOT NULL
+        AND (
+          effective.replen_method <> 'pallet_drop'
+          OR COALESCE(demand.active_pending_lines, 0) > 0
+          OR (
+            COALESCE(velocity.daily_velocity, 0) > 0
+            AND (COALESCE(il.variant_qty, 0)::numeric / velocity.daily_velocity) < effective.trigger_value
+          )
+        )
         ${variantFilter}
         ${locationFilter}
         ${warehouseFilter}
@@ -1296,12 +1372,28 @@ export class ReplenishmentUseCases {
           SELECT 1
           FROM inventory.inventory_levels ril
           JOIN warehouse.warehouse_locations rwl ON rwl.id = ril.warehouse_location_id
-          JOIN catalog.product_variants source_pv ON source_pv.id = ril.product_variant_id
+            JOIN catalog.product_variants source_pv ON source_pv.id = ril.product_variant_id
           WHERE ril.variant_qty > 0
             AND source_pv.product_id = pv.product_id
-            AND rwl.location_type = 'reserve'
-            AND rwl.is_pickable = 0
+            AND rwl.location_type = effective.source_location_type
             AND (wl.warehouse_id IS NULL OR rwl.warehouse_id = wl.warehouse_id)
+            AND (
+              (effective.source_variant_id IS NOT NULL AND source_pv.id = effective.source_variant_id)
+              OR (
+                effective.source_variant_id IS NULL
+                AND (
+                  source_pv.id = pv.id
+                  OR (
+                    effective.source_hierarchy_level IS NOT NULL
+                    AND source_pv.hierarchy_level = effective.source_hierarchy_level
+                    AND source_pv.id <> pv.id
+                    AND source_pv.is_active = true
+                    AND source_pv.units_per_variant > pv.units_per_variant
+                    AND MOD(source_pv.units_per_variant, pv.units_per_variant) = 0
+                  )
+                )
+              )
+            )
         )
         AND NOT EXISTS (
           SELECT 1
@@ -1329,6 +1421,7 @@ export class ReplenishmentUseCases {
     for (const row of candidatesResult.rows as Array<{
       variant_id: number | string;
       location_id: number | string;
+      active_pending_lines?: number | string | null;
       sku: string | null;
       location_code: string | null;
     }>) {
@@ -1346,6 +1439,7 @@ export class ReplenishmentUseCases {
 
       await this.checkAndTriggerAfterPick(variantId, locationId, "health_queue", {
         blocksShipment: false,
+        forceWhenAtOrBelowZero: Number(row.active_pending_lines ?? 0) > 0,
       });
 
       const activeAfter = await this.findActiveTaskForPickBin(variantId, locationId);
@@ -1607,7 +1701,9 @@ export class ReplenishmentUseCases {
   ): Promise<ReplenTask | null> {
     const _tag = `[Replen checkAndTrigger] variant=${productVariantId} loc=${warehouseLocationId}`;
 
-    const eval_ = await this.evaluateReplenNeed(productVariantId, warehouseLocationId);
+    const eval_ = await this.evaluateReplenNeed(productVariantId, warehouseLocationId, {
+      forceWhenAtOrBelowZero: context?.forceWhenAtOrBelowZero === true,
+    });
 
     if (eval_.status === "skip") {
       console.log(`${_tag} EXIT: ${eval_.skipReason}`);
