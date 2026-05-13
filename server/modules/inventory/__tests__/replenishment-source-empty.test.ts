@@ -97,8 +97,8 @@ function makeDb() {
       }),
     })),
     delete: vi.fn(),
-    execute: vi.fn(),
-    transaction: vi.fn(),
+    execute: vi.fn(async () => ({ rows: [] })),
+    transaction: vi.fn(async (callback: (txArg: any) => Promise<any>) => callback(db)),
   };
 
   return { db, inserts, updates, state, selectCounts };
@@ -211,8 +211,8 @@ function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSour
     })),
     update: vi.fn(),
     delete: vi.fn(),
-    execute: vi.fn(),
-    transaction: vi.fn(),
+    execute: vi.fn(async () => ({ rows: [] })),
+    transaction: vi.fn(async (callback: (txArg: any) => Promise<any>) => callback(db)),
   };
 
   return { db, sourceLocation, inserts };
@@ -549,6 +549,8 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         executionMode: "queue",
       },
     });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledTimes(1);
     expect(inserts.filter(insert => insert.table === replenTasks)).toHaveLength(0);
     expect(guidanceSpy).not.toHaveBeenCalled();
     expect(executeSpy).not.toHaveBeenCalled();

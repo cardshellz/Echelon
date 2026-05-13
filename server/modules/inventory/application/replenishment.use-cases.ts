@@ -225,6 +225,26 @@ export class ReplenishmentUseCases {
     private readonly inventoryUseCases: InventoryUseCases,
   ) {}
 
+  private async withPickBinTaskLock<T>(
+    pickVariantId: number,
+    toLocationId: number,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    // Serialize cooperating replen creation paths for the same pick bin/SKU.
+    // The action continues through the service's normal DB handle so existing
+    // task execution/rollback behavior is unchanged; this transaction only
+    // holds the advisory lock until the create/reuse decision completes.
+    return this.db.transaction(async (tx: any) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          hashtext('inventory.replen_tasks.pick_bin'),
+          hashtext(${`${pickVariantId}:${toLocationId}`})
+        )
+      `);
+      return action();
+    });
+  }
+
   private async findActiveTaskForPickBin(
     pickVariantId: number,
     toLocationId: number,
@@ -1064,6 +1084,17 @@ export class ReplenishmentUseCases {
     triggeredBy: string = "inline_pick",
     context?: ReplenOrderContext,
   ): Promise<ReplenTask | null> {
+    return this.withPickBinTaskLock(productVariantId, warehouseLocationId, () =>
+      this.checkAndTriggerAfterPickLocked(productVariantId, warehouseLocationId, triggeredBy, context),
+    );
+  }
+
+  private async checkAndTriggerAfterPickLocked(
+    productVariantId: number,
+    warehouseLocationId: number,
+    triggeredBy: string = "inline_pick",
+    context?: ReplenOrderContext,
+  ): Promise<ReplenTask | null> {
     const _tag = `[Replen checkAndTrigger] variant=${productVariantId} loc=${warehouseLocationId}`;
 
     const eval_ = await this.evaluateReplenNeed(productVariantId, warehouseLocationId);
@@ -1327,6 +1358,17 @@ export class ReplenishmentUseCases {
     userId?: string,
     context?: ReplenOrderContext,
   ): Promise<{ task: ReplenTask; moved: number } | null> {
+    return this.withPickBinTaskLock(pickVariantId, toLocationId, () =>
+      this.createAndExecuteReplenLocked(pickVariantId, toLocationId, userId, context),
+    );
+  }
+
+  private async createAndExecuteReplenLocked(
+    pickVariantId: number,
+    toLocationId: number,
+    userId?: string,
+    context?: ReplenOrderContext,
+  ): Promise<{ task: ReplenTask; moved: number } | null> {
     const _tag = `[Replen createAndExecute] variant=${pickVariantId} loc=${toLocationId}`;
 
     const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
@@ -1411,6 +1453,17 @@ export class ReplenishmentUseCases {
   }
 
   async ensureQueuedReplenForShortPick(
+    pickVariantId: number,
+    toLocationId: number,
+    userId?: string,
+    context?: ReplenOrderContext,
+  ): Promise<{ task: ReplenTask; moved: number; guidance?: ReplenGuidance } | null> {
+    return this.withPickBinTaskLock(pickVariantId, toLocationId, () =>
+      this.ensureQueuedReplenForShortPickLocked(pickVariantId, toLocationId, userId, context),
+    );
+  }
+
+  private async ensureQueuedReplenForShortPickLocked(
     pickVariantId: number,
     toLocationId: number,
     userId?: string,
