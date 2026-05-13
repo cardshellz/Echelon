@@ -778,6 +778,7 @@ export class PickingUseCases {
     if (!beforeItem) {
       throw new IntegrityError(`Item ${itemId} not found`);
     }
+    const orderForPick = await this.storage.getOrderById(beforeItem.orderId);
 
     // Prevent double-pick — if already completed, treat as success (idempotent)
     if (status === "completed" && beforeItem.status === "completed") {
@@ -840,6 +841,7 @@ export class PickingUseCases {
 
         const deductResult = await this._deductInventory(provisionalItem, beforeItem, {
           warehouseLocationId,
+          warehouseId: orderForPick?.warehouseId ?? null,
           userId,
           inventoryCore: txInventoryCore,
           pickMethod,
@@ -895,7 +897,7 @@ export class PickingUseCases {
     }
 
     // Log the action (fire-and-forget)
-    const order = await this.storage.getOrderById(item.orderId);
+    const order = orderForPick ?? await this.storage.getOrderById(item.orderId);
     const pickerId = order?.assignedPickerId;
     const picker = pickerId ? await this.storage.getUser(pickerId) : null;
 
@@ -986,6 +988,7 @@ export class PickingUseCases {
     if (status === "completed" && beforeItem.status !== "completed") {
       const deductResult = completedDeductResult ?? await this._deductInventory(item, beforeItem, {
         warehouseLocationId,
+        warehouseId: order?.warehouseId ?? null,
         userId,
         pickMethod,
       });
@@ -1436,7 +1439,7 @@ export class PickingUseCases {
   private async _deductInventory(
     item: OrderItem,
     beforeItem: OrderItem,
-    opts: { warehouseLocationId?: number; userId?: string; inventoryCore?: InventoryCore; pickMethod?: string },
+    opts: { warehouseLocationId?: number; warehouseId?: number | null; userId?: string; inventoryCore?: InventoryCore; pickMethod?: string },
   ): Promise<DeductInventoryResult> {
     const pickedQty = item.pickedQuantity || item.quantity;
     const productVariant = await this.storage.getProductVariantBySku(item.sku);
@@ -1449,12 +1452,31 @@ export class PickingUseCases {
 
     const levels = await this.storage.getInventoryLevelsByProductVariantId(productVariant.id);
     const allLocations = await this.storage.getAllWarehouseLocations();
+    const warehouseId = opts.warehouseId != null ? Number(opts.warehouseId) : null;
+    const belongsToOrderWarehouse = (loc: WarehouseLocation | undefined): boolean => {
+      if (!loc || warehouseId == null || loc.warehouseId == null) return true;
+      return Number(loc.warehouseId) === warehouseId;
+    };
 
     // Resolve assigned bin info for context (even if deduction fails)
     let assignedLocationId: number | null = null;
     let assignedLocationCode: string | null = null;
     if (item.location && item.location !== "UNASSIGNED") {
-      const assignedLoc = allLocations.find(loc => loc.code === item.location);
+      const assignedCode = item.location.trim().toUpperCase();
+      const assignedMatches = allLocations.filter(loc => loc.code?.toUpperCase() === assignedCode);
+      const qtyAtLocation = (loc: WarehouseLocation | undefined): number => {
+        if (!loc) return 0;
+        const level = levels.find((l: any) => Number(l.warehouseLocationId) === Number(loc.id));
+        return Number(level?.variantQty ?? 0);
+      };
+      const isActivePickableLocation = (loc: WarehouseLocation | undefined): boolean =>
+        loc?.isPickable === 1 && loc?.isActive === 1 && !loc?.cycleCountFreezeId;
+      const assignedLoc = warehouseId != null
+        ? assignedMatches.find(loc => loc.warehouseId != null && Number(loc.warehouseId) === warehouseId)
+          ?? assignedMatches.find(loc => loc.warehouseId == null)
+        : assignedMatches.find(loc => isActivePickableLocation(loc) && qtyAtLocation(loc) > 0)
+          ?? assignedMatches.find(loc => isActivePickableLocation(loc) && loc.locationType === "pick")
+          ?? assignedMatches[0];
       if (assignedLoc) {
         assignedLocationId = assignedLoc.id;
         assignedLocationCode = assignedLoc.code;
@@ -1474,6 +1496,7 @@ export class PickingUseCases {
         return { level: l, loc };
       })
       .filter(({ loc }) => loc?.isPickable === 1 && !loc.cycleCountFreezeId)
+      .filter(({ loc }) => belongsToOrderWarehouse(loc))
       .sort((a, b) => (pickablePriority[a.loc?.locationType as string] ?? 99) - (pickablePriority[b.loc?.locationType as string] ?? 99));
 
     // Try the location already assigned to this order item.
@@ -1513,6 +1536,19 @@ export class PickingUseCases {
     const inventoryCore = opts.inventoryCore ?? this.inventoryCore;
 
     const pickLocation = allLocations.find(l => l.id === pickLocationId);
+    if (!belongsToOrderWarehouse(pickLocation)) {
+      return {
+        success: false,
+        error: "wrong_warehouse_location",
+        message: `Bin ${pickLocation?.code || pickLocationId} belongs to warehouse ${pickLocation?.warehouseId}, not order warehouse ${warehouseId}`,
+        productVariantId: productVariant.id,
+        locationId: pickLocationId,
+        locationCode: pickLocation?.code || assignedLocationCode,
+        systemQty: 0,
+        pickerBlocking: false,
+        shipmentBlocking: true,
+      };
+    }
     const currentLevel = levels.find((l: any) => l.warehouseLocationId === pickLocationId);
     const systemQtyBeforePick = currentLevel?.variantQty ?? 0;
     let scanAutoResolved: ScanAutoResolvedInventory | undefined;
