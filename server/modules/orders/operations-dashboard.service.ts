@@ -592,6 +592,12 @@ export class OperationsDashboardService {
               AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
               AND COALESCE(demand.active_pending_lines, 0) = 0
             THEN 'stale_replen_no_demand'
+            WHEN rt.status IN ('pending', 'assigned')
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+              AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
+            THEN 'stale_replen_no_demand'
             WHEN rt.status IN ('blocked', 'in_progress')
             THEN 'stuck_replen'
             WHEN rt.status IN ('pending', 'assigned')
@@ -606,6 +612,12 @@ export class OperationsDashboardService {
               AND COALESCE(rt.qty_target_units, 0) = 0
               AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
               AND COALESCE(demand.active_pending_lines, 0) = 0
+            THEN 4
+            WHEN rt.status IN ('pending', 'assigned')
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+              AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
             THEN 4
             WHEN rt.status = 'blocked' THEN 1
             WHEN rt.status = 'in_progress' THEN 2
@@ -639,6 +651,12 @@ export class OperationsDashboardService {
               AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
               AND COALESCE(demand.active_pending_lines, 0) = 0
             THEN 'no active demand and no executable replen quantity'
+            WHEN rt.status IN ('pending', 'assigned')
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+              AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
+            THEN 'no active demand and task source no longer has enough stock'
             WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
             WHEN rt.status = 'in_progress' THEN 'in progress longer than 1h'
             WHEN COALESCE(demand.active_pending_lines, 0) > 0 THEN 'active demand waiting on queued replen'
@@ -652,6 +670,12 @@ export class OperationsDashboardService {
               AND COALESCE(rt.qty_target_units, 0) = 0
               AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
               AND COALESCE(demand.active_pending_lines, 0) = 0
+            THEN 'cancel_no_demand'
+            WHEN rt.status IN ('pending', 'assigned')
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+              AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
             THEN 'cancel_no_demand'
             WHEN rt.status = 'blocked' THEN 'resolve_blocker'
             ELSE 'execute_or_cancel'
@@ -671,6 +695,9 @@ export class OperationsDashboardService {
             AND oi.status = 'pending'
             AND oi.requires_shipping = 1
         ) demand ON true
+        LEFT JOIN inventory.inventory_levels source_level
+          ON source_level.product_variant_id = rt.source_product_variant_id
+         AND source_level.warehouse_location_id = rt.from_location_id
         WHERE rt.status NOT IN ('completed', 'cancelled')
           AND (
             rt.status = 'blocked'

@@ -887,6 +887,66 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     expect(checkSpy).toHaveBeenCalledWith(1);
   });
 
+  it("re-resolves an executable task source before execution when the frozen source is empty", async () => {
+    const updates: Array<{ table: unknown; value: any }> = [];
+    const task = {
+      id: 765,
+      fromLocationId: 111,
+      toLocationId: 1331,
+      pickProductVariantId: 66,
+      sourceProductVariantId: 438,
+      qtySourceUnits: 1,
+      qtyTargetUnits: 750,
+      status: "pending",
+      notes: "Old source",
+    };
+    const db = {
+      update: vi.fn((table: unknown) => ({
+        set: vi.fn((value: any) => {
+          updates.push({ table, value });
+          return { where: vi.fn(async () => []) };
+        }),
+      })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const serviceAny = service as any;
+    vi.spyOn(serviceAny, "getInventoryQty").mockImplementation(async (variantId: number, locationId: number) => {
+      if (variantId === 438 && locationId === 111) return 0;
+      if (variantId === 67 && locationId === 1232) return 36;
+      return 0;
+    });
+    vi.spyOn(serviceAny, "evaluateReplenNeed").mockResolvedValue({
+      status: "needed_with_source",
+      sourceLocation: { id: 1232, code: "F-02" },
+      sourceVariant: { id: 67, sku: "ARM-ENV-SGL-C700" },
+      resolvedSourceVariantId: 67,
+      qtySourceUnits: 1,
+      qtyTargetUnits: 700,
+      params: { replenMethod: "case_break" },
+    });
+    vi.spyOn(serviceAny, "getTaskById").mockResolvedValue(null);
+
+    const result = await serviceAny.reResolveTaskSourceBeforeExecute(task, "admin");
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      table: replenTasks,
+      value: {
+        fromLocationId: 1232,
+        sourceProductVariantId: 67,
+        qtySourceUnits: 1,
+        qtyTargetUnits: 700,
+        replenMethod: "case_break",
+        exceptionReason: null,
+      },
+    });
+    expect(result).toMatchObject({
+      fromLocationId: 1232,
+      sourceProductVariantId: 67,
+      qtyTargetUnits: 700,
+    });
+  });
+
   it("cancels stale no-demand health tasks through the bounded cleanup path", async () => {
     const db = {
       execute: vi.fn(async () => ({ rows: [{ id: 977 }, { id: 962 }] })),
@@ -899,7 +959,6 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       userId: "admin",
     });
 
-    expect(db.execute).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({
       mode: "stale_no_demand",
       cancelledStaleNoDemand: 2,
@@ -908,6 +967,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       cancelledDuplicateTaskIds: [],
       keptDuplicateTaskIds: [],
     });
+    expect(db.execute).toHaveBeenCalledTimes(2);
   });
 
   it("cancels duplicate active tasks while reporting the task kept", async () => {

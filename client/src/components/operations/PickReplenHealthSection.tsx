@@ -46,6 +46,7 @@ type CleanupRequest = {
 
 type CleanupResult = {
   cancelledStaleNoDemand: number;
+  cancelledStaleBacklog?: number;
   cancelledDuplicates: number;
   queuedReplen?: number;
 };
@@ -265,7 +266,7 @@ export default function PickReplenHealthSection({
       return res.json() as Promise<CleanupResult>;
     },
     onSuccess: (result) => {
-      const cleaned = result.cancelledStaleNoDemand + result.cancelledDuplicates;
+      const cleaned = result.cancelledStaleNoDemand + (result.cancelledStaleBacklog ?? 0) + result.cancelledDuplicates;
       const queued = result.queuedReplen ?? 0;
       toast({
         title: queued > 0 ? "Replen queued" : "Replen cleanup complete",

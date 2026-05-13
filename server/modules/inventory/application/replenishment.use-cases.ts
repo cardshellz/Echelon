@@ -104,8 +104,10 @@ export type ReplenHealthCleanupMode = "all" | "stale_no_demand" | "duplicates";
 export type ReplenHealthCleanupResult = {
   mode: ReplenHealthCleanupMode;
   cancelledStaleNoDemand: number;
+  cancelledStaleBacklog: number;
   cancelledDuplicates: number;
   cancelledStaleNoDemandTaskIds: number[];
+  cancelledStaleBacklogTaskIds: number[];
   cancelledDuplicateTaskIds: number[];
   keptDuplicateTaskIds: number[];
 };
@@ -399,6 +401,116 @@ export class ReplenishmentUseCases {
       exceptionReason: "execute_failed",
       notes: `${task.notes || ""}\nExecute failed: ${message}`.trim(),
     }).where(eq(replenTasks.id, task.id));
+  }
+
+  private async getInventoryQty(
+    productVariantId: number | null | undefined,
+    warehouseLocationId: number | null | undefined,
+  ): Promise<number> {
+    if (!productVariantId || !warehouseLocationId) return 0;
+
+    const [level] = await this.db
+      .select({ variantQty: inventoryLevels.variantQty })
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.productVariantId, productVariantId),
+        eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+      ))
+      .limit(1);
+
+    return Number(level?.variantQty ?? 0);
+  }
+
+  private requiredSourceUnits(task: ReplenTask): number {
+    return Math.max(1, Number(task.qtySourceUnits ?? 0));
+  }
+
+  private async blockTaskNoCurrentSource(task: ReplenTask, reason: string): Promise<void> {
+    await this.db.update(replenTasks).set({
+      status: "blocked",
+      exceptionReason: "no_source_stock",
+      notes: `${task.notes || ""}\nBlocked before execution: ${reason}`.trim(),
+    }).where(eq(replenTasks.id, task.id));
+  }
+
+  private async reResolveTaskSourceBeforeExecute(task: ReplenTask, userId?: string): Promise<ReplenTask> {
+    const sourceVariantId = task.sourceProductVariantId ?? task.pickProductVariantId;
+    const requiredSourceUnits = this.requiredSourceUnits(task);
+    const currentSourceQty = await this.getInventoryQty(sourceVariantId, task.fromLocationId);
+    if (currentSourceQty >= requiredSourceUnits) return task;
+
+    if (!task.pickProductVariantId || !task.toLocationId) {
+      const reason = `current source has ${currentSourceQty}, needs ${requiredSourceUnits}, and task has no pick bin to re-resolve`;
+      await this.blockTaskNoCurrentSource(task, reason);
+      throw new Error(`source_stock_unavailable: ${reason}`);
+    }
+
+    const eval_ = await this.evaluateReplenNeed(task.pickProductVariantId, task.toLocationId, {
+      ignoreTaskId: task.id,
+    });
+
+    if (eval_.status === "skip") {
+      const reason = `re-evaluation skipped (${eval_.skipReason}) after source had ${currentSourceQty}, needs ${requiredSourceUnits}`;
+      await this.db.update(replenTasks).set({
+        status: "cancelled",
+        completedAt: new Date(),
+        notes: `${task.notes || ""}\nCancelled before execution: ${reason}`.trim(),
+      }).where(eq(replenTasks.id, task.id));
+      throw new Error(`replen_no_longer_needed: ${reason}`);
+    }
+
+    if (eval_.status === "dedup") {
+      const reason = `superseded by active replen task #${eval_.existingTaskId}`;
+      await this.db.update(replenTasks).set({
+        status: "cancelled",
+        completedAt: new Date(),
+        notes: `${task.notes || ""}\nCancelled before execution: ${reason}`.trim(),
+      }).where(eq(replenTasks.id, task.id));
+      throw new Error(`replen_superseded: ${reason}`);
+    }
+
+    if (eval_.status === "needed_stockout" || !eval_.sourceLocation) {
+      const reason = eval_.sourceResolutionIssue?.note
+        ?? `no replacement source found after source had ${currentSourceQty}, needs ${requiredSourceUnits}`;
+      await this.blockTaskNoCurrentSource(task, reason);
+      throw new Error(`source_stock_unavailable: ${reason}`);
+    }
+
+    const resolvedSourceVariantId = eval_.resolvedSourceVariantId ?? task.pickProductVariantId;
+    const resolvedSourceQty = await this.getInventoryQty(resolvedSourceVariantId, eval_.sourceLocation.id);
+    if (resolvedSourceQty < Math.max(1, eval_.qtySourceUnits)) {
+      const reason = `resolved source ${eval_.sourceVariant.sku ?? `#${resolvedSourceVariantId}`} at ${eval_.sourceLocation.code} has ${resolvedSourceQty}, needs ${eval_.qtySourceUnits}`;
+      await this.blockTaskNoCurrentSource(task, reason);
+      throw new Error(`source_stock_unavailable: ${reason}`);
+    }
+
+    const notes = [
+      task.notes || "",
+      `Re-resolved source before execution${userId ? ` by ${userId}` : ""}: ` +
+        `from location #${task.fromLocationId} variant #${sourceVariantId} ` +
+        `to ${eval_.sourceLocation.code} / ${eval_.sourceVariant.sku ?? `#${resolvedSourceVariantId}`}.`,
+    ].filter(Boolean).join("\n");
+
+    await this.db.update(replenTasks).set({
+      fromLocationId: eval_.sourceLocation.id,
+      sourceProductVariantId: resolvedSourceVariantId,
+      qtySourceUnits: eval_.qtySourceUnits,
+      qtyTargetUnits: eval_.qtyTargetUnits,
+      replenMethod: eval_.params.replenMethod,
+      exceptionReason: null,
+      notes,
+    }).where(eq(replenTasks.id, task.id));
+
+    return await this.getTaskById(task.id) ?? {
+      ...task,
+      fromLocationId: eval_.sourceLocation.id,
+      sourceProductVariantId: resolvedSourceVariantId,
+      qtySourceUnits: eval_.qtySourceUnits,
+      qtyTargetUnits: eval_.qtyTargetUnits,
+      replenMethod: eval_.params.replenMethod,
+      exceptionReason: null,
+      notes,
+    };
   }
 
   private async executeInlineTaskForPicker(
@@ -838,32 +950,34 @@ export class ReplenishmentUseCases {
       );
     }
 
+    const executableTask = await this.reResolveTaskSourceBeforeExecute(task as ReplenTask, userId);
+
     // Load source and pick variants
-    const [sourceVariant] = task.sourceProductVariantId
+    const [sourceVariant] = executableTask.sourceProductVariantId
       ? await this.db
           .select()
           .from(productVariants)
-          .where(eq(productVariants.id, task.sourceProductVariantId))
+          .where(eq(productVariants.id, executableTask.sourceProductVariantId))
           .limit(1)
       : [null];
 
-    const [pickVariant] = task.pickProductVariantId
+    const [pickVariant] = executableTask.pickProductVariantId
       ? await this.db
           .select()
           .from(productVariants)
-          .where(eq(productVariants.id, task.pickProductVariantId))
+          .where(eq(productVariants.id, executableTask.pickProductVariantId))
           .limit(1)
       : [null];
 
     // Read replen method from the task itself (persisted at creation).
     // Fall back to rule lookup for legacy tasks that predate the column.
-    let replenMethod = (task as any).replenMethod || "full_case";
-    if (replenMethod === "full_case" && task.replenRuleId) {
+    let replenMethod = (executableTask as any).replenMethod || "full_case";
+    if (replenMethod === "full_case" && executableTask.replenRuleId) {
       // Legacy fallback: task didn't have replenMethod, try the linked rule
       const [rule] = await this.db
         .select()
         .from(replenRules)
-        .where(eq(replenRules.id, task.replenRuleId))
+        .where(eq(replenRules.id, executableTask.replenRuleId))
         .limit(1);
       if (rule?.replenMethod) replenMethod = rule.replenMethod;
     }
@@ -896,26 +1010,26 @@ export class ReplenishmentUseCases {
         pickVariant &&
         sourceVariant.id !== pickVariant.id
       ) {
-        const baseUnitsFromSource = task.qtySourceUnits * sourceVariant.unitsPerVariant;
+        const baseUnitsFromSource = executableTask.qtySourceUnits * sourceVariant.unitsPerVariant;
         const pickVariantUnits = Math.floor(baseUnitsFromSource / pickVariant.unitsPerVariant);
         const remainder = baseUnitsFromSource - (pickVariantUnits * pickVariant.unitsPerVariant);
 
         if (pickVariantUnits <= 0) {
           throw new Error(
-            `Case break would produce 0 pick units: ${task.qtySourceUnits} x ${sourceVariant.unitsPerVariant} ` +
+            `Case break would produce 0 pick units: ${executableTask.qtySourceUnits} x ${sourceVariant.unitsPerVariant} ` +
             `base units / ${pickVariant.unitsPerVariant} per pick unit`,
           );
         }
 
-        const breakNotes = `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
+        const breakNotes = `Case break: ${executableTask.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
           (remainder > 0 ? ` (${remainder} base units remainder)` : "");
 
         // Decrement source variant via inventoryUseCases.adjustInventory()
         // (routes through audit trail, lot tracking, negative guards, and notifyChange)
         await invTx.adjustInventory({
           productVariantId: sourceVariant.id,
-          warehouseLocationId: task.fromLocationId,
-          qtyDelta: -task.qtySourceUnits,
+          warehouseLocationId: executableTask.fromLocationId,
+          qtyDelta: -executableTask.qtySourceUnits,
           reason: breakNotes,
           userId: userId ?? undefined,
         });
@@ -924,7 +1038,7 @@ export class ReplenishmentUseCases {
         // (routes through audit trail, lot tracking, and notifyChange)
         await invTx.adjustInventory({
           productVariantId: pickVariant.id,
-          warehouseLocationId: task.toLocationId,
+          warehouseLocationId: executableTask.toLocationId,
           qtyDelta: pickVariantUnits,
           reason: `Replen case-break to pick location` +
             (remainder > 0 ? ` (${remainder} base units lost in conversion)` : ""),
@@ -933,15 +1047,15 @@ export class ReplenishmentUseCases {
 
         moved = baseUnitsFromSource;
       } else {
-        const variantId = task.sourceProductVariantId ?? task.pickProductVariantId!;
+        const variantId = executableTask.sourceProductVariantId ?? executableTask.pickProductVariantId!;
         const variant = sourceVariant ?? pickVariant;
-        const baseUnits = task.qtySourceUnits * (variant?.unitsPerVariant ?? 1);
+        const baseUnits = executableTask.qtySourceUnits * (variant?.unitsPerVariant ?? 1);
 
         await invTx.transfer({
           productVariantId: variantId,
-          fromLocationId: task.fromLocationId,
-          toLocationId: task.toLocationId,
-          qty: task.qtySourceUnits,
+          fromLocationId: executableTask.fromLocationId,
+          toLocationId: executableTask.toLocationId,
+          qty: executableTask.qtySourceUnits,
           userId,
           notes: `Replen task #${taskId} (full_case)`,
         });
@@ -955,7 +1069,7 @@ export class ReplenishmentUseCases {
           status: "completed",
           qtyCompleted: moved,
           completedAt: new Date(),
-          assignedTo: userId ?? task.assignedTo,
+          assignedTo: userId ?? executableTask.assignedTo,
         })
         .where(eq(replenTasks.id, taskId));
 
@@ -1099,16 +1213,21 @@ export class ReplenishmentUseCases {
     const result: ReplenHealthCleanupResult = {
       mode,
       cancelledStaleNoDemand: 0,
+      cancelledStaleBacklog: 0,
       cancelledDuplicates: 0,
       cancelledStaleNoDemandTaskIds: [],
+      cancelledStaleBacklogTaskIds: [],
       cancelledDuplicateTaskIds: [],
       keptDuplicateTaskIds: [],
     };
 
     if (mode === "all" || mode === "stale_no_demand") {
       const taskIds = await this.cancelStaleNoDemandTasks(params);
+      const backlogTaskIds = await this.cancelStaleNoDemandBacklogTasks(params);
       result.cancelledStaleNoDemand = taskIds.length;
+      result.cancelledStaleBacklog = backlogTaskIds.length;
       result.cancelledStaleNoDemandTaskIds = taskIds;
+      result.cancelledStaleBacklogTaskIds = backlogTaskIds;
     }
 
     if (mode === "all" || mode === "duplicates") {
@@ -1169,6 +1288,92 @@ export class ReplenishmentUseCases {
     `);
 
     return (result.rows as Array<{ id: number | string }>).map((row) => Number(row.id));
+  }
+
+  private async cancelStaleNoDemandBacklogTasks(params: {
+    taskId?: number | null;
+    limit?: number;
+    userId?: string;
+  }): Promise<number[]> {
+    const taskFilter = params.taskId ? sql`AND rt.id = ${params.taskId}` : sql``;
+    const limit = this.cleanupLimit(params.limit);
+
+    const candidatesResult = await this.db.execute(sql`
+      SELECT
+        rt.id,
+        rt.from_location_id AS "fromLocationId",
+        rt.to_location_id AS "toLocationId",
+        rt.product_id AS "productId",
+        rt.source_product_variant_id AS "sourceProductVariantId",
+        rt.pick_product_variant_id AS "pickProductVariantId",
+        rt.qty_source_units AS "qtySourceUnits",
+        rt.qty_target_units AS "qtyTargetUnits",
+        rt.status,
+        rt.priority,
+        rt.triggered_by AS "triggeredBy",
+        rt.execution_mode AS "executionMode",
+        rt.replen_method AS "replenMethod",
+        rt.auto_replen AS "autoReplen",
+        rt.blocks_shipment AS "blocksShipment",
+        rt.warehouse_id AS "warehouseId",
+        rt.assigned_to AS "assignedTo",
+        rt.notes,
+        rt.exception_reason AS "exceptionReason",
+        rt.depends_on_task_id AS "dependsOnTaskId",
+        rt.created_at AS "createdAt"
+      FROM inventory.replen_tasks rt
+      LEFT JOIN catalog.product_variants pv ON pv.id = rt.pick_product_variant_id
+      WHERE rt.status IN ('pending', 'assigned')
+        AND rt.blocks_shipment = false
+        AND rt.depends_on_task_id IS NULL
+        ${taskFilter}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.order_items oi
+          JOIN wms.orders o
+            ON o.id = oi.order_id
+           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+          WHERE oi.sku = pv.sku
+            AND oi.status = 'pending'
+            AND oi.requires_shipping = 1
+        )
+      ORDER BY rt.created_at ASC, rt.id ASC
+      LIMIT ${limit}
+    `);
+
+    const cancelled: number[] = [];
+    for (const task of candidatesResult.rows as ReplenTask[]) {
+      if (!task.pickProductVariantId || !task.toLocationId) continue;
+
+      const eval_ = await this.evaluateReplenNeed(task.pickProductVariantId, task.toLocationId, {
+        ignoreTaskId: task.id,
+      });
+
+      let reason: string | null = null;
+      if (eval_.status === "skip") {
+        reason = `re-evaluation skipped (${eval_.skipReason})`;
+      } else if (eval_.status === "needed_stockout") {
+        reason = eval_.sourceResolutionIssue?.note ?? "no source stock found during no-demand cleanup";
+      } else if (eval_.status === "needed_with_source") {
+        const resolvedSourceVariantId = eval_.resolvedSourceVariantId ?? task.pickProductVariantId;
+        const sourceQty = await this.getInventoryQty(resolvedSourceVariantId, eval_.sourceLocation?.id);
+        if (sourceQty < Math.max(1, eval_.qtySourceUnits)) {
+          reason = `resolved source has ${sourceQty}, needs ${eval_.qtySourceUnits}`;
+        }
+      }
+
+      if (!reason) continue;
+
+      const auditNote = `Cancelled by replen health cleanup${params.userId ? ` by ${params.userId}` : ""}: no active demand; ${reason}`;
+      await this.db.update(replenTasks).set({
+        status: "cancelled",
+        completedAt: new Date(),
+        notes: `${task.notes || ""}\n${auditNote}`.trim(),
+      }).where(eq(replenTasks.id, task.id));
+      cancelled.push(Number(task.id));
+    }
+
+    return cancelled;
   }
 
   private async cancelDuplicateActiveTasks(params: {
@@ -1549,14 +1754,17 @@ export class ReplenishmentUseCases {
 
     const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
     if (existingTask) {
-      console.log(`${_tag} reusing active task ${existingTask.id} status=${existingTask.status}`);
+      const currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
+        ? await this.reResolveTaskSourceBeforeExecute(existingTask, userId)
+        : existingTask;
+      console.log(`${_tag} reusing active task ${currentTask.id} status=${currentTask.status}`);
       if (
-        existingTask.executionMode === "inline" &&
-        EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
+        currentTask.executionMode === "inline" &&
+        EXECUTABLE_REPLEN_TASK_STATUSES.includes(currentTask.status)
       ) {
-        return this.executeInlineTaskForPicker(existingTask, userId, _tag);
+        return this.executeInlineTaskForPicker(currentTask, userId, _tag);
       }
-      return { task: existingTask, moved: 0 };
+      return { task: currentTask, moved: 0 };
     }
 
     // Re-derive guidance from current DB state (fresh, not stale)
@@ -1649,8 +1857,11 @@ export class ReplenishmentUseCases {
 
     const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
     if (existingTask) {
-      console.log(`${_tag} reusing active task ${existingTask.id} status=${existingTask.status}`);
-      return { task: existingTask, moved: 0 };
+      const currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
+        ? await this.reResolveTaskSourceBeforeExecute(existingTask, userId)
+        : existingTask;
+      console.log(`${_tag} reusing active task ${currentTask.id} status=${currentTask.status}`);
+      return { task: currentTask, moved: 0 };
     }
 
     const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId, {
