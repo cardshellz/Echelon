@@ -122,6 +122,14 @@ function makePickItemHarness(replenResult: { task: any; moved: number } | null) 
       productId: 10,
       unitsPerVariant: 1,
     })),
+    getProductVariantById: vi.fn(async (id: number) => ({
+      id,
+      sku: "SKU-1",
+      name: "Each",
+      productId: 10,
+      unitsPerVariant: 1,
+      hierarchyLevel: 0,
+    })),
     getInventoryLevelsByProductVariantId: vi.fn(async () => levels.map(level => ({ ...level }))),
     getAllWarehouseLocations: vi.fn(async () => locations),
     getOrderById: vi.fn(async () => ({
@@ -542,7 +550,65 @@ describe("PickingUseCases post-pick replen context", () => {
       taskStatus: "completed",
       autoExecuted: true,
       autoExecutedMoved: 8,
+      autoExecutedMovedBaseUnits: 8,
+      autoExecutedMovedUom: "units",
       qtyToMove: 8,
+    });
+  });
+
+  it("reports case-break inline replen movement in pick-bin units for picker verification", async () => {
+    const { service, storage } = makePickItemHarness({
+      task: {
+        id: 123,
+        status: "completed",
+        replenMethod: "case_break",
+        sourceProductVariantId: 200,
+        pickProductVariantId: 100,
+        qtySourceUnits: 1,
+        qtyTargetUnits: 1000,
+      },
+      moved: 1000,
+    });
+    storage.getProductVariantById.mockImplementation(async (id: number) => {
+      if (id === 100) {
+        return {
+          id,
+          sku: "ARM-ENV-SGL-P25",
+          name: "Pack of 25",
+          productId: 10,
+          unitsPerVariant: 25,
+          hierarchyLevel: 1,
+        };
+      }
+
+      return {
+        id,
+        sku: "ARM-ENV-SGL-C1000",
+        name: "Case of 1000",
+        productId: 10,
+        unitsPerVariant: 1000,
+        hierarchyLevel: 3,
+      };
+    });
+
+    const result = await service.pickItem(500, {
+      status: "completed",
+      pickedQuantity: 1,
+      pickMethod: "scan",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({ success: true });
+    if (!result.success) throw new Error("pickItem should have succeeded");
+    expect(result.inventory.replen).toMatchObject({
+      triggered: true,
+      taskId: 123,
+      taskStatus: "completed",
+      autoExecuted: true,
+      autoExecutedMoved: 40,
+      autoExecutedMovedBaseUnits: 1000,
+      autoExecutedMovedUom: "packs",
+      qtyToMove: 40,
     });
   });
 });
