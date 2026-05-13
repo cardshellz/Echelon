@@ -56,6 +56,7 @@ describe("OperationsDashboardService pick/replen health", () => {
     expect(db.execute).toHaveBeenCalledTimes(2);
     expect(result.counts).toMatchObject({
       stuck_replen: 2,
+      stale_replen_no_demand: 0,
       short_pick_unresolved: 1,
       duplicate_replen: 0,
     });
@@ -97,5 +98,58 @@ describe("OperationsDashboardService pick/replen health", () => {
 
     expect(result.total).toBe(1);
     expect(result.pageSize).toBe(100);
+  });
+
+  it("maps stale no-demand replen rows as cleanup work", async () => {
+    const db = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({
+          rows: [{ type: "stale_replen_no_demand", count: "1" }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{
+            type: "stale_replen_no_demand",
+            source_id: "977",
+            priority: "4",
+            task_id: "977",
+            exception_id: null,
+            cycle_count_id: null,
+            order_id: null,
+            order_number: null,
+            order_item_id: null,
+            variant_id: "161",
+            sku: "SHLZ-TOP-55PT-SLIM-BLU-C1000",
+            name: "Slim Blue Case",
+            location_id: "1259",
+            location_code: "H-01",
+            source_location_code: "H-01",
+            status: "blocked",
+            exception_reason: "no_source_stock",
+            qty: "0",
+            age_hours: "12",
+            created_at: "2026-05-12T01:00:00.000Z",
+            detail: "no active demand and no executable replen quantity",
+            action: "cancel_no_demand",
+          }],
+        }),
+    };
+    const service = new OperationsDashboardService(db as any);
+
+    const result = await service.getPickReplenHealth({
+      filter: "stale_replen_no_demand",
+    });
+
+    expect(result.counts.stale_replen_no_demand).toBe(1);
+    expect(result.total).toBe(1);
+    expect(result.items).toEqual([expect.objectContaining({
+      id: "stale_replen_no_demand-977",
+      type: "stale_replen_no_demand",
+      priority: 4,
+      taskId: 977,
+      sku: "SHLZ-TOP-55PT-SLIM-BLU-C1000",
+      qty: 0,
+      detail: "no active demand and no executable replen quantity",
+      action: "cancel_no_demand",
+    })]);
   });
 });

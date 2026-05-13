@@ -321,6 +321,43 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
   });
 
+  it("does not let no-demand source review tasks shadow fresh source resolution", async () => {
+    const reviewOnlyTask = {
+      id: 765,
+      status: "blocked",
+      blocksShipment: false,
+      sourceProductVariantId: 438,
+      pickProductVariantId: 66,
+      toLocationId: 1,
+      fromLocationId: 1,
+      qtySourceUnits: 0,
+      qtyTargetUnits: 0,
+      replenMethod: "case_break",
+      executionMode: "queue",
+      exceptionReason: "no_source_stock",
+      notes: "Blocked: no source stock found in pick locations",
+    };
+    const { db, sourceLocation } = makeSourceResolutionDb({ activeTask: reviewOnlyTask });
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
+      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+    vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
+
+    const guidance = await service.checkReplenNeeded(66, 1, {
+      currentQtyOverride: 0,
+    });
+
+    expect(findSourceLocation).toHaveBeenCalled();
+    expect(guidance).toMatchObject({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceVariantId: 67,
+      sourceVariantSku: "ARM-ENV-SGL-C700",
+    });
+    expect(guidance.existingTaskId).toBeUndefined();
+  });
+
   it("does not create fake no-source replen tasks for non-shipment event checks", async () => {
     const { db } = makeSourceResolutionDb({ explicitSourceRule: true });
     const service = new ReplenishmentUseCases(db as any, {} as any);

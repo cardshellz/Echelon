@@ -236,10 +236,19 @@ export class ReplenishmentUseCases {
         eq(replenTasks.pickProductVariantId, pickVariantId),
         eq(replenTasks.toLocationId, toLocationId),
         inArray(replenTasks.status, ACTIVE_REPLEN_TASK_STATUSES),
+        sql`NOT (
+          ${replenTasks.status} = 'blocked'
+          AND ${replenTasks.blocksShipment} = false
+          AND ${replenTasks.dependsOnTaskId} IS NULL
+          AND COALESCE(${replenTasks.qtySourceUnits}, 0) = 0
+          AND COALESCE(${replenTasks.qtyTargetUnits}, 0) = 0
+          AND ${replenTasks.exceptionReason} IN ('no_source_stock', 'no_source_variant')
+        )`,
       ))
       .limit(1);
 
-    return (task as ReplenTask | undefined) ?? null;
+    const activeTask = task as ReplenTask | undefined;
+    return activeTask && !this.isNoSourceReviewOnlyTask(activeTask) ? activeTask : null;
   }
 
   private async getTaskById(taskId: number): Promise<ReplenTask | null> {

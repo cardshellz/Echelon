@@ -50,6 +50,7 @@ const VALID_ACTION_FILTERS = ["all", "negative_inventory", "aging_receiving", "p
 const VALID_PICK_REPLEN_HEALTH_FILTERS = [
   "all",
   "stuck_replen",
+  "stale_replen_no_demand",
   "duplicate_replen",
   "short_pick_unresolved",
   "open_allocation_exception",
@@ -580,8 +581,30 @@ export class OperationsDashboardService {
     const healthCte = sql`
       WITH health_items AS (
         SELECT
-          'stuck_replen'::text as type,
-          CASE WHEN rt.status = 'blocked' THEN 1 WHEN rt.status = 'in_progress' THEN 2 ELSE 3 END as priority,
+          CASE
+            WHEN rt.status = 'blocked'
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(rt.qty_source_units, 0) = 0
+              AND COALESCE(rt.qty_target_units, 0) = 0
+              AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+            THEN 'stale_replen_no_demand'
+            ELSE 'stuck_replen'
+          END::text as type,
+          CASE
+            WHEN rt.status = 'blocked'
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(rt.qty_source_units, 0) = 0
+              AND COALESCE(rt.qty_target_units, 0) = 0
+              AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+            THEN 4
+            WHEN rt.status = 'blocked' THEN 1
+            WHEN rt.status = 'in_progress' THEN 2
+            ELSE 3
+          END as priority,
           rt.id::text as source_id,
           rt.id as task_id,
           NULL::int as exception_id,
@@ -601,16 +624,45 @@ export class OperationsDashboardService {
           FLOOR(EXTRACT(EPOCH FROM NOW() - COALESCE(rt.started_at, rt.assigned_at, rt.created_at)) / 3600)::int as age_hours,
           rt.created_at,
           CASE
+            WHEN rt.status = 'blocked'
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(rt.qty_source_units, 0) = 0
+              AND COALESCE(rt.qty_target_units, 0) = 0
+              AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+            THEN 'no active demand and no executable replen quantity'
             WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
             WHEN rt.status = 'in_progress' THEN 'in progress longer than 1h'
             ELSE rt.status || ' longer than 4h'
           END as detail,
-          CASE WHEN rt.status = 'blocked' THEN 'resolve_blocker' ELSE 'execute_or_cancel' END as action
+          CASE
+            WHEN rt.status = 'blocked'
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(rt.qty_source_units, 0) = 0
+              AND COALESCE(rt.qty_target_units, 0) = 0
+              AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+            THEN 'cancel_no_demand'
+            WHEN rt.status = 'blocked' THEN 'resolve_blocker'
+            ELSE 'execute_or_cancel'
+          END as action
         FROM inventory.replen_tasks rt
         JOIN warehouse.warehouse_locations wl_to ON rt.to_location_id = wl_to.id
         LEFT JOIN warehouse.warehouse_locations wl_from ON rt.from_location_id = wl_from.id
         LEFT JOIN catalog.product_variants pv ON rt.pick_product_variant_id = pv.id
         LEFT JOIN wms.orders o ON rt.order_id = o.id
+        LEFT JOIN LATERAL (
+          SELECT COUNT(oi.id)::int AS active_pending_lines
+          FROM wms.order_items oi
+          JOIN wms.orders demand_order
+            ON demand_order.id = oi.order_id
+           AND COALESCE(demand_order.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+          WHERE oi.sku = pv.sku
+            AND oi.status = 'pending'
+            AND oi.requires_shipping = 1
+        ) demand ON true
         WHERE rt.status NOT IN ('completed', 'cancelled')
           AND (
             rt.status = 'blocked'

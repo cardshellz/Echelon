@@ -43,6 +43,11 @@ const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
     badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
     icon: AlertTriangle,
   },
+  stale_replen_no_demand: {
+    label: "Stale Replen",
+    badge: "bg-slate-100 text-slate-800 dark:bg-slate-900/30 dark:text-slate-400",
+    icon: RefreshCcw,
+  },
   duplicate_replen: {
     label: "Duplicate Replen",
     badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
@@ -78,6 +83,7 @@ const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
 const FILTERS: Array<{ value: PickReplenHealthFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "stuck_replen", label: "Stuck" },
+  { value: "stale_replen_no_demand", label: "Stale" },
   { value: "duplicate_replen", label: "Duplicates" },
   { value: "short_pick_unresolved", label: "Short Picks" },
   { value: "open_allocation_exception", label: "Exceptions" },
@@ -89,6 +95,7 @@ const FILTERS: Array<{ value: PickReplenHealthFilter; label: string }> = [
 const ACTION_LABELS: Record<string, string> = {
   resolve_blocker: "Resolve blocker",
   execute_or_cancel: "Execute or cancel",
+  cancel_no_demand: "Cancel stale task",
   cancel_duplicate: "Cancel duplicate",
   create_replen_or_exception: "Create task/exception",
   review_short_pick: "Review short pick",
