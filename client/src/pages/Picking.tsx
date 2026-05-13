@@ -1343,7 +1343,10 @@ export default function Picking() {
     }
   };
   
-  const [view, setView] = useState<"queue" | "picking" | "complete" | "exceptions">("queue");
+  const [view, setView] = useState<"queue" | "picking" | "complete" | "exceptions">(() => {
+    const value = new URLSearchParams(window.location.search).get("view");
+    return value === "picking" || value === "complete" || value === "exceptions" ? value : "queue";
+  });
   const [channelFilter, setChannelFilter] = useState<string>("all"); // 'all' | 'shopify' | 'ebay'
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
