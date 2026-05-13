@@ -190,16 +190,6 @@ type PickResponse = {
   inventory: PickInventoryContext;
 };
 
-function replenCountUomLabel(uom: string | null | undefined): string {
-  const label = uom?.trim();
-  return label ? label : "units";
-}
-
-function capitalizedReplenCountUomLabel(uom: string | null | undefined): string {
-  const label = replenCountUomLabel(uom);
-  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
-}
-
 type ResolveAllocationResponse = {
   success: boolean;
   item?: OrderItem;
@@ -1021,28 +1011,14 @@ export default function Picking() {
     },
   });
   
-  // Bin count dialog state (combined with replen confirmation)
+  // Bin count dialog state for true inventory discrepancies.
   const [binCountOpen, setBinCountOpen] = useState(false);
   const [binCountContext, setBinCountContext] = useState<PickInventoryContext | null>(null);
   const [binCountQty, setBinCountQty] = useState("");
-  const [didReplen, setDidReplen] = useState(false);
-  // @deprecated — kept for backward compat references, will be cleaned up
-  const [replenConfirmOpen, setReplenConfirmOpen] = useState(false);
-  const [pendingReplenTaskId, setPendingReplenTaskId] = useState<number | null>(null);
-  const [replenConfirmed, setReplenConfirmed] = useState(false);
   const binCountPendingRef = useRef(false); // Track bin count synchronously to prevent race conditions
   const orderCompletedPendingRef = useRef(false); // Defer order completion until API response confirms no binCount needed
   const focusedScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const scanPickInFlightRef = useRef<Set<number>>(new Set());
-  const replenCountUom = replenCountUomLabel(binCountContext?.replen.autoExecutedMovedUom);
-  const replenCountInputLabel = capitalizedReplenCountUomLabel(binCountContext?.replen.autoExecutedMovedUom);
-  const replenMovedBaseUnits = binCountContext?.replen.autoExecutedMovedBaseUnits ?? null;
-  const replenMovedPickUnits = binCountContext?.replen.autoExecutedMoved ?? null;
-  const showReplenBaseUnits =
-    replenMovedBaseUnits != null &&
-    replenMovedPickUnits != null &&
-    replenMovedBaseUnits !== replenMovedPickUnits &&
-    replenCountUom !== "units";
 
   // Mutation for updating items
   const updateItemMutation = useMutation({
@@ -1067,36 +1043,26 @@ export default function Picking() {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
 
       const replen = inventory?.replen;
-      const replenMoved = replen?.autoExecutedMoved ?? 0;
-      const shouldConfirmInlineReplen =
-        !!inventory?.locationId &&
-        replen?.triggered === true &&
-        replen.autoExecuted === true &&
-        replenMoved > 0;
-
-      if (shouldConfirmInlineReplen) {
-        binCountPendingRef.current = true;
-        setBinCountContext(inventory);
-        const expectedQty = Math.max(0, inventory.systemQtyAfter + replenMoved);
-        setBinCountQty(String(expectedQty));
-        setReplenConfirmOpen(true);
-      } else {
-        binCountPendingRef.current = false;
-        if (replen?.triggered) {
-          if (replen.autoExecutedFailed) {
-            toast({
-              title: "Replen needs review",
-              description: replen.autoExecuteFailReason
-                ? `Replen could not complete: ${replen.autoExecuteFailReason}`
-                : "Replen could not complete.",
-              variant: "destructive",
-            });
-          } else if (replen.taskStatus && replen.taskStatus !== "completed") {
-            toast({
-              title: "Replen queued",
-              description: "A replen task was created without interrupting picking.",
-            });
-          }
+      binCountPendingRef.current = false;
+      if (replen?.triggered) {
+        if (replen.autoExecutedFailed) {
+          toast({
+            title: "Replen needs review",
+            description: replen.autoExecuteFailReason
+              ? `Replen could not complete: ${replen.autoExecuteFailReason}`
+              : "Replen could not complete.",
+            variant: "destructive",
+          });
+        } else if (replen.autoExecuted) {
+          toast({
+            title: "Replen completed",
+            description: "Inventory moved without interrupting picking.",
+          });
+        } else if (replen.taskStatus && replen.taskStatus !== "completed") {
+          toast({
+            title: "Replen queued",
+            description: "A replen task was created without interrupting picking.",
+          });
         }
       }
 
@@ -1121,9 +1087,7 @@ export default function Picking() {
       binCountPendingRef.current = false;
       orderCompletedPendingRef.current = false;
       setBinCountOpen(false);
-      setReplenConfirmOpen(false);
       setBinCountContext(null);
-      setPendingReplenTaskId(null);
       setMultiQtyOpen(false);
 
       // Show error to user
@@ -1202,10 +1166,8 @@ export default function Picking() {
     onSuccess: (result: BinCountResponse) => {
       binCountPendingRef.current = false;
       setBinCountOpen(false);
-      setReplenConfirmOpen(false);
       setBinCountContext(null);
       setBinCountQty("");
-      setDidReplen(false);
 
       if (result.adjustment !== 0) {
         toast({
@@ -1265,63 +1227,6 @@ export default function Picking() {
     },
   });
 
-
-  // Simplified replen confirm — picker taps ✓ or ✗, we call /api/picking/replen-confirm
-  const replenConfirmMutation = useMutation({
-    mutationFn: async ({ sku, locationId, confirmed }: { sku: string; locationId: number; confirmed: boolean }) => {
-      const res = await fetch("/api/picking/replen-confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sku, locationId, confirmed }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(err.error || "Failed to confirm replen");
-      }
-      return res.json() as Promise<{ success: true; action: "confirmed" | "flagged" }>;
-    },
-    onSuccess: (result) => {
-      binCountPendingRef.current = false;
-      setReplenConfirmOpen(false);
-      setBinCountContext(null);
-      setBinCountQty("");
-
-      if (result.action === "confirmed") {
-        toast({ title: "Replen confirmed ✓", description: "Case break verified — inventory updated" });
-        playSound("success");
-      } else {
-        toast({
-          title: "Issue flagged",
-          description: "A lead has been notified to investigate the bin",
-        });
-        playSound("error");
-      }
-
-      // Complete order if deferred
-      if (orderCompletedPendingRef.current) {
-        orderCompletedPendingRef.current = false;
-        setTimeout(() => {
-          if (pickingMode === "batch") {
-            setActiveBatchId(null);
-          } else {
-            setActiveOrderId(null);
-          }
-          playSound("complete");
-          triggerHaptic("heavy");
-          setCurrentItemIndex(0);
-          setView("queue");
-        }, 500);
-      }
-    },
-    onError: (error: Error) => {
-      binCountPendingRef.current = false;
-      setReplenConfirmOpen(false);
-      setBinCountContext(null);
-      setBinCountQty("");
-      toast({ title: "Failed", description: error.message, variant: "destructive" });
-      playSound("error");
-    },
-  });
 
   // Mutation for marking order ready to ship
   const readyToShipMutation = useMutation({
@@ -1461,10 +1366,10 @@ export default function Picking() {
   // Keep focus on scan input - aggressive refocus for scanner devices
   const maintainFocus = useCallback(() => {
     // Don't steal focus when any dialog is open — let dialogs own their focus
-    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen && !allocationDialogOpen) {
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !allocationDialogOpen) {
       if (hiddenScannerRef.current) hiddenScannerRef.current.focus();
     }
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, allocationDialogOpen]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, allocationDialogOpen]);
 
   // Focus scan input on mount only — do NOT re-focus on every click/touch.
   // The global window keydown handler captures scanner input regardless of focus,
@@ -1481,10 +1386,10 @@ export default function Picking() {
 
   // Refocus after dialogs close (but not bin count — it has its own focus)
   useEffect(() => {
-    if (!shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen && !allocationDialogOpen) {
+    if (!shortPickOpen && !multiQtyOpen && !binCountOpen && !allocationDialogOpen) {
       setTimeout(maintainFocus, 100);
     }
-  }, [shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, allocationDialogOpen, maintainFocus]);
+  }, [shortPickOpen, multiQtyOpen, binCountOpen, allocationDialogOpen, maintainFocus]);
 
   // Prevent other inputs from stealing focus — but allow dialog inputs when a dialog is open
   useEffect(() => {
@@ -1492,7 +1397,7 @@ export default function Picking() {
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as HTMLElement;
         // If a dialog is open, let its inputs have focus normally
-        if (shortPickOpen || multiQtyOpen || binCountOpen || replenConfirmOpen || allocationDialogOpen) return;
+        if (shortPickOpen || multiQtyOpen || binCountOpen || allocationDialogOpen) return;
         // Otherwise redirect any stray input focus back to the scan input
         if (target !== manualInputRef.current && target.tagName === "INPUT") {
           e.preventDefault();
@@ -1503,7 +1408,7 @@ export default function Picking() {
       document.addEventListener("focusin", handleFocusIn);
       return () => document.removeEventListener("focusin", handleFocusIn);
     }
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, maintainFocus]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, maintainFocus]);
   
   // Auto-scroll to keep first pending item visible after each pick
   useEffect(() => {
@@ -1530,7 +1435,7 @@ export default function Picking() {
   // Global scanner capture - works with readOnly input to suppress keyboard
   // Captures all keystrokes and builds buffer, processes on Enter
   useEffect(() => {
-    if (view !== "picking" || shortPickOpen || multiQtyOpen || binCountOpen || replenConfirmOpen) {
+    if (view !== "picking" || shortPickOpen || multiQtyOpen || binCountOpen) {
       return;
     }
     
@@ -1598,7 +1503,7 @@ export default function Picking() {
         clearTimeout(scanBufferTimeoutRef.current);
       }
     };
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen]);
   
   // Claim error state
   const [claimError, setClaimError] = useState<string | null>(null);
@@ -1911,7 +1816,7 @@ export default function Picking() {
     }
     // Always refocus scan input after pick confirmation — even if a dialog opens briefly
     setTimeout(() => {
-      if (manualInputRef.current && !shortPickOpen && !binCountOpen && !replenConfirmOpen) {
+      if (manualInputRef.current && !shortPickOpen && !binCountOpen) {
         manualInputRef.current.focus();
       }
     }, 500);
@@ -4906,113 +4811,6 @@ export default function Picking() {
         </DialogContent>
       </Dialog>
       
-      {/* Simple Replen Confirm Dialog — shown after auto-replen executes */}
-      <Dialog open={replenConfirmOpen} onOpenChange={() => { /* non-dismissable */ }}>
-        <DialogContent className="w-[95vw] max-w-sm p-4 [&>button]:hidden" onPointerDownOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()} onInteractOutside={(e) => e.preventDefault()}>
-          <DialogHeader>
-            <DialogTitle className="flex items-center justify-center gap-2 text-blue-700">
-              <PackageCheck className="h-5 w-5" />
-              Confirm Replen Count
-            </DialogTitle>
-            {binCountContext && (
-              <DialogDescription className="text-center space-y-1">
-                <div>
-                  <span className="font-mono font-semibold">{binCountContext.sku}</span>
-                  {binCountContext.replen.autoExecutedMoved != null && (
-                    <span className="block text-sm text-blue-600 font-medium mt-1">
-                      {binCountContext.replen.autoExecutedMoved} {replenCountUom} moved to pick bin
-                      {showReplenBaseUnits && replenMovedBaseUnits != null && (
-                        <span className="block text-xs text-slate-500 font-normal">
-                          {replenMovedBaseUnits} pieces
-                        </span>
-                      )}
-                    </span>
-                  )}
-                </div>
-              </DialogDescription>
-            )}
-          </DialogHeader>
-
-          <div className="py-3 space-y-3">
-            <div className="space-y-2">
-              <Label htmlFor="replen-bin-count" className="text-sm font-medium">
-                {replenCountInputLabel} in pick bin now
-              </Label>
-              <Input
-                id="replen-bin-count"
-                type="number"
-                inputMode="numeric"
-                value={binCountQty}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val.length > 5) return;
-                  setBinCountQty(val);
-                }}
-                onKeyDown={(e) => {
-                  const qty = parseInt(binCountQty);
-                  if (e.key === "Enter" && !isNaN(qty) && qty >= 0 && qty <= 10000 && binCountContext?.locationId) {
-                    binCountMutation.mutate({
-                      sku: binCountContext.sku,
-                      locationId: binCountContext.locationId,
-                      binCount: qty,
-                      didReplen: true,
-                      replenAlreadyRecorded: true,
-                    });
-                  }
-                }}
-                max={10000}
-                min={0}
-                className="w-full h-14 text-xl text-center font-bold"
-                autoFocus
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <Button
-              size="lg"
-              className="h-16 text-base bg-emerald-600 hover:bg-emerald-700 flex flex-col gap-1"
-              disabled={binCountQty === "" || parseInt(binCountQty) > 10000 || !binCountContext?.locationId || binCountMutation.isPending}
-              onClick={() => {
-                const qty = parseInt(binCountQty);
-                if (binCountContext?.locationId && !isNaN(qty) && qty >= 0 && qty <= 10000) {
-                  binCountMutation.mutate({
-                    sku: binCountContext.sku,
-                    locationId: binCountContext.locationId,
-                    binCount: qty,
-                    didReplen: true,
-                    replenAlreadyRecorded: true,
-                  });
-                }
-              }}
-              data-testid="button-replen-confirmed"
-            >
-              <CheckCircle2 className="h-5 w-5" />
-              <span>Confirm</span>
-            </Button>
-            <Button
-              size="lg"
-              variant="outline"
-              className="h-16 text-base border-amber-400 text-amber-700 hover:bg-amber-50 flex flex-col gap-1"
-              disabled={replenConfirmMutation.isPending || binCountMutation.isPending}
-              onClick={() => {
-                if (binCountContext?.locationId) {
-                  replenConfirmMutation.mutate({
-                    sku: binCountContext.sku,
-                    locationId: binCountContext.locationId,
-                    confirmed: false,
-                  });
-                }
-              }}
-              data-testid="button-replen-flag-issue"
-            >
-              <AlertTriangle className="h-5 w-5" />
-              <span>Flag issue</span>
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
       {/* Bin Count Dialog — only shown for inventory discrepancy (deduction failure) */}
       <Dialog open={binCountOpen} onOpenChange={() => { /* non-dismissable — must confirm count */ }}>
         <DialogContent className="w-[95vw] max-w-sm p-4 [&>button]:hidden" onPointerDownOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()} onInteractOutside={(e) => e.preventDefault()}>

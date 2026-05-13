@@ -726,16 +726,12 @@ describe("PickingUseCases pick queue replen prediction", () => {
 });
 
 describe("PickingUseCases bin count replen feedback", () => {
-  it("reports queued replen as pending instead of completed", async () => {
+  it("does not create replen work from picker bin-count input", async () => {
     const { service } = makeService([
       { warehouseLocationId: 1, variantQty: 5 },
     ]);
-    (service as any).replenishment = {
-      createAndExecuteReplen: vi.fn(async () => ({
-        task: { id: 121, status: "pending" },
-        moved: 0,
-      })),
-    };
+    const createAndExecuteReplen = vi.fn();
+    (service as any).replenishment = { createAndExecuteReplen };
 
     const result = await service.handleBinCount({
       sku: "SKU-1",
@@ -746,10 +742,37 @@ describe("PickingUseCases bin count replen feedback", () => {
     });
 
     expect(result).toMatchObject({
-      replenTriggered: true,
-      replenTaskStatus: "pending",
+      replenTriggered: false,
+      replenTaskStatus: null,
       replenFailReason: null,
     });
+    expect(createAndExecuteReplen).not.toHaveBeenCalled();
+  });
+
+  it("does not cancel existing replen work from picker bin-count input", async () => {
+    const { service, storage } = makeService([
+      { warehouseLocationId: 1, variantQty: 5 },
+    ]);
+    storage.getPendingReplenTasksForLocation.mockResolvedValue([{
+      id: 121,
+      pickProductVariantId: 100,
+      status: "pending",
+    }]);
+
+    const result = await service.handleBinCount({
+      sku: "SKU-1",
+      locationId: 1,
+      binCount: 5,
+      didReplen: false,
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      replenTriggered: false,
+      replenTaskStatus: null,
+      replenFailReason: null,
+    });
+    expect(storage.updateReplenTask).not.toHaveBeenCalled();
   });
 });
 
