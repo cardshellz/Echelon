@@ -48,6 +48,7 @@ export interface ActionQueueResponse {
 export type PickReplenHealthFilter =
   | "all"
   | "stuck_replen"
+  | "stale_replen_no_demand"
   | "duplicate_replen"
   | "short_pick_unresolved"
   | "open_allocation_exception"
@@ -57,6 +58,7 @@ export type PickReplenHealthFilter =
 
 export interface PickReplenHealthCounts {
   stuck_replen: number;
+  stale_replen_no_demand: number;
   duplicate_replen: number;
   short_pick_unresolved: number;
   open_allocation_exception: number;
