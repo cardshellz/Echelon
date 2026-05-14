@@ -1534,6 +1534,12 @@ export default function Replenishment() {
                       const noSourceReviewTask = isNoSourceReviewTask(task);
                       const demandLines = activeDemandLines(task);
                       const demandUnits = activeDemandUnits(task);
+                      const hasActiveDemand = demandLines > 0 && OPEN_REPLEN_STATUSES.has(task.status);
+                      const canExecuteTask = ["pending", "assigned", "in_progress"].includes(task.status) && !noSourceReviewTask;
+                      const canMarkDoneWithoutMovement =
+                        ["pending", "assigned", "in_progress", "blocked"].includes(task.status) &&
+                        !noSourceReviewTask &&
+                        !hasActiveDemand;
                       return (
                       <TableRow
                         key={task.id}
@@ -1632,7 +1638,7 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="py-2">
                           <div className="flex gap-1">
-                            {task.status === "pending" && (
+                            {task.status === "pending" && !canExecuteTask && (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -1647,22 +1653,24 @@ export default function Replenishment() {
                                 <span className="hidden sm:inline">Start</span>
                               </Button>
                             )}
-                            {task.status === "in_progress" && (
+                            {canExecuteTask && (
+                              <Button
+                                size="sm"
+                                className="bg-green-500 hover:bg-green-600 min-h-[36px] text-xs"
+                                disabled={executeTaskMutation.isPending}
+                                onClick={() => executeTaskMutation.mutate(task.id)}
+                                data-testid={`button-complete-task-${task.id}`}
+                              >
+                                {executeTaskMutation.isPending ? (
+                                  <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
+                                ) : (
+                                  <CheckCircle className="w-3 h-3 sm:mr-1" />
+                                )}
+                                <span className="hidden sm:inline">Complete</span>
+                              </Button>
+                            )}
+                            {task.status === "in_progress" && !noSourceReviewTask && (
                               <>
-                                <Button
-                                  size="sm"
-                                  className="bg-green-500 hover:bg-green-600 min-h-[36px] text-xs"
-                                  disabled={executeTaskMutation.isPending}
-                                  onClick={() => executeTaskMutation.mutate(task.id)}
-                                  data-testid={`button-complete-task-${task.id}`}
-                                >
-                                  {executeTaskMutation.isPending ? (
-                                    <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
-                                  ) : (
-                                    <CheckCircle className="w-3 h-3 sm:mr-1" />
-                                  )}
-                                  <span className="hidden sm:inline">Complete</span>
-                                </Button>
                                 <Button
                                   size="sm"
                                   variant="destructive"
@@ -1680,7 +1688,7 @@ export default function Replenishment() {
                                   <Badge variant="outline" className="min-h-[36px] border-red-200 bg-red-50 px-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">
                                     Review only
                                   </Badge>
-                                ) : (
+                                ) : canMarkDoneWithoutMovement ? (
                                   <Button
                                     size="sm"
                                     variant="outline"
@@ -1694,8 +1702,13 @@ export default function Replenishment() {
                                     ) : (
                                       <CheckCircle className="w-3 h-3 sm:mr-1" />
                                     )}
-                                    <span className="hidden sm:inline">Done</span>
+                                    <span className="hidden sm:inline">Mark done</span>
                                   </Button>
+                                ) : null}
+                                {hasActiveDemand && !canExecuteTask && !noSourceReviewTask && (
+                                  <Badge variant="outline" className="min-h-[36px] border-orange-200 bg-orange-50 px-2 text-xs text-orange-700 dark:border-orange-900 dark:bg-orange-950/30 dark:text-orange-400">
+                                    Demand
+                                  </Badge>
                                 )}
                                 <Button
                                   size="sm"
