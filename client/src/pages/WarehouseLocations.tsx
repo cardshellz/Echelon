@@ -81,6 +81,29 @@ const DEFAULT_ZONES = [
   { code: "SHIP", name: "Shipping Lane", locationType: "staging" },
 ];
 
+function isValidPickFace(location: WarehouseLocation | null | undefined): boolean {
+  return !!location
+    && location.locationType === "pick"
+    && location.isPickable === 1
+    && location.warehouseId != null;
+}
+
+function LocationStatusBadges({ location }: { location: WarehouseLocation }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      <Badge variant="outline" className="text-xs">{location.locationType.replace('_', ' ')}</Badge>
+      {location.isPickable === 1 ? (
+        <Badge variant="secondary" className="text-xs">Pickable</Badge>
+      ) : (
+        <Badge variant="destructive" className="text-xs">Not pickable</Badge>
+      )}
+      {location.warehouseId == null && (
+        <Badge variant="destructive" className="text-xs">No warehouse</Badge>
+      )}
+    </div>
+  );
+}
+
 export default function WarehouseLocations() {
   const { hasPermission } = useAuth();
   const { toast } = useToast();
@@ -116,6 +139,7 @@ export default function WarehouseLocations() {
   });
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("all");
   const [binSearchQuery, setBinSearchQuery] = useState<string>("");
+  const assigningLocationCanReceiveSku = isValidPickFace(assigningToLocation);
 
   const canView = hasPermission("inventory", "view");
   const canEdit = hasPermission("inventory", "edit");
@@ -735,10 +759,8 @@ export default function WarehouseLocations() {
                         )}
                         <div className="space-y-1">
                           <div className="font-mono font-medium text-sm">{loc.code}</div>
-                          <div className="flex flex-wrap gap-1">
-                            <Badge variant="outline" className="text-xs">{loc.locationType.replace('_', ' ')}</Badge>
-                            {loc.zone && <Badge variant="secondary" className="text-xs">{loc.zone}</Badge>}
-                          </div>
+                          <LocationStatusBadges location={loc} />
+                          {loc.zone && <Badge variant="secondary" className="text-xs">{loc.zone}</Badge>}
                           <div className="text-xs text-muted-foreground">
                             {loc.name && <div>{loc.name}</div>}
                             <div>Warehouse: {getWarehouseName(loc.warehouseId)}</div>
@@ -834,7 +856,7 @@ export default function WarehouseLocations() {
                       <TableCell>{loc.level || '-'}</TableCell>
                       <TableCell>{loc.bin || '-'}</TableCell>
                       <TableCell>
-                        <Badge variant="outline">{loc.locationType.replace('_', ' ')}</Badge>
+                        <LocationStatusBadges location={loc} />
                       </TableCell>
                       {canEdit && (
                         <TableCell>
@@ -1511,9 +1533,21 @@ BULK,B,02,B,,Bulk B2,pallet,0"
               <MapPin className="h-5 w-5" />
               Location {assigningToLocation?.code}
             </DialogTitle>
+            {assigningToLocation && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span>{getWarehouseName(assigningToLocation.warehouseId)}</span>
+                <LocationStatusBadges location={assigningToLocation} />
+              </div>
+            )}
           </DialogHeader>
 
           <div className="space-y-4">
+            {assigningToLocation && !assigningLocationCanReceiveSku && (
+              <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                SKU assignment is blocked because this location is not an active warehouse-backed pick face.
+              </div>
+            )}
+
             {/* Assigned SKUs Section */}
             <div>
               <Label className="text-xs md:text-sm font-medium">Assigned SKUs ({productsInBin.length})</Label>
@@ -1553,60 +1587,67 @@ BULK,B,02,B,,Bulk B2,pallet,0"
               {/* Assign SKU Search */}
               {canEdit && (
                 <div className="mt-3">
-                  <Popover open={assignSkuOpen} onOpenChange={setAssignSkuOpen}>
-                    <PopoverTrigger asChild>
-                      <Button variant="outline" size="sm" className="w-full justify-start gap-2 h-10">
-                        <Plus className="h-4 w-4" />
-                        Assign SKU to this location
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-[350px] p-0" align="start">
-                      <Command shouldFilter={false}>
-                        <CommandInput
-                          placeholder="Search by SKU or product name..."
-                          value={assignSkuSearch}
-                          onValueChange={setAssignSkuSearch}
-                        />
-                        <CommandList>
-                          {assignSkuSearch.length < 2 ? (
-                            <CommandEmpty>Type at least 2 characters to search...</CommandEmpty>
-                          ) : filteredProducts.length === 0 ? (
-                            <CommandEmpty>No matching products found.</CommandEmpty>
-                          ) : (
-                            <CommandGroup>
-                              {filteredProducts.map((product) => (
-                                <CommandItem
-                                  key={product.variantId}
-                                  onSelect={() => {
-                                    if (assigningToLocation) {
-                                      assignProductMutation.mutate({
-                                        locationId: assigningToLocation.id,
-                                        productVariantId: product.variantId,
-                                      });
-                                    }
-                                  }}
-                                  className="cursor-pointer"
-                                >
-                                  <div className="flex items-center gap-2 w-full">
-                                    {product.imageUrl && (
-                                      <img src={product.imageUrl} alt="" className="w-8 h-8 object-cover rounded" />
-                                    )}
-                                    <div className="flex-1 min-w-0">
-                                      <div className="font-medium text-sm">{product.sku || "No SKU"}</div>
-                                      {product.matchedVariantSku && product.matchedVariantSku !== product.sku && (
-                                        <div className="text-xs text-blue-600 font-mono">variant: {product.matchedVariantSku}</div>
+                  {assigningLocationCanReceiveSku ? (
+                    <Popover open={assignSkuOpen} onOpenChange={setAssignSkuOpen}>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" size="sm" className="w-full justify-start gap-2 h-10">
+                          <Plus className="h-4 w-4" />
+                          Assign SKU to this location
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-[350px] p-0" align="start">
+                        <Command shouldFilter={false}>
+                          <CommandInput
+                            placeholder="Search by SKU or product name..."
+                            value={assignSkuSearch}
+                            onValueChange={setAssignSkuSearch}
+                          />
+                          <CommandList>
+                            {assignSkuSearch.length < 2 ? (
+                              <CommandEmpty>Type at least 2 characters to search...</CommandEmpty>
+                            ) : filteredProducts.length === 0 ? (
+                              <CommandEmpty>No matching products found.</CommandEmpty>
+                            ) : (
+                              <CommandGroup>
+                                {filteredProducts.map((product) => (
+                                  <CommandItem
+                                    key={product.variantId}
+                                    onSelect={() => {
+                                      if (assigningToLocation) {
+                                        assignProductMutation.mutate({
+                                          locationId: assigningToLocation.id,
+                                          productVariantId: product.variantId,
+                                        });
+                                      }
+                                    }}
+                                    className="cursor-pointer"
+                                  >
+                                    <div className="flex items-center gap-2 w-full">
+                                      {product.imageUrl && (
+                                        <img src={product.imageUrl} alt="" className="w-8 h-8 object-cover rounded" />
                                       )}
-                                      <div className="text-xs text-muted-foreground truncate">{product.title}</div>
+                                      <div className="flex-1 min-w-0">
+                                        <div className="font-medium text-sm">{product.sku || "No SKU"}</div>
+                                        {product.matchedVariantSku && product.matchedVariantSku !== product.sku && (
+                                          <div className="text-xs text-blue-600 font-mono">variant: {product.matchedVariantSku}</div>
+                                        )}
+                                        <div className="text-xs text-muted-foreground truncate">{product.title}</div>
+                                      </div>
                                     </div>
-                                  </div>
-                                </CommandItem>
-                              ))}
-                            </CommandGroup>
-                          )}
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
+                                  </CommandItem>
+                                ))}
+                              </CommandGroup>
+                            )}
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
+                  ) : (
+                    <Button variant="outline" size="sm" className="w-full justify-start gap-2 h-10" disabled>
+                      <Plus className="h-4 w-4" />
+                      Assign SKU to this location
+                    </Button>
+                  )}
                 </div>
               )}
             </div>
@@ -1648,8 +1689,8 @@ BULK,B,02,B,,Bulk B2,pallet,0"
                                   locationId: assigningToLocation.id,
                                   productVariantId: inv.variantId,
                                 })}
-                                disabled={assignProductMutation.isPending}
-                                title="Assign this SKU to this bin"
+                                disabled={assignProductMutation.isPending || !assigningLocationCanReceiveSku}
+                                title={assigningLocationCanReceiveSku ? "Assign this SKU to this bin" : "Location is not an active warehouse-backed pick face"}
                               >
                                 <Plus className="h-3 w-3 mr-1" />
                                 Assign
