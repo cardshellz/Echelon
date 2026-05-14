@@ -776,6 +776,72 @@ describe("PickingUseCases bin count replen feedback", () => {
   });
 });
 
+describe("PickingUseCases allocation blocker idempotency", () => {
+  const blockerInput = {
+    item: makeItem({ id: 501, orderId: 901, sku: "SKU-BLOCK" }),
+    order: { id: 901, orderNumber: "#901" },
+    productVariantId: 100,
+    exceptionType: "inventory_deduction_failed",
+    requestedQty: 3,
+    selectedLocationId: 1,
+    selectedLocationCode: "A-01",
+    reviewReason: "Bin A-01 has 0 for SKU-BLOCK, but 3 is needed",
+    metadata: {
+      pickerNonBlocking: true,
+      systemQty: 0,
+    },
+  };
+
+  it("reuses an exact open shipment blocker instead of inserting a duplicate", async () => {
+    const tx = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ id: 71, metadata: { firstSeen: true } }] })
+        .mockResolvedValueOnce({ rows: [{ id: 71, metadata: { firstSeen: true, shipmentBlocking: true } }] }),
+      insert: vi.fn(),
+    };
+    const db = {
+      transaction: vi.fn(async (callback: (txArg: any) => Promise<any>) => callback(tx)),
+      execute: vi.fn(),
+    };
+    const service = new PickingUseCases(db as any, {} as any, {} as any, {} as any);
+
+    await expect((service as any).createBlockingAllocationException(blockerInput)).resolves.toMatchObject({
+      created: false,
+      exception: { id: 71 },
+    });
+    expect(tx.insert).not.toHaveBeenCalled();
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("supersedes older open blockers before inserting the current blocker", async () => {
+    const returning = vi.fn(async () => [{ id: 72 }]);
+    const values = vi.fn(() => ({ returning }));
+    const tx = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: 70 }] }),
+      insert: vi.fn(() => ({ values })),
+    };
+    const db = {
+      transaction: vi.fn(async (callback: (txArg: any) => Promise<any>) => callback(tx)),
+      execute: vi.fn(),
+    };
+    const service = new PickingUseCases(db as any, {} as any, {} as any, {} as any);
+
+    await expect((service as any).createBlockingAllocationException(blockerInput)).resolves.toMatchObject({
+      created: true,
+      exception: { id: 72 },
+    });
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(tx.insert).toHaveBeenCalledTimes(1);
+    expect(values).toHaveBeenCalledWith(expect.objectContaining({
+      orderItemId: 501,
+      status: "blocked",
+      metadata: expect.objectContaining({ shipmentBlocking: true }),
+    }));
+  });
+});
+
 describe("PickingUseCases shipment blocker cleanup", () => {
   it("keeps shipment blockers open when the exception is held", async () => {
     const db = {

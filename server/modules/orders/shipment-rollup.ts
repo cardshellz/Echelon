@@ -726,18 +726,68 @@ export async function recomputeOrderStatusFromShipments(
 
   if (stampCompletedAt) {
     await db.execute(sql`
-      UPDATE wms.orders SET
-        warehouse_status = ${derived},
-        completed_at = ${now},
-        updated_at = ${now}
-      WHERE id = ${wmsOrderId}
+      WITH updated_order AS (
+        UPDATE wms.orders SET
+          warehouse_status = ${derived},
+          completed_at = ${now},
+          updated_at = ${now}
+        WHERE id = ${wmsOrderId}
+        RETURNING id
+      ),
+      closed_blockers AS (
+        UPDATE wms.allocation_exceptions
+        SET
+          status = CASE WHEN ${derived} = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
+          resolution = CONCAT('order_', ${derived}, '_shipment_rollup'),
+          resolved_at = ${now},
+          updated_at = ${now},
+          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+            'closedBy', 'shipment_rollup',
+            'closedByOrderStatus', ${derived},
+            'closedAt', ${now}
+          )
+        WHERE order_id = ${wmsOrderId}
+          AND ${derived} IN ('shipped', 'cancelled')
+          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          AND (
+            status = 'blocked'
+            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
+          )
+        RETURNING id
+      )
+      SELECT id FROM updated_order
     `);
   } else {
     await db.execute(sql`
-      UPDATE wms.orders SET
-        warehouse_status = ${derived},
-        updated_at = ${now}
-      WHERE id = ${wmsOrderId}
+      WITH updated_order AS (
+        UPDATE wms.orders SET
+          warehouse_status = ${derived},
+          updated_at = ${now}
+        WHERE id = ${wmsOrderId}
+        RETURNING id
+      ),
+      closed_blockers AS (
+        UPDATE wms.allocation_exceptions
+        SET
+          status = CASE WHEN ${derived} = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
+          resolution = CONCAT('order_', ${derived}, '_shipment_rollup'),
+          resolved_at = ${now},
+          updated_at = ${now},
+          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+            'closedBy', 'shipment_rollup',
+            'closedByOrderStatus', ${derived},
+            'closedAt', ${now}
+          )
+        WHERE order_id = ${wmsOrderId}
+          AND ${derived} IN ('shipped', 'cancelled')
+          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          AND (
+            status = 'blocked'
+            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
+          )
+        RETURNING id
+      )
+      SELECT id FROM updated_order
     `);
   }
 

@@ -657,6 +657,28 @@ export const orderMethods: IOrderStorage = {
       `);
     }
 
+    if (status === "cancelled") {
+      await db.execute(sql`
+        UPDATE wms.allocation_exceptions
+        SET
+          status = 'cancelled',
+          resolution = 'order_cancelled_status_update',
+          resolved_at = NOW(),
+          updated_at = NOW(),
+          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+            'closedBy', 'orders_storage',
+            'closedByOrderStatus', 'cancelled',
+            'closedAt', NOW()
+          )
+        WHERE order_id = ${orderId}
+          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          AND (
+            status = 'blocked'
+            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
+          )
+      `);
+    }
+
     return result[0] || null;
   },
 
