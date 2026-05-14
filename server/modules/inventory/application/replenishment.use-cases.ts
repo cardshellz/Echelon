@@ -1484,14 +1484,31 @@ export class ReplenishmentUseCases {
           AND it.created_at > NOW() - MAKE_INTERVAL(days => 14)
       ) velocity ON true
       LEFT JOIN LATERAL (
-        SELECT COUNT(oi.id)::int AS active_pending_lines
-        FROM wms.order_items oi
-        JOIN wms.orders o
-          ON o.id = oi.order_id
-         AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-        WHERE oi.sku = pv.sku
-          AND oi.status = 'pending'
-          AND oi.requires_shipping = 1
+        SELECT COUNT(*)::int AS active_pending_lines
+        FROM (
+          SELECT oi.id::text AS demand_id
+          FROM wms.order_items oi
+          JOIN wms.orders o
+            ON o.id = oi.order_id
+           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+          WHERE oi.sku = pv.sku
+            AND oi.status = 'pending'
+            AND oi.requires_shipping = 1
+
+          UNION ALL
+
+          SELECT 'allocation_exception:' || ae.id::text AS demand_id
+          FROM wms.allocation_exceptions ae
+          JOIN wms.orders o
+            ON o.id = ae.order_id
+           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+          WHERE ae.sku = pv.sku
+            AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+            AND (
+              ae.status = 'blocked'
+              OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
+            )
+        ) demand_line
       ) demand ON true
       WHERE pl.status = 'active'
         AND pl.is_primary = 1
@@ -1639,6 +1656,18 @@ export class ReplenishmentUseCases {
             WHERE oi.sku = pv.sku
               AND oi.status = 'pending'
               AND oi.requires_shipping = 1
+            UNION ALL
+            SELECT 1
+            FROM wms.allocation_exceptions ae
+            JOIN wms.orders o
+              ON o.id = ae.order_id
+             AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE ae.sku = pv.sku
+              AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+              AND (
+                ae.status = 'blocked'
+                OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
+              )
           )
         ORDER BY rt.created_at ASC, rt.id ASC
         LIMIT ${limit}
@@ -1684,6 +1713,18 @@ export class ReplenishmentUseCases {
             WHERE oi.sku = pv.sku
               AND oi.status = 'pending'
               AND oi.requires_shipping = 1
+            UNION ALL
+            SELECT 1
+            FROM wms.allocation_exceptions ae
+            JOIN wms.orders o
+              ON o.id = ae.order_id
+             AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE ae.sku = pv.sku
+              AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+              AND (
+                ae.status = 'blocked'
+                OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
+              )
           )
         ORDER BY rt.created_at ASC, rt.id ASC
         LIMIT ${limit}
@@ -2553,16 +2594,35 @@ export class ReplenishmentUseCases {
     if (!task.pickProductVariantId) return 0;
 
     const result = await this.db.execute(sql`
-      SELECT COUNT(oi.id)::int AS active_pending_lines
-      FROM wms.order_items oi
-      JOIN wms.orders o
-        ON o.id = oi.order_id
-       AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-      JOIN catalog.product_variants pv
-        ON pv.id = ${task.pickProductVariantId}
-      WHERE oi.sku = pv.sku
-        AND oi.status = 'pending'
-        AND oi.requires_shipping = 1
+      SELECT COUNT(*)::int AS active_pending_lines
+      FROM (
+        SELECT oi.id::text AS demand_id
+        FROM wms.order_items oi
+        JOIN wms.orders o
+          ON o.id = oi.order_id
+         AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+        JOIN catalog.product_variants pv
+          ON pv.id = ${task.pickProductVariantId}
+        WHERE oi.sku = pv.sku
+          AND oi.status = 'pending'
+          AND oi.requires_shipping = 1
+
+        UNION ALL
+
+        SELECT 'allocation_exception:' || ae.id::text AS demand_id
+        FROM wms.allocation_exceptions ae
+        JOIN wms.orders o
+          ON o.id = ae.order_id
+         AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+        JOIN catalog.product_variants pv
+          ON pv.id = ${task.pickProductVariantId}
+        WHERE ae.sku = pv.sku
+          AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          AND (
+            ae.status = 'blocked'
+            OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
+          )
+      ) demand_line
     `);
 
     return Number(result.rows?.[0]?.active_pending_lines ?? 0);
