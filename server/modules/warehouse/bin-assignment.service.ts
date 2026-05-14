@@ -46,6 +46,14 @@ export type BinAssignmentRow = {
   zone: string | null;
   isPrimary: number | null;
   currentQty: number | null;
+  slotStatus: "valid" | "unassigned" | "invalid" | "duplicate";
+  slotIssue: string | null;
+  assignmentCount: number;
+  validAssignmentCount: number;
+  suggestedLocationId: number | null;
+  suggestedLocationCode: string | null;
+  suggestedLocationZone: string | null;
+  suggestedQty: number | null;
 };
 
 export type AssignmentFilters = {
@@ -82,31 +90,137 @@ export class BinAssignmentService {
    */
   async getAssignmentsView(filters?: AssignmentFilters): Promise<BinAssignmentRow[]> {
     const rows = await this.db.execute(sql`
+      WITH variant_base AS (
+        SELECT
+          pv.id AS product_variant_id,
+          p.id AS product_id,
+          COALESCE(pv.sku, p.sku) AS sku,
+          p.name AS product_name,
+          pv.name AS variant_name,
+          pv.units_per_variant
+        FROM catalog.product_variants pv
+        JOIN catalog.products p ON pv.product_id = p.id
+        WHERE pv.is_active = true
+          ${filters?.search ? sql`AND (UPPER(COALESCE(pv.sku, p.sku, '')) LIKE ${"%" + filters.search.toUpperCase() + "%"} OR UPPER(COALESCE(p.title, p.name, '')) LIKE ${"%" + filters.search.toUpperCase() + "%"})` : sql``}
+      ),
+      active_assignments AS (
+        SELECT
+          vb.*,
+          pl.id AS product_location_id,
+          pl.location AS legacy_location_code,
+          wl.code AS assigned_location_code,
+          wl.id AS assigned_location_id,
+          wl.location_type,
+          wl.zone,
+          wl.warehouse_id,
+          wl.is_pickable,
+          wl.is_active,
+          pl.is_primary,
+          il.variant_qty AS current_qty,
+          CASE
+            WHEN pl.id IS NULL THEN NULL
+            WHEN pl.warehouse_location_id IS NULL OR wl.id IS NULL THEN 'assignment_missing_location'
+            WHEN wl.warehouse_id IS NULL THEN 'location_missing_warehouse'
+            WHEN wl.is_active <> 1 THEN 'location_inactive'
+            WHEN wl.location_type <> 'pick' OR wl.is_pickable <> 1 THEN 'assignment_not_pick_face'
+            ELSE NULL
+          END AS slot_issue,
+          CASE
+            WHEN wl.id IS NOT NULL
+             AND wl.warehouse_id IS NOT NULL
+             AND wl.is_active = 1
+             AND wl.location_type = 'pick'
+             AND wl.is_pickable = 1
+            THEN 1 ELSE 0
+          END AS valid_pick_face
+        FROM variant_base vb
+        LEFT JOIN warehouse.product_locations pl
+          ON pl.status = 'active'
+         AND (
+           pl.product_variant_id = vb.product_variant_id
+           OR (
+             pl.product_variant_id IS NULL
+             AND pl.sku IS NOT NULL
+             AND UPPER(pl.sku) = UPPER(COALESCE(vb.sku, ''))
+           )
+         )
+        LEFT JOIN warehouse.warehouse_locations wl ON pl.warehouse_location_id = wl.id
+        LEFT JOIN inventory.inventory_levels il
+          ON il.product_variant_id = vb.product_variant_id
+         AND il.warehouse_location_id = wl.id
+      ),
+      assignment_counts AS (
+        SELECT
+          product_variant_id,
+          COUNT(product_location_id) AS assignment_count,
+          COALESCE(SUM(valid_pick_face), 0) AS valid_assignment_count
+        FROM active_assignments
+        GROUP BY product_variant_id
+      ),
+      pick_stock_suggestions AS (
+        SELECT DISTINCT ON (il.product_variant_id)
+          il.product_variant_id,
+          wl.id AS suggested_location_id,
+          wl.code AS suggested_location_code,
+          wl.zone AS suggested_location_zone,
+          il.variant_qty AS suggested_qty
+        FROM inventory.inventory_levels il
+        JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+        WHERE il.variant_qty > 0
+          AND wl.warehouse_id IS NOT NULL
+          AND wl.is_active = 1
+          AND wl.location_type = 'pick'
+          AND wl.is_pickable = 1
+        ORDER BY
+          il.product_variant_id,
+          il.variant_qty DESC,
+          wl.pick_sequence NULLS LAST,
+          wl.code ASC
+      )
       SELECT
-        pv.id AS product_variant_id,
-        p.id AS product_id,
-        COALESCE(pv.sku, p.sku) AS sku,
-        p.name AS product_name,
-        pv.name AS variant_name,
-        pv.units_per_variant,
-        pl.id AS product_location_id,
-        wl.code AS assigned_location_code,
-        wl.id AS assigned_location_id,
-        wl.location_type,
-        wl.zone,
-        pl.is_primary,
-        il.variant_qty AS current_qty
-      FROM catalog.product_variants pv
-      JOIN catalog.products p ON pv.product_id = p.id
-      LEFT JOIN warehouse.product_locations pl ON pl.product_variant_id = pv.id
-      LEFT JOIN warehouse.warehouse_locations wl ON pl.warehouse_location_id = wl.id AND wl.is_pickable = 1
-      LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id AND il.warehouse_location_id = wl.id
-      WHERE pv.is_active = true
-      ${filters?.search ? sql`AND (UPPER(COALESCE(pv.sku, p.sku, '')) LIKE ${"%" + filters.search.toUpperCase() + "%"} OR UPPER(COALESCE(p.title, p.name, '')) LIKE ${"%" + filters.search.toUpperCase() + "%"})` : sql``}
-      ${filters?.unassignedOnly ? sql`AND pl.id IS NULL` : sql``}
-      ${filters?.zone ? sql`AND wl.zone = ${filters.zone.toUpperCase()}` : sql``}
-      ${filters?.warehouseId ? sql`AND wl.warehouse_id = ${filters.warehouseId}` : sql``}
-      ORDER BY COALESCE(pv.sku, p.sku) ASC
+        aa.product_variant_id,
+        aa.product_id,
+        aa.sku,
+        aa.product_name,
+        aa.variant_name,
+        aa.units_per_variant,
+        aa.product_location_id,
+        COALESCE(aa.assigned_location_code, aa.legacy_location_code) AS assigned_location_code,
+        aa.assigned_location_id,
+        aa.location_type,
+        aa.zone,
+        aa.is_primary,
+        aa.current_qty,
+        CASE
+          WHEN aa.product_location_id IS NULL THEN 'unassigned'
+          WHEN aa.slot_issue IS NOT NULL THEN 'invalid'
+          WHEN COALESCE(ac.assignment_count, 0) > 1 THEN 'duplicate'
+          ELSE 'valid'
+        END AS slot_status,
+        aa.slot_issue,
+        COALESCE(ac.assignment_count, 0) AS assignment_count,
+        COALESCE(ac.valid_assignment_count, 0) AS valid_assignment_count,
+        pss.suggested_location_id,
+        pss.suggested_location_code,
+        pss.suggested_location_zone,
+        pss.suggested_qty
+      FROM active_assignments aa
+      JOIN assignment_counts ac ON ac.product_variant_id = aa.product_variant_id
+      LEFT JOIN pick_stock_suggestions pss ON pss.product_variant_id = aa.product_variant_id
+      WHERE 1 = 1
+      ${filters?.unassignedOnly ? sql`AND aa.product_location_id IS NULL` : sql``}
+      ${filters?.zone ? sql`AND aa.zone = ${filters.zone.toUpperCase()}` : sql``}
+      ${filters?.warehouseId ? sql`AND aa.warehouse_id = ${filters.warehouseId}` : sql``}
+      ORDER BY
+        aa.sku ASC,
+        CASE
+          WHEN aa.slot_issue IS NOT NULL THEN 0
+          WHEN COALESCE(ac.assignment_count, 0) > 1 THEN 1
+          WHEN aa.product_location_id IS NULL THEN 2
+          ELSE 3
+        END,
+        aa.is_primary DESC NULLS LAST,
+        aa.assigned_location_code ASC NULLS LAST
     `);
 
     return rows.rows.map((r: any) => ({
@@ -123,6 +237,14 @@ export class BinAssignmentService {
       zone: r.zone,
       isPrimary: r.is_primary,
       currentQty: r.current_qty,
+      slotStatus: r.slot_status,
+      slotIssue: r.slot_issue,
+      assignmentCount: Number(r.assignment_count || 0),
+      validAssignmentCount: Number(r.valid_assignment_count || 0),
+      suggestedLocationId: r.suggested_location_id,
+      suggestedLocationCode: r.suggested_location_code,
+      suggestedLocationZone: r.suggested_location_zone,
+      suggestedQty: r.suggested_qty,
     }));
   }
 
@@ -156,55 +278,110 @@ export class BinAssignmentService {
 
     const product = await this.storage.getProductById(variant.productId);
 
-    // Check for existing assignment for this variant
-    const existing = await this.db
-      .select()
-      .from(productLocations)
-      .where(eq(productLocations.productVariantId, params.productVariantId));
-
     const isPrimary = params.isPrimary ?? 1;
+    const upperSku = (variant.sku || product?.sku || "").toUpperCase();
 
-    if (existing.length > 0) {
-      // Update existing assignment to new location
-      const result = await this.db
-        .update(productLocations)
-        .set({
-          warehouseLocationId: params.warehouseLocationId,
+    return await this.db.transaction(async (tx) => {
+      const existingResult = await tx.execute(sql`
+        SELECT pl.id
+        FROM warehouse.product_locations pl
+        LEFT JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+        WHERE pl.status = 'active'
+          AND (
+            pl.product_variant_id = ${params.productVariantId}
+            OR (
+              pl.product_variant_id IS NULL
+              AND pl.sku IS NOT NULL
+              AND UPPER(pl.sku) = ${upperSku}
+            )
+          )
+        ORDER BY
+          CASE WHEN pl.warehouse_location_id = ${params.warehouseLocationId} THEN 0 ELSE 1 END,
+          CASE
+            WHEN wl.id IS NOT NULL
+             AND wl.warehouse_id IS NOT NULL
+             AND wl.is_active = 1
+             AND wl.location_type = 'pick'
+             AND wl.is_pickable = 1
+            THEN 0 ELSE 1
+          END,
+          pl.is_primary DESC,
+          pl.updated_at DESC,
+          pl.id ASC
+      `);
+      const existingIds = existingResult.rows.map((row: any) => Number(row.id)).filter(Number.isInteger);
+      const canonicalId = existingIds[0];
+
+      if (isPrimary === 1) {
+        await tx.execute(sql`
+          UPDATE warehouse.product_locations
+          SET is_primary = 0, updated_at = NOW()
+          WHERE status = 'active'
+            AND (
+              product_variant_id = ${params.productVariantId}
+              OR (
+                product_variant_id IS NULL
+                AND sku IS NOT NULL
+                AND UPPER(sku) = ${upperSku}
+              )
+            )
+        `);
+      }
+
+      if (canonicalId) {
+        const result = await tx
+          .update(productLocations)
+          .set({
+            productId: variant.productId,
+            productVariantId: params.productVariantId,
+            sku: upperSku || null,
+            name: product?.name || variant.name,
+            barcode: variant.barcode || null,
+            warehouseLocationId: params.warehouseLocationId,
+            location: loc.code,
+            zone: loc.zone || "U",
+            isPrimary,
+            status: "active",
+            updatedAt: new Date(),
+          })
+          .where(eq(productLocations.id, canonicalId))
+          .returning();
+
+        if (existingIds.length > 1) {
+          await tx.execute(sql`
+            DELETE FROM warehouse.product_locations
+            WHERE id <> ${canonicalId}
+              AND (
+                product_variant_id = ${params.productVariantId}
+                OR (
+                  product_variant_id IS NULL
+                  AND sku IS NOT NULL
+                  AND UPPER(sku) = ${upperSku}
+                )
+              )
+          `);
+        }
+
+        return result[0];
+      }
+
+      const result = await tx
+        .insert(productLocations)
+        .values({
+          productId: variant.productId,
+          productVariantId: params.productVariantId,
+          sku: upperSku || null,
+          name: product?.name || variant.name,
           location: loc.code,
           zone: loc.zone || "U",
+          warehouseLocationId: params.warehouseLocationId,
           isPrimary,
-          updatedAt: new Date(),
+          status: "active",
+          barcode: variant.barcode || null,
         })
-        .where(eq(productLocations.id, existing[0].id))
         .returning();
       return result[0];
-    }
-
-    // Clear isPrimary on other locations for same product if setting this as primary
-    if (isPrimary === 1) {
-      await this.db
-        .update(productLocations)
-        .set({ isPrimary: 0, updatedAt: new Date() })
-        .where(eq(productLocations.productId, variant.productId));
-    }
-
-    // Insert new assignment
-    const result = await this.db
-      .insert(productLocations)
-      .values({
-        productId: variant.productId,
-        productVariantId: params.productVariantId,
-        sku: (variant.sku || product?.sku || "").toUpperCase() || null,
-        name: product?.name || variant.name,
-        location: loc.code,
-        zone: loc.zone || "U",
-        warehouseLocationId: params.warehouseLocationId,
-        isPrimary,
-        status: "active",
-        barcode: variant.barcode || null,
-      })
-      .returning();
-    return result[0];
+    });
   }
 
   /**
@@ -282,14 +459,18 @@ export class BinAssignmentService {
    */
   async exportAssignments(): Promise<string> {
     const assignments = await this.getAssignmentsView();
-    const assigned = assignments.filter((a) => a.productLocationId !== null);
+    const assigned = assignments.filter((a) =>
+      a.productLocationId !== null &&
+      a.slotIssue == null &&
+      a.assignedLocationCode
+    );
 
     const csvHeader =
-      "sku,product_name,variant_name,location_code,zone,is_primary,current_qty\n";
+      "sku,product_name,variant_name,location_code,zone,is_primary,current_qty,slot_status\n";
     const csvRows = assigned
       .map(
         (a) =>
-          `"${a.sku || ""}","${(a.productName || "").replace(/"/g, '""')}","${(a.variantName || "").replace(/"/g, '""')}","${a.assignedLocationCode || ""}","${a.zone || ""}",${a.isPrimary || 0},${a.currentQty || 0}`,
+          `"${a.sku || ""}","${(a.productName || "").replace(/"/g, '""')}","${(a.variantName || "").replace(/"/g, '""')}","${a.assignedLocationCode || ""}","${a.zone || ""}",${a.isPrimary || 0},${a.currentQty || 0},"${a.slotStatus}"`,
       )
       .join("\n");
 

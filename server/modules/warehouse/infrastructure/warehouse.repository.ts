@@ -277,9 +277,14 @@ export async function addProductToLocation(data: {
   const [loc] = await tx.select({ isPickable: warehouseLocations.isPickable }).from(warehouseLocations).where(eq(warehouseLocations.id, data.warehouseLocationId)).limit(1);
   if (loc && loc.isPickable !== 1) throw new Error(`Cannot assign products to non-pick location`);
 
-  const existingByProduct = await tx.select().from(productLocations).where(eq(productLocations.productId, data.productId));
-  if (existingByProduct.length > 0) {
-    const existing = existingByProduct[0];
+  const existingByTarget = data.productVariantId != null
+    ? await tx.select().from(productLocations).where(eq(productLocations.productVariantId, data.productVariantId))
+    : data.sku
+      ? await tx.select().from(productLocations).where(eq(productLocations.sku, data.sku.toUpperCase()))
+      : await tx.select().from(productLocations).where(eq(productLocations.productId, data.productId));
+
+  if (existingByTarget.length > 0) {
+    const existing = existingByTarget[0];
     const result = await tx.update(productLocations).set({
       productVariantId: data.productVariantId ?? existing.productVariantId,
       warehouseLocationId: data.warehouseLocationId, sku: data.sku?.toUpperCase() || existing.sku,
@@ -290,7 +295,7 @@ export async function addProductToLocation(data: {
     return result[0];
   }
 
-  if (data.sku) {
+  if (!data.productVariantId && data.sku) {
     const existingBySku = await tx.select().from(productLocations).where(eq(productLocations.sku, data.sku.toUpperCase()));
     if (existingBySku.length > 0) {
       const existing = existingBySku[0];
@@ -305,7 +310,13 @@ export async function addProductToLocation(data: {
   }
 
   if (data.isPrimary === 1) {
-    await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productId, data.productId));
+    if (data.productVariantId != null) {
+      await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productVariantId, data.productVariantId));
+    } else if (data.sku) {
+      await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.sku, data.sku.toUpperCase()));
+    } else {
+      await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productId, data.productId));
+    }
   }
 
   const result = await tx.insert(productLocations).values({
@@ -322,7 +333,11 @@ export async function setPrimaryLocation(productLocationId: number, tx: Tx = db)
   const location = await getProductLocationById(productLocationId, tx);
   if (!location || !location.productId) return undefined;
 
-  await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productId, location.productId));
+  if (location.productVariantId != null) {
+    await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productVariantId, location.productVariantId));
+  } else {
+    await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productId, location.productId));
+  }
   const result = await tx.update(productLocations).set({ isPrimary: 1, updatedAt: new Date() }).where(eq(productLocations.id, productLocationId)).returning();
   return result[0];
 }

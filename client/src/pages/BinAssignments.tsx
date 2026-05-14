@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { useToast } from "@/hooks/use-toast";
-import { MapPin, Search, Upload, Download, FileDown, Trash2, ChevronsUpDown, Check, X, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { MapPin, Search, Upload, Download, FileDown, Trash2, ChevronsUpDown, Check, X, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type BinAssignment = {
@@ -24,6 +24,14 @@ type BinAssignment = {
   zone: string | null;
   isPrimary: number | null;
   currentQty: number | null;
+  slotStatus: "valid" | "unassigned" | "invalid" | "duplicate";
+  slotIssue: string | null;
+  assignmentCount: number;
+  validAssignmentCount: number;
+  suggestedLocationId: number | null;
+  suggestedLocationCode: string | null;
+  suggestedLocationZone: string | null;
+  suggestedQty: number | null;
 };
 
 type WarehouseLocation = {
@@ -56,6 +64,7 @@ export default function BinAssignments() {
   });
   const debouncedSearch = useDebounce(search, 300);
   const [unassignedOnly, setUnassignedOnly] = useState(false);
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
   const [zoneFilter, setZoneFilter] = useState("");
 
   // Sort state
@@ -133,6 +142,11 @@ export default function BinAssignments() {
       return String(valA).localeCompare(String(valB)) * mul;
     });
   }, [assignments, sortKey, sortDir]);
+
+  const visibleAssignments = useMemo(() => {
+    if (!needsReviewOnly) return sortedAssignments;
+    return sortedAssignments.filter(a => a.slotStatus === "invalid" || a.slotStatus === "duplicate");
+  }, [needsReviewOnly, sortedAssignments]);
 
   // Mutations
   const assignMutation = useMutation({
@@ -247,10 +261,58 @@ export default function BinAssignments() {
     window.location.href = "/api/bin-assignments/export";
   }
 
-  // Stats
-  const totalVariants = assignments.length;
-  const assignedCount = assignments.filter(a => a.productLocationId !== null).length;
-  const unassignedCount = totalVariants - assignedCount;
+  // Stats are variant-based so duplicate slot rows do not inflate counts.
+  const stats = useMemo(() => {
+    const byVariant = new Map<number, {
+      assigned: boolean;
+      unassigned: boolean;
+      needsReview: boolean;
+    }>();
+    for (const assignment of assignments) {
+      const current = byVariant.get(assignment.productVariantId) || {
+        assigned: false,
+        unassigned: false,
+        needsReview: false,
+      };
+      current.assigned = current.assigned || assignment.validAssignmentCount > 0;
+      current.unassigned = current.unassigned || assignment.assignmentCount === 0;
+      current.needsReview = current.needsReview || assignment.slotStatus === "invalid" || assignment.slotStatus === "duplicate";
+      byVariant.set(assignment.productVariantId, current);
+    }
+    const values = Array.from(byVariant.values());
+    return {
+      totalVariants: byVariant.size,
+      assignedCount: values.filter(v => v.assigned).length,
+      unassignedCount: values.filter(v => v.unassigned).length,
+      reviewCount: values.filter(v => v.needsReview).length,
+    };
+  }, [assignments]);
+
+  function slotIssueLabel(assignment: BinAssignment) {
+    if (assignment.slotStatus === "duplicate") {
+      return `${assignment.assignmentCount} active assignments`;
+    }
+    switch (assignment.slotIssue) {
+      case "assignment_missing_location":
+        return "Missing location";
+      case "location_missing_warehouse":
+        return "Location missing warehouse";
+      case "location_inactive":
+        return "Inactive location";
+      case "assignment_not_pick_face":
+        return "Not a pick face";
+      default:
+        return assignment.slotStatus === "unassigned" ? "No pick face assigned" : "Needs review";
+    }
+  }
+
+  function assignSuggestedLocation(assignment: BinAssignment) {
+    if (!assignment.suggestedLocationId) return;
+    assignMutation.mutate({
+      productVariantId: assignment.productVariantId,
+      warehouseLocationId: assignment.suggestedLocationId,
+    });
+  }
 
   return (
     <div className="p-4 md:p-6 space-y-4">
@@ -269,9 +331,10 @@ export default function BinAssignments() {
 
       {/* Summary bar */}
       <div className="flex gap-4 text-sm">
-        <span>{totalVariants} variants</span>
-        <span className="text-emerald-600">{assignedCount} assigned</span>
-        <span className="text-amber-600">{unassignedCount} unassigned</span>
+        <span>{stats.totalVariants} variants</span>
+        <span className="text-emerald-600">{stats.assignedCount} assigned</span>
+        <span className="text-amber-600">{stats.unassignedCount} unassigned</span>
+        {stats.reviewCount > 0 && <span className="text-red-600">{stats.reviewCount} need review</span>}
       </div>
 
       {/* Toolbar */}
@@ -320,6 +383,14 @@ export default function BinAssignments() {
           onClick={() => setUnassignedOnly(!unassignedOnly)}
         >
           Unassigned Only
+        </Button>
+        <Button
+          variant={needsReviewOnly ? "default" : "outline"}
+          size="sm"
+          className="h-10"
+          onClick={() => setNeedsReviewOnly(!needsReviewOnly)}
+        >
+          Needs Review
         </Button>
 
         <div className="flex-1" />
@@ -370,14 +441,14 @@ export default function BinAssignments() {
                   Loading...
                 </TableCell>
               </TableRow>
-            ) : assignments.length === 0 ? (
+            ) : visibleAssignments.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                   No variants found
                 </TableCell>
               </TableRow>
-            ) : sortedAssignments.map((a) => (
-              <TableRow key={a.productVariantId}>
+            ) : visibleAssignments.map((a) => (
+              <TableRow key={`${a.productVariantId}-${a.productLocationId ?? "unassigned"}`}>
                 <TableCell className="font-mono text-xs">{a.sku || "-"}</TableCell>
                 <TableCell>{a.productName}</TableCell>
                 <TableCell className="text-sm text-muted-foreground whitespace-nowrap">{a.variantName}</TableCell>
@@ -402,27 +473,53 @@ export default function BinAssignments() {
                       }}
                     />
                   ) : (
-                    <button
-                      className="text-left w-full hover:bg-muted/50 rounded px-2 py-1 -mx-2 -my-1 transition-colors"
-                      onClick={() => {
-                        setEditingVariantId(a.productVariantId);
-                        setLocationSearch("");
-                        setLocationPopoverOpen(true);
-                      }}
-                    >
-                      {a.assignedLocationCode ? (
-                        <span className="font-mono text-sm">{a.assignedLocationCode}</span>
-                      ) : (
-                        <span className="text-muted-foreground text-sm italic">Click to assign...</span>
+                    <div className="space-y-1">
+                      <button
+                        className="text-left w-full hover:bg-muted/50 rounded px-2 py-1 -mx-2 -my-1 transition-colors"
+                        onClick={() => {
+                          setEditingVariantId(a.productVariantId);
+                          setLocationSearch(a.suggestedLocationCode || "");
+                          setLocationPopoverOpen(true);
+                        }}
+                      >
+                        {a.assignedLocationCode ? (
+                          <span className="font-mono text-sm">{a.assignedLocationCode}</span>
+                        ) : (
+                          <span className="text-muted-foreground text-sm italic">Click to assign...</span>
+                        )}
+                      </button>
+                      {(a.slotStatus === "invalid" || a.slotStatus === "duplicate") && (
+                        <div className="flex items-center gap-1 text-[11px] text-red-600">
+                          <AlertTriangle className="h-3 w-3 shrink-0" />
+                          <span>{slotIssueLabel(a)}</span>
+                        </div>
                       )}
-                    </button>
+                      {a.slotStatus !== "valid" && a.suggestedLocationId && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => assignSuggestedLocation(a)}
+                          disabled={assignMutation.isPending}
+                        >
+                          <Check className="h-3 w-3 mr-1" />
+                          Use {a.suggestedLocationCode}
+                          {a.suggestedQty != null ? ` (${a.suggestedQty})` : ""}
+                        </Button>
+                      )}
+                    </div>
                   )}
                 </TableCell>
                 <TableCell className="text-sm">{a.zone || "-"}</TableCell>
                 <TableCell className="text-center">
-                  {a.isPrimary === 1 && <Badge variant="outline" className="text-xs">Primary</Badge>}
+                  <div className="flex items-center justify-center gap-1">
+                    {a.isPrimary === 1 && <Badge variant="outline" className="text-xs">Primary</Badge>}
+                    {a.slotStatus === "invalid" && <Badge variant="destructive" className="text-xs">Invalid</Badge>}
+                    {a.slotStatus === "duplicate" && <Badge variant="secondary" className="text-xs">Duplicate</Badge>}
+                  </div>
                 </TableCell>
-                <TableCell className="text-right font-mono text-sm">{a.currentQty ?? "-"}</TableCell>
+                <TableCell className="text-right font-mono text-sm">{a.currentQty ?? a.suggestedQty ?? "-"}</TableCell>
                 <TableCell>
                   {a.productLocationId && (
                     <Button
