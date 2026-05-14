@@ -59,6 +59,8 @@ const VALID_PICK_REPLEN_HEALTH_FILTERS = [
   "cycle_count_review",
   "exception_order_no_blocker",
   "pick_bin_needs_replen",
+  "inventory_at_invalid_location",
+  "invalid_pick_assignment",
 ] as const;
 
 // ── Public param types ──────────────────────────────────────────────
@@ -1143,6 +1145,102 @@ export class OperationsDashboardService {
                 AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
               )
           )
+
+        UNION ALL
+
+        SELECT
+          'inventory_at_invalid_location'::text,
+          1,
+          il.id::text,
+          NULL::int,
+          NULL::int,
+          NULL::int,
+          NULL::int,
+          NULL::text,
+          NULL::int,
+          pv.id,
+          pv.sku,
+          pv.name,
+          wl.id,
+          wl.code,
+          NULL::text,
+          'invalid_location'::text,
+          CASE
+            WHEN wl.warehouse_id IS NULL THEN 'location_missing_warehouse'
+            WHEN wl.is_active <> 1 THEN 'location_inactive'
+            ELSE 'invalid_location'
+          END::text,
+          il.variant_qty::int,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - il.updated_at) / 3600)::int,
+          il.updated_at,
+          'inventory is sitting in an invalid operational location: '
+            || wl.code || ' is '
+            || COALESCE(wl.location_type, 'unknown') || ', pickable='
+            || COALESCE(wl.is_pickable::text, 'null') || ', warehouse='
+            || COALESCE(wl.warehouse_id::text, 'none'),
+          'fix_location_or_transfer_stock'
+        FROM inventory.inventory_levels il
+        JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+        JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+        WHERE il.variant_qty > 0
+          AND (
+            wl.warehouse_id IS NULL
+            OR wl.is_active <> 1
+          )
+          ${locationWarehouseFilter}
+
+        UNION ALL
+
+        SELECT
+          'invalid_pick_assignment'::text,
+          1,
+          pl.id::text,
+          NULL::int,
+          NULL::int,
+          NULL::int,
+          NULL::int,
+          NULL::text,
+          NULL::int,
+          pv.id,
+          pv.sku,
+          COALESCE(pv.name, pl.name),
+          wl.id,
+          COALESCE(wl.code, pl.location),
+          NULL::text,
+          'invalid_assignment'::text,
+          CASE
+            WHEN pl.warehouse_location_id IS NULL OR wl.id IS NULL THEN 'assignment_missing_location'
+            WHEN wl.warehouse_id IS NULL THEN 'location_missing_warehouse'
+            WHEN wl.is_active <> 1 THEN 'location_inactive'
+            WHEN wl.location_type <> 'pick' OR wl.is_pickable <> 1 THEN 'assignment_not_pick_face'
+            ELSE 'invalid_assignment'
+          END::text,
+          COALESCE(il.variant_qty, 0)::int,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - pl.updated_at) / 3600)::int,
+          pl.updated_at,
+          'active pick assignment points at an invalid pick face: '
+            || COALESCE(pv.sku, pl.sku, 'unknown SKU') || ' -> '
+            || COALESCE(wl.code, pl.location, 'unknown location')
+            || ' (type=' || COALESCE(wl.location_type, 'missing')
+            || ', pickable=' || COALESCE(wl.is_pickable::text, 'null')
+            || ', warehouse=' || COALESCE(wl.warehouse_id::text, 'none') || ')',
+          'fix_pick_assignment'
+        FROM warehouse.product_locations pl
+        JOIN catalog.product_variants pv ON pv.id = pl.product_variant_id
+        LEFT JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+        LEFT JOIN inventory.inventory_levels il
+          ON il.product_variant_id = pv.id
+         AND il.warehouse_location_id = wl.id
+        WHERE pl.status = 'active'
+          AND (
+            pl.warehouse_location_id IS NULL
+            OR wl.id IS NULL
+            OR wl.warehouse_id IS NULL
+            OR wl.is_active <> 1
+            OR wl.location_type <> 'pick'
+            OR wl.is_pickable <> 1
+          )
+          ${locationWarehouseFilter}
       )
     `;
 

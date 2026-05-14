@@ -104,6 +104,8 @@ function criticalCount(counts: Record<string, number>): number {
     "short_pick_unresolved",
     "open_allocation_exception",
     "exception_order_no_blocker",
+    "inventory_at_invalid_location",
+    "invalid_pick_assignment",
   ].reduce((sum, key) => sum + (Number(counts[key]) || 0), 0);
 }
 

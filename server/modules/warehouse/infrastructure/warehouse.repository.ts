@@ -19,6 +19,10 @@ import type {
   WarehouseLocation, InsertWarehouseLocation, FulfillmentRoutingRule, InsertFulfillmentRoutingRule,
   ProductLocation, InsertProductLocation, UpdateProductLocation, EchelonSetting
 } from "../../../storage/base";
+import {
+  normalizeLocationInput,
+  validateWarehouseLocationIntegrity,
+} from "../location-integrity";
 
 type Tx = typeof db | any;
 
@@ -133,16 +137,18 @@ export async function getWarehouseLocationByCode(code: string, tx: Tx = db): Pro
 }
 
 export async function createWarehouseLocation(location: InsertWarehouseLocation | Omit<InsertWarehouseLocation, 'code'>, tx: Tx = db): Promise<WarehouseLocation> {
-  const rawCode = ('code' in location && location.code) ? location.code : generateLocationCode(location as any);
+  const normalized = normalizeLocationInput(location);
+  const rawCode = ('code' in normalized && normalized.code) ? normalized.code : generateLocationCode(normalized as any);
   const code = rawCode.toUpperCase().trim();
+  validateWarehouseLocationIntegrity({ ...normalized, code });
 
   const conditions = [eq(warehouseLocations.code, code.toUpperCase())];
-  if (location.warehouseId) conditions.push(eq(warehouseLocations.warehouseId, location.warehouseId));
+  if (normalized.warehouseId) conditions.push(eq(warehouseLocations.warehouseId, normalized.warehouseId));
   
   const [existing] = await tx.select().from(warehouseLocations).where(and(...conditions));
   if (existing) throw new Error(`Location code "${code}" already exists in this warehouse`);
 
-  const result = await tx.insert(warehouseLocations).values({ ...location, code }).returning();
+  const result = await tx.insert(warehouseLocations).values({ ...normalized, code }).returning();
   return result[0];
 }
 
@@ -150,18 +156,20 @@ export async function updateWarehouseLocation(id: number, updates: Partial<Omit<
   const existing = await getWarehouseLocationById(id, tx);
   if (!existing) return null;
   
-  const merged = { ...existing, ...updates };
+  const normalizedUpdates = normalizeLocationInput(updates);
+  const merged = { ...existing, ...normalizedUpdates };
   const newCode = generateLocationCode(merged as any);
+  validateWarehouseLocationIntegrity({ ...merged, code: newCode });
   
   if (newCode !== existing.code) {
-    const whId = updates.warehouseId ?? existing.warehouseId;
+    const whId = normalizedUpdates.warehouseId ?? existing.warehouseId;
     const conditions = [eq(warehouseLocations.code, newCode.toUpperCase())];
     if (whId) conditions.push(eq(warehouseLocations.warehouseId, whId));
     const [conflict] = await tx.select().from(warehouseLocations).where(and(...conditions));
     if (conflict && conflict.id !== id) throw new Error(`Location code "${newCode}" already exists in this warehouse`);
   }
   
-  const result = await tx.update(warehouseLocations).set({ ...updates, code: newCode, updatedAt: new Date() }).where(eq(warehouseLocations.id, id)).returning();
+  const result = await tx.update(warehouseLocations).set({ ...normalizedUpdates, code: newCode, updatedAt: new Date() }).where(eq(warehouseLocations.id, id)).returning();
   return result[0] || null;
 }
 
