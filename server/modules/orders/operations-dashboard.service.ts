@@ -1168,6 +1168,7 @@ export class OperationsDashboardService {
           CASE
             WHEN wl.warehouse_id IS NULL THEN 'location_missing_warehouse'
             WHEN wl.is_active <> 1 THEN 'location_inactive'
+            WHEN wl.location_type = 'pick' AND wl.is_pickable <> 1 THEN 'pick_location_not_pickable'
             ELSE 'invalid_location'
           END::text,
           il.variant_qty::int,
@@ -1186,6 +1187,7 @@ export class OperationsDashboardService {
           AND (
             wl.warehouse_id IS NULL
             OR wl.is_active <> 1
+            OR (wl.location_type = 'pick' AND wl.is_pickable <> 1)
           )
           ${locationWarehouseFilter}
 

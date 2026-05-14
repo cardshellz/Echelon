@@ -274,8 +274,17 @@ export async function addProductToLocation(data: {
   sku?: string | null; shopifyVariantId?: number | null; name: string;
   location: string; zone: string; isPrimary?: number; imageUrl?: string | null; barcode?: string | null;
 }, tx: Tx = db): Promise<ProductLocation> {
-  const [loc] = await tx.select({ isPickable: warehouseLocations.isPickable }).from(warehouseLocations).where(eq(warehouseLocations.id, data.warehouseLocationId)).limit(1);
-  if (loc && loc.isPickable !== 1) throw new Error(`Cannot assign products to non-pick location`);
+  const [loc] = await tx.select({
+    code: warehouseLocations.code,
+    warehouseId: warehouseLocations.warehouseId,
+    locationType: warehouseLocations.locationType,
+    isPickable: warehouseLocations.isPickable,
+    isActive: warehouseLocations.isActive,
+  }).from(warehouseLocations).where(eq(warehouseLocations.id, data.warehouseLocationId)).limit(1);
+  if (!loc) throw new Error(`Warehouse location ${data.warehouseLocationId} not found`);
+  if (loc.isActive !== 1) throw new Error(`Location ${loc.code} is inactive - cannot assign products`);
+  if (loc.warehouseId == null) throw new Error(`Location ${loc.code} is not assigned to a warehouse - cannot assign products`);
+  if (loc.locationType !== "pick" || loc.isPickable !== 1) throw new Error(`Location ${loc.code} is not a pick face - cannot assign products`);
 
   const existingByTarget = data.productVariantId != null
     ? await tx.select().from(productLocations).where(eq(productLocations.productVariantId, data.productVariantId))
@@ -344,8 +353,17 @@ export async function setPrimaryLocation(productLocationId: number, tx: Tx = db)
 
 export async function createProductLocation(location: InsertProductLocation, tx: Tx = db): Promise<ProductLocation> {
   if (location.warehouseLocationId) {
-    const [loc] = await tx.select({ isPickable: warehouseLocations.isPickable }).from(warehouseLocations).where(eq(warehouseLocations.id, location.warehouseLocationId)).limit(1);
-    if (loc && loc.isPickable !== 1) throw new Error(`Cannot assign products to non-pick location`);
+    const [loc] = await tx.select({
+      code: warehouseLocations.code,
+      warehouseId: warehouseLocations.warehouseId,
+      locationType: warehouseLocations.locationType,
+      isPickable: warehouseLocations.isPickable,
+      isActive: warehouseLocations.isActive,
+    }).from(warehouseLocations).where(eq(warehouseLocations.id, location.warehouseLocationId)).limit(1);
+    if (!loc) throw new Error(`Warehouse location ${location.warehouseLocationId} not found`);
+    if (loc.isActive !== 1) throw new Error(`Location ${loc.code} is inactive - cannot assign products`);
+    if (loc.warehouseId == null) throw new Error(`Location ${loc.code} is not assigned to a warehouse - cannot assign products`);
+    if (loc.locationType !== "pick" || loc.isPickable !== 1) throw new Error(`Location ${loc.code} is not a pick face - cannot assign products`);
   }
   const result = await tx.insert(productLocations).values({
     ...location, sku: location.sku?.toUpperCase() || null, location: location.location.toUpperCase(), zone: location.zone.toUpperCase(),

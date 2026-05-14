@@ -1,14 +1,16 @@
 import type { Express } from "express";
 import { z } from "zod";
-import { warehouseStorage } from "../warehouse";
+import { createBinAssignmentService, warehouseStorage } from "../warehouse";
 import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
+import { db } from "../../storage/base";
 const storage = { ...warehouseStorage, ...catalogStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
 
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
 
 export function registerWarehouseRoutes(app: Express) {
+  const binAssignments = createBinAssignmentService(db, storage);
 
   // ============================================
   // INVENTORY MANAGEMENT (WMS) API
@@ -650,8 +652,13 @@ export function registerWarehouseRoutes(app: Express) {
         return res.status(404).json({ error: "Warehouse location not found" });
       }
 
-      if (warehouseLocation.isPickable !== 1) {
-        return res.status(400).json({ error: `Location ${warehouseLocation.code} is not pickable` });
+      if (productVariantId) {
+        const productLocation = await binAssignments.assignVariantToLocation({
+          productVariantId,
+          warehouseLocationId,
+          isPrimary: isPrimary ?? 1,
+        });
+        return res.status(201).json(productLocation);
       }
 
       let finalProductId = productId;
@@ -698,7 +705,13 @@ export function registerWarehouseRoutes(app: Express) {
       res.status(201).json(productLocation);
     } catch (error: any) {
       console.error("Error assigning product to location:", error);
-      res.status(500).json({ error: error.message || "Failed to assign product" });
+      const message = error.message || "Failed to assign product";
+      const status = /not found/i.test(message)
+        ? 404
+        : /(cannot assign|not assigned to a warehouse|not a pick face|inactive|required)/i.test(message)
+          ? 400
+          : 500;
+      res.status(status).json({ error: message });
     }
   });
 
