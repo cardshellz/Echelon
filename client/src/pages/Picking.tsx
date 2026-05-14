@@ -420,6 +420,10 @@ function ReplenPredictionBadge({
 
   const hasExistingTask = !!prediction.existingTaskId;
   const hasBlockedTask = prediction.existingTaskStatus === "blocked";
+  const hasInlineReadyTask =
+    hasExistingTask &&
+    prediction.existingTaskExecutionMode === "inline" &&
+    (prediction.existingTaskStatus === "pending" || prediction.existingTaskStatus === "assigned");
   const isShipmentBlocking = hasBlockedTask && prediction.existingTaskBlocksShipment === true;
   const isSourceUnavailable = prediction.stockout;
   const isBlocked = isShipmentBlocking || hasBlockedTask || isSourceUnavailable;
@@ -428,7 +432,9 @@ function ReplenPredictionBadge({
       ? "Replen blocks shipment"
       : hasBlockedTask
         ? "Replen needs review"
-        : "Replen queued"
+        : hasInlineReadyTask
+          ? "Replen ready"
+          : "Replen queued"
     : isSourceUnavailable ? "No source stock" : "Replen after pick";
   const detail = hasExistingTask
     ? `#${prediction.existingTaskId}${prediction.sourceLocationCode ? ` from ${prediction.sourceLocationCode}` : ""}`

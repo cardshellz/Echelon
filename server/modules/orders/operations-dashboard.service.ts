@@ -662,7 +662,10 @@ export class OperationsDashboardService {
             WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
             WHEN rt.status = 'in_progress' THEN 'in progress longer than 1h'
             WHEN COALESCE(demand.active_pending_lines, 0) > 0
-              THEN 'active demand waiting on queued replen: '
+              THEN CASE WHEN rt.execution_mode = 'inline'
+                THEN 'active demand waiting on inline replen: '
+                ELSE 'active demand waiting on queued replen: '
+              END
                 || demand.active_pending_lines::text || ' line'
                 || CASE WHEN demand.active_pending_lines = 1 THEN '' ELSE 's' END
                 || ', ' || COALESCE(demand.active_pending_units, 0)::text || ' unit'
@@ -685,6 +688,12 @@ export class OperationsDashboardService {
               AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
             THEN 'cancel_no_demand'
             WHEN rt.status = 'blocked' THEN 'resolve_blocker'
+            WHEN COALESCE(demand.active_pending_lines, 0) > 0
+              AND rt.execution_mode = 'inline'
+            THEN 'complete_inline_replen'
+            WHEN rt.status IN ('pending', 'assigned')
+              AND COALESCE(demand.active_pending_lines, 0) = 0
+            THEN 'cancel_no_demand'
             ELSE 'execute_or_cancel'
           END as action
         FROM inventory.replen_tasks rt

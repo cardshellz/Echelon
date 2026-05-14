@@ -444,6 +444,34 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     expect(db.update).not.toHaveBeenCalled();
   });
 
+  it("rejects manually marking active-demand replen work done without moving inventory", async () => {
+    const activeDemandTask = {
+      id: 858,
+      status: "pending",
+      blocksShipment: false,
+      qtySourceUnits: 1,
+      qtyTargetUnits: 6,
+      exceptionReason: null,
+      dependsOnTaskId: null,
+      pickProductVariantId: 62,
+    };
+    const db = {
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            limit: vi.fn(async () => [activeDemandTask]),
+          }),
+        }),
+      })),
+      update: vi.fn(),
+      execute: vi.fn(async () => ({ rows: [{ active_pending_lines: 2 }] })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    await expect(service.markTaskDone(858, "admin")).rejects.toThrow("complete the replen so inventory moves");
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
   it("creates a linked cycle count for picker-reported source-empty replen blockers", async () => {
     const { db, inserts, updates } = makeDb();
     const service = new ReplenishmentUseCases(db as any, {} as any);
@@ -986,6 +1014,31 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       cancelledStaleNoDemandTaskIds: [977, 962],
       cancelledDuplicateTaskIds: [],
       keptDuplicateTaskIds: [],
+    });
+    expect(db.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels stale no-demand queued backlog without requiring source failure", async () => {
+    const db = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: 933 }] }),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    const result = await service.cleanupHealthIssues({
+      mode: "stale_no_demand",
+      taskId: 933,
+      limit: 10,
+      userId: "admin",
+    });
+
+    expect(result).toMatchObject({
+      mode: "stale_no_demand",
+      cancelledStaleNoDemand: 0,
+      cancelledStaleBacklog: 1,
+      cancelledStaleBacklogTaskIds: [933],
+      cancelledDuplicates: 0,
     });
     expect(db.execute).toHaveBeenCalledTimes(2);
   });

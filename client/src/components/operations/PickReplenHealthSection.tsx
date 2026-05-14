@@ -127,8 +127,9 @@ const FILTERS: Array<{ value: PickReplenHealthFilter; label: string }> = [
 
 const ACTION_LABELS: Record<string, string> = {
   resolve_blocker: "Resolve blocker",
+  complete_inline_replen: "Complete replen",
   execute_or_cancel: "Execute or cancel",
-  cancel_no_demand: "Cancel stale task",
+  cancel_no_demand: "Cancel no-demand",
   cancel_duplicate: "Cancel duplicate",
   create_replen_or_exception: "Create task/exception",
   review_short_pick: "Review short pick",

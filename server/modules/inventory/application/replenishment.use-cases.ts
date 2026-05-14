@@ -1661,84 +1661,43 @@ export class ReplenishmentUseCases {
     userId?: string;
   }): Promise<number[]> {
     const taskFilter = params.taskId ? sql`AND rt.id = ${params.taskId}` : sql``;
+    const ageFilter = params.taskId ? sql`` : sql`AND rt.created_at < NOW() - INTERVAL '4 hours'`;
     const limit = this.cleanupLimit(params.limit);
+    const auditNote = `Cancelled by replen health cleanup${params.userId ? ` by ${params.userId}` : ""}: no active demand; stale queued replen can be recreated from current rules when needed`;
 
-    const candidatesResult = await this.db.execute(sql`
-      SELECT
-        rt.id,
-        rt.from_location_id AS "fromLocationId",
-        rt.to_location_id AS "toLocationId",
-        rt.product_id AS "productId",
-        rt.source_product_variant_id AS "sourceProductVariantId",
-        rt.pick_product_variant_id AS "pickProductVariantId",
-        rt.qty_source_units AS "qtySourceUnits",
-        rt.qty_target_units AS "qtyTargetUnits",
-        rt.status,
-        rt.priority,
-        rt.triggered_by AS "triggeredBy",
-        rt.execution_mode AS "executionMode",
-        rt.replen_method AS "replenMethod",
-        rt.auto_replen AS "autoReplen",
-        rt.blocks_shipment AS "blocksShipment",
-        rt.warehouse_id AS "warehouseId",
-        rt.assigned_to AS "assignedTo",
-        rt.notes,
-        rt.exception_reason AS "exceptionReason",
-        rt.depends_on_task_id AS "dependsOnTaskId",
-        rt.created_at AS "createdAt"
-      FROM inventory.replen_tasks rt
-      LEFT JOIN catalog.product_variants pv ON pv.id = rt.pick_product_variant_id
-      WHERE rt.status IN ('pending', 'assigned')
-        AND rt.blocks_shipment = false
-        AND rt.depends_on_task_id IS NULL
-        ${taskFilter}
-        AND NOT EXISTS (
-          SELECT 1
-          FROM wms.order_items oi
-          JOIN wms.orders o
-            ON o.id = oi.order_id
-           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-          WHERE oi.sku = pv.sku
-            AND oi.status = 'pending'
-            AND oi.requires_shipping = 1
-        )
-      ORDER BY rt.created_at ASC, rt.id ASC
-      LIMIT ${limit}
+    const result = await this.db.execute(sql`
+      WITH candidates AS (
+        SELECT rt.id
+        FROM inventory.replen_tasks rt
+        LEFT JOIN catalog.product_variants pv ON pv.id = rt.pick_product_variant_id
+        WHERE rt.status IN ('pending', 'assigned')
+          AND rt.blocks_shipment = false
+          AND rt.depends_on_task_id IS NULL
+          ${taskFilter}
+          ${ageFilter}
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.order_items oi
+            JOIN wms.orders o
+              ON o.id = oi.order_id
+             AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE oi.sku = pv.sku
+              AND oi.status = 'pending'
+              AND oi.requires_shipping = 1
+          )
+        ORDER BY rt.created_at ASC, rt.id ASC
+        LIMIT ${limit}
+      )
+      UPDATE inventory.replen_tasks rt
+      SET status = 'cancelled',
+          completed_at = NOW(),
+          notes = trim(both E'\n' from COALESCE(rt.notes, '') || E'\n' || ${auditNote})
+      FROM candidates c
+      WHERE rt.id = c.id
+      RETURNING rt.id
     `);
 
-    const cancelled: number[] = [];
-    for (const task of candidatesResult.rows as ReplenTask[]) {
-      if (!task.pickProductVariantId || !task.toLocationId) continue;
-
-      const eval_ = await this.evaluateReplenNeed(task.pickProductVariantId, task.toLocationId, {
-        ignoreTaskId: task.id,
-      });
-
-      let reason: string | null = null;
-      if (eval_.status === "skip") {
-        reason = `re-evaluation skipped (${eval_.skipReason})`;
-      } else if (eval_.status === "needed_stockout") {
-        reason = eval_.sourceResolutionIssue?.note ?? "no source stock found during no-demand cleanup";
-      } else if (eval_.status === "needed_with_source") {
-        const resolvedSourceVariantId = eval_.resolvedSourceVariantId ?? task.pickProductVariantId;
-        const sourceQty = await this.getInventoryQty(resolvedSourceVariantId, eval_.sourceLocation?.id);
-        if (sourceQty < Math.max(1, eval_.qtySourceUnits)) {
-          reason = `resolved source has ${sourceQty}, needs ${eval_.qtySourceUnits}`;
-        }
-      }
-
-      if (!reason) continue;
-
-      const auditNote = `Cancelled by replen health cleanup${params.userId ? ` by ${params.userId}` : ""}: no active demand; ${reason}`;
-      await this.db.update(replenTasks).set({
-        status: "cancelled",
-        completedAt: new Date(),
-        notes: `${task.notes || ""}\n${auditNote}`.trim(),
-      }).where(eq(replenTasks.id, task.id));
-      cancelled.push(Number(task.id));
-    }
-
-    return cancelled;
+    return (result.rows as Array<{ id: number | string }>).map((row) => Number(row.id));
   }
 
   private async cancelDuplicateActiveTasks(params: {
@@ -2557,6 +2516,15 @@ export class ReplenishmentUseCases {
       throw new Error(`Task ${taskId} has no valid source stock and no replen quantity; cancel or resolve source stock instead of marking done`);
     }
 
+    if (["pending", "assigned", "in_progress"].includes(task.status)) {
+      const activeDemandLines = await this.countActivePendingDemandLines(task as ReplenTask);
+      if (activeDemandLines > 0) {
+        throw new Error(
+          `Task ${taskId} has ${activeDemandLines} active demand line${activeDemandLines === 1 ? "" : "s"}; complete the replen so inventory moves instead of marking done`,
+        );
+      }
+    }
+
     await this.db
       .update(replenTasks)
       .set({
@@ -2579,6 +2547,25 @@ export class ReplenishmentUseCases {
 
     console.log(`[Replen] Task #${taskId} manually marked done by ${userId || "unknown"}`);
     return updated as ReplenTask;
+  }
+
+  private async countActivePendingDemandLines(task: ReplenTask): Promise<number> {
+    if (!task.pickProductVariantId) return 0;
+
+    const result = await this.db.execute(sql`
+      SELECT COUNT(oi.id)::int AS active_pending_lines
+      FROM wms.order_items oi
+      JOIN wms.orders o
+        ON o.id = oi.order_id
+       AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+      JOIN catalog.product_variants pv
+        ON pv.id = ${task.pickProductVariantId}
+      WHERE oi.sku = pv.sku
+        AND oi.status = 'pending'
+        AND oi.requires_shipping = 1
+    `);
+
+    return Number(result.rows?.[0]?.active_pending_lines ?? 0);
   }
 
   // ---------------------------------------------------------------------------
