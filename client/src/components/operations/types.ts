@@ -56,7 +56,9 @@ export type PickReplenHealthFilter =
   | "allocation_review_needed"
   | "cycle_count_review"
   | "exception_order_no_blocker"
-  | "pick_bin_needs_replen";
+  | "pick_bin_needs_replen"
+  | "inventory_at_invalid_location"
+  | "invalid_pick_assignment";
 
 export interface PickReplenHealthCounts {
   stuck_replen: number;
@@ -69,6 +71,8 @@ export interface PickReplenHealthCounts {
   cycle_count_review: number;
   exception_order_no_blocker: number;
   pick_bin_needs_replen: number;
+  inventory_at_invalid_location: number;
+  invalid_pick_assignment: number;
 }
 
 export interface PickReplenHealthItem {

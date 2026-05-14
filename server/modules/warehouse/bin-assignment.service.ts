@@ -142,8 +142,16 @@ export class BinAssignmentService {
     const loc = await this.storage.getWarehouseLocationById(params.warehouseLocationId);
     if (!loc) throw new Error(`Warehouse location ${params.warehouseLocationId} not found`);
 
-    if (loc.isPickable !== 1) {
-      throw new Error(`Location ${loc.code} is not pickable — cannot assign SKUs to non-pick locations`);
+    if (loc.isActive !== 1) {
+      throw new Error(`Location ${loc.code} is inactive - cannot assign SKUs to inactive locations`);
+    }
+
+    if (loc.warehouseId == null) {
+      throw new Error(`Location ${loc.code} is not assigned to a warehouse - cannot assign SKUs to orphan locations`);
+    }
+
+    if (loc.locationType !== "pick" || loc.isPickable !== 1) {
+      throw new Error(`Location ${loc.code} is not a pick face - cannot assign SKUs to non-pick locations`);
     }
 
     const product = await this.storage.getProductById(variant.productId);

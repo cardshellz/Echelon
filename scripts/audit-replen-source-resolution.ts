@@ -231,6 +231,17 @@ function auditSlot(
   defaults: TierDefault[],
 ): AuditIssue[] {
   const issues: AuditIssue[] = [];
+  if (slot.warehouse_id == null) {
+    issues.push({
+      severity: "error",
+      code: "pick_slot_missing_warehouse",
+      pickSku: slot.pick_sku,
+      pickLocation: slot.pick_location_code,
+      message: "Pick slot location is not assigned to a warehouse; replen source resolution is unsafe.",
+    });
+    return issues;
+  }
+
   const { skuRule, ignoredProductRules } = chooseRule(slot, rules);
   const tierDefault = chooseTierDefault(slot, defaults);
 

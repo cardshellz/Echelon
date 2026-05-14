@@ -547,7 +547,17 @@ export function registerWarehouseRoutes(app: Express) {
           const code = loc.code?.trim() || codeParts.join("-");
           
           const existingLocations = await storage.getAllWarehouseLocations();
-          const existing = existingLocations.find(l => l.code === code);
+          let existing = existingLocations.find(l =>
+            l.code === code &&
+            (effectiveWarehouseId == null || l.warehouseId === effectiveWarehouseId)
+          );
+          if (effectiveWarehouseId == null && existing?.warehouseId != null) {
+            effectiveWarehouseId = existing.warehouseId;
+          }
+          if (effectiveWarehouseId == null) {
+            results.errors.push(`Row ${rowNum}: warehouse_id is required for active warehouse locations`);
+            continue;
+          }
           
           const locationData = {
             zone,
@@ -556,7 +566,7 @@ export function registerWarehouseRoutes(app: Express) {
             level,
             bin,
             name: loc.name?.trim() || null,
-            locationType: (loc.locationType || loc.location_type || "bin").trim(),
+            locationType: (loc.locationType || loc.location_type || existing?.locationType || "pick").trim(),
             isPickable: loc.isPickable !== undefined || loc.is_pickable !== undefined 
               ? parseInt(loc.isPickable ?? loc.is_pickable) 
               : (existing?.isPickable ?? 1),

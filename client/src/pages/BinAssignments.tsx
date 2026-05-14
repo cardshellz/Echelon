@@ -33,6 +33,7 @@ type WarehouseLocation = {
   locationType: string;
   warehouseId: number | null;
   isPickable: number;
+  isActive: number;
 };
 
 function useDebounce(value: string, delay: number) {
@@ -109,9 +110,14 @@ export default function BinAssignments() {
     return Array.from(zoneSet).sort();
   }, [locations]);
 
-  // Pickable locations only for assignment (uses is_pickable flag, not location_type)
+  // Valid pick faces only; orphan or mismatched location rows can make replen invisible.
   const pickLocations = useMemo(() => {
-    return locations.filter(l => l.isPickable === 1);
+    return locations.filter(l =>
+      l.isActive === 1 &&
+      l.warehouseId != null &&
+      l.locationType === "pick" &&
+      l.isPickable === 1
+    );
   }, [locations]);
 
   // Sorted assignments

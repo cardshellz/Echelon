@@ -41,6 +41,7 @@ interface Location {
   locationType: string;
   zone: string | null;
   warehouseId: number | null;
+  isActive: number;
 }
 
 interface SkuAtLocation {
@@ -107,10 +108,11 @@ export default function InlineTransferDialog({
 
   // Filter locations for search
   const filteredLocations = useMemo(() => {
-    if (!locations) return [];
-    if (!locationSearch) return locations;
+    const validLocations = (locations ?? []).filter((loc) => loc.isActive === 1 && loc.warehouseId != null);
+    if (!validLocations.length) return [];
+    if (!locationSearch) return validLocations;
     const q = locationSearch.toLowerCase();
-    return locations.filter(
+    return validLocations.filter(
       (loc) =>
         loc.code.toLowerCase().includes(q) ||
         loc.locationType.toLowerCase().includes(q) ||

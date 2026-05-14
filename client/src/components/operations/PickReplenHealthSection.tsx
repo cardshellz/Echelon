@@ -109,6 +109,16 @@ const TYPE_CONFIG: Record<Exclude<PickReplenHealthFilter, "all">, {
     badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
     icon: PackagePlus,
   },
+  inventory_at_invalid_location: {
+    label: "Invalid Inventory",
+    badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+    icon: ShieldAlert,
+  },
+  invalid_pick_assignment: {
+    label: "Invalid Pick Face",
+    badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+    icon: ShieldAlert,
+  },
 };
 
 const FILTERS: Array<{ value: PickReplenHealthFilter; label: string }> = [
@@ -123,6 +133,8 @@ const FILTERS: Array<{ value: PickReplenHealthFilter; label: string }> = [
   { value: "cycle_count_review", label: "Counts" },
   { value: "exception_order_no_blocker", label: "Order Status" },
   { value: "pick_bin_needs_replen", label: "Pick Bins" },
+  { value: "inventory_at_invalid_location", label: "Bad Stock" },
+  { value: "invalid_pick_assignment", label: "Bad Slots" },
 ];
 
 const ACTION_LABELS: Record<string, string> = {
@@ -139,6 +151,8 @@ const ACTION_LABELS: Record<string, string> = {
   finish_count: "Finish count",
   review_order_status: "Review status",
   queue_replen: "Queue replen",
+  fix_location_or_transfer_stock: "Fix location",
+  fix_pick_assignment: "Fix assignment",
 };
 
 function formatAge(hours: number | null) {

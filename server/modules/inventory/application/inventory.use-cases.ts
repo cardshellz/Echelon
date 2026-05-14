@@ -506,6 +506,29 @@ export class InventoryUseCases {
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
 
     await this.db.transaction(async (tx) => {
+      const [fromLoc] = await tx
+        .select()
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, params.fromLocationId))
+        .limit(1);
+      const [toLoc] = await tx
+        .select()
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, params.toLocationId))
+        .limit(1);
+
+      if (!fromLoc) throw new Error(`Source location ${params.fromLocationId} not found`);
+      if (!toLoc) throw new Error(`Destination location ${params.toLocationId} not found`);
+      if (fromLoc.isActive !== 1) throw new Error(`Source location ${fromLoc.code} is inactive`);
+      if (toLoc.isActive !== 1) throw new Error(`Destination location ${toLoc.code} is inactive`);
+      if (fromLoc.warehouseId == null) throw new Error(`Source location ${fromLoc.code} is not assigned to a warehouse`);
+      if (toLoc.warehouseId == null) throw new Error(`Destination location ${toLoc.code} is not assigned to a warehouse`);
+      if (fromLoc.warehouseId !== toLoc.warehouseId) {
+        throw new Error(
+          `Inventory transfer must stay within one warehouse (${fromLoc.code} warehouse ${fromLoc.warehouseId}, ${toLoc.code} warehouse ${toLoc.warehouseId})`,
+        );
+      }
+
       const sourceLevel = await this.storage.lockInventoryLevel(
         params.fromLocationId,
         params.productVariantId,
