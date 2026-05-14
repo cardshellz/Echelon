@@ -703,15 +703,36 @@ export class OperationsDashboardService {
         LEFT JOIN wms.orders o ON rt.order_id = o.id
         LEFT JOIN LATERAL (
           SELECT
-            COUNT(oi.id)::int AS active_pending_lines,
-            COALESCE(SUM(GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0)), 0)::int AS active_pending_units
-          FROM wms.order_items oi
-          JOIN wms.orders demand_order
-            ON demand_order.id = oi.order_id
-           AND COALESCE(demand_order.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-          WHERE oi.sku = pv.sku
-            AND oi.status = 'pending'
-            AND oi.requires_shipping = 1
+            COUNT(*)::int AS active_pending_lines,
+            COALESCE(SUM(demand_line.units_needed), 0)::int AS active_pending_units
+          FROM (
+            SELECT
+              oi.id::text AS demand_id,
+              GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0)::int AS units_needed
+            FROM wms.order_items oi
+            JOIN wms.orders demand_order
+              ON demand_order.id = oi.order_id
+             AND COALESCE(demand_order.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE oi.sku = pv.sku
+              AND oi.status = 'pending'
+              AND oi.requires_shipping = 1
+
+            UNION ALL
+
+            SELECT
+              ('allocation_exception:' || ae.id::text) AS demand_id,
+              GREATEST(COALESCE(ae.requested_qty, 0), 1)::int AS units_needed
+            FROM wms.allocation_exceptions ae
+            JOIN wms.orders demand_order
+              ON demand_order.id = ae.order_id
+             AND COALESCE(demand_order.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE ae.sku = pv.sku
+              AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+              AND (
+                ae.status = 'blocked'
+                OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
+              )
+          ) demand_line
         ) demand ON true
         LEFT JOIN inventory.inventory_levels source_level
           ON source_level.product_variant_id = rt.source_product_variant_id
@@ -1034,15 +1055,36 @@ export class OperationsDashboardService {
         ) missing_velocity ON true
         LEFT JOIN LATERAL (
           SELECT
-            COUNT(oi.id)::int AS active_pending_lines,
-            COALESCE(SUM(GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0)), 0)::int AS active_pending_units
-          FROM wms.order_items oi
-          JOIN wms.orders o
-            ON o.id = oi.order_id
-           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-          WHERE oi.sku = pv.sku
-            AND oi.status = 'pending'
-            AND oi.requires_shipping = 1
+            COUNT(*)::int AS active_pending_lines,
+            COALESCE(SUM(demand_line.units_needed), 0)::int AS active_pending_units
+          FROM (
+            SELECT
+              oi.id::text AS demand_id,
+              GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0)::int AS units_needed
+            FROM wms.order_items oi
+            JOIN wms.orders o
+              ON o.id = oi.order_id
+             AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE oi.sku = pv.sku
+              AND oi.status = 'pending'
+              AND oi.requires_shipping = 1
+
+            UNION ALL
+
+            SELECT
+              ('allocation_exception:' || ae.id::text) AS demand_id,
+              GREATEST(COALESCE(ae.requested_qty, 0), 1)::int AS units_needed
+            FROM wms.allocation_exceptions ae
+            JOIN wms.orders o
+              ON o.id = ae.order_id
+             AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+            WHERE ae.sku = pv.sku
+              AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+              AND (
+                ae.status = 'blocked'
+                OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
+              )
+          ) demand_line
         ) missing_demand ON true
         WHERE pl.status = 'active'
           AND pl.is_primary = 1

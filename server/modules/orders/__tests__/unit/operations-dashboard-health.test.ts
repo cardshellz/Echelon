@@ -6,6 +6,17 @@ vi.mock("../../../warehouse/settings.resolver", () => ({
 
 import { OperationsDashboardService } from "../../operations-dashboard.service";
 
+function sqlText(query: any): string {
+  return (query?.queryChunks ?? [])
+    .map((chunk: any) => {
+      if (typeof chunk === "string") return chunk;
+      if (Array.isArray(chunk?.value)) return chunk.value.join("");
+      if (Array.isArray(chunk?.queryChunks)) return sqlText(chunk);
+      return "";
+    })
+    .join("");
+}
+
 describe("OperationsDashboardService pick/replen health", () => {
   it("returns counts and drill-down rows for pick/replen cleanup", async () => {
     const db = {
@@ -83,6 +94,9 @@ describe("OperationsDashboardService pick/replen health", () => {
       ageHours: 12,
       action: "resolve_blocker",
     })]);
+    const detailSql = sqlText(db.execute.mock.calls[1][0]);
+    expect(detailSql).toContain("allocation_exceptions");
+    expect(detailSql).toContain("shipmentBlocking");
   });
 
   it("falls back to all when the filter is not recognized", async () => {

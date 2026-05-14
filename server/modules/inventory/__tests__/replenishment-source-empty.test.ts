@@ -21,6 +21,17 @@ import {
   warehouseLocations,
 } from "@shared/schema";
 
+function sqlText(query: any): string {
+  return (query?.queryChunks ?? [])
+    .map((chunk: any) => {
+      if (typeof chunk === "string") return chunk;
+      if (Array.isArray(chunk?.value)) return chunk.value.join("");
+      if (Array.isArray(chunk?.queryChunks)) return sqlText(chunk);
+      return "";
+    })
+    .join("");
+}
+
 function makeDb() {
   const inserts: Array<{ table: unknown; value: any }> = [];
   const updates: Array<{ table: unknown; value: any }> = [];
@@ -1102,6 +1113,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       blocksShipment: false,
       forceWhenAtOrBelowZero: false,
     });
+    expect(sqlText(db.execute.mock.calls[0][0])).toContain("allocation_exceptions");
     expect(result).toMatchObject({
       mode: "queue_replen",
       scannedPickBins: 1,

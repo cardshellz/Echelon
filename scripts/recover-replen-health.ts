@@ -213,14 +213,31 @@ async function fetchAgedReplenTasks(client: pg.PoolClient, options: CliOptions):
         ON source_level.product_variant_id = rt.source_product_variant_id
        AND source_level.warehouse_location_id = rt.from_location_id
       LEFT JOIN LATERAL (
-        SELECT COUNT(oi.id)::int AS active_pending_lines
-        FROM wms.order_items oi
-        JOIN wms.orders o
-          ON o.id = oi.order_id
-         AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-        WHERE oi.sku = pv_pick.sku
-          AND oi.status = 'pending'
-          AND oi.requires_shipping = 1
+        SELECT COUNT(*)::int AS active_pending_lines
+        FROM (
+          SELECT oi.id::text AS demand_id
+          FROM wms.order_items oi
+          JOIN wms.orders o
+            ON o.id = oi.order_id
+           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+          WHERE oi.sku = pv_pick.sku
+            AND oi.status = 'pending'
+            AND oi.requires_shipping = 1
+
+          UNION ALL
+
+          SELECT 'allocation_exception:' || ae.id::text AS demand_id
+          FROM wms.allocation_exceptions ae
+          JOIN wms.orders o
+            ON o.id = ae.order_id
+           AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+          WHERE ae.sku = pv_pick.sku
+            AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+            AND (
+              ae.status = 'blocked'
+              OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
+            )
+        ) demand_line
       ) demand ON true
       WHERE rt.status NOT IN ('completed', 'cancelled')
         AND (
