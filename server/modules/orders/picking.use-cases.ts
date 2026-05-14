@@ -246,6 +246,23 @@ export type CloseShipmentBlockersResult = {
   replenTasksClosed: number;
 };
 
+type BlockingAllocationExceptionInput = {
+  item: OrderItem;
+  order?: Order;
+  productVariantId: number | null;
+  exceptionType: string;
+  requestedQty: number;
+  selectedLocationId?: number | null;
+  selectedLocationCode?: string | null;
+  reviewReason: string;
+  metadata?: Record<string, any>;
+};
+
+type BlockingAllocationExceptionResult = {
+  exception: any;
+  created: boolean;
+};
+
 export type PickQueueOrder = any; // Pass-through type from storage
 
 function emptyPickInventoryContext(sku: string): PickInventoryContext {
@@ -312,6 +329,141 @@ export class PickingUseCases {
     if (hierarchyLevel === 2) return "boxes";
     if (hierarchyLevel >= 3) return "cases";
     return "units";
+  }
+
+  private isOpenBlockerUniqueViolation(error: any): boolean {
+    return error?.code === "23505"
+      && String(error?.constraint || error?.detail || error?.message || "").includes("allocation_exceptions_one_open_blocker_per_item_idx");
+  }
+
+  private readJsonb(value: any): Record<string, any> {
+    if (!value) return {};
+    if (typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value === "string") {
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  }
+
+  private async findCurrentBlockingAllocationException(orderItemId: number): Promise<any | null> {
+    const result = await this.db.execute(sql`
+      SELECT *
+      FROM wms.allocation_exceptions
+      WHERE order_item_id = ${orderItemId}
+        AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+        AND (
+          status = 'blocked'
+          OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
+        )
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `);
+    return result.rows?.[0] ?? null;
+  }
+
+  private async createBlockingAllocationException(
+    params: BlockingAllocationExceptionInput,
+  ): Promise<BlockingAllocationExceptionResult> {
+    const now = new Date();
+    const metadata = {
+      ...(params.metadata ?? {}),
+      shipmentBlocking: true,
+    };
+    const selectedLocationId = params.selectedLocationId ?? null;
+    const selectedLocationCode = params.selectedLocationCode ?? null;
+
+    try {
+      return await this.db.transaction(async (tx) => {
+        const exactResult = await tx.execute(sql`
+          SELECT id, metadata
+          FROM wms.allocation_exceptions
+          WHERE order_item_id = ${params.item.id}
+            AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+            AND (
+              status = 'blocked'
+              OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
+            )
+            AND exception_type = ${params.exceptionType}
+            AND COALESCE(selected_location_id, -1) = COALESCE(${selectedLocationId}, -1)
+            AND COALESCE(selected_location_code, '') = COALESCE(${selectedLocationCode}, '')
+            AND COALESCE(review_reason, '') = ${params.reviewReason}
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+          FOR UPDATE
+        `);
+
+        const exact = exactResult.rows?.[0];
+        if (exact) {
+          const mergedMetadata = {
+            ...this.readJsonb(exact.metadata),
+            ...metadata,
+            duplicateObservedAt: now.toISOString(),
+          };
+          const updated = await tx.execute(sql`
+            UPDATE wms.allocation_exceptions
+            SET
+              requested_qty = ${params.requestedQty},
+              metadata = ${JSON.stringify(mergedMetadata)}::jsonb,
+              updated_at = ${now}
+            WHERE id = ${Number(exact.id)}
+            RETURNING *
+          `);
+          return { exception: updated.rows?.[0] ?? exact, created: false };
+        }
+
+        await tx.execute(sql`
+          UPDATE wms.allocation_exceptions
+          SET
+            status = 'cancelled',
+            resolution = 'superseded_by_new_blocker',
+            resolved_at = ${now},
+            updated_at = ${now},
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+              'supersededBy', 'newer_blocking_exception',
+              'supersededAt', ${now},
+              'supersededExceptionType', ${params.exceptionType}
+            )
+          WHERE order_item_id = ${params.item.id}
+            AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+            AND (
+              status = 'blocked'
+              OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
+            )
+        `);
+
+        const [exception] = await tx.insert(allocationExceptions).values({
+          orderId: params.item.orderId,
+          orderItemId: params.item.id,
+          orderNumber: params.order?.orderNumber ?? null,
+          sku: params.item.sku,
+          productVariantId: params.productVariantId,
+          exceptionType: params.exceptionType,
+          status: "blocked",
+          requestedQty: params.requestedQty,
+          selectedLocationId,
+          selectedLocationCode,
+          resolution: null,
+          autoFixedSetup: false,
+          reviewReason: params.reviewReason,
+          resolvedBy: null,
+          resolvedAt: null,
+          metadata,
+        }).returning();
+
+        return { exception, created: true };
+      });
+    } catch (error: any) {
+      if (this.isOpenBlockerUniqueViolation(error)) {
+        const existing = await this.findCurrentBlockingAllocationException(params.item.id);
+        if (existing) return { exception: existing, created: false };
+      }
+      throw error;
+    }
   }
 
   private async describeInlineReplenMove(
@@ -384,14 +536,11 @@ export class PickingUseCases {
     const requestedQty = Math.max(0, (item.quantity || 0) - (item.pickedQuantity || 0)) || item.quantity || 0;
 
     const createBlockedException = async (exceptionType: string, message: string, metadata: Record<string, any> = {}) => {
-      const [exception] = await this.db.insert(allocationExceptions).values({
-        orderId: item.orderId,
-        orderItemId: item.id,
-        orderNumber: order.orderNumber,
-        sku: item.sku,
+      const result = await this.createBlockingAllocationException({
+        item,
+        order,
         productVariantId: variant?.id ?? null,
         exceptionType,
-        status: "blocked",
         requestedQty,
         selectedLocationId: metadata.selectedLocationId ?? null,
         selectedLocationCode: metadata.selectedLocationCode ?? null,
@@ -401,26 +550,28 @@ export class PickingUseCases {
           locationCode: typedCode || null,
           warehouseLocationId: params.warehouseLocationId ?? null,
         },
-      }).returning();
+      });
 
-      try {
-        const { notify } = await import("../notifications/notifications.service");
-        await notify("allocation_blocked", {
-          title: `Allocation blocked: ${item.sku}`,
-          message,
-          data: {
-            orderId: item.orderId,
-            orderNumber: order.orderNumber,
-            orderItemId: item.id,
-            sku: item.sku,
-            exceptionId: exception.id,
-          },
-        });
-      } catch (notifyErr: any) {
-        console.warn(`[Allocation] blocked notification failed: ${notifyErr.message}`);
+      if (result.created) {
+        try {
+          const { notify } = await import("../notifications/notifications.service");
+          await notify("allocation_blocked", {
+            title: `Allocation blocked: ${item.sku}`,
+            message,
+            data: {
+              orderId: item.orderId,
+              orderNumber: order.orderNumber,
+              orderItemId: item.id,
+              sku: item.sku,
+              exceptionId: result.exception.id,
+            },
+          });
+        } catch (notifyErr: any) {
+          console.warn(`[Allocation] blocked notification failed: ${notifyErr.message}`);
+        }
       }
 
-      return exception;
+      return result.exception;
     };
 
     if (!variant) {
@@ -1380,22 +1531,15 @@ export class PickingUseCases {
     deviceType?: string;
     sessionId?: string;
   }): Promise<void> {
-    const [exception] = await this.db.insert(allocationExceptions).values({
-      orderId: params.item.orderId,
-      orderItemId: params.item.id,
-      orderNumber: params.order?.orderNumber ?? null,
-      sku: params.item.sku,
+    const { exception } = await this.createBlockingAllocationException({
+      item: params.item,
+      order: params.order,
       productVariantId: params.productVariantId,
       exceptionType: "inventory_deduction_failed",
-      status: "blocked",
       requestedQty: params.requestedQty,
       selectedLocationId: params.locationId,
       selectedLocationCode: params.locationCode,
-      resolution: null,
-      autoFixedSetup: false,
       reviewReason: params.message,
-      resolvedBy: null,
-      resolvedAt: null,
       metadata: {
         pickerNonBlocking: true,
         shipmentBlocking: true,
@@ -1406,7 +1550,7 @@ export class PickingUseCases {
         sessionId: params.sessionId || null,
         observedBy: params.userId || null,
       },
-    }).returning();
+    });
 
     await this.storage.createPickingLog({
       actionType: "inventory_shipment_blocked",

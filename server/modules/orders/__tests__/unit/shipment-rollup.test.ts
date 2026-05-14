@@ -1312,6 +1312,8 @@ describe("recomputeOrderStatusFromShipments :: state matrix", () => {
     });
     expect(result).toEqual({ warehouseStatus: "shipped", changed: true });
     expect(mock.getCallCount()).toBe(3);
+    expect(mock.calls[2].sqlText).toContain("allocation_exceptions");
+    expect(mock.calls[2].sqlText).toContain("shipment_rollup");
   });
 
   it("2 shipments both 'shipped' → 'shipped'", async () => {
