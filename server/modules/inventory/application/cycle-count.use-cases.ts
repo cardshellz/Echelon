@@ -11,8 +11,8 @@
  *   - SKU mismatch pairs: when a counter finds a different SKU than expected,
  *     two linked items are created (expected_missing + unexpected_found).
  *   - Auto-approve tolerance: small variances can be auto-committed.
- *   - Bin reconciliation: after approval, product_locations (bin assignments)
- *     are synced with physical reality.
+ *   - Cycle count approval reconciles inventory only. Slotting/product_locations
+ *     remain a setup source of truth and are not inferred from count mismatches.
  */
 
 import { sql, eq, and } from "drizzle-orm";
@@ -179,46 +179,14 @@ export class CycleCountUseCases {
   // =========================================================================
 
   /**
-   * After cycle count approval, sync product_locations (bin assignments)
-   * to match physical reality. Only acts on pick-type locations.
+   * Preserve slotting while approving count variances.
+   *
+   * A mismatch proves inventory drift at a bin, not that the planned pick face
+   * should be deleted or replaced. Slotting changes must run through the
+   * canonical assignment flow so operators make that decision explicitly.
    */
   private async reconcileBinAssignment(item: CycleCountItem): Promise<void> {
     if (!item.varianceType) return;
-
-    const loc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
-    if (!loc || loc.isPickable !== 1) return;
-
-    // EXPECTED_MISSING: old SKU no longer in this bin → remove assignment
-    if (item.mismatchType === "expected_missing") {
-      if (!item.productId) return;
-      const existing = await this.storage.getProductLocationByComposite(item.productId, item.warehouseLocationId);
-      if (existing) await this.storage.deleteProductLocation(existing.id);
-      return;
-    }
-
-    // UNEXPECTED_FOUND or standalone UNEXPECTED_ITEM: new SKU lives here → create assignment
-    // Guard: only create assignment if the item was actually counted with qty > 0
-    if ((item.mismatchType === "unexpected_found" && (item.countedQty ?? 0) > 0) ||
-        (item.varianceType === "unexpected_item" && !item.mismatchType)) {
-      if (!item.productId) return;
-      const existing = await this.storage.getProductLocationByComposite(item.productId, item.warehouseLocationId);
-      if (existing) return; // idempotent
-
-      const product = await this.storage.getProductById(item.productId);
-      if (!product) return;
-
-      await this.storage.createProductLocation({
-        productId: item.productId,
-        sku: item.countedSku?.toUpperCase() || product.sku || null,
-        name: product.name || item.countedSku || "Unknown",
-        location: loc.code,
-        zone: loc.zone || "U",
-        warehouseLocationId: item.warehouseLocationId,
-        isPrimary: 1,
-        status: "active",
-      });
-    }
-    // quantity_over, quantity_under: no bin assignment changes needed
   }
 
   /**
