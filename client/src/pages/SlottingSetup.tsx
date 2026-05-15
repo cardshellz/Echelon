@@ -242,9 +242,14 @@ export default function SlottingSetup() {
     },
   });
 
+  const activeLocations = useMemo(
+    () => locations.filter(location => location.isActive !== 0),
+    [locations],
+  );
+
   const selectedLocation = useMemo(
-    () => locations.find(location => location.id === selectedLocationId) || null,
-    [locations, selectedLocationId],
+    () => activeLocations.find(location => location.id === selectedLocationId) || null,
+    [activeLocations, selectedLocationId],
   );
 
   useEffect(() => {
@@ -252,11 +257,17 @@ export default function SlottingSetup() {
   }, [selectedLocation]);
 
   useEffect(() => {
-    if (!selectedLocationId && locations.length > 0) {
-      const firstAssignable = locations.find(isAssignablePickFace);
-      setSelectedLocationId(firstAssignable?.id ?? locations[0].id);
+    if (activeLocations.length === 0) {
+      if (selectedLocationId !== null) setSelectedLocationId(null);
+      return;
     }
-  }, [locations, selectedLocationId]);
+    const selectedIsActive = selectedLocationId != null
+      && activeLocations.some(location => location.id === selectedLocationId);
+    if (!selectedIsActive) {
+      const firstAssignable = activeLocations.find(isAssignablePickFace);
+      setSelectedLocationId(firstAssignable?.id ?? activeLocations[0].id);
+    }
+  }, [activeLocations, selectedLocationId]);
 
   const warehouseNameById = useMemo(() => {
     const map = new Map<number, string>();
@@ -306,7 +317,7 @@ export default function SlottingSetup() {
 
   const filteredLocations = useMemo(() => {
     const term = debouncedSlotSearch.trim().toUpperCase();
-    return locations
+    return activeLocations
       .filter(location => {
         if (!term) return true;
         const assigned = assignmentsByLocation.get(location.id) || [];
@@ -325,7 +336,7 @@ export default function SlottingSetup() {
         if (aAssignable !== bAssignable) return aAssignable - bAssignable;
         return a.code.localeCompare(b.code);
       });
-  }, [assignmentsByLocation, debouncedSlotSearch, locations]);
+  }, [activeLocations, assignmentsByLocation, debouncedSlotSearch]);
 
   const assignMutation = useMutation({
     mutationFn: async (params: { productVariantId: number; warehouseLocationId: number }) => {
