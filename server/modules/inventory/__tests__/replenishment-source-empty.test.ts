@@ -580,6 +580,119 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
   });
 
+  it("creates linked QA cycle count work for high-risk completed replen", async () => {
+    const inserts: Array<{ table: unknown; value: any }> = [];
+    const updates: Array<{ table: unknown; value: any }> = [];
+    const inventoryRows = [
+      [{ variantQty: 0 }],
+      [{ variantQty: 750 }],
+    ];
+    const selectRows = (table: unknown) => {
+      if (table === inventoryLevels) return inventoryRows.shift() ?? [];
+      if (table === warehouseLocations) return [{ id: 1, code: "A-01", warehouseId: 7 }];
+      if (table === productVariants) return [{ id: 100, sku: "SKU-1", productId: 10 }];
+      return [];
+    };
+    const db = {
+      select: vi.fn(() => ({
+        from: (table: unknown) => ({
+          where: () => ({
+            limit: vi.fn(async () => selectRows(table)),
+          }),
+        }),
+      })),
+      insert: vi.fn((table: unknown) => ({
+        values: vi.fn((value: any) => {
+          inserts.push({ table, value });
+          return {
+            returning: vi.fn(async () => [{ id: table === cycleCounts ? 333 : 444, ...value }]),
+          };
+        }),
+      })),
+      update: vi.fn((table: unknown) => ({
+        set: vi.fn((value: any) => {
+          updates.push({ table, value });
+          return { where: vi.fn(async () => []) };
+        }),
+      })),
+      delete: vi.fn(),
+      execute: vi.fn(async () => ({ rows: [] })),
+      transaction: vi.fn(),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    const cycleCountId = await (service as any).createQaVerificationForCompletedReplen({
+      id: 990,
+      status: "completed",
+      fromLocationId: 2,
+      toLocationId: 1,
+      sourceProductVariantId: 100,
+      pickProductVariantId: 100,
+      productId: 10,
+      qtySourceUnits: 1000,
+      qtyTargetUnits: 1000,
+      qtyCompleted: 1000,
+      replenMethod: "full_case",
+      executionMode: "inline",
+      blocksShipment: true,
+      warehouseId: 7,
+      notes: "System auto-executed inline replen.",
+      linkedCycleCountId: null,
+    }, 1000, "system:auto-replen");
+
+    expect(cycleCountId).toBe(333);
+    expect(inserts.find(insert => insert.table === cycleCounts)?.value).toMatchObject({
+      name: "Replen QA - Task #990",
+      status: "in_progress",
+      warehouseId: 7,
+      locationCodes: "A-01",
+      totalBins: 1,
+      createdBy: "system:replen-qa",
+    });
+    expect(inserts.find(insert => insert.table === cycleCounts)?.value.description).toContain("large_move");
+    expect(inserts.find(insert => insert.table === cycleCountItems)?.value).toMatchObject({
+      cycleCountId: 333,
+      warehouseLocationId: 1,
+      productVariantId: 100,
+      productId: 10,
+      expectedSku: "SKU-1",
+      expectedQty: 750,
+      status: "pending",
+      countedBy: "system:auto-replen",
+    });
+    expect(updates.find(update => update.table === replenTasks)?.value).toMatchObject({
+      linkedCycleCountId: 333,
+    });
+    expect(updates.find(update => update.table === replenTasks)?.value.notes).toContain("Linked QA cycle count #333");
+  });
+
+  it("does not duplicate QA count work when a replen task is already linked", async () => {
+    const db = {
+      select: vi.fn(),
+      insert: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      execute: vi.fn(),
+      transaction: vi.fn(),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+
+    const cycleCountId = await (service as any).createQaVerificationForCompletedReplen({
+      id: 991,
+      status: "completed",
+      fromLocationId: 2,
+      toLocationId: 1,
+      sourceProductVariantId: 100,
+      pickProductVariantId: 100,
+      replenMethod: "case_break",
+      linkedCycleCountId: 333,
+    }, 1000, "system:auto-replen");
+
+    expect(cycleCountId).toBeNull();
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
   it("returns an existing queued replen task instead of creating a duplicate", async () => {
     const { db, inserts, state } = makeDb();
     state.insertedReplenTask = {

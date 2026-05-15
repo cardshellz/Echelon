@@ -279,6 +279,15 @@ type InventoryCore = {
 
 import { InventoryUseCases } from "./inventory.use-cases";
 
+const DEFAULT_REPLEN_QA_RANDOM_SAMPLE_RATE = 0.02;
+const DEFAULT_REPLEN_QA_LARGE_MOVE_BASE_UNITS = 500;
+const DEFAULT_REPLEN_QA_SOURCE_LOW_UNITS = 0;
+
+type ReplenQaReason = {
+  code: string;
+  detail: string;
+};
+
 /**
  * Replenishment use cases for the Echelon WMS.
  *
@@ -583,6 +592,187 @@ export class ReplenishmentUseCases {
       await this.blockTaskExecutionFailure(task, err);
       throw err;
     }
+  }
+
+  private envNumber(name: string, fallback: number): number {
+    const raw = Number(process.env[name]);
+    return Number.isFinite(raw) ? raw : fallback;
+  }
+
+  private replenQaSampleRate(): number {
+    const rate = this.envNumber("REPLEN_QA_RANDOM_SAMPLE_RATE", DEFAULT_REPLEN_QA_RANDOM_SAMPLE_RATE);
+    return Math.max(0, Math.min(1, rate));
+  }
+
+  private replenQaLargeMoveThreshold(): number {
+    return Math.max(1, this.envNumber("REPLEN_QA_LARGE_MOVE_BASE_UNITS", DEFAULT_REPLEN_QA_LARGE_MOVE_BASE_UNITS));
+  }
+
+  private replenQaSourceLowThreshold(): number {
+    return Math.max(0, this.envNumber("REPLEN_QA_SOURCE_LOW_UNITS", DEFAULT_REPLEN_QA_SOURCE_LOW_UNITS));
+  }
+
+  private isDeterministicallySampledForQa(taskId: number): boolean {
+    const rate = this.replenQaSampleRate();
+    if (rate <= 0) return false;
+    const sampleCeiling = Math.round(rate * 10000);
+    const bucket = (Math.imul(taskId, 2654435761) >>> 0) % 10000;
+    return bucket < sampleCeiling;
+  }
+
+  private async hasRecentVarianceAtPickBin(task: ReplenTask): Promise<boolean> {
+    if (!task.pickProductVariantId || !task.toLocationId) return false;
+    try {
+      const result = await this.db.execute(sql`
+        SELECT 1
+        FROM inventory.cycle_count_items cci
+        JOIN inventory.cycle_counts cc ON cc.id = cci.cycle_count_id
+        WHERE cci.product_variant_id = ${task.pickProductVariantId}
+          AND cci.warehouse_location_id = ${task.toLocationId}
+          AND cc.created_at > NOW() - INTERVAL '90 days'
+          AND (
+            COALESCE(cci.variance_qty, 0) <> 0
+            OR cci.variance_type IS NOT NULL
+            OR cci.status IN ('variance', 'investigate', 'adjusted')
+          )
+        LIMIT 1
+      `);
+      return (result.rows ?? []).length > 0;
+    } catch (err: any) {
+      console.warn(`[Replen QA] Failed to check prior variance for task ${task.id}:`, err?.message || err);
+      return false;
+    }
+  }
+
+  private async getReplenQaReasons(task: ReplenTask, movedBaseUnits: number): Promise<ReplenQaReason[]> {
+    const reasons: ReplenQaReason[] = [];
+    const method = task.replenMethod || "full_case";
+
+    if (method === "case_break") {
+      reasons.push({ code: "case_break", detail: "case-break replen movement" });
+    }
+
+    const largeMoveThreshold = this.replenQaLargeMoveThreshold();
+    if (movedBaseUnits >= largeMoveThreshold) {
+      reasons.push({
+        code: "large_move",
+        detail: `${movedBaseUnits} base units moved (threshold ${largeMoveThreshold})`,
+      });
+    }
+
+    const sourceVariantId = task.sourceProductVariantId ?? task.pickProductVariantId;
+    const sourceRemainingQty = await this.getInventoryQty(sourceVariantId, task.fromLocationId);
+    const sourceLowThreshold = this.replenQaSourceLowThreshold();
+    if (sourceRemainingQty <= sourceLowThreshold) {
+      reasons.push({
+        code: "source_low",
+        detail: `source remaining qty ${sourceRemainingQty} at or below ${sourceLowThreshold}`,
+      });
+    }
+
+    if (task.blocksShipment === true || task.orderId || task.orderItemId) {
+      reasons.push({ code: "demand_recovery", detail: "replen tied to active demand or shipment recovery" });
+    }
+
+    if (await this.hasRecentVarianceAtPickBin(task)) {
+      reasons.push({ code: "recent_variance", detail: "pick bin had recent cycle-count variance" });
+    }
+
+    if (this.isDeterministicallySampledForQa(task.id)) {
+      reasons.push({ code: "sampled", detail: "deterministic QA sample" });
+    }
+
+    const seen = new Set<string>();
+    return reasons.filter((reason) => {
+      if (seen.has(reason.code)) return false;
+      seen.add(reason.code);
+      return true;
+    });
+  }
+
+  private async createQaVerificationForCompletedReplen(
+    task: ReplenTask,
+    movedBaseUnits: number,
+    userId?: string,
+  ): Promise<number | null> {
+    if (movedBaseUnits <= 0) return null;
+    if (task.status && task.status !== "completed") return null;
+    if (task.linkedCycleCountId) return null;
+    if (!task.pickProductVariantId || !task.toLocationId) return null;
+
+    const reasons = await this.getReplenQaReasons(task, movedBaseUnits);
+    if (reasons.length === 0) return null;
+
+    const [pickLocation] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, task.toLocationId))
+      .limit(1);
+    if (!pickLocation) return null;
+
+    const [pickVariant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, task.pickProductVariantId))
+      .limit(1);
+    if (!pickVariant) return null;
+
+    const [targetLevel] = await this.db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.productVariantId, task.pickProductVariantId),
+        eq(inventoryLevels.warehouseLocationId, task.toLocationId),
+      ))
+      .limit(1);
+
+    const reasonCodes = reasons.map((reason) => reason.code).join(", ");
+    const reasonDetails = reasons.map((reason) => reason.detail).join("; ");
+    const [cycleCount] = await this.db.insert(cycleCounts).values({
+      name: `Replen QA - Task #${task.id}`,
+      description: `Verify ${pickVariant.sku ?? `variant #${task.pickProductVariantId}`} at ${pickLocation.code} after replen task #${task.id}. Reason codes: ${reasonCodes}. Details: ${reasonDetails}`,
+      status: "in_progress",
+      warehouseId: task.warehouseId ?? pickLocation.warehouseId ?? null,
+      locationCodes: pickLocation.code,
+      totalBins: 1,
+      countedBins: 0,
+      varianceCount: 0,
+      approvedVariances: 0,
+      createdBy: "system:replen-qa",
+    }).returning();
+
+    if (!cycleCount?.id) return null;
+
+    await this.db.insert(cycleCountItems).values({
+      cycleCountId: cycleCount.id,
+      warehouseLocationId: task.toLocationId,
+      productVariantId: task.pickProductVariantId,
+      productId: task.productId ?? pickVariant.productId ?? null,
+      expectedSku: pickVariant.sku ?? null,
+      expectedQty: targetLevel?.variantQty ?? 0,
+      status: "pending",
+      countedBy: userId || "system:replen-qa",
+    });
+
+    await this.db.update(replenTasks).set({
+      linkedCycleCountId: cycleCount.id,
+      notes: `${task.notes || ""}\nLinked QA cycle count #${cycleCount.id}: ${reasonCodes}`.trim(),
+    }).where(and(eq(replenTasks.id, task.id), isNull(replenTasks.linkedCycleCountId)));
+
+    notify("cycle_count_needed", {
+      title: `Replen QA count: ${pickVariant.sku ?? `variant #${task.pickProductVariantId}`}`,
+      message: `Verify ${pickLocation.code} after replen task #${task.id} (${reasonCodes})`,
+      data: {
+        taskId: task.id,
+        cycleCountId: cycleCount.id,
+        productVariantId: task.pickProductVariantId,
+        locationId: task.toLocationId,
+        locationCode: pickLocation.code,
+        reasons: reasons.map((reason) => reason.code),
+      },
+    }).catch(() => {});
+
+    return cycleCount.id;
   }
 
   private replenOrderTaskFields(context?: ReplenOrderContext): Pick<InsertReplenTask, "orderId" | "orderItemId" | "blocksShipment"> {
@@ -1257,6 +1447,17 @@ export class ReplenishmentUseCases {
     });
 
     await this.unblockDependentTasks(taskId, userId);
+
+    const completedTask = await this.getTaskById(taskId);
+    try {
+      await this.createQaVerificationForCompletedReplen(
+        (completedTask ?? executableTask) as ReplenTask,
+        movedBaseUnits,
+        userId,
+      );
+    } catch (err: any) {
+      console.warn(`[Replen QA] Failed to create verification count for task ${taskId}:`, err?.message || err);
+    }
 
     return { moved: movedBaseUnits };
   }
