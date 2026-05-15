@@ -60,6 +60,8 @@ type ApiMutationError = Error & {
   canDeactivate?: boolean;
 };
 
+type LocationActiveFilter = "active" | "inactive" | "all";
+
 // Location function types (pick, reserve, receiving, staging)
 const LOCATION_TYPES = [
   { value: "pick", label: "Pick" },
@@ -155,6 +157,7 @@ export default function WarehouseLocations() {
   });
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("all");
   const [binSearchQuery, setBinSearchQuery] = useState<string>("");
+  const [activeFilter, setActiveFilter] = useState<LocationActiveFilter>("active");
   const assigningLocationCanReceiveSku = isValidPickFace(assigningToLocation);
 
   const canView = hasPermission("inventory", "view");
@@ -466,10 +469,15 @@ export default function WarehouseLocations() {
   };
 
   const toggleSelectAll = () => {
-    if (selectedIds.size === locations.length) {
-      setSelectedIds(new Set());
+    const visibleIds = filteredLocations.map((location) => location.id);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+
+    if (allVisibleSelected) {
+      const next = new Set(selectedIds);
+      visibleIds.forEach((id) => next.delete(id));
+      setSelectedIds(next);
     } else {
-      setSelectedIds(new Set(locations.map(l => l.id)));
+      setSelectedIds(new Set([...selectedIds, ...visibleIds]));
     }
   };
 
@@ -563,6 +571,10 @@ export default function WarehouseLocations() {
 
   const filteredLocations = useMemo(() => {
     let result = locations;
+
+    if (activeFilter !== "all") {
+      result = result.filter(loc => activeFilter === "active" ? loc.isActive !== 0 : loc.isActive === 0);
+    }
     
     if (selectedWarehouseId !== "all") {
       result = result.filter(loc => loc.warehouseId === parseInt(selectedWarehouseId));
@@ -582,7 +594,11 @@ export default function WarehouseLocations() {
     }
     
     return result;
-  }, [locations, selectedWarehouseId, binSearchQuery]);
+  }, [locations, activeFilter, selectedWarehouseId, binSearchQuery]);
+
+  const visibleLocationIds = filteredLocations.map((location) => location.id);
+  const allVisibleSelected = visibleLocationIds.length > 0
+    && visibleLocationIds.every((id) => selectedIds.has(id));
 
   const getWarehouseName = (warehouseId: number | null) => {
     if (!warehouseId) return "-";
@@ -646,6 +662,16 @@ export default function WarehouseLocations() {
                       {wh.name} ({wh.code})
                     </SelectItem>
                   ))}
+                </SelectContent>
+              </Select>
+              <Select value={activeFilter} onValueChange={(value) => setActiveFilter(value as LocationActiveFilter)}>
+                <SelectTrigger className="w-full sm:w-36 h-11" data-testid="select-active-filter">
+                  <SelectValue placeholder="Active" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">Active</SelectItem>
+                  <SelectItem value="inactive">Inactive</SelectItem>
+                  <SelectItem value="all">All</SelectItem>
                 </SelectContent>
               </Select>
               <div className="text-xs text-muted-foreground">
@@ -761,7 +787,7 @@ export default function WarehouseLocations() {
                   {canEdit && (
                     <TableHead className="w-[40px]">
                       <Checkbox
-                        checked={locations.length > 0 && selectedIds.size === locations.length}
+                        checked={allVisibleSelected}
                         onCheckedChange={toggleSelectAll}
                         data-testid="checkbox-select-all"
                       />
