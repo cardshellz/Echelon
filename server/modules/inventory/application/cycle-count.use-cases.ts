@@ -470,7 +470,7 @@ export class CycleCountUseCases {
       SET
         status = 'cancelled',
         blocks_shipment = FALSE,
-        notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END, ${note})
+        notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END, CAST(${note} AS text))
       WHERE linked_cycle_count_id = ${cycleCountId}
         AND (
           exception_reason IN ('source_empty', 'empty', 'short', 'wrong_product', 'other')
