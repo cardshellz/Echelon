@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { filterActionableWarehouseLocations, isActionableWarehouseLocation } from "@/lib/warehouse-locations";
 
 interface InlineCaseBreakDialogProps {
   open: boolean;
@@ -41,6 +42,7 @@ interface Location {
   locationType: string;
   zone: string | null;
   warehouseId: number | null;
+  isActive?: number | null;
 }
 
 export default function InlineCaseBreakDialog({
@@ -97,26 +99,19 @@ export default function InlineCaseBreakDialog({
 
   useEffect(() => {
     if (open && toLocationId === null && targetLocations && targetLocations.length > 0) {
+      const actionableTargets = targetLocations.filter((target: any) => isActionableWarehouseLocation(target.location));
       // Prefer pick bins, otherwise just take the first one
-      const pickBin = targetLocations.find((l: any) => l.location?.locationType === "pick");
+      const pickBin = actionableTargets.find((l: any) => l.location?.locationType === "pick");
       if (pickBin?.location?.id) {
         setToLocationId(pickBin.location.id);
-      } else if (targetLocations[0].location?.id) {
-        setToLocationId(targetLocations[0].location.id);
+      } else if (actionableTargets[0]?.location?.id) {
+        setToLocationId(actionableTargets[0].location.id);
       }
     }
   }, [open, toLocationId, targetLocations]);
 
   const filteredLocations = useMemo(() => {
-    if (!locations) return [];
-    if (!locationSearch) return locations;
-    const q = locationSearch.toLowerCase();
-    return locations.filter(
-      (loc) =>
-        loc.code.toLowerCase().includes(q) ||
-        loc.locationType.toLowerCase().includes(q) ||
-        (loc.zone?.toLowerCase().includes(q) ?? false),
-    );
+    return filterActionableWarehouseLocations(locations ?? [], { search: locationSearch });
   }, [locations, locationSearch]);
 
   const caseBreakMutation = useMutation({

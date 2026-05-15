@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 
 interface InlineTransferDialogProps {
   open: boolean;
@@ -108,16 +109,7 @@ export default function InlineTransferDialog({
 
   // Filter locations for search
   const filteredLocations = useMemo(() => {
-    const validLocations = (locations ?? []).filter((loc) => loc.isActive === 1 && loc.warehouseId != null);
-    if (!validLocations.length) return [];
-    if (!locationSearch) return validLocations;
-    const q = locationSearch.toLowerCase();
-    return validLocations.filter(
-      (loc) =>
-        loc.code.toLowerCase().includes(q) ||
-        loc.locationType.toLowerCase().includes(q) ||
-        (loc.zone?.toLowerCase().includes(q) ?? false),
-    );
+    return filterActionableWarehouseLocations(locations ?? [], { search: locationSearch });
   }, [locations, locationSearch]);
 
   const transferMutation = useMutation({

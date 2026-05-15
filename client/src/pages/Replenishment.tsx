@@ -33,6 +33,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 import { 
   Plus, 
   Edit, 
@@ -65,6 +66,8 @@ interface WarehouseLocation {
   name: string | null;
   locationType: string | null;
   isPickable: number | null;
+  warehouseId?: number | null;
+  isActive?: number | null;
 }
 
 interface ProductRecord {
@@ -422,6 +425,15 @@ export default function Replenishment() {
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
     queryKey: ["/api/warehouse/locations"],
   });
+
+  const actionableLocations = useMemo(
+    () => filterActionableWarehouseLocations(locations),
+    [locations],
+  );
+  const pickLocations = useMemo(
+    () => filterActionableWarehouseLocations(locations, { locationType: "pick" }),
+    [locations],
+  );
 
   const { data: products = [] } = useQuery<ProductRecord[]>({
     queryKey: ["/api/catalog/products"],
@@ -2817,7 +2829,7 @@ export default function Replenishment() {
                   <SelectValue placeholder="Select location..." />
                 </SelectTrigger>
                 <SelectContent>
-                  {locations.filter(l => l.locationType === "pick").map((loc) => (
+                  {pickLocations.map((loc) => (
                     <SelectItem key={loc.id} value={loc.id.toString()}>
                       {loc.code} {loc.name ? `(${loc.name})` : ""}
                     </SelectItem>
@@ -3024,7 +3036,7 @@ export default function Replenishment() {
                 <PopoverTrigger asChild>
                   <Button variant="outline" className="w-full justify-between h-10 font-normal" data-testid="select-from-location">
                     {taskForm.fromLocationId
-                      ? (() => { const loc = locations.find(l => l.id.toString() === taskForm.fromLocationId); return loc ? `${loc.code}${loc.name ? ` - ${loc.name}` : ""}` : "Select source..."; })()
+                      ? (() => { const loc = actionableLocations.find(l => l.id.toString() === taskForm.fromLocationId); return loc ? `${loc.code}${loc.name ? ` - ${loc.name}` : ""}` : "Select source..."; })()
                       : "Select source..."}
                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                   </Button>
@@ -3035,8 +3047,7 @@ export default function Replenishment() {
                     <CommandList>
                       <CommandEmpty>No locations found.</CommandEmpty>
                       <CommandGroup>
-                        {locations
-                          .filter(loc => !taskFromSearch || loc.code.toLowerCase().includes(taskFromSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskFromSearch.toLowerCase())))
+                        {filterActionableWarehouseLocations(locations, { search: taskFromSearch })
                           .slice(0, 50)
                           .map(loc => (
                             <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString(), sourceVariantId: "", pickVariantId: "", productId: "", qtySourceUnits: "", qtyTargetUnits: "" }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
@@ -3121,7 +3132,7 @@ export default function Replenishment() {
                 <PopoverTrigger asChild>
                   <Button variant="outline" className="w-full justify-between h-10 font-normal" data-testid="select-to-location">
                     {taskForm.toLocationId
-                      ? (() => { const loc = locations.find(l => l.id.toString() === taskForm.toLocationId); return loc ? `${loc.code}${loc.name ? ` - ${loc.name}` : ""}` : "Select destination..."; })()
+                      ? (() => { const loc = actionableLocations.find(l => l.id.toString() === taskForm.toLocationId); return loc ? `${loc.code}${loc.name ? ` - ${loc.name}` : ""}` : "Select destination..."; })()
                       : "Select destination..."}
                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                   </Button>
@@ -3132,8 +3143,7 @@ export default function Replenishment() {
                     <CommandList>
                       <CommandEmpty>No locations found.</CommandEmpty>
                       <CommandGroup>
-                        {locations
-                          .filter(loc => !taskToSearch || loc.code.toLowerCase().includes(taskToSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskToSearch.toLowerCase())))
+                        {filterActionableWarehouseLocations(locations, { search: taskToSearch })
                           .slice(0, 50)
                           .map(loc => (
                             <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm(prev => ({ ...prev, toLocationId: loc.id.toString() })); setTaskToOpen(false); setTaskToSearch(""); }}>

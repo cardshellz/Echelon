@@ -48,6 +48,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -758,6 +759,7 @@ function ManualEntrySection() {
   const { data: locations } = useQuery<any[]>({
     queryKey: ["/api/inventory/locations"],
   });
+  const actionableLocations = filterActionableWarehouseLocations(locations || []);
 
   const createMutation = useMutation({
     mutationFn: async () => {
@@ -850,7 +852,7 @@ function ManualEntrySection() {
                   <SelectValue placeholder="Select location..." />
                 </SelectTrigger>
                 <SelectContent className="max-h-60">
-                  {(locations || []).map((l: any) => (
+                  {actionableLocations.map((l: any) => (
                     <SelectItem key={l.id} value={String(l.id)}>
                       {l.code} — {l.name || l.zone || ""}
                     </SelectItem>

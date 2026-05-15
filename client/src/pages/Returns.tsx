@@ -25,6 +25,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { RotateCcw, Search, Package, AlertCircle } from "lucide-react";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 
 interface OrderLookup {
   order: {
@@ -62,6 +63,9 @@ interface WarehouseLocation {
   code: string;
   zone: string | null;
   name: string | null;
+  warehouseId?: number | null;
+  locationType?: string | null;
+  isActive?: number | null;
 }
 
 interface ReturnItemState {
@@ -84,6 +88,8 @@ export default function Returns() {
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
     queryKey: ["/api/warehouse/locations"],
   });
+
+  const putbackLocations = filterActionableWarehouseLocations(locations);
 
   const {
     data: lookupData,
@@ -563,7 +569,7 @@ export default function Returns() {
                       <SelectValue placeholder="Select location..." />
                     </SelectTrigger>
                     <SelectContent>
-                      {locations.map((loc) => (
+                      {putbackLocations.map((loc) => (
                         <SelectItem key={loc.id} value={loc.id.toString()}>
                           {loc.code}{loc.name ? ` — ${loc.name}` : ""}
                         </SelectItem>

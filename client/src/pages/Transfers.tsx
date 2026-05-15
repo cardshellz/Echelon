@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Se
 import { apiRequest } from "@/lib/queryClient";
 import { format } from "date-fns";
 import { playSoundWithHaptic } from "@/lib/sounds";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 
 interface Transfer {
   id: number;
@@ -31,6 +32,8 @@ interface WarehouseLocation {
   zone?: string;
   locationType?: string;
   warehouseId?: number;
+  isActive?: number;
+  name?: string | null;
 }
 
 interface Warehouse {
@@ -94,6 +97,11 @@ export default function Transfers() {
     queryKey: ["/api/warehouse/locations"]
   });
 
+  const actionableLocations = useMemo(
+    () => filterActionableWarehouseLocations(locations),
+    [locations],
+  );
+
   // Cycle count context (passed via URL params when coming from cycle count Transfer button)
   const [cycleCountCtx, setCycleCountCtx] = useState<{ ccId: number; ccItemId: number } | null>(null);
 
@@ -104,9 +112,9 @@ export default function Transfers() {
     const qty = params.get("qty");
     const ccId = params.get("ccId");
     const ccItemId = params.get("ccItemId");
-    if (!fromCode || locations.length === 0) return;
+    if (!fromCode || actionableLocations.length === 0) return;
 
-    const loc = locations.find(l => l.code === fromCode);
+    const loc = actionableLocations.find(l => l.code === fromCode);
     if (!loc) return;
 
     // Store cycle count context before clearing URL
@@ -126,7 +134,7 @@ export default function Transfers() {
       setLocationSearch(fromCode);
       if (qty) setQuantity(qty);
     }
-  }, [locations, isMobile]);
+  }, [actionableLocations, isMobile]);
 
   const { data: warehouses = [] } = useQuery<Warehouse[]>({
     queryKey: ["/api/warehouses"]
@@ -254,13 +262,12 @@ export default function Transfers() {
     setMobileQuantity("");
   };
   
-  const filteredLocations = locations.filter(loc => 
-    loc.code.toLowerCase().includes(locationSearch.toLowerCase())
-  );
+  const filteredLocations = filterActionableWarehouseLocations(locations, { search: locationSearch });
   
-  const filteredDestLocations = locations.filter(loc => 
-    loc.code.toLowerCase().includes(destLocationSearch.toLowerCase()) && loc.id !== fromLocationId
-  );
+  const filteredDestLocations = filterActionableWarehouseLocations(locations, {
+    search: destLocationSearch,
+    excludeId: fromLocationId,
+  });
   
   const handleDesktopSubmit = () => {
     if (!fromLocationId || !toLocationId || !variantId || !quantity) {
@@ -277,8 +284,8 @@ export default function Transfers() {
   };
   
   const handleMobileSubmit = () => {
-    const sourceLoc = locations.find(l => l.code.toUpperCase() === sourceLocationCode.toUpperCase());
-    const destLoc = locations.find(l => l.code.toUpperCase() === destLocationCode.toUpperCase());
+    const sourceLoc = actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode.toUpperCase());
+    const destLoc = actionableLocations.find(l => l.code.toUpperCase() === destLocationCode.toUpperCase());
     
     if (!sourceLoc || !destLoc || !selectedSku || !mobileQuantity) {
       toast({ title: "Missing Fields", description: "Please complete all steps", variant: "destructive" });
@@ -321,9 +328,9 @@ export default function Transfers() {
                     data-testid="input-source-location"
                   />
                 </div>
-                {sourceLocationCode && !locations.find(l => l.code.toUpperCase() === sourceLocationCode) && (
+                {sourceLocationCode && !actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode) && (
                   <div className="border rounded-md max-h-48 overflow-y-auto">
-                    {locations
+                    {actionableLocations
                       .filter(loc => loc.code.toUpperCase().includes(sourceLocationCode))
                       .slice(0, 10)
                       .map(loc => (
@@ -344,16 +351,16 @@ export default function Transfers() {
                           </span>
                         </button>
                       ))}
-                    {locations.filter(loc => loc.code.toUpperCase().includes(sourceLocationCode)).length === 0 && (
+                    {actionableLocations.filter(loc => loc.code.toUpperCase().includes(sourceLocationCode)).length === 0 && (
                       <p className="px-4 py-3 text-sm text-muted-foreground">No matching bins</p>
                     )}
                   </div>
                 )}
                 <Button
                   className="w-full h-14 text-lg"
-                  disabled={!sourceLocationCode || !locations.find(l => l.code.toUpperCase() === sourceLocationCode)}
+                  disabled={!sourceLocationCode || !actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode)}
                   onClick={() => {
-                    const loc = locations.find(l => l.code.toUpperCase() === sourceLocationCode);
+                    const loc = actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode);
                     if (loc) {
                       setFromLocationId(loc.id);
                       playSoundWithHaptic("scan", "classic", true);
@@ -519,9 +526,9 @@ export default function Transfers() {
                   <p className="text-sm text-red-500">Destination must be different from source</p>
                 )}
 
-                {destLocationCode && !locations.find(l => l.code.toUpperCase() === destLocationCode) && (
+                {destLocationCode && !actionableLocations.find(l => l.code.toUpperCase() === destLocationCode) && (
                   <div className="border rounded-md max-h-48 overflow-y-auto">
-                    {locations
+                    {actionableLocations
                       .filter(loc => loc.code.toUpperCase().includes(destLocationCode) && loc.code.toUpperCase() !== sourceLocationCode.toUpperCase())
                       .slice(0, 10)
                       .map(loc => (
@@ -542,7 +549,7 @@ export default function Transfers() {
                           </span>
                         </button>
                       ))}
-                    {locations.filter(loc => loc.code.toUpperCase().includes(destLocationCode) && loc.code.toUpperCase() !== sourceLocationCode.toUpperCase()).length === 0 && (
+                    {actionableLocations.filter(loc => loc.code.toUpperCase().includes(destLocationCode) && loc.code.toUpperCase() !== sourceLocationCode.toUpperCase()).length === 0 && (
                       <p className="px-4 py-3 text-sm text-muted-foreground">No matching bins</p>
                     )}
                   </div>
@@ -552,11 +559,11 @@ export default function Transfers() {
                   className="w-full h-14 text-lg"
                   disabled={
                     !destLocationCode ||
-                    !locations.find(l => l.code.toUpperCase() === destLocationCode) ||
+                    !actionableLocations.find(l => l.code.toUpperCase() === destLocationCode) ||
                     destLocationCode.toUpperCase() === sourceLocationCode.toUpperCase()
                   }
                   onClick={() => {
-                    const loc = locations.find(l => l.code.toUpperCase() === destLocationCode);
+                    const loc = actionableLocations.find(l => l.code.toUpperCase() === destLocationCode);
                     if (loc) {
                       setToLocationId(loc.id);
                       playSoundWithHaptic("scan", "classic", true);
@@ -701,7 +708,7 @@ export default function Transfers() {
                     value={locationSearch}
                     onChange={(e) => {
                       setLocationSearch(e.target.value);
-                      const match = locations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
+                      const match = actionableLocations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
                       if (match) setFromLocationId(match.id);
                     }}
                     placeholder="Search bin location..."

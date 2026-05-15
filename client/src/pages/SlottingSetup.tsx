@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { useDebounce } from "@/hooks/use-debounce";
+import { filterActiveWarehouseLocations } from "@/lib/warehouse-locations";
 import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
@@ -243,7 +244,7 @@ export default function SlottingSetup() {
   });
 
   const activeLocations = useMemo(
-    () => locations.filter(location => location.isActive !== 0),
+    () => filterActiveWarehouseLocations(locations),
     [locations],
   );
 

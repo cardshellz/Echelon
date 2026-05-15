@@ -46,6 +46,7 @@ import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandE
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 import { 
   Package, 
   Plus, 
@@ -129,6 +130,8 @@ interface WarehouseLocation {
   zone: string | null;
   name: string | null;
   warehouseId: number | null;
+  locationType?: string | null;
+  isActive?: number | null;
 }
 
 function LocationTypeahead({ 
@@ -148,12 +151,7 @@ function LocationTypeahead({
   
   const selectedLocation = locations.find(l => l.id === value);
   
-  const filteredLocations = search.length > 0
-    ? locations.filter(l => 
-        l.code.toLowerCase().includes(search.toLowerCase()) ||
-        (l.name && l.name.toLowerCase().includes(search.toLowerCase()))
-      ).slice(0, 15)
-    : locations.slice(0, 15);
+  const filteredLocations = filterActionableWarehouseLocations(locations, { search }).slice(0, 15);
   
   useEffect(() => {
     if (open && inputRef.current) {
@@ -752,9 +750,9 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   // Location search for add line dialog (local filter, no API call needed)
-  const warehouseFilteredLocations = selectedReceipt?.warehouseId
-    ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId)
-    : locations;
+  const warehouseFilteredLocations = filterActionableWarehouseLocations(locations, {
+    warehouseId: selectedReceipt?.warehouseId ?? null,
+  });
 
   const handleLocationSearch = (query: string) => {
     setLocationSearch(query);
@@ -763,10 +761,7 @@ DEF-456,25,,,5.00,,Location TBD`;
       setShowLocationDropdown(false);
       return;
     }
-    const filtered = warehouseFilteredLocations.filter(loc =>
-      loc.code.toLowerCase().includes(query.toLowerCase()) ||
-      (loc.name && loc.name.toLowerCase().includes(query.toLowerCase()))
-    ).slice(0, 20);
+    const filtered = filterActionableWarehouseLocations(warehouseFilteredLocations, { search: query }).slice(0, 20);
     setLocationResults(filtered);
     setShowLocationDropdown(filtered.length > 0);
   };
