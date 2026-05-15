@@ -530,7 +530,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
   });
 
-  it("executes picker-confirmed replen when guidance is inline", async () => {
+  it("executes inline replen through the replenishment service", async () => {
     const { db, inserts, state } = makeDb();
     const service = new ReplenishmentUseCases(db as any, {} as any);
     vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
@@ -1029,6 +1029,56 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     expect(db.execute).toHaveBeenCalledTimes(2);
   });
 
+  it("system-executes health-triggered inline replen instead of leaving it pending", async () => {
+    const { db, inserts, state } = makeDb();
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service as any, "evaluateReplenNeed").mockResolvedValue({
+      status: "needed_with_source",
+      location: { id: 1, code: "A-01", warehouseId: 7 },
+      variant: { id: 100, sku: "SKU-1", name: "Each", productId: 10 },
+      whSettings: null,
+      params: {
+        replenMethod: "full_case",
+        priority: 5,
+        sourceLocationType: "pick",
+        sourcePriority: "fifo",
+        autoReplen: 1,
+      },
+      taskNotes: "Below threshold",
+      sourceResolutionIssue: null,
+      rule: null,
+      resolvedSourceVariantId: 100,
+      sourceLocation: { id: 2, code: "B-01", warehouseId: 7, isPickable: 0 },
+      sourceVariant: { id: 100, sku: "SKU-1", unitsPerVariant: 1 },
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      executionMode: "inline",
+      shouldAutoExecute: true,
+    });
+    const executeTask = vi.spyOn(service, "executeTask").mockImplementation(async () => {
+      state.insertedReplenTask = {
+        ...state.insertedReplenTask,
+        status: "completed",
+        qtyCompleted: 4,
+      };
+      return { moved: 4 };
+    });
+
+    const result = await service.checkAndTriggerAfterPick(100, 1, "health_queue");
+
+    expect(executeTask).toHaveBeenCalledWith(121, "system:auto-replen");
+    expect(result).toMatchObject({
+      id: 121,
+      status: "completed",
+      qtyCompleted: 4,
+    });
+    expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
+      status: "pending",
+      executionMode: "inline",
+      triggeredBy: "health_queue",
+    });
+  });
+
   it("cancels stale no-demand queued backlog without requiring source failure", async () => {
     const db = {
       execute: vi.fn()
@@ -1080,6 +1130,51 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       cancelledStaleNoDemandTaskIds: [],
       cancelledDuplicateTaskIds: [222, 223],
       keptDuplicateTaskIds: [121],
+    });
+  });
+
+  it("recovers pending inline replen tasks through health cleanup", async () => {
+    const inlineTask = {
+      id: 993,
+      status: "pending",
+      executionMode: "inline",
+      dependsOnTaskId: null,
+    };
+    const db = {
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: vi.fn(async () => [inlineTask]),
+            }),
+          }),
+        }),
+      })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service, "executeTask").mockResolvedValue({ moved: 1000 });
+    vi.spyOn(service as any, "getTaskById").mockResolvedValue({
+      ...inlineTask,
+      status: "completed",
+      qtyCompleted: 1000,
+    });
+
+    const result = await service.cleanupHealthIssues({
+      mode: "inline_execution",
+      taskId: 993,
+      limit: 10,
+      userId: "admin",
+    });
+
+    expect(service.executeTask).toHaveBeenCalledWith(993, "admin");
+    expect(result).toMatchObject({
+      mode: "inline_execution",
+      executedInline: 1,
+      failedInline: 0,
+      executedInlineTaskIds: [993],
+      failedInlineTaskIds: [],
+      cancelledStaleNoDemand: 0,
+      cancelledDuplicates: 0,
     });
   });
 

@@ -35,7 +35,7 @@ interface PickReplenHealthSectionProps {
   searchQuery?: string;
 }
 
-type CleanupMode = "stale_no_demand" | "duplicates" | "queue_replen" | "queue_missing_replen";
+type CleanupMode = "stale_no_demand" | "duplicates" | "queue_replen" | "queue_missing_replen" | "inline_execution";
 
 type CleanupRequest = {
   mode: CleanupMode;
@@ -46,6 +46,10 @@ type CleanupRequest = {
 };
 
 type CleanupResult = {
+  executedInline?: number;
+  failedInline?: number;
+  executedInlineTaskIds?: number[];
+  failedInlineTaskIds?: number[];
   cancelledStaleNoDemand: number;
   cancelledStaleBacklog?: number;
   cancelledDuplicates: number;
@@ -139,7 +143,8 @@ const FILTERS: Array<{ value: PickReplenHealthFilter; label: string }> = [
 
 const ACTION_LABELS: Record<string, string> = {
   resolve_blocker: "Resolve blocker",
-  complete_inline_replen: "Complete replen",
+  auto_execute_replen: "Auto-execute replen",
+  complete_inline_replen: "Auto-execute replen",
   execute_or_cancel: "Execute or cancel",
   cancel_no_demand: "Cancel no-demand",
   cancel_duplicate: "Cancel duplicate",
@@ -191,6 +196,7 @@ function cleanupModeForAction(action: string): CleanupMode | null {
   if (action === "cancel_no_demand") return "stale_no_demand";
   if (action === "cancel_duplicate") return "duplicates";
   if (action === "queue_replen") return "queue_replen";
+  if (action === "auto_execute_replen" || action === "complete_inline_replen") return "inline_execution";
   return null;
 }
 
@@ -285,12 +291,16 @@ export default function PickReplenHealthSection({
       return res.json() as Promise<CleanupResult>;
     },
     onSuccess: (result) => {
+      const executed = result.executedInline ?? 0;
+      const failed = result.failedInline ?? 0;
       const cleaned = result.cancelledStaleNoDemand + (result.cancelledStaleBacklog ?? 0) + result.cancelledDuplicates;
       const queued = result.queuedReplen ?? 0;
       const skipped = result.skippedPickBins ?? 0;
       toast({
-        title: queued > 0 ? "Replen queued" : "Replen cleanup complete",
-        description: queued > 0
+        title: executed > 0 ? "Replen executed" : queued > 0 ? "Replen queued" : "Replen cleanup complete",
+        description: executed > 0
+          ? `Executed ${executed} inline replen task${executed === 1 ? "" : "s"}${failed > 0 ? `; ${failed} failed` : ""}`
+          : queued > 0
           ? `Queued ${queued} replen task${queued === 1 ? "" : "s"}${skipped > 0 ? `; ${skipped} bin${skipped === 1 ? "" : "s"} need review` : ""}`
           : cleaned > 0
             ? `Cleaned ${cleaned} replen task${cleaned === 1 ? "" : "s"}`
