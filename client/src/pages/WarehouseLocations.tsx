@@ -46,6 +46,7 @@ interface WarehouseLocation {
   depthMm: number | null;
   warehouseId: number | null;
   primarySku?: string | null;
+  isActive: number;
 }
 
 interface Warehouse {
@@ -53,6 +54,11 @@ interface Warehouse {
   name: string;
   code: string;
 }
+
+type ApiMutationError = Error & {
+  status?: number;
+  canDeactivate?: boolean;
+};
 
 // Location function types (pick, reserve, receiving, staging)
 const LOCATION_TYPES = [
@@ -90,6 +96,9 @@ function LocationStatusBadges({ location }: { location: WarehouseLocation }) {
   return (
     <div className="flex flex-wrap gap-1">
       <Badge variant="outline" className="text-xs">{location.locationType.replace('_', ' ')}</Badge>
+      {location.isActive === 0 && (
+        <Badge variant="outline" className="text-xs">Inactive</Badge>
+      )}
       {location.isPickable === 1 ? (
         <Badge variant="secondary" className="text-xs">Pickable</Badge>
       ) : (
@@ -100,6 +109,14 @@ function LocationStatusBadges({ location }: { location: WarehouseLocation }) {
       )}
     </div>
   );
+}
+
+async function readApiMutationError(res: Response, fallback: string): Promise<ApiMutationError> {
+  const body = await res.json().catch(() => ({}));
+  const error = new Error(body.error || fallback) as ApiMutationError;
+  error.status = res.status;
+  error.canDeactivate = body.canDeactivate === true;
+  return error;
 }
 
 export default function WarehouseLocations() {
@@ -263,15 +280,21 @@ export default function WarehouseLocations() {
   const deleteLocationMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/warehouse/locations/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to delete location");
+      if (!res.ok) throw await readApiMutationError(res, "Failed to delete location");
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
       toast({ title: "Location deleted" });
     },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to delete location", variant: "destructive" });
+    onError: (error: ApiMutationError) => {
+      toast({
+        title: error.status === 409 ? "Location cannot be deleted" : "Error",
+        description: error.canDeactivate
+          ? `${error.message} Use Active = off to archive it from operations.`
+          : error.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -425,6 +448,7 @@ export default function WarehouseLocations() {
       bin: editingLocation.bin?.trim() || null,
       name: editingLocation.name?.trim() || null,
       warehouseId: editingLocation.warehouseId || null,
+      isActive: editingLocation.isActive,
     };
 
     updateLocationMutation.mutate({ id: editingLocation.id, data });
@@ -1232,6 +1256,20 @@ export default function WarehouseLocations() {
                 />
                 <Label htmlFor="edit-is-pickable" className="text-xs md:text-sm font-normal cursor-pointer">
                   Is Pickable (contributes to available-to-promise)
+                </Label>
+              </div>
+              <div className="flex items-center space-x-2 min-h-[44px]">
+                <Checkbox
+                  id="edit-is-active"
+                  checked={editingLocation.isActive !== 0}
+                  onCheckedChange={(checked) => setEditingLocation({
+                    ...editingLocation,
+                    isActive: checked ? 1 : 0,
+                  })}
+                  data-testid="checkbox-edit-location-active"
+                />
+                <Label htmlFor="edit-is-active" className="text-xs md:text-sm font-normal cursor-pointer">
+                  Active location
                 </Label>
               </div>
             </div>
