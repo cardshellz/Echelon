@@ -2884,8 +2884,8 @@ export default function ProductDetail() {
               ) : (
                 <p className="text-sm text-muted-foreground">No pick location assigned</p>
               )}
-              <Link href="/bin-assignments" className="text-xs text-blue-600 hover:underline mt-2 inline-block">
-                Manage in Bin Assignments
+              <Link href="/slotting-setup" className="text-xs text-blue-600 hover:underline mt-2 inline-block">
+                Manage in Slotting Setup
               </Link>
             </CardContent>
           </Card>

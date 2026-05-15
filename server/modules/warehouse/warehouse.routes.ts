@@ -642,9 +642,9 @@ export function registerWarehouseRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid location ID" });
       }
 
-      const { productId, productVariantId, isPrimary } = req.body;
-      if (!productId && !productVariantId) {
-        return res.status(400).json({ error: "productId or productVariantId is required" });
+      const { productVariantId, isPrimary } = req.body;
+      if (!productVariantId) {
+        return res.status(400).json({ error: "productVariantId is required" });
       }
 
       const warehouseLocation = await storage.getWarehouseLocationById(warehouseLocationId);
@@ -652,56 +652,11 @@ export function registerWarehouseRoutes(app: Express) {
         return res.status(404).json({ error: "Warehouse location not found" });
       }
 
-      if (productVariantId) {
-        const productLocation = await binAssignments.assignVariantToLocation({
-          productVariantId,
-          warehouseLocationId,
-          isPrimary: isPrimary ?? 1,
-        });
-        return res.status(201).json(productLocation);
-      }
-
-      let finalProductId = productId;
-      let finalVariantId = productVariantId;
-      let assignmentSku: string | null = null;
-      let assignmentName: string;
-      let shopifyVariantId: number | null = null;
-
-      if (productVariantId) {
-        const variant = await storage.getProductVariantById(productVariantId);
-        if (!variant) {
-          return res.status(404).json({ error: "Product variant not found" });
-        }
-        finalProductId = variant.productId;
-        assignmentSku = variant.sku;
-        assignmentName = variant.name || variant.sku || "Unknown Variant";
-        shopifyVariantId = variant.shopifyVariantId ? Number(variant.shopifyVariantId) : null;
-      } else {
-        const product = await storage.getProductById(productId!);
-        if (!product) {
-          return res.status(404).json({ error: "Product not found" });
-        }
-        assignmentSku = product.sku || null;
-        assignmentName = product.title || product.name;
-        shopifyVariantId = product.shopifyProductId ? Number(product.shopifyProductId) : null;
-      }
-
-      const productLocation = await storage.addProductToLocation({
-        productId: finalProductId!,
-        productVariantId: finalVariantId || null,
+      const productLocation = await binAssignments.assignVariantToLocation({
+        productVariantId,
         warehouseLocationId,
-        sku: assignmentSku,
-        shopifyVariantId,
-        name: assignmentName,
-        location: warehouseLocation.code,
-        zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
         isPrimary: isPrimary ?? 1,
       });
-
-      if (assignmentSku) {
-
-      }
-
       res.status(201).json(productLocation);
     } catch (error: any) {
       console.error("Error assigning product to location:", error);

@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
-import { useDebounce } from "@/hooks/use-debounce";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -15,8 +15,6 @@ import { useToast } from "@/hooks/use-toast";
 import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare, Package, Star, Search } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface WarehouseZone {
@@ -108,6 +106,7 @@ export default function WarehouseLocations() {
   const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
   const [activeTab, setActiveTab] = useState("locations");
   const [isCreateLocationOpen, setIsCreateLocationOpen] = useState(false);
   const [isCreateZoneOpen, setIsCreateZoneOpen] = useState(false);
@@ -160,15 +159,6 @@ export default function WarehouseLocations() {
     enabled: canView,
   });
 
-  interface ProductSearchResult {
-    id: number;
-    variantId: number;
-    title: string;
-    sku: string | null;
-    imageUrl: string | null;
-    matchedVariantSku: string | null;
-  }
-
   interface ProductInBin {
     id: number;
     productId: number | null;
@@ -194,7 +184,7 @@ export default function WarehouseLocations() {
     barcode: string | null;
   }
 
-  const { data: inventoryInBin = [], refetch: refetchInventoryInBin } = useQuery<InventoryInBin[]>({
+  const { data: inventoryInBin = [] } = useQuery<InventoryInBin[]>({
     queryKey: ["/api/warehouse/locations", assigningToLocation?.id, "inventory"],
     queryFn: async () => {
       if (!assigningToLocation) return [];
@@ -205,7 +195,7 @@ export default function WarehouseLocations() {
     enabled: !!assigningToLocation,
   });
 
-  const { data: productsInBin = [], refetch: refetchProductsInBin } = useQuery<ProductInBin[]>({
+  const { data: productsInBin = [] } = useQuery<ProductInBin[]>({
     queryKey: ["/api/warehouse/locations", assigningToLocation?.id, "products"],
     queryFn: async () => {
       if (!assigningToLocation) return [];
@@ -216,69 +206,12 @@ export default function WarehouseLocations() {
     enabled: !!assigningToLocation && isAssignProductsOpen,
   });
 
-  const [assignSkuSearch, setAssignSkuSearch] = useState("");
-  const [assignSkuOpen, setAssignSkuOpen] = useState(false);
-  const debouncedAssignSkuSearch = useDebounce(assignSkuSearch, 300);
-
-  // Server-side search across products AND variant SKUs
-  const { data: productSearchResults = [] } = useQuery<ProductSearchResult[]>({
-    queryKey: ["/api/catalog/products/search", debouncedAssignSkuSearch],
-    queryFn: async () => {
-      if (!debouncedAssignSkuSearch || debouncedAssignSkuSearch.length < 2) return [];
-      const res = await fetch(`/api/catalog/products/search?q=${encodeURIComponent(debouncedAssignSkuSearch)}&limit=20`);
-      if (!res.ok) return [];
-      return res.json();
-    },
-    enabled: debouncedAssignSkuSearch.length >= 2 && assignSkuOpen,
-  });
-
-  // Filter out already-assigned products
-  const filteredProducts = useMemo(() => {
-    const assignedIds = new Set(productsInBin.map(p => p.productId));
-    return productSearchResults.filter(p => !assignedIds.has(p.id));
-  }, [productSearchResults, productsInBin]);
-
-  const assignProductMutation = useMutation({
-    mutationFn: async ({ locationId, productId, productVariantId }: { locationId: number; productId?: number; productVariantId?: number }) => {
-      const res = await fetch(`/api/warehouse/locations/${locationId}/products`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productId, productVariantId, locationType: "pick", isPrimary: 1 }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to assign product");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
-      toast({ title: "SKU assigned to location" });
-      refetchProductsInBin();
-      refetchInventoryInBin();
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
-      setAssignSkuSearch("");
-      setAssignSkuOpen(false);
-    },
-    onError: (error: Error) => {
-      toast({ title: "Failed to assign", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const unassignProductMutation = useMutation({
-    mutationFn: async (productLocationId: number) => {
-      const res = await fetch(`/api/locations/${productLocationId}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to unassign product");
-    },
-    onSuccess: () => {
-      toast({ title: "SKU unassigned from location" });
-      refetchProductsInBin();
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Failed to unassign", description: error.message, variant: "destructive" });
-    },
-  });
-
+  function openSlottingSetup(location: WarehouseLocation, variant?: { variantId: number; sku?: string | null }) {
+    const params = new URLSearchParams({ locationId: String(location.id) });
+    if (variant?.variantId) params.set("variantId", String(variant.variantId));
+    if (variant?.sku) params.set("sku", variant.sku);
+    navigate(`/slotting-setup?${params.toString()}`);
+  }
 
   const createLocationMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -1518,13 +1451,11 @@ BULK,B,02,B,,Bulk B2,pallet,0"
         </DialogContent>
       </Dialog>
 
-      {/* View Inventory / Assign SKU Dialog */}
+      {/* View Inventory / Slotting Shortcut Dialog */}
       <Dialog open={isAssignProductsOpen} onOpenChange={(open) => {
         setIsAssignProductsOpen(open);
         if (!open) {
           setAssigningToLocation(null);
-          setAssignSkuSearch("");
-          setAssignSkuOpen(false);
         }
       }}>
         <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
@@ -1543,8 +1474,8 @@ BULK,B,02,B,,Bulk B2,pallet,0"
 
           <div className="space-y-4">
             {assigningToLocation && !assigningLocationCanReceiveSku && (
-              <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                SKU assignment is blocked because this location is not an active warehouse-backed pick face.
+              <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                This location cannot receive a pick-face assignment until its warehouse, active, type, and pickable flags are valid.
               </div>
             )}
 
@@ -1569,14 +1500,12 @@ BULK,B,02,B,,Bulk B2,pallet,0"
                       </div>
                       {canEdit && (
                         <Button
-                          variant="ghost"
+                          variant="outline"
                           size="sm"
-                          className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive"
-                          onClick={() => unassignProductMutation.mutate(p.id)}
-                          disabled={unassignProductMutation.isPending}
-                          title="Unassign SKU"
+                          className="h-8 text-xs"
+                          onClick={() => assigningToLocation && openSlottingSetup(assigningToLocation)}
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          Manage
                         </Button>
                       )}
                     </div>
@@ -1584,70 +1513,18 @@ BULK,B,02,B,,Bulk B2,pallet,0"
                 </div>
               )}
 
-              {/* Assign SKU Search */}
               {canEdit && (
                 <div className="mt-3">
-                  {assigningLocationCanReceiveSku ? (
-                    <Popover open={assignSkuOpen} onOpenChange={setAssignSkuOpen}>
-                      <PopoverTrigger asChild>
-                        <Button variant="outline" size="sm" className="w-full justify-start gap-2 h-10">
-                          <Plus className="h-4 w-4" />
-                          Assign SKU to this location
-                        </Button>
-                      </PopoverTrigger>
-                      <PopoverContent className="w-[350px] p-0" align="start">
-                        <Command shouldFilter={false}>
-                          <CommandInput
-                            placeholder="Search by SKU or product name..."
-                            value={assignSkuSearch}
-                            onValueChange={setAssignSkuSearch}
-                          />
-                          <CommandList>
-                            {assignSkuSearch.length < 2 ? (
-                              <CommandEmpty>Type at least 2 characters to search...</CommandEmpty>
-                            ) : filteredProducts.length === 0 ? (
-                              <CommandEmpty>No matching products found.</CommandEmpty>
-                            ) : (
-                              <CommandGroup>
-                                {filteredProducts.map((product) => (
-                                  <CommandItem
-                                    key={product.variantId}
-                                    onSelect={() => {
-                                      if (assigningToLocation) {
-                                        assignProductMutation.mutate({
-                                          locationId: assigningToLocation.id,
-                                          productVariantId: product.variantId,
-                                        });
-                                      }
-                                    }}
-                                    className="cursor-pointer"
-                                  >
-                                    <div className="flex items-center gap-2 w-full">
-                                      {product.imageUrl && (
-                                        <img src={product.imageUrl} alt="" className="w-8 h-8 object-cover rounded" />
-                                      )}
-                                      <div className="flex-1 min-w-0">
-                                        <div className="font-medium text-sm">{product.sku || "No SKU"}</div>
-                                        {product.matchedVariantSku && product.matchedVariantSku !== product.sku && (
-                                          <div className="text-xs text-blue-600 font-mono">variant: {product.matchedVariantSku}</div>
-                                        )}
-                                        <div className="text-xs text-muted-foreground truncate">{product.title}</div>
-                                      </div>
-                                    </div>
-                                  </CommandItem>
-                                ))}
-                              </CommandGroup>
-                            )}
-                          </CommandList>
-                        </Command>
-                      </PopoverContent>
-                    </Popover>
-                  ) : (
-                    <Button variant="outline" size="sm" className="w-full justify-start gap-2 h-10" disabled>
-                      <Plus className="h-4 w-4" />
-                      Assign SKU to this location
-                    </Button>
-                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full justify-start gap-2 h-10"
+                    onClick={() => assigningToLocation && openSlottingSetup(assigningToLocation)}
+                    disabled={!assigningToLocation}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Assign SKU to this location
+                  </Button>
                 </div>
               )}
             </div>
@@ -1685,15 +1562,13 @@ BULK,B,02,B,,Bulk B2,pallet,0"
                                 variant="outline"
                                 size="sm"
                                 className="h-8 text-xs shrink-0"
-                                onClick={() => assignProductMutation.mutate({
-                                  locationId: assigningToLocation.id,
-                                  productVariantId: inv.variantId,
+                                onClick={() => openSlottingSetup(assigningToLocation, {
+                                  variantId: inv.variantId,
+                                  sku: inv.sku,
                                 })}
-                                disabled={assignProductMutation.isPending || !assigningLocationCanReceiveSku}
-                                title={assigningLocationCanReceiveSku ? "Assign this SKU to this bin" : "Location is not an active warehouse-backed pick face"}
                               >
                                 <Plus className="h-3 w-3 mr-1" />
-                                Assign
+                                Slot
                               </Button>
                             )}
                           </div>

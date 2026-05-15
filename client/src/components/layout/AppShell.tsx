@@ -106,7 +106,7 @@ const navStructure: NavEntry[] = [
       { label: "Stock Levels", icon: Box, href: "/inventory" },
       { label: "Warehouses", icon: Building2, href: "/warehouse" },
       { label: "Pick Zones", icon: MapIcon, href: "/pick-zones" },
-      { label: "Bin Assignments", icon: MapPin, href: "/bin-assignments" },
+      { label: "Slotting Setup", icon: MapPin, href: "/slotting-setup" },
       { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts" },
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },
       { label: "Replenishment", icon: RefreshCw, href: "/replenishment" },

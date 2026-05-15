@@ -222,7 +222,6 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
 }) {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
-  const { toast } = useToast();
   const locationUrl = warehouseId
     ? `/api/inventory/variants/${variantId}/locations?warehouseId=${warehouseId}`
     : `/api/inventory/variants/${variantId}/locations`;
@@ -238,26 +237,6 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [locationUrl] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
-    },
-  });
-
-  const assignHereMutation = useMutation({
-    mutationFn: async (warehouseLocationId: number) => {
-      const res = await fetch("/api/bin-assignments", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productVariantId: variantId, warehouseLocationId }),
-      });
-      if (!res.ok) throw new Error((await res.json()).error);
-      return res.json();
-    },
-    onSuccess: (_data, _vars) => {
-      queryClient.invalidateQueries({ queryKey: [locationUrl] });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
-      toast({ title: `${sku} assigned to bin` });
-    },
-    onError: (err: Error) => {
-      toast({ title: err.message || "Failed to assign", variant: "destructive" });
     },
   });
 
@@ -337,7 +316,6 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
                           variant="ghost"
                           size="sm"
                           className="h-6 text-xs px-2 text-amber-600 hover:text-amber-700"
-                          disabled={assignHereMutation.isPending}
                         >
                           <MapPin className="h-3 w-3 mr-1" />
                           Assign
@@ -346,13 +324,26 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
                         <DropdownMenuItem
-                          onClick={() => assignHereMutation.mutate(locLevel.location!.id)}
+                          onClick={() => {
+                            const params = new URLSearchParams({
+                              locationId: String(locLevel.location!.id),
+                              variantId: String(variantId),
+                              sku,
+                            });
+                            navigate(`/slotting-setup?${params.toString()}`);
+                          }}
                         >
                           <MapPin className="h-3 w-3 mr-2" />
                           Assign to {locLevel.location.code}
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          onClick={() => navigate(`/bin-assignments?search=${encodeURIComponent(sku)}`)}
+                          onClick={() => {
+                            const params = new URLSearchParams({
+                              variantId: String(variantId),
+                              sku,
+                            });
+                            navigate(`/slotting-setup?${params.toString()}`);
+                          }}
                         >
                           <ArrowLeftRight className="h-3 w-3 mr-2" />
                           Assign to other bin...
