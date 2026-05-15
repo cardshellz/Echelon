@@ -1285,10 +1285,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const service = new ReplenishmentUseCases(db as any, {} as any);
     const serviceAny = service as any;
     vi.spyOn(serviceAny, "findActiveTaskForPickBin")
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 888, status: "pending" });
-    const triggerSpy = vi.spyOn(service, "checkAndTriggerAfterPick")
-      .mockResolvedValue(null as any);
+      .mockResolvedValueOnce(null);
+    const createAndExecuteSpy = vi.spyOn(service, "createAndExecuteReplen")
+      .mockResolvedValue({ task: { id: 888, status: "pending" } as any, moved: 0 });
 
     const result = await service.queueMissingPickBinReplen({
       mode: "queue_replen",
@@ -1297,9 +1296,10 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       limit: 1,
     });
 
-    expect(triggerSpy).toHaveBeenCalledWith(100, 1, "health_queue", {
+    expect(createAndExecuteSpy).toHaveBeenCalledWith(100, 1, "system:health-replen", {
       blocksShipment: false,
       forceWhenAtOrBelowZero: false,
+      triggeredBy: "health_queue",
     });
     expect(sqlText(db.execute.mock.calls[0][0])).toContain("allocation_exceptions");
     expect(result).toMatchObject({

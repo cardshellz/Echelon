@@ -87,6 +87,7 @@ export type ReplenOrderContext = {
   orderNumber?: string | null;
   blocksShipment?: boolean;
   forceWhenAtOrBelowZero?: boolean;
+  triggeredBy?: string;
 };
 
 export type ReplenSourceEmptyReport = {
@@ -1718,14 +1719,14 @@ export class ReplenishmentUseCases {
         continue;
       }
 
-      await this.checkAndTriggerAfterPick(variantId, locationId, "health_queue", {
+      const created = await this.createAndExecuteReplen(variantId, locationId, "system:health-replen", {
         blocksShipment: false,
         forceWhenAtOrBelowZero: Number(row.active_pending_lines ?? 0) > 0,
+        triggeredBy: "health_queue",
       });
 
-      const activeAfter = await this.findActiveTaskForPickBin(variantId, locationId);
-      if (activeAfter) {
-        queuedTaskIds.add(Number(activeAfter.id));
+      if (created?.task) {
+        queuedTaskIds.add(Number(created.task.id));
       } else {
         skipped.push({
           variantId,
@@ -2112,7 +2113,7 @@ export class ReplenishmentUseCases {
   async checkReplenNeeded(
     productVariantId: number,
     warehouseLocationId: number,
-    options?: { currentQtyOverride?: number; ignoreTaskId?: number },
+    options?: ReplenEvaluationOptions,
   ): Promise<ReplenGuidance> {
     const noReplen = (reason: string, eval_?: Extract<ReplenEvalResult, { status: "skip" }>): ReplenGuidance => ({
       needed: false, stockout: false, sourceLocationId: null, sourceLocationCode: null,
@@ -2267,12 +2268,15 @@ export class ReplenishmentUseCases {
     }
 
     // Re-derive guidance from current DB state (fresh, not stale)
-    const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId);
+    const triggeredBy = context?.triggeredBy ?? "inline_pick";
+    const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId, {
+      forceWhenAtOrBelowZero: context?.forceWhenAtOrBelowZero === true,
+    });
     if (guidance.needed && guidance.stockout && context?.blocksShipment) {
       const blockedTask = await this.checkAndTriggerAfterPick(
         pickVariantId,
         toLocationId,
-        "inline_pick",
+        triggeredBy,
         context,
       );
       return blockedTask ? { task: blockedTask, moved: 0 } : null;
@@ -2310,7 +2314,7 @@ export class ReplenishmentUseCases {
       qtyCompleted: 0, // will be updated by executeTask
       status: "pending", // executeTask transitions to completed
       priority,
-      triggeredBy: "inline_pick",
+      triggeredBy,
       executionMode: guidance.executionMode,
       replenMethod: guidance.replenMethod,
       autoReplen,
