@@ -9,6 +9,29 @@ import { requirePermission } from "../../routes/middleware";
 
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
 
+function getLocationDeleteConflictMessage(error: any) {
+  const constraint = String(error?.constraint || "");
+  if (constraint.includes("product_locations")) {
+    return "Cannot delete location because SKU slotting assignments reference it. Remove the assignments or deactivate the location instead.";
+  }
+  if (constraint.includes("inventory_levels")) {
+    return "Cannot delete location because inventory records reference it. Move or adjust stock first, or deactivate the location if it is only historical.";
+  }
+  if (constraint.includes("inventory_lots")) {
+    return "Cannot delete location because inventory lot history references it. Deactivate the location instead.";
+  }
+  if (constraint.includes("inventory_transactions")) {
+    return "Cannot delete location because inventory transaction history references it. Deactivate the location instead.";
+  }
+  if (constraint.includes("replen")) {
+    return "Cannot delete location because replenishment history or tasks reference it. Deactivate the location instead.";
+  }
+  if (constraint.includes("order")) {
+    return "Cannot delete location because order or pick history references it. Deactivate the location instead.";
+  }
+  return "Cannot delete location because other records still reference it. Deactivate the location instead.";
+}
+
 export function registerWarehouseRoutes(app: Express) {
   const binAssignments = createBinAssignmentService(db, storage);
 
@@ -427,7 +450,11 @@ export function registerWarehouseRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error deleting warehouse location:", error);
       if (error.code === "23503") {
-        return res.status(409).json({ error: "Cannot delete location - products are assigned to it. Remove products first." });
+        return res.status(409).json({
+          error: getLocationDeleteConflictMessage(error),
+          canDeactivate: true,
+          constraint: error.constraint,
+        });
       }
       res.status(500).json({ error: "Failed to delete location" });
     }
