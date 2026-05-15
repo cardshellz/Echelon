@@ -59,6 +59,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 
 interface CycleCount {
   id: number;
@@ -569,7 +570,7 @@ export default function CycleCounts() {
   });
 
   // Warehouse locations for transfer destination picker
-  interface WarehouseLocationOption { id: number; code: string; zone: string | null; locationType: string; }
+  interface WarehouseLocationOption { id: number; code: string; zone: string | null; locationType: string; warehouseId?: number | null; isActive?: number | null; }
   const { data: warehouseLocations = [] } = useQuery<WarehouseLocationOption[]>({
     queryKey: ["/api/warehouse/locations"],
     queryFn: async () => {
@@ -580,11 +581,9 @@ export default function CycleCounts() {
     enabled: transferDialogOpen,
   });
 
-  const filteredLocations = warehouseLocations.filter((loc) => {
-    if (!locationSearch || locationSearch.length < 1) return false;
-    const q = locationSearch.toLowerCase();
-    return loc.code.toLowerCase().includes(q) || (loc.zone?.toLowerCase().includes(q) ?? false);
-  }).slice(0, 15);
+  const filteredLocations = locationSearch.length < 1
+    ? []
+    : filterActionableWarehouseLocations(warehouseLocations, { search: locationSearch }).slice(0, 15);
 
   const resolveTransferMutation = useMutation({
     mutationFn: async (params: { itemId: number; data: { destinationLocationId: number; qty: number; notes?: string } }) => {
