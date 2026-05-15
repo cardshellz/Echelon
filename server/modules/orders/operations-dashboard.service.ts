@@ -932,7 +932,11 @@ export class OperationsDashboardService {
 
         SELECT
           'cycle_count_review'::text,
-          CASE WHEN cc.status = 'pending_review' THEN 1 ELSE 3 END,
+          CASE
+            WHEN cc.status = 'pending_review' THEN 1
+            WHEN cc.name LIKE 'Replen QA - Task #%' THEN 2
+            ELSE 3
+          END,
           cc.id::text,
           NULL::int,
           NULL::int,
@@ -952,10 +956,18 @@ export class OperationsDashboardService {
           FLOOR(EXTRACT(EPOCH FROM NOW() - cc.created_at) / 3600)::int,
           cc.created_at,
           COALESCE(cc.description, cc.name),
-          CASE WHEN cc.status = 'pending_review' THEN 'approve_or_resolve_count' ELSE 'finish_count' END
+          CASE
+            WHEN cc.status = 'pending_review' THEN 'approve_or_resolve_count'
+            WHEN cc.name LIKE 'Replen QA - Task #%' THEN 'verify_replen_count'
+            ELSE 'finish_count'
+          END
         FROM inventory.cycle_counts cc
         WHERE cc.status IN ('in_progress', 'pending_review')
-          AND (cc.status = 'pending_review' OR cc.created_at < NOW() - INTERVAL '24 hours')
+          AND (
+            cc.status = 'pending_review'
+            OR cc.name LIKE 'Replen QA - Task #%'
+            OR cc.created_at < NOW() - INTERVAL '24 hours'
+          )
           ${countWarehouseFilter}
 
         UNION ALL
