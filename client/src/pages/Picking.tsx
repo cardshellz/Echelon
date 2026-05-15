@@ -1157,11 +1157,11 @@ export default function Picking() {
 
   // Consolidated bin count + replen mutation (single API call)
   const binCountMutation = useMutation({
-    mutationFn: async ({ sku, locationId, binCount, didReplen: replenDone, replenAlreadyRecorded }: { sku: string; locationId: number; binCount: number; didReplen: boolean; replenAlreadyRecorded?: boolean }) => {
+    mutationFn: async ({ sku, locationId, binCount, didReplen: replenDone }: { sku: string; locationId: number; binCount: number; didReplen: boolean }) => {
       const res = await fetch("/api/picking/bin-count", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sku, locationId, binCount, didReplen: replenDone, replenAlreadyRecorded }),
+        body: JSON.stringify({ sku, locationId, binCount, didReplen: replenDone }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed to submit bin count" }));

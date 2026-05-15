@@ -12,6 +12,10 @@ import Papa from "papaparse";
 
 export function registerPickingRoutes(app: Express) {
   const { orderCombining } = app.locals.services;
+  const pickerReplenAuthorityRemoved = (res: any) => res.status(410).json({
+    error: "Picker replen confirmation has been removed",
+    message: "Replenishment is system-owned. Use replenishment/admin workflows for task execution or cancellation; picker input is limited to pick exceptions and QA review signals.",
+  });
 
   // ===== PICKING QUEUE API =====
   
@@ -228,30 +232,13 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/case-break", requireAuth, async (req, res) => {
-    try {
-      const { picking } = req.app.locals.services;
-      const { sku, warehouseLocationId } = req.body;
-      if (!sku || !warehouseLocationId) {
-        return res.status(400).json({ error: "sku and warehouseLocationId are required" });
-      }
-      const result = await picking.initiateCaseBreak(sku, warehouseLocationId, req.session.user?.id);
-      if (!result.success) {
-        const code = result.taskId ? 409 : 404;
-        return res.status(code).json({ error: result.error, taskId: result.taskId });
-      }
-      res.json(result);
-    } catch (error: any) {
-      console.error("Error in picker case break:", error);
-      res.status(500).json({ error: error.message || "Failed to execute case break" });
-    }
-  });
+  app.post("/api/picking/case-break", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
 
-  // Consolidated bin count + replen confirmation (replaces separate endpoints below)
+  // Consolidated picker bin count. Replen execution remains system-owned.
   app.post("/api/picking/bin-count", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
-      const { sku, locationId, binCount, didReplen, replenAlreadyRecorded } = req.body;
+      const { sku, locationId, binCount, didReplen } = req.body;
       if (!sku || !locationId || binCount == null || didReplen == null) {
         return res.status(400).json({ error: "sku, locationId, binCount, and didReplen are required" });
       }
@@ -260,7 +247,6 @@ export function registerPickingRoutes(app: Express) {
         locationId,
         binCount: Number(binCount),
         didReplen: Boolean(didReplen),
-        replenAlreadyRecorded: Boolean(replenAlreadyRecorded),
         userId: req.session.user?.id,
       });
       res.json(result);
@@ -270,93 +256,11 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  // @deprecated — use POST /api/picking/bin-count instead
-  // Kept alive with logging to detect any external callers before removal
-  app.post("/api/picking/case-break/confirm", requireAuth, async (req, res) => {
-    console.warn("[DEPRECATED] POST /api/picking/case-break/confirm was called — migrate to /api/picking/bin-count");
-    try {
-      const { picking } = req.app.locals.services;
-      const { sku, warehouseLocationId, actualBinQty } = req.body;
-      if (!sku || !warehouseLocationId || actualBinQty == null) {
-        return res.status(400).json({ error: "sku, warehouseLocationId, and actualBinQty are required" });
-      }
-      const result = await picking.confirmCaseBreak(sku, warehouseLocationId, actualBinQty, req.session.user?.id);
-      res.json(result);
-    } catch (error: any) {
-      console.error("Error confirming case break:", error);
-      res.status(500).json({ error: error.message || "Failed to confirm case break" });
-    }
-  });
-
-  app.post("/api/picking/case-break/skip", requireAuth, async (req, res) => {
-    console.warn("[DEPRECATED] POST /api/picking/case-break/skip was called — migrate to /api/picking/bin-count");
-    try {
-      const { picking } = req.app.locals.services;
-      const { sku, warehouseLocationId, actualBinQty } = req.body;
-      if (!sku || !warehouseLocationId || actualBinQty == null) {
-        return res.status(400).json({ error: "sku, warehouseLocationId, and actualBinQty are required" });
-      }
-      const result = await picking.skipReplen(sku, warehouseLocationId, actualBinQty, req.session.user?.id);
-      res.json(result);
-    } catch (error: any) {
-      console.error("Error skipping case break:", error);
-      res.status(500).json({ error: error.message || "Failed to skip case break" });
-    }
-  });
-
-  app.post("/api/picking/replen/confirm", requireAuth, async (req, res) => {
-    try {
-      const { replenishment } = req.app.locals.services;
-      const { taskId } = req.body;
-      if (!taskId) {
-        return res.status(400).json({ error: "taskId is required" });
-      }
-      const task = await replenishment.confirmPickerReplen(taskId, req.session.user?.id);
-      res.json(task);
-    } catch (error: any) {
-      console.error("Error confirming replen:", error);
-      res.status(500).json({ error: error.message || "Failed to confirm replen" });
-    }
-  });
-
-  app.post("/api/picking/replen/cancel", requireAuth, async (req, res) => {
-    try {
-      const { replenishment } = req.app.locals.services;
-      const { taskId, actualCount } = req.body;
-      if (!taskId) {
-        return res.status(400).json({ error: "taskId is required" });
-      }
-      if (actualCount === undefined || actualCount === null || typeof actualCount !== "number") {
-        return res.status(400).json({ error: "actualCount (number) is required — the picker must enter the actual bin count" });
-      }
-      await replenishment.cancelPickerReplen(taskId, actualCount, req.session.user?.id);
-      res.json({ success: true });
-    } catch (error: any) {
-      console.error("Error cancelling replen:", error);
-      res.status(500).json({ error: error.message || "Failed to cancel replen" });
-    }
-  });
-
-  // Simplified replen confirm — replaces the old bin-count dialog for replen flow
-  app.post("/api/picking/replen-confirm", requireAuth, async (req, res) => {
-    try {
-      const { picking } = req.app.locals.services;
-      const { sku, locationId, confirmed } = req.body;
-      if (!sku || locationId == null || confirmed == null) {
-        return res.status(400).json({ error: "sku, locationId, and confirmed are required" });
-      }
-      const result = await picking.confirmReplen({
-        sku,
-        locationId: Number(locationId),
-        confirmed: Boolean(confirmed),
-        userId: req.session.user?.id,
-      });
-      res.json(result);
-    } catch (error: any) {
-      console.error("Error confirming replen:", error);
-      res.status(500).json({ error: error.message || "Failed to confirm replen" });
-    }
-  });
+  app.post("/api/picking/case-break/confirm", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
+  app.post("/api/picking/case-break/skip", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
+  app.post("/api/picking/replen/confirm", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
+  app.post("/api/picking/replen/cancel", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
+  app.post("/api/picking/replen-confirm", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
 
   app.post("/api/picking/replen-guidance", requireAuth, async (req, res) => {
     try {
