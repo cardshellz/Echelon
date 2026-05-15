@@ -566,10 +566,10 @@ async function recoverCompletedPickLedger(
         'recoveredBy', 'recover-allocation-exceptions',
         'recoveredAt', NOW(),
         'recoveryReason', 'stale_completed_pick_unposted',
-        'recoveredPickTransactionId', $3,
-        'recoveredLocationId', $1,
-        'recoveredLocationCode', $2,
-        'recoveredQty', $4
+        'recoveredPickTransactionId', $3::int,
+        'recoveredLocationId', $1::int,
+        'recoveredLocationCode', $2::text,
+        'recoveredQty', $4::int
       )
     WHERE id = $5
       AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
@@ -617,8 +617,8 @@ async function recoverCompletedPickLedger(
       $12,
       'completed',
       jsonb_build_object(
-        'exceptionId', $13,
-        'inventoryTransactionId', $14,
+        'exceptionId', $13::int,
+        'inventoryTransactionId', $14::int,
         'recoveryReason', 'stale_completed_pick_unposted'
       )
     )
