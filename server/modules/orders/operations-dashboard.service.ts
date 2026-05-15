@@ -934,7 +934,9 @@ export class OperationsDashboardService {
           'cycle_count_review'::text,
           CASE
             WHEN cc.status = 'pending_review' THEN 1
-            WHEN cc.name LIKE 'Replen QA - Task #%' THEN 2
+            WHEN cc.name LIKE 'Daily Replen QA -%' THEN 2
+            WHEN cc.name LIKE 'Replen Source Empty - Task #%' THEN 2
+            WHEN cc.name LIKE 'Replen Exception - Task #%' THEN 2
             ELSE 3
           END,
           cc.id::text,
@@ -958,14 +960,18 @@ export class OperationsDashboardService {
           COALESCE(cc.description, cc.name),
           CASE
             WHEN cc.status = 'pending_review' THEN 'approve_or_resolve_count'
-            WHEN cc.name LIKE 'Replen QA - Task #%' THEN 'verify_replen_count'
+            WHEN cc.name LIKE 'Daily Replen QA -%' THEN 'verify_replen_count'
+            WHEN cc.name LIKE 'Replen Source Empty - Task #%' THEN 'verify_replen_count'
+            WHEN cc.name LIKE 'Replen Exception - Task #%' THEN 'verify_replen_count'
             ELSE 'finish_count'
           END
         FROM inventory.cycle_counts cc
         WHERE cc.status IN ('in_progress', 'pending_review')
           AND (
             cc.status = 'pending_review'
-            OR cc.name LIKE 'Replen QA - Task #%'
+            OR cc.name LIKE 'Daily Replen QA -%'
+            OR cc.name LIKE 'Replen Source Empty - Task #%'
+            OR cc.name LIKE 'Replen Exception - Task #%'
             OR cc.created_at < NOW() - INTERVAL '24 hours'
           )
           ${countWarehouseFilter}

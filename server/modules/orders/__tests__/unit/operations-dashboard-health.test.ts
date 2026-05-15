@@ -97,7 +97,7 @@ describe("OperationsDashboardService pick/replen health", () => {
     const detailSql = sqlText(db.execute.mock.calls[1][0]);
     expect(detailSql).toContain("allocation_exceptions");
     expect(detailSql).toContain("shipmentBlocking");
-    expect(detailSql).toContain("Replen QA - Task #%");
+    expect(detailSql).toContain("Daily Replen QA -%");
   });
 
   it("falls back to all when the filter is not recognized", async () => {
@@ -189,7 +189,7 @@ describe("OperationsDashboardService pick/replen health", () => {
             order_item_id: null,
             variant_id: null,
             sku: null,
-            name: "Replen QA - Task #990",
+            name: "Daily Replen QA - 2026-05-15",
             location_id: null,
             location_code: "A-01",
             source_location_code: null,
@@ -198,7 +198,7 @@ describe("OperationsDashboardService pick/replen health", () => {
             qty: "0",
             age_hours: "0",
             created_at: "2026-05-15T23:00:00.000Z",
-            detail: "Verify SKU-1 at A-01 after replen task #990.",
+            detail: "Daily random replen QA sample.",
             action: "verify_replen_count",
           }],
         }),
@@ -215,13 +215,15 @@ describe("OperationsDashboardService pick/replen health", () => {
       type: "cycle_count_review",
       priority: 2,
       cycleCountId: 333,
-      name: "Replen QA - Task #990",
+      name: "Daily Replen QA - 2026-05-15",
       locationCode: "A-01",
       status: "in_progress",
       action: "verify_replen_count",
     })]);
     const detailSql = sqlText(db.execute.mock.calls[1][0]);
     expect(detailSql).toContain("verify_replen_count");
-    expect(detailSql).toContain("Replen QA - Task #%");
+    expect(detailSql).toContain("Daily Replen QA -%");
+    expect(detailSql).toContain("Replen Source Empty - Task #%");
+    expect(detailSql).toContain("Replen Exception - Task #%");
   });
 });
