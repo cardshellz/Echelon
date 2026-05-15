@@ -605,6 +605,7 @@ export class OperationsDashboardService {
             WHEN rt.status IN ('pending', 'assigned', 'in_progress')
               AND rt.execution_mode = 'inline'
               AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) > 0
               AND rt.created_at < NOW() - INTERVAL '5 minutes'
             THEN 'stuck_replen'
             WHEN rt.status IN ('blocked', 'in_progress')
@@ -631,6 +632,7 @@ export class OperationsDashboardService {
             WHEN rt.status IN ('pending', 'assigned', 'in_progress')
               AND rt.execution_mode = 'inline'
               AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) > 0
               AND rt.created_at < NOW() - INTERVAL '5 minutes'
             THEN 1
             WHEN rt.status = 'blocked' THEN 1
@@ -674,6 +676,7 @@ export class OperationsDashboardService {
             WHEN rt.status IN ('pending', 'assigned', 'in_progress')
               AND rt.execution_mode = 'inline'
               AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) > 0
               AND rt.created_at < NOW() - INTERVAL '5 minutes'
             THEN 'inline replen should have been system-executed automatically'
             WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
@@ -707,6 +710,7 @@ export class OperationsDashboardService {
             WHEN rt.status IN ('pending', 'assigned', 'in_progress')
               AND rt.execution_mode = 'inline'
               AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) > 0
               AND rt.created_at < NOW() - INTERVAL '5 minutes'
             THEN 'auto_execute_replen'
             WHEN rt.status = 'blocked' THEN 'resolve_blocker'
@@ -768,6 +772,7 @@ export class OperationsDashboardService {
               rt.status IN ('pending', 'assigned', 'in_progress')
               AND rt.execution_mode = 'inline'
               AND rt.depends_on_task_id IS NULL
+              AND COALESCE(demand.active_pending_lines, 0) > 0
               AND rt.created_at < NOW() - INTERVAL '5 minutes'
             )
           )

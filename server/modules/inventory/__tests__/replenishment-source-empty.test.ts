@@ -1139,6 +1139,98 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       status: "pending",
       executionMode: "inline",
       dependsOnTaskId: null,
+      pickProductVariantId: 232,
+      sourceProductVariantId: 206,
+      fromLocationId: 1352,
+      toLocationId: 1163,
+      qtySourceUnits: 1000,
+      qtyTargetUnits: 1000,
+    };
+    const updates: Array<{ table: unknown; value: any }> = [];
+    const db = {
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: vi.fn(async () => [inlineTask]),
+            }),
+          }),
+        }),
+      })),
+      update: vi.fn((table: unknown) => ({
+        set: vi.fn((value: any) => {
+          updates.push({ table, value });
+          return { where: vi.fn(async () => []) };
+        }),
+      })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const serviceAny = service as any;
+    vi.spyOn(serviceAny, "countActivePendingDemandLines").mockResolvedValue(8);
+    vi.spyOn(serviceAny, "evaluateReplenNeed").mockResolvedValue({
+      status: "needed_with_source",
+      location: { id: 1163, code: "B-09", warehouseId: 1 },
+      variant: { id: 232, sku: "SHLZ-TOP-35PT-BLU-P25", productId: 1 },
+      whSettings: null,
+      params: { replenMethod: "case_break" },
+      taskNotes: "Active demand still needs replen",
+      sourceResolutionIssue: null,
+      rule: null,
+      sourceLocation: { id: 1352, code: "A-FLOOR" },
+      resolvedSourceVariantId: 206,
+      sourceVariant: { id: 206, sku: "SHLZ-TOP-35PT-BLU-C1000", unitsPerVariant: 1000 },
+      qtySourceUnits: 1,
+      qtyTargetUnits: 1000,
+      executionMode: "inline",
+      shouldAutoExecute: true,
+      triggerValue: 1,
+      evaluatedQty: 0,
+    });
+    vi.spyOn(serviceAny, "getInventoryQty").mockResolvedValue(80);
+    vi.spyOn(service, "executeTask").mockResolvedValue({ moved: 1000 });
+    vi.spyOn(serviceAny, "getTaskById").mockResolvedValue({
+      ...inlineTask,
+      qtySourceUnits: 1,
+      qtyTargetUnits: 1000,
+    });
+
+    const result = await service.cleanupHealthIssues({
+      mode: "inline_execution",
+      taskId: 993,
+      limit: 10,
+      userId: "admin",
+    });
+
+    expect(service.executeTask).toHaveBeenCalledWith(993, "admin");
+    expect(updates.find(update => update.table === replenTasks)?.value).toMatchObject({
+      fromLocationId: 1352,
+      sourceProductVariantId: 206,
+      qtySourceUnits: 1,
+      qtyTargetUnits: 1000,
+      replenMethod: "case_break",
+      exceptionReason: null,
+    });
+    expect(result).toMatchObject({
+      mode: "inline_execution",
+      executedInline: 1,
+      failedInline: 0,
+      skippedInline: 0,
+      executedInlineTaskIds: [993],
+      failedInlineTaskIds: [],
+      skippedInlineTaskIds: [],
+      cancelledStaleNoDemand: 0,
+      cancelledDuplicates: 0,
+    });
+  });
+
+  it("skips inline replen recovery when current rules no longer require replen", async () => {
+    const inlineTask = {
+      id: 978,
+      status: "pending",
+      executionMode: "inline",
+      dependsOnTaskId: null,
+      pickProductVariantId: 140,
+      toLocationId: 1157,
     };
     const db = {
       select: vi.fn(() => ({
@@ -1152,29 +1244,30 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       })),
     };
     const service = new ReplenishmentUseCases(db as any, {} as any);
-    vi.spyOn(service, "executeTask").mockResolvedValue({ moved: 1000 });
-    vi.spyOn(service as any, "getTaskById").mockResolvedValue({
-      ...inlineTask,
-      status: "completed",
-      qtyCompleted: 1000,
+    const serviceAny = service as any;
+    vi.spyOn(serviceAny, "countActivePendingDemandLines").mockResolvedValue(0);
+    vi.spyOn(serviceAny, "evaluateReplenNeed").mockResolvedValue({
+      status: "skip",
+      skipReason: "above_threshold",
     });
+    const executeTask = vi.spyOn(service, "executeTask");
 
     const result = await service.cleanupHealthIssues({
       mode: "inline_execution",
-      taskId: 993,
+      taskId: 978,
       limit: 10,
       userId: "admin",
     });
 
-    expect(service.executeTask).toHaveBeenCalledWith(993, "admin");
+    expect(executeTask).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       mode: "inline_execution",
-      executedInline: 1,
+      executedInline: 0,
       failedInline: 0,
-      executedInlineTaskIds: [993],
+      skippedInline: 1,
+      executedInlineTaskIds: [],
       failedInlineTaskIds: [],
-      cancelledStaleNoDemand: 0,
-      cancelledDuplicates: 0,
+      skippedInlineTaskIds: [978],
     });
   });
 

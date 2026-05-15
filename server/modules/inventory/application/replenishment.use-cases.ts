@@ -106,11 +106,13 @@ export type ReplenHealthCleanupResult = {
   mode: ReplenHealthCleanupMode;
   executedInline: number;
   failedInline: number;
+  skippedInline: number;
   cancelledStaleNoDemand: number;
   cancelledStaleBacklog: number;
   cancelledDuplicates: number;
   executedInlineTaskIds: number[];
   failedInlineTaskIds: number[];
+  skippedInlineTaskIds: number[];
   cancelledStaleNoDemandTaskIds: number[];
   cancelledStaleBacklogTaskIds: number[];
   cancelledDuplicateTaskIds: number[];
@@ -1391,11 +1393,13 @@ export class ReplenishmentUseCases {
       mode,
       executedInline: 0,
       failedInline: 0,
+      skippedInline: 0,
       cancelledStaleNoDemand: 0,
       cancelledStaleBacklog: 0,
       cancelledDuplicates: 0,
       executedInlineTaskIds: [],
       failedInlineTaskIds: [],
+      skippedInlineTaskIds: [],
       cancelledStaleNoDemandTaskIds: [],
       cancelledStaleBacklogTaskIds: [],
       cancelledDuplicateTaskIds: [],
@@ -1422,8 +1426,10 @@ export class ReplenishmentUseCases {
       const inlineResult = await this.executePendingInlineTasks(params);
       result.executedInline = inlineResult.executedTaskIds.length;
       result.failedInline = inlineResult.failedTaskIds.length;
+      result.skippedInline = inlineResult.skippedTaskIds.length;
       result.executedInlineTaskIds = inlineResult.executedTaskIds;
       result.failedInlineTaskIds = inlineResult.failedTaskIds;
+      result.skippedInlineTaskIds = inlineResult.skippedTaskIds;
     }
 
     return result;
@@ -1437,7 +1443,7 @@ export class ReplenishmentUseCases {
     taskId?: number | null;
     limit?: number;
     userId?: string;
-  }): Promise<{ executedTaskIds: number[]; failedTaskIds: number[] }> {
+  }): Promise<{ executedTaskIds: number[]; failedTaskIds: number[]; skippedTaskIds: number[] }> {
     const conditions = [
       inArray(replenTasks.status, EXECUTABLE_REPLEN_TASK_STATUSES),
       eq(replenTasks.executionMode, "inline"),
@@ -1457,18 +1463,80 @@ export class ReplenishmentUseCases {
 
     const executedTaskIds: number[] = [];
     const failedTaskIds: number[] = [];
+    const skippedTaskIds: number[] = [];
     const userId = params.userId ?? "system:auto-replen-recovery";
 
     for (const task of tasks as ReplenTask[]) {
       try {
-        await this.executeInlineTaskAutomatically(task, userId, "[Replen inlineRecovery]");
-        executedTaskIds.push(task.id);
+        const revalidatedTask = await this.revalidateInlineTaskForRecovery(task, userId);
+        if (!revalidatedTask) {
+          skippedTaskIds.push(task.id);
+          continue;
+        }
+
+        await this.executeInlineTaskAutomatically(revalidatedTask, userId, "[Replen inlineRecovery]");
+        executedTaskIds.push(revalidatedTask.id);
       } catch {
         failedTaskIds.push(task.id);
       }
     }
 
-    return { executedTaskIds, failedTaskIds };
+    return { executedTaskIds, failedTaskIds, skippedTaskIds };
+  }
+
+  private async revalidateInlineTaskForRecovery(
+    task: ReplenTask,
+    userId: string,
+  ): Promise<ReplenTask | null> {
+    if (!task.pickProductVariantId || !task.toLocationId) return null;
+
+    const activeDemandLines = await this.countActivePendingDemandLines(task);
+    const eval_ = await this.evaluateReplenNeed(task.pickProductVariantId, task.toLocationId, {
+      ignoreTaskId: task.id,
+      forceWhenAtOrBelowZero: activeDemandLines > 0,
+    });
+
+    if (eval_.status !== "needed_with_source") return null;
+    if (!(eval_.shouldAutoExecute || eval_.executionMode === "inline")) return null;
+    if (!eval_.sourceLocation) return null;
+
+    const resolvedSourceVariantId = eval_.resolvedSourceVariantId ?? task.pickProductVariantId;
+    const sourceQty = await this.getInventoryQty(resolvedSourceVariantId, eval_.sourceLocation.id);
+    if (sourceQty < Math.max(1, eval_.qtySourceUnits)) {
+      await this.blockTaskNoCurrentSource(
+        task,
+        `revalidated source ${eval_.sourceLocation.code} has ${sourceQty}, needs ${eval_.qtySourceUnits}`,
+      );
+      throw new Error("source_stock_unavailable");
+    }
+
+    const notes = [
+      task.notes || "",
+      `Revalidated inline recovery${userId ? ` by ${userId}` : ""}: ` +
+        `${activeDemandLines} active demand line${activeDemandLines === 1 ? "" : "s"}, ` +
+        `source ${eval_.sourceLocation.code}, qty ${eval_.qtySourceUnits}.`,
+    ].filter(Boolean).join("\n");
+
+    await this.db.update(replenTasks).set({
+      fromLocationId: eval_.sourceLocation.id,
+      sourceProductVariantId: resolvedSourceVariantId,
+      qtySourceUnits: eval_.qtySourceUnits,
+      qtyTargetUnits: eval_.qtyTargetUnits,
+      replenMethod: eval_.params.replenMethod,
+      exceptionReason: null,
+      notes,
+    }).where(eq(replenTasks.id, task.id));
+
+    return await this.getTaskById(task.id) ?? {
+      ...task,
+      fromLocationId: eval_.sourceLocation.id,
+      sourceProductVariantId: resolvedSourceVariantId,
+      qtySourceUnits: eval_.qtySourceUnits,
+      qtyTargetUnits: eval_.qtyTargetUnits,
+      replenMethod: eval_.params.replenMethod,
+      exceptionReason: null,
+      notes,
+    };
   }
 
   async queueMissingPickBinReplen(params: {

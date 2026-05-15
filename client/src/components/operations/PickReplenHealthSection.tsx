@@ -48,8 +48,10 @@ type CleanupRequest = {
 type CleanupResult = {
   executedInline?: number;
   failedInline?: number;
+  skippedInline?: number;
   executedInlineTaskIds?: number[];
   failedInlineTaskIds?: number[];
+  skippedInlineTaskIds?: number[];
   cancelledStaleNoDemand: number;
   cancelledStaleBacklog?: number;
   cancelledDuplicates: number;
@@ -293,6 +295,7 @@ export default function PickReplenHealthSection({
     onSuccess: (result) => {
       const executed = result.executedInline ?? 0;
       const failed = result.failedInline ?? 0;
+      const skippedInline = result.skippedInline ?? 0;
       const cleaned = result.cancelledStaleNoDemand + (result.cancelledStaleBacklog ?? 0) + result.cancelledDuplicates;
       const queued = result.queuedReplen ?? 0;
       const skipped = result.skippedPickBins ?? 0;
@@ -304,6 +307,8 @@ export default function PickReplenHealthSection({
           ? `Queued ${queued} replen task${queued === 1 ? "" : "s"}${skipped > 0 ? `; ${skipped} bin${skipped === 1 ? "" : "s"} need review` : ""}`
           : cleaned > 0
             ? `Cleaned ${cleaned} replen task${cleaned === 1 ? "" : "s"}`
+            : skippedInline > 0
+              ? `Skipped ${skippedInline} inline replen task${skippedInline === 1 ? "" : "s"} because current rules no longer require execution`
             : "No safe cleanup was available",
       });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/pick-replen-health"] });
