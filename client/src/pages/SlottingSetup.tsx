@@ -3,10 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { useDebounce } from "@/hooks/use-debounce";
@@ -91,6 +93,31 @@ type CandidateSku = {
   source: "search" | "inventory" | "shortcut";
 };
 
+type LocationSettingsDraft = {
+  warehouseId: string;
+  locationType: string;
+  binType: string;
+  isPickable: boolean;
+  isActive: boolean;
+};
+
+const LOCATION_TYPES = [
+  { value: "pick", label: "Pick" },
+  { value: "reserve", label: "Reserve" },
+  { value: "receiving", label: "Receiving" },
+  { value: "staging", label: "Staging" },
+];
+
+const BIN_TYPES = [
+  { value: "bin", label: "Bin" },
+  { value: "shelf", label: "Shelf" },
+  { value: "pallet", label: "Pallet" },
+  { value: "carton_flow", label: "Carton Flow" },
+  { value: "floor", label: "Floor" },
+];
+
+const OPERATIONAL_LOCATION_TYPES = new Set(["pick", "reserve", "receiving", "staging"]);
+
 function parseNumberParam(params: URLSearchParams, key: string) {
   const value = params.get(key);
   if (!value) return null;
@@ -120,6 +147,51 @@ function displaySku(candidate: CandidateSku | null) {
   return candidate.sku || `Variant ${candidate.variantId}`;
 }
 
+function settingsFromLocation(location: WarehouseLocation | null): LocationSettingsDraft {
+  return {
+    warehouseId: location?.warehouseId ? String(location.warehouseId) : "none",
+    locationType: location?.locationType || "pick",
+    binType: location?.binType || "bin",
+    isPickable: location?.isPickable === 1,
+    isActive: location?.isActive !== 0,
+  };
+}
+
+function validateLocationSettings(draft: LocationSettingsDraft) {
+  const isActive = draft.isActive;
+  const hasWarehouse = draft.warehouseId !== "none";
+
+  if (isActive && OPERATIONAL_LOCATION_TYPES.has(draft.locationType) && !hasWarehouse) {
+    return "Active operational locations need a warehouse.";
+  }
+  if (isActive && draft.isPickable && draft.locationType !== "pick") {
+    return "Only pick locations can be pickable.";
+  }
+  if (isActive && draft.locationType === "pick" && !draft.isPickable) {
+    return "Pick locations must be marked pickable.";
+  }
+  return null;
+}
+
+function locationSettingsChanged(location: WarehouseLocation | null, draft: LocationSettingsDraft) {
+  if (!location) return false;
+  return draft.warehouseId !== (location.warehouseId ? String(location.warehouseId) : "none")
+    || draft.locationType !== location.locationType
+    || draft.binType !== location.binType
+    || draft.isPickable !== (location.isPickable === 1)
+    || draft.isActive !== (location.isActive !== 0);
+}
+
+function buildLocationSettingsPayload(draft: LocationSettingsDraft) {
+  return {
+    warehouseId: draft.warehouseId === "none" ? null : Number(draft.warehouseId),
+    locationType: draft.locationType,
+    binType: draft.binType,
+    isPickable: draft.isPickable ? 1 : 0,
+    isActive: draft.isActive ? 1 : 0,
+  };
+}
+
 export default function SlottingSetup() {
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
@@ -133,6 +205,7 @@ export default function SlottingSetup() {
   const [slotSearch, setSlotSearch] = useState(initialSku || "");
   const [skuSearch, setSkuSearch] = useState(initialSku || "");
   const [skuPickerOpen, setSkuPickerOpen] = useState(false);
+  const [locationDraft, setLocationDraft] = useState<LocationSettingsDraft>(() => settingsFromLocation(null));
   const [candidate, setCandidate] = useState<CandidateSku | null>(
     initialVariantId
       ? { variantId: initialVariantId, sku: initialSku || null, title: initialSku || `Variant ${initialVariantId}`, source: "shortcut" }
@@ -173,6 +246,10 @@ export default function SlottingSetup() {
     () => locations.find(location => location.id === selectedLocationId) || null,
     [locations, selectedLocationId],
   );
+
+  useEffect(() => {
+    setLocationDraft(settingsFromLocation(selectedLocation));
+  }, [selectedLocation]);
 
   useEffect(() => {
     if (!selectedLocationId && locations.length > 0) {
@@ -299,7 +376,36 @@ export default function SlottingSetup() {
     },
   });
 
+  const updateLocationMutation = useMutation({
+    mutationFn: async (params: { locationId: number; data: Partial<WarehouseLocation> }) => {
+      const res = await fetch(`/api/warehouse/locations/${params.locationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(params.data),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to update location");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
+      toast({ title: "Location updated" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to update location", description: error.message, variant: "destructive" });
+    },
+  });
+
   const blockReason = slotBlockReason(selectedLocation);
+  const locationSettingsError = validateLocationSettings(locationDraft);
+  const hasLocationSettingsChanges = locationSettingsChanged(selectedLocation, locationDraft);
+  const canSaveLocationSettings = !!selectedLocation
+    && hasLocationSettingsChanges
+    && !locationSettingsError
+    && !updateLocationMutation.isPending;
   const canSave = !!selectedLocation && !!candidate && !blockReason && !assignMutation.isPending;
 
   function selectLocation(locationId: number) {
@@ -316,6 +422,33 @@ export default function SlottingSetup() {
     assignMutation.mutate({
       productVariantId: candidate.variantId,
       warehouseLocationId: selectedLocation.id,
+    });
+  }
+
+  function saveLocationSettings() {
+    if (!selectedLocation || !canSaveLocationSettings) return;
+    updateLocationMutation.mutate({
+      locationId: selectedLocation.id,
+      data: buildLocationSettingsPayload(locationDraft),
+    });
+  }
+
+  function makeSelectedLocationPickable() {
+    if (!selectedLocation || updateLocationMutation.isPending) return;
+    updateLocationMutation.mutate({
+      locationId: selectedLocation.id,
+      data: {
+        locationType: "pick",
+        isPickable: 1,
+      },
+    });
+  }
+
+  function deactivateSelectedLocation() {
+    if (!selectedLocation || updateLocationMutation.isPending) return;
+    updateLocationMutation.mutate({
+      locationId: selectedLocation.id,
+      data: { isActive: 0 },
     });
   }
 
@@ -392,6 +525,7 @@ export default function SlottingSetup() {
                       <TableCell>
                         <div className="font-mono text-sm">{location.code}</div>
                         <div className="text-xs text-muted-foreground">
+                          #{location.id} · {" "}
                           {location.warehouseId ? warehouseNameById.get(location.warehouseId) || `Warehouse ${location.warehouseId}` : "No warehouse"}
                           {location.zone ? ` · ${location.zone}` : ""}
                         </div>
@@ -425,6 +559,7 @@ export default function SlottingSetup() {
                 <h2 className="font-semibold">{selectedLocation?.code || "Select a slot"}</h2>
                 {selectedLocation && (
                   <p className="text-xs text-muted-foreground">
+                    #{selectedLocation.id} · {" "}
                     {selectedLocation.locationType.replace("_", " ")}
                     {selectedLocation.binType ? ` · ${selectedLocation.binType.replace("_", " ")}` : ""}
                     {selectedLocation.zone ? ` · Zone ${selectedLocation.zone}` : ""}
@@ -443,6 +578,11 @@ export default function SlottingSetup() {
                   ) : (
                     <Badge variant="outline" className="text-xs">Not pickable</Badge>
                   )}
+                  {selectedLocation.isActive === 1 ? (
+                    <Badge variant="secondary" className="text-xs">Active</Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-xs">Inactive</Badge>
+                  )}
                 </div>
               )}
             </div>
@@ -451,10 +591,141 @@ export default function SlottingSetup() {
           <div className="space-y-5 p-4">
             {blockReason && (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                <AlertTriangle className="mr-2 inline h-4 w-4" />
-                {blockReason}
+                <div>
+                  <AlertTriangle className="mr-2 inline h-4 w-4" />
+                  {blockReason}
+                </div>
+                {selectedLocation && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {selectedLocation.warehouseId != null && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 border-amber-300 bg-white text-amber-900 hover:bg-amber-100"
+                        disabled={updateLocationMutation.isPending}
+                        onClick={makeSelectedLocationPickable}
+                      >
+                        Make Pickable
+                      </Button>
+                    )}
+                    {selectedLocation.warehouseId == null && selectedLocation.isActive === 1 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 border-amber-300 bg-white text-amber-900 hover:bg-amber-100"
+                        disabled={updateLocationMutation.isPending}
+                        onClick={deactivateSelectedLocation}
+                      >
+                        Deactivate
+                      </Button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label className="text-sm font-medium">Location Settings</Label>
+                {selectedLocation && (
+                  <span className="font-mono text-xs text-muted-foreground">ID {selectedLocation.id}</span>
+                )}
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Warehouse</Label>
+                  <Select
+                    value={locationDraft.warehouseId}
+                    onValueChange={(warehouseId) => setLocationDraft({ ...locationDraft, warehouseId })}
+                    disabled={!selectedLocation || updateLocationMutation.isPending}
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue placeholder="Warehouse" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No warehouse</SelectItem>
+                      {warehouses.map((warehouse) => (
+                        <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+                          {warehouse.code || warehouse.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Type</Label>
+                  <Select
+                    value={locationDraft.locationType}
+                    onValueChange={(locationType) => setLocationDraft({
+                      ...locationDraft,
+                      locationType,
+                      isPickable: locationType === "pick" ? locationDraft.isPickable : false,
+                    })}
+                    disabled={!selectedLocation || updateLocationMutation.isPending}
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue placeholder="Type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LOCATION_TYPES.map((type) => (
+                        <SelectItem key={type.value} value={type.value}>{type.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Form</Label>
+                  <Select
+                    value={locationDraft.binType}
+                    onValueChange={(binType) => setLocationDraft({ ...locationDraft, binType })}
+                    disabled={!selectedLocation || updateLocationMutation.isPending}
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue placeholder="Form" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {BIN_TYPES.map((type) => (
+                        <SelectItem key={type.value} value={type.value}>{type.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-wrap gap-4">
+                  <label className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={locationDraft.isPickable}
+                      disabled={!selectedLocation || locationDraft.locationType !== "pick" || updateLocationMutation.isPending}
+                      onCheckedChange={(checked) => setLocationDraft({ ...locationDraft, isPickable: checked === true })}
+                    />
+                    Pickable
+                  </label>
+                  <label className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={locationDraft.isActive}
+                      disabled={!selectedLocation || updateLocationMutation.isPending}
+                      onCheckedChange={(checked) => setLocationDraft({ ...locationDraft, isActive: checked === true })}
+                    />
+                    Active
+                  </label>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-9"
+                  disabled={!canSaveLocationSettings}
+                  onClick={saveLocationSettings}
+                >
+                  Save Location
+                </Button>
+              </div>
+              {locationSettingsError && (
+                <div className="text-xs text-amber-700">{locationSettingsError}</div>
+              )}
+            </section>
 
             <section className="space-y-2">
               <div className="flex items-center justify-between">
