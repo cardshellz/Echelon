@@ -24,7 +24,7 @@ export const ordersStorage: OrdersModuleStorage = {
 
 
 // Service types
-export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "./picking.use-cases";
+export type { PickingService, PickItemResult, PickInventoryContext, BinCountResult } from "./picking.use-cases";
 export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "./returns.service";
 export type { OrderRoutingContext, RoutingResult } from "./fulfillment-router.service";
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "./combining.service";

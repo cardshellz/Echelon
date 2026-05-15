@@ -302,7 +302,7 @@ export type { ReservationResult } from "../modules/channels/reservation.service"
 export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "../modules/orders/returns.service";
 export type { OrderRoutingContext, RoutingResult } from "../modules/orders/fulfillment-router.service";
 export type { SLAAlert, SLASummary } from "../modules/orders/sla-monitor.service";
-export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "../modules/orders/picking.use-cases";
+export type { PickingService, PickItemResult, PickInventoryContext, BinCountResult } from "../modules/orders/picking.use-cases";
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "../modules/orders/combining.service";
 export type { CycleCountUseCases as CycleCountService, CycleCountError, ApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/operations-dashboard.service";

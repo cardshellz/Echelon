@@ -74,7 +74,6 @@ type ReplenishmentService = {
     existingTaskExecutionMode: string | null;
     existingTaskBlocksShipment: boolean;
   } | null>;
-  executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
   createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number } | null>;
   ensureQueuedReplenForShortPick: (pickVariantId: number, toLocationId: number, userId?: string, context?: ReplenOrderContext) => Promise<{ task: any; moved: number; guidance?: any } | null>;
   recordSourceEmptyBlocker: (params: {
@@ -114,8 +113,6 @@ type Storage = {
   getUser: (id: string) => Promise<any | undefined>;
   getInventoryLevelsByProductVariantId: (id: number) => Promise<any[]>;
   getAllWarehouseLocations: () => Promise<WarehouseLocation[]>;
-  getPendingReplenTasksForLocation: (locationId: number) => Promise<any[]>;
-  updateReplenTask: (id: number, updates: any) => Promise<any | null>;
   getPickQueueOrders: () => Promise<any[]>;
   getActiveReplenTierDefaults: () => Promise<any[]>;
   getActiveReplenRules: () => Promise<any[]>;
@@ -163,10 +160,6 @@ export type PickInventoryContext = {
 export type PickItemResult =
   | { success: true; item: OrderItem; inventory: PickInventoryContext }
   | { success: false; error: string; message: string };
-
-export type CaseBreakResult =
-  | { success: true; taskId: number; moved: number; action: string }
-  | { success: false; error: string; taskId?: number };
 
 export type BinCountResult = {
   success: true;
@@ -2041,173 +2034,7 @@ export class PickingUseCases {
   }
 
   // -------------------------------------------------------------------------
-  // 5. initiateCaseBreak
-  // -------------------------------------------------------------------------
-
-  async initiateCaseBreak(sku: string, warehouseLocationId: number, userId?: string): Promise<CaseBreakResult> {
-    const variant = await this.storage.getProductVariantBySku(sku);
-    if (!variant) {
-      return { success: false, error: `No variant found for SKU ${sku}` };
-    }
-
-    // Check for existing pending/blocked task
-    const existingTasks = await this.storage.getPendingReplenTasksForLocation(warehouseLocationId);
-    const existing = existingTasks.find((t: any) => t.pickProductVariantId === variant.id);
-
-    if (existing) {
-      try {
-        if (existing.status === "blocked") {
-          await this.storage.updateReplenTask(existing.id, { status: "pending" });
-        }
-        const result = await this.replenishment.executeTask(existing.id, userId || "picker");
-        return { success: true, taskId: existing.id, moved: result.moved, action: "executed_existing" };
-      } catch (err: any) {
-        return { success: false, error: err.message, taskId: existing.id };
-      }
-    }
-
-    // No existing task — trigger replen check
-    const task = await this.replenishment.checkAndTriggerAfterPick(variant.id, warehouseLocationId);
-    if (!task) {
-      return { success: false, error: "Could not create replen task — no source stock or no threshold configured" };
-    }
-
-    // If auto-executed, already done
-    if (task.status === "completed") {
-      return { success: true, taskId: task.id, moved: task.qtyCompleted, action: "auto_completed" };
-    }
-
-    // Otherwise execute it now (picker requested)
-    try {
-      const result = await this.replenishment.executeTask(task.id, userId || "picker");
-      return { success: true, taskId: task.id, moved: result.moved, action: "executed" };
-    } catch (err: any) {
-      return { success: false, error: err.message, taskId: task.id };
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 6. confirmCaseBreak
-  // -------------------------------------------------------------------------
-
-  async confirmCaseBreak(sku: string, warehouseLocationId: number, actualBinQty: number, userId?: string): Promise<BinCountResult> {
-    const variant = await this.storage.getProductVariantBySku(sku);
-    if (!variant) {
-      throw new Error(`No variant found for SKU ${sku}`);
-    }
-
-    const level = await this.inventoryCore.getLevel(variant.id, warehouseLocationId);
-    const systemQty = level?.variantQty ?? 0;
-    const adjustment = actualBinQty - systemQty;
-
-    if (adjustment !== 0) {
-      // Use adjustInventory instead of adjustLevel — handles sync triggers,
-      // audit trail, negative guards, and lot tracking automatically
-      await this.inventoryCore.adjustInventory({
-        productVariantId: variant.id,
-        warehouseLocationId,
-        qtyDelta: adjustment,
-        reason: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
-        userId: userId || undefined,
-      });
-    } else {
-      // Log verification even when count matches system (audit trail)
-      await this.inventoryCore.logTransaction({
-        productVariantId: variant.id,
-        toLocationId: warehouseLocationId,
-        transactionType: "cycle_count",
-        variantQtyDelta: 0,
-        variantQtyBefore: systemQty,
-        variantQtyAfter: actualBinQty,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        referenceType: "picker_verification",
-        referenceId: `${sku}:${warehouseLocationId}`,
-        notes: `Picker verified bin count matches system: qty=${systemQty}`,
-        userId: userId || null,
-      });
-    }
-
-    // Evaluate replen on corrected qty
-    const replenTask = await this.replenishment
-      .checkAndTriggerAfterPick(variant.id, warehouseLocationId)
-      .catch((err: any) => { console.warn("[Replen] post-count trigger failed:", err.message); return null; });
-
-    return {
-      success: true,
-      systemQtyBefore: systemQty,
-      actualBinQty,
-      adjustment,
-      replenTriggered: !!replenTask,
-      replenTaskStatus: replenTask?.status || null,
-      replenFailReason: null,
-      inferredReplen: false,
-      inferredReplenMoved: null,
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // 7. skipReplen
-  // -------------------------------------------------------------------------
-
-  async skipReplen(sku: string, warehouseLocationId: number, actualBinQty: number, userId?: string): Promise<BinCountResult> {
-    const variant = await this.storage.getProductVariantBySku(sku);
-    if (!variant) {
-      throw new Error(`No variant found for SKU ${sku}`);
-    }
-
-    const level = await this.inventoryCore.getLevel(variant.id, warehouseLocationId);
-    const systemQty = level?.variantQty ?? 0;
-    const adjustment = actualBinQty - systemQty;
-
-    // Correct inventory if needed — picker's count is source of truth
-    if (adjustment !== 0) {
-      await this.inventoryCore.adjustInventory({
-        productVariantId: variant.id,
-        warehouseLocationId,
-        qtyDelta: adjustment,
-        reason: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
-        userId: userId || undefined,
-      });
-
-      // If we found MORE stock than expected, trigger cycle count notification
-      // on the source case bin — an unrecorded case break may have occurred
-      if (adjustment > 0) {
-        try {
-          const pendingTasks = await this.storage.getPendingReplenTasksForLocation(warehouseLocationId);
-          const matchingTask = pendingTasks.find(
-            (t: any) => t.pickProductVariantId === variant.id && t.fromLocationId
-          );
-
-          if (matchingTask?.fromLocationId) {
-            const { notify } = await import("../notifications/notifications.service");
-
-            await notify("cycle_count_needed", {
-              title: `Bin variance: ${variant.sku}`,
-              message: `Bin has +${adjustment} more than expected ` +
-                `(system: ${systemQty}, actual: ${actualBinQty}). ` +
-                `Verify source bin (location ${matchingTask.fromLocationId}) — possible unrecorded case break.`,
-              data: {
-                sourceLocationId: matchingTask.fromLocationId,
-                targetLocationId: warehouseLocationId,
-                variantId: variant.id,
-                adjustment,
-                systemQty,
-                actualBinQty,
-              },
-            });
-          }
-        } catch (notifyErr: any) {
-          console.warn(`[Picking] Cycle count notification failed: ${notifyErr.message}`);
-        }
-      }
-    }
-
-    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment, replenTriggered: false, replenTaskStatus: null, replenFailReason: null, inferredReplen: false, inferredReplenMoved: null };
-  }
-
-  // -------------------------------------------------------------------------
-  // 7b. CONSOLIDATED BIN COUNT
+  // 5. CONSOLIDATED BIN COUNT
   // -------------------------------------------------------------------------
 
   /**
@@ -2220,10 +2047,9 @@ export class PickingUseCases {
     locationId: number;
     binCount: number;
     didReplen: boolean;
-    replenAlreadyRecorded?: boolean;
     userId?: string;
   }): Promise<BinCountResult> {
-    const { sku, locationId, binCount, didReplen, replenAlreadyRecorded = false, userId } = params;
+    const { sku, locationId, binCount, didReplen, userId } = params;
 
     // Guard: reject obviously wrong counts (e.g. barcode scanned into number field)
     const MAX_BIN_COUNT = 10_000;
@@ -2239,13 +2065,7 @@ export class PickingUseCases {
       throw new Error(`No variant found for SKU ${sku}`);
     }
 
-    const replenResult: any = didReplen && replenAlreadyRecorded
-      ? { task: null, moved: null, alreadyRecorded: true }
-      : null;
-
-    if (didReplen && replenAlreadyRecorded) {
-      console.log(`[BinCount] verifying already-recorded replen for ${sku} at location ${locationId}`);
-    } else if (didReplen) {
+    if (didReplen) {
       console.log(`[BinCount] picker reported replen for ${sku} at location ${locationId}; recording count only`);
     }
 
@@ -2263,7 +2083,7 @@ export class PickingUseCases {
       // Use adjustInventory for bin count corrections — handles sync triggers,
       // audit trail, negative guards, and lot tracking automatically
       const reason = didReplen
-        ? `Bin count after picker-reported replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.alreadyRecorded ? 'already_recorded' : 'not_system_recorded'}`
+        ? `Bin count after picker-reported replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`
         : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`;
 
       await this.inventoryCore.adjustInventory({
@@ -2309,7 +2129,7 @@ export class PickingUseCases {
         targetState: "on_hand",
         referenceType: didReplen ? "picker_bin_count_reported_replen" : "picker_bin_count",
         referenceId: `${sku}:${locationId}`,
-        notes: `Bin count verified: system=${postSystemQty}, actual=${binCount} (match)${didReplen ? `, replen moved=${replenResult?.alreadyRecorded ? 'already_recorded' : 'not_system_recorded'}` : ''}`,
+        notes: `Bin count verified: system=${postSystemQty}, actual=${binCount} (match)${didReplen ? ", picker reported replen" : ""}`,
         userId: userId || null,
       });
     }
@@ -2319,8 +2139,8 @@ export class PickingUseCases {
       systemQtyBefore: systemQty,
       actualBinQty: binCount,
       adjustment,
-      replenTriggered: !!replenResult,
-      replenTaskStatus: replenResult?.alreadyRecorded ? "completed" : null,
+      replenTriggered: false,
+      replenTaskStatus: null,
       replenFailReason: null,
       inferredReplen: false,
       inferredReplenMoved: null,
@@ -2328,65 +2148,7 @@ export class PickingUseCases {
   }
 
   // -------------------------------------------------------------------------
-  // 8. confirmReplen — simplified picker replen confirmation
-  // -------------------------------------------------------------------------
-
-  /**
-   * Called after auto-replen executes. The picker taps:
-   *   confirmed = true  → log it as verified, done
-   *   confirmed = false -> notify leads (flag for cycle count)
-   */
-  async confirmReplen(params: {
-    sku: string;
-    locationId: number;
-    confirmed: boolean;
-    userId?: string;
-  }): Promise<{ success: true; action: "confirmed" | "flagged" }> {
-    const { sku, locationId, confirmed, userId } = params;
-
-    const variant = await this.storage.getProductVariantBySku(sku);
-    if (!variant) {
-      throw new Error(`No variant found for SKU ${sku}`);
-    }
-
-    if (confirmed) {
-      // Picker verified — just write an audit log
-      this.storage.createPickingLog({
-        actionType: "replen_confirmed",
-        pickerId: userId || undefined,
-        sku,
-        locationCode: String(locationId),
-        notes: "Picker confirmed case break replen completed",
-      }).catch((e: any) => console.warn("[ReplenConfirm] log failed:", e.message));
-
-      return { success: true, action: "confirmed" };
-    } else {
-      // Picker flagged issue; replen task lifecycle remains system/review-owned.
-      try {
-        const { notify } = await import("../notifications/notifications.service");
-        await notify("cycle_count_needed", {
-          title: `Replen issue flagged: ${sku}`,
-          message: `Picker flagged a replen issue at location ${locationId}. Please verify the bin.`,
-          data: { targetLocationId: locationId, variantId: variant.id, sku, flaggedBy: userId },
-        });
-      } catch (notifyErr: any) {
-        console.warn(`[ReplenConfirm] Notification failed: ${notifyErr.message}`);
-      }
-
-      this.storage.createPickingLog({
-        actionType: "replen_issue_flagged",
-        pickerId: userId || undefined,
-        sku,
-        locationCode: String(locationId),
-        notes: "Picker flagged replen issue — cycle count needed",
-      }).catch((e: any) => console.warn("[ReplenConfirm] log failed:", e.message));
-
-      return { success: true, action: "flagged" };
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 9. getPickQueue
+  // 6. getPickQueue
   // -------------------------------------------------------------------------
 
   async getPickQueue(warehouseId?: number): Promise<PickQueueOrder[]> {
