@@ -602,6 +602,11 @@ export class OperationsDashboardService {
               AND COALESCE(demand.active_pending_lines, 0) = 0
               AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
             THEN 'stale_replen_no_demand'
+            WHEN rt.status IN ('pending', 'assigned', 'in_progress')
+              AND rt.execution_mode = 'inline'
+              AND rt.depends_on_task_id IS NULL
+              AND rt.created_at < NOW() - INTERVAL '5 minutes'
+            THEN 'stuck_replen'
             WHEN rt.status IN ('blocked', 'in_progress')
             THEN 'stuck_replen'
             WHEN rt.status IN ('pending', 'assigned')
@@ -623,6 +628,11 @@ export class OperationsDashboardService {
               AND COALESCE(demand.active_pending_lines, 0) = 0
               AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
             THEN 4
+            WHEN rt.status IN ('pending', 'assigned', 'in_progress')
+              AND rt.execution_mode = 'inline'
+              AND rt.depends_on_task_id IS NULL
+              AND rt.created_at < NOW() - INTERVAL '5 minutes'
+            THEN 1
             WHEN rt.status = 'blocked' THEN 1
             WHEN rt.status = 'in_progress' THEN 2
             WHEN COALESCE(demand.active_pending_lines, 0) > 0 THEN 2
@@ -661,6 +671,11 @@ export class OperationsDashboardService {
               AND COALESCE(demand.active_pending_lines, 0) = 0
               AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
             THEN 'no active demand and task source no longer has enough stock'
+            WHEN rt.status IN ('pending', 'assigned', 'in_progress')
+              AND rt.execution_mode = 'inline'
+              AND rt.depends_on_task_id IS NULL
+              AND rt.created_at < NOW() - INTERVAL '5 minutes'
+            THEN 'inline replen should have been system-executed automatically'
             WHEN rt.status = 'blocked' THEN COALESCE(rt.exception_reason, 'blocked')
             WHEN rt.status = 'in_progress' THEN 'in progress longer than 1h'
             WHEN COALESCE(demand.active_pending_lines, 0) > 0
@@ -689,10 +704,15 @@ export class OperationsDashboardService {
               AND COALESCE(demand.active_pending_lines, 0) = 0
               AND COALESCE(source_level.variant_qty, 0) < GREATEST(1, COALESCE(rt.qty_source_units, 0))
             THEN 'cancel_no_demand'
+            WHEN rt.status IN ('pending', 'assigned', 'in_progress')
+              AND rt.execution_mode = 'inline'
+              AND rt.depends_on_task_id IS NULL
+              AND rt.created_at < NOW() - INTERVAL '5 minutes'
+            THEN 'auto_execute_replen'
             WHEN rt.status = 'blocked' THEN 'resolve_blocker'
             WHEN COALESCE(demand.active_pending_lines, 0) > 0
               AND rt.execution_mode = 'inline'
-            THEN 'complete_inline_replen'
+            THEN 'auto_execute_replen'
             WHEN rt.status IN ('pending', 'assigned')
               AND COALESCE(demand.active_pending_lines, 0) = 0
             THEN 'cancel_no_demand'
@@ -744,6 +764,12 @@ export class OperationsDashboardService {
             rt.status = 'blocked'
             OR (rt.status = 'in_progress' AND COALESCE(rt.started_at, rt.created_at) < NOW() - INTERVAL '1 hour')
             OR (rt.status IN ('pending', 'assigned') AND rt.created_at < NOW() - INTERVAL '4 hours')
+            OR (
+              rt.status IN ('pending', 'assigned', 'in_progress')
+              AND rt.execution_mode = 'inline'
+              AND rt.depends_on_task_id IS NULL
+              AND rt.created_at < NOW() - INTERVAL '5 minutes'
+            )
           )
           ${targetWarehouseFilter}
 

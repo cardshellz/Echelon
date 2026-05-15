@@ -1,4 +1,4 @@
-import { eq, and, or, sql, inArray, isNull } from "drizzle-orm";
+import { eq, and, or, sql, inArray, isNull, asc } from "drizzle-orm";
 import {
   replenRules,
   replenTasks,
@@ -100,13 +100,17 @@ export type ReplenSourceEmptyReport = {
   userId?: string;
 };
 
-export type ReplenHealthCleanupMode = "all" | "stale_no_demand" | "duplicates";
+export type ReplenHealthCleanupMode = "all" | "stale_no_demand" | "duplicates" | "inline_execution";
 
 export type ReplenHealthCleanupResult = {
   mode: ReplenHealthCleanupMode;
+  executedInline: number;
+  failedInline: number;
   cancelledStaleNoDemand: number;
   cancelledStaleBacklog: number;
   cancelledDuplicates: number;
+  executedInlineTaskIds: number[];
+  failedInlineTaskIds: number[];
   cancelledStaleNoDemandTaskIds: number[];
   cancelledStaleBacklogTaskIds: number[];
   cancelledDuplicateTaskIds: number[];
@@ -561,13 +565,13 @@ export class ReplenishmentUseCases {
     };
   }
 
-  private async executeInlineTaskForPicker(
+  private async executeInlineTaskAutomatically(
     task: ReplenTask,
     userId: string | undefined,
     tag: string,
   ): Promise<{ task: ReplenTask; moved: number }> {
     try {
-      const result = await this.executeTask(task.id, userId ?? "picker:confirmed");
+      const result = await this.executeTask(task.id, userId ?? "system:auto-replen");
       const finalTask = await this.getTaskById(task.id);
       console.log(`${tag} task ${task.id} executed, moved ${result.moved} units`);
       return { task: finalTask ?? task, moved: result.moved };
@@ -1379,15 +1383,19 @@ export class ReplenishmentUseCases {
     userId?: string;
   } = {}): Promise<ReplenHealthCleanupResult> {
     const mode = params.mode ?? "all";
-    if (!["all", "stale_no_demand", "duplicates"].includes(mode)) {
+    if (!["all", "stale_no_demand", "duplicates", "inline_execution"].includes(mode)) {
       throw new Error(`Unsupported replen cleanup mode: ${mode}`);
     }
 
     const result: ReplenHealthCleanupResult = {
       mode,
+      executedInline: 0,
+      failedInline: 0,
       cancelledStaleNoDemand: 0,
       cancelledStaleBacklog: 0,
       cancelledDuplicates: 0,
+      executedInlineTaskIds: [],
+      failedInlineTaskIds: [],
       cancelledStaleNoDemandTaskIds: [],
       cancelledStaleBacklogTaskIds: [],
       cancelledDuplicateTaskIds: [],
@@ -1410,11 +1418,57 @@ export class ReplenishmentUseCases {
       result.keptDuplicateTaskIds = duplicateResult.keptTaskIds;
     }
 
+    if (mode === "all" || mode === "inline_execution") {
+      const inlineResult = await this.executePendingInlineTasks(params);
+      result.executedInline = inlineResult.executedTaskIds.length;
+      result.failedInline = inlineResult.failedTaskIds.length;
+      result.executedInlineTaskIds = inlineResult.executedTaskIds;
+      result.failedInlineTaskIds = inlineResult.failedTaskIds;
+    }
+
     return result;
   }
 
   private cleanupLimit(limit?: number): number {
     return Math.min(250, Math.max(1, Number.isFinite(limit) ? Math.floor(limit as number) : 50));
+  }
+
+  private async executePendingInlineTasks(params: {
+    taskId?: number | null;
+    limit?: number;
+    userId?: string;
+  }): Promise<{ executedTaskIds: number[]; failedTaskIds: number[] }> {
+    const conditions = [
+      inArray(replenTasks.status, EXECUTABLE_REPLEN_TASK_STATUSES),
+      eq(replenTasks.executionMode, "inline"),
+      isNull(replenTasks.dependsOnTaskId),
+    ];
+
+    if (params.taskId) {
+      conditions.push(eq(replenTasks.id, params.taskId));
+    }
+
+    const tasks = await this.db
+      .select()
+      .from(replenTasks)
+      .where(and(...conditions))
+      .orderBy(asc(replenTasks.createdAt), asc(replenTasks.id))
+      .limit(this.cleanupLimit(params.limit));
+
+    const executedTaskIds: number[] = [];
+    const failedTaskIds: number[] = [];
+    const userId = params.userId ?? "system:auto-replen-recovery";
+
+    for (const task of tasks as ReplenTask[]) {
+      try {
+        await this.executeInlineTaskAutomatically(task, userId, "[Replen inlineRecovery]");
+        executedTaskIds.push(task.id);
+      } catch {
+        failedTaskIds.push(task.id);
+      }
+    }
+
+    return { executedTaskIds, failedTaskIds };
   }
 
   async queueMissingPickBinReplen(params: {
@@ -1853,6 +1907,12 @@ export class ReplenishmentUseCases {
     }
     if (eval_.status === "dedup") {
       console.log(`${_tag} EXIT: dedup — existing task #${eval_.existingTaskId}`);
+      if (
+        eval_.existingTask.executionMode === "inline" &&
+        EXECUTABLE_REPLEN_TASK_STATUSES.includes(eval_.existingTask.status)
+      ) {
+        return (await this.executeInlineTaskAutomatically(eval_.existingTask, "system:auto-replen", _tag)).task;
+      }
       return eval_.existingTask;
     }
 
@@ -1963,6 +2023,10 @@ export class ReplenishmentUseCases {
         message: `${variant.sku ?? `variant #${productVariantId}`} at ${location.code}`,
         data: { taskId: task.id, productVariantId, locationCode: location.code },
       }).catch(() => {});
+    }
+
+    if (eval_.shouldAutoExecute || executionMode === "inline") {
+      return (await this.executeInlineTaskAutomatically(task as ReplenTask, "system:auto-replen", _tag)).task;
     }
 
     if (sourceLocation!.isPickable !== 1) {
@@ -2129,7 +2193,7 @@ export class ReplenishmentUseCases {
         currentTask.executionMode === "inline" &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(currentTask.status)
       ) {
-        return this.executeInlineTaskForPicker(currentTask, userId, _tag);
+        return this.executeInlineTaskAutomatically(currentTask, userId, _tag);
       }
       return { task: currentTask, moved: 0 };
     }
@@ -2165,7 +2229,7 @@ export class ReplenishmentUseCases {
     const priority = rule?.priority ?? 5;
     const autoReplen = rule?.autoReplen ?? 0;
 
-    // Create task as completed (the picker already physically did the replen)
+    // Create the task, then let the replenishment service post the movement.
     const [task] = await this.db.insert(replenTasks).values({
       replenRuleId: rule?.id ?? null,
       fromLocationId: guidance.sourceLocationId,
@@ -2185,7 +2249,7 @@ export class ReplenishmentUseCases {
       ...this.replenOrderTaskFields(context),
       warehouseId: location.warehouseId ?? undefined,
       notes: this.appendOrderContextNote(
-        `${guidance.taskNotes}\nConfirmed by picker, executing atomically`,
+        `${guidance.taskNotes}\nSystem auto-executed inline replen.`,
         context,
       ),
     } satisfies InsertReplenTask).returning();
@@ -2193,7 +2257,7 @@ export class ReplenishmentUseCases {
     let moved = 0;
     if (guidance.executionMode === "inline") {
       console.log(`${_tag} created task ${task.id}, executing immediately...`);
-      return this.executeInlineTaskForPicker(task as ReplenTask, userId, _tag);
+      return this.executeInlineTaskAutomatically(task as ReplenTask, userId, _tag);
     } else {
       console.log(`${_tag} created task ${task.id}, executionMode is queue. Leaving as pending.`);
     }
