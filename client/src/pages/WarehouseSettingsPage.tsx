@@ -63,6 +63,13 @@ interface WarehouseSettings {
   // Velocity / reorder
   velocityLookbackDays: number;
 
+  // Replenishment QA sampling
+  replenQaDailyEnabled: number;
+  replenQaDailySampleLimit: number;
+  replenQaCooldownDays: number;
+  replenQaIncludePickBins: number;
+  replenQaIncludePalletLocations: number;
+
   // Picking workflow
   postPickStatus: string;
   pickMode: string;
@@ -500,6 +507,105 @@ export default function WarehouseSettingsPage() {
                   onChange={(e) => setForm({ ...form, scheduledReplenIntervalMinutes: parseInt(e.target.value) || 30 })}
                   className="mt-1"
                 />
+              </div>
+              <div className="md:col-span-2 border-t pt-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <Label className="text-base font-semibold">
+                      Daily replen QA counts
+                      <HintIcon text="Creates a small rotating cycle count sample outside the picker replen flow." />
+                    </Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Uses least-recently-counted rotation with random tie-breaking.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      checked={(form.replenQaDailyEnabled ?? 1) === 1}
+                      onCheckedChange={(checked) => setForm({ ...form, replenQaDailyEnabled: checked ? 1 : 0 })}
+                      data-testid="switch-replen-qa-enabled"
+                    />
+                    <span className="text-sm text-muted-foreground">
+                      {(form.replenQaDailyEnabled ?? 1) === 1 ? "Enabled" : "Paused"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div>
+                    <Label>Daily sample size</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={form.replenQaDailySampleLimit ?? 2}
+                      onChange={(e) => setForm({
+                        ...form,
+                        replenQaDailySampleLimit: Math.min(50, Math.max(1, parseInt(e.target.value) || 2)),
+                      })}
+                      disabled={(form.replenQaDailyEnabled ?? 1) !== 1}
+                      className="mt-1"
+                      data-testid="input-replen-qa-daily-sample-limit"
+                    />
+                  </div>
+                  <div>
+                    <Label>Cooldown days</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={365}
+                      value={form.replenQaCooldownDays ?? 30}
+                      onChange={(e) => setForm({
+                        ...form,
+                        replenQaCooldownDays: Math.min(365, Math.max(0, parseInt(e.target.value) || 0)),
+                      })}
+                      disabled={(form.replenQaDailyEnabled ?? 1) !== 1}
+                      className="mt-1"
+                      data-testid="input-replen-qa-cooldown-days"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-3">
+                  <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <span>
+                      <span className="block text-sm font-medium">Pick bins</span>
+                      <span className="block text-xs text-muted-foreground">Assigned pick faces and pickable bins.</span>
+                    </span>
+                    <Switch
+                      checked={(form.replenQaIncludePickBins ?? 1) === 1}
+                      onCheckedChange={(checked) => setForm({
+                        ...form,
+                        replenQaIncludePickBins: checked ? 1 : 0,
+                        replenQaIncludePalletLocations:
+                          !checked && (form.replenQaIncludePalletLocations ?? 1) !== 1
+                            ? 1
+                            : (form.replenQaIncludePalletLocations ?? 1),
+                      })}
+                      disabled={(form.replenQaDailyEnabled ?? 1) !== 1}
+                      data-testid="switch-replen-qa-pick-bins"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <span>
+                      <span className="block text-sm font-medium">Pallet locations</span>
+                      <span className="block text-xs text-muted-foreground">Reserve pallet slots with stock.</span>
+                    </span>
+                    <Switch
+                      checked={(form.replenQaIncludePalletLocations ?? 1) === 1}
+                      onCheckedChange={(checked) => setForm({
+                        ...form,
+                        replenQaIncludePalletLocations: checked ? 1 : 0,
+                        replenQaIncludePickBins:
+                          !checked && (form.replenQaIncludePickBins ?? 1) !== 1
+                            ? 1
+                            : (form.replenQaIncludePickBins ?? 1),
+                      })}
+                      disabled={(form.replenQaDailyEnabled ?? 1) !== 1}
+                      data-testid="switch-replen-qa-pallet-locations"
+                    />
+                  </label>
+                </div>
               </div>
             </CardContent>
           </Card>

@@ -97,6 +97,7 @@ describe("OperationsDashboardService pick/replen health", () => {
     const detailSql = sqlText(db.execute.mock.calls[1][0]);
     expect(detailSql).toContain("allocation_exceptions");
     expect(detailSql).toContain("shipmentBlocking");
+    expect(detailSql).toContain("Daily Replen QA -%");
   });
 
   it("falls back to all when the filter is not recognized", async () => {
@@ -167,5 +168,62 @@ describe("OperationsDashboardService pick/replen health", () => {
       detail: "no active demand and no executable replen quantity",
       action: "cancel_no_demand",
     })]);
+  });
+
+  it("maps replen QA cycle counts as immediate verification work", async () => {
+    const db = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({
+          rows: [{ type: "cycle_count_review", count: "1" }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{
+            type: "cycle_count_review",
+            source_id: "333",
+            priority: "2",
+            task_id: null,
+            exception_id: null,
+            cycle_count_id: "333",
+            order_id: null,
+            order_number: null,
+            order_item_id: null,
+            variant_id: null,
+            sku: null,
+            name: "Daily Replen QA - 2026-05-15",
+            location_id: null,
+            location_code: "A-01",
+            source_location_code: null,
+            status: "in_progress",
+            exception_reason: null,
+            qty: "0",
+            age_hours: "0",
+            created_at: "2026-05-15T23:00:00.000Z",
+            detail: "Daily random replen QA sample.",
+            action: "verify_replen_count",
+          }],
+        }),
+    };
+    const service = new OperationsDashboardService(db as any);
+
+    const result = await service.getPickReplenHealth({
+      filter: "cycle_count_review",
+    });
+
+    expect(result.counts.cycle_count_review).toBe(1);
+    expect(result.items).toEqual([expect.objectContaining({
+      id: "cycle_count_review-333",
+      type: "cycle_count_review",
+      priority: 2,
+      cycleCountId: 333,
+      name: "Daily Replen QA - 2026-05-15",
+      locationCode: "A-01",
+      status: "in_progress",
+      action: "verify_replen_count",
+    })]);
+    const detailSql = sqlText(db.execute.mock.calls[1][0]);
+    expect(detailSql).toContain("verify_replen_count");
+    expect(detailSql).toContain("Daily Replen QA -%");
+    expect(detailSql).toContain("Replen Source Empty - Task #%");
+    expect(detailSql).toContain("Replen Exception - Task #%");
   });
 });

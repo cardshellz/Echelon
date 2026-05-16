@@ -311,6 +311,11 @@ export function registerWarehouseRoutes(app: Express) {
         channelSyncEnabled: data.channelSyncEnabled ?? 0,
         channelSyncIntervalMinutes: data.channelSyncIntervalMinutes || 15,
         velocityLookbackDays: data.velocityLookbackDays || 14,
+        replenQaDailyEnabled: data.replenQaDailyEnabled ?? 1,
+        replenQaDailySampleLimit: data.replenQaDailySampleLimit || 2,
+        replenQaCooldownDays: data.replenQaCooldownDays ?? 30,
+        replenQaIncludePickBins: data.replenQaIncludePickBins ?? 1,
+        replenQaIncludePalletLocations: data.replenQaIncludePalletLocations ?? 1,
         isActive: data.isActive ?? 1,
       });
       res.status(201).json(settings);

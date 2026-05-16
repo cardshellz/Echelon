@@ -235,6 +235,13 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   // Velocity calculation
   velocityLookbackDays: integer("velocity_lookback_days").notNull().default(14), // Days of pick history for SKU velocity
 
+  // Replenishment QA sampling
+  replenQaDailyEnabled: integer("replen_qa_daily_enabled").notNull().default(1),
+  replenQaDailySampleLimit: integer("replen_qa_daily_sample_limit").notNull().default(2),
+  replenQaCooldownDays: integer("replen_qa_cooldown_days").notNull().default(30),
+  replenQaIncludePickBins: integer("replen_qa_include_pick_bins").notNull().default(1),
+  replenQaIncludePalletLocations: integer("replen_qa_include_pallet_locations").notNull().default(1),
+
   // Picking workflow settings
   postPickStatus: varchar("post_pick_status", { length: 30 }).notNull().default("ready_to_ship"), // ready_to_ship, picked, staged
   pickMode: varchar("pick_mode", { length: 20 }).notNull().default("single_order"), // single_order, batch, wave

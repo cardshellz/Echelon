@@ -28,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -195,6 +196,11 @@ interface WarehouseSettings {
   scheduledReplenIntervalMinutes: number | null;
   scheduledReplenEnabled: number | null;
   velocityLookbackDays: number;
+  replenQaDailyEnabled: number;
+  replenQaDailySampleLimit: number;
+  replenQaCooldownDays: number;
+  replenQaIncludePickBins: number;
+  replenQaIncludePalletLocations: number;
   maxOrdersPerWave: number | null;
   maxItemsPerWave: number | null;
   waveAutoRelease: number | null;
@@ -514,6 +520,11 @@ export default function Replenishment() {
     shortPickAction: "partial_pick",
     inlineReplenMaxUnits: "50",
     velocityLookbackDays: "14",
+    replenQaDailyEnabled: true,
+    replenQaDailySampleLimit: "2",
+    replenQaCooldownDays: "30",
+    replenQaIncludePickBins: true,
+    replenQaIncludePalletLocations: true,
   });
 
   // Auto-select first warehouse when data loads
@@ -526,17 +537,34 @@ export default function Replenishment() {
   // Sync settings form when selected warehouse changes
   useEffect(() => {
     if (selectedWarehouse) {
+      const includePickBins = selectedWarehouse.replenQaIncludePickBins !== 0;
+      const includePalletLocations = selectedWarehouse.replenQaIncludePalletLocations !== 0;
       setSettingsForm({
         replenMode: selectedWarehouse.replenMode,
         shortPickAction: selectedWarehouse.shortPickAction,
         inlineReplenMaxUnits: selectedWarehouse.inlineReplenMaxUnits?.toString() || "50",
         velocityLookbackDays: selectedWarehouse.velocityLookbackDays?.toString() || "14",
+        replenQaDailyEnabled: selectedWarehouse.replenQaDailyEnabled !== 0,
+        replenQaDailySampleLimit: selectedWarehouse.replenQaDailySampleLimit?.toString() || "2",
+        replenQaCooldownDays: selectedWarehouse.replenQaCooldownDays?.toString() || "30",
+        replenQaIncludePickBins: includePickBins || !includePalletLocations,
+        replenQaIncludePalletLocations: includePalletLocations,
       });
     }
   }, [selectedWarehouse]);
 
   const saveSettingsMutation = useMutation({
-    mutationFn: async (data: { replenMode: string; shortPickAction: string; inlineReplenMaxUnits: number | null; velocityLookbackDays: number }) => {
+    mutationFn: async (data: {
+      replenMode: string;
+      shortPickAction: string;
+      inlineReplenMaxUnits: number | null;
+      velocityLookbackDays: number;
+      replenQaDailyEnabled: number;
+      replenQaDailySampleLimit: number;
+      replenQaCooldownDays: number;
+      replenQaIncludePickBins: number;
+      replenQaIncludePalletLocations: number;
+    }) => {
       if (!selectedWarehouseData) throw new Error("No warehouse selected");
       
       if (selectedWarehouse?.id) {
@@ -2266,6 +2294,99 @@ export default function Replenishment() {
                     />
                   </div>
 
+                  <div className="pt-4 border-t space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <Label className="text-sm md:text-base font-semibold">Daily Replen QA Counts</Label>
+                        <p className="text-xs md:text-sm text-muted-foreground mt-1">
+                          Random bin checks created outside the picker replen flow.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          checked={settingsForm.replenQaDailyEnabled}
+                          onCheckedChange={(checked) => setSettingsForm({ ...settingsForm, replenQaDailyEnabled: checked })}
+                          data-testid="switch-replen-qa-enabled"
+                        />
+                        <span className="text-sm text-muted-foreground">
+                          {settingsForm.replenQaDailyEnabled ? "Enabled" : "Paused"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <Label className="text-xs md:text-sm" htmlFor="replenQaDailySampleLimit">Daily sample size</Label>
+                        <Input
+                          id="replenQaDailySampleLimit"
+                          type="number"
+                          className="mt-1 w-full sm:w-32 h-10"
+                          min="1"
+                          max="50"
+                          value={settingsForm.replenQaDailySampleLimit}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, replenQaDailySampleLimit: e.target.value })}
+                          disabled={!settingsForm.replenQaDailyEnabled}
+                          autoComplete="off"
+                          data-testid="input-replen-qa-daily-sample-limit"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs md:text-sm" htmlFor="replenQaCooldownDays">Cooldown days</Label>
+                        <Input
+                          id="replenQaCooldownDays"
+                          type="number"
+                          className="mt-1 w-full sm:w-32 h-10"
+                          min="0"
+                          max="365"
+                          value={settingsForm.replenQaCooldownDays}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, replenQaCooldownDays: e.target.value })}
+                          disabled={!settingsForm.replenQaDailyEnabled}
+                          autoComplete="off"
+                          data-testid="input-replen-qa-cooldown-days"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                        <span>
+                          <span className="block text-sm font-medium">Pick bins</span>
+                          <span className="block text-xs text-muted-foreground">Assigned pick faces and pickable bins.</span>
+                        </span>
+                        <Switch
+                          checked={settingsForm.replenQaIncludePickBins}
+                          onCheckedChange={(checked) => setSettingsForm({
+                            ...settingsForm,
+                            replenQaIncludePickBins: checked,
+                            replenQaIncludePalletLocations: !checked && !settingsForm.replenQaIncludePalletLocations
+                              ? true
+                              : settingsForm.replenQaIncludePalletLocations,
+                          })}
+                          disabled={!settingsForm.replenQaDailyEnabled}
+                          data-testid="switch-replen-qa-pick-bins"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                        <span>
+                          <span className="block text-sm font-medium">Pallet locations</span>
+                          <span className="block text-xs text-muted-foreground">Reserve pallet slots with stock.</span>
+                        </span>
+                        <Switch
+                          checked={settingsForm.replenQaIncludePalletLocations}
+                          onCheckedChange={(checked) => setSettingsForm({
+                            ...settingsForm,
+                            replenQaIncludePalletLocations: checked,
+                            replenQaIncludePickBins: !checked && !settingsForm.replenQaIncludePickBins
+                              ? true
+                              : settingsForm.replenQaIncludePickBins,
+                          })}
+                          disabled={!settingsForm.replenQaDailyEnabled}
+                          data-testid="switch-replen-qa-pallet-locations"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
                   <div className="flex justify-end pt-4 border-t">
                     <Button
                       className="w-full sm:w-auto min-h-[44px]"
@@ -2276,6 +2397,11 @@ export default function Replenishment() {
                           ? parseInt(settingsForm.inlineReplenMaxUnits) || 50
                           : null,
                         velocityLookbackDays: parseInt(settingsForm.velocityLookbackDays) || 14,
+                        replenQaDailyEnabled: settingsForm.replenQaDailyEnabled ? 1 : 0,
+                        replenQaDailySampleLimit: Math.min(50, Math.max(1, parseInt(settingsForm.replenQaDailySampleLimit) || 2)),
+                        replenQaCooldownDays: Math.min(365, Math.max(0, parseInt(settingsForm.replenQaCooldownDays) || 0)),
+                        replenQaIncludePickBins: settingsForm.replenQaIncludePickBins ? 1 : 0,
+                        replenQaIncludePalletLocations: settingsForm.replenQaIncludePalletLocations ? 1 : 0,
                       })}
                       disabled={saveSettingsMutation.isPending}
                       data-testid="button-save-settings"
