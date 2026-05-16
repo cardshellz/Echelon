@@ -446,3 +446,42 @@ Next step:
   route handlers behind the existing URLs, or first add operator-visible
   receiving reconciliation retry/status endpoints if the UI needs that before
   route splitting.
+
+### 2026-05-16 - Phase 1 Slice 5: Receiving Route Ownership Split
+
+Scope:
+
+- Added `server/modules/procurement/receiving.routes.ts` as the receiving route
+  owner while preserving the existing receiving URLs and handler behavior.
+- Moved receiving order, receiving line, complete-all, close, open, create
+  variant, bulk import, and draft discard route registrations out of the main
+  procurement route monolith.
+- Left `registerPurchasingRoutes(app)` as the public procurement route entry
+  point and mounted the receiving registrar from there, so callers and app
+  startup do not change.
+- Kept the existing duplicated `DELETE /api/receiving/:id` registration order
+  intact during the move rather than changing delete semantics inside a route
+  ownership slice.
+- Added a focused receiving route smoke test for list/vendor enrichment and
+  close orchestration, including notification and post-receiving replenishment
+  checks.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/procurement/__tests__/unit/receiving.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receipt-discard.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- The broader procurement route file is still too large. This slice moves the
+  receiving surface first because receiving service boundaries are now in
+  place. PO, shipment tracking, AP, exceptions, and notification routes still
+  need their own ownership passes.
+
+Next step:
+
+- Open the receiving route split PR.
+- After merge, continue route/API ownership with purchase-order route grouping
+  or operator-visible receiving reconciliation retry/status, depending on which
+  UI workflow needs the next hardening pass.
