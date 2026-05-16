@@ -31,8 +31,6 @@ import type { PoLineType, PoPhysicalStatus, PoFinancialStatus } from "@shared/sc
 import {
   PO_LINE_TYPES,
   isPoLineType,
-  PO_PHYSICAL_STATUSES,
-  PO_FINANCIAL_STATUSES,
 } from "@shared/schema/procurement.schema";
 import { Decimal } from "decimal.js";
 import {
@@ -45,6 +43,12 @@ import {
   detectPastDue,
   detectMatchMismatch,
 } from "./po-exceptions.service";
+import {
+  PoLifecycleError,
+  buildFinancialTransitionChange,
+  buildPhysicalTransitionChange,
+  getAllowedLegacyTransitions,
+} from "./purchase-order-lifecycle.service";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -121,70 +125,6 @@ export class PurchasingError extends Error {
     this.name = "PurchasingError";
   }
 }
-
-// ── Valid state transitions ─────────────────────────────────────────
-
-const VALID_TRANSITIONS: Record<string, string[]> = {
-  draft: ["pending_approval", "approved", "cancelled"],
-  pending_approval: ["draft", "approved", "cancelled"],
-  approved: ["sent", "cancelled"],
-  sent: ["acknowledged", "partially_received", "received", "cancelled"],
-  acknowledged: ["partially_received", "received", "cancelled"],
-  partially_received: ["received", "closed"],
-  received: ["closed"],
-};
-
-// ── Dual-track transition tables (migration 0565) ──────────────────────────
-//
-// physicalStatus models goods movement; financialStatus models AP/payment.
-// Both are independent state machines. The legacy `status` column is kept
-// in sync by transitionPhysical for back-compat.
-
-const VALID_PHYSICAL_TRANSITIONS: Record<PoPhysicalStatus, PoPhysicalStatus[]> = {
-  draft:        ["sent", "cancelled"],
-  sent:         ["acknowledged", "cancelled"],
-  acknowledged: ["shipped", "cancelled"],
-  shipped:      ["in_transit", "arrived", "cancelled"],
-  in_transit:   ["arrived", "cancelled"],
-  arrived:      ["receiving", "cancelled"],
-  receiving:    ["received", "short_closed"],
-  received:     [],
-  short_closed: [],
-  cancelled:    [],
-};
-
-const VALID_FINANCIAL_TRANSITIONS: Record<PoFinancialStatus, PoFinancialStatus[]> = {
-  unbilled:      ["invoiced"],
-  invoiced:      ["partially_paid", "paid", "disputed"],
-  partially_paid: ["paid", "disputed"],
-  paid:          [],
-  disputed:      ["partially_paid", "paid"],
-};
-
-// Maps a physical status to the appropriate legacy (single-track) status for
-// back-compat. Where there is no direct equivalent, use the nearest ancestor
-// that callers already understand.
-const PHYSICAL_TO_LEGACY_STATUS: Partial<Record<PoPhysicalStatus, string>> = {
-  draft:        "approved",   // physical draft covers draft/pending_approval/approved
-  sent:         "sent",
-  acknowledged: "acknowledged",
-  shipped:      "acknowledged", // no legacy equivalent; acknowledged is closest
-  in_transit:   "acknowledged",
-  arrived:      "acknowledged",
-  receiving:    "partially_received",
-  received:     "received",
-  short_closed: "closed",
-  cancelled:    "cancelled",
-};
-
-// Timestamp column to stamp on each physical transition.
-const PHYSICAL_TIMESTAMP_COLUMN: Partial<Record<PoPhysicalStatus, string>> = {
-  sent:         "sentToVendorAt",
-  shipped:      "firstShippedAt",
-  arrived:      "firstArrivedAt",
-  received:     "actualDeliveryDate",
-  cancelled:    "cancelledAt",
-};
 
 const EDITABLE_STATUSES = new Set(["draft"]);
 // Broader set for amending existing lines (cost corrections, qty adjustments) — any non-terminal state
@@ -633,8 +573,8 @@ export function createPurchasingService(db: any, storage: Storage) {
   // recordStatusChange removed in favor of storage.updatePurchaseOrderStatusWithHistory
 
   function assertTransition(currentStatus: string, targetStatus: string) {
-    const allowed = VALID_TRANSITIONS[currentStatus];
-    if (!allowed || !allowed.includes(targetStatus)) {
+    const allowed = getAllowedLegacyTransitions(currentStatus);
+    if (!allowed.includes(targetStatus)) {
       throw new PurchasingError(
         `Cannot transition from '${currentStatus}' to '${targetStatus}'`,
         400,
@@ -642,12 +582,19 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
   }
 
+  function toPurchasingError(error: unknown): never {
+    if (error instanceof PoLifecycleError) {
+      throw new PurchasingError(error.message, error.statusCode, error.details);
+    }
+    throw error;
+  }
+
   // ── Dual-track state machine functions (migration 0565) ──────────────────
 
   /**
    * Transition the physical (goods-movement) status of a PO.
    *
-   * Validates against VALID_PHYSICAL_TRANSITIONS, stamps the appropriate
+   * Validates through purchase-order-lifecycle.service, stamps the appropriate
    * lifecycle timestamp, syncs the legacy `status` column for back-compat,
    * and writes a po_status_history row with old/new physical status.
    *
@@ -659,56 +606,33 @@ export function createPurchasingService(db: any, storage: Storage) {
     target: PoPhysicalStatus,
     userId?: string,
     notes?: string,
+    extraPatch?: Record<string, any>,
+    historyFromStatus?: string,
   ): Promise<any> {
     const po = await storage.getPurchaseOrderById(poId);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
 
-    const current = (po.physicalStatus ?? "draft") as PoPhysicalStatus;
-    const allowed = VALID_PHYSICAL_TRANSITIONS[current] ?? [];
-    if (!allowed.includes(target)) {
-      throw new PurchasingError(
-        `Cannot transition physical status from '${current}' to '${target}'`,
-        400,
-        { current, target, allowed },
-      );
-    }
+    const change = (() => {
+      try {
+        return buildPhysicalTransitionChange({
+          po,
+          target,
+          userId,
+          notes,
+          extraPatch,
+          historyFromStatus,
+        });
+      } catch (error) {
+        return toPurchasingError(error);
+      }
+    })();
+    const patch = change.patch;
 
-    const now = new Date();
-    const patch: Record<string, any> = {
-      physicalStatus: target,
-      updatedBy: userId,
-    };
-
-    // Stamp the appropriate lifecycle timestamp when entering key states.
-    const tsCol = PHYSICAL_TIMESTAMP_COLUMN[target];
-    if (tsCol && !po[tsCol]) {
-      // Only stamp first occurrence (don't overwrite if already set).
-      patch[tsCol] = now;
-    }
-
-    // Sync legacy `status` column for back-compat.
-    const legacyStatus = PHYSICAL_TO_LEGACY_STATUS[target];
-    if (legacyStatus) {
-      patch.status = legacyStatus;
-    }
-
-    // Special-case: cancelled also stamps cancelledAt
-    if (target === "cancelled" && !po.cancelledAt) {
-      patch.cancelledAt = now;
-      patch.cancelledBy = userId ?? null;
-    }
-    // short_closed stamps closedAt
-    if (target === "short_closed" && !po.closedAt) {
-      patch.closedAt = now;
-      patch.closedBy = userId ?? null;
-    }
-
-    const result = await storage.updatePurchaseOrderStatusWithHistory(poId, patch, {
-      fromStatus: po.status ?? current,
-      toStatus: legacyStatus ?? po.status,
-      changedBy: userId,
-      notes: notes ?? `Physical status: ${current} → ${target}`,
-    });
+    const result = await storage.updatePurchaseOrderStatusWithHistory(
+      poId,
+      patch,
+      change.history,
+    );
 
     // ── Exception detection hooks (event-driven, Phase 1) ──────────────────
     // Run after the DB write so detection reads fresh data.
@@ -731,7 +655,7 @@ export function createPurchasingService(db: any, storage: Storage) {
   /**
    * Transition the financial (AP/payment) status of a PO.
    *
-   * Validates against VALID_FINANCIAL_TRANSITIONS, stamps lifecycle
+   * Validates through purchase-order-lifecycle.service, stamps lifecycle
    * timestamps, and writes a po_status_history row.
    *
    * Does NOT modify the legacy `status` column — that is owned by the
@@ -742,46 +666,31 @@ export function createPurchasingService(db: any, storage: Storage) {
     target: PoFinancialStatus,
     userId?: string,
     notes?: string,
+    extraPatch?: Record<string, any>,
   ): Promise<any> {
     const po = await storage.getPurchaseOrderById(poId);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
 
-    const current = (po.financialStatus ?? "unbilled") as PoFinancialStatus;
-    const allowed = VALID_FINANCIAL_TRANSITIONS[current] ?? [];
-    if (!allowed.includes(target)) {
-      throw new PurchasingError(
-        `Cannot transition financial status from '${current}' to '${target}'`,
-        400,
-        { current, target, allowed },
-      );
-    }
+    const change = (() => {
+      try {
+        return buildFinancialTransitionChange({
+          po,
+          target,
+          userId,
+          notes,
+          extraPatch,
+        });
+      } catch (error) {
+        return toPurchasingError(error);
+      }
+    })();
+    const patch = change.patch;
 
-    const now = new Date();
-    const patch: Record<string, any> = {
-      financialStatus: target,
-      updatedBy: userId,
-    };
-
-    // Stamp first-invoice and first-payment timestamps.
-    if (target === "invoiced" && !po.firstInvoicedAt) {
-      patch.firstInvoicedAt = now;
-    }
-    if ((target === "partially_paid" || target === "paid") && !po.firstPaidAt) {
-      patch.firstPaidAt = now;
-    }
-    if (target === "paid" && !po.fullyPaidAt) {
-      patch.fullyPaidAt = now;
-    }
-
-    // Write the update. For financial-only changes the legacy status column
-    // doesn't change, so we can pass the current legacy status as both from/to
-    // to satisfy the po_status_history NOT NULL constraint.
-    return await storage.updatePurchaseOrderStatusWithHistory(poId, patch, {
-      fromStatus: po.status,
-      toStatus: po.status,
-      changedBy: userId,
-      notes: notes ?? `Financial status: ${current} → ${target}`,
-    });
+    return await storage.updatePurchaseOrderStatusWithHistory(
+      poId,
+      patch,
+      change.history,
+    );
   }
 
   /**
@@ -1314,23 +1223,9 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "sent");
 
-    const result = await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "sent",
+    const result = await transitionPhysical(id, "sent", userId, "Sent to vendor", {
       orderDate: new Date(),
-      sentToVendorAt: new Date(),
-      updatedBy: userId,
-    }, {
-        fromStatus: po.status,
-        toStatus: "sent",
-        changedBy: userId,
-        notes: "Sent to vendor"
-      });
-
-    // Sync physical track: approved → sent
-    const currentPhysical = (po.physicalStatus ?? "draft") as PoPhysicalStatus;
-    if (currentPhysical === "draft") {
-      await storage.updatePurchaseOrder(id, { physicalStatus: "sent" as PoPhysicalStatus });
-    }
+    });
 
     return result;
   }
@@ -1388,17 +1283,14 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     // Now send
-    return await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "sent",
-      orderDate: new Date(),
-      sentToVendorAt: new Date(),
-      updatedBy: userId,
-    }, {
-        fromStatus: "approved",
-        toStatus: "sent",
-        changedBy: userId,
-        notes: "Sent to vendor (solo mode)"
-      });
+    return await transitionPhysical(
+      id,
+      "sent",
+      userId,
+      "Sent to vendor (solo mode)",
+      { orderDate: new Date() },
+      "approved",
+    );
   }
 
   async function acknowledge(id: number, data: { vendorRefNumber?: string; confirmedDeliveryDate?: Date }, userId?: string) {
@@ -1406,24 +1298,11 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "acknowledged");
 
-    const result = await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "acknowledged",
+    const result = await transitionPhysical(id, "acknowledged", userId, "Vendor acknowledged", {
       vendorAckDate: new Date(),
       vendorRefNumber: data.vendorRefNumber,
       confirmedDeliveryDate: data.confirmedDeliveryDate,
-      updatedBy: userId,
-    }, {
-        fromStatus: po.status,
-        toStatus: "acknowledged",
-        changedBy: userId,
-        notes: "Vendor acknowledged"
-      });
-
-    // Sync physical track: sent → acknowledged
-    const currentPhysical = (po.physicalStatus ?? "draft") as PoPhysicalStatus;
-    if (currentPhysical === "sent") {
-      await storage.updatePurchaseOrder(id, { physicalStatus: "acknowledged" as PoPhysicalStatus });
-    }
+    });
 
     return result;
   }
@@ -1446,19 +1325,9 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     }
 
-    const result = await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "cancelled",
-      cancelledAt: new Date(),
-      cancelledBy: userId,
+    const result = await transitionPhysical(id, "cancelled", userId, reason, {
       cancelReason: reason,
-      updatedBy: userId,
-      physicalStatus: "cancelled" as PoPhysicalStatus,
-    }, {
-        fromStatus: po.status,
-        toStatus: "cancelled",
-        changedBy: userId,
-        notes: reason
-      });
+    });
     return result;
   }
 
