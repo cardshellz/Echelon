@@ -49,6 +49,7 @@ interface Purchasing {
     receivedQty: number;
     damagedQty?: number;
     unitCost?: number;
+    unitCostMills?: number;
   }>): Promise<void>;
   // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
   // landed unit cost after spreading non-product line totals
@@ -270,7 +271,8 @@ export class ReceivingService {
       purchaseOrderLineId: line.purchaseOrderLineId || undefined,
       receivedQty: line.receivedQty || 0,
       damagedQty: line.damagedQty || 0,
-      unitCost: line.unitCost || undefined,
+      unitCost: line.unitCost ?? undefined,
+      unitCostMills: line.unitCostMills ?? undefined,
     }));
   }
 

@@ -49,6 +49,11 @@ import {
   buildPhysicalTransitionChange,
   getAllowedLegacyTransitions,
 } from "./purchase-order-lifecycle.service";
+import {
+  findOpenPoLineByProduct as findOpenPoLineByProductWithStorage,
+  reconcilePurchaseOrderReceipt,
+  type ReceivingReconciliationLine,
+} from "./purchase-order-receipt-reconciliation.service";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -85,6 +90,12 @@ interface Storage {
   createPoReceipt(data: any): Promise<any>;
   getPoReceipts(purchaseOrderId: number): Promise<any[]>;
   getPoReceiptsByLine?(purchaseOrderLineId: number): Promise<any[]>;
+  reconcilePoReceiptLine(input: {
+    purchaseOrderLineId: number;
+    receivingLineId: number;
+    lineUpdates: Record<string, unknown>;
+    receipt: Record<string, unknown>;
+  }): Promise<{ applied: boolean; receipt?: any; purchaseOrderLine?: any }>;
 
   // Approval Tiers
   getAllPoApprovalTiers(): Promise<any[]>;
@@ -1578,211 +1589,19 @@ export function createPurchasingService(db: any, storage: Storage) {
     poId: number,
     productId: number,
   ): Promise<any | null> {
-    const lines = await storage.getPurchaseOrderLines(poId);
-    const candidates = lines.filter((l: any) => {
-      if ((l.lineType ?? "product") !== "product") return false;
-      if (l.productId !== productId) return false;
-      if (l.status === "cancelled" || l.status === "received" || l.status === "closed") return false;
-      const remaining = (Number(l.orderQty) || 0)
-        - (Number(l.receivedQty) || 0)
-        - (Number(l.cancelledQty) || 0);
-      return remaining > 0;
-    });
-    if (candidates.length === 1) return candidates[0];
-    // Zero or ambiguous (multiple open lines for the same product) — cannot auto-link.
-    return null;
+    return findOpenPoLineByProductWithStorage(storage, poId, productId);
   }
 
-  async function onReceivingOrderClosed(receivingOrderId: number, receivingLines: Array<{
-    receivingLineId: number;
-    purchaseOrderLineId?: number;
-    receivedQty: number;
-    damagedQty?: number;
-    unitCost?: number;
-  }>) {
-    // Resolve the PO ID. Prefer explicit PO line linkage; fall back to the
-    // receiving order's own purchaseOrderId for unlinked-line receipts.
-    const poLineIds = receivingLines
-      .map(l => l.purchaseOrderLineId)
-      .filter(Boolean) as number[];
-
-    let poId: number | null = null;
-
-    if (poLineIds.length > 0) {
-      const firstPoLine = await storage.getPurchaseOrderLineById(poLineIds[0]);
-      if (firstPoLine) poId = firstPoLine.purchaseOrderId;
-    }
-
-    // If no linked lines, check the receiving order itself
-    if (!poId) {
-      const receivingOrder = await storage.getReceivingOrderById(receivingOrderId);
-      if (receivingOrder?.purchaseOrderId) {
-        poId = receivingOrder.purchaseOrderId;
-      }
-    }
-
-    if (!poId) return; // Not a PO-linked receipt
-
-    const po = await storage.getPurchaseOrderById(poId);
-    if (!po) return;
-
-    // ── Auto-match unlinked receiving lines to PO lines by product_id ────────
-    //
-    // Phase 1: when a receiving line has no purchaseOrderLineId, attempt to
-    // match it by looking for a single open product PO line with the same
-    // product_id. If exactly one match exists, auto-link. If zero or multiple,
-    // leave unlinked and log a warning (Phase 2 UI will surface these).
-    for (const rl of receivingLines) {
-      if (rl.purchaseOrderLineId) continue; // Already linked
-      const rlRecord = await storage.getReceivingLineById(rl.receivingLineId);
-      if (!rlRecord) continue;
-
-      // Resolve product_id: first from the receiving line record, then via
-      // product variant lookup if only productVariantId is present.
-      let productId: number | null = rlRecord.productId ?? null;
-      if (!productId && rlRecord.productVariantId) {
-        const variant = await storage.getProductVariantById(rlRecord.productVariantId);
-        productId = variant?.productId ?? null;
-      }
-
-      if (!productId) {
-        console.warn(
-          `[Receiving] Auto-match skipped for receiving line ${rl.receivingLineId}: no product_id resolvable`,
-        );
-        continue;
-      }
-
-      const matchedLine = await findOpenPoLineByProduct(poId, productId);
-      if (matchedLine) {
-        // Mutate the in-memory rl so the reconciliation loop below picks it up.
-        rl.purchaseOrderLineId = matchedLine.id;
-        console.info(
-          `[Receiving] Auto-matched receiving line ${rl.receivingLineId} → PO line ${matchedLine.id} (product_id=${productId})`,
-        );
-      } else {
-        console.warn(
-          `[Receiving] Auto-match failed for receiving line ${rl.receivingLineId}: ` +
-          `zero or multiple open PO lines for product_id=${productId} on PO ${poId}. Leaving unlinked.`,
-        );
-      }
-    }
-
-    // Update each PO line's received/damaged quantities
-    for (const rl of receivingLines) {
-      if (!rl.purchaseOrderLineId) continue;
-      const poLine = await storage.getPurchaseOrderLineById(rl.purchaseOrderLineId);
-      if (!poLine) continue;
-      // Skip non-product PO lines. Discount/fee/tax/rebate/adjustment lines
-      // are accounting entries and cannot be physically received. A receiving
-      // line pointing at one is either a data bug or a vendor sent something
-      // we weren't expecting; let receiving surface the anomaly on its own UI.
-      // Rows without lineType (pre-migration-0563) default to product.
-      if ((poLine.lineType ?? "product") !== "product") continue;
-
-      // Variant-Agnostic Reconciliation: Convert received variant quantity to base units, 
-      // then convert those base units into the PO line's ordered variant units.
-      const receivingLine = await storage.getReceivingLineById(rl.receivingLineId);
-      if (!receivingLine) continue;
-
-      const poVariant = await storage.getProductVariantById(poLine.productVariantId as number);
-      const rlVariant = await storage.getProductVariantById(receivingLine.productVariantId as number);
-
-      const poUnitsPerVariant = poVariant?.unitsPerVariant || poLine.unitsPerUom || 1;
-      const rlUnitsPerVariant = rlVariant?.unitsPerVariant || 1;
-
-      const baseUnitsReceived = rl.receivedQty * rlUnitsPerVariant;
-      const damagedBaseUnits = (rl.damagedQty || 0) * rlUnitsPerVariant;
-
-      const poLineUnitsReceived = Math.floor(baseUnitsReceived / poUnitsPerVariant);
-      const poLineDamagedReceived = Math.floor(damagedBaseUnits / poUnitsPerVariant);
-
-      const existingReceipts =
-        typeof storage.getPoReceiptsByLine === "function"
-          ? await storage.getPoReceiptsByLine(poLine.id)
-          : [];
-      const alreadyReconciled = existingReceipts.some(
-        (receipt: any) => receipt.receivingLineId === rl.receivingLineId,
-      );
-      if (alreadyReconciled) {
-        continue;
-      }
-
-      const newReceivedQty = (poLine.receivedQty || 0) + poLineUnitsReceived;
-      const newDamagedQty = (poLine.damagedQty || 0) + poLineDamagedReceived;
-      const remaining = poLine.orderQty - newReceivedQty - (poLine.cancelledQty || 0);
-
-      const lineUpdates: any = {
-        receivedQty: newReceivedQty,
-        damagedQty: newDamagedQty,
-        lastReceivedAt: new Date(),
-      };
-
-      if (!poLine.receivedDate) {
-        lineUpdates.receivedDate = new Date();
-      }
-
-      if (remaining <= 0) {
-        lineUpdates.status = "received";
-        lineUpdates.fullyReceivedDate = new Date();
-      } else if (newReceivedQty > 0) {
-        lineUpdates.status = "partially_received";
-      }
-
-      await storage.updatePurchaseOrderLine(poLine.id, lineUpdates);
-
-      // Create PO receipt record
-      await storage.createPoReceipt({
-        purchaseOrderId: poId,
-        purchaseOrderLineId: poLine.id,
-        receivingOrderId: receivingOrderId,
-        receivingLineId: rl.receivingLineId,
-        qtyReceived: poLineUnitsReceived,
-        poUnitCostCents: poLine.unitCostCents,
-        actualUnitCostCents: rl.unitCost || poLine.unitCostCents,
-        varianceCents: (rl.unitCost || poLine.unitCostCents) - poLine.unitCostCents,
-      });
-    }
-
-    // Recalculate totals
-    await recalculateTotals(poId);
-
-    // Auto-transition PO status. Only product lines gate this — non-product
-    // lines (discount/fee/tax/rebate/adjustment) have no physical qty to
-    // receive, so they shouldn't block closure. Rows without lineType
-    // (pre-migration-0563) default to product.
-    const allLines = await storage.getPurchaseOrderLines(poId);
-    const activeLines = allLines.filter(
-      (l: any) =>
-        l.status !== "cancelled" && ((l.lineType ?? "product") === "product"),
-    );
-    const allReceived = activeLines.every((l: any) => l.status === "received");
-    const someReceived = activeLines.some((l: any) =>
-      l.status === "received" || l.status === "partially_received"
-    );
-
-    if (allReceived && po.status !== "received" && po.status !== "closed") {
-      await storage.updatePurchaseOrderStatusWithHistory(poId, {
-        status: "received",
-        actualDeliveryDate: new Date(),
-      }, {
-        fromStatus: po.status,
-        toStatus: "received",
-        changedBy: undefined,
-        notes: "All lines fully received"
-      });
-    } else if (
-      someReceived &&
-      po.status !== "partially_received" &&
-      po.status !== "received" &&
-      po.status !== "closed"
-    ) {
-      await storage.updatePurchaseOrderStatusWithHistory(poId, { status: "partially_received" }, {
-        fromStatus: po.status,
-        toStatus: "partially_received",
-        changedBy: undefined,
-        notes: "Partial receipt"
-      });
-    }
+  async function onReceivingOrderClosed(
+    receivingOrderId: number,
+    receivingLines: ReceivingReconciliationLine[],
+  ) {
+    await reconcilePurchaseOrderReceipt({
+      storage,
+      receivingOrderId,
+      receivingLines,
+      recalculateTotals,
+    });
   }
 
   // ── REORDER → PO ───────────────────────────────────────────────

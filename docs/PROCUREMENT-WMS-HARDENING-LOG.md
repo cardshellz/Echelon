@@ -360,3 +360,45 @@ Next step:
 - Open the receiving idempotency/reconciliation PR.
 - Then move to the next meaningful chunk: receiving orchestration extraction
   plus PO close/close-short alignment with the lifecycle boundary.
+
+### 2026-05-16 - Phase 1 Slice 3: Atomic PO Receipt Reconciliation
+
+Scope:
+
+- Extracted PO receipt reconciliation into
+  `server/modules/procurement/purchase-order-receipt-reconciliation.service.ts`.
+- Kept the existing `createPurchasingService(...).onReceivingOrderClosed`
+  public API stable, but made it delegate to the reconciliation service instead
+  of carrying receipt matching, PO line mutation, receipt insert, total
+  recalculation, and status advancement inline.
+- Added `procurementStorage.reconcilePoReceiptLine(...)` as the single storage
+  boundary for applying a receiving line to a PO line.
+- Made the PO line received/damaged quantity update and `po_receipts` insert a
+  single database transaction.
+- Kept receipt replay idempotent by returning the existing receipt when the
+  receiving-line receipt already exists, including duplicate-key races against
+  `po_receipts_po_line_rcv_line_idx`.
+- Preserved legitimate zero-cost receiving lines during PO receipt
+  reconciliation and carried receipt cost in both cents and mills.
+- Exported the reconciliation service from the procurement module boundary.
+- Updated dual-track receiving tests to assert the transactional reconciliation
+  call instead of the old separate line-update and receipt-insert calls.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/dual-track.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+
+Remaining risk:
+
+- `ReceivingService.close` still coordinates inventory posting and PO
+  reconciliation as two high-level phases. This slice makes the PO
+  reconciliation write atomic, but the broader receiving orchestration still
+  needs a dedicated owner before we split route files further.
+
+Next step:
+
+- Run the broader targeted procurement verification set, then open the
+  reconciliation PR.
+- After merge, continue with receiving orchestration ownership and PO
+  close/close-short alignment.
