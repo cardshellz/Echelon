@@ -311,3 +311,52 @@ Next step:
 
 - Open the lifecycle-boundary PR, or continue directly into Phase 1 Slice 2:
   idempotent PO create-receipt plus receiving close orchestration.
+
+### 2026-05-16 - Phase 1 Slice 2: Receiving Idempotency and PO Reconciliation
+
+Scope:
+
+- Made `POST /api/purchase-orders/:id/create-receipt` require
+  `Idempotency-Key`.
+- Updated PO detail, receiving, and inbound shipment UI entry points to send a
+  fresh idempotency key when creating a PO receipt.
+- Added service-level idempotency for `createReceiptFromPO`: when an active
+  draft/open/receiving/verified receipt already exists for the PO, the service
+  returns that receipt instead of creating another header and line set.
+- Added a procurement storage lookup for receiving orders by purchase order.
+- Made `ReceivingService.close` retry-safe for already-closed receipts by
+  rerunning PO reconciliation without reposting inventory.
+- Removed the swallowed PO reconciliation failure after inventory posting.
+  Reconciliation errors now surface to the caller, so operators see that the
+  receipt needs retry/repair instead of leaving silent PO drift.
+- Made `onReceivingOrderClosed` skip receiving lines that already have a
+  `po_receipts` row, preventing duplicate close/retry attempts from
+  double-incrementing PO line received quantities.
+- Guarded repeated PO status transitions so reconciliation replay does not add
+  duplicate status-history rows when the PO is already received/closed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+
+Environment note:
+
+- This slice was developed in clean worktree
+  `C:\Users\owner\Echelon-procurement-next` because the main workspace had
+  unrelated dirty OMS/currency files that overlapped the new `origin/main`.
+  The worktree uses a local `node_modules` junction to the main checkout for
+  verification only.
+
+Remaining risk:
+
+- PO line update plus `po_receipts` insert are now replay-safe after a
+  successful reconciliation, but they still are not one database transaction.
+  A failure between line update and receipt insert remains a deeper atomicity
+  gap to handle when we extract full receiving orchestration.
+
+Next step:
+
+- Open the receiving idempotency/reconciliation PR.
+- Then move to the next meaningful chunk: receiving orchestration extraction
+  plus PO close/close-short alignment with the lifecycle boundary.

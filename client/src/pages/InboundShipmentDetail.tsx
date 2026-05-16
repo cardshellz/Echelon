@@ -860,7 +860,15 @@ export default function InboundShipmentDetail() {
                   return;
                 }
                 try {
-                  const res = await fetch(`/api/purchase-orders/${poIds[0]}/create-receipt`, { method: "POST" });
+                  const idempotencyKey = (
+                    typeof crypto !== "undefined" && "randomUUID" in crypto
+                      ? (crypto as any).randomUUID()
+                      : `shipment-receipt-${poIds[0]}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+                  ) as string;
+                  const res = await fetch(`/api/purchase-orders/${poIds[0]}/create-receipt`, {
+                    method: "POST",
+                    headers: { "Idempotency-Key": idempotencyKey },
+                  });
                   if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed"); }
                   const receipt = await res.json();
                   toast({ title: "Receipt created", description: `${receipt.receiptNumber} created from shipment` });

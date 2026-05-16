@@ -44,3 +44,110 @@ describe("ReceivingService - completeAllLines semantics", () => {
     expect(result.updated).toBe(3);
   });
 });
+
+describe("ReceivingService - close reconciliation semantics", () => {
+  it("retries PO reconciliation for an already closed receipt without reposting inventory", async () => {
+    const lines = [
+      {
+        id: 501,
+        purchaseOrderLineId: 100,
+        receivedQty: 3,
+        damagedQty: 0,
+        unitCost: 500,
+        putawayLocationId: 12,
+      },
+    ];
+    const mockStorage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue({
+        id: 9,
+        status: "closed",
+        purchaseOrderId: 1,
+        receivedLineCount: 1,
+        receivedTotalUnits: 3,
+      }),
+      getReceivingLines: vi.fn().mockResolvedValue(lines),
+    };
+    const inventoryCore = { receiveInventory: vi.fn() };
+    const purchasing = { onReceivingOrderClosed: vi.fn().mockResolvedValue(undefined) };
+    const service = new ReceivingService(
+      {} as any,
+      inventoryCore as any,
+      {} as any,
+      mockStorage as any,
+      purchasing as any,
+    );
+
+    const result = await service.close(9, "user-1");
+
+    expect(inventoryCore.receiveInventory).not.toHaveBeenCalled();
+    expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledWith(9, [
+      {
+        receivingLineId: 501,
+        purchaseOrderLineId: 100,
+        receivedQty: 3,
+        damagedQty: 0,
+        unitCost: 500,
+      },
+    ]);
+    expect(result).toMatchObject({
+      success: true,
+      linesProcessed: 1,
+      unitsReceived: 3,
+      putawayLocationIds: [12],
+    });
+  });
+
+  it("surfaces PO reconciliation failures after inventory posting", async () => {
+    const order = {
+      id: 10,
+      status: "open",
+      sourceType: "po",
+      poNumber: "PO-10",
+      purchaseOrderId: 1,
+    };
+    const lines = [
+      {
+        id: 601,
+        productVariantId: 5,
+        purchaseOrderLineId: 100,
+        receivedQty: 2,
+        damagedQty: 0,
+        unitCost: 500,
+        putawayLocationId: 12,
+      },
+    ];
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
+    const mockStorage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue(order),
+      getReceivingLines: vi.fn().mockResolvedValue(lines),
+      getProductVariantById: vi.fn().mockResolvedValue({ id: 5, hierarchyLevel: 1 }),
+      getProductVariantsByProductId: vi.fn().mockResolvedValue([]),
+      updateReceivingLine: vi.fn().mockResolvedValue({}),
+      updateReceivingOrder: vi.fn().mockResolvedValue({
+        ...order,
+        status: "closed",
+        receivedLineCount: 1,
+        receivedTotalUnits: 2,
+      }),
+    };
+    const db = {
+      transaction: vi.fn(async (fn) => fn(tx)),
+    };
+    const inventoryCore = { receiveInventory: vi.fn().mockResolvedValue(undefined) };
+    const channelSync = { queueSyncAfterInventoryChange: vi.fn().mockResolvedValue(undefined) };
+    const purchasing = {
+      onReceivingOrderClosed: vi.fn().mockRejectedValue(new Error("PO reconcile failed")),
+    };
+    const service = new ReceivingService(
+      db as any,
+      inventoryCore as any,
+      channelSync as any,
+      mockStorage as any,
+      purchasing as any,
+    );
+
+    await expect(service.close(10, "user-1")).rejects.toThrow("PO reconcile failed");
+    expect(inventoryCore.receiveInventory).toHaveBeenCalledOnce();
+    expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledOnce();
+  });
+});

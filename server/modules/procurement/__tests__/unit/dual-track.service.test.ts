@@ -114,6 +114,7 @@ function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
     getPoRevisions: vi.fn(),
     createPoReceipt: vi.fn().mockResolvedValue({}),
     getPoReceipts: vi.fn(),
+    getPoReceiptsByLine: vi.fn().mockResolvedValue([]),
     getAllPoApprovalTiers: vi.fn().mockResolvedValue([]),
     getPoApprovalTierById: vi.fn(),
     getMatchingApprovalTier: vi.fn().mockResolvedValue(null),
@@ -124,6 +125,7 @@ function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
     getProductVariantById: vi.fn(),
     getProductById: vi.fn(),
     createReceivingOrder: vi.fn(),
+    getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([]),
     generateReceiptNumber: vi.fn(),
     bulkCreateReceivingLines: vi.fn(),
     getReceivingLineById: vi.fn(),
@@ -288,6 +290,38 @@ describe("transitionFinancial", () => {
     await expect(
       svc.transitionFinancial(1, "unbilled", "user-1"),
     ).rejects.toThrow(/Cannot transition financial status/);
+  });
+});
+
+describe("createReceiptFromPO — receipt idempotency", () => {
+  let svc: ReturnType<typeof createPurchasingService>;
+  let storage: ReturnType<typeof buildMockStorage>;
+
+  beforeEach(() => {
+    storage = buildMockStorage();
+    svc = createPurchasingService(buildMockDb(), storage);
+  });
+
+  it("returns an active existing receipt instead of creating a duplicate", async () => {
+    const existingReceipt = {
+      id: 77,
+      receiptNumber: "RCV-TEST-077",
+      purchaseOrderId: 1,
+      status: "open",
+    };
+
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent" }));
+    storage.getReceivingOrdersForPurchaseOrder.mockResolvedValue([existingReceipt]);
+
+    const result = await svc.createReceiptFromPO(1, "user-1");
+
+    expect(result).toMatchObject({
+      id: 77,
+      receiptNumber: "RCV-TEST-077",
+      reusedExisting: true,
+    });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+    expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
   });
 });
 
@@ -491,6 +525,48 @@ describe("onReceivingOrderClosed — auto-match", () => {
       (c: any[]) => "receivedQty" in c[1],
     );
     expect(callsWithReceivedQty.length).toBe(0);
+  });
+
+  it("skips a receiving line that already has a PO receipt record", async () => {
+    const productId = 42;
+    const poLine = {
+      id: 100,
+      purchaseOrderId: 1,
+      productId,
+      productVariantId: 5,
+      lineType: "product",
+      status: "open",
+      orderQty: 10,
+      receivedQty: 0,
+      cancelledQty: 0,
+      unitCostCents: 500,
+      discountPercent: 0,
+      taxRatePercent: 0,
+      lineTotalCents: 5000,
+      unitsPerUom: 1,
+    };
+
+    storage.getReceivingOrderById.mockResolvedValue({ id: 99, purchaseOrderId: 1 });
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent" }));
+    storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
+    storage.getPurchaseOrderLineById.mockResolvedValue(poLine);
+    storage.getReceivingLineById.mockResolvedValue({
+      id: 201,
+      productId,
+      productVariantId: 5,
+    });
+    storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1 });
+    storage.getPoReceiptsByLine.mockResolvedValue([{ receivingLineId: 201 }]);
+
+    await svc.onReceivingOrderClosed(99, [
+      { receivingLineId: 201, purchaseOrderLineId: 100, receivedQty: 3 },
+    ]);
+
+    const callsWithReceivedQty = storage.updatePurchaseOrderLine.mock.calls.filter(
+      (c: any[]) => "receivedQty" in c[1],
+    );
+    expect(callsWithReceivedQty.length).toBe(0);
+    expect(storage.createPoReceipt).not.toHaveBeenCalled();
   });
 });
 

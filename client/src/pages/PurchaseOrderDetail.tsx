@@ -1106,7 +1106,15 @@ export default function PurchaseOrderDetail() {
 
   const createReceiptMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(`/api/purchase-orders/${poId}/create-receipt`, { method: "POST" });
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `po-receipt-${poId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
+      const res = await fetch(`/api/purchase-orders/${poId}/create-receipt`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+      });
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create receipt"); }
       return res.json();
     },
