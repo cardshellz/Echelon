@@ -402,3 +402,47 @@ Next step:
   reconciliation PR.
 - After merge, continue with receiving orchestration ownership and PO
   close/close-short alignment.
+
+### 2026-05-16 - Phase 1 Slice 4: Receiving Close Ownership and PO Close Alignment
+
+Scope:
+
+- Added `server/modules/procurement/receiving-orchestration.service.ts` as the
+  receiving-side owner for mapping closed receiving lines into PO
+  reconciliation input and delegating PO-linked receipts to purchasing.
+- Kept `ReceivingService.close` behavior stable, but moved its PO
+  reconciliation handoff through the orchestration boundary instead of keeping
+  that mapping inline in the service class.
+- Added `server/modules/procurement/purchase-order-close.service.ts` as the PO
+  close boundary for standard close, close-short status patching, and remaining
+  line close-short patches.
+- Routed `purchasing.close` and `purchasing.closeShort` through the close
+  boundary while preserving existing 3-way match gate behavior and existing
+  close-short line updates.
+- Exported the new close and receiving orchestration helpers from the
+  procurement module boundary.
+- Added focused unit tests for close patch construction, close-short patch
+  construction, receiving reconciliation mapping, PO-linked reconciliation
+  delegation, and zero-cost receiving line preservation.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- Inventory posting and PO reconciliation are still separate high-level phases
+  inside receiving close. The PO reconciliation write is atomic from Slice 3,
+  and this slice gives the handoff an owner, but a future receiving
+  orchestration slice still needs to formalize the full close command,
+  side-effect order, operator retry result, and route ownership.
+
+Next step:
+
+- Open the receiving close ownership PR.
+- After merge, continue into route/API ownership: split stable receiving and PO
+  route handlers behind the existing URLs, or first add operator-visible
+  receiving reconciliation retry/status endpoints if the UI needs that before
+  route splitting.
