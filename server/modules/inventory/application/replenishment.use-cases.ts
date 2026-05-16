@@ -1382,6 +1382,7 @@ export class ReplenishmentUseCases {
   async cleanupHealthIssues(params: {
     mode?: ReplenHealthCleanupMode;
     taskId?: number | null;
+    warehouseId?: number | null;
     limit?: number;
     userId?: string;
   } = {}): Promise<ReplenHealthCleanupResult> {
@@ -1442,6 +1443,7 @@ export class ReplenishmentUseCases {
 
   private async executePendingInlineTasks(params: {
     taskId?: number | null;
+    warehouseId?: number | null;
     limit?: number;
     userId?: string;
   }): Promise<{ executedTaskIds: number[]; failedTaskIds: number[]; skippedTaskIds: number[] }> {
@@ -1453,6 +1455,9 @@ export class ReplenishmentUseCases {
 
     if (params.taskId) {
       conditions.push(eq(replenTasks.id, params.taskId));
+    }
+    if (params.warehouseId != null) {
+      conditions.push(eq(replenTasks.warehouseId, params.warehouseId));
     }
 
     const tasks = await this.db

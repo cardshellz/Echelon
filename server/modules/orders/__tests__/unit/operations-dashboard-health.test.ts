@@ -98,6 +98,8 @@ describe("OperationsDashboardService pick/replen health", () => {
     expect(detailSql).toContain("allocation_exceptions");
     expect(detailSql).toContain("shipmentBlocking");
     expect(detailSql).toContain("Daily Replen QA -%");
+    expect(detailSql).toContain("active demand waiting on manual/admin queued replen");
+    expect(detailSql).toContain("execute_manual_replen");
   });
 
   it("falls back to all when the filter is not recognized", async () => {
