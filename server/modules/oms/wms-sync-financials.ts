@@ -13,7 +13,6 @@
 
 import {
   ensureCents,
-  ensurePositiveCents,
   ensureCurrencyCode,
   CurrencyValidationError,
 } from "@shared/validation/currency";
@@ -45,12 +44,10 @@ export type OmsLineFinancialFields = {
  *
  * Rules enforced (per refactor plan invariant #9 + coding-standards #3):
  *   - All cents values are integer ≥ 0 (ensureCents).
- *   - `totalCents` is strictly > 0 on a paid order (ensurePositiveCents).
+ *   - `totalCents` may be 0 for fully discounted/free orders.
  *   - `currency` is a valid 3-letter ISO 4217 code (ensureCurrencyCode).
  *   - Every line must have `paidPriceCents` present and valid; zero is
- *     rejected because a billable line that reaches WMS with
- *     unit_price=0 would be pushed to ShipStation as $0 (the exact
- *     silent-failure class we are refactoring away).
+ *     valid for promotional/free-gift lines.
  *   - Every line `totalPriceCents` must be valid cents (≥ 0).
  *
  * Non-USD currencies pass through unchanged — we only reject malformed
@@ -62,10 +59,9 @@ export function validateOmsOrderFinancials(
 ): void {
   const omsOrderId = omsOrder.id;
 
-  const check = (field: string, value: unknown, positive: boolean) => {
+  const check = (field: string, value: unknown) => {
     try {
-      if (positive) ensurePositiveCents(field, value);
-      else ensureCents(field, value);
+      ensureCents(field, value);
     } catch (err) {
       console.error(
         `[WmsSync] Financial validation failed for OMS order ${omsOrderId}: field=${field} value=${JSON.stringify(value)}`,
@@ -75,14 +71,14 @@ export function validateOmsOrderFinancials(
   };
 
   // Header cents. Subtotal / shipping / tax / discount may be 0
-  // legitimately (tax-exempt, free shipping, no discount) so we only
-  // require non-negative integer. `totalCents` must be > 0 — a paid
-  // order with total=0 is always a data bug.
-  check("omsOrder.subtotalCents", omsOrder.subtotalCents, false);
-  check("omsOrder.shippingCents", omsOrder.shippingCents, false);
-  check("omsOrder.taxCents", omsOrder.taxCents, false);
-  check("omsOrder.discountCents", omsOrder.discountCents, false);
-  check("omsOrder.totalCents", omsOrder.totalCents, true);
+  // legitimately (tax-exempt, free shipping, no discount, fully comped
+  // products, or true zero-dollar orders) so we only require
+  // non-negative integer cents.
+  check("omsOrder.subtotalCents", omsOrder.subtotalCents);
+  check("omsOrder.shippingCents", omsOrder.shippingCents);
+  check("omsOrder.taxCents", omsOrder.taxCents);
+  check("omsOrder.discountCents", omsOrder.discountCents);
+  check("omsOrder.totalCents", omsOrder.totalCents);
 
   // Currency — 3-letter ISO 4217. Non-USD is fine; malformed is not.
   try {
@@ -102,12 +98,12 @@ export function validateOmsOrderFinancials(
   for (const line of omsLines) {
     const lineTag = `omsOrderLines[${line.id}]`;
     // paidPriceCents is per-unit paid after discount — snapshot source
-    // for wms.order_items.unit_price_cents and SS unitPrice. Zero here
-    // is always a bug.
-    check(`${lineTag}.paidPriceCents`, line.paidPriceCents, true);
-    // totalPriceCents is extended line total — allowed to be 0 only for
-    // free/gift lines. Non-negative integer is the right rule.
-    check(`${lineTag}.totalPriceCents`, line.totalPriceCents, false);
+    // for wms.order_items.unit_price_cents and SS unitPrice. Zero is
+    // valid for free gifts and 100%-discounted shippable lines.
+    check(`${lineTag}.paidPriceCents`, line.paidPriceCents);
+    // totalPriceCents is extended line total. Non-negative integer is
+    // the right boundary rule here too.
+    check(`${lineTag}.totalPriceCents`, line.totalPriceCents);
   }
 }
 

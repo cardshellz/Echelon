@@ -14,9 +14,7 @@
  *   - Flag-off path: pure-function equivalent is "helper not called" —
  *     asserted structurally by the service keeping the pre-v2 INSERT
  *     shape; documented here, not exercised end-to-end (needs integ).
- *   - Missing line paidPriceCents → throws WmsSyncValidationError with
- *     the correct field path.
- *   - totalCents = 0 on a paid order → throws.
+ *   - Zero-dollar orders and shippable free-gift lines pass.
  *   - Non-USD currency → passes through unchanged, not rejected.
  *   - Negative cents value → throws.
  *   - Float cents value → throws (Rule #3: no floats for money).
@@ -78,7 +76,7 @@ describe("validateOmsOrderFinancials :: happy path", () => {
     ).not.toThrow();
   });
 
-  it("accepts zero for subtotal/shipping/tax/discount (tax-exempt, free ship)", () => {
+  it("accepts zero for subtotal/shipping/tax/discount/total (free order)", () => {
     expect(() =>
       validateOmsOrderFinancials(
         okOrder({
@@ -86,20 +84,38 @@ describe("validateOmsOrderFinancials :: happy path", () => {
           shippingCents: 0,
           taxCents: 0,
           discountCents: 0,
-          totalCents: 1, // still must be > 0 on a paid order
+          totalCents: 0,
         }),
-        [okLine({ paidPriceCents: 1, totalPriceCents: 1, quantity: 1 })],
+        [okLine({ paidPriceCents: 0, totalPriceCents: 0, quantity: 1 })],
       ),
     ).not.toThrow();
   });
 
-  it("accepts a line with totalPriceCents=0 (free/gift line)", () => {
-    // totalPriceCents is extended total — allowed to be 0 (the positive
-    // constraint only applies to paidPriceCents per-unit).
+  it("accepts a shippable line with paidPriceCents=0 and totalPriceCents=0", () => {
     expect(() =>
       validateOmsOrderFinancials(okOrder(), [
-        okLine({ paidPriceCents: 1, totalPriceCents: 0, quantity: 1 }),
+        okLine({ paidPriceCents: 0, totalPriceCents: 0, quantity: 1 }),
       ]),
+    ).not.toThrow();
+  });
+
+  it("accepts #57204-style fully discounted shippable gift lines", () => {
+    expect(() =>
+      validateOmsOrderFinancials(
+        okOrder({
+          id: 168436,
+          subtotalCents: 0,
+          shippingCents: 599,
+          taxCents: 0,
+          discountCents: 3297,
+          totalCents: 599,
+        }),
+        [
+          okLine({ id: 102888, paidPriceCents: 0, totalPriceCents: 0, quantity: 1 }),
+          okLine({ id: 102889, paidPriceCents: 0, totalPriceCents: 0, quantity: 1 }),
+          okLine({ id: 102890, paidPriceCents: 0, totalPriceCents: 0, quantity: 1 }),
+        ],
+      ),
     ).not.toThrow();
   });
 });
@@ -125,23 +141,6 @@ describe("validateOmsOrderFinancials :: non-USD passthrough", () => {
 });
 
 describe("validateOmsOrderFinancials :: header violations", () => {
-  it("throws when totalCents is 0 (paid order must be > 0)", () => {
-    expect(() =>
-      validateOmsOrderFinancials(okOrder({ totalCents: 0 }), [okLine()]),
-    ).toThrow(WmsSyncValidationError);
-
-    try {
-      validateOmsOrderFinancials(okOrder({ totalCents: 0 }), [okLine()]);
-    } catch (err) {
-      const e = err as WmsSyncValidationError;
-      expect(e).toBeInstanceOf(WmsSyncValidationError);
-      expect(e.omsOrderId).toBe(42);
-      expect(e.field).toBe("omsOrder.totalCents");
-      expect(e.value).toBe(0);
-      expect(e.code).toBe("WMS_SYNC_VALIDATION_FAILED");
-    }
-  });
-
   it("throws when taxCents is negative", () => {
     const thrown = captureThrow(() =>
       validateOmsOrderFinancials(okOrder({ taxCents: -1 }), [okLine()]),
@@ -185,21 +184,6 @@ describe("validateOmsOrderFinancials :: header violations", () => {
 });
 
 describe("validateOmsOrderFinancials :: line violations", () => {
-  it("throws when a line's paidPriceCents is 0 (missing paid price)", () => {
-    const thrown = captureThrow(() =>
-      validateOmsOrderFinancials(okOrder(), [
-        okLine({ id: 777, paidPriceCents: 0 }),
-      ]),
-    );
-    expect(thrown).toBeInstanceOf(WmsSyncValidationError);
-    expect((thrown as WmsSyncValidationError).field).toBe(
-      "omsOrderLines[777].paidPriceCents",
-    );
-    expect((thrown as WmsSyncValidationError).value).toBe(0);
-    // Order id is preserved so the log line names the right OMS row.
-    expect((thrown as WmsSyncValidationError).omsOrderId).toBe(42);
-  });
-
   it("throws when a line's paidPriceCents is negative", () => {
     const thrown = captureThrow(() =>
       validateOmsOrderFinancials(okOrder(), [
@@ -211,6 +195,8 @@ describe("validateOmsOrderFinancials :: line violations", () => {
       "omsOrderLines[888].paidPriceCents",
     );
     expect((thrown as WmsSyncValidationError).value).toBe(-100);
+    // Order id is preserved so the log line names the right OMS row.
+    expect((thrown as WmsSyncValidationError).omsOrderId).toBe(42);
   });
 
   it("throws when a line's totalPriceCents is negative", () => {
@@ -229,8 +215,8 @@ describe("validateOmsOrderFinancials :: line violations", () => {
     // Two bad lines — expect the first-bad line's field name.
     const thrown = captureThrow(() =>
       validateOmsOrderFinancials(okOrder(), [
-        okLine({ id: 1, paidPriceCents: 0 }),
-        okLine({ id: 2, paidPriceCents: -5 }),
+        okLine({ id: 1, paidPriceCents: -1 }),
+        okLine({ id: 2, totalPriceCents: -5 }),
       ]),
     );
     expect(thrown).toBeInstanceOf(WmsSyncValidationError);
@@ -276,6 +262,12 @@ describe("buildWmsOrderFinancialSnapshot", () => {
     expect(snap.shippingCents).toBe(500);
     expect(snap.discountCents).toBe(250);
     expect(snap.currency).toBe("EUR");
+  });
+
+  it("maps zero-dollar order totals through as zero", () => {
+    const snap = buildWmsOrderFinancialSnapshot(okOrder({ totalCents: 0 }));
+    expect(snap.amountPaidCents).toBe(0);
+    expect(snap.totalCents).toBe(0);
   });
 
   it("does not mutate the input object (Rule #3)", () => {
@@ -337,6 +329,15 @@ describe("buildWmsItemFinancialSnapshot", () => {
     expect(snap.unitPriceCents).toBe(500);
     expect(snap.totalPriceCents).toBe(500);
   });
+
+  it("maps zero-dollar free-gift lines through as zero", () => {
+    const snap = buildWmsItemFinancialSnapshot(
+      okLine({ quantity: 1, paidPriceCents: 0, totalPriceCents: 0 }),
+    );
+    expect(snap.unitPriceCents).toBe(0);
+    expect(snap.paidPriceCents).toBe(0);
+    expect(snap.totalPriceCents).toBe(0);
+  });
 });
 
 // ─── Structural guarantees (flag-off parity) ─────────────────────────
@@ -351,7 +352,7 @@ describe("WMS_FINANCIAL_SNAPSHOT flag-off behavior (structural)", () => {
   it("helpers throw on invalid input regardless of any flag (safe by default)", () => {
     expect(() =>
       validateOmsOrderFinancials(
-        okOrder({ totalCents: 0 }),
+        okOrder({ totalCents: -1 }),
         [okLine()],
       ),
     ).toThrow(WmsSyncValidationError);
