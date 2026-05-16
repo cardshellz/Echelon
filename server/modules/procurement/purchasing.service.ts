@@ -50,6 +50,11 @@ import {
   getAllowedLegacyTransitions,
 } from "./purchase-order-lifecycle.service";
 import {
+  buildPoCloseChange,
+  buildPoCloseShortChange,
+  buildPoCloseShortLinePatch,
+} from "./purchase-order-close.service";
+import {
   findOpenPoLineByProduct as findOpenPoLineByProductWithStorage,
   reconcilePurchaseOrderReceipt,
   type ReceivingReconciliationLine,
@@ -1401,53 +1406,49 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     }
 
-    assertTransition(po.status, "closed");
+    const change = (() => {
+      try {
+        return buildPoCloseChange({ po, userId, notes });
+      } catch (error) {
+        return toPurchasingError(error);
+      }
+    })();
 
-    return await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "closed",
-      closedAt: new Date(),
-      closedBy: userId,
-      updatedBy: userId,
-    }, {
-        fromStatus: po.status,
-        toStatus: "closed",
-        changedBy: userId,
-        notes: notes || "PO closed"
-      });
+    return await storage.updatePurchaseOrderStatusWithHistory(
+      id,
+      change.patch,
+      change.history,
+    );
   }
 
   async function closeShort(id: number, reason: string, userId?: string) {
     const po = await storage.getPurchaseOrderById(id);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
 
-    if (po.status !== "partially_received") {
-      throw new PurchasingError("Can only close-short a partially received PO", 400);
-    }
     if (!reason) throw new PurchasingError("Close-short reason is required", 400);
 
     // Close all remaining open lines
     const lines = await storage.getPurchaseOrderLines(id);
     for (const line of lines) {
-      if (line.status === "open" || line.status === "partially_received") {
-        await storage.updatePurchaseOrderLine(line.id, {
-          status: "closed",
-          closeShortReason: reason,
-        });
+      const linePatch = buildPoCloseShortLinePatch(line, reason);
+      if (linePatch) {
+        await storage.updatePurchaseOrderLine(line.id, linePatch);
       }
     }
 
-    return await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "closed",
-      closedAt: new Date(),
-      closedBy: userId,
-      updatedBy: userId,
-      physicalStatus: "short_closed" as PoPhysicalStatus,
-    }, {
-        fromStatus: po.status,
-        toStatus: "closed",
-        changedBy: userId,
-        notes: `Closed short: ${reason}`
-      });
+    const change = (() => {
+      try {
+        return buildPoCloseShortChange({ po, reason, userId });
+      } catch (error) {
+        return toPurchasingError(error);
+      }
+    })();
+
+    return await storage.updatePurchaseOrderStatusWithHistory(
+      id,
+      change.patch,
+      change.history,
+    );
   }
 
   // ── RECEIVING INTEGRATION ───────────────────────────────────────

@@ -29,6 +29,15 @@ export {
   findOpenPoLineByProduct,
   reconcilePurchaseOrderReceipt,
 } from "./purchase-order-receipt-reconciliation.service";
+export {
+  buildPoCloseChange,
+  buildPoCloseShortChange,
+  buildPoCloseShortLinePatch,
+} from "./purchase-order-close.service";
+export {
+  buildPoReconciliationLines,
+  reconcileLinkedPurchaseOrder,
+} from "./receiving-orchestration.service";
 export { createReceivingService } from "./receiving.service";
 export { createShipmentTrackingService } from "./shipment-tracking.service";
 export { renderPoHtml } from "./po-document";
@@ -39,5 +48,6 @@ export type {
   ReceiptReconciliationResult,
   ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
+export type { ReceivingOrchestrationPurchasing } from "./receiving-orchestration.service";
 export type { ReceivingService, ReceivingError } from "./receiving.service";
 export type { ShipmentTrackingService, ShipmentTrackingError } from "./shipment-tracking.service";

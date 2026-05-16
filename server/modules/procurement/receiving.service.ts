@@ -21,6 +21,9 @@ import {
   centsToMills,
   dollarsToMills,
 } from "@shared/utils/money";
+import {
+  reconcileLinkedPurchaseOrder,
+} from "./receiving-orchestration.service";
 
 interface InventoryCore {
   receiveInventory(params: {
@@ -265,23 +268,13 @@ export class ReceivingService {
     private shipmentTracking: ShipmentTracking | null = null,
   ) {}
 
-  private buildPoReconciliationLines(lines: any[]) {
-    return lines.map((line: any) => ({
-      receivingLineId: line.id,
-      purchaseOrderLineId: line.purchaseOrderLineId || undefined,
-      receivedQty: line.receivedQty || 0,
-      damagedQty: line.damagedQty || 0,
-      unitCost: line.unitCost ?? undefined,
-      unitCostMills: line.unitCostMills ?? undefined,
-    }));
-  }
-
   private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[]) {
-    if (!order.purchaseOrderId || !this.purchasing) return;
-    await this.purchasing.onReceivingOrderClosed(
-      orderId,
-      this.buildPoReconciliationLines(lines),
-    );
+    await reconcileLinkedPurchaseOrder({
+      receivingOrderId: orderId,
+      receivingOrder: order,
+      receivingLines: lines,
+      purchasing: this.purchasing,
+    });
   }
 
   private buildCloseResult(order: any, lines: any[], putawayLocationIds?: number[]) {
