@@ -8,9 +8,9 @@
  *
  * This module provides:
  *   - `CentsSchema`           — non-negative integer cents (default).
- *   - `PositiveCentsSchema`   — strictly positive integer cents, for
- *     fields where zero is a bug (e.g. `amount_paid_cents` on a paid
- *     order, `unit_price_cents` on a billable line).
+ *   - `PositiveCentsSchema`   — strictly positive integer cents, only
+ *     for fields where zero is not a valid business state. Do not use it
+ *     for promotional/free order totals or free-gift line prices.
  *   - `CurrencyCodeSchema`    — 3-letter ISO 4217 currency.
  *   - `ensureCents` / `ensurePositiveCents` — throwing guards with
  *     structured messages.
@@ -55,9 +55,9 @@ export const CentsSchema = z
   .finite("cents must be finite");
 
 /**
- * Strictly positive integer cents. Use for fields where zero is a bug
- * (e.g. `amount_paid_cents` on a paid order, `unit_price_cents` on a
- * billable line, `total_price_cents` on any line with qty > 0).
+ * Strictly positive integer cents. Use only for fields where zero is a
+ * bug. Fully discounted orders and free-gift line prices should use
+ * `CentsSchema` instead.
  */
 export const PositiveCentsSchema = z
   .number({ invalid_type_error: "cents must be a number" })
