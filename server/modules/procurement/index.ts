@@ -17,6 +17,14 @@ export const procurementStorage: IProcurementStorage = procurementMethods;
 
 // Services
 export { createPurchasingService } from "./purchasing.service";
+export {
+  PoLifecycleError,
+  buildFinancialTransitionChange,
+  buildPhysicalTransitionChange,
+  getAllowedFinancialTransitions,
+  getAllowedLegacyTransitions,
+  getAllowedPhysicalTransitions,
+} from "./purchase-order-lifecycle.service";
 export { createReceivingService } from "./receiving.service";
 export { createShipmentTrackingService } from "./shipment-tracking.service";
 export { renderPoHtml } from "./po-document";
