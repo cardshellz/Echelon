@@ -1311,4 +1311,52 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       skippedPickBins: 0,
     });
   });
+
+  it("continues queueing missing pick-bin replen candidates when one resolver fails", async () => {
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [
+          {
+            variant_id: 100,
+            location_id: 1,
+            sku: "SKU-1",
+            location_code: "A-01",
+          },
+          {
+            variant_id: 101,
+            location_id: 2,
+            sku: "SKU-2",
+            location_code: "A-02",
+          },
+        ],
+      })),
+    };
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const serviceAny = service as any;
+    vi.spyOn(serviceAny, "findActiveTaskForPickBin").mockResolvedValue(null);
+    vi.spyOn(service, "createAndExecuteReplen")
+      .mockRejectedValueOnce(new Error("source_stock_unavailable"))
+      .mockResolvedValueOnce({ task: { id: 889, status: "pending" } as any, moved: 0 });
+
+    const result = await service.queueMissingPickBinReplen({
+      mode: "queue_missing_replen",
+      limit: 10,
+    });
+
+    expect(result).toMatchObject({
+      mode: "queue_missing_replen",
+      scannedPickBins: 2,
+      queuedReplen: 1,
+      queuedTaskIds: [889],
+      existingTaskIds: [],
+      skippedPickBins: 1,
+      skipped: [
+        expect.objectContaining({
+          variantId: 100,
+          locationId: 1,
+          reason: "source_stock_unavailable",
+        }),
+      ],
+    });
+  });
 });
