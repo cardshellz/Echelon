@@ -345,9 +345,17 @@ DEF-456,25,,,5.00,,Location TBD`;
     mutationFn: async (data: typeof newReceipt) => {
       // If PO source type with a selected PO, use the create-receipt-from-PO endpoint
       if (data.sourceType === "po" && selectedPoId) {
+        const idempotencyKey = (
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? (crypto as any).randomUUID()
+            : `po-receipt-${selectedPoId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        ) as string;
         const res = await fetch(`/api/purchase-orders/${selectedPoId}/create-receipt`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);

@@ -264,6 +264,44 @@ export class ReceivingService {
     private shipmentTracking: ShipmentTracking | null = null,
   ) {}
 
+  private buildPoReconciliationLines(lines: any[]) {
+    return lines.map((line: any) => ({
+      receivingLineId: line.id,
+      purchaseOrderLineId: line.purchaseOrderLineId || undefined,
+      receivedQty: line.receivedQty || 0,
+      damagedQty: line.damagedQty || 0,
+      unitCost: line.unitCost || undefined,
+    }));
+  }
+
+  private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[]) {
+    if (!order.purchaseOrderId || !this.purchasing) return;
+    await this.purchasing.onReceivingOrderClosed(
+      orderId,
+      this.buildPoReconciliationLines(lines),
+    );
+  }
+
+  private buildCloseResult(order: any, lines: any[], putawayLocationIds?: number[]) {
+    const receivedLines = lines.filter((line: any) => (line.receivedQty || 0) > 0);
+    const locationIds = putawayLocationIds ?? Array.from(new Set(
+      receivedLines
+        .map((line: any) => line.putawayLocationId)
+        .filter((id: any) => typeof id === "number"),
+    ));
+
+    return {
+      success: true,
+      order,
+      linesProcessed: order.receivedLineCount ?? receivedLines.length,
+      unitsReceived: order.receivedTotalUnits ?? receivedLines.reduce(
+        (sum: number, line: any) => sum + (line.receivedQty || 0),
+        0,
+      ),
+      putawayLocationIds: locationIds,
+    };
+  }
+
   // ─── Discard Draft ──────────────────────────────────────────
 
   /**
@@ -366,8 +404,14 @@ export class ReceivingService {
   async close(orderId: number, userId: string | null) {
     const order = await this.storage.getReceivingOrderById(orderId);
     if (!order) throw new ReceivingError("Receiving order not found", 404);
-    if (order.status === "closed" || order.status === "cancelled") {
-      throw new ReceivingError("Order already closed or cancelled");
+    if (order.status === "cancelled") {
+      throw new ReceivingError("Order already cancelled");
+    }
+
+    if (order.status === "closed") {
+      const closedLines = await this.storage.getReceivingLines(orderId);
+      await this.reconcileLinkedPurchaseOrder(orderId, order, closedLines);
+      return this.buildCloseResult(order, closedLines);
     }
 
     const lines = await this.storage.getReceivingLines(orderId);
@@ -619,30 +663,14 @@ export class ReceivingService {
       }, tx);
     });
 
-    // Fire channel sync for all received variants (fire-and-forget)
+    const closedLines = await this.storage.getReceivingLines(orderId);
+    await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines);
 
-    // If this receipt is linked to a PO, update PO line quantities and auto-transition status
-    if (order.purchaseOrderId && this.purchasing) {
-      try {
-        await this.purchasing.onReceivingOrderClosed(orderId, lines.map((l: any) => ({
-          receivingLineId: l.id,
-          purchaseOrderLineId: l.purchaseOrderLineId || undefined,
-          receivedQty: l.receivedQty || 0,
-          damagedQty: l.damagedQty || 0,
-          unitCost: l.unitCost || undefined,
-        })));
-      } catch (err: any) {
-        console.warn(`[Receiving] PO callback failed for order ${orderId}:`, err.message);
-      }
-    }
-
-    return {
-      success: true,
-      order: updated,
-      linesProcessed: linesReceived,
-      unitsReceived: totalReceived,
-      putawayLocationIds: Array.from(putawayLocationIds),
-    };
+    return this.buildCloseResult(
+      updated,
+      closedLines,
+      Array.from(putawayLocationIds),
+    );
   }
 
   // ─── Complete All Lines ───────────────────────────────────────

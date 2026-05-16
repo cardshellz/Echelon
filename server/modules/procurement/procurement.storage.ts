@@ -71,6 +71,7 @@ export interface IProcurementStorage {
   getAllReceivingOrders(): Promise<ReceivingOrder[]>;
   getReceivingOrderById(id: number): Promise<ReceivingOrder | undefined>;
   getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
+  getReceivingOrdersForPurchaseOrder(purchaseOrderId: number): Promise<ReceivingOrder[]>;
   getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]>;
   createReceivingOrder(data: InsertReceivingOrder): Promise<ReceivingOrder>;
   updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>): Promise<ReceivingOrder | null>;
@@ -274,6 +275,12 @@ export const procurementMethods: IProcurementStorage = {
   async getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined> {
     const result = await db.select().from(receivingOrders).where(eq(receivingOrders.receiptNumber, receiptNumber)).limit(1);
     return result[0];
+  },
+
+  async getReceivingOrdersForPurchaseOrder(purchaseOrderId: number): Promise<ReceivingOrder[]> {
+    return await db.select().from(receivingOrders)
+      .where(eq(receivingOrders.purchaseOrderId, purchaseOrderId))
+      .orderBy(desc(receivingOrders.createdAt));
   },
 
   async getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]> {

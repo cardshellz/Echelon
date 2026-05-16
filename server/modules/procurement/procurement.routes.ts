@@ -2575,10 +2575,10 @@ export function registerPurchasingRoutes(app: Express) {
 
   // ── PO ↔ Receiving ─────────────────────────────────────────────────
 
-  app.post("/api/purchase-orders/:id/create-receipt", requirePermission("inventory", "receive"), async (req, res) => {
+  app.post("/api/purchase-orders/:id/create-receipt", requirePermission("inventory", "receive"), requireIdempotency(), async (req, res) => {
     try {
       const ro = await purchasing.createReceiptFromPO(Number(req.params.id), req.session.user?.id);
-      res.status(201).json(ro);
+      res.status((ro as any)?.reusedExisting ? 200 : 201).json(ro);
     } catch (error: any) {
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });

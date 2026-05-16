@@ -84,6 +84,7 @@ interface Storage {
   // PO Receipts
   createPoReceipt(data: any): Promise<any>;
   getPoReceipts(purchaseOrderId: number): Promise<any[]>;
+  getPoReceiptsByLine?(purchaseOrderLineId: number): Promise<any[]>;
 
   // Approval Tiers
   getAllPoApprovalTiers(): Promise<any[]>;
@@ -104,6 +105,7 @@ interface Storage {
 
   // Receiving
   createReceivingOrder(data: any): Promise<any>;
+  getReceivingOrdersForPurchaseOrder?(purchaseOrderId: number): Promise<any[]>;
   generateReceiptNumber(): Promise<string>;
   bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
   getReceivingLineById(id: number): Promise<any>;
@@ -1448,6 +1450,18 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot create receipt for PO in '${po.status}' status`, 400);
     }
 
+    const existingReceipts =
+      typeof storage.getReceivingOrdersForPurchaseOrder === "function"
+        ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId)
+        : [];
+    const reusableReceipt = existingReceipts.find((receipt: any) =>
+      ["draft", "open", "receiving", "verified"].includes(receipt.status),
+    );
+
+    if (reusableReceipt) {
+      return { ...reusableReceipt, reusedExisting: true };
+    }
+
     const lines = await storage.getPurchaseOrderLines(purchaseOrderId);
     const receivableLines = lines.filter((l: any) =>
       // Only product lines are physically received. Discount/fee/tax/rebate/
@@ -1682,6 +1696,17 @@ export function createPurchasingService(db: any, storage: Storage) {
       const poLineUnitsReceived = Math.floor(baseUnitsReceived / poUnitsPerVariant);
       const poLineDamagedReceived = Math.floor(damagedBaseUnits / poUnitsPerVariant);
 
+      const existingReceipts =
+        typeof storage.getPoReceiptsByLine === "function"
+          ? await storage.getPoReceiptsByLine(poLine.id)
+          : [];
+      const alreadyReconciled = existingReceipts.some(
+        (receipt: any) => receipt.receivingLineId === rl.receivingLineId,
+      );
+      if (alreadyReconciled) {
+        continue;
+      }
+
       const newReceivedQty = (poLine.receivedQty || 0) + poLineUnitsReceived;
       const newDamagedQty = (poLine.damagedQty || 0) + poLineDamagedReceived;
       const remaining = poLine.orderQty - newReceivedQty - (poLine.cancelledQty || 0);
@@ -1735,7 +1760,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       l.status === "received" || l.status === "partially_received"
     );
 
-    if (allReceived) {
+    if (allReceived && po.status !== "received" && po.status !== "closed") {
       await storage.updatePurchaseOrderStatusWithHistory(poId, {
         status: "received",
         actualDeliveryDate: new Date(),
@@ -1745,7 +1770,12 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: undefined,
         notes: "All lines fully received"
       });
-    } else if (someReceived && po.status !== "partially_received") {
+    } else if (
+      someReceived &&
+      po.status !== "partially_received" &&
+      po.status !== "received" &&
+      po.status !== "closed"
+    ) {
       await storage.updatePurchaseOrderStatusWithHistory(poId, { status: "partially_received" }, {
         fromStatus: po.status,
         toStatus: "partially_received",
