@@ -684,7 +684,7 @@ export class OperationsDashboardService {
             WHEN COALESCE(demand.active_pending_lines, 0) > 0
               THEN CASE WHEN rt.execution_mode = 'inline'
                 THEN 'active demand waiting on inline replen: '
-                ELSE 'active demand waiting on queued replen: '
+                ELSE 'active demand waiting on manual/admin queued replen: '
               END
                 || demand.active_pending_lines::text || ' line'
                 || CASE WHEN demand.active_pending_lines = 1 THEN '' ELSE 's' END
@@ -717,6 +717,9 @@ export class OperationsDashboardService {
             WHEN COALESCE(demand.active_pending_lines, 0) > 0
               AND rt.execution_mode = 'inline'
             THEN 'auto_execute_replen'
+            WHEN COALESCE(demand.active_pending_lines, 0) > 0
+              AND COALESCE(rt.execution_mode, 'queue') <> 'inline'
+            THEN 'execute_manual_replen'
             WHEN rt.status IN ('pending', 'assigned')
               AND COALESCE(demand.active_pending_lines, 0) = 0
             THEN 'cancel_no_demand'

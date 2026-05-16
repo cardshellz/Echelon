@@ -148,6 +148,7 @@ const ACTION_LABELS: Record<string, string> = {
   auto_execute_replen: "Auto-execute replen",
   complete_inline_replen: "Auto-execute replen",
   execute_or_cancel: "Execute or cancel",
+  execute_manual_replen: "Execute manual replen",
   cancel_no_demand: "Cancel no-demand",
   cancel_duplicate: "Cancel duplicate",
   create_replen_or_exception: "Create task/exception",

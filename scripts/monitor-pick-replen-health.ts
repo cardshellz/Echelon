@@ -9,6 +9,9 @@
  *
  * Scheduler with system-owned pick-bin replen queueing:
  *   npx tsx scripts/monitor-pick-replen-health.ts --notify --queueMissingReplen --json
+ *
+ * Scheduler with all system-owned replen recovery:
+ *   npx tsx scripts/monitor-pick-replen-health.ts --notify --recoverInlineReplen --queueMissingReplen --json
  */
 
 import fs from "node:fs";
@@ -22,6 +25,8 @@ type CliOptions = {
   threshold: number;
   sampleLimit: number;
   dedupeHours: number;
+  recoverInlineReplen: boolean;
+  recoveryLimit: number;
   queueMissingReplen: boolean;
   queueLimit: number;
 };
@@ -35,6 +40,8 @@ function parseArgs(args: string[]): CliOptions {
     threshold: 1,
     sampleLimit: 10,
     dedupeHours: 2,
+    recoverInlineReplen: false,
+    recoveryLimit: 25,
     queueMissingReplen: false,
     queueLimit: 25,
   };
@@ -54,6 +61,10 @@ function parseArgs(args: string[]): CliOptions {
       options.sampleLimit = parsePositiveInt(arg, "--sampleLimit=");
     } else if (arg.startsWith("--dedupeHours=")) {
       options.dedupeHours = parsePositiveInt(arg, "--dedupeHours=");
+    } else if (arg === "--recoverInlineReplen") {
+      options.recoverInlineReplen = true;
+    } else if (arg.startsWith("--recoveryLimit=")) {
+      options.recoveryLimit = parsePositiveInt(arg, "--recoveryLimit=");
     } else if (arg === "--queueMissingReplen") {
       options.queueMissingReplen = true;
     } else if (arg.startsWith("--queueLimit=")) {
@@ -112,6 +123,12 @@ function applyNpmConfigDefaults(options: CliOptions): void {
   );
   if (queueMissing !== null) options.queueMissingReplen = queueMissing;
 
+  const recoverInline = parseBooleanValue(
+    firstEnv("npm_config_recoverinlinereplen", "npm_config_recover_inline_replen"),
+    "--recoverInlineReplen",
+  );
+  if (recoverInline !== null) options.recoverInlineReplen = recoverInline;
+
   const warehouseId = firstEnv("npm_config_warehouseid", "npm_config_warehouse_id");
   if (warehouseId !== undefined && options.warehouseId === null) {
     options.warehouseId = parsePositiveIntValue(Number(warehouseId), "--warehouseId");
@@ -135,6 +152,11 @@ function applyNpmConfigDefaults(options: CliOptions): void {
   const queueLimit = firstEnv("npm_config_queuelimit", "npm_config_queue_limit");
   if (queueLimit !== undefined) {
     options.queueLimit = parsePositiveIntValue(Number(queueLimit), "--queueLimit");
+  }
+
+  const recoveryLimit = firstEnv("npm_config_recoverylimit", "npm_config_recovery_limit");
+  if (recoveryLimit !== undefined) {
+    options.recoveryLimit = parsePositiveIntValue(Number(recoveryLimit), "--recoveryLimit");
   }
 }
 
@@ -184,6 +206,17 @@ function criticalCount(counts: Record<string, number>): number {
   ].reduce((sum, key) => sum + (Number(counts[key]) || 0), 0);
 }
 
+function hasSystemActions(options: CliOptions): boolean {
+  return options.recoverInlineReplen || options.queueMissingReplen;
+}
+
+function outputMode(options: CliOptions): "read-only" | "notify" | "system-actions" | "notify-system-actions" {
+  if (options.notify && hasSystemActions(options)) return "notify-system-actions";
+  if (options.notify) return "notify";
+  if (hasSystemActions(options)) return "system-actions";
+  return "read-only";
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   await loadDotenvIfAvailable();
@@ -198,8 +231,9 @@ async function main() {
   const { notify } = await import("../server/modules/notifications/notifications.service");
 
   try {
-    let missingReplenQueue = null;
-    if (options.queueMissingReplen) {
+    let replenishment: any = null;
+    const getReplenishment = async () => {
+      if (replenishment) return replenishment;
       const {
         InventoryUseCases,
         inventoryStorage,
@@ -211,8 +245,25 @@ async function main() {
       const inventoryLots = createInventoryLotService(db);
       const cogs = createCOGSService(db);
       const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs);
-      const replenishment = createReplenishmentService(db, inventoryCore);
-      missingReplenQueue = await replenishment.queueMissingPickBinReplen({
+      replenishment = createReplenishmentService(db, inventoryCore);
+      return replenishment;
+    };
+
+    let inlineReplenRecovery: any = null;
+    if (options.recoverInlineReplen) {
+      const replen = await getReplenishment();
+      inlineReplenRecovery = await replen.cleanupHealthIssues({
+        mode: "inline_execution",
+        warehouseId: options.warehouseId,
+        limit: options.recoveryLimit,
+        userId: "system:health-monitor",
+      });
+    }
+
+    let missingReplenQueue: any = null;
+    if (options.queueMissingReplen) {
+      const replen = await getReplenishment();
+      missingReplenQueue = await replen.queueMissingPickBinReplen({
         mode: "queue_missing_replen",
         warehouseId: options.warehouseId,
         limit: options.queueLimit,
@@ -249,14 +300,15 @@ async function main() {
           title: critical > 0
             ? `Pick/Replen health has ${critical} critical item${critical === 1 ? "" : "s"}`
             : `Pick/Replen health has ${total} item${total === 1 ? "" : "s"}`,
-          message: missingReplenQueue
-            ? "System queued missing pick-bin replen first. Open Pick/Replen Health for remaining stale tasks, duplicates, unresolved shorts, and allocation exceptions."
+          message: hasSystemActions(options)
+            ? "System replen recovery ran first. Open Pick/Replen Health for remaining manual replen, QA counts, stale tasks, duplicates, unresolved shorts, and allocation exceptions."
             : "Open Pick/Replen Health to clean stale tasks, duplicates, unresolved shorts, and allocation exceptions.",
           data: {
             counts: health.counts,
             total,
             critical,
             warehouseId: options.warehouseId,
+            inlineReplenRecovery,
             missingReplenQueue,
             sampleItems: health.items.map((item) => ({
               id: item.id,
@@ -279,13 +331,19 @@ async function main() {
     }
 
     const output = {
-      mode: options.notify ? "notify" : "dry-run",
+      mode: outputMode(options),
+      readOnly: !hasSystemActions(options),
       warehouseId: options.warehouseId,
       threshold: options.threshold,
       total,
       critical,
       counts: health.counts,
       sampleItems: health.items,
+      systemActions: {
+        inlineReplenRecovery,
+        missingReplenQueue,
+      },
+      inlineReplenRecovery,
       missingReplenQueue,
       notificationSent,
       notificationSuppressed,

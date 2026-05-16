@@ -78,6 +78,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       const result = await replenishment.cleanupHealthIssues({
         mode,
         taskId,
+        warehouseId: req.body?.warehouseId ? Number(req.body.warehouseId) : null,
         limit,
         userId: req.session.user?.id,
       });
