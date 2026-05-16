@@ -485,3 +485,42 @@ Next step:
 - After merge, continue route/API ownership with purchase-order route grouping
   or operator-visible receiving reconciliation retry/status, depending on which
   UI workflow needs the next hardening pass.
+
+### 2026-05-16 - Phase 1 Slice 6: Purchase Order Route Ownership Split
+
+Scope:
+
+- Added `server/modules/procurement/purchase-order.routes.ts` as the core PO
+  route owner while preserving existing purchase-order, PO exception,
+  procurement settings, PO document, PO email, PO receipt, and PO payment URLs.
+- Left `registerPurchasingRoutes(app)` as the public procurement route entry
+  point and mounted the PO registrar from the same location in the route order.
+- Moved the route-level dependencies for PO exception counts, document
+  rendering, email sending, AP payment lookup, idempotent create/send actions,
+  and related-user enrichment out of the procurement route monolith with the
+  handlers that use them.
+- Kept shipment-owned PO views (`/api/purchase-orders/:id/shipments`) and
+  invoice-owned PO views (`/api/purchase-orders/:id/invoices`) in the main file
+  for now because those belong with inbound shipment and AP route ownership
+  passes.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- The PO route file is now an owner, but it is still broad: CRUD, line edits,
+  lifecycle transitions, exception actions, documents, email, receipts, and PO
+  settings live together. That is acceptable for this ownership split, but the
+  next hardening pass should separate high-risk commands from read/document
+  endpoints once the remaining monolith route groups are extracted.
+
+Next step:
+
+- Open the purchase-order route split PR.
+- After merge, continue route/API ownership with vendor catalog and approval
+  settings, then inbound shipment and AP route groups.
