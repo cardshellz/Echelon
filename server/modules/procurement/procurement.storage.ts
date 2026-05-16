@@ -155,6 +155,12 @@ export interface IProcurementStorage {
   createPoReceipt(data: InsertPoReceipt): Promise<PoReceipt>;
   getPoReceipts(purchaseOrderId: number): Promise<PoReceipt[]>;
   getPoReceiptsByLine(purchaseOrderLineId: number): Promise<PoReceipt[]>;
+  reconcilePoReceiptLine(input: {
+    purchaseOrderLineId: number;
+    receivingLineId: number;
+    lineUpdates: Partial<InsertPurchaseOrderLine>;
+    receipt: InsertPoReceipt;
+  }): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
   getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]>;
   getInventoryLotById(id: number): Promise<InventoryLot | undefined>;
   createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot>;
@@ -875,6 +881,60 @@ export const procurementMethods: IProcurementStorage = {
     return await db.select().from(poReceipts)
       .where(eq(poReceipts.purchaseOrderLineId, purchaseOrderLineId))
       .orderBy(desc(poReceipts.createdAt));
+  },
+
+  async reconcilePoReceiptLine(input: {
+    purchaseOrderLineId: number;
+    receivingLineId: number;
+    lineUpdates: Partial<InsertPurchaseOrderLine>;
+    receipt: InsertPoReceipt;
+  }): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }> {
+    try {
+      return await db.transaction(async (tx) => {
+        const existingReceipt = await tx.select()
+          .from(poReceipts)
+          .where(and(
+            eq(poReceipts.purchaseOrderLineId, input.purchaseOrderLineId),
+            eq(poReceipts.receivingLineId, input.receivingLineId),
+          ))
+          .limit(1);
+
+        if (existingReceipt[0]) {
+          return { applied: false, receipt: existingReceipt[0] };
+        }
+
+        const updatedLines = await tx.update(purchaseOrderLines)
+          .set({ ...input.lineUpdates, updatedAt: new Date() })
+          .where(eq(purchaseOrderLines.id, input.purchaseOrderLineId))
+          .returning();
+
+        const insertedReceipts = await tx.insert(poReceipts)
+          .values(input.receipt)
+          .returning();
+
+        return {
+          applied: true,
+          purchaseOrderLine: updatedLines[0] || null,
+          receipt: insertedReceipts[0],
+        };
+      });
+    } catch (error: any) {
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
+        const existingReceipt = await db.select()
+          .from(poReceipts)
+          .where(and(
+            eq(poReceipts.purchaseOrderLineId, input.purchaseOrderLineId),
+            eq(poReceipts.receivingLineId, input.receivingLineId),
+          ))
+          .limit(1);
+
+        if (existingReceipt[0]) {
+          return { applied: false, receipt: existingReceipt[0] };
+        }
+      }
+
+      throw error;
+    }
   },
 
   async getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]> {

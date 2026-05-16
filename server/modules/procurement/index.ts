@@ -25,11 +25,19 @@ export {
   getAllowedLegacyTransitions,
   getAllowedPhysicalTransitions,
 } from "./purchase-order-lifecycle.service";
+export {
+  findOpenPoLineByProduct,
+  reconcilePurchaseOrderReceipt,
+} from "./purchase-order-receipt-reconciliation.service";
 export { createReceivingService } from "./receiving.service";
 export { createShipmentTrackingService } from "./shipment-tracking.service";
 export { renderPoHtml } from "./po-document";
 
 // Service types
 export type { PurchasingService, PurchasingError } from "./purchasing.service";
+export type {
+  ReceiptReconciliationResult,
+  ReceivingReconciliationLine,
+} from "./purchase-order-receipt-reconciliation.service";
 export type { ReceivingService, ReceivingError } from "./receiving.service";
 export type { ShipmentTrackingService, ShipmentTrackingError } from "./shipment-tracking.service";

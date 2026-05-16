@@ -115,6 +115,11 @@ function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
     createPoReceipt: vi.fn().mockResolvedValue({}),
     getPoReceipts: vi.fn(),
     getPoReceiptsByLine: vi.fn().mockResolvedValue([]),
+    reconcilePoReceiptLine: vi.fn().mockImplementation(async (input: any) => ({
+      applied: true,
+      purchaseOrderLine: { id: input.purchaseOrderLineId, ...input.lineUpdates },
+      receipt: input.receipt,
+    })),
     getAllPoApprovalTiers: vi.fn().mockResolvedValue([]),
     getPoApprovalTierById: vi.fn(),
     getMatchingApprovalTier: vi.fn().mockResolvedValue(null),
@@ -463,17 +468,27 @@ describe("onReceivingOrderClosed — auto-match", () => {
     // Variant lookup for unit conversion
     storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1 });
 
-    const receivingLines = [{ receivingLineId: 201, receivedQty: 3, purchaseOrderLineId: undefined }];
+    const receivingLines = [{ receivingLineId: 201, receivedQty: 3, unitCost: 0, purchaseOrderLineId: undefined }];
     await svc.onReceivingOrderClosed(99, receivingLines);
 
-    // After auto-match, the reconciliation loop should update the PO line with receivedQty.
-    // recalculateTotals may also call updatePurchaseOrderLine; we check that at least
-    // ONE call contained receivedQty (the reconciliation update).
-    const callsWithReceivedQty = storage.updatePurchaseOrderLine.mock.calls.filter(
-      (c: any[]) => c[0] === 100 && "receivedQty" in c[1],
-    );
-    expect(callsWithReceivedQty.length).toBeGreaterThan(0);
-    expect(callsWithReceivedQty[0][1].receivedQty).toBeGreaterThan(0);
+    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledOnce();
+    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledWith(expect.objectContaining({
+      purchaseOrderLineId: 100,
+      receivingLineId: 201,
+      lineUpdates: expect.objectContaining({
+        receivedQty: 3,
+        status: "partially_received",
+      }),
+      receipt: expect.objectContaining({
+        purchaseOrderId: 1,
+        purchaseOrderLineId: 100,
+        receivingOrderId: 99,
+        receivingLineId: 201,
+        qtyReceived: 3,
+        actualUnitCostCents: 0,
+        varianceCents: -500,
+      }),
+    }));
   });
 
   it("(9) leaves unlinked when no open PO lines match the product_id", async () => {
@@ -500,11 +515,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
     const receivingLines = [{ receivingLineId: 201, receivedQty: 3, purchaseOrderLineId: undefined }];
     await svc.onReceivingOrderClosed(99, receivingLines);
 
-    // No auto-match: updatePurchaseOrderLine should NOT have been called with receivedQty
-    const callsWithReceivedQty = storage.updatePurchaseOrderLine.mock.calls.filter(
-      (c: any[]) => "receivedQty" in c[1],
-    );
-    expect(callsWithReceivedQty.length).toBe(0);
+    expect(storage.reconcilePoReceiptLine).not.toHaveBeenCalled();
   });
 
   it("(10) leaves unlinked when multiple open PO lines match product_id (ambiguous)", async () => {
@@ -520,11 +531,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
     const receivingLines = [{ receivingLineId: 201, receivedQty: 3, purchaseOrderLineId: undefined }];
     await svc.onReceivingOrderClosed(99, receivingLines);
 
-    // Ambiguous — no receivedQty updates should have happened
-    const callsWithReceivedQty = storage.updatePurchaseOrderLine.mock.calls.filter(
-      (c: any[]) => "receivedQty" in c[1],
-    );
-    expect(callsWithReceivedQty.length).toBe(0);
+    expect(storage.reconcilePoReceiptLine).not.toHaveBeenCalled();
   });
 
   it("skips a receiving line that already has a PO receipt record", async () => {
@@ -556,16 +563,16 @@ describe("onReceivingOrderClosed — auto-match", () => {
       productVariantId: 5,
     });
     storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1 });
-    storage.getPoReceiptsByLine.mockResolvedValue([{ receivingLineId: 201 }]);
+    storage.reconcilePoReceiptLine.mockResolvedValue({
+      applied: false,
+      receipt: { receivingLineId: 201 },
+    });
 
     await svc.onReceivingOrderClosed(99, [
       { receivingLineId: 201, purchaseOrderLineId: 100, receivedQty: 3 },
     ]);
 
-    const callsWithReceivedQty = storage.updatePurchaseOrderLine.mock.calls.filter(
-      (c: any[]) => "receivedQty" in c[1],
-    );
-    expect(callsWithReceivedQty.length).toBe(0);
+    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledOnce();
     expect(storage.createPoReceipt).not.toHaveBeenCalled();
   });
 });
