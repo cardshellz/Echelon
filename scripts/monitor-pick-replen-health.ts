@@ -6,6 +6,9 @@
  *
  * Scheduler/production notification:
  *   npx tsx scripts/monitor-pick-replen-health.ts --notify --json
+ *
+ * Scheduler with system-owned pick-bin replen queueing:
+ *   npx tsx scripts/monitor-pick-replen-health.ts --notify --queueMissingReplen --json
  */
 
 import fs from "node:fs";
@@ -19,6 +22,8 @@ type CliOptions = {
   threshold: number;
   sampleLimit: number;
   dedupeHours: number;
+  queueMissingReplen: boolean;
+  queueLimit: number;
 };
 
 function parseArgs(args: string[]): CliOptions {
@@ -30,6 +35,8 @@ function parseArgs(args: string[]): CliOptions {
     threshold: 1,
     sampleLimit: 10,
     dedupeHours: 2,
+    queueMissingReplen: false,
+    queueLimit: 25,
   };
 
   for (const arg of args) {
@@ -47,20 +54,88 @@ function parseArgs(args: string[]): CliOptions {
       options.sampleLimit = parsePositiveInt(arg, "--sampleLimit=");
     } else if (arg.startsWith("--dedupeHours=")) {
       options.dedupeHours = parsePositiveInt(arg, "--dedupeHours=");
+    } else if (arg === "--queueMissingReplen") {
+      options.queueMissingReplen = true;
+    } else if (arg.startsWith("--queueLimit=")) {
+      options.queueLimit = parsePositiveInt(arg, "--queueLimit=");
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
+
+  applyNpmConfigDefaults(options);
 
   return options;
 }
 
 function parsePositiveInt(arg: string, prefix: string): number {
   const value = Number(arg.slice(prefix.length));
+  return parsePositiveIntValue(value, prefix.slice(0, -1));
+}
+
+function parsePositiveIntValue(value: number, label: string): number {
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${prefix.slice(0, -1)} must be a positive integer`);
+    throw new Error(`${label} must be a positive integer`);
   }
   return value;
+}
+
+function parseBooleanValue(rawValue: string | undefined, label: string): boolean | null {
+  if (rawValue === undefined) return null;
+  const raw = rawValue.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  throw new Error(`${label} must be true or false`);
+}
+
+function firstEnv(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined && value !== "") return value;
+  }
+  return undefined;
+}
+
+function applyNpmConfigDefaults(options: CliOptions): void {
+  const notify = parseBooleanValue(firstEnv("npm_config_notify"), "--notify");
+  if (notify !== null) options.notify = notify;
+
+  const force = parseBooleanValue(firstEnv("npm_config_force"), "--force");
+  if (force !== null) options.force = force;
+
+  const json = parseBooleanValue(firstEnv("npm_config_json"), "--json");
+  if (json !== null) options.json = json;
+
+  const queueMissing = parseBooleanValue(
+    firstEnv("npm_config_queuemissingreplen", "npm_config_queue_missing_replen"),
+    "--queueMissingReplen",
+  );
+  if (queueMissing !== null) options.queueMissingReplen = queueMissing;
+
+  const warehouseId = firstEnv("npm_config_warehouseid", "npm_config_warehouse_id");
+  if (warehouseId !== undefined && options.warehouseId === null) {
+    options.warehouseId = parsePositiveIntValue(Number(warehouseId), "--warehouseId");
+  }
+
+  const threshold = firstEnv("npm_config_threshold");
+  if (threshold !== undefined) {
+    options.threshold = parsePositiveIntValue(Number(threshold), "--threshold");
+  }
+
+  const sampleLimit = firstEnv("npm_config_samplelimit", "npm_config_sample_limit");
+  if (sampleLimit !== undefined) {
+    options.sampleLimit = parsePositiveIntValue(Number(sampleLimit), "--sampleLimit");
+  }
+
+  const dedupeHours = firstEnv("npm_config_dedupehours", "npm_config_dedupe_hours");
+  if (dedupeHours !== undefined) {
+    options.dedupeHours = parsePositiveIntValue(Number(dedupeHours), "--dedupeHours");
+  }
+
+  const queueLimit = firstEnv("npm_config_queuelimit", "npm_config_queue_limit");
+  if (queueLimit !== undefined) {
+    options.queueLimit = parsePositiveIntValue(Number(queueLimit), "--queueLimit");
+  }
 }
 
 async function loadDotenvIfAvailable(): Promise<void> {
@@ -123,6 +198,27 @@ async function main() {
   const { notify } = await import("../server/modules/notifications/notifications.service");
 
   try {
+    let missingReplenQueue = null;
+    if (options.queueMissingReplen) {
+      const {
+        InventoryUseCases,
+        inventoryStorage,
+        createInventoryLotService,
+        createCOGSService,
+        createReplenishmentService,
+      } = await import("../server/modules/inventory");
+
+      const inventoryLots = createInventoryLotService(db);
+      const cogs = createCOGSService(db);
+      const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs);
+      const replenishment = createReplenishmentService(db, inventoryCore);
+      missingReplenQueue = await replenishment.queueMissingPickBinReplen({
+        mode: "queue_missing_replen",
+        warehouseId: options.warehouseId,
+        limit: options.queueLimit,
+      });
+    }
+
     const operationsDashboard = createOperationsDashboardService(db);
     const health = await operationsDashboard.getPickReplenHealth({
       warehouseId: options.warehouseId,
@@ -153,12 +249,15 @@ async function main() {
           title: critical > 0
             ? `Pick/Replen health has ${critical} critical item${critical === 1 ? "" : "s"}`
             : `Pick/Replen health has ${total} item${total === 1 ? "" : "s"}`,
-          message: "Open Pick/Replen Health to clean stale tasks, duplicates, unresolved shorts, and allocation exceptions.",
+          message: missingReplenQueue
+            ? "System queued missing pick-bin replen first. Open Pick/Replen Health for remaining stale tasks, duplicates, unresolved shorts, and allocation exceptions."
+            : "Open Pick/Replen Health to clean stale tasks, duplicates, unresolved shorts, and allocation exceptions.",
           data: {
             counts: health.counts,
             total,
             critical,
             warehouseId: options.warehouseId,
+            missingReplenQueue,
             sampleItems: health.items.map((item) => ({
               id: item.id,
               type: item.type,
@@ -187,6 +286,7 @@ async function main() {
       critical,
       counts: health.counts,
       sampleItems: health.items,
+      missingReplenQueue,
       notificationSent,
       notificationSuppressed,
     };

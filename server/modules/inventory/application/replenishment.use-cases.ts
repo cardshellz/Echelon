@@ -1719,21 +1719,31 @@ export class ReplenishmentUseCases {
         continue;
       }
 
-      const created = await this.createAndExecuteReplen(variantId, locationId, "system:health-replen", {
-        blocksShipment: false,
-        forceWhenAtOrBelowZero: Number(row.active_pending_lines ?? 0) > 0,
-        triggeredBy: "health_queue",
-      });
+      try {
+        const created = await this.createAndExecuteReplen(variantId, locationId, "system:health-replen", {
+          blocksShipment: false,
+          forceWhenAtOrBelowZero: Number(row.active_pending_lines ?? 0) > 0,
+          triggeredBy: "health_queue",
+        });
 
-      if (created?.task) {
-        queuedTaskIds.add(Number(created.task.id));
-      } else {
+        if (created?.task) {
+          queuedTaskIds.add(Number(created.task.id));
+        } else {
+          skipped.push({
+            variantId,
+            locationId,
+            sku: row.sku ?? null,
+            locationCode: row.location_code ?? null,
+            reason: "replen resolver did not create an active task",
+          });
+        }
+      } catch (error) {
         skipped.push({
           variantId,
           locationId,
           sku: row.sku ?? null,
           locationCode: row.location_code ?? null,
-          reason: "replen resolver did not create an active task",
+          reason: error instanceof Error ? error.message : String(error),
         });
       }
     }
