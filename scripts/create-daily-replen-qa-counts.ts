@@ -1,5 +1,5 @@
 /**
- * Create a small daily random QA cycle count sample for replen/bin accuracy.
+ * Create a small daily rotating QA cycle count sample for replen/bin accuracy.
  *
  * Dry run:
  *   npx tsx scripts/create-daily-replen-qa-counts.ts --json
@@ -16,8 +16,22 @@ import { cycleCountItems, cycleCounts } from "@shared/schema";
 type CliOptions = {
   execute: boolean;
   json: boolean;
-  limit: number;
+  force: boolean;
+  limit: number | null;
+  cooldownDays: number | null;
+  includePickBins: boolean | null;
+  includePalletLocations: boolean | null;
   warehouseId: number | null;
+};
+
+type QaConfig = {
+  enabled: boolean;
+  limit: number;
+  cooldownDays: number;
+  includePickBins: boolean;
+  includePalletLocations: boolean;
+  source: "warehouse" | "default" | "fallback";
+  settingsId: number | null;
 };
 
 type CandidateLocation = {
@@ -29,13 +43,19 @@ type CandidateLocation = {
   is_pickable: number | boolean | null;
   total_qty: string | number | null;
   has_assignment: boolean;
+  last_counted_at: string | Date | null;
+  inside_cooldown: boolean;
 };
 
 function parseArgs(args: string[]): CliOptions {
   const options: CliOptions = {
     execute: false,
     json: false,
-    limit: 2,
+    force: false,
+    limit: null,
+    cooldownDays: null,
+    includePickBins: null,
+    includePalletLocations: null,
     warehouseId: null,
   };
 
@@ -44,8 +64,16 @@ function parseArgs(args: string[]): CliOptions {
       options.execute = true;
     } else if (arg === "--json") {
       options.json = true;
+    } else if (arg === "--force") {
+      options.force = true;
     } else if (arg.startsWith("--limit=")) {
       options.limit = parsePositiveInt(arg, "--limit=");
+    } else if (arg.startsWith("--cooldownDays=")) {
+      options.cooldownDays = parseNonNegativeInt(arg, "--cooldownDays=");
+    } else if (arg.startsWith("--includePickBins=")) {
+      options.includePickBins = parseBoolean(arg, "--includePickBins=");
+    } else if (arg.startsWith("--includePalletLocations=")) {
+      options.includePalletLocations = parseBoolean(arg, "--includePalletLocations=");
     } else if (arg.startsWith("--warehouseId=")) {
       options.warehouseId = parsePositiveInt(arg, "--warehouseId=");
     } else {
@@ -62,6 +90,25 @@ function parsePositiveInt(arg: string, prefix: string): number {
     throw new Error(`${prefix.slice(0, -1)} must be a positive integer`);
   }
   return value;
+}
+
+function parseNonNegativeInt(arg: string, prefix: string): number {
+  const value = Number(arg.slice(prefix.length));
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${prefix.slice(0, -1)} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function parseBoolean(arg: string, prefix: string): boolean {
+  const raw = arg.slice(prefix.length).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  throw new Error(`${prefix.slice(0, -1)} must be true or false`);
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 async function loadDotenvIfAvailable(): Promise<void> {
@@ -105,9 +152,102 @@ function countName(day: string, warehouseId: number | null): string {
     : `Daily Replen QA - ${day}`;
 }
 
-async function selectCandidates(db: any, limit: number, warehouseId: number | null): Promise<CandidateLocation[]> {
+function intFlag(value: unknown, fallback: boolean): boolean {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+  return fallback;
+}
+
+async function resolveQaConfig(db: any, options: CliOptions): Promise<QaConfig> {
+  const settingsResult = options.warehouseId
+    ? await db.execute(sql`
+        SELECT
+          id,
+          warehouse_id,
+          warehouse_code,
+          replen_qa_daily_enabled,
+          replen_qa_daily_sample_limit,
+          replen_qa_cooldown_days,
+          replen_qa_include_pick_bins,
+          replen_qa_include_pallet_locations
+        FROM inventory.warehouse_settings
+        WHERE warehouse_id = ${options.warehouseId}
+           OR warehouse_code = 'DEFAULT'
+        ORDER BY CASE WHEN warehouse_id = ${options.warehouseId} THEN 0 ELSE 1 END
+        LIMIT 1
+      `)
+    : await db.execute(sql`
+        SELECT
+          id,
+          warehouse_id,
+          warehouse_code,
+          replen_qa_daily_enabled,
+          replen_qa_daily_sample_limit,
+          replen_qa_cooldown_days,
+          replen_qa_include_pick_bins,
+          replen_qa_include_pallet_locations
+        FROM inventory.warehouse_settings
+        WHERE warehouse_code = 'DEFAULT'
+        LIMIT 1
+      `);
+
+  const settings = settingsResult.rows?.[0] ?? null;
+  const enabled = options.force
+    ? true
+    : intFlag(settings?.replen_qa_daily_enabled, true);
+  const limit = clampInt(
+    options.limit ?? Number(settings?.replen_qa_daily_sample_limit ?? 2),
+    1,
+    50,
+  );
+  const cooldownDays = clampInt(
+    options.cooldownDays ?? Number(settings?.replen_qa_cooldown_days ?? 30),
+    0,
+    365,
+  );
+  const includePickBins = options.includePickBins ?? intFlag(settings?.replen_qa_include_pick_bins, true);
+  const includePalletLocations =
+    options.includePalletLocations ?? intFlag(settings?.replen_qa_include_pallet_locations, true);
+
+  return {
+    enabled,
+    limit,
+    cooldownDays,
+    includePickBins,
+    includePalletLocations,
+    source: settings
+      ? settings.warehouse_id === options.warehouseId && options.warehouseId != null
+        ? "warehouse"
+        : "default"
+      : "fallback",
+    settingsId: settings?.id ?? null,
+  };
+}
+
+async function selectCandidates(db: any, config: QaConfig, warehouseId: number | null): Promise<CandidateLocation[]> {
   const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
+  const scopeParts = [];
+  if (config.includePickBins) {
+    scopeParts.push(sql`(wl.is_pickable = 1 OR wl.location_type = 'pick')`);
+  }
+  if (config.includePalletLocations) {
+    scopeParts.push(sql`(wl.bin_type = 'pallet' OR wl.location_type = 'pallet')`);
+  }
+  if (scopeParts.length === 0) return [];
+  const scopeFilter = sql`AND (${sql.join(scopeParts, sql` OR `)})`;
+
   const result = await db.execute(sql`
+    WITH last_counts AS (
+      SELECT
+        cci.warehouse_location_id,
+        MAX(COALESCE(cc.completed_at, cc.started_at, cc.created_at)) AS last_counted_at
+      FROM inventory.cycle_count_items cci
+      JOIN inventory.cycle_counts cc ON cc.id = cci.cycle_count_id
+      WHERE cc.status <> 'cancelled'
+      GROUP BY cci.warehouse_location_id
+    )
     SELECT
       wl.id,
       wl.code,
@@ -116,6 +256,13 @@ async function selectCandidates(db: any, limit: number, warehouseId: number | nu
       wl.bin_type,
       wl.is_pickable,
       COALESCE(SUM(il.variant_qty), 0) AS total_qty,
+      lc.last_counted_at,
+      CASE
+        WHEN lc.last_counted_at IS NULL THEN false
+        WHEN ${config.cooldownDays} <= 0 THEN false
+        WHEN lc.last_counted_at >= NOW() - make_interval(days => ${config.cooldownDays}) THEN true
+        ELSE false
+      END AS inside_cooldown,
       EXISTS (
         SELECT 1
         FROM warehouse.product_locations pl
@@ -125,13 +272,11 @@ async function selectCandidates(db: any, limit: number, warehouseId: number | nu
     FROM warehouse.warehouse_locations wl
     LEFT JOIN inventory.inventory_levels il
       ON il.warehouse_location_id = wl.id
+    LEFT JOIN last_counts lc
+      ON lc.warehouse_location_id = wl.id
     WHERE wl.is_active = 1
       AND wl.cycle_count_freeze_id IS NULL
-      AND (
-        wl.is_pickable = 1
-        OR wl.bin_type = 'pallet'
-        OR wl.location_type = 'pallet'
-      )
+      ${scopeFilter}
       ${warehouseFilter}
       AND (
         EXISTS (
@@ -154,9 +299,17 @@ async function selectCandidates(db: any, limit: number, warehouseId: number | nu
         WHERE cc.status IN ('draft', 'in_progress', 'pending_review')
           AND counted.code = UPPER(wl.code)
       )
-    GROUP BY wl.id, wl.code, wl.warehouse_id, wl.location_type, wl.bin_type, wl.is_pickable
-    ORDER BY random()
-    LIMIT ${limit}
+    GROUP BY wl.id, wl.code, wl.warehouse_id, wl.location_type, wl.bin_type, wl.is_pickable, lc.last_counted_at
+    ORDER BY
+      CASE
+        WHEN lc.last_counted_at IS NULL THEN 0
+        WHEN ${config.cooldownDays} <= 0 THEN 1
+        WHEN lc.last_counted_at < NOW() - make_interval(days => ${config.cooldownDays}) THEN 1
+        ELSE 2
+      END,
+      lc.last_counted_at ASC NULLS FIRST,
+      random()
+    LIMIT ${config.limit}
   `);
 
   return (result.rows ?? []) as CandidateLocation[];
@@ -248,6 +401,7 @@ async function main() {
   const name = countName(day, options.warehouseId);
 
   try {
+    const config = await resolveQaConfig(db, options);
     const existing = await db.execute(sql`
       SELECT id, status, location_codes
       FROM inventory.cycle_counts
@@ -258,7 +412,9 @@ async function main() {
     const existingCount = existing.rows?.[0] ?? null;
     const candidates = existingCount
       ? []
-      : await selectCandidates(db, options.limit, options.warehouseId);
+      : config.enabled
+        ? await selectCandidates(db, config, options.warehouseId)
+        : [];
 
     let cycleCountId: number | null = existingCount?.id ?? null;
     let createdItems = 0;
@@ -303,7 +459,7 @@ async function main() {
       mode: options.execute ? "execute" : "dry-run",
       name,
       warehouseId: options.warehouseId,
-      limit: options.limit,
+      config,
       existingCount,
       selectedCount: candidates.length,
       cycleCountId,
@@ -317,6 +473,8 @@ async function main() {
         isPickable: location.is_pickable,
         totalQty: Number(location.total_qty ?? 0),
         hasAssignment: location.has_assignment,
+        lastCountedAt: location.last_counted_at,
+        insideCooldown: location.inside_cooldown,
       })),
     };
 
@@ -324,6 +482,8 @@ async function main() {
       console.log(JSON.stringify(output, null, 2));
     } else if (existingCount) {
       console.log(`Daily replen QA already exists: #${existingCount.id} (${existingCount.status})`);
+    } else if (!config.enabled) {
+      console.log("Daily replen QA is disabled for this scope.");
     } else if (options.execute) {
       console.log(`Created daily replen QA count #${cycleCountId} for ${candidates.length} location(s).`);
     } else {
