@@ -81,21 +81,31 @@ function parseArgs(args: string[]): CliOptions {
     }
   }
 
+  applyNpmConfigDefaults(options);
+
   return options;
 }
 
 function parsePositiveInt(arg: string, prefix: string): number {
   const value = Number(arg.slice(prefix.length));
+  return parsePositiveIntValue(value, prefix.slice(0, -1));
+}
+
+function parsePositiveIntValue(value: number, label: string): number {
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${prefix.slice(0, -1)} must be a positive integer`);
+    throw new Error(`${label} must be a positive integer`);
   }
   return value;
 }
 
 function parseNonNegativeInt(arg: string, prefix: string): number {
   const value = Number(arg.slice(prefix.length));
+  return parseNonNegativeIntValue(value, prefix.slice(0, -1));
+}
+
+function parseNonNegativeIntValue(value: number, label: string): number {
   if (!Number.isInteger(value) || value < 0) {
-    throw new Error(`${prefix.slice(0, -1)} must be a non-negative integer`);
+    throw new Error(`${label} must be a non-negative integer`);
   }
   return value;
 }
@@ -105,6 +115,55 @@ function parseBoolean(arg: string, prefix: string): boolean {
   if (["1", "true", "yes", "on"].includes(raw)) return true;
   if (["0", "false", "no", "off"].includes(raw)) return false;
   throw new Error(`${prefix.slice(0, -1)} must be true or false`);
+}
+
+function parseBooleanValue(rawValue: string | undefined, label: string): boolean | null {
+  if (rawValue === undefined) return null;
+  const raw = rawValue.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  throw new Error(`${label} must be true or false`);
+}
+
+function firstEnv(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined && value !== "") return value;
+  }
+  return undefined;
+}
+
+function applyNpmConfigDefaults(options: CliOptions): void {
+  const execute = parseBooleanValue(firstEnv("npm_config_execute"), "--execute");
+  if (execute !== null) options.execute = execute;
+
+  const force = parseBooleanValue(firstEnv("npm_config_force"), "--force");
+  if (force !== null) options.force = force;
+
+  if (options.limit === null) {
+    const value = firstEnv("npm_config_limit");
+    if (value !== undefined) options.limit = parsePositiveIntValue(Number(value), "--limit");
+  }
+
+  if (options.cooldownDays === null) {
+    const value = firstEnv("npm_config_cooldowndays", "npm_config_cooldown_days");
+    if (value !== undefined) options.cooldownDays = parseNonNegativeIntValue(Number(value), "--cooldownDays");
+  }
+
+  if (options.includePickBins === null) {
+    const value = firstEnv("npm_config_includepickbins", "npm_config_include_pick_bins");
+    options.includePickBins = parseBooleanValue(value, "--includePickBins");
+  }
+
+  if (options.includePalletLocations === null) {
+    const value = firstEnv("npm_config_includepalletlocations", "npm_config_include_pallet_locations");
+    options.includePalletLocations = parseBooleanValue(value, "--includePalletLocations");
+  }
+
+  if (options.warehouseId === null) {
+    const value = firstEnv("npm_config_warehouseid", "npm_config_warehouse_id");
+    if (value !== undefined) options.warehouseId = parsePositiveIntValue(Number(value), "--warehouseId");
+  }
 }
 
 function clampInt(value: number, min: number, max: number): number {
@@ -230,7 +289,7 @@ async function selectCandidates(db: any, config: QaConfig, warehouseId: number |
   const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
   const scopeParts = [];
   if (config.includePickBins) {
-    scopeParts.push(sql`(wl.is_pickable = 1 OR wl.location_type = 'pick')`);
+    scopeParts.push(sql`(wl.location_type = 'pick' AND wl.is_pickable = 1)`);
   }
   if (config.includePalletLocations) {
     scopeParts.push(sql`(wl.bin_type = 'pallet' OR wl.location_type = 'pallet')`);
