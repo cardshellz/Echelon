@@ -1,0 +1,220 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import express from "express";
+import type { Express, Request, Response, NextFunction } from "express";
+import http from "http";
+import { AddressInfo } from "net";
+
+const mocks = vi.hoisted(() => ({
+  procurement: {
+    getReorderAnalysisData: vi.fn(),
+    getOpenPoSummaryReport: vi.fn(),
+    getDashboardData: vi.fn(),
+    getReorderExclusionRules: vi.fn(),
+    getTotalExcludedProducts: vi.fn(),
+    getExclusionRuleMatchCount: vi.fn(),
+    createReorderExclusionRule: vi.fn(),
+    deleteReorderExclusionRule: vi.fn(),
+    setProductReorderExcluded: vi.fn(),
+    getLatestAutoDraftRun: vi.fn(),
+    getAutoDraftSettings: vi.fn(),
+    updateAutoDraftSettings: vi.fn(),
+  },
+  inventory: {
+    getVelocityLookbackDays: vi.fn(),
+    updateVelocityLookbackDays: vi.fn(),
+  },
+  db: {
+    execute: vi.fn(),
+    select: vi.fn(),
+  },
+  runAutoDraftJob: vi.fn(),
+}));
+
+vi.mock("../../../../routes/middleware", () => {
+  const pass = (req: Request, _res: Response, next: NextFunction) => {
+    (req as any).user = { id: "admin-user", role: "admin" };
+    (req as any).session = { user: { id: "admin-user", role: "admin" } };
+    next();
+  };
+  return {
+    requirePermission: () => pass,
+  };
+});
+
+vi.mock("../..", () => ({ procurementStorage: mocks.procurement }));
+vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.inventory }));
+vi.mock("../../../../db", () => ({ db: mocks.db }));
+vi.mock("../../../../storage/base", () => ({
+  products: {},
+  reorderExclusionRules: {},
+}));
+vi.mock("../../../../jobs/auto-draft.job", () => ({
+  runAutoDraftJob: mocks.runAutoDraftJob,
+}));
+
+import {
+  registerPurchasingRecommendationAdminRoutes,
+  registerPurchasingRecommendationRoutes,
+} from "../../purchasing-recommendation.routes";
+
+function buildApp(): Express {
+  const app = express();
+  app.use(express.json());
+  registerPurchasingRecommendationRoutes(app);
+  registerPurchasingRecommendationAdminRoutes(app);
+  return app;
+}
+
+function startServer(app: Express): Promise<{ url: string; close: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const server = http.createServer(app).listen(0, () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+describe("purchasing recommendation routes", () => {
+  let server: { url: string; close: () => Promise<void> } | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.db.execute.mockResolvedValue({ rows: [] });
+    mocks.db.select.mockReturnValue({ from: vi.fn().mockResolvedValue([]) });
+    mocks.runAutoDraftJob.mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    if (server) await server.close();
+    server = undefined;
+  });
+
+  it("computes purchasing KPIs from reorder analysis and open PO pipeline", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(10);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        total_pieces: 3,
+        total_reserved_pieces: 1,
+        total_outbound_pieces: 10,
+        on_order_pieces: 0,
+        lead_time_days: null,
+        safety_stock_days: null,
+        unit_cost_cents: 250,
+      },
+      {
+        total_pieces: 200,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 1,
+        on_order_pieces: 0,
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        unit_cost_cents: 100,
+      },
+    ]);
+    mocks.db.execute.mockResolvedValue({
+      rows: [
+        { key: "default_lead_time_days", value: "4" },
+        { key: "default_safety_stock_days", value: "3" },
+      ],
+    });
+    mocks.procurement.getOpenPoSummaryReport.mockResolvedValue([
+      { status: "sent", total_value_cents: "5000", total_lines: "2" },
+      { status: "draft", total_value_cents: "1000", total_lines: "10" },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/kpis");
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      criticalRestocks: 1,
+      upcomingRestocks: 0,
+      idleCapitalCents: 20000,
+      inboundPipelineValueCents: 5000,
+      totalOpenLines: 2,
+    });
+    expect(body.lastComputedAt).toEqual(expect.any(String));
+  });
+
+  it("returns reorder analysis items and summary with configured lookback", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 5,
+        variant_id: 51,
+        base_sku: "SKU-P1",
+        product_name: "Product",
+        variant_count: 1,
+        total_pieces: 5,
+        total_reserved_pieces: 1,
+        total_outbound_pieces: 60,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        last_received_at: "2026-05-01",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+
+    expect(status).toBe(200);
+    expect(mocks.procurement.getReorderAnalysisData).toHaveBeenCalledWith(30);
+    expect(body).toMatchObject({
+      lookbackDays: 30,
+      summary: {
+        totalProducts: 1,
+        outOfStock: 0,
+        belowReorderPoint: 1,
+        orderSoon: 0,
+        noMovement: 0,
+        totalOnHand: 5,
+        excludedCount: 0,
+      },
+      items: [
+        {
+          productId: 5,
+          productVariantId: 51,
+          sku: "SKU-P1",
+          available: 4,
+          avgDailyUsage: 2,
+          reorderPoint: 6,
+          suggestedOrderQty: 1,
+          suggestedOrderPieces: 10,
+          orderUomLabel: "Box",
+          status: "order_now",
+        },
+      ],
+    });
+  });
+
+  it("starts the auto-draft job for an admin user without awaiting completion", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft/run");
+
+    expect(status).toBe(202);
+    expect(mocks.runAutoDraftJob).toHaveBeenCalledWith({
+      triggeredBy: "manual",
+      triggeredByUser: "admin-user",
+    });
+    expect(body).toEqual({ message: "Auto-draft job started" });
+  });
+});
