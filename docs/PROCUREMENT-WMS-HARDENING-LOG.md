@@ -562,3 +562,43 @@ Next step:
 - Open the vendor catalog / purchasing admin route split PR.
 - After merge, continue route/API ownership with inbound shipment and landed
   cost routes, then AP invoice/payment routes.
+
+### 2026-05-16 - Phase 1 Slice 8: Inbound Shipment and Landed Cost Route Split
+
+Scope:
+
+- Added `server/modules/procurement/inbound-shipment.routes.ts` as the owner
+  for inbound shipment tracking, shipment line import/dimension routes,
+  landed-cost rows, shipment-cost AP bridge routes, allocation/finalization,
+  and PO-to-shipment cross references.
+- Preserved the existing inbound shipment, shipment cost, allocation, and
+  `/api/purchase-orders/:id/shipments` URLs while mounting the new registrar
+  from `registerPurchasingRoutes(app)` at the same point in route order.
+- Removed shipment-tracking route dependencies from the main procurement route
+  file so the remaining monolith no longer owns shipment lifecycle endpoint
+  wiring.
+- Kept shipment-cost AP bridge endpoints with inbound shipments for now because
+  operators reach those actions from the shipment landed-cost workflow.
+- Added focused route coverage for shipment list filter parsing, delivered
+  notification emission, PO-line import request parsing, and cost enrichment
+  delegation.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/add-lines-from-po.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+
+Remaining risk:
+
+- The new route owner is still a broad shipment/lifecycle/cost owner. That is
+  intentional for this extraction slice; future hardening should split AP
+  invoice/payment ownership and then tighten shipment command/read boundaries
+  once all large route groups have first-class owners.
+
+Next step:
+
+- Open the inbound shipment route split PR.
+- After merge, continue route/API ownership with AP invoice/payment routes,
+  then decide whether the remaining reports/notifications surface should stay
+  in the public procurement route registrar or move into narrower owners.
