@@ -35,6 +35,7 @@ export { createReplenishmentService, ReplenishmentUseCases as ReplenishmentServi
 export { createCycleCountService, CycleCountUseCases as CycleCountService } from "./application/cycle-count.use-cases";
 export { createBreakAssemblyService, BreakAssemblyUseCases as BreakAssemblyService } from "./application/break-assembly.use-cases";
 export { createCOGSService, COGSService } from "./cogs.service";
+export { registerReplenishmentRoutes } from "./replenishment.routes";
 
 // Service types
 export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "./atp.service";
