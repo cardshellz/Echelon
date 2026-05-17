@@ -6,14 +6,15 @@ import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
 import { requirePermission, requireAuth, requireInternalApiKey } from "../../routes/middleware";
-import * as notificationService from "../notifications/notifications.service";
 import { sql } from "drizzle-orm";
 import { db } from "../../db";
+import { registerNotificationRoutes } from "../notifications/notifications.routes";
 import { registerReceivingRoutes } from "./receiving.routes";
 import { registerPurchaseOrderRoutes } from "./purchase-order.routes";
 import { registerPurchasingAdminRoutes } from "./purchasing-admin.routes";
 import { registerInboundShipmentRoutes } from "./inbound-shipment.routes";
 import { registerApLedgerRoutes } from "./ap-ledger.routes";
+import { registerProcurementReportRoutes } from "./procurement-report.routes";
 
 export function registerPurchasingRoutes(app: Express) {
   // ===== VENDORS API =====
@@ -1461,221 +1462,13 @@ export function registerPurchasingRoutes(app: Express) {
   registerPurchaseOrderRoutes(app);
   registerPurchasingAdminRoutes(app);
 
-  // FINANCIAL REPORTING ENDPOINTS
-  // ════════════════════════════════════════════════════════════════════
-
-  // --- Order Profitability ---
-  app.get("/api/reports/order-profitability", requirePermission("inventory", "view"), async (req, res) => {
-    try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
-      const offset = Number(req.query.offset) || 0;
-
-      const rows = await storage.getOrderProfitabilityReport(limit, offset);
-
-      res.json({ orders: rows });
-    } catch (error: any) {
-      console.error("Error fetching order profitability:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch order profitability" });
-    }
-  });
-
-  // --- Product Profitability ---
-  app.get("/api/reports/product-profitability", requirePermission("inventory", "view"), async (req, res) => {
-    try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
-      const offset = Number(req.query.offset) || 0;
-
-      const rows = await storage.getProductProfitabilityReport(limit, offset);
-
-      res.json({ products: rows });
-    } catch (error: any) {
-      console.error("Error fetching product profitability:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch product profitability" });
-    }
-  });
-
-  // --- Inventory Valuation (via lot service) ---
-  app.get("/api/reports/inventory-valuation", requirePermission("inventory", "view"), async (req, res) => {
-    try {
-      const { inventoryLots } = req.app.locals.services;
-      const valuation = await inventoryLots.getInventoryValuation();
-      res.json(valuation);
-    } catch (error: any) {
-      console.error("Error computing inventory valuation:", error);
-      res.status(500).json({ error: error.message || "Failed to compute inventory valuation" });
-    }
-  });
-
-  // --- Vendor Spend ---
-  app.get("/api/reports/vendor-spend", requirePermission("purchasing", "view"), async (req, res) => {
-    try {
-      const rows = await storage.getVendorSpendReport();
-
-      res.json({ vendors: rows });
-    } catch (error: any) {
-      console.error("Error fetching vendor spend:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch vendor spend" });
-    }
-  });
-
-  // --- Cost Variance (PO cost vs actual receipt cost) ---
-  app.get("/api/reports/cost-variance", requirePermission("purchasing", "view"), async (req, res) => {
-    try {
-      const rows = await storage.getCostVarianceReport();
-
-      res.json({ variances: rows });
-    } catch (error: any) {
-      console.error("Error fetching cost variance:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch cost variance" });
-    }
-  });
-
-  // --- Open PO Summary ---
-  app.get("/api/reports/open-po-summary", requirePermission("purchasing", "view"), async (req, res) => {
-    try {
-      const rows = await storage.getOpenPoSummaryReport();
-
-      const total = (rows as any[]).reduce(
-        (acc: any, r: any) => ({
-          poCount: acc.poCount + Number(r.po_count),
-          valueCents: acc.valueCents + Number(r.total_value_cents || 0),
-        }),
-        { poCount: 0, valueCents: 0 },
-      );
-
-      res.json({ byStatus: rows, total });
-    } catch (error: any) {
-      console.error("Error fetching open PO summary:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch open PO summary" });
-    }
-  });
-
-  // --- PO Aging ---
-  app.get("/api/reports/po-aging", requirePermission("purchasing", "view"), async (req, res) => {
-    try {
-      const rows = await storage.getPoAgingReport();
-
-      res.json({ orders: rows });
-    } catch (error: any) {
-      console.error("Error fetching PO aging:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch PO aging" });
-    }
-  });
-
-  // --- Expected Receipts ---
-  app.get("/api/reports/expected-receipts", requirePermission("purchasing", "view"), async (req, res) => {
-    try {
-      const rows = await storage.getExpectedReceiptsReport();
-
-      res.json({ receipts: rows });
-    } catch (error: any) {
-      console.error("Error fetching expected receipts:", error);
-      res.status(500).json({ error: error.message || "Failed to fetch expected receipts" });
-    }
-  });
+  registerProcurementReportRoutes(app);
 
   registerInboundShipmentRoutes(app);
 
   registerApLedgerRoutes(app);
 
-  // ============================================================
-  // NOTIFICATIONS
-  // ============================================================
-
-  // Get notifications for the current user
-  app.get("/api/notifications", requireAuth, async (req, res) => {
-    try {
-      const userId = (req as any).user?.id ?? req.session.user!.id;
-      const unreadOnly = req.query.unreadOnly === "true";
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
-      const offset = parseInt(req.query.offset as string) || 0;
-      const rows = await notificationService.getUserNotifications(userId, { unreadOnly, limit, offset });
-      res.json(rows);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Get unread count (for badge)
-  app.get("/api/notifications/unread-count", requireAuth, async (req, res) => {
-    try {
-      const userId = (req as any).user?.id ?? req.session.user!.id;
-      const count = await notificationService.getUnreadCount(userId);
-      res.json({ count });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Mark single notification as read
-  app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
-    try {
-      const userId = (req as any).user?.id ?? req.session.user!.id;
-      await notificationService.markRead(parseInt(req.params.id), userId);
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Mark all notifications as read
-  app.post("/api/notifications/read-all", requireAuth, async (req, res) => {
-    try {
-      const userId = (req as any).user?.id ?? req.session.user!.id;
-      await notificationService.markAllRead(userId);
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Get notification preferences for the current user
-  app.get("/api/notification-preferences", requireAuth, async (req, res) => {
-    try {
-      const userId = (req as any).user?.id ?? req.session.user!.id;
-      const prefs = await notificationService.getPreferencesForUser(userId);
-      res.json(prefs);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Set a user-specific notification preference
-  app.put("/api/notification-preferences/:typeId", requireAuth, async (req, res) => {
-    try {
-      const userId = (req as any).user?.id ?? req.session.user!.id;
-      const typeId = parseInt(req.params.typeId);
-      const { enabled } = req.body;
-      if (typeof enabled !== "boolean") {
-        return res.status(400).json({ error: "enabled (boolean) is required" });
-      }
-      await notificationService.setUserPreference(userId, typeId, enabled);
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Reset user's notification preferences to role defaults
-  app.delete("/api/notification-preferences", requireAuth, async (req, res) => {
-    try {
-      const userId = (req as any).user?.id ?? req.session.user!.id;
-      await notificationService.resetUserPreferences(userId);
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // List all notification types (admin only, for settings)
-  app.get("/api/notification-types", requirePermission("settings", "view"), async (req, res) => {
-    try {
-      const types = await notificationService.getAllNotificationTypes();
-      res.json(types);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+  registerNotificationRoutes(app);
 
   // ===== PURCHASING DASHBOARD ROUTES =====
 

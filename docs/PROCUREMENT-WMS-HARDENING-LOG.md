@@ -642,3 +642,44 @@ Next step:
 - After merge, finish route/API ownership by deciding whether procurement
   reports, notifications, replenishment admin, and auto-draft settings remain
   in the public procurement registrar or move into smaller route owners.
+
+### 2026-05-17 - Phase 1 Slice 10: Reports and Notifications Route Split
+
+Scope:
+
+- Added `server/modules/procurement/procurement-report.routes.ts` as the owner
+  for financial/procurement report endpoints under `/api/reports/*`.
+- Added `server/modules/notifications/notifications.routes.ts` as the owner
+  for core user notification, notification preference, unread-count, and
+  notification-type endpoints.
+- Preserved the existing public URLs and mount order by registering the new
+  report owner before inbound shipment/AP routes and the notification owner
+  before the remaining purchasing dashboard routes.
+- Removed report and notification handler blocks from
+  `server/modules/procurement/procurement.routes.ts`, reducing the remaining
+  registrar by another broad read/notification surface without changing
+  purchasing behavior.
+- Added focused route coverage for report pagination/totals/service delegation
+  and notification user scoping, read mutation, and preference validation.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/procurement/__tests__/unit/procurement-report.routes.test.ts server/modules/notifications/__tests__/unit/notifications.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/procurement-report.routes.test.ts server/modules/notifications/__tests__/unit/notifications.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts`
+
+Remaining risk:
+
+- The procurement report route owner still depends on legacy reporting methods
+  in `procurementStorage`. That is acceptable for this ownership slice because
+  the routes are read-only; deeper financial-report hardening should validate
+  source-of-truth boundaries, costing semantics, and export/report permissions.
+- Core notifications are now owned by the notifications module, but still mount
+  from the procurement registrar for order preservation during the monolith
+  split. A later route bootstrap cleanup can register this owner directly from
+  `server/routes.ts`.
+
+Next step:
+
+- Finish Phase 1 route/API ownership with replenishment admin/task routes and
+  the purchasing recommendation/auto-draft surface. Those are the last large
+  handler groups still sitting inside the remaining procurement route registrar.
