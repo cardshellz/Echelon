@@ -2463,23 +2463,36 @@ export function createPurchasingService(db: any, storage: Storage) {
         currentStatus = "approved";
       }
 
+      const now = new Date();
+      const sentChange = (() => {
+        try {
+          return buildPhysicalTransitionChange({
+            po: { ...fresh, status: currentStatus },
+            target: "sent",
+            userId: userId ?? undefined,
+            notes: "Sent to vendor (PDF placeholder)",
+            now,
+            extraPatch: { orderDate: fresh.orderDate ?? now },
+            historyFromStatus: currentStatus,
+          });
+        } catch (error) {
+          return toPurchasingError(error);
+        }
+      })();
+
       const [row] = await tx
         .update(purchaseOrdersTable)
         .set({
-          status: "sent",
-          orderDate: new Date(),
-          sentToVendorAt: new Date(),
+          ...sentChange.patch,
           updatedBy: userId ?? null,
-          updatedAt: new Date(),
+          updatedAt: now,
         })
         .where(eq(purchaseOrdersTable.id, poId))
         .returning();
       await tx.insert(poStatusHistoryTable).values({
         purchaseOrderId: poId,
-        fromStatus: currentStatus,
-        toStatus: "sent",
+        ...sentChange.history,
         changedBy: userId ?? null,
-        notes: "Sent to vendor (PDF placeholder)",
       });
       await emitPoEventTx(tx, poId, "sent_to_vendor", userId, {
         method: "pdf_placeholder",

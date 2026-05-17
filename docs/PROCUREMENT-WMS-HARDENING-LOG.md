@@ -769,3 +769,40 @@ Next step:
   whether to complete a final route-owner cleanup for vendor/SLA/ops/internal
   sync endpoints or begin the deeper purchasing recommendation engine hardening
   work.
+
+### 2026-05-17 - Phase 2 Slice 1: Send Path Lifecycle Sync
+
+Scope:
+
+- Began PO lifecycle backbone hardening by tightening the highest-traffic send
+  path used by inline PO creation and `/api/purchase-orders/:id/send-pdf`.
+- Updated `sendPurchaseOrder` so the final send step uses
+  `buildPhysicalTransitionChange` instead of directly setting only the legacy
+  `status` column inside the transaction.
+- Preserved the existing draft-to-approved-to-sent transactional behavior,
+  approval-tier pending path, PO status history rows, and `sent_to_vendor`
+  event emission.
+- Ensured the send transaction now writes `physicalStatus: "sent"` alongside
+  legacy `status: "sent"`, `sentToVendorAt`, and `orderDate`, preventing
+  dual-track drift for new sent POs.
+- Added focused service coverage for the lifecycle-backed send path and
+  refreshed stale validation fixtures that omitted required `productId`.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-create-send.service.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-create-send.service.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- Submit, return-to-draft, approve, cancel, close, and close-short still need a
+  fuller command-level lifecycle pass. This slice fixes the send drift first
+  because it is the active PO creation/send path and the cleanest entry point
+  into Phase 2.
+
+Next step:
+
+- Continue Phase 2 by centralizing the remaining PO lifecycle action handlers
+  behind explicit command helpers and expanding invalid-transition/audit tests.
