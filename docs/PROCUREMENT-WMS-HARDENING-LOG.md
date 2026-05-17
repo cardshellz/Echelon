@@ -845,3 +845,46 @@ Next step:
 - Continue Phase 2 with explicit next-action derivation and command boundaries,
   then start replacing route/UI assumptions with the lifecycle service's valid
   action list.
+
+### 2026-05-17 - Phase 2 Slice 3: Lifecycle-Derived Next Actions
+
+Scope:
+
+- Added a central PO lifecycle summary builder that derives resolved physical
+  status, allowed legacy/physical/financial transitions, terminal state, and
+  operator next actions from the same lifecycle tables used by command
+  validation.
+- Exposed that lifecycle summary on both PO list and PO detail API responses so
+  admin UI callers can stop re-implementing status-machine logic in component
+  conditionals.
+- Included route metadata, target statuses, destructive/dialog flags, and
+  required permission metadata for lifecycle actions such as submit, approve,
+  send, acknowledge, mark shipped/in-transit/arrived, create receipt, cancel,
+  close, and close-short.
+- Migrated the PO detail header actions and quick-action rail to use the
+  backend-derived next-action list with legacy client-side fallbacks for older
+  deployments.
+- Preserved the existing solo-mode approval setting and vendor-acknowledgment
+  setting as UI-level display choices while moving status eligibility to the
+  lifecycle service.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/po-phase2-api.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+
+Remaining risk:
+
+- The action contract now identifies valid status actions, but the route
+  handlers still call individual service methods instead of a single command
+  dispatcher. That command boundary remains the next hardening step.
+- Financial actions are represented only as allowed transitions for now. Add
+  invoice/payment next-action derivation once AP command boundaries are moved
+  behind the same lifecycle contract.
+
+Next step:
+
+- Continue Phase 2 by introducing an explicit PO lifecycle command dispatcher
+  so routes, audit events, and next-action derivation share one command
+  vocabulary end to end.

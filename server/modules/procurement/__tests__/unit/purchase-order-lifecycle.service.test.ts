@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PoLifecycleError,
+  buildPoLifecycleSummary,
   buildFinancialTransitionChange,
   buildPhysicalTransitionChange,
   getAllowedLegacyTransitions,
@@ -123,5 +124,76 @@ describe("purchase-order-lifecycle.service", () => {
     expect(getAllowedLegacyTransitions("approved")).toEqual(["sent", "cancelled"]);
     expect(getAllowedLegacyTransitions("received")).toEqual(["closed"]);
     expect(getAllowedLegacyTransitions("not_real")).toEqual([]);
+  });
+
+  it("derives next actions for a draft PO from the central lifecycle table", () => {
+    const lifecycle = buildPoLifecycleSummary({
+      id: 10,
+      status: "draft",
+      physicalStatus: "draft",
+      financialStatus: "unbilled",
+    });
+
+    expect(lifecycle.physicalStatus).toBe("draft");
+    expect(lifecycle.allowedPhysicalTransitions).toEqual(["sent", "cancelled"]);
+    expect(lifecycle.nextActions.map((action) => action.id)).toEqual(
+      expect.arrayContaining(["submit", "send_to_vendor", "cancel"]),
+    );
+    expect(lifecycle.nextActions.find((action) => action.id === "send_to_vendor")).toMatchObject({
+      endpoint: "/api/purchase-orders/10/send-to-vendor",
+      requiredPermission: { resource: "purchasing", action: "create" },
+    });
+  });
+
+  it("uses legacy status fallback when deriving actions for older rows", () => {
+    const lifecycle = buildPoLifecycleSummary({
+      id: 11,
+      status: "sent",
+      physicalStatus: "draft",
+      financialStatus: "unbilled",
+    });
+
+    expect(lifecycle.physicalStatus).toBe("sent");
+    expect(lifecycle.allowedPhysicalTransitions).toEqual(["acknowledged", "cancelled"]);
+    expect(lifecycle.nextActions.map((action) => action.id)).toEqual(
+      expect.arrayContaining(["acknowledge", "create_receipt", "cancel"]),
+    );
+  });
+
+  it("derives physical movement actions from allowed physical transitions", () => {
+    const acknowledged = buildPoLifecycleSummary({
+      id: 12,
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+      financialStatus: "unbilled",
+    });
+    expect(acknowledged.nextActions.map((action) => action.id)).toEqual(
+      expect.arrayContaining(["mark_shipped", "create_receipt", "cancel"]),
+    );
+
+    const shipped = buildPoLifecycleSummary({
+      id: 13,
+      status: "acknowledged",
+      physicalStatus: "shipped",
+      financialStatus: "unbilled",
+    });
+    expect(shipped.nextActions.map((action) => action.id)).toEqual(
+      expect.arrayContaining(["mark_in_transit", "mark_arrived", "create_receipt", "cancel"]),
+    );
+  });
+
+  it("keeps close and AP movement distinct in the derived lifecycle summary", () => {
+    const lifecycle = buildPoLifecycleSummary({
+      id: 14,
+      status: "received",
+      physicalStatus: "received",
+      financialStatus: "unbilled",
+    });
+
+    expect(lifecycle.allowedLegacyTransitions).toEqual(["closed"]);
+    expect(lifecycle.allowedPhysicalTransitions).toEqual([]);
+    expect(lifecycle.allowedFinancialTransitions).toEqual(["invoiced"]);
+    expect(lifecycle.isTerminal).toBe(false);
+    expect(lifecycle.nextActions.map((action) => action.id)).toContain("close");
   });
 });

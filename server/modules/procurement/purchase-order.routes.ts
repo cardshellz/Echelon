@@ -16,9 +16,15 @@ import * as emailService from "../notifications/email.service";
 import { inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { users as identityUsers } from "../../storage/base";
+import { buildPoLifecycleSummary } from "./purchase-order-lifecycle.service";
 
 export function registerPurchaseOrderRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
+
+  const withLifecycle = (po: any) => ({
+    ...po,
+    lifecycle: buildPoLifecycleSummary(po),
+  });
 
   // PO CRUD
 
@@ -63,7 +69,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
       );
 
       const enriched = pos.map((po: any, i: number) => ({
-        ...po,
+        ...withLifecycle(po),
         vendor: vendorMap.get(po.vendorId) || null,
         openExceptionCount: exceptionCounts[i].count,
         maxOpenSeverity: exceptionCounts[i].maxSeverity,
@@ -150,7 +156,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
       }
 
       res.json({
-        ...po,
+        ...withLifecycle(po),
         lines,
         vendor,
         openExceptionCount: exceptionCount.count,

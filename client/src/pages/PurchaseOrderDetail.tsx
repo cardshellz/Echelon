@@ -95,6 +95,25 @@ const FINANCIAL_TRACK_STAGES = [
 
 type StageState = "done" | "current" | "warn" | "future";
 
+type PoLifecycleActionId =
+  | "submit"
+  | "return_to_draft"
+  | "approve"
+  | "send"
+  | "send_to_vendor"
+  | "acknowledge"
+  | "mark_shipped"
+  | "mark_in_transit"
+  | "mark_arrived"
+  | "create_receipt"
+  | "cancel"
+  | "close"
+  | "close_short";
+
+type PoLifecycleSummary = {
+  nextActions?: Array<{ id: PoLifecycleActionId }>;
+};
+
 function stageState(
   stageIndex: number,
   currentIndex: number,
@@ -829,6 +848,12 @@ export default function PurchaseOrderDetail() {
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
+  const lifecycle = (po as any)?.lifecycle as PoLifecycleSummary | undefined;
+  const lifecycleActionIds = new Set(
+    (lifecycle?.nextActions ?? []).map((action) => action.id),
+  );
+  const canLifecycleAction = (id: PoLifecycleActionId, fallback: boolean) =>
+    lifecycle ? lifecycleActionIds.has(id) : fallback;
 
   // PO detail endpoint resolves all referenced actor UUIDs (createdBy,
   // cancelledBy, history.changedBy, exception.detectedBy/...) into a single
@@ -942,6 +967,30 @@ export default function PurchaseOrderDetail() {
   const isDraft = po?.status === "draft";
   const canEditLines = po && ["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"].includes(po.status);
   const isNotCancelled = po && !["cancelled"].includes(po.status);
+  const canSubmitPo = canLifecycleAction("submit", po?.status === "draft");
+  const canReturnPoToDraft = canLifecycleAction("return_to_draft", po?.status === "pending_approval");
+  const canApprovePo = canLifecycleAction("approve", po?.status === "pending_approval");
+  const canSendPo = canLifecycleAction("send", po?.status === "approved");
+  const canSendPoToVendor = canLifecycleAction(
+    "send_to_vendor",
+    po?.status === "draft" || po?.status === "approved",
+  );
+  const canAcknowledgePo = canLifecycleAction("acknowledge", po?.physicalStatus === "sent");
+  const canMarkPoShipped = canLifecycleAction("mark_shipped", po?.physicalStatus === "acknowledged");
+  const canMarkPoInTransit = canLifecycleAction("mark_in_transit", po?.physicalStatus === "shipped");
+  const canMarkPoArrived = canLifecycleAction(
+    "mark_arrived",
+    po?.physicalStatus === "in_transit" || po?.physicalStatus === "shipped",
+  );
+  const canCreateReceiptForPo = canLifecycleAction(
+    "create_receipt",
+    ["sent", "acknowledged", "partially_received"].includes(po?.status),
+  );
+  const canCancelPo = canLifecycleAction(
+    "cancel",
+    po ? !["closed", "cancelled"].includes(po.status) : false,
+  );
+  const canClosePo = canLifecycleAction("close", po?.status === "received");
 
   // Incoterms-driven charge applicability: if no terms set, all are editable
   const poIncoterms = po?.incoterms as string | null | undefined;
@@ -1648,57 +1697,61 @@ export default function PurchaseOrderDetail() {
         {/* Context-sensitive action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
           {/* Solo mode: combined "Send to Vendor" button (draft → approved → sent in one click) */}
-          {po.status === "draft" && isSoloMode && (
+          {canSendPoToVendor && po.status === "draft" && isSoloMode && (
             <Button onClick={() => sendToVendorMutation.mutate()} disabled={sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
               {sendToVendorMutation.isPending ? "Submitting..." : "Submit & Send"}
             </Button>
           )}
           {/* Multi-person mode: individual Submit button */}
-          {po.status === "draft" && !isSoloMode && (
+          {canSubmitPo && po.status === "draft" && !isSoloMode && (
             <Button onClick={() => submitMutation.mutate()} disabled={submitMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
               Submit
             </Button>
           )}
-          {po.status === "pending_approval" && (
+          {(canApprovePo || canReturnPoToDraft) && po.status === "pending_approval" && (
             <>
-              <Button onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
-                <CheckCircle className="h-4 w-4 mr-2" />
-                Approve
-              </Button>
-              <Button variant="outline" onClick={() => returnToDraftMutation.mutate()} disabled={returnToDraftMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
-                <RotateCcw className="h-4 w-4 mr-2" />
-                Return to Draft
-              </Button>
+              {canApprovePo && (
+                <Button onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+                  <CheckCircle className="h-4 w-4 mr-2" />
+                  Approve
+                </Button>
+              )}
+              {canReturnPoToDraft && (
+                <Button variant="outline" onClick={() => returnToDraftMutation.mutate()} disabled={returnToDraftMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+                  <RotateCcw className="h-4 w-4 mr-2" />
+                  Return to Draft
+                </Button>
+              )}
             </>
           )}
-          {po.status === "approved" && (
+          {canSendPo && po.status === "approved" && (
             <Button onClick={() => sendMutation.mutate()} disabled={sendMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
               Mark as Sent
             </Button>
           )}
           {/* Acknowledge button: only shown when acknowledgment is required (multi-person mode) */}
-          {po.status === "sent" && requireAcknowledgment && (
+          {canAcknowledgePo && requireAcknowledgment && (
             <Button onClick={() => setShowAckDialog(true)} className="flex-1 sm:flex-none min-h-[44px]">
               <CheckCircle className="h-4 w-4 mr-2" />
               Acknowledge
             </Button>
           )}
-          {["sent", "acknowledged", "partially_received"].includes(po.status) && (
+          {canCreateReceiptForPo && (
             <Button variant="outline" onClick={() => createReceiptMutation.mutate()} disabled={createReceiptMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Truck className="h-4 w-4 mr-2" />
               Create Receipt
             </Button>
           )}
-          {po.status === "received" && (
+          {canClosePo && (
             <Button onClick={() => closeMutation.mutate()} disabled={closeMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Archive className="h-4 w-4 mr-2" />
               Close PO
             </Button>
           )}
-          {!["closed", "cancelled"].includes(po.status) && (
+          {canCancelPo && (
             <Button variant="outline" onClick={() => setShowCancelDialog(true)} className="flex-1 sm:flex-none min-h-[44px] text-red-600 hover:text-red-700">
               <Ban className="h-4 w-4 mr-2" />
               {["sent", "acknowledged"].includes(po.status) ? "Void" : "Cancel"}
@@ -2735,7 +2788,7 @@ export default function PurchaseOrderDetail() {
             {/* Physical actions */}
 
             {/* Send to vendor (draft or approved only — matches server state machine) */}
-            {(po.status === "draft" || po.status === "approved") && isSoloMode && (
+            {canSendPoToVendor && isSoloMode && (
               <Button
                 className="w-full justify-start"
                 size="sm"
@@ -2748,7 +2801,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Mark acknowledged (sent) */}
-            {po.physicalStatus === "sent" && (
+            {canAcknowledgePo && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
@@ -2761,7 +2814,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Mark shipped */}
-            {po.physicalStatus === "acknowledged" && (
+            {canMarkPoShipped && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
@@ -2775,7 +2828,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Mark in transit */}
-            {po.physicalStatus === "shipped" && (
+            {canMarkPoInTransit && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
@@ -2789,7 +2842,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Mark arrived */}
-            {(po.physicalStatus === "in_transit" || po.physicalStatus === "shipped") && (
+            {canMarkPoArrived && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
@@ -2821,8 +2874,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Create receipt */}
-            {(["arrived", "receiving", "acknowledged", "shipped", "in_transit", "sent", "partially_received"].includes(po.physicalStatus ?? "") ||
-              ["sent", "acknowledged", "partially_received"].includes(po.status)) && (
+            {canCreateReceiptForPo && (
               <Button
                 className="w-full justify-start"
                 variant="outline"
@@ -2836,7 +2888,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Cancel PO */}
-            {["draft", "sent", "acknowledged"].includes(po.physicalStatus ?? "") &&
+            {canCancelPo &&
               po.financialStatus === "unbilled" &&
               !["closed", "cancelled"].includes(po.status) && (
               <Button
