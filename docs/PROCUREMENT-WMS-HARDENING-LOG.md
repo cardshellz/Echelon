@@ -524,3 +524,41 @@ Next step:
 - Open the purchase-order route split PR.
 - After merge, continue route/API ownership with vendor catalog and approval
   settings, then inbound shipment and AP route groups.
+
+### 2026-05-16 - Phase 1 Slice 7: Vendor Catalog and Purchasing Admin Route Split
+
+Scope:
+
+- Added `server/modules/procurement/purchasing-admin.routes.ts` as the owner for
+  supplier catalog and purchasing admin routes adjacent to purchase orders.
+- Moved vendor product CRUD, vendor catalog bulk upsert, vendor catalog search,
+  approval tier CRUD, and reorder-to-PO creation out of the procurement route
+  monolith while preserving existing URLs and route behavior.
+- Kept `registerPurchasingRoutes(app)` as the public procurement route entry
+  point and mounted the admin registrar immediately after purchase-order routes
+  to preserve route order.
+- Left purchasing dashboard, reorder analysis, auto-draft settings, inbound
+  shipment, landed cost, and AP routes in the remaining route file for later
+  ownership slices.
+- Added focused route coverage for vendor product filters, bulk vendor catalog
+  normalization, and approval tier reads.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving.routes.test.ts server/modules/procurement/__tests__/unit/bulk-upsert-catalog.service.test.ts server/modules/procurement/__tests__/unit/catalog-search.storage.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- The purchasing admin route owner is intentionally pragmatic: supplier catalog,
+  approval tiers, and reorder-to-PO creation are grouped because they are all
+  small PO-adjacent admin endpoints. Future hardening can split supplier
+  catalog from approval settings if either surface grows materially.
+
+Next step:
+
+- Open the vendor catalog / purchasing admin route split PR.
+- After merge, continue route/API ownership with inbound shipment and landed
+  cost routes, then AP invoice/payment routes.
