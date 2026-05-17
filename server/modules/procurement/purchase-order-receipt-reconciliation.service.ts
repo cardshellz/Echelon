@@ -25,11 +25,29 @@ export type PoReceiptReconciliationStorage = {
   updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any): Promise<any>;
 };
 
+export type ReceiptReconciliationIssueReason =
+  | "purchase_order_not_found"
+  | "missing_receiving_product"
+  | "auto_match_unresolved"
+  | "unlinked_receiving_line"
+  | "invalid_purchase_order_line"
+  | "missing_receiving_line"
+  | "receipt_not_applied";
+
+export type ReceiptReconciliationIssue = {
+  receivingLineId?: number;
+  purchaseOrderLineId?: number;
+  reason: ReceiptReconciliationIssueReason;
+  detail: string;
+};
+
 export type ReceiptReconciliationResult = {
   purchaseOrderId: number | null;
   appliedLines: number;
+  existingReceiptLines: number;
   skippedLines: number;
   autoMatchedLines: number;
+  issues: ReceiptReconciliationIssue[];
 };
 
 export async function findOpenPoLineByProduct(
@@ -63,15 +81,33 @@ export async function reconcilePurchaseOrderReceipt(params: {
   const poId = await resolvePurchaseOrderId(storage, receivingOrderId, receivingLines);
 
   if (!poId) {
-    return { purchaseOrderId: null, appliedLines: 0, skippedLines: 0, autoMatchedLines: 0 };
+    return {
+      purchaseOrderId: null,
+      appliedLines: 0,
+      existingReceiptLines: 0,
+      skippedLines: 0,
+      autoMatchedLines: 0,
+      issues: [],
+    };
   }
 
   const po = await storage.getPurchaseOrderById(poId);
   if (!po) {
-    return { purchaseOrderId: poId, appliedLines: 0, skippedLines: 0, autoMatchedLines: 0 };
+    return {
+      purchaseOrderId: poId,
+      appliedLines: 0,
+      existingReceiptLines: 0,
+      skippedLines: receivingLines.length,
+      autoMatchedLines: 0,
+      issues: [{
+        reason: "purchase_order_not_found",
+        detail: `Purchase order ${poId} no longer exists for receiving order ${receivingOrderId}`,
+      }],
+    };
   }
 
   let autoMatchedLines = 0;
+  const issues: ReceiptReconciliationIssue[] = [];
   for (const receivingLine of receivingLines) {
     if (receivingLine.purchaseOrderLineId) continue;
 
@@ -85,6 +121,11 @@ export async function reconcilePurchaseOrderReceipt(params: {
     }
 
     if (!productId) {
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        reason: "missing_receiving_product",
+        detail: `Receiving line ${receivingLine.receivingLineId} has no product_id resolvable for PO auto-match`,
+      });
       logger.warn(
         `[Receiving] Auto-match skipped for receiving line ${receivingLine.receivingLineId}: no product_id resolvable`,
       );
@@ -99,6 +140,11 @@ export async function reconcilePurchaseOrderReceipt(params: {
         `[Receiving] Auto-matched receiving line ${receivingLine.receivingLineId} to PO line ${matchedLine.id} (product_id=${productId})`,
       );
     } else {
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        reason: "auto_match_unresolved",
+        detail: `Receiving line ${receivingLine.receivingLineId} could not be auto-matched to exactly one open PO line for product_id=${productId}`,
+      });
       logger.warn(
         `[Receiving] Auto-match failed for receiving line ${receivingLine.receivingLineId}: ` +
         `zero or multiple open PO lines for product_id=${productId} on PO ${poId}. Leaving unlinked.`,
@@ -107,23 +153,41 @@ export async function reconcilePurchaseOrderReceipt(params: {
   }
 
   let appliedLines = 0;
+  let existingReceiptLines = 0;
   let skippedLines = 0;
 
   for (const receivingLine of receivingLines) {
     if (!receivingLine.purchaseOrderLineId) {
       skippedLines++;
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        reason: "unlinked_receiving_line",
+        detail: `Receiving line ${receivingLine.receivingLineId} is not linked to a purchase order line`,
+      });
       continue;
     }
 
     const poLine = await storage.getPurchaseOrderLineById(receivingLine.purchaseOrderLineId);
     if (!poLine || (poLine.lineType ?? "product") !== "product") {
       skippedLines++;
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        purchaseOrderLineId: receivingLine.purchaseOrderLineId,
+        reason: "invalid_purchase_order_line",
+        detail: `PO line ${receivingLine.purchaseOrderLineId} is missing or not physically receivable`,
+      });
       continue;
     }
 
     const receivingLineRecord = await storage.getReceivingLineById(receivingLine.receivingLineId);
     if (!receivingLineRecord) {
       skippedLines++;
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        purchaseOrderLineId: receivingLine.purchaseOrderLineId,
+        reason: "missing_receiving_line",
+        detail: `Receiving line ${receivingLine.receivingLineId} no longer exists during PO reconciliation`,
+      });
       continue;
     }
 
@@ -181,15 +245,23 @@ export async function reconcilePurchaseOrderReceipt(params: {
 
     if (result.applied) {
       appliedLines++;
+    } else if (result.receipt) {
+      existingReceiptLines++;
     } else {
       skippedLines++;
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        purchaseOrderLineId: poLine.id,
+        reason: "receipt_not_applied",
+        detail: `PO receipt was not applied for receiving line ${receivingLine.receivingLineId}`,
+      });
     }
   }
 
   await recalculateTotals(poId);
   await updatePurchaseOrderReceiptStatus(storage, poId, po);
 
-  return { purchaseOrderId: poId, appliedLines, skippedLines, autoMatchedLines };
+  return { purchaseOrderId: poId, appliedLines, existingReceiptLines, skippedLines, autoMatchedLines, issues };
 }
 
 function resolveReceiptUnitCosts(receivingLine: ReceivingReconciliationLine, poLine: any) {

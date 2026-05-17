@@ -22,8 +22,10 @@ import {
   dollarsToMills,
 } from "@shared/utils/money";
 import {
+  type ReceivingCloseReconciliation,
   reconcileLinkedPurchaseOrder,
 } from "./receiving-orchestration.service";
+import type { ReceiptReconciliationResult } from "./purchase-order-receipt-reconciliation.service";
 
 interface InventoryCore {
   receiveInventory(params: {
@@ -53,7 +55,7 @@ interface Purchasing {
     damagedQty?: number;
     unitCost?: number;
     unitCostMills?: number;
-  }>): Promise<void>;
+  }>): Promise<ReceiptReconciliationResult | void>;
   // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
   // landed unit cost after spreading non-product line totals
   // (discount / fee / tax / rebate / adjustment) across the product lines.
@@ -269,7 +271,7 @@ export class ReceivingService {
   ) {}
 
   private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[]) {
-    await reconcileLinkedPurchaseOrder({
+    return await reconcileLinkedPurchaseOrder({
       receivingOrderId: orderId,
       receivingOrder: order,
       receivingLines: lines,
@@ -277,7 +279,12 @@ export class ReceivingService {
     });
   }
 
-  private buildCloseResult(order: any, lines: any[], putawayLocationIds?: number[]) {
+  private buildCloseResult(
+    order: any,
+    lines: any[],
+    putawayLocationIds?: number[],
+    poReconciliation?: ReceivingCloseReconciliation,
+  ) {
     const receivedLines = lines.filter((line: any) => (line.receivedQty || 0) > 0);
     const locationIds = putawayLocationIds ?? Array.from(new Set(
       receivedLines
@@ -294,6 +301,7 @@ export class ReceivingService {
         0,
       ),
       putawayLocationIds: locationIds,
+      poReconciliation,
     };
   }
 
@@ -405,8 +413,8 @@ export class ReceivingService {
 
     if (order.status === "closed") {
       const closedLines = await this.storage.getReceivingLines(orderId);
-      await this.reconcileLinkedPurchaseOrder(orderId, order, closedLines);
-      return this.buildCloseResult(order, closedLines);
+      const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, order, closedLines);
+      return this.buildCloseResult(order, closedLines, undefined, poReconciliation);
     }
 
     const lines = await this.storage.getReceivingLines(orderId);
@@ -659,12 +667,13 @@ export class ReceivingService {
     });
 
     const closedLines = await this.storage.getReceivingLines(orderId);
-    await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines);
+    const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines);
 
     return this.buildCloseResult(
       updated,
       closedLines,
       Array.from(putawayLocationIds),
+      poReconciliation,
     );
   }
 
