@@ -8,3 +8,4 @@
 
 export { notify, getUserNotifications, markRead, markAllRead, getUnreadCount } from "./notifications.service";
 export { isSmtpConfigured, sendEmail, sendPurchaseOrder } from "./email.service";
+export { registerNotificationRoutes } from "./notifications.routes";
