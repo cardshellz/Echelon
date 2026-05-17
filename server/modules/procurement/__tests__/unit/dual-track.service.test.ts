@@ -40,6 +40,7 @@ function buildMockDb() {
     _invoiceRows: [] as Array<{ invoicedAmountCents: number; paidAmountCents: number }>,
     _poState: null as any,
     _updateCalls: [] as any[],
+    _insertRows: [] as any[],
 
     select: vi.fn().mockImplementation((shape?: any) => {
       // Returns a chainable builder that resolves based on what's queued.
@@ -75,17 +76,23 @@ function buildMockDb() {
       set: vi.fn().mockImplementation((patch: any) => {
         mockDb._updateCalls.push(patch);
         return {
-          where: vi.fn().mockResolvedValue(undefined),
+          where: vi.fn().mockReturnValue({
+            returning: vi.fn().mockResolvedValue([{ id: 1, ...patch }]),
+          }),
         };
       }),
     }),
 
     insert: vi.fn().mockReturnValue({
-      values: vi.fn().mockReturnValue({
-        returning: vi.fn().mockResolvedValue([]),
+      values: vi.fn().mockImplementation((row: any) => {
+        mockDb._insertRows.push(row);
+        return {
+          returning: vi.fn().mockResolvedValue([]),
+        };
       }),
     }),
   };
+  mockDb.transaction = vi.fn(async (fn: any) => fn(mockDb));
 
   return mockDb;
 }
@@ -171,10 +178,12 @@ function makePo(overrides: Partial<Record<string, any>> = {}): any {
 describe("transitionPhysical", () => {
   let svc: ReturnType<typeof createPurchasingService>;
   let storage: ReturnType<typeof buildMockStorage>;
+  let mockDb: ReturnType<typeof buildMockDb>;
 
   beforeEach(() => {
     storage = buildMockStorage();
-    svc = createPurchasingService(buildMockDb(), storage);
+    mockDb = buildMockDb();
+    svc = createPurchasingService(mockDb, storage);
   });
 
   it("(1) accepts a valid physical transition: draft → sent", async () => {
@@ -183,8 +192,9 @@ describe("transitionPhysical", () => {
 
     await svc.transitionPhysical(1, "sent", "user-1");
 
-    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledOnce();
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledOnce();
+    const patch = mockDb._updateCalls[0];
     expect(patch.physicalStatus).toBe("sent");
     expect(patch.status).toBe("sent"); // legacy sync
   });
@@ -213,7 +223,7 @@ describe("transitionPhysical", () => {
 
     await svc.transitionPhysical(1, "sent", "user-1");
 
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    const patch = mockDb._updateCalls[0];
     expect(patch.status).toBe("sent");
   });
 
@@ -223,7 +233,7 @@ describe("transitionPhysical", () => {
 
     await svc.transitionPhysical(1, "cancelled", "user-1");
 
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    const patch = mockDb._updateCalls[0];
     expect(patch.physicalStatus).toBe("cancelled");
     expect(patch.status).toBe("cancelled");
   });

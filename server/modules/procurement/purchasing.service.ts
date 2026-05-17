@@ -668,6 +668,31 @@ export function createPurchasingService(db: any, storage: Storage) {
     return result[0] || null;
   }
 
+  async function updatePurchaseOrderStatusWithEvent(
+    id: number,
+    updates: Record<string, unknown>,
+    historyData: {
+      fromStatus?: string;
+      toStatus?: string;
+      changedBy?: string;
+      notes?: string;
+    },
+    eventType: string,
+    userId: string | null | undefined,
+    payload?: Record<string, unknown>,
+  ): Promise<any | null> {
+    return db.transaction(async (tx: any) => {
+      const updated = await updatePurchaseOrderStatusWithHistoryTx(
+        tx,
+        id,
+        updates,
+        historyData,
+      );
+      await emitPoEventTx(tx, id, eventType, userId, payload);
+      return updated;
+    });
+  }
+
   // ── Dual-track state machine functions (migration 0565) ──────────────────
 
   /**
@@ -677,8 +702,8 @@ export function createPurchasingService(db: any, storage: Storage) {
    * lifecycle timestamp, syncs the legacy `status` column for back-compat,
    * and writes a po_status_history row with old/new physical status.
    *
-   * Rule #7: all updates go through storage.updatePurchaseOrderStatusWithHistory
-   * which uses a DB transaction internally.
+   * Rule #7: status history and po_events are written in the same transaction
+   * so a lifecycle action cannot leave an audit gap.
    */
   async function transitionPhysical(
     poId: number,
@@ -705,22 +730,25 @@ export function createPurchasingService(db: any, storage: Storage) {
         return toPurchasingError(error);
       }
     })();
-    const patch = change.patch;
-
-    const result = await storage.updatePurchaseOrderStatusWithHistory(
-      poId,
-      patch,
-      change.history,
-    );
-
     const eventType = PHYSICAL_LIFECYCLE_EVENTS[target];
-    if (eventType) {
-      await emitPoEvent(poId, eventType, userId, {
-        from_status: change.history.fromStatus,
-        to_status: change.history.toStatus,
-        physical_status: target,
-      });
-    }
+    const result = await db.transaction(async (tx: any) => {
+      const updated = await updatePurchaseOrderStatusWithHistoryTx(
+        tx,
+        poId,
+        change.patch,
+        change.history,
+      );
+
+      if (eventType) {
+        await emitPoEventTx(tx, poId, eventType, userId, {
+          from_status: change.history.fromStatus,
+          to_status: change.history.toStatus,
+          physical_status: target,
+        });
+      }
+
+      return updated;
+    });
 
     // ── Exception detection hooks (event-driven, Phase 1) ──────────────────
     // Run after the DB write so detection reads fresh data.
@@ -1239,47 +1267,57 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (tier) {
       // Needs approval
       assertTransition(po.status, "pending_approval");
-      const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
-        status: "pending_approval",
-        approvalTierId: tier.id,
-        updatedBy: userId,
-      }, {
-        fromStatus: po.status,
-        toStatus: "pending_approval",
-        changedBy: userId,
-        notes: `Approval required: ${tier.tierName}`
-      });
-      await emitPoEvent(id, "submitted", userId, {
-        from_status: po.status,
-        to_status: "pending_approval",
-        tier_id: tier.id,
-        tier_name: tier.tierName,
-        total_cents: totalCents,
-      });
-      return updated;
+      return updatePurchaseOrderStatusWithEvent(
+        id,
+        {
+          status: "pending_approval",
+          approvalTierId: tier.id,
+          updatedBy: userId,
+        },
+        {
+          fromStatus: po.status,
+          toStatus: "pending_approval",
+          changedBy: userId,
+          notes: `Approval required: ${tier.tierName}`,
+        },
+        "submitted",
+        userId,
+        {
+          from_status: po.status,
+          to_status: "pending_approval",
+          tier_id: tier.id,
+          tier_name: tier.tierName,
+          total_cents: totalCents,
+        },
+      );
     } else {
       // Auto-approve (no tier matches)
       assertTransition(po.status, "approved");
-      const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
-        status: "approved",
-        approvedBy: userId,
-        approvedAt: new Date(),
-        approvalNotes: "Auto-approved (below approval threshold)",
-        updatedBy: userId,
-      }, {
-        fromStatus: po.status,
-        toStatus: "approved",
-        changedBy: userId,
-        notes: "Auto-approved (below threshold)"
-      });
-      await emitPoEvent(id, "approved", userId, {
-        from_status: po.status,
-        to_status: "approved",
-        auto: true,
-        reason: "below_threshold",
-        total_cents: totalCents,
-      });
-      return updated;
+      return updatePurchaseOrderStatusWithEvent(
+        id,
+        {
+          status: "approved",
+          approvedBy: userId,
+          approvedAt: new Date(),
+          approvalNotes: "Auto-approved (below approval threshold)",
+          updatedBy: userId,
+        },
+        {
+          fromStatus: po.status,
+          toStatus: "approved",
+          changedBy: userId,
+          notes: "Auto-approved (below threshold)",
+        },
+        "approved",
+        userId,
+        {
+          from_status: po.status,
+          to_status: "approved",
+          auto: true,
+          reason: "below_threshold",
+          total_cents: totalCents,
+        },
+      );
     }
   }
 
@@ -1288,25 +1326,30 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "draft");
 
-    const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "draft",
-      approvalTierId: null,
-      approvedBy: null,
-      approvedAt: null,
-      approvalNotes: null,
-      updatedBy: userId,
-    }, {
+    return updatePurchaseOrderStatusWithEvent(
+      id,
+      {
+        status: "draft",
+        approvalTierId: null,
+        approvedBy: null,
+        approvedAt: null,
+        approvalNotes: null,
+        updatedBy: userId,
+      },
+      {
         fromStatus: po.status,
         toStatus: "draft",
         changedBy: userId,
-        notes: notes || "Returned to draft"
-      });
-    await emitPoEvent(id, "returned_to_draft", userId, {
-      from_status: po.status,
-      to_status: "draft",
-      notes: notes ?? null,
-    });
-    return updated;
+        notes: notes || "Returned to draft",
+      },
+      "returned_to_draft",
+      userId,
+      {
+        from_status: po.status,
+        to_status: "draft",
+        notes: notes ?? null,
+      },
+    );
   }
 
   async function approve(id: number, userId?: string, notes?: string) {
@@ -1314,24 +1357,29 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "approved");
 
-    const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
-      status: "approved",
-      approvedBy: userId,
-      approvedAt: new Date(),
-      approvalNotes: notes,
-      updatedBy: userId,
-    }, {
+    return updatePurchaseOrderStatusWithEvent(
+      id,
+      {
+        status: "approved",
+        approvedBy: userId,
+        approvedAt: new Date(),
+        approvalNotes: notes,
+        updatedBy: userId,
+      },
+      {
         fromStatus: po.status,
         toStatus: "approved",
         changedBy: userId,
-        notes: notes || "Approved"
-      });
-    await emitPoEvent(id, "approved", userId, {
-      from_status: po.status,
-      to_status: "approved",
-      notes: notes ?? null,
-    });
-    return updated;
+        notes: notes || "Approved",
+      },
+      "approved",
+      userId,
+      {
+        from_status: po.status,
+        to_status: "approved",
+        notes: notes ?? null,
+      },
+    );
   }
 
   async function send(id: number, userId?: string) {
@@ -1384,24 +1432,30 @@ export function createPurchasingService(db: any, storage: Storage) {
       await recalculateTotals(id, userId);
 
       // Auto-approve
-      await storage.updatePurchaseOrderStatusWithHistory(id, {
+      await updatePurchaseOrderStatusWithEvent(
+        id,
+        {
         status: "approved",
         approvedBy: userId,
         approvedAt: new Date(),
         approvalNotes: "Auto-approved (solo mode — no approval tiers)",
         updatedBy: userId,
-      }, {
-        fromStatus: "draft",
-        toStatus: "approved",
-        changedBy: userId,
-        notes: "Auto-approved (solo mode)"
-      });
-      await emitPoEvent(id, "approved", userId, {
-        from_status: "draft",
-        to_status: "approved",
-        auto: true,
-        reason: "solo_mode",
-      });
+        },
+        {
+          fromStatus: "draft",
+          toStatus: "approved",
+          changedBy: userId,
+          notes: "Auto-approved (solo mode)",
+        },
+        "approved",
+        userId,
+        {
+          from_status: "draft",
+          to_status: "approved",
+          auto: true,
+          reason: "solo_mode",
+        },
+      );
     }
 
     // Now send
