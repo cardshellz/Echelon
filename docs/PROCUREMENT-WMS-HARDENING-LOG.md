@@ -727,3 +727,45 @@ Next step:
   surface from the remaining procurement route registrar. That is the last
   large procurement-specific handler group before deeper purchasing-engine
   hardening begins.
+
+### 2026-05-17 - Phase 1 Slice 12: Purchasing Recommendation Route Split
+
+Scope:
+
+- Added `server/modules/procurement/purchasing-recommendation.routes.ts` as the
+  owner for purchasing KPI, reorder-analysis, velocity lookback, dashboard,
+  exclusion-rule, product reorder-exclusion, auto-draft run/status, and
+  auto-draft settings endpoints.
+- Preserved existing public URLs and route order by exposing two registrars:
+  one for the KPI/reorder-analysis routes that already mounted before internal
+  sync endpoints, and one for dashboard/exclusion/auto-draft admin routes that
+  already mounted after notifications.
+- Removed the last large purchasing recommendation/auto-draft handler group
+  from `server/modules/procurement/procurement.routes.ts` without changing the
+  legacy recommendation math, exclusion semantics, or auto-draft job dispatch.
+- Added focused route coverage for KPI aggregation, reorder-analysis response
+  shaping, and admin-triggered auto-draft dispatch.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/procurement-report.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/inventory/__tests__/unit/replenishment.routes.test.ts`
+
+Remaining risk:
+
+- This slice intentionally preserves the current recommendation calculations,
+  dynamic exclusion filtering, and auto-draft job trigger. Forecasting accuracy,
+  supplier lead-time quality, demand signals, and recommendation explainability
+  remain deeper purchasing-engine hardening work after route ownership is
+  complete.
+- The remaining procurement registrar still directly owns vendor CRUD, SLA/ops
+  dashboard reads, and internal Archon sync endpoints. Those are smaller route
+  groups; the next decision is whether to carve those into owners or move into
+  service/command hardening for purchasing recommendations.
+
+Next step:
+
+- Review the now-small remaining `procurement.routes.ts` surface and decide
+  whether to complete a final route-owner cleanup for vendor/SLA/ops/internal
+  sync endpoints or begin the deeper purchasing recommendation engine hardening
+  work.
