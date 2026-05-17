@@ -190,6 +190,86 @@ describe("PO lifecycle actions", () => {
     );
   });
 
+  it("dispatches physical movement through the lifecycle command boundary", async () => {
+    const db = buildMockDb();
+    const storage = buildMockStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 33,
+        status: "acknowledged",
+        physicalStatus: "acknowledged",
+      }),
+      updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 33, physicalStatus: "shipped" }),
+    });
+    const svc = createPurchasingService(db, storage);
+
+    await svc.executeLifecycleCommand(33, "mark_shipped", { notes: "vendor shipped" }, "user-33");
+
+    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledWith(
+      33,
+      expect.objectContaining({ physicalStatus: "shipped" }),
+      expect.objectContaining({
+        fromStatus: "acknowledged",
+        toStatus: "acknowledged",
+        changedBy: "user-33",
+        notes: "vendor shipped",
+      }),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        poId: 33,
+        eventType: "marked_shipped",
+        actorId: "user-33",
+      }),
+    );
+  });
+
+  it("dispatches acknowledge data through the lifecycle command boundary", async () => {
+    const confirmedDeliveryDate = new Date("2026-05-21T00:00:00.000Z");
+    const db = buildMockDb();
+    const storage = buildMockStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 34,
+        status: "sent",
+        physicalStatus: "sent",
+      }),
+      updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 34, physicalStatus: "acknowledged" }),
+    });
+    const svc = createPurchasingService(db, storage);
+
+    await svc.executeLifecycleCommand(
+      34,
+      "acknowledge",
+      { vendorRefNumber: "VREF-34", confirmedDeliveryDate },
+      "user-34",
+    );
+
+    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledWith(
+      34,
+      expect.objectContaining({
+        physicalStatus: "acknowledged",
+        status: "acknowledged",
+        vendorRefNumber: "VREF-34",
+        confirmedDeliveryDate,
+      }),
+      expect.objectContaining({
+        notes: "Vendor acknowledged",
+      }),
+    );
+  });
+
+  it("rejects unknown lifecycle commands", async () => {
+    const db = buildMockDb();
+    const storage = buildMockStorage();
+    const svc = createPurchasingService(db, storage);
+
+    await expect(
+      svc.executeLifecycleCommand(99, "not_real" as any, {}, "user-99"),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Unknown PO lifecycle command 'not_real'",
+    });
+  });
+
   it("close-short writes a close-short event after line close patches", async () => {
     const db = buildMockDb();
     const storage = buildMockStorage({

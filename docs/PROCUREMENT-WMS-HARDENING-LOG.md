@@ -888,3 +888,45 @@ Next step:
 - Continue Phase 2 by introducing an explicit PO lifecycle command dispatcher
   so routes, audit events, and next-action derivation share one command
   vocabulary end to end.
+
+### 2026-05-17 - Phase 2 Slice 4: PO Lifecycle Command Dispatcher
+
+Scope:
+
+- Added `PoLifecycleCommand` as the shared command vocabulary behind the
+  previously exposed next-action IDs.
+- Added `purchasing.executeLifecycleCommand(...)` to dispatch submit,
+  return-to-draft, approve, send, send-to-vendor, acknowledge, physical movement
+  commands, create receipt, cancel, close, and close-short through one service
+  boundary.
+- Kept the existing implementation methods intact for now, but moved HTTP
+  status/action routes to call the command dispatcher instead of directly
+  choosing individual service methods.
+- Preserved current route URLs, permissions, request payloads, response status
+  behavior for create receipt, and existing audited transition/event behavior.
+- Added service tests for command-dispatched physical movement, acknowledgment
+  payload handling, and unknown command rejection.
+- Updated route tests to verify physical movement endpoints dispatch command
+  IDs and payloads through the shared command boundary.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/po-phase2-api.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+
+Remaining risk:
+
+- The dispatcher is now the route boundary, but some commands still perform
+  status/history writes and event writes as separate service operations. The
+  next hardening step is to move high-risk commands into transactional command
+  handlers where the audit event, status history, and PO patch commit together.
+- AP invoice/payment actions are still outside the PO lifecycle command
+  vocabulary; they should get their own command boundary before demand
+  forecasting starts depending on financial state.
+
+Next step:
+
+- Continue Phase 2 by making the most consequential lifecycle commands
+  transactional end to end, starting with cancel/void and close/close-short
+  because they alter line state as well as PO state.

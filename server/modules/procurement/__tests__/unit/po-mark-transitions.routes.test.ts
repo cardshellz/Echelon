@@ -78,6 +78,7 @@ function buildPurchasingMock(overrides: Record<string, any> = {}): any {
     createPOFromReorder: vi.fn(),
     getOnOrderQty: vi.fn(),
     // The three under test
+    executeLifecycleCommand: vi.fn(),
     transitionPhysical: vi.fn(),
     transitionFinancial: vi.fn(),
     ...overrides,
@@ -134,17 +135,17 @@ describe("POST /api/purchase-orders/:id/mark-shipped", () => {
 
   it("(1) returns 200 and the updated PO when transitioning from acknowledged", async () => {
     const updatedPo = { id: 10, physicalStatus: "shipped" };
-    purchasing.transitionPhysical.mockResolvedValue(updatedPo);
+    purchasing.executeLifecycleCommand.mockResolvedValue(updatedPo);
 
     const { status, body } = await post(server.url, "/api/purchase-orders/10/mark-shipped");
 
     expect(status).toBe(200);
     expect(body.physicalStatus).toBe("shipped");
-    expect(purchasing.transitionPhysical).toHaveBeenCalledWith(10, "shipped", "test-user", undefined);
+    expect(purchasing.executeLifecycleCommand).toHaveBeenCalledWith(10, "mark_shipped", {}, "test-user");
   });
 
   it("(2) returns 4xx when transitioning from draft (invalid transition)", async () => {
-    purchasing.transitionPhysical.mockRejectedValue(
+    purchasing.executeLifecycleCommand.mockRejectedValue(
       new PurchasingError("Cannot transition physical status from 'draft' to 'shipped'", 400),
     );
 
@@ -168,13 +169,13 @@ describe("POST /api/purchase-orders/:id/mark-in-transit", () => {
 
   it("(3) returns 200 and the updated PO when transitioning from shipped", async () => {
     const updatedPo = { id: 11, physicalStatus: "in_transit" };
-    purchasing.transitionPhysical.mockResolvedValue(updatedPo);
+    purchasing.executeLifecycleCommand.mockResolvedValue(updatedPo);
 
     const { status, body } = await post(server.url, "/api/purchase-orders/11/mark-in-transit");
 
     expect(status).toBe(200);
     expect(body.physicalStatus).toBe("in_transit");
-    expect(purchasing.transitionPhysical).toHaveBeenCalledWith(11, "in_transit", "test-user", undefined);
+    expect(purchasing.executeLifecycleCommand).toHaveBeenCalledWith(11, "mark_in_transit", {}, "test-user");
   });
 });
 
@@ -191,34 +192,39 @@ describe("POST /api/purchase-orders/:id/mark-arrived", () => {
 
   it("(4) returns 200 when transitioning from in_transit", async () => {
     const updatedPo = { id: 12, physicalStatus: "arrived" };
-    purchasing.transitionPhysical.mockResolvedValue(updatedPo);
+    purchasing.executeLifecycleCommand.mockResolvedValue(updatedPo);
 
     const { status, body } = await post(server.url, "/api/purchase-orders/12/mark-arrived");
 
     expect(status).toBe(200);
     expect(body.physicalStatus).toBe("arrived");
-    expect(purchasing.transitionPhysical).toHaveBeenCalledWith(12, "arrived", "test-user", undefined);
+    expect(purchasing.executeLifecycleCommand).toHaveBeenCalledWith(12, "mark_arrived", {}, "test-user");
   });
 
   it("(5) returns 200 when transitioning from shipped (skip in_transit allowed)", async () => {
     // VALID_PHYSICAL_TRANSITIONS: shipped → ["in_transit", "arrived", "cancelled"]
     // shipped → arrived is valid (skipping in_transit).
     const updatedPo = { id: 13, physicalStatus: "arrived" };
-    purchasing.transitionPhysical.mockResolvedValue(updatedPo);
+    purchasing.executeLifecycleCommand.mockResolvedValue(updatedPo);
 
     const { status, body } = await post(server.url, "/api/purchase-orders/13/mark-arrived");
 
     expect(status).toBe(200);
     expect(body.physicalStatus).toBe("arrived");
-    // Service validates the transition; route just forwards.
-    expect(purchasing.transitionPhysical).toHaveBeenCalledWith(13, "arrived", "test-user", undefined);
+    // Service validates the transition; route just forwards the command.
+    expect(purchasing.executeLifecycleCommand).toHaveBeenCalledWith(13, "mark_arrived", {}, "test-user");
   });
 
-  it("forwards optional notes from request body to transitionPhysical", async () => {
-    purchasing.transitionPhysical.mockResolvedValue({ id: 14, physicalStatus: "arrived" });
+  it("forwards optional notes from request body to the lifecycle command", async () => {
+    purchasing.executeLifecycleCommand.mockResolvedValue({ id: 14, physicalStatus: "arrived" });
 
     await post(server.url, "/api/purchase-orders/14/mark-arrived", { notes: "Arrived at warehouse" });
 
-    expect(purchasing.transitionPhysical).toHaveBeenCalledWith(14, "arrived", "test-user", "Arrived at warehouse");
+    expect(purchasing.executeLifecycleCommand).toHaveBeenCalledWith(
+      14,
+      "mark_arrived",
+      { notes: "Arrived at warehouse" },
+      "test-user",
+    );
   });
 });

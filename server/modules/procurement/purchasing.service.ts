@@ -48,6 +48,7 @@ import {
   buildFinancialTransitionChange,
   buildPhysicalTransitionChange,
   getAllowedLegacyTransitions,
+  type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
 import {
   buildPoCloseChange,
@@ -159,6 +160,13 @@ const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
   received: "received",
   short_closed: "closed_short",
   cancelled: "cancelled",
+};
+
+type PoLifecycleCommandInput = {
+  notes?: string;
+  reason?: string;
+  vendorRefNumber?: string;
+  confirmedDeliveryDate?: Date;
 };
 
 // Signed mills <-> cents helpers for the typed-PO-lines pipeline.
@@ -1515,6 +1523,57 @@ export function createPurchasingService(db: any, storage: Storage) {
       reason,
     });
     return updated;
+  }
+
+  // ── LIFECYCLE COMMAND DISPATCH ─────────────────────────────────
+
+  async function executeLifecycleCommand(
+    id: number,
+    command: PoLifecycleCommand,
+    input: PoLifecycleCommandInput = {},
+    userId?: string,
+  ) {
+    switch (command) {
+      case "submit":
+        return submit(id, userId);
+      case "return_to_draft":
+        return returnToDraft(id, userId, input.notes);
+      case "approve":
+        return approve(id, userId, input.notes);
+      case "send":
+        return send(id, userId);
+      case "send_to_vendor":
+        return sendToVendor(id, userId);
+      case "acknowledge":
+        return acknowledge(
+          id,
+          {
+            vendorRefNumber: input.vendorRefNumber,
+            confirmedDeliveryDate: input.confirmedDeliveryDate,
+          },
+          userId,
+        );
+      case "mark_shipped":
+        return transitionPhysical(id, "shipped", userId, input.notes);
+      case "mark_in_transit":
+        return transitionPhysical(id, "in_transit", userId, input.notes);
+      case "mark_arrived":
+        return transitionPhysical(id, "arrived", userId, input.notes);
+      case "create_receipt":
+        return createReceiptFromPO(id, userId);
+      case "cancel":
+        return cancel(id, input.reason ?? "", userId);
+      case "close":
+        return close(id, userId, input.notes);
+      case "close_short":
+        return closeShort(id, input.reason ?? "", userId);
+      default: {
+        const exhaustive: never = command;
+        throw new PurchasingError(`Unknown PO lifecycle command '${exhaustive}'`, 400, {
+          command: exhaustive,
+        });
+      }
+    }
   }
 
   // ── RECEIVING INTEGRATION ───────────────────────────────────────
@@ -3176,6 +3235,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     cancel,
     close,
     closeShort,
+    executeLifecycleCommand,
 
     // Recalculate
     recalculateTotals,
