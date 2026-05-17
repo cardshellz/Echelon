@@ -969,3 +969,44 @@ Next step:
 - Continue Phase 2 by either transactionalizing the remaining movement commands
   or starting the AP command-boundary pass, depending on whether we want to
   finish physical lifecycle atomicity before moving into financial lifecycle.
+
+### 2026-05-17 - Phase 2 Slice 6: Physical Lifecycle Atomicity
+
+Scope:
+
+- Moved `transitionPhysical` onto the shared transaction helper so physical PO
+  movement writes the PO patch, `po_status_history`, and mapped `po_events`
+  row atomically.
+- This makes `send`, `acknowledge`, `mark_shipped`, `mark_in_transit`,
+  `mark_arrived`, and any direct physical transition caller inherit the same
+  transactional audit behavior.
+- Folded submit, auto-approve, return-to-draft, approve, and solo-mode
+  auto-approve status/event writes into the same transaction helper as well.
+- Preserved public routes, command IDs, lifecycle validation, and the
+  non-blocking post-transition exception detection hooks.
+- Scanned the procurement module for remaining PO lifecycle status-history
+  writes. Remaining status writes are either financial/AP state
+  (`transitionFinancial`) or receipt reconciliation, which belongs to the AP
+  and receiving phases rather than the Phase 2 physical lifecycle closeout.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/po-phase2-api.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Phase 2 closeout:
+
+- PO lifecycle routes now dispatch through `executeLifecycleCommand`.
+- UI next actions are derived by the lifecycle service instead of local status
+  branching.
+- Physical lifecycle commands write PO state, status history, and audit events
+  through one transaction path.
+- Financial/AP state and receipt reconciliation are intentionally deferred to
+  Phase 7 and Phase 3 respectively.
+
+Next step:
+
+- Move to Phase 3: receiving orchestration, starting with receipt close and PO
+  reconciliation drift prevention.

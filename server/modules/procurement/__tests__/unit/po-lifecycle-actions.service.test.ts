@@ -126,10 +126,16 @@ describe("PO lifecycle actions", () => {
     const result = await svc.submit(1, "user-1");
 
     expect(result.status).toBe("pending_approval");
-    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledWith(
-      1,
-      expect.objectContaining({ status: "pending_approval", approvalTierId: 7 }),
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(db.updateCalls).toContainEqual(
       expect.objectContaining({
+        patch: expect.objectContaining({ status: "pending_approval", approvalTierId: 7 }),
+      }),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        purchaseOrderId: 1,
         fromStatus: "draft",
         toStatus: "pending_approval",
         changedBy: "user-1",
@@ -182,12 +188,27 @@ describe("PO lifecycle actions", () => {
         status: "acknowledged",
         physicalStatus: "acknowledged",
       }),
-      updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 3, physicalStatus: "shipped" }),
     });
     const svc = createPurchasingService(db, storage);
 
     await svc.transitionPhysical(3, "shipped", "user-3", "vendor shipped");
 
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(db.updateCalls).toContainEqual(
+      expect.objectContaining({
+        patch: expect.objectContaining({ physicalStatus: "shipped" }),
+      }),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        purchaseOrderId: 3,
+        fromStatus: "acknowledged",
+        toStatus: "acknowledged",
+        changedBy: "user-3",
+        notes: "vendor shipped",
+      }),
+    );
     expect(db.insertedRows).toContainEqual(
       expect.objectContaining({
         poId: 3,
@@ -210,16 +231,21 @@ describe("PO lifecycle actions", () => {
         status: "acknowledged",
         physicalStatus: "acknowledged",
       }),
-      updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 33, physicalStatus: "shipped" }),
     });
     const svc = createPurchasingService(db, storage);
 
     await svc.executeLifecycleCommand(33, "mark_shipped", { notes: "vendor shipped" }, "user-33");
 
-    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledWith(
-      33,
-      expect.objectContaining({ physicalStatus: "shipped" }),
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(db.updateCalls).toContainEqual(
       expect.objectContaining({
+        patch: expect.objectContaining({ physicalStatus: "shipped" }),
+      }),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        purchaseOrderId: 33,
         fromStatus: "acknowledged",
         toStatus: "acknowledged",
         changedBy: "user-33",
@@ -244,7 +270,6 @@ describe("PO lifecycle actions", () => {
         status: "sent",
         physicalStatus: "sent",
       }),
-      updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 34, physicalStatus: "acknowledged" }),
     });
     const svc = createPurchasingService(db, storage);
 
@@ -255,16 +280,29 @@ describe("PO lifecycle actions", () => {
       "user-34",
     );
 
-    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledWith(
-      34,
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(db.updateCalls).toContainEqual(
       expect.objectContaining({
-        physicalStatus: "acknowledged",
-        status: "acknowledged",
-        vendorRefNumber: "VREF-34",
-        confirmedDeliveryDate,
+        patch: expect.objectContaining({
+          physicalStatus: "acknowledged",
+          status: "acknowledged",
+          vendorRefNumber: "VREF-34",
+          confirmedDeliveryDate,
+        }),
       }),
+    );
+    expect(db.insertedRows).toContainEqual(
       expect.objectContaining({
+        purchaseOrderId: 34,
         notes: "Vendor acknowledged",
+      }),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        poId: 34,
+        eventType: "vendor_acknowledged",
+        actorId: "user-34",
       }),
     );
   });
