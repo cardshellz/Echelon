@@ -1124,8 +1124,11 @@ export type AutoDraftRun = typeof autoDraftRuns.$inferSelect;
 // duplicates) have a home without polluting the status machine table.
 // Every row is an immutable audit record: who did what to which PO when.
 //
-// event_type values emitted by the PO module today:
-//   'created', 'submitted', 'approved', 'sent_to_vendor',
+// event_type values emitted by the PO module today include:
+//   'created', 'submitted', 'approved', 'returned_to_draft',
+//   'sent_to_vendor', 'vendor_acknowledged', 'marked_shipped',
+//   'marked_in_transit', 'marked_arrived', 'receiving_started',
+//   'received', 'closed', 'closed_short', 'cancelled',
 //   'edited', 'duplicated_from'
 // Other modules (receiving, AP) will add more types over time.
 //
