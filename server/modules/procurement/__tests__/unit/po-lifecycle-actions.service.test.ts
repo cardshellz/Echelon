@@ -14,8 +14,10 @@ import { createPurchasingService } from "../../purchasing.service";
 
 function buildMockDb() {
   const insertedRows: any[] = [];
-  return {
+  const updateCalls: Array<{ table: unknown; patch: any }> = [];
+  const db: any = {
     insertedRows,
+    updateCalls,
     insert: vi.fn(() => ({
       values: vi.fn((row: any) => {
         insertedRows.push(row);
@@ -28,9 +30,19 @@ function buildMockDb() {
       innerJoin: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),
     })),
-    update: vi.fn(),
-    transaction: vi.fn(async (fn: any) => fn({})),
-  } as any;
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((patch: any) => {
+        updateCalls.push({ table, patch });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([{ id: 1, ...patch }]),
+          })),
+        };
+      }),
+    })),
+  };
+  db.transaction = vi.fn(async (fn: any) => fn(db));
+  return db;
 }
 
 function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
@@ -270,7 +282,61 @@ describe("PO lifecycle actions", () => {
     });
   });
 
-  it("close-short writes a close-short event after line close patches", async () => {
+  it("cancel writes line cancellations, status history, and event in one transaction", async () => {
+    const db = buildMockDb();
+    const storage = buildMockStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 5,
+        status: "approved",
+        physicalStatus: "draft",
+      }),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue([
+        { id: 50, status: "open", orderQty: 12 },
+        { id: 51, status: "received", orderQty: 2 },
+      ]),
+    });
+    const svc = createPurchasingService(db, storage);
+
+    await svc.cancel(5, "vendor cancelled", "user-5");
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(storage.updatePurchaseOrderLine).not.toHaveBeenCalled();
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(db.updateCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          patch: expect.objectContaining({ status: "cancelled", cancelledQty: 12 }),
+        }),
+        expect.objectContaining({
+          patch: expect.objectContaining({
+            status: "cancelled",
+            physicalStatus: "cancelled",
+            cancelReason: "vendor cancelled",
+          }),
+        }),
+      ]),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        purchaseOrderId: 5,
+        fromStatus: "approved",
+        toStatus: "cancelled",
+      }),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        poId: 5,
+        eventType: "cancelled",
+        actorId: "user-5",
+        payloadJson: expect.objectContaining({
+          reason: "vendor cancelled",
+          physical_status: "cancelled",
+        }),
+      }),
+    );
+  });
+
+  it("close-short writes line patches, status history, and event in one transaction", async () => {
     const db = buildMockDb();
     const storage = buildMockStorage({
       getPurchaseOrderById: vi.fn().mockResolvedValue({
@@ -281,15 +347,30 @@ describe("PO lifecycle actions", () => {
       getPurchaseOrderLines: vi.fn().mockResolvedValue([
         { id: 40, status: "open", orderQty: 10 },
       ]),
-      updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 4, status: "closed" }),
     });
     const svc = createPurchasingService(db, storage);
 
     await svc.closeShort(4, "vendor short-shipped", "user-4");
 
-    expect(storage.updatePurchaseOrderLine).toHaveBeenCalledWith(
-      40,
-      expect.objectContaining({ status: "closed", closeShortReason: "vendor short-shipped" }),
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(storage.updatePurchaseOrderLine).not.toHaveBeenCalled();
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(db.updateCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          patch: expect.objectContaining({ status: "closed", closeShortReason: "vendor short-shipped" }),
+        }),
+        expect.objectContaining({
+          patch: expect.objectContaining({ status: "closed", physicalStatus: "short_closed" }),
+        }),
+      ]),
+    );
+    expect(db.insertedRows).toContainEqual(
+      expect.objectContaining({
+        purchaseOrderId: 4,
+        toStatus: "closed",
+        notes: "Closed short: vendor short-shipped",
+      }),
     );
     expect(db.insertedRows).toContainEqual(
       expect.objectContaining({

@@ -31,6 +31,8 @@ let selectCallCount = 0;
 
 function buildMockDb() {
   selectCallCount = 0;
+  const insertedRows: any[] = [];
+  const updateCalls: Array<{ table: unknown; patch: any }> = [];
   const chain: any = {
     select: vi.fn(() => chain),
     from: vi.fn(() => chain),
@@ -48,12 +50,29 @@ function buildMockDb() {
       );
     }),
   };
-  return {
+  const db: any = {
+    insertedRows,
+    updateCalls,
     select: vi.fn(() => chain),
-    insert: vi.fn().mockReturnValue({ values: vi.fn().mockResolvedValue([]) }),
-    update: vi.fn().mockReturnValue({ set: vi.fn().mockReturnValue({ where: vi.fn() }) }),
-    transaction: vi.fn(async (fn: any) => fn(buildMockDb())),
+    insert: vi.fn().mockReturnValue({
+      values: vi.fn((row: any) => {
+        insertedRows.push(row);
+        return Promise.resolve([]);
+      }),
+    }),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((patch: any) => {
+        updateCalls.push({ table, patch });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([{ id: 1, ...patch }]),
+          })),
+        };
+      }),
+    })),
   };
+  db.transaction = vi.fn(async (fn: any) => fn(db));
+  return db;
 }
 
 function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
@@ -120,8 +139,9 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     allPoLinks = [];
 
     const result = await svc.close(1, "user-1", "all good");
-    expect(result).toEqual({ id: 1, status: "closed" });
-    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalled();
+    expect(result).toMatchObject({ id: 1, status: "closed" });
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
     expect(mockDetectMatchMismatch).not.toHaveBeenCalled();
   });
 
@@ -134,7 +154,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     ];
 
     const result = await svc.close(1, "user-1", "all matched");
-    expect(result).toEqual({ id: 1, status: "closed" });
+    expect(result).toMatchObject({ id: 1, status: "closed" });
     expect(mockDetectMatchMismatch).not.toHaveBeenCalled();
   });
 
@@ -146,7 +166,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     ];
 
     const result = await svc.close(1, "user-1", "pending is ok");
-    expect(result).toEqual({ id: 1, status: "closed" });
+    expect(result).toMatchObject({ id: 1, status: "closed" });
     expect(mockDetectMatchMismatch).not.toHaveBeenCalled();
   });
 
@@ -159,7 +179,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     ];
 
     const result = await svc.close(1, "user-1", "mixed ok");
-    expect(result).toEqual({ id: 1, status: "closed" });
+    expect(result).toMatchObject({ id: 1, status: "closed" });
   });
 
   it("throws 409 when invoice line has qty_mismatch", async () => {
@@ -251,7 +271,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     ]);
 
     const result = await svc.closeShort(1, "vendor short-shipped", "user-1");
-    expect(result).toEqual({ id: 1, status: "closed" });
+    expect(result).toMatchObject({ id: 1, status: "closed" });
     // closeShort does not check 3-way match — no db.select calls for poLinks
     expect(mockDetectMatchMismatch).not.toHaveBeenCalled();
   });

@@ -930,3 +930,42 @@ Next step:
 - Continue Phase 2 by making the most consequential lifecycle commands
   transactional end to end, starting with cancel/void and close/close-short
   because they alter line state as well as PO state.
+
+### 2026-05-17 - Phase 2 Slice 5: Transactional Lifecycle Commands
+
+Scope:
+
+- Moved `cancel`, `close`, and `closeShort` onto caller-owned DB transactions
+  for their consequential writes.
+- `cancel` now commits open-line cancellation patches, PO physical cancellation,
+  `po_status_history`, and the `cancelled` event together.
+- `close` now commits the close patch, status history, and `closed` event
+  together after the existing three-way-match gate passes.
+- `closeShort` now commits remaining line close-short patches, the
+  short-closed PO patch, status history, and `closed_short` event together.
+- Preserved existing public route behavior, lifecycle validation, close-match
+  blocking, and post-cancel best-effort past-due exception detection.
+- Added focused coverage proving these command paths no longer split line
+  writes, status/history writes, and audit-event writes across separate storage
+  calls.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/po-phase2-api.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- Generic movement commands (`mark_shipped`, `mark_in_transit`, `mark_arrived`,
+  and `acknowledge`) still use the storage helper followed by a separate event
+  write. Those are lower risk than cancel/close because they do not also patch
+  PO lines, but they should eventually move behind the same transaction helper.
+- AP invoice/payment actions remain outside the PO lifecycle command boundary.
+
+Next step:
+
+- Continue Phase 2 by either transactionalizing the remaining movement commands
+  or starting the AP command-boundary pass, depending on whether we want to
+  finish physical lifecycle atomicity before moving into financial lifecycle.

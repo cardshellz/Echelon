@@ -626,6 +626,48 @@ export function createPurchasingService(db: any, storage: Storage) {
     throw error;
   }
 
+  async function updatePurchaseOrderStatusWithHistoryTx(
+    tx: any,
+    id: number,
+    updates: Record<string, unknown>,
+    historyData: {
+      fromStatus?: string;
+      toStatus?: string;
+      changedBy?: string;
+      notes?: string;
+    },
+  ): Promise<any | null> {
+    if (!historyData?.toStatus) {
+      throw new Error("updatePurchaseOrderStatusWithHistoryTx requires historyData.toStatus");
+    }
+
+    const result = await tx.update(purchaseOrdersTable)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(purchaseOrdersTable.id, id))
+      .returning();
+
+    const updatedPo = result[0] || null;
+    if (updatedPo) {
+      await tx.insert(poStatusHistoryTable).values({
+        ...historyData,
+        purchaseOrderId: id,
+      });
+    }
+    return updatedPo;
+  }
+
+  async function updatePurchaseOrderLineTx(
+    tx: any,
+    id: number,
+    updates: Record<string, unknown>,
+  ): Promise<any | null> {
+    const result = await tx.update(purchaseOrderLinesTable)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(purchaseOrderLinesTable.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
   // ── Dual-track state machine functions (migration 0565) ──────────────────
 
   /**
@@ -1397,17 +1439,52 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot cancel/void PO in '${po.status}' status`, 400);
     }
 
-    // Cancel all open lines
     const lines = await storage.getPurchaseOrderLines(id);
-    for (const line of lines) {
-      if (line.status === "open") {
-        await storage.updatePurchaseOrderLine(line.id, { status: "cancelled", cancelledQty: line.orderQty });
+    const change = (() => {
+      try {
+        return buildPhysicalTransitionChange({
+          po,
+          target: "cancelled",
+          userId,
+          notes: reason,
+          extraPatch: { cancelReason: reason },
+        });
+      } catch (error) {
+        return toPurchasingError(error);
       }
+    })();
+
+    const result = await db.transaction(async (tx: any) => {
+      for (const line of lines) {
+        if (line.status === "open") {
+          await updatePurchaseOrderLineTx(tx, line.id, {
+            status: "cancelled",
+            cancelledQty: line.orderQty,
+          });
+        }
+      }
+
+      const updated = await updatePurchaseOrderStatusWithHistoryTx(
+        tx,
+        id,
+        change.patch,
+        change.history,
+      );
+      await emitPoEventTx(tx, id, "cancelled", userId, {
+        from_status: change.history.fromStatus,
+        to_status: change.history.toStatus,
+        physical_status: "cancelled",
+        reason,
+      });
+      return updated;
+    });
+
+    try {
+      await detectPastDue(id);
+    } catch (detectionErr) {
+      console.error("[po-exceptions] detection hook failed in cancel:", detectionErr);
     }
 
-    const result = await transitionPhysical(id, "cancelled", userId, reason, {
-      cancelReason: reason,
-    });
     return result;
   }
 
@@ -1476,17 +1553,20 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     })();
 
-    const updated = await storage.updatePurchaseOrderStatusWithHistory(
-      id,
-      change.patch,
-      change.history,
-    );
-    await emitPoEvent(id, "closed", userId, {
-      from_status: change.history.fromStatus,
-      to_status: change.history.toStatus,
-      notes: notes ?? null,
+    return db.transaction(async (tx: any) => {
+      const updated = await updatePurchaseOrderStatusWithHistoryTx(
+        tx,
+        id,
+        change.patch,
+        change.history,
+      );
+      await emitPoEventTx(tx, id, "closed", userId, {
+        from_status: change.history.fromStatus,
+        to_status: change.history.toStatus,
+        notes: notes ?? null,
+      });
+      return updated;
     });
-    return updated;
   }
 
   async function closeShort(id: number, reason: string, userId?: string) {
@@ -1495,14 +1575,7 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     if (!reason) throw new PurchasingError("Close-short reason is required", 400);
 
-    // Close all remaining open lines
     const lines = await storage.getPurchaseOrderLines(id);
-    for (const line of lines) {
-      const linePatch = buildPoCloseShortLinePatch(line, reason);
-      if (linePatch) {
-        await storage.updatePurchaseOrderLine(line.id, linePatch);
-      }
-    }
 
     const change = (() => {
       try {
@@ -1512,17 +1585,27 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     })();
 
-    const updated = await storage.updatePurchaseOrderStatusWithHistory(
-      id,
-      change.patch,
-      change.history,
-    );
-    await emitPoEvent(id, "closed_short", userId, {
-      from_status: change.history.fromStatus,
-      to_status: change.history.toStatus,
-      reason,
+    return db.transaction(async (tx: any) => {
+      for (const line of lines) {
+        const linePatch = buildPoCloseShortLinePatch(line, reason);
+        if (linePatch) {
+          await updatePurchaseOrderLineTx(tx, line.id, linePatch);
+        }
+      }
+
+      const updated = await updatePurchaseOrderStatusWithHistoryTx(
+        tx,
+        id,
+        change.patch,
+        change.history,
+      );
+      await emitPoEventTx(tx, id, "closed_short", userId, {
+        from_status: change.history.fromStatus,
+        to_status: change.history.toStatus,
+        reason,
+      });
+      return updated;
     });
-    return updated;
   }
 
   // ── LIFECYCLE COMMAND DISPATCH ─────────────────────────────────
