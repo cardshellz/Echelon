@@ -602,3 +602,43 @@ Next step:
 - After merge, continue route/API ownership with AP invoice/payment routes,
   then decide whether the remaining reports/notifications surface should stay
   in the public procurement route registrar or move into narrower owners.
+
+### 2026-05-16 - Phase 1 Slice 9: AP Invoice and Payment Route Split
+
+Scope:
+
+- Added `server/modules/procurement/ap-ledger.routes.ts` as the owner for AP
+  vendor invoice, invoice line, invoice attachment, AP payment, PO invoice
+  cross-reference, and AP summary endpoints.
+- Preserved existing AP URLs and mounted the AP registrar immediately after
+  inbound shipment routes, keeping the prior shipment-to-AP route order.
+- Removed AP service, route-level idempotency, and attachment upload
+  dependencies from the main procurement route registrar.
+- Kept shipment-cost AP bridge endpoints with inbound shipments because those
+  actions are part of the landed-cost workflow; this AP owner covers direct
+  invoice/payment ledger workflows.
+- Added focused route coverage for invoice filter parsing, invoice creation
+  date/user normalization, PO invoice reads, AP payment posting, and AP summary
+  delegation.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- The AP route owner still groups invoice, payment, attachment, PO invoice
+  lookup, and summary routes. That is acceptable while the route monolith is
+  being dismantled; future hardening should split command endpoints from read
+  endpoints and attach explicit retry/audit semantics around invoice/payment
+  writes.
+
+Next step:
+
+- Open the AP route split PR.
+- After merge, finish route/API ownership by deciding whether procurement
+  reports, notifications, replenishment admin, and auto-draft settings remain
+  in the public procurement registrar or move into smaller route owners.
