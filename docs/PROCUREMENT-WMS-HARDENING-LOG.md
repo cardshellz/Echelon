@@ -683,3 +683,47 @@ Next step:
 - Finish Phase 1 route/API ownership with replenishment admin/task routes and
   the purchasing recommendation/auto-draft surface. Those are the last large
   handler groups still sitting inside the remaining procurement route registrar.
+
+### 2026-05-17 - Phase 1 Slice 11: Replenishment Route Owner Split
+
+Scope:
+
+- Added `server/modules/inventory/replenishment.routes.ts` as the route owner
+  for replenishment tier defaults, SKU rules, location replen configs, CSV
+  upload/template endpoints, and replenishment task CRUD/execute/exception
+  actions under the existing `/api/replen/*` URLs.
+- Preserved existing replenishment behavior by mechanically moving the route
+  block out of `server/modules/procurement/procurement.routes.ts` and mounting
+  it from `registerPurchasingRoutes(app)` at the same point after receiving
+  routes.
+- Exported `registerReplenishmentRoutes` from the inventory module so route
+  ownership matches table/service ownership: replen rules, tier defaults,
+  location replen configs, replen tasks, and replenishment use cases already
+  belong to inventory.
+- Added focused route coverage for enriched replen rule reads, manual task
+  creation through the unified auto-execute decision path, and the guard that
+  prevents marking tasks completed without using the execute path that moves
+  inventory.
+
+Verification:
+
+- Passed: `npx vitest run server/modules/inventory/__tests__/unit/replenishment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/inventory/__tests__/unit/replenishment.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/procurement-report.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+
+Remaining risk:
+
+- This slice intentionally does not redesign replenishment behavior. The new
+  owner still contains legacy CSV parsing and admin/task handlers in one route
+  file. Later replen hardening can split config/admin routes from task command
+  routes if either surface grows.
+- `registerPurchasingRoutes(app)` still mounts the inventory replenishment
+  route owner for URL/order preservation while Phase 1 dismantles the old
+  procurement route monolith. A later bootstrap cleanup can register the owner
+  directly from `server/routes.ts`.
+
+Next step:
+
+- Finish Phase 1 by extracting the purchasing recommendation/auto-draft
+  surface from the remaining procurement route registrar. That is the last
+  large procurement-specific handler group before deeper purchasing-engine
+  hardening begins.
