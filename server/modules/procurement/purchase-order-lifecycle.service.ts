@@ -102,21 +102,23 @@ export function getAllowedFinancialTransitions(status: PoFinancialStatus): PoFin
 
 export type PoLifecycleTrack = "legacy" | "physical" | "financial" | "receiving";
 
+export type PoLifecycleCommand =
+  | "submit"
+  | "return_to_draft"
+  | "approve"
+  | "send"
+  | "send_to_vendor"
+  | "acknowledge"
+  | "mark_shipped"
+  | "mark_in_transit"
+  | "mark_arrived"
+  | "create_receipt"
+  | "cancel"
+  | "close"
+  | "close_short";
+
 export type PoNextAction = {
-  id:
-    | "submit"
-    | "return_to_draft"
-    | "approve"
-    | "send"
-    | "send_to_vendor"
-    | "acknowledge"
-    | "mark_shipped"
-    | "mark_in_transit"
-    | "mark_arrived"
-    | "create_receipt"
-    | "cancel"
-    | "close"
-    | "close_short";
+  id: PoLifecycleCommand;
   label: string;
   track: PoLifecycleTrack;
   method: "POST";

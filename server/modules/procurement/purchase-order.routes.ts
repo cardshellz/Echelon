@@ -16,7 +16,10 @@ import * as emailService from "../notifications/email.service";
 import { inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { users as identityUsers } from "../../storage/base";
-import { buildPoLifecycleSummary } from "./purchase-order-lifecycle.service";
+import {
+  buildPoLifecycleSummary,
+  type PoLifecycleCommand,
+} from "./purchase-order-lifecycle.service";
 
 export function registerPurchaseOrderRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
@@ -25,6 +28,36 @@ export function registerPurchaseOrderRoutes(app: Express) {
     ...po,
     lifecycle: buildPoLifecycleSummary(po),
   });
+
+  const buildLifecycleCommandInput = (req: any) => {
+    const input: Record<string, unknown> = {};
+    if (req.body?.notes !== undefined) input.notes = req.body.notes;
+    if (req.body?.reason !== undefined) input.reason = req.body.reason;
+    if (req.body?.vendorRefNumber !== undefined) input.vendorRefNumber = req.body.vendorRefNumber;
+    if (req.body?.confirmedDeliveryDate) {
+      input.confirmedDeliveryDate = new Date(req.body.confirmedDeliveryDate);
+    }
+    return input;
+  };
+
+  const handleLifecycleCommand = async (req: any, res: any, command: PoLifecycleCommand) => {
+    try {
+      const result = await purchasing.executeLifecycleCommand(
+        Number(req.params.id),
+        command,
+        buildLifecycleCommandInput(req),
+        req.session.user?.id,
+      );
+      if (command === "create_receipt") {
+        res.status((result as any)?.reusedExisting ? 200 : 201).json(result);
+        return;
+      }
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  };
 
   // PO CRUD
 
@@ -556,170 +589,66 @@ export function registerPurchaseOrderRoutes(app: Express) {
   // Status Transitions
 
   app.post("/api/purchase-orders/:id/submit", requirePermission("purchasing", "create"), async (req, res) => {
-    try {
-      const po = await purchasing.submit(Number(req.params.id), req.session.user?.id);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "submit");
   });
 
   app.post("/api/purchase-orders/:id/return-to-draft", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const po = await purchasing.returnToDraft(Number(req.params.id), req.session.user?.id, req.body.notes);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "return_to_draft");
   });
 
   app.post("/api/purchase-orders/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
-    try {
-      const po = await purchasing.approve(Number(req.params.id), req.session.user?.id, req.body.notes);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "approve");
   });
 
   app.post("/api/purchase-orders/:id/send", requirePermission("purchasing", "create"), async (req, res) => {
-    try {
-      const po = await purchasing.send(Number(req.params.id), req.session.user?.id);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "send");
   });
 
   // Combined send-to-vendor: draft -> approved -> sent in one click (solo mode only)
   app.post("/api/purchase-orders/:id/send-to-vendor", requirePermission("purchasing", "create"), async (req, res) => {
-    try {
-      const po = await purchasing.sendToVendor(Number(req.params.id), req.session.user?.id);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "send_to_vendor");
   });
 
-  // Phase 3 physical-status transitions
-  // All three delegate directly to purchasing.transitionPhysical which
-  // validates the VALID_PHYSICAL_TRANSITIONS table and returns 400/409 on
-  // invalid moves. PurchasingError.statusCode is forwarded verbatim.
+  // Phase 3 physical-status transitions. Routes delegate through the shared
+  // lifecycle command boundary; the service validates the state machine and
+  // returns 400/409 on invalid moves. PurchasingError.statusCode is forwarded.
 
   app.post("/api/purchase-orders/:id/mark-shipped", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const po = await purchasing.transitionPhysical(
-        Number(req.params.id),
-        "shipped",
-        req.session.user?.id,
-        req.body.notes,
-      );
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "mark_shipped");
   });
 
   app.post("/api/purchase-orders/:id/mark-in-transit", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const po = await purchasing.transitionPhysical(
-        Number(req.params.id),
-        "in_transit",
-        req.session.user?.id,
-        req.body.notes,
-      );
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "mark_in_transit");
   });
 
   app.post("/api/purchase-orders/:id/mark-arrived", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const po = await purchasing.transitionPhysical(
-        Number(req.params.id),
-        "arrived",
-        req.session.user?.id,
-        req.body.notes,
-      );
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "mark_arrived");
   });
 
   app.post("/api/purchase-orders/:id/acknowledge", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const data = {
-        ...req.body,
-        confirmedDeliveryDate: req.body.confirmedDeliveryDate ? new Date(req.body.confirmedDeliveryDate) : undefined,
-      };
-      const po = await purchasing.acknowledge(Number(req.params.id), data, req.session.user?.id);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "acknowledge");
   });
 
   app.post("/api/purchase-orders/:id/cancel", requirePermission("purchasing", "cancel"), async (req, res) => {
-    try {
-      const po = await purchasing.cancel(Number(req.params.id), req.body.reason, req.session.user?.id);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "cancel");
   });
 
   app.post("/api/purchase-orders/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
-    try {
-      const po = await purchasing.cancel(Number(req.params.id), req.body.reason, req.session.user?.id);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "cancel");
   });
 
   app.post("/api/purchase-orders/:id/close", requirePermission("purchasing", "create"), async (req, res) => {
-    try {
-      const po = await purchasing.close(Number(req.params.id), req.session.user?.id, req.body.notes);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "close");
   });
 
   app.post("/api/purchase-orders/:id/close-short", requirePermission("purchasing", "approve"), async (req, res) => {
-    try {
-      const po = await purchasing.closeShort(Number(req.params.id), req.body.reason, req.session.user?.id);
-      res.json(po);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "close_short");
   });
 
   // PO / Receiving
 
   app.post("/api/purchase-orders/:id/create-receipt", requirePermission("inventory", "receive"), requireIdempotency(), async (req, res) => {
-    try {
-      const ro = await purchasing.createReceiptFromPO(Number(req.params.id), req.session.user?.id);
-      res.status((ro as any)?.reusedExisting ? 200 : 201).json(ro);
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    await handleLifecycleCommand(req, res, "create_receipt");
   });
 
   app.get("/api/purchase-orders/:id/receipts", requirePermission("purchasing", "view"), async (req, res) => {
