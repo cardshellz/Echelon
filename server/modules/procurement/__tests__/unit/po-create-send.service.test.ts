@@ -110,7 +110,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productVariantId: 1, orderQty: -5, unitCostCents: 100 }],
+        lines: [{ productId: 1, productVariantId: 1, orderQty: -5, unitCostCents: 100 }],
       } as any),
     ).rejects.toThrow(/must be > 0/);
   });
@@ -119,7 +119,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productVariantId: 1, orderQty: 1, unitCostCents: 10.5 }],
+        lines: [{ productId: 1, productVariantId: 1, orderQty: 1, unitCostCents: 10.5 }],
       } as any),
     ).rejects.toThrow(/must be an integer/);
   });
@@ -129,7 +129,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 999,
-        lines: [{ productVariantId: 1, orderQty: 1, unitCostCents: 100 }],
+        lines: [{ productId: 1, productVariantId: 1, orderQty: 1, unitCostCents: 100 }],
       } as any),
     ).rejects.toThrow(/Vendor not found/);
   });
@@ -164,6 +164,93 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
     ]);
     await expect(svc.sendPurchaseOrder(1, "u1")).rejects.toThrow(
       /at least one line with quantity > 0/,
+    );
+  });
+
+  it("sends through the lifecycle transition so physicalStatus stays in sync", async () => {
+    const updatePatches: any[] = [];
+    const insertedRows: any[] = [];
+    const db = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockResolvedValue([]),
+      }),
+      insert: vi.fn(),
+      update: vi.fn(),
+      transaction: vi.fn(async (fn: any) => {
+        const tx = {
+          update: vi.fn(() => ({
+            set: vi.fn((patch: any) => {
+              updatePatches.push(patch);
+              return {
+                where: vi.fn(() => ({
+                  returning: vi.fn().mockResolvedValue([{ id: 1, ...patch }]),
+                })),
+              };
+            }),
+          })),
+          insert: vi.fn(() => ({
+            values: vi.fn((row: any) => {
+              insertedRows.push(row);
+              return Promise.resolve([]);
+            }),
+          })),
+        };
+        return fn(tx);
+      }),
+    };
+    const po = {
+      id: 1,
+      status: "draft",
+      physicalStatus: "draft",
+      totalCents: 100,
+      discountCents: 0,
+      taxCents: 0,
+      shippingCostCents: 0,
+      sentToVendorAt: null,
+      orderDate: null,
+    };
+    storage = buildMockStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue([
+        {
+          id: 10,
+          status: "open",
+          orderQty: 1,
+          unitCostCents: 100,
+          lineTotalCents: 100,
+        },
+      ]),
+      updatePurchaseOrder: vi.fn().mockResolvedValue({ ...po, totalCents: 100 }),
+      updatePurchaseOrderLine: vi.fn(),
+      getMatchingApprovalTier: vi.fn().mockResolvedValue(null),
+    });
+    svc = createPurchasingService(db, storage);
+
+    const result = await svc.sendPurchaseOrder(1, "u1");
+
+    expect(result.status).toBe("sent");
+    const sentPatch = updatePatches.at(-1);
+    expect(sentPatch.status).toBe("sent");
+    expect(sentPatch.physicalStatus).toBe("sent");
+    expect(sentPatch.sentToVendorAt).toBeInstanceOf(Date);
+    expect(sentPatch.orderDate).toBeInstanceOf(Date);
+    expect(insertedRows).toContainEqual(
+      expect.objectContaining({
+        purchaseOrderId: 1,
+        fromStatus: "approved",
+        toStatus: "sent",
+        changedBy: "u1",
+      }),
+    );
+    expect(insertedRows).toContainEqual(
+      expect.objectContaining({
+        poId: 1,
+        eventType: "sent_to_vendor",
+        actorType: "user",
+        actorId: "u1",
+      }),
     );
   });
 });
