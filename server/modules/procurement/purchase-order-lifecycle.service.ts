@@ -76,7 +76,7 @@ const PHYSICAL_TIMESTAMP_COLUMN: Partial<Record<PoPhysicalStatus, string>> = {
   cancelled: "cancelledAt",
 };
 
-function resolveCurrentPhysicalStatus(po: Record<string, any>): PoPhysicalStatus {
+export function resolveCurrentPhysicalStatus(po: Record<string, any>): PoPhysicalStatus {
   const physical = (po.physicalStatus ?? "draft") as PoPhysicalStatus;
 
   // Back-compat for pre-dual-track rows where legacy status had advanced but
@@ -98,6 +98,242 @@ export function getAllowedPhysicalTransitions(status: PoPhysicalStatus): PoPhysi
 
 export function getAllowedFinancialTransitions(status: PoFinancialStatus): PoFinancialStatus[] {
   return PO_FINANCIAL_TRANSITIONS[status] ?? [];
+}
+
+export type PoLifecycleTrack = "legacy" | "physical" | "financial" | "receiving";
+
+export type PoNextAction = {
+  id:
+    | "submit"
+    | "return_to_draft"
+    | "approve"
+    | "send"
+    | "send_to_vendor"
+    | "acknowledge"
+    | "mark_shipped"
+    | "mark_in_transit"
+    | "mark_arrived"
+    | "create_receipt"
+    | "cancel"
+    | "close"
+    | "close_short";
+  label: string;
+  track: PoLifecycleTrack;
+  method: "POST";
+  endpoint: string;
+  targetStatus?: string;
+  requiresDialog?: boolean;
+  destructive?: boolean;
+  requiredPermission: {
+    resource: string;
+    action: string;
+  };
+};
+
+export type PoLifecycleSummary = {
+  legacyStatus: string;
+  physicalStatus: PoPhysicalStatus;
+  financialStatus: PoFinancialStatus;
+  allowedLegacyTransitions: string[];
+  allowedPhysicalTransitions: PoPhysicalStatus[];
+  allowedFinancialTransitions: PoFinancialStatus[];
+  isTerminal: boolean;
+  nextActions: PoNextAction[];
+};
+
+const CANCELLABLE_LEGACY_STATUSES = new Set(["draft", "pending_approval", "approved", "sent", "acknowledged"]);
+
+function action(
+  po: Record<string, any>,
+  values: Omit<PoNextAction, "endpoint" | "method"> & { endpointSuffix: string },
+): PoNextAction {
+  const base = po.id ? `/api/purchase-orders/${po.id}` : "/api/purchase-orders/:id";
+  const { endpointSuffix, ...rest } = values;
+  return {
+    ...rest,
+    method: "POST",
+    endpoint: `${base}/${endpointSuffix}`,
+  };
+}
+
+export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSummary {
+  const legacyStatus = po.status ?? "draft";
+  const physicalStatus = resolveCurrentPhysicalStatus(po);
+  const financialStatus = (po.financialStatus ?? "unbilled") as PoFinancialStatus;
+  const allowedLegacyTransitions = getAllowedLegacyTransitions(legacyStatus);
+  const allowedPhysicalTransitions = getAllowedPhysicalTransitions(physicalStatus);
+  const allowedFinancialTransitions = getAllowedFinancialTransitions(financialStatus);
+  const nextActions: PoNextAction[] = [];
+
+  if (legacyStatus === "draft") {
+    nextActions.push(
+      action(po, {
+        id: "submit",
+        label: "Submit",
+        track: "legacy",
+        endpointSuffix: "submit",
+        targetStatus: "pending_approval",
+        requiredPermission: { resource: "purchasing", action: "create" },
+      }),
+      action(po, {
+        id: "send_to_vendor",
+        label: "Send to vendor",
+        track: "physical",
+        endpointSuffix: "send-to-vendor",
+        targetStatus: "sent",
+        requiredPermission: { resource: "purchasing", action: "create" },
+      }),
+    );
+  }
+
+  if (allowedLegacyTransitions.includes("draft")) {
+    nextActions.push(action(po, {
+      id: "return_to_draft",
+      label: "Return to draft",
+      track: "legacy",
+      endpointSuffix: "return-to-draft",
+      targetStatus: "draft",
+      requiredPermission: { resource: "purchasing", action: "edit" },
+    }));
+  }
+
+  if (allowedLegacyTransitions.includes("approved")) {
+    nextActions.push(action(po, {
+      id: "approve",
+      label: "Approve",
+      track: "legacy",
+      endpointSuffix: "approve",
+      targetStatus: "approved",
+      requiredPermission: { resource: "purchasing", action: "approve" },
+    }));
+  }
+
+  if (legacyStatus === "approved" && allowedPhysicalTransitions.includes("sent")) {
+    nextActions.push(
+      action(po, {
+        id: "send",
+        label: "Mark as sent",
+        track: "physical",
+        endpointSuffix: "send",
+        targetStatus: "sent",
+        requiredPermission: { resource: "purchasing", action: "create" },
+      }),
+      action(po, {
+        id: "send_to_vendor",
+        label: "Send to vendor",
+        track: "physical",
+        endpointSuffix: "send-to-vendor",
+        targetStatus: "sent",
+        requiredPermission: { resource: "purchasing", action: "create" },
+      }),
+    );
+  }
+
+  if (allowedPhysicalTransitions.includes("acknowledged")) {
+    nextActions.push(action(po, {
+      id: "acknowledge",
+      label: "Mark acknowledged",
+      track: "physical",
+      endpointSuffix: "acknowledge",
+      targetStatus: "acknowledged",
+      requiresDialog: true,
+      requiredPermission: { resource: "purchasing", action: "edit" },
+    }));
+  }
+
+  if (allowedPhysicalTransitions.includes("shipped")) {
+    nextActions.push(action(po, {
+      id: "mark_shipped",
+      label: "Mark shipped",
+      track: "physical",
+      endpointSuffix: "mark-shipped",
+      targetStatus: "shipped",
+      requiredPermission: { resource: "purchasing", action: "edit" },
+    }));
+  }
+
+  if (allowedPhysicalTransitions.includes("in_transit")) {
+    nextActions.push(action(po, {
+      id: "mark_in_transit",
+      label: "Mark in transit",
+      track: "physical",
+      endpointSuffix: "mark-in-transit",
+      targetStatus: "in_transit",
+      requiredPermission: { resource: "purchasing", action: "edit" },
+    }));
+  }
+
+  if (allowedPhysicalTransitions.includes("arrived")) {
+    nextActions.push(action(po, {
+      id: "mark_arrived",
+      label: "Mark arrived",
+      track: "physical",
+      endpointSuffix: "mark-arrived",
+      targetStatus: "arrived",
+      requiredPermission: { resource: "purchasing", action: "edit" },
+    }));
+  }
+
+  if (["sent", "acknowledged", "partially_received"].includes(legacyStatus)) {
+    nextActions.push(action(po, {
+      id: "create_receipt",
+      label: "Create receipt",
+      track: "receiving",
+      endpointSuffix: "create-receipt",
+      requiredPermission: { resource: "inventory", action: "receive" },
+    }));
+  }
+
+  if (CANCELLABLE_LEGACY_STATUSES.has(legacyStatus) && allowedPhysicalTransitions.includes("cancelled")) {
+    nextActions.push(action(po, {
+      id: "cancel",
+      label: ["sent", "acknowledged"].includes(legacyStatus) ? "Void" : "Cancel",
+      track: "physical",
+      endpointSuffix: "cancel",
+      targetStatus: "cancelled",
+      requiresDialog: true,
+      destructive: true,
+      requiredPermission: { resource: "purchasing", action: "cancel" },
+    }));
+  }
+
+  if (allowedLegacyTransitions.includes("closed")) {
+    nextActions.push(action(po, {
+      id: "close",
+      label: "Close PO",
+      track: "legacy",
+      endpointSuffix: "close",
+      targetStatus: "closed",
+      requiredPermission: { resource: "purchasing", action: "create" },
+    }));
+  }
+
+  if (legacyStatus === "partially_received" && allowedPhysicalTransitions.includes("short_closed")) {
+    nextActions.push(action(po, {
+      id: "close_short",
+      label: "Close short",
+      track: "physical",
+      endpointSuffix: "close-short",
+      targetStatus: "short_closed",
+      requiresDialog: true,
+      destructive: true,
+      requiredPermission: { resource: "purchasing", action: "approve" },
+    }));
+  }
+
+  return {
+    legacyStatus,
+    physicalStatus,
+    financialStatus,
+    allowedLegacyTransitions,
+    allowedPhysicalTransitions,
+    allowedFinancialTransitions,
+    isTerminal:
+      allowedLegacyTransitions.length === 0 &&
+      allowedPhysicalTransitions.length === 0 &&
+      allowedFinancialTransitions.length === 0,
+    nextActions,
+  };
 }
 
 export type LifecycleChange = {
