@@ -149,6 +149,17 @@ const EDITABLE_STATUSES = new Set(["draft"]);
 const LINE_AMENDABLE_STATUSES = new Set(["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"]);
 const CANCELLABLE_FROM = new Set(["draft", "pending_approval", "approved"]);
 const VOIDABLE_FROM = new Set(["sent", "acknowledged"]);
+const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
+  sent: "sent_to_vendor",
+  acknowledged: "vendor_acknowledged",
+  shipped: "marked_shipped",
+  in_transit: "marked_in_transit",
+  arrived: "marked_arrived",
+  receiving: "receiving_started",
+  received: "received",
+  short_closed: "closed_short",
+  cancelled: "cancelled",
+};
 
 // Signed mills <-> cents helpers for the typed-PO-lines pipeline.
 //
@@ -651,6 +662,15 @@ export function createPurchasingService(db: any, storage: Storage) {
       patch,
       change.history,
     );
+
+    const eventType = PHYSICAL_LIFECYCLE_EVENTS[target];
+    if (eventType) {
+      await emitPoEvent(poId, eventType, userId, {
+        from_status: change.history.fromStatus,
+        to_status: change.history.toStatus,
+        physical_status: target,
+      });
+    }
 
     // ── Exception detection hooks (event-driven, Phase 1) ──────────────────
     // Run after the DB write so detection reads fresh data.
@@ -1169,7 +1189,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (tier) {
       // Needs approval
       assertTransition(po.status, "pending_approval");
-      return await storage.updatePurchaseOrder(id, {
+      const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
         status: "pending_approval",
         approvalTierId: tier.id,
         updatedBy: userId,
@@ -1179,10 +1199,18 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         notes: `Approval required: ${tier.tierName}`
       });
+      await emitPoEvent(id, "submitted", userId, {
+        from_status: po.status,
+        to_status: "pending_approval",
+        tier_id: tier.id,
+        tier_name: tier.tierName,
+        total_cents: totalCents,
+      });
+      return updated;
     } else {
       // Auto-approve (no tier matches)
       assertTransition(po.status, "approved");
-      return await storage.updatePurchaseOrderStatusWithHistory(id, {
+      const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
         status: "approved",
         approvedBy: userId,
         approvedAt: new Date(),
@@ -1194,6 +1222,14 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         notes: "Auto-approved (below threshold)"
       });
+      await emitPoEvent(id, "approved", userId, {
+        from_status: po.status,
+        to_status: "approved",
+        auto: true,
+        reason: "below_threshold",
+        total_cents: totalCents,
+      });
+      return updated;
     }
   }
 
@@ -1202,7 +1238,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "draft");
 
-    return await storage.updatePurchaseOrderStatusWithHistory(id, {
+    const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "draft",
       approvalTierId: null,
       approvedBy: null,
@@ -1215,6 +1251,12 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         notes: notes || "Returned to draft"
       });
+    await emitPoEvent(id, "returned_to_draft", userId, {
+      from_status: po.status,
+      to_status: "draft",
+      notes: notes ?? null,
+    });
+    return updated;
   }
 
   async function approve(id: number, userId?: string, notes?: string) {
@@ -1222,7 +1264,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "approved");
 
-    return await storage.updatePurchaseOrderStatusWithHistory(id, {
+    const updated = await storage.updatePurchaseOrderStatusWithHistory(id, {
       status: "approved",
       approvedBy: userId,
       approvedAt: new Date(),
@@ -1234,6 +1276,12 @@ export function createPurchasingService(db: any, storage: Storage) {
         changedBy: userId,
         notes: notes || "Approved"
       });
+    await emitPoEvent(id, "approved", userId, {
+      from_status: po.status,
+      to_status: "approved",
+      notes: notes ?? null,
+    });
+    return updated;
   }
 
   async function send(id: number, userId?: string) {
@@ -1297,6 +1345,12 @@ export function createPurchasingService(db: any, storage: Storage) {
         toStatus: "approved",
         changedBy: userId,
         notes: "Auto-approved (solo mode)"
+      });
+      await emitPoEvent(id, "approved", userId, {
+        from_status: "draft",
+        to_status: "approved",
+        auto: true,
+        reason: "solo_mode",
       });
     }
 
@@ -1414,11 +1468,17 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     })();
 
-    return await storage.updatePurchaseOrderStatusWithHistory(
+    const updated = await storage.updatePurchaseOrderStatusWithHistory(
       id,
       change.patch,
       change.history,
     );
+    await emitPoEvent(id, "closed", userId, {
+      from_status: change.history.fromStatus,
+      to_status: change.history.toStatus,
+      notes: notes ?? null,
+    });
+    return updated;
   }
 
   async function closeShort(id: number, reason: string, userId?: string) {
@@ -1444,11 +1504,17 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     })();
 
-    return await storage.updatePurchaseOrderStatusWithHistory(
+    const updated = await storage.updatePurchaseOrderStatusWithHistory(
       id,
       change.patch,
       change.history,
     );
+    await emitPoEvent(id, "closed_short", userId, {
+      from_status: change.history.fromStatus,
+      to_status: change.history.toStatus,
+      reason,
+    });
+    return updated;
   }
 
   // ── RECEIVING INTEGRATION ───────────────────────────────────────

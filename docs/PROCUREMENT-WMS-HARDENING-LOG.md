@@ -806,3 +806,42 @@ Next step:
 
 - Continue Phase 2 by centralizing the remaining PO lifecycle action handlers
   behind explicit command helpers and expanding invalid-transition/audit tests.
+
+### 2026-05-17 - Phase 2 Slice 2: Lifecycle Action Audit Events
+
+Scope:
+
+- Continued PO lifecycle backbone hardening by making operator lifecycle
+  actions write the immutable `po_events` stream consistently.
+- Fixed the pending-approval submit branch to use
+  `updatePurchaseOrderStatusWithHistory` instead of the plain PO update helper,
+  so submitting into `pending_approval` now writes status history.
+- Added lifecycle event emission for submit, auto-approve, approve,
+  return-to-draft, solo-mode auto-approve, close, close-short, and generic
+  physical transitions such as sent, acknowledged, shipped, in-transit,
+  arrived, received, and cancelled.
+- Kept the existing route URLs and operator behavior unchanged; this slice
+  adds auditability and removes one direct status-history bypass.
+- Updated the `po_events` schema comment so the documented event vocabulary
+  matches the events emitted by the service.
+- Added focused service coverage for pending-approval submit history/events,
+  approval events, physical transition events, and close-short events.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-lifecycle-actions.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.service.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-close.service.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts`
+
+Remaining risk:
+
+- Lifecycle event emission for most storage-backed actions is still a second
+  write after `updatePurchaseOrderStatusWithHistory`; the send path remains the
+  strongest pattern because it writes status, history, and event in one
+  transaction. A later lifecycle command-service pass should move all actions
+  to one command boundary.
+
+Next step:
+
+- Continue Phase 2 with explicit next-action derivation and command boundaries,
+  then start replacing route/UI assumptions with the lifecycle service's valid
+  action list.
