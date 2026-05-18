@@ -330,12 +330,12 @@ export function registerApLedgerRoutes(app: Express) {
   app.post("/api/ap-payments/:id/void", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
     try {
       const { reason } = req.body;
-      await apLedger.executeApLedgerCommand("void_payment", {
+      const result = await apLedger.executeApLedgerCommand("void_payment", {
         paymentId: Number(req.params.id),
         reason,
         userId: getUserId(req),
       });
-      res.json({ ok: true });
+      res.json(result);
     } catch (err: any) {
       handleApLedgerError(res, err);
     }

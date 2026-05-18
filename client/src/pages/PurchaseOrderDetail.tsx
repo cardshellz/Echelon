@@ -85,6 +85,14 @@ const FINANCIAL_LABELS: Record<string, string> = {
   disputed: "Disputed",
 };
 
+function apLedgerOutcomeDescription(result: any): string | undefined {
+  const outcome = result?.apLedgerOutcome;
+  if (!outcome) return undefined;
+  const poIds = Array.isArray(outcome.affectedPurchaseOrderIds) ? outcome.affectedPurchaseOrderIds : [];
+  if (poIds.length) return `Updated linked POs: ${poIds.join(", ")}`;
+  return outcome.message;
+}
+
 // The 4 linear financial stages; 'disputed' shown as warn on partially_paid
 const FINANCIAL_TRACK_STAGES = [
   "unbilled",
@@ -1327,7 +1335,7 @@ export default function PurchaseOrderDetail() {
       }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/payments`] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/invoices`] });
@@ -1343,7 +1351,7 @@ export default function PurchaseOrderDetail() {
         bankAccountLabel: "",
         notes: "",
       }));
-      toast({ title: "Payment recorded" });
+      toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
     },
     onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });

@@ -1430,3 +1430,32 @@ Next step:
 - Continue Phase 7 by making AP ledger outcomes more operator-visible, starting
   with command responses and admin surfaces that should show which invoices,
   payments, and linked POs were affected by a mutation.
+
+### 2026-05-18 - Phase 7 Slice 3: AP Ledger Command Outcomes
+
+Scope:
+
+- Added `apLedgerOutcome` metadata to AP command responses, including command,
+  entity type/id, affected invoice ids, affected payment ids, affected linked
+  PO ids, and a concise operator message.
+- Kept existing response compatibility by attaching outcome metadata to the
+  normal invoice/payment JSON rather than replacing route payloads with a new
+  envelope.
+- Returned the command outcome from payment void routes instead of a bare
+  `{ ok: true }` response.
+- Surfaced affected linked POs in AP invoice detail, AP payments, and PO detail
+  success toasts after invoice/payment mutations.
+- Expanded AP service and route tests to prove command outcome metadata is
+  produced and passed through to clients.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 7 by adding AP command history/audit visibility for recent
+  mutations so operators can review what changed after the toast disappears.

@@ -68,6 +68,16 @@ export type ApLedgerCommandInput = {
   payment?: RecordApPaymentInput;
 };
 
+export type ApLedgerCommandOutcome = {
+  command: ApLedgerCommand;
+  entityType: "invoice" | "payment";
+  entityId?: number;
+  affectedInvoiceIds: number[];
+  affectedPaymentIds: number[];
+  affectedPurchaseOrderIds: number[];
+  message: string;
+};
+
 type ApLedgerDbClient = Pick<typeof db, "select" | "insert" | "update">;
 
 type RecomputePoFinancialAggregatesOptions = {
@@ -94,6 +104,58 @@ async function getPoIdsForInvoice(invoiceId: number, client: ApLedgerDbClient = 
     .from(vendorInvoicePoLinks)
     .where(eq(vendorInvoicePoLinks.vendorInvoiceId, invoiceId));
   return rows.map((r: { purchaseOrderId: number }) => r.purchaseOrderId);
+}
+
+async function getInvoiceIdsForPayment(paymentId: number, client: ApLedgerDbClient = db): Promise<number[]> {
+  const rows = await client
+    .select({ vendorInvoiceId: apPaymentAllocations.vendorInvoiceId })
+    .from(apPaymentAllocations)
+    .where(eq(apPaymentAllocations.apPaymentId, paymentId));
+  return rows.map((r: { vendorInvoiceId: number }) => r.vendorInvoiceId);
+}
+
+function uniqueNumbers(values: Iterable<number | null | undefined>): number[] {
+  return [...new Set([...values].filter((value): value is number => Number.isFinite(value)))];
+}
+
+async function getPoIdsForInvoices(invoiceIds: Iterable<number>): Promise<number[]> {
+  const affectedPoIds = new Set<number>();
+  for (const invoiceId of uniqueNumbers(invoiceIds)) {
+    for (const poId of await getPoIdsForInvoice(invoiceId)) {
+      affectedPoIds.add(poId);
+    }
+  }
+  return [...affectedPoIds];
+}
+
+function attachApLedgerOutcome<T extends object>(data: T, outcome: ApLedgerCommandOutcome): T & { apLedgerOutcome: ApLedgerCommandOutcome } {
+  return { ...data, apLedgerOutcome: outcome };
+}
+
+function buildApLedgerOutcome(input: {
+  command: ApLedgerCommand;
+  entityType: "invoice" | "payment";
+  entityId?: number;
+  affectedInvoiceIds?: number[];
+  affectedPaymentIds?: number[];
+  affectedPurchaseOrderIds?: number[];
+}): ApLedgerCommandOutcome {
+  const affectedInvoiceIds = uniqueNumbers(input.affectedInvoiceIds ?? []);
+  const affectedPaymentIds = uniqueNumbers(input.affectedPaymentIds ?? []);
+  const affectedPurchaseOrderIds = uniqueNumbers(input.affectedPurchaseOrderIds ?? []);
+  const poPart = affectedPurchaseOrderIds.length
+    ? ` Updated ${affectedPurchaseOrderIds.length} linked PO${affectedPurchaseOrderIds.length === 1 ? "" : "s"}.`
+    : " No linked POs were affected.";
+
+  return {
+    command: input.command,
+    entityType: input.entityType,
+    entityId: input.entityId,
+    affectedInvoiceIds,
+    affectedPaymentIds,
+    affectedPurchaseOrderIds,
+    message: `${input.command.replace(/_/g, " ")} completed.${poPart}`,
+  };
 }
 
 async function runPoFinancialDetectionHooks(poId: number): Promise<void> {
@@ -926,31 +988,88 @@ function requireCommandReason(reason: string | undefined): string {
 
 export async function executeApLedgerCommand(command: ApLedgerCommand, input: ApLedgerCommandInput = {}) {
   switch (command) {
-    case "approve_invoice":
-      return approveInvoice(requireCommandId(input.invoiceId, "invoiceId"), input.userId);
-    case "dispute_invoice":
-      return disputeInvoice(
-        requireCommandId(input.invoiceId, "invoiceId"),
+    case "approve_invoice": {
+      const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
+      const invoice = await approveInvoice(invoiceId, input.userId);
+      const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
+      return attachApLedgerOutcome(invoice, buildApLedgerOutcome({
+        command,
+        entityType: "invoice",
+        entityId: invoiceId,
+        affectedInvoiceIds: [invoiceId],
+        affectedPurchaseOrderIds,
+      }));
+    }
+    case "dispute_invoice": {
+      const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
+      const invoice = await disputeInvoice(
+        invoiceId,
         requireCommandReason(input.reason),
         input.userId,
       );
-    case "void_invoice":
-      return voidInvoice(
-        requireCommandId(input.invoiceId, "invoiceId"),
+      const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
+      return attachApLedgerOutcome(invoice, buildApLedgerOutcome({
+        command,
+        entityType: "invoice",
+        entityId: invoiceId,
+        affectedInvoiceIds: [invoiceId],
+        affectedPurchaseOrderIds,
+      }));
+    }
+    case "void_invoice": {
+      const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
+      const invoice = await voidInvoice(
+        invoiceId,
         requireCommandReason(input.reason),
         input.userId,
       );
+      const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
+      return attachApLedgerOutcome(invoice, buildApLedgerOutcome({
+        command,
+        entityType: "invoice",
+        entityId: invoiceId,
+        affectedInvoiceIds: [invoiceId],
+        affectedPurchaseOrderIds,
+      }));
+    }
     case "record_payment":
       if (!input.payment) {
         throw new ApLedgerError("payment is required");
       }
-      return recordPayment(input.payment);
-    case "void_payment":
-      return voidPayment(
-        requireCommandId(input.paymentId, "paymentId"),
+      {
+        const payment = await recordPayment(input.payment);
+        const affectedInvoiceIds = uniqueNumbers(input.payment.allocations.map((allocation) => allocation.vendorInvoiceId));
+        const affectedPurchaseOrderIds = await getPoIdsForInvoices(affectedInvoiceIds);
+        return attachApLedgerOutcome(payment, buildApLedgerOutcome({
+          command,
+          entityType: "payment",
+          entityId: payment.id,
+          affectedInvoiceIds,
+          affectedPaymentIds: [payment.id],
+          affectedPurchaseOrderIds,
+        }));
+      }
+    case "void_payment": {
+      const paymentId = requireCommandId(input.paymentId, "paymentId");
+      const affectedInvoiceIds = await getInvoiceIdsForPayment(paymentId);
+      await voidPayment(
+        paymentId,
         requireCommandReason(input.reason),
         input.userId,
       );
+      const affectedPurchaseOrderIds = await getPoIdsForInvoices(affectedInvoiceIds);
+      return {
+        ok: true,
+        apLedgerOutcome: buildApLedgerOutcome({
+          command,
+          entityType: "payment",
+          entityId: paymentId,
+          affectedInvoiceIds,
+          affectedPaymentIds: [paymentId],
+          affectedPurchaseOrderIds,
+        }),
+      };
+    }
     default: {
       const exhaustive: never = command;
       throw new ApLedgerError(`Unsupported AP ledger command: ${exhaustive}`);

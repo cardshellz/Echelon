@@ -153,6 +153,41 @@ describe("AP ledger atomic side effects", () => {
     expect(mocks.detectPastDue).toHaveBeenCalledWith(7);
   });
 
+  it("returns operator-visible AP command outcome metadata", async () => {
+    const { executeApLedgerCommand } = await import("../../ap-ledger.service");
+    const tx = buildTx([
+      [{ total: 2500 }],
+      [{ invoicedAmountCents: 2500, status: "approved" }],
+      [{ purchaseOrderId: 7 }],
+      [{ invoicedAmountCents: 2500, paidAmountCents: 2500 }],
+      [{ financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null }],
+    ]);
+    mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
+    mocks.db.select
+      .mockReturnValueOnce(makeSelectChain([]))
+      .mockReturnValueOnce(makeSelectChain([{ purchaseOrderId: 7 }]));
+
+    const result = await executeApLedgerCommand("record_payment", {
+      payment: {
+        vendorId: 4,
+        paymentDate: new Date("2026-05-18T12:00:00Z"),
+        paymentMethod: "ach",
+        totalAmountCents: 2500,
+        allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+        createdBy: "ops-user",
+      },
+    });
+
+    expect(result.apLedgerOutcome).toMatchObject({
+      command: "record_payment",
+      entityType: "payment",
+      entityId: 21,
+      affectedInvoiceIds: [12],
+      affectedPaymentIds: [21],
+      affectedPurchaseOrderIds: [7],
+    });
+  });
+
   it("voids payment, reverses invoice balance, and recomputes PO aggregate inside one transaction", async () => {
     const { voidPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([
