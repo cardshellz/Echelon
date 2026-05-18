@@ -93,6 +93,17 @@ type LandedCostPushResult = {
     lineIds?: number[];
   }>;
 };
+
+type LandedCostFollowupFilter =
+  | "all"
+  | "any"
+  | "critical"
+  | "warning"
+  | "allocation"
+  | "needs_finalize"
+  | "ready_to_push"
+  | "stale_provisional";
+
 type InboundShipment = {
   id: number;
   shipmentNumber: string;
@@ -122,6 +133,7 @@ export default function InboundShipments() {
   // Filters
   const [statusFilter, setStatusFilter] = useState("active");
   const [modeFilter, setModeFilter] = useState("all");
+  const [landedCostFilter, setLandedCostFilter] = useState<LandedCostFollowupFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
 
   // Create dialog
@@ -164,15 +176,34 @@ export default function InboundShipments() {
   const { data: landedCostHealth } = useQuery<LandedCostHealth>({
     queryKey: ["/api/procurement/landed-cost-health"],
     queryFn: async () => {
-      const res = await fetch("/api/procurement/landed-cost-health?limit=50", { credentials: "include" });
+      const res = await fetch("/api/procurement/landed-cost-health?limit=100", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch landed cost health");
       return res.json();
     },
   });
 
-  const shipments = statusFilter === "active"
+  const baseShipments = statusFilter === "active"
     ? (shipmentData?.shipments ?? []).filter(s => !["cancelled"].includes(s.status))
     : (shipmentData?.shipments ?? []);
+  const landedCostIssuesByShipment = new Map<number, LandedCostHealth["items"]>();
+  for (const item of landedCostHealth?.items ?? []) {
+    const existing = landedCostIssuesByShipment.get(item.shipmentId) ?? [];
+    existing.push(item);
+    landedCostIssuesByShipment.set(item.shipmentId, existing);
+  }
+  const matchesLandedCostFilter = (shipment: InboundShipment, filter: LandedCostFollowupFilter = landedCostFilter) => {
+    if (filter === "all") return true;
+    const issues = landedCostIssuesByShipment.get(shipment.id) ?? [];
+    if (filter === "any") return issues.length > 0;
+    if (filter === "critical") return issues.some((issue) => issue.severity === "critical");
+    if (filter === "warning") return issues.some((issue) => issue.severity === "warning");
+    if (filter === "allocation") return issues.some((issue) => issue.type === "allocation_blocked" || issue.type === "allocation_warning");
+    if (filter === "needs_finalize") return issues.some((issue) => issue.type === "pending_finalization");
+    if (filter === "ready_to_push") return issues.some((issue) => issue.type === "finalized_not_pushed");
+    if (filter === "stale_provisional") return issues.some((issue) => issue.type === "stale_provisional_lots");
+    return true;
+  };
+  const shipments = baseShipments.filter((shipment) => matchesLandedCostFilter(shipment));
 
   // Stats
   const stats = {
@@ -292,6 +323,34 @@ export default function InboundShipments() {
     { value: "closed", label: "Closed" },
     { value: "cancelled", label: "Cancelled" },
   ];
+  const landedCostFilterOptions: Array<{ value: LandedCostFollowupFilter; label: string; count: number }> = [
+    { value: "all", label: "All", count: baseShipments.length },
+    { value: "any", label: "Any Follow-Up", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "any")).length },
+    { value: "critical", label: "Critical", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "critical")).length },
+    { value: "warning", label: "Warnings", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "warning")).length },
+    { value: "allocation", label: "Allocation", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "allocation")).length },
+    { value: "needs_finalize", label: "Needs Finalize", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "needs_finalize")).length },
+    { value: "ready_to_push", label: "Ready To Push", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "ready_to_push")).length },
+    { value: "stale_provisional", label: "Stale Provisional", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "stale_provisional")).length },
+  ];
+
+  function renderLandedCostFollowupBadges(shipmentId: number) {
+    const issues = landedCostIssuesByShipment.get(shipmentId) ?? [];
+    if (issues.length === 0) return null;
+    const primary = issues[0];
+    return (
+      <div className="flex flex-wrap gap-1">
+        <Badge variant={primary.severity === "critical" ? "destructive" : "outline"} className="text-[10px]">
+          {renderHealthType(primary.type)}
+        </Badge>
+        {issues.length > 1 && (
+          <Badge variant="outline" className="text-[10px] text-muted-foreground">
+            +{issues.length - 1}
+          </Badge>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
@@ -398,6 +457,23 @@ export default function InboundShipments() {
             </div>
 
             {landedCostHealth.items.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant={landedCostFilter === "critical" ? "default" : "outline"} onClick={() => setLandedCostFilter("critical")}>
+                  Critical
+                </Button>
+                <Button size="sm" variant={landedCostFilter === "warning" ? "default" : "outline"} onClick={() => setLandedCostFilter("warning")}>
+                  Warnings
+                </Button>
+                <Button size="sm" variant={landedCostFilter === "ready_to_push" ? "default" : "outline"} onClick={() => setLandedCostFilter("ready_to_push")}>
+                  Ready To Push
+                </Button>
+                <Button size="sm" variant={landedCostFilter === "all" ? "ghost" : "outline"} onClick={() => setLandedCostFilter("all")}>
+                  Clear Filter
+                </Button>
+              </div>
+            )}
+
+            {landedCostHealth.items.length > 0 && (
               <div className="space-y-2">
                 {landedCostHealth.items.slice(0, 5).map((item) => (
                   <div
@@ -477,6 +553,22 @@ export default function InboundShipments() {
             </Button>
           ))}
         </div>
+        {landedCostHealth && landedCostHealth.items.length > 0 && (
+          <div className="flex gap-1 flex-wrap">
+            {landedCostFilterOptions.map((opt) => (
+              <Button
+                key={opt.value}
+                variant={landedCostFilter === opt.value ? "default" : "outline"}
+                size="sm"
+                onClick={() => setLandedCostFilter(opt.value)}
+                className="h-8 text-xs"
+              >
+                {opt.label}
+                <span className="ml-1 font-mono text-[10px] opacity-70">{opt.count}</span>
+              </Button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Mobile Card View */}
@@ -506,6 +598,7 @@ export default function InboundShipments() {
                         {STATUS_BADGES[shipment.status]?.label || shipment.status}
                       </Badge>
                       {renderModeBadge(shipment.mode)}
+                      {renderLandedCostFollowupBadges(shipment.id)}
                     </div>
                     <div className="text-sm mt-1">{shipment.carrierName || "No carrier"}</div>
                     <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
@@ -538,6 +631,7 @@ export default function InboundShipments() {
               <TableHead>Route</TableHead>
               <TableHead>ETA</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Landed Cost</TableHead>
               <TableHead className="text-right">Est. Cost</TableHead>
               <TableHead className="text-right">Actual Cost</TableHead>
             </TableRow>
@@ -545,7 +639,7 @@ export default function InboundShipments() {
           <TableBody>
             {shipments.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
+                <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
                   No inbound shipments found. Click "New Shipment" to create one.
                 </TableCell>
               </TableRow>
@@ -573,6 +667,7 @@ export default function InboundShipments() {
                       {STATUS_BADGES[shipment.status]?.label || shipment.status}
                     </Badge>
                   </TableCell>
+                  <TableCell>{renderLandedCostFollowupBadges(shipment.id) || <span className="text-muted-foreground">-</span>}</TableCell>
                   <TableCell className="text-right font-mono">{formatCents(shipment.estimatedCostCents)}</TableCell>
                   <TableCell className="text-right font-mono">{formatCents(shipment.actualCostCents)}</TableCell>
                 </TableRow>
