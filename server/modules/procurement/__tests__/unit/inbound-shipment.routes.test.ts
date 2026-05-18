@@ -86,6 +86,7 @@ function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
     updateCost: vi.fn(),
     removeCost: vi.fn(),
     runAllocation: vi.fn(),
+    getAllocationStatus: vi.fn(),
     finalizeAllocations: vi.fn(),
     getShipmentsByPo: vi.fn(),
     pushLandedCostsToLots: vi.fn(),
@@ -237,6 +238,38 @@ describe("inbound shipment routes", () => {
     expect(status).toBe(200);
     expect(mocks.apLedger.enrichCostsWithInvoiceInfo).toHaveBeenCalledWith(12);
     expect(body).toEqual([{ id: 22, amountCents: 1200, invoiceNumber: "INV-22" }]);
+  });
+
+  it("returns allocation status for an inbound shipment", async () => {
+    const allocationStatus = {
+      shipmentId: 12,
+      status: "needs_allocation",
+      lineCount: 1,
+      costCount: 1,
+      allocatableCostCount: 1,
+      effectiveCostCents: 1200,
+      allocatedCostCents: 0,
+      unallocatedCents: 1200,
+      issueCount: 1,
+      blockerCount: 1,
+      warningCount: 0,
+      costs: [{ costId: 31, status: "needs_allocation" }],
+      issues: [{ severity: "blocker", code: "cost_not_allocated", costId: 31 }],
+    };
+    const shipmentTracking = buildShipmentTrackingMock({
+      getAllocationStatus: vi.fn().mockResolvedValue(allocationStatus),
+    });
+    server = await startServer(buildApp(shipmentTracking));
+
+    const { status, body } = await requestJson(
+      server.url,
+      "GET",
+      "/api/inbound-shipments/12/allocation-status",
+    );
+
+    expect(status).toBe(200);
+    expect(shipmentTracking.getAllocationStatus).toHaveBeenCalledWith(12);
+    expect(body).toEqual(allocationStatus);
   });
 
   it("returns landed cost push-to-lots results with skipped reasons", async () => {

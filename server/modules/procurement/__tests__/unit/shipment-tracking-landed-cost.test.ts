@@ -8,6 +8,7 @@ function buildStorage(overrides: Record<string, any> = {}) {
     getProvisionalLotsByShipment: vi.fn().mockResolvedValue([]),
     getInboundShipmentLines: vi.fn().mockResolvedValue([]),
     getInboundFreightCosts: vi.fn().mockResolvedValue([]),
+    getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
     deleteAllocationsForShipment: vi.fn().mockResolvedValue(undefined),
     bulkCreateInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
     updateInboundShipmentLine: vi.fn().mockResolvedValue({}),
@@ -36,6 +37,72 @@ const finalizedSnapshot = {
   landedUnitCostCents: 100,
   qty: 5,
 };
+
+describe("ShipmentTrackingService.getAllocationStatus", () => {
+  it("reports costs that still need allocation", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, sku: "SKU-1", qtyShipped: 5, totalVolumeCbm: "1.2" },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 1200, allocationMethod: null },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getAllocationStatus(1);
+
+    expect(result.status).toBe("needs_allocation");
+    expect(result.effectiveCostCents).toBe(1200);
+    expect(result.allocatedCostCents).toBe(0);
+    expect(result.unallocatedCents).toBe(1200);
+    expect(result.blockerCount).toBe(1);
+    expect(result.costs[0]).toEqual(expect.objectContaining({
+      costId: 31,
+      method: "by_volume",
+      methodSource: "shipment_default",
+      status: "needs_allocation",
+    }));
+    expect(result.issues[0]).toEqual(expect.objectContaining({
+      code: "cost_not_allocated",
+      costId: 31,
+      severity: "blocker",
+    }));
+  });
+
+  it("reports allocation basis fallback as a warning", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, sku: "SKU-1", qtyShipped: 5, totalWeightKg: "0" },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 1200, allocationMethod: "by_weight" },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 1200 },
+      ]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getAllocationStatus(1);
+
+    expect(result.status).toBe("allocated_with_warnings");
+    expect(result.warningCount).toBe(1);
+    expect(result.costs[0]).toEqual(expect.objectContaining({
+      status: "allocated_with_fallback",
+      rawBasisTotal: 0,
+      basisTotal: 1,
+      usedFallback: true,
+    }));
+    expect(result.issues[0]).toEqual(expect.objectContaining({
+      code: "allocation_basis_fallback",
+      severity: "warning",
+    }));
+  });
+});
 
 describe("ShipmentTrackingService.finalizeAllocations", () => {
   it("rejects finalization outside costing or closed status", async () => {
