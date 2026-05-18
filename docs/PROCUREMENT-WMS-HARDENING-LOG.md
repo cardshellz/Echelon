@@ -1340,3 +1340,32 @@ Next step:
 - Continue Phase 6 by deciding whether shipment list filters are enough for
   landed-cost follow-up, then move to the next procurement/WMS hardening area if
   no additional guardrails are needed.
+
+### 2026-05-18 - Phase 6 Slice 8: Landed Cost Follow-Up Filters
+
+Scope:
+
+- Added landed-cost follow-up filters to the Inbound Shipments list so
+  operators can narrow shipments by any issue, severity, allocation issue,
+  pending finalization, ready-to-push landed costs, or stale provisional lots.
+- Reused the existing landed-cost health read model for filter counts and
+  shipment issue badges, keeping the table aligned with the health panel and
+  procurement dashboard escalation.
+- Increased the health query limit on the inbound shipment list to match the
+  shipment list page size used for follow-up.
+- Added landed-cost issue badges to mobile cards and the desktop table so
+  affected shipments remain visible after filtering or searching.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+
+Next step:
+
+- Phase 6 now has provenance guards, idempotent finalization, operator push
+  visibility, allocation explainability, health monitoring, safe recovery,
+  dashboard escalation, and list follow-up filters. Move to the next
+  procurement/WMS hardening area unless live testing exposes another
+  landed-cost operational gap.
