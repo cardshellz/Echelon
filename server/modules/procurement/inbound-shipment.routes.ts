@@ -376,6 +376,16 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   // Allocation
 
+  app.get("/api/inbound-shipments/:id/allocation-status", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const result = await shipmentTracking.getAllocationStatus(Number(req.params.id));
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/inbound-shipments/:id/allocate", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const result = await shipmentTracking.runAllocation(Number(req.params.id));

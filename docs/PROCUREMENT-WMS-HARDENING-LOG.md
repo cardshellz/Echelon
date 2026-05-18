@@ -1231,3 +1231,32 @@ Next step:
 
 - Continue Phase 6 by tightening allocation explainability/status reporting in
   the inbound shipment UI/API, then move toward landed-cost health monitoring.
+
+### 2026-05-18 - Phase 6 Slice 4: Inbound Allocation Explainability
+
+Scope:
+
+- Added a read-only allocation status endpoint for inbound shipments that
+  reports overall allocation health, effective vs allocated cost, blockers,
+  warnings, and per-cost allocation state.
+- Reused the same allocation method and basis-resolution helpers for both
+  allocation execution and status reporting, keeping operator visibility aligned
+  with the actual allocation engine.
+- Flagged unallocated costs, stale line allocations, allocation total
+  mismatches, and even-split basis fallbacks as explicit operator-visible
+  signals.
+- Wired the inbound shipment allocation tab to the status endpoint and surfaced
+  status, cost totals, issue messages, method source, basis total, and per-cost
+  allocation state.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+
+Next step:
+
+- Continue Phase 6 with landed-cost health monitoring so stale provisional lots,
+  finalized-but-not-pushed shipments, and allocation warning states are visible
+  outside a single shipment detail page.

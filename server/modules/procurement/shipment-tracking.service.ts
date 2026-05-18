@@ -134,6 +134,64 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
 
   // ─── Private helpers ────────────────────────────────────────────
 
+  function resolveAllocationMethod(cost: InboundFreightCost, shipment: InboundShipment) {
+    const costTypeOverride = COST_TYPE_ALLOCATION_OVERRIDES[cost.costType];
+    if (costTypeOverride) {
+      return { method: costTypeOverride, source: "cost_type_override" };
+    }
+    if (cost.allocationMethod) {
+      return { method: cost.allocationMethod, source: "cost_row" };
+    }
+    if (shipment.allocationMethodDefault) {
+      return { method: shipment.allocationMethodDefault, source: "shipment_default" };
+    }
+    return { method: "by_volume", source: "fallback_default" };
+  }
+
+  async function buildAllocationBasis(lines: InboundShipmentLine[], method: string) {
+    const values: Array<{ lineId: number; basis: number }> = [];
+    let rawBasisTotal = 0;
+
+    for (const line of lines) {
+      let basis = 0;
+      switch (method) {
+        case "by_volume":
+          basis = Number(line.totalVolumeCbm || 0);
+          break;
+        case "by_chargeable_weight":
+          basis = Number(line.chargeableWeightKg || 0);
+          break;
+        case "by_weight":
+          basis = Number(line.totalWeightKg || 0);
+          break;
+        case "by_value":
+          if (line.purchaseOrderLineId) {
+            const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
+            basis = (poLine?.unitCostCents || 0) * line.qtyShipped;
+          }
+          break;
+        case "by_line_count":
+          basis = 1;
+          break;
+        default:
+          basis = 1;
+      }
+      values.push({ lineId: line.id, basis });
+      rawBasisTotal += basis;
+    }
+
+    if (rawBasisTotal === 0) {
+      return {
+        values: values.map((value) => ({ ...value, basis: 1 })),
+        rawBasisTotal,
+        basisTotal: values.length,
+        usedFallback: values.length > 0,
+      };
+    }
+
+    return { values, rawBasisTotal, basisTotal: rawBasisTotal, usedFallback: false };
+  }
+
   function assertTransition(currentStatus: string, targetStatus: string) {
     const allowed = VALID_TRANSITIONS[currentStatus];
     if (!allowed || !allowed.includes(targetStatus)) {
@@ -917,51 +975,10 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       const effectiveAmount = cost.actualCents ?? cost.estimatedCents ?? 0;
       if (effectiveAmount === 0) continue;
 
-      // Determine allocation method (priority: cost-type override → cost-level override → shipment default → mode default)
-      const method = COST_TYPE_ALLOCATION_OVERRIDES[cost.costType]
-        || cost.allocationMethod
-        || shipment.allocationMethodDefault
-        || "by_volume";
-
-      // Compute per-line basis values
-      const basisValues: Array<{ lineId: number; basis: number }> = [];
-      let basisTotal = 0;
-
-      for (const line of lines) {
-        let basis = 0;
-        switch (method) {
-          case "by_volume":
-            // Net volume from per-carton dims × cartonCount (gross is shipment-level only)
-            basis = Number(line.totalVolumeCbm || 0);
-            break;
-          case "by_chargeable_weight":
-            basis = Number(line.chargeableWeightKg || 0);
-            break;
-          case "by_weight":
-            basis = Number(line.totalWeightKg || 0);
-            break;
-          case "by_value":
-            // PO line cost × qty shipped
-            if (line.purchaseOrderLineId) {
-              const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
-              basis = (poLine?.unitCostCents || 0) * line.qtyShipped;
-            }
-            break;
-          case "by_line_count":
-            basis = 1;
-            break;
-          default:
-            basis = 1; // Fallback to even split
-        }
-        basisValues.push({ lineId: line.id, basis });
-        basisTotal += basis;
-      }
-
-      // Fallback to even split if all basis values are 0
-      if (basisTotal === 0) {
-        for (const bv of basisValues) bv.basis = 1;
-        basisTotal = basisValues.length;
-      }
+      const { method } = resolveAllocationMethod(cost, shipment);
+      const basisSummary = await buildAllocationBasis(lines, method);
+      const basisValues = basisSummary.values;
+      const basisTotal = basisSummary.basisTotal;
 
       // Allocate to each line
       let allocated = 0;
@@ -1050,6 +1067,131 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     }
 
     return { allocations: resultLines, totalAllocated };
+  }
+
+  async function getAllocationStatus(shipmentId: number) {
+    const shipment = await getShipment(shipmentId);
+    const lines = await storage.getInboundShipmentLines(shipmentId);
+    const costs = await storage.getInboundFreightCosts(shipmentId);
+    const currentLineIds = new Set(lines.map((line) => line.id));
+    const issues: Array<{
+      severity: "blocker" | "warning";
+      code: string;
+      message: string;
+      costId?: number;
+      lineId?: number;
+    }> = [];
+    const costStatuses: any[] = [];
+
+    let effectiveCostCents = 0;
+    let allocatedCostCents = 0;
+    let allocatableCostCount = 0;
+
+    if (lines.length === 0) {
+      issues.push({
+        severity: "blocker",
+        code: "no_lines",
+        message: "Shipment has no lines to allocate costs to",
+      });
+    }
+
+    for (const cost of costs) {
+      const effectiveCents = cost.actualCents ?? cost.estimatedCents ?? 0;
+      const { method, source } = resolveAllocationMethod(cost, shipment);
+      const allocations = await storage.getInboundFreightCostAllocations(cost.id);
+      const allocatedCents = allocations.reduce((sum: number, allocation: any) => sum + Number(allocation.allocatedCents || 0), 0);
+      const staleAllocationCount = allocations.filter((allocation: any) => !currentLineIds.has(allocation.inboundShipmentLineId)).length;
+      const basisSummary = lines.length > 0
+        ? await buildAllocationBasis(lines, method)
+        : { rawBasisTotal: 0, basisTotal: 0, usedFallback: false };
+
+      effectiveCostCents += effectiveCents;
+      allocatedCostCents += allocatedCents;
+      if (effectiveCents !== 0) {
+        allocatableCostCount += 1;
+      }
+
+      let status = "allocated";
+      if (effectiveCents === 0) {
+        status = "zero_amount";
+      } else if (allocations.length === 0) {
+        status = "needs_allocation";
+        issues.push({
+          severity: "blocker",
+          code: "cost_not_allocated",
+          costId: cost.id,
+          message: `${cost.costType} cost has not been allocated`,
+        });
+      } else if (staleAllocationCount > 0) {
+        status = "stale_allocation";
+        issues.push({
+          severity: "blocker",
+          code: "stale_allocation_line",
+          costId: cost.id,
+          message: `${cost.costType} cost has allocations tied to missing shipment lines`,
+        });
+      } else if (allocatedCents !== effectiveCents) {
+        status = "allocation_mismatch";
+        issues.push({
+          severity: "blocker",
+          code: "allocation_total_mismatch",
+          costId: cost.id,
+          message: `${cost.costType} cost allocation total does not match the effective cost`,
+        });
+      } else if (basisSummary.usedFallback && method !== "by_line_count") {
+        status = "allocated_with_fallback";
+        issues.push({
+          severity: "warning",
+          code: "allocation_basis_fallback",
+          costId: cost.id,
+          message: `${cost.costType} used even split because ${method} basis values were zero`,
+        });
+      }
+
+      costStatuses.push({
+        costId: cost.id,
+        costType: cost.costType,
+        description: cost.description,
+        effectiveCents,
+        allocatedCents,
+        allocationCount: allocations.length,
+        method,
+        methodSource: source,
+        rawBasisTotal: basisSummary.rawBasisTotal,
+        basisTotal: basisSummary.basisTotal,
+        usedFallback: basisSummary.usedFallback,
+        status,
+      });
+    }
+
+    const blockerCount = issues.filter((issue) => issue.severity === "blocker").length;
+    const warningCount = issues.filter((issue) => issue.severity === "warning").length;
+    const allocationStatus =
+      lines.length === 0
+        ? "blocked"
+        : allocatableCostCount === 0
+          ? "no_costs"
+          : blockerCount > 0
+            ? "needs_allocation"
+            : warningCount > 0
+              ? "allocated_with_warnings"
+              : "allocated";
+
+    return {
+      shipmentId,
+      status: allocationStatus,
+      lineCount: lines.length,
+      costCount: costs.length,
+      allocatableCostCount,
+      effectiveCostCents,
+      allocatedCostCents,
+      unallocatedCents: effectiveCostCents - allocatedCostCents,
+      issueCount: issues.length,
+      blockerCount,
+      warningCount,
+      costs: costStatuses,
+      issues,
+    };
   }
 
   function getCostCategory(costType: string): "freight" | "duty" | "insurance" | "other" {
@@ -1414,6 +1556,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
 
     // Allocation
     runAllocation,
+    getAllocationStatus,
     finalizeAllocations,
 
     // Receiving integration

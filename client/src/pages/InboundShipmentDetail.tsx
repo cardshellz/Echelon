@@ -129,6 +129,56 @@ type LandedCostPushResult = {
   }>;
 };
 
+type AllocationStatus = {
+  status: "blocked" | "no_costs" | "needs_allocation" | "allocated_with_warnings" | "allocated";
+  lineCount: number;
+  costCount: number;
+  allocatableCostCount: number;
+  effectiveCostCents: number;
+  allocatedCostCents: number;
+  unallocatedCents: number;
+  blockerCount: number;
+  warningCount: number;
+  costs: Array<{
+    costId: number;
+    costType: string;
+    description?: string | null;
+    effectiveCents: number;
+    allocatedCents: number;
+    allocationCount: number;
+    method: string;
+    methodSource: string;
+    rawBasisTotal: number;
+    basisTotal: number;
+    usedFallback: boolean;
+    status: string;
+  }>;
+  issues: Array<{
+    severity: "blocker" | "warning";
+    code: string;
+    message: string;
+    costId?: number;
+    lineId?: number;
+  }>;
+};
+
+const ALLOCATION_STATUS_LABELS: Record<AllocationStatus["status"], string> = {
+  blocked: "Blocked",
+  no_costs: "No Costs",
+  needs_allocation: "Needs Allocation",
+  allocated_with_warnings: "Allocated With Warnings",
+  allocated: "Allocated",
+};
+
+const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
+  zero_amount: "Zero Amount",
+  needs_allocation: "Needs Allocation",
+  stale_allocation: "Stale Allocation",
+  allocation_mismatch: "Mismatch",
+  allocated_with_fallback: "Even Split",
+  allocated: "Allocated",
+};
+
 const LANDED_COST_SKIP_LABELS: Record<string, string> = {
   ambiguous_variant_landed_cost: "Ambiguous same-SKU landed cost",
   invalid_lot_variant: "Invalid lot variant",
@@ -264,14 +314,9 @@ export default function InboundShipmentDetail() {
     enabled: !!selectedPoId,
   });
 
-  const { data: allocationData } = useQuery<any>({
-    queryKey: [`/api/inbound-shipments/${shipmentId}/allocation`],
+  const { data: allocationStatus } = useQuery<AllocationStatus>({
+    queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`],
     enabled: !!shipmentId && activeTab === "allocation",
-    // Allocation is computed on-demand, use the lines data from the main query
-    queryFn: async () => {
-      // Return the lines from the main shipment query with their allocation data
-      return { lines: shipment?.lines ?? [] };
-    },
   });
 
   const { data: vendorsData } = useQuery<any[]>({
@@ -546,6 +591,7 @@ export default function InboundShipmentDetail() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
       toast({ title: "Allocation complete", description: "Costs allocated to shipment lines" });
     },
     onError: (err: Error) => {
@@ -560,6 +606,7 @@ export default function InboundShipmentDetail() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
       toast({ title: "Finalized", description: "Landed costs finalized and snapshotted" });
     },
     onError: (err: Error) => {
@@ -575,6 +622,7 @@ export default function InboundShipmentDetail() {
     onSuccess: (result) => {
       setLastLandedCostPush(result);
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
       const skippedCount = result.skipped?.length ?? 0;
       toast({
         title: skippedCount > 0 ? "Landed cost push needs review" : "Landed costs pushed",
@@ -1429,6 +1477,98 @@ export default function InboundShipmentDetail() {
               </Button>
             )}
           </div>
+
+          {allocationStatus && (
+            <Card>
+              <CardHeader className="pb-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <CardTitle className="text-base">Allocation Status</CardTitle>
+                  <Badge
+                    variant={allocationStatus.blockerCount > 0 ? "destructive" : allocationStatus.warningCount > 0 ? "outline" : "secondary"}
+                    className={allocationStatus.warningCount > 0 && allocationStatus.blockerCount === 0 ? "border-amber-500 text-amber-700" : undefined}
+                  >
+                    {ALLOCATION_STATUS_LABELS[allocationStatus.status]}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div>
+                    <div className="text-xs text-muted-foreground">Lines</div>
+                    <div className="font-mono text-sm">{allocationStatus.lineCount}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Allocatable Costs</div>
+                    <div className="font-mono text-sm">{allocationStatus.allocatableCostCount}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Effective Cost</div>
+                    <div className="font-mono text-sm">{formatCents(allocationStatus.effectiveCostCents)}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Unallocated Delta</div>
+                    <div className={`font-mono text-sm ${allocationStatus.unallocatedCents === 0 ? "" : "text-amber-700"}`}>
+                      {formatCents(allocationStatus.unallocatedCents)}
+                    </div>
+                  </div>
+                </div>
+
+                {allocationStatus.issues.length > 0 && (
+                  <div className="space-y-2">
+                    {allocationStatus.issues.map((issue) => (
+                      <div key={`${issue.code}-${issue.costId ?? issue.lineId ?? "shipment"}`} className="flex flex-wrap items-center gap-2 text-sm">
+                        <AlertTriangle className={`h-4 w-4 ${issue.severity === "blocker" ? "text-destructive" : "text-amber-600"}`} />
+                        <Badge variant={issue.severity === "blocker" ? "destructive" : "outline"}>{issue.severity}</Badge>
+                        <span>{issue.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {allocationStatus.costs.length > 0 && (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Cost</TableHead>
+                        <TableHead>Method</TableHead>
+                        <TableHead className="text-right">Effective</TableHead>
+                        <TableHead className="text-right">Allocated</TableHead>
+                        <TableHead className="text-right">Basis</TableHead>
+                        <TableHead>Status</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {allocationStatus.costs.map((cost) => (
+                        <TableRow key={cost.costId}>
+                          <TableCell>
+                            <div className="font-medium">{cost.costType.replace(/_/g, " ")}</div>
+                            {cost.description && <div className="text-xs text-muted-foreground">{cost.description}</div>}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {ALLOCATION_METHOD_LABELS[cost.method] || cost.method.replace(/_/g, " ")}
+                            <div className="text-xs text-muted-foreground">{cost.methodSource.replace(/_/g, " ")}</div>
+                          </TableCell>
+                          <TableCell className="text-right font-mono">{formatCents(cost.effectiveCents)}</TableCell>
+                          <TableCell className="text-right font-mono">{formatCents(cost.allocatedCents)}</TableCell>
+                          <TableCell className="text-right font-mono">
+                            {Number(cost.basisTotal || 0).toLocaleString(undefined, { maximumFractionDigits: 3 })}
+                          </TableCell>
+                          <TableCell>
+                            <Badge
+                              variant={["needs_allocation", "stale_allocation", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
+                              className={cost.status === "allocated_with_fallback" ? "border-amber-500 text-amber-700" : undefined}
+                            >
+                              {ALLOCATION_COST_STATUS_LABELS[cost.status] || cost.status.replace(/_/g, " ")}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {lastLandedCostPush && (
             <Card className={lastLandedCostPush.skipped?.length ? "border-amber-300 bg-amber-50/60 dark:bg-amber-950/10" : "border-green-300 bg-green-50/60 dark:bg-green-950/10"}>
