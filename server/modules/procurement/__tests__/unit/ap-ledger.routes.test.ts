@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
     recordPayment: vi.fn(),
     getPaymentById: vi.fn(),
     voidPayment: vi.fn(),
+    executeApLedgerCommand: vi.fn(),
     getApSummary: vi.fn(),
   },
 }));
@@ -155,8 +156,39 @@ describe("AP ledger routes", () => {
     expect(body).toEqual({ invoices: [{ id: 31, purchaseOrderId: 55 }] });
   });
 
+  it("dispatches invoice approval through the AP command boundary", async () => {
+    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 12, status: "approved" });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/approve");
+
+    expect(status).toBe(200);
+    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("approve_invoice", {
+      invoiceId: 12,
+      userId: "test-user",
+    });
+    expect(body).toEqual({ id: 12, status: "approved" });
+  });
+
+  it("dispatches invoice disputes through the AP command boundary", async () => {
+    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 12, status: "disputed" });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/dispute", {
+      reason: "price mismatch",
+    });
+
+    expect(status).toBe(200);
+    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("dispute_invoice", {
+      invoiceId: 12,
+      reason: "price mismatch",
+      userId: "test-user",
+    });
+    expect(body).toEqual({ id: 12, status: "disputed" });
+  });
+
   it("records AP payments with normalized date, allocations, and creator", async () => {
-    mocks.apLedger.recordPayment.mockResolvedValue({ id: 21, paymentNumber: "PAY-21" });
+    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 21, paymentNumber: "PAY-21" });
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "POST", "/api/ap-payments", {
@@ -168,15 +200,34 @@ describe("AP ledger routes", () => {
     });
 
     expect(status).toBe(201);
-    expect(mocks.apLedger.recordPayment).toHaveBeenCalledWith({
-      vendorId: 4,
-      paymentDate: new Date("2026-05-16T12:00:00.000Z"),
-      paymentMethod: "ach",
-      totalAmountCents: 2500,
-      allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
-      createdBy: "test-user",
+    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("record_payment", {
+      payment: {
+        vendorId: 4,
+        paymentDate: new Date("2026-05-16T12:00:00.000Z"),
+        paymentMethod: "ach",
+        totalAmountCents: 2500,
+        allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+        createdBy: "test-user",
+      },
     });
     expect(body).toEqual({ id: 21, paymentNumber: "PAY-21" });
+  });
+
+  it("dispatches payment voids through the AP command boundary", async () => {
+    mocks.apLedger.executeApLedgerCommand.mockResolvedValue(undefined);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/ap-payments/21/void", {
+      reason: "duplicate",
+    });
+
+    expect(status).toBe(200);
+    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("void_payment", {
+      paymentId: 21,
+      reason: "duplicate",
+      userId: "test-user",
+    });
+    expect(body).toEqual({ ok: true });
   });
 
   it("returns AP summary data", async () => {
