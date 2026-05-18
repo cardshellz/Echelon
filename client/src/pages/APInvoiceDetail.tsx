@@ -66,6 +66,14 @@ function formatDate(d: string | null | undefined) {
   try { return format(parseISO(d), "MMM d, yyyy"); } catch { return d; }
 }
 
+function apLedgerOutcomeDescription(result: any): string | undefined {
+  const outcome = result?.apLedgerOutcome;
+  if (!outcome) return undefined;
+  const poIds = Array.isArray(outcome.affectedPurchaseOrderIds) ? outcome.affectedPurchaseOrderIds : [];
+  if (poIds.length) return `Updated linked POs: ${poIds.join(", ")}`;
+  return outcome.message;
+}
+
 function formatBytes(bytes: number | null | undefined): string {
   if (!bytes) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -220,19 +228,19 @@ export default function APInvoiceDetail() {
 
   const approveMutation = useMutation({
     mutationFn: () => action("approve"),
-    onSuccess: () => { invalidate(); toast({ title: "Invoice approved" }); },
+    onSuccess: (result) => { invalidate(); toast({ title: "Invoice approved", description: apLedgerOutcomeDescription(result) }); },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   const disputeMutation = useMutation({
     mutationFn: () => action("dispute", { reason }),
-    onSuccess: () => { invalidate(); setShowDisputeDialog(false); setReason(""); toast({ title: "Invoice disputed" }); },
+    onSuccess: (result) => { invalidate(); setShowDisputeDialog(false); setReason(""); toast({ title: "Invoice disputed", description: apLedgerOutcomeDescription(result) }); },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   const voidMutation = useMutation({
     mutationFn: () => action("void", { reason }),
-    onSuccess: () => { invalidate(); setShowVoidDialog(false); setReason(""); toast({ title: "Invoice voided" }); },
+    onSuccess: (result) => { invalidate(); setShowVoidDialog(false); setReason(""); toast({ title: "Invoice voided", description: apLedgerOutcomeDescription(result) }); },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
@@ -304,12 +312,12 @@ export default function APInvoiceDetail() {
       }),
     }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       invalidate();
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       setShowPaymentDialog(false);
       setPayment({ paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", amountDollars: "", notes: "" });
-      toast({ title: "Payment recorded" });
+      toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });

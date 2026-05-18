@@ -36,6 +36,14 @@ function formatDate(d: string | null | undefined) {
   try { return format(parseISO(d), "MMM d, yyyy"); } catch { return d; }
 }
 
+function apLedgerOutcomeDescription(result: any): string | undefined {
+  const outcome = result?.apLedgerOutcome;
+  if (!outcome) return undefined;
+  const poIds = Array.isArray(outcome.affectedPurchaseOrderIds) ? outcome.affectedPurchaseOrderIds : [];
+  if (poIds.length) return `Updated linked POs: ${poIds.join(", ")}`;
+  return outcome.message;
+}
+
 const METHOD_LABELS: Record<string, string> = {
   ach: "ACH", check: "Check", wire: "Wire", credit_card: "Credit Card", other: "Other",
 };
@@ -122,14 +130,14 @@ export default function APPayments() {
       if (!res.ok) throw new Error((await res.json()).error);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
       setShowPaymentDialog(false);
       setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "" });
       setAllocations({});
-      toast({ title: "Payment recorded" });
+      toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
@@ -153,13 +161,13 @@ export default function APPayments() {
         return r.json();
       });
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
       setShowVoidDialog(null);
       setVoidReason("");
-      toast({ title: "Payment voided" });
+      toast({ title: "Payment voided", description: apLedgerOutcomeDescription(result) });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });

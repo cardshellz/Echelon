@@ -157,7 +157,16 @@ describe("AP ledger routes", () => {
   });
 
   it("dispatches invoice approval through the AP command boundary", async () => {
-    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 12, status: "approved" });
+    const apLedgerOutcome = {
+      command: "approve_invoice",
+      entityType: "invoice",
+      entityId: 12,
+      affectedInvoiceIds: [12],
+      affectedPaymentIds: [],
+      affectedPurchaseOrderIds: [55],
+      message: "approve invoice completed. Updated 1 linked PO.",
+    };
+    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 12, status: "approved", apLedgerOutcome });
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/approve");
@@ -167,7 +176,7 @@ describe("AP ledger routes", () => {
       invoiceId: 12,
       userId: "test-user",
     });
-    expect(body).toEqual({ id: 12, status: "approved" });
+    expect(body).toEqual({ id: 12, status: "approved", apLedgerOutcome });
   });
 
   it("dispatches invoice disputes through the AP command boundary", async () => {
@@ -214,7 +223,16 @@ describe("AP ledger routes", () => {
   });
 
   it("dispatches payment voids through the AP command boundary", async () => {
-    mocks.apLedger.executeApLedgerCommand.mockResolvedValue(undefined);
+    const apLedgerOutcome = {
+      command: "void_payment",
+      entityType: "payment",
+      entityId: 21,
+      affectedInvoiceIds: [12],
+      affectedPaymentIds: [21],
+      affectedPurchaseOrderIds: [55],
+      message: "void payment completed. Updated 1 linked PO.",
+    };
+    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ ok: true, apLedgerOutcome });
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "POST", "/api/ap-payments/21/void", {
@@ -227,7 +245,7 @@ describe("AP ledger routes", () => {
       reason: "duplicate",
       userId: "test-user",
     });
-    expect(body).toEqual({ ok: true });
+    expect(body).toEqual({ ok: true, apLedgerOutcome });
   });
 
   it("returns AP summary data", async () => {
