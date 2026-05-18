@@ -1882,12 +1882,22 @@ export function createPurchasingService(db: any, storage: Storage) {
     receivingOrderId: number,
     receivingLines: ReceivingReconciliationLine[],
   ) {
-    return await reconcilePurchaseOrderReceipt({
+    const result = await reconcilePurchaseOrderReceipt({
       storage,
       receivingOrderId,
       receivingLines,
       recalculateTotals,
     });
+
+    if (result.purchaseOrderId && result.poStatusUpdate?.legacyStatus === "received") {
+      try {
+        await detectQtyVariance(result.purchaseOrderId);
+      } catch (error) {
+        console.error("[po-exceptions] qty variance detection failed after receiving close:", error);
+      }
+    }
+
+    return result;
   }
 
   // ── REORDER → PO ───────────────────────────────────────────────

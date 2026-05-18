@@ -1,4 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const mockDetectQtyVariance = vi.hoisted(() => vi.fn());
+
+vi.mock("../../po-exceptions.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../po-exceptions.service")>();
+  return {
+    ...actual,
+    detectQtyVariance: (...args: any[]) => mockDetectQtyVariance(...args),
+  };
+});
+
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -254,6 +265,7 @@ describe("transitionFinancial", () => {
   let storage: ReturnType<typeof buildMockStorage>;
 
   beforeEach(() => {
+    mockDetectQtyVariance.mockReset();
     storage = buildMockStorage();
     svc = createPurchasingService(buildMockDb(), storage);
   });
@@ -522,6 +534,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
   let storage: ReturnType<typeof buildMockStorage>;
 
   beforeEach(() => {
+    mockDetectQtyVariance.mockReset();
     storage = buildMockStorage();
     svc = createPurchasingService(buildMockDb(), storage);
   });
@@ -582,6 +595,109 @@ describe("onReceivingOrderClosed — auto-match", () => {
         varianceCents: -500,
       }),
     }));
+  });
+
+  it("keeps PO physical status aligned when a partial receipt reconciles", async () => {
+    const productId = 42;
+    const poLine = {
+      id: 100,
+      purchaseOrderId: 1,
+      productId,
+      productVariantId: 5,
+      lineType: "product",
+      status: "open",
+      orderQty: 10,
+      receivedQty: 0,
+      cancelledQty: 0,
+      unitCostCents: 500,
+      unitsPerUom: 1,
+    };
+
+    storage.getReceivingOrderById.mockResolvedValue({ id: 99, purchaseOrderId: 1 });
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent", physicalStatus: "sent" }));
+    storage.getPurchaseOrderLines
+      .mockResolvedValueOnce([poLine])
+      .mockResolvedValueOnce([{ ...poLine, status: "partially_received", receivedQty: 3 }]);
+    storage.getPurchaseOrderLineById.mockResolvedValue(poLine);
+    storage.getReceivingLineById.mockResolvedValue({
+      id: 201,
+      productId,
+      productVariantId: 5,
+    });
+    storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1 });
+
+    const result = await svc.onReceivingOrderClosed(99, [
+      { receivingLineId: 201, purchaseOrderLineId: 100, receivedQty: 3 },
+    ]);
+
+    expect(result.poStatusUpdate).toEqual({
+      legacyStatus: "partially_received",
+      physicalStatus: "receiving",
+    });
+    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        status: "partially_received",
+        physicalStatus: "receiving",
+      }),
+      expect.objectContaining({
+        fromStatus: "sent",
+        toStatus: "partially_received",
+      }),
+    );
+    expect(mockDetectQtyVariance).not.toHaveBeenCalled();
+  });
+
+  it("marks fully reconciled receipts as physically received and runs quantity variance detection", async () => {
+    const productId = 42;
+    const poLine = {
+      id: 100,
+      purchaseOrderId: 1,
+      productId,
+      productVariantId: 5,
+      lineType: "product",
+      status: "open",
+      orderQty: 3,
+      receivedQty: 0,
+      cancelledQty: 0,
+      unitCostCents: 500,
+      unitsPerUom: 1,
+    };
+
+    storage.getReceivingOrderById.mockResolvedValue({ id: 99, purchaseOrderId: 1 });
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent", physicalStatus: "sent" }));
+    storage.getPurchaseOrderLines
+      .mockResolvedValueOnce([poLine])
+      .mockResolvedValueOnce([{ ...poLine, status: "received", receivedQty: 3 }]);
+    storage.getPurchaseOrderLineById.mockResolvedValue(poLine);
+    storage.getReceivingLineById.mockResolvedValue({
+      id: 201,
+      productId,
+      productVariantId: 5,
+    });
+    storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1 });
+
+    const result = await svc.onReceivingOrderClosed(99, [
+      { receivingLineId: 201, purchaseOrderLineId: 100, receivedQty: 3 },
+    ]);
+
+    expect(result.poStatusUpdate).toEqual({
+      legacyStatus: "received",
+      physicalStatus: "received",
+    });
+    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        status: "received",
+        physicalStatus: "received",
+        actualDeliveryDate: expect.any(Date),
+      }),
+      expect.objectContaining({
+        fromStatus: "sent",
+        toStatus: "received",
+      }),
+    );
+    expect(mockDetectQtyVariance).toHaveBeenCalledWith(1);
   });
 
   it("(9) leaves unlinked when no open PO lines match the product_id", async () => {

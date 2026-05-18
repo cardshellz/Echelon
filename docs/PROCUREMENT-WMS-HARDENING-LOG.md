@@ -1089,3 +1089,33 @@ Next step:
 - Continue Phase 3 by hardening receiving variance and landed-cost touchpoints
   that feed PO/AP accuracy, then move into the demand and purchasing
   recommendation engine once the purchasing system is operationally reliable.
+
+### 2026-05-18 - Phase 3 Slice 3: Receiving PO State and Variance Controls
+
+Scope:
+
+- Kept PO dual-track physical status aligned when receipt reconciliation updates
+  the legacy PO receiving status.
+- Partial receipt reconciliation now writes both `status = partially_received`
+  and `physicalStatus = receiving`.
+- Full receipt reconciliation now writes both `status = received` and
+  `physicalStatus = received`, preserving the existing receipt audit history.
+- Reused the existing `detectQtyVariance` exception detector after reconciliation
+  moves a PO to fully received, so over-receipts become visible through the
+  established `qty_over`/`qty_short` PO exception path instead of a second
+  receiving-only variance mechanism.
+- Extended reconciliation results with the PO status update that was applied, so
+  callers and tests can distinguish no-op retries from actual PO state movement.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/receiving.routes.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/po-exceptions.service.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 3 by tightening receiving close blockers and cost provenance
+  around provisional landed costs, then move into the dedicated inbound shipment
+  and landed cost phase once receiving state is fully stable.
