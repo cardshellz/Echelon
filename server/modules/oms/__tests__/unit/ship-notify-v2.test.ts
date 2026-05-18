@@ -10,7 +10,7 @@
  *   - Shipment not found → falls back to the legacy orderKey path
  *     (verified by observing the legacy path's SQL pattern).
  *   - Void detected → dispatches 'voided' (no OMS status change).
- *   - Idempotency: already-shipped with same tracking → no-op.
+ *   - Idempotency: already-shipped with same tracking → repair cascade.
  *   - Flag-off (default) → legacy path, V2 SQL never runs.
  *
  * What it does NOT cover (left to integration tests per the plan):
@@ -336,7 +336,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(insertCalls.length).toBe(1);
   });
 
-  it("idempotent: already-shipped with same tracking → no-op, no UPDATE, no OMS write", async () => {
+  it("idempotent: already-shipped with same tracking runs OMS/Shopify repair without rewriting shipment", async () => {
     const shipmentPayload = makeShipmentPayload();
 
     const mock = makeDb([
@@ -359,9 +359,29 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
-      // No further execute calls should happen.
+      // recompute: order row.
+      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
+      // recompute: shipment statuses.
+      { rows: [{ status: "shipped" }] },
+      // recompute UPDATE wms.orders.
+      { rows: [] },
+      // resolve OMS id.
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // OMS line status derivation.
+      { rows: [] },
+      // delayed tracking provider guard.
+      { rows: [{ provider: "shopify" }] },
+      // Shopify fulfillment provider guard.
+      { rows: [{ provider: "shopify" }] },
     ]);
 
+    (mock.db as any).__fulfillmentPush = {
+      pushShopifyFulfillment: vi.fn(async () => ({
+        shopifyFulfillmentId: "gid://shopify/Fulfillment/repaired",
+        alreadyPushed: false,
+      })),
+      pushTracking: vi.fn(),
+    };
     globalThis.fetch = mockFetchOnceOk({
       shipments: [shipmentPayload],
     }) as any;
@@ -369,17 +389,17 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const svc = createShipStationService(mock.db);
     const processed = await svc.processShipNotify("/foo");
 
-    expect(processed).toBe(0); // no-op counts as not processed
+    expect(processed).toBe(1);
 
-    // Exactly 4 execute calls: the V2 lookup, the mark-* load-current,
-    // the WMS->OMS pointer lookup used by replay side-effect repair,
-    // and the pending retry lookup before enqueueing Shopify repair.
-    // No UPDATE, no rollup, no OMS writes.
     const executeSqls = mock.calls.filter((c) => c.tag === "execute");
-    expect(executeSqls.length).toBe(4);
+    expect(executeSqls.map((c) => c.sqlText).join("\n")).toMatch(/UPDATE oms\.oms_order_lines/);
+    expect(executeSqls.map((c) => c.sqlText).join("\n")).toMatch(/UPDATE wms\.orders/);
 
-    expect(mock.calls.filter((c) => c.tag === "update").length).toBe(0);
+    // No outbound shipment UPDATE is emitted because status/tracking already match,
+    // but the OMS order and line-level fulfillment state are repaired.
+    expect(mock.calls.filter((c) => c.tag === "update").length).toBe(1);
     expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
+    expect((mock.db as any).__fulfillmentPush.pushShopifyFulfillment).toHaveBeenCalledWith(501);
   });
 
   it("ignores ShipStation split/package edits that are not shipped", async () => {
@@ -1008,7 +1028,11 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
           },
         ],
       },
+      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [] },
       { rows: [{ provider: "shopify" }] },
       { rows: [{ provider: "shopify" }] },
     ]);
@@ -1047,7 +1071,11 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
           },
         ],
       },
+      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [] },
       { rows: [{ provider: "ebay" }] },
       { rows: [] },
       { rows: [{ provider: "ebay" }] },
