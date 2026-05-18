@@ -737,17 +737,17 @@ export async function recomputeOrderStatusFromShipments(
       closed_blockers AS (
         UPDATE wms.allocation_exceptions
         SET
-          status = CASE WHEN ${derived} = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
-          resolution = CONCAT('order_', ${derived}, '_shipment_rollup'),
+          status = CASE WHEN ${derived}::text = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
+          resolution = CONCAT('order_', ${derived}::text, '_shipment_rollup'),
           resolved_at = ${now},
           updated_at = ${now},
           metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
             'closedBy', 'shipment_rollup',
-            'closedByOrderStatus', ${derived},
-            'closedAt', ${now}
+            'closedByOrderStatus', ${derived}::text,
+            'closedAt', ${now}::timestamptz
           )
         WHERE order_id = ${wmsOrderId}
-          AND ${derived} IN ('shipped', 'cancelled')
+          AND ${derived}::text IN ('shipped', 'cancelled')
           AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
           AND (
             status = 'blocked'
@@ -769,17 +769,17 @@ export async function recomputeOrderStatusFromShipments(
       closed_blockers AS (
         UPDATE wms.allocation_exceptions
         SET
-          status = CASE WHEN ${derived} = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
-          resolution = CONCAT('order_', ${derived}, '_shipment_rollup'),
+          status = CASE WHEN ${derived}::text = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
+          resolution = CONCAT('order_', ${derived}::text, '_shipment_rollup'),
           resolved_at = ${now},
           updated_at = ${now},
           metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
             'closedBy', 'shipment_rollup',
-            'closedByOrderStatus', ${derived},
-            'closedAt', ${now}
+            'closedByOrderStatus', ${derived}::text,
+            'closedAt', ${now}::timestamptz
           )
         WHERE order_id = ${wmsOrderId}
-          AND ${derived} IN ('shipped', 'cancelled')
+          AND ${derived}::text IN ('shipped', 'cancelled')
           AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
           AND (
             status = 'blocked'
