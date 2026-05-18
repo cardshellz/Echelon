@@ -27,13 +27,16 @@ live operational observations.
 
 Started: 2026-05-16
 
-Current phase: Phase 1 - Domain Boundaries and Route Split Plan
+Current phase: Phase 7 - AP Financial Command Boundary
 
 Current objective:
 
-- Establish the first implementation boundary for procurement hardening.
-- Begin with PO lifecycle and receiving orchestration because those flows can
-  create inventory, PO, AP, and reporting drift.
+- Centralize AP invoice and payment lifecycle mutations behind a shared command
+  vocabulary.
+- Keep public AP URLs stable while financial actions gain one service boundary
+  for validation, audit, idempotency, and retry semantics.
+- Finish financial state hardening before demand forecasting depends on AP,
+  landed-cost, and PO payment state.
 
 ## Baseline Decisions
 
@@ -1369,3 +1372,33 @@ Next step:
   dashboard escalation, and list follow-up filters. Move to the next
   procurement/WMS hardening area unless live testing exposes another
   landed-cost operational gap.
+
+### 2026-05-18 - Phase 7 Slice 1: AP Ledger Command Boundary
+
+Scope:
+
+- Started Phase 7 after landed-cost Phase 6 by introducing a shared AP ledger
+  command vocabulary for invoice approval, invoice dispute, invoice void,
+  payment record, and payment void.
+- Added `executeApLedgerCommand(...)` as the service entry point for AP
+  lifecycle mutations while preserving the existing underlying invoice and
+  payment behavior.
+- Routed the existing AP invoice/payment mutation URLs through the command
+  boundary without changing public URLs, permissions, or current idempotency
+  requirements.
+- Centralized command-level required-id and required-reason validation through
+  `ApLedgerError`, keeping route error handling consistent for command calls.
+- Expanded AP route coverage to assert invoice and payment mutations dispatch
+  through the shared command boundary.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+
+Next step:
+
+- Continue Phase 7 by making AP command side effects more atomic and
+  operator-visible, starting with invoice status transitions and payment voids
+  because they alter invoice balances and PO financial aggregates.

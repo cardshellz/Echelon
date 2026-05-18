@@ -38,6 +38,36 @@ export class ApLedgerError extends Error {
   }
 }
 
+export type ApLedgerCommand =
+  | "approve_invoice"
+  | "dispute_invoice"
+  | "void_invoice"
+  | "record_payment"
+  | "void_payment";
+
+export type RecordApPaymentInput = {
+  vendorId: number;
+  paymentDate: Date;
+  paymentMethod: string;
+  referenceNumber?: string;
+  checkNumber?: string;
+  bankAccountLabel?: string;
+  totalAmountCents: number;
+  currency?: string;
+  notes?: string;
+  status?: string;
+  allocations: Array<{ vendorInvoiceId: number; appliedAmountCents: number; notes?: string }>;
+  createdBy?: string;
+};
+
+export type ApLedgerCommandInput = {
+  invoiceId?: number;
+  paymentId?: number;
+  reason?: string;
+  userId?: string;
+  payment?: RecordApPaymentInput;
+};
+
 // ─── PO Financial Aggregate Recompute ───────────────────────────────────────
 //
 // Called after any invoice or payment write that can affect a PO's financial
@@ -676,20 +706,7 @@ export async function getPaymentsForPo(purchaseOrderId: number) {
 
 // ─── Payments ─────────────────────────────────────────────────────────────────
 
-export async function recordPayment(data: {
-  vendorId: number;
-  paymentDate: Date;
-  paymentMethod: string;
-  referenceNumber?: string;
-  checkNumber?: string;
-  bankAccountLabel?: string;
-  totalAmountCents: number;
-  currency?: string;
-  notes?: string;
-  status?: string;
-  allocations: Array<{ vendorInvoiceId: number; appliedAmountCents: number; notes?: string }>;
-  createdBy?: string;
-}) {
+export async function recordPayment(data: RecordApPaymentInput) {
   const paymentNumber = await generatePaymentNumber();
 
   // Validate allocations sum <= total
@@ -849,6 +866,54 @@ export async function voidPayment(id: number, reason: string, userId?: string) {
 }
 
 // ─── AP Summary / Aging ───────────────────────────────────────────────────────
+
+function requireCommandId(value: number | undefined, field: string): number {
+  if (!Number.isFinite(value)) {
+    throw new ApLedgerError(`${field} is required`);
+  }
+  return value as number;
+}
+
+function requireCommandReason(reason: string | undefined): string {
+  if (!reason?.trim()) {
+    throw new ApLedgerError("reason is required");
+  }
+  return reason;
+}
+
+export async function executeApLedgerCommand(command: ApLedgerCommand, input: ApLedgerCommandInput = {}) {
+  switch (command) {
+    case "approve_invoice":
+      return approveInvoice(requireCommandId(input.invoiceId, "invoiceId"), input.userId);
+    case "dispute_invoice":
+      return disputeInvoice(
+        requireCommandId(input.invoiceId, "invoiceId"),
+        requireCommandReason(input.reason),
+        input.userId,
+      );
+    case "void_invoice":
+      return voidInvoice(
+        requireCommandId(input.invoiceId, "invoiceId"),
+        requireCommandReason(input.reason),
+        input.userId,
+      );
+    case "record_payment":
+      if (!input.payment) {
+        throw new ApLedgerError("payment is required");
+      }
+      return recordPayment(input.payment);
+    case "void_payment":
+      return voidPayment(
+        requireCommandId(input.paymentId, "paymentId"),
+        requireCommandReason(input.reason),
+        input.userId,
+      );
+    default: {
+      const exhaustive: never = command;
+      throw new ApLedgerError(`Unsupported AP ledger command: ${exhaustive}`);
+    }
+  }
+}
 
 export async function getApSummary() {
   const now = new Date();

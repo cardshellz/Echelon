@@ -3,6 +3,17 @@ import { requirePermission, upload } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import * as apLedger from "./ap-ledger.service";
 
+function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
+  if (err?.name === "ApLedgerError") {
+    return res.status(err.statusCode).json({ error: err.message, details: err.details });
+  }
+  return res.status(err?.statusCode ?? fallbackStatus).json({ error: err.message });
+}
+
+function getUserId(req: any): string | undefined {
+  return req.user?.id ?? req.session?.user?.id;
+}
+
 export function registerApLedgerRoutes(app: Express) {
   // ============================================================
   // AP LEDGER - Vendor invoices
@@ -79,32 +90,41 @@ export function registerApLedgerRoutes(app: Express) {
 
   app.post("/api/vendor-invoices/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
-      const invoice = await apLedger.approveInvoice(Number(req.params.id), (req as any).user?.id);
+      const invoice = await apLedger.executeApLedgerCommand("approve_invoice", {
+        invoiceId: Number(req.params.id),
+        userId: getUserId(req),
+      });
       res.json(invoice);
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      handleApLedgerError(res, err);
     }
   });
 
   app.post("/api/vendor-invoices/:id/dispute", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const { reason } = req.body;
-      if (!reason) return res.status(400).json({ error: "reason is required" });
-      const invoice = await apLedger.disputeInvoice(Number(req.params.id), reason, (req as any).user?.id);
+      const invoice = await apLedger.executeApLedgerCommand("dispute_invoice", {
+        invoiceId: Number(req.params.id),
+        reason,
+        userId: getUserId(req),
+      });
       res.json(invoice);
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      handleApLedgerError(res, err);
     }
   });
 
   app.post("/api/vendor-invoices/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
       const { reason } = req.body;
-      if (!reason) return res.status(400).json({ error: "reason is required" });
-      const invoice = await apLedger.voidInvoice(Number(req.params.id), reason, (req as any).user?.id);
+      const invoice = await apLedger.executeApLedgerCommand("void_invoice", {
+        invoiceId: Number(req.params.id),
+        reason,
+        userId: getUserId(req),
+      });
       res.json(invoice);
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      handleApLedgerError(res, err);
     }
   });
 
@@ -283,18 +303,17 @@ export function registerApLedgerRoutes(app: Express) {
       if (!body.vendorId || !body.paymentDate || !body.paymentMethod || body.totalAmountCents == null) {
         return res.status(400).json({ error: "vendorId, paymentDate, paymentMethod, and totalAmountCents are required" });
       }
-      const payment = await apLedger.recordPayment({
-        ...body,
-        paymentDate: new Date(body.paymentDate),
-        allocations: body.allocations ?? [],
-        createdBy: (req as any).user?.id,
+      const payment = await apLedger.executeApLedgerCommand("record_payment", {
+        payment: {
+          ...body,
+          paymentDate: new Date(body.paymentDate),
+          allocations: body.allocations ?? [],
+          createdBy: getUserId(req),
+        },
       });
       res.status(201).json(payment);
     } catch (err: any) {
-      if (err?.name === "ApLedgerError") {
-        return res.status(err.statusCode).json({ error: err.message });
-      }
-      res.status(400).json({ error: err.message });
+      handleApLedgerError(res, err);
     }
   });
 
@@ -311,11 +330,14 @@ export function registerApLedgerRoutes(app: Express) {
   app.post("/api/ap-payments/:id/void", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
     try {
       const { reason } = req.body;
-      if (!reason) return res.status(400).json({ error: "reason is required" });
-      await apLedger.voidPayment(Number(req.params.id), reason, (req as any).user?.id);
+      await apLedger.executeApLedgerCommand("void_payment", {
+        paymentId: Number(req.params.id),
+        reason,
+        userId: getUserId(req),
+      });
       res.json({ ok: true });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      handleApLedgerError(res, err);
     }
   });
 
