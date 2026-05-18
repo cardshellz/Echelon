@@ -1745,38 +1745,23 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       event,
       { fulfillmentPush },
     );
-    if (!changed) {
+    if (!changed && event.kind !== "shipped") {
       console.log(
         `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already in target state - no-op`,
       );
-      let omsOrderId: number | null = null;
-      if (event.kind === "shipped" && inventoryCore) {
-        await recordInventoryForShipment(
-          wmsShipmentRow.id,
-          wmsOrderId,
-          inventoryItemsToRecord,
-        );
-      }
-      if (event.kind === "shipped") {
-        await applyShipmentQuantitiesToWmsOrderItems(inventoryItemsToRecord);
-      }
-      if (event.kind === "shipped") {
-        omsOrderId = await resolveOmsOrderIdForWmsOrder(wmsOrderId, wmsShipmentRow.id);
-        if (omsOrderId !== null) {
-          await enqueueDelayedTrackingPushForShippedShipment(
-            omsOrderId,
-            wmsShipmentRow.id,
-          );
-        }
-        await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id, omsOrderId);
-      }
       return { processed: false, fallback: false };
+    }
+    if (!changed) {
+      console.log(
+        `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already shipped - running repair cascade`,
+      );
     }
 
     // Roll up order-level warehouse_status from ALL shipments. This is
     // the fix for the single-shipment-flips-whole-order bug: the order
-    // status is now derived from the full shipment set, not from the
-    // one shipment that just updated.
+    // status is now derived from the full shipment set. Shipped replays
+    // also run this cascade because the original attempt may have died
+    // after WMS shipment state changed but before OMS/Shopify were updated.
     const rollup = await recomputeOrderStatusFromShipments(db, wmsOrderId);
     console.log(
       `[ShipStation Webhook V2] WMS order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus} (changed=${rollup.changed})`,
@@ -1795,10 +1780,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       wmsOrderId,
       warehouseStatus: rollup.warehouseStatus,
     });
-    await recordShipmentEventV2(omsOrderId, event, shipment, {
-      wmsFirst: true,
-      wmsShipmentId: wmsShipmentRow.id,
-    });
+    if (changed || rollup.changed) {
+      await recordShipmentEventV2(omsOrderId, event, shipment, {
+        wmsFirst: true,
+        wmsShipmentId: wmsShipmentRow.id,
+      });
+    }
 
     if (event.kind === "shipped") {
       if (inventoryCore) {
@@ -1816,10 +1803,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       );
     }
 
-    // Shopify fulfillment push runs after the shipment commit. The same
-    // helper is also used for already-shipped replays so a missed Shopify
-    // push can be repaired without changing WMS shipment state again.
-    if (event.kind === "shipped" && changed) {
+    // Shopify fulfillment push runs after the shipment commit. Already-shipped
+    // replays use the same path so a missed Shopify push can be repaired
+    // without changing WMS shipment state again.
+    if (event.kind === "shipped") {
       await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id, omsOrderId);
     }
 
@@ -2420,8 +2407,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     if (failures.length > 0) {
+      const failureSummary = failures
+        .slice(0, 5)
+        .map((failure) =>
+          `shipment ${failure.shipmentId ?? "unknown"}: ${failure.message}`,
+        )
+        .join("; ");
+      const suffix = failureSummary ? ` (${failureSummary})` : "";
       throw new ShipStationWebhookProcessingError(
-        `ShipStation SHIP_NOTIFY processed ${processed}/${shipments.length} shipment(s); ${failures.length} failed`,
+        `ShipStation SHIP_NOTIFY processed ${processed}/${shipments.length} shipment(s); ${failures.length} failed${suffix}`,
         failures,
         processed,
       );
