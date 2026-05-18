@@ -74,6 +74,14 @@ function apLedgerOutcomeDescription(result: any): string | undefined {
   return outcome.message;
 }
 
+function createApCommandIdempotencyKey(prefix: string): string {
+  return (
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? (crypto as any).randomUUID()
+      : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  ) as string;
+}
+
 function formatBytes(bytes: number | null | undefined): string {
   if (!bytes) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -211,12 +219,17 @@ export default function APInvoiceDetail() {
     queryClient.invalidateQueries({ queryKey: [`/api/vendor-invoices/${invoiceId}`] });
     queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
     queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
   };
 
   function action(endpoint: string, body?: any) {
+    const idempotencyKey = createApCommandIdempotencyKey(`ap-invoice-${endpoint}`);
     return fetch(`/api/vendor-invoices/${invoiceId}/${endpoint}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
       body: body ? JSON.stringify(body) : undefined,
     }).then(async (r) => {
       if (!r.ok) throw new Error((await r.json()).error);

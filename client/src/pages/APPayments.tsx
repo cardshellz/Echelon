@@ -146,6 +146,7 @@ export default function APPayments() {
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
       setShowPaymentDialog(false);
       setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "" });
       setAllocations({});
@@ -177,6 +178,7 @@ export default function APPayments() {
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
       setShowVoidDialog(null);
       setVoidReason("");
       toast({ title: "Payment voided", description: apLedgerOutcomeDescription(result) });
