@@ -479,7 +479,11 @@ export class ReceivingService {
         let unitCostCents = resolved.cents;
         let unitCostMills = resolved.mills;
         let costProvisional = 0;
-        let inboundShipmentId: number | undefined;
+        const parsedInboundShipmentId = Number(order.inboundShipmentId);
+        const inboundShipmentId =
+          Number.isInteger(parsedInboundShipmentId) && parsedInboundShipmentId > 0
+            ? parsedInboundShipmentId
+            : undefined;
 
         if (line.purchaseOrderLineId && this.shipmentTracking) {
           try {
@@ -492,18 +496,20 @@ export class ReceivingService {
               // If landed-cost ever migrates to mills, update here.
               unitCostCents = landedCost;
               unitCostMills = centsToMills(landedCost);
-            } else if (order.inboundShipmentId) {
-              // Shipment exists but costs not finalized — mark provisional
+            } else if (inboundShipmentId) {
+              // Shipment exists but costs not finalized - mark provisional.
               costProvisional = 1;
-              inboundShipmentId = order.inboundShipmentId;
             }
           } catch {
-            // Non-critical — fall through to PO/line cost
+            // Landed-cost lookup failure should not make a shipment-linked
+            // receipt look final. Keep the PO/line cost, but mark it provisional.
+            if (inboundShipmentId) {
+              costProvisional = 1;
+            }
           }
-        } else if (order.inboundShipmentId) {
-          // Receiving order linked to shipment but no tracking service — mark provisional
+        } else if (inboundShipmentId) {
+          // Receiving order linked to shipment but no tracking service - mark provisional.
           costProvisional = 1;
-          inboundShipmentId = order.inboundShipmentId;
         }
 
         // Typed-lines allocator (Option C, 2026-04-28).

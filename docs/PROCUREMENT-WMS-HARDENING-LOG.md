@@ -1119,3 +1119,31 @@ Next step:
 - Continue Phase 3 by tightening receiving close blockers and cost provenance
   around provisional landed costs, then move into the dedicated inbound shipment
   and landed cost phase once receiving state is fully stable.
+
+### 2026-05-18 - Phase 3 Slice 4: Receiving Cost Provenance Guards
+
+Scope:
+
+- Preserved inbound shipment linkage on inventory receipt lots even when landed
+  costs have already been finalized, so finalized shipment receipts remain
+  traceable back to the inbound shipment.
+- Marked shipment-linked receipts as provisional when landed cost is missing or
+  lookup fails, keeping PO/receiving-line cost as the temporary value without
+  presenting it as final landed cost.
+- Kept domestic typed-line allocation behavior unchanged for receipts that are
+  not tied to inbound shipments.
+- Added focused receiving close coverage for finalized landed cost, pending
+  landed cost, and landed-cost lookup failure provenance.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/receiving.routes.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts server/modules/procurement/__tests__/unit/po-exceptions.service.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check` with Windows line-ending warnings only.
+
+Next step:
+
+- Run the receiving cost provenance tests and typecheck, then continue into the
+  dedicated inbound shipment and landed cost phase once this receiving guard is
+  merged.
