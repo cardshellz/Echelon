@@ -1314,6 +1314,8 @@ describe("recomputeOrderStatusFromShipments :: state matrix", () => {
     expect(mock.getCallCount()).toBe(3);
     expect(mock.calls[2].sqlText).toContain("allocation_exceptions");
     expect(mock.calls[2].sqlText).toContain("shipment_rollup");
+    expect(mock.calls[2].sqlText).toContain("::text");
+    expect(mock.calls[2].sqlText).toContain("::timestamptz");
   });
 
   it("2 shipments both 'shipped' → 'shipped'", async () => {
