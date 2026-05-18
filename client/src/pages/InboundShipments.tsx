@@ -21,6 +21,8 @@ import {
   Package,
   DollarSign,
   Anchor,
+  AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 
 // Status badge config
@@ -54,6 +56,33 @@ function formatCents(cents: number | null | undefined): string {
 }
 
 type Warehouse = { id: number; code: string; name: string };
+type LandedCostHealth = {
+  status: "healthy" | "warning" | "critical";
+  scannedShipments: number;
+  critical: number;
+  warning: number;
+  counts: {
+    allocationBlockers: number;
+    allocationWarnings: number;
+    pendingFinalization: number;
+    finalizedNotPushed: number;
+    staleProvisionalLots: number;
+  };
+  items: Array<{
+    id: string;
+    type: string;
+    severity: "critical" | "warning";
+    shipmentId: number;
+    shipmentNumber: string | null;
+    shipmentStatus: string;
+    detail: string;
+    action: string;
+    provisionalLotCount?: number;
+    missingSnapshotLineIds?: number[];
+    blockerCount?: number;
+    warningCount?: number;
+  }>;
+};
 type InboundShipment = {
   id: number;
   shipmentNumber: string;
@@ -118,6 +147,15 @@ export default function InboundShipments() {
     queryFn: async () => {
       const res = await fetch("/api/warehouses", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch warehouses");
+      return res.json();
+    },
+  });
+
+  const { data: landedCostHealth } = useQuery<LandedCostHealth>({
+    queryKey: ["/api/procurement/landed-cost-health"],
+    queryFn: async () => {
+      const res = await fetch("/api/procurement/landed-cost-health?limit=50", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch landed cost health");
       return res.json();
     },
   });
@@ -196,6 +234,10 @@ export default function InboundShipments() {
     return `${origin} → ${dest}`;
   }
 
+  function renderHealthType(type: string) {
+    return type.replace(/_/g, " ");
+  }
+
   // Status filter buttons
   const statusOptions = [
     { value: "active", label: "Active" },
@@ -269,6 +311,72 @@ export default function InboundShipments() {
           </CardContent>
         </Card>
       </div>
+
+      {landedCostHealth && (
+        <Card className={landedCostHealth.status === "critical" ? "border-red-300" : landedCostHealth.status === "warning" ? "border-amber-300" : "border-emerald-300"}>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                {landedCostHealth.status === "healthy" ? (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                ) : (
+                  <AlertTriangle className={`h-4 w-4 ${landedCostHealth.status === "critical" ? "text-red-600" : "text-amber-600"}`} />
+                )}
+                <span className="font-semibold">Landed Cost Health</span>
+                <Badge variant={landedCostHealth.status === "healthy" ? "outline" : "destructive"}>
+                  {landedCostHealth.status}
+                </Badge>
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                <span>{landedCostHealth.scannedShipments} shipments checked</span>
+                <span>{landedCostHealth.critical} critical</span>
+                <span>{landedCostHealth.warning} warnings</span>
+              </div>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5 text-sm">
+              <div>
+                <div className="text-xs text-muted-foreground">Allocation Blockers</div>
+                <div className="font-mono">{landedCostHealth.counts.allocationBlockers}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Allocation Warnings</div>
+                <div className="font-mono">{landedCostHealth.counts.allocationWarnings}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Needs Finalize</div>
+                <div className="font-mono">{landedCostHealth.counts.pendingFinalization}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Ready To Push</div>
+                <div className="font-mono">{landedCostHealth.counts.finalizedNotPushed}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Stale Provisional Lots</div>
+                <div className="font-mono">{landedCostHealth.counts.staleProvisionalLots}</div>
+              </div>
+            </div>
+
+            {landedCostHealth.items.length > 0 && (
+              <div className="space-y-2">
+                {landedCostHealth.items.slice(0, 5).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => navigate(`/shipments/${item.shipmentId}`)}
+                    className="w-full text-left flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-accent"
+                  >
+                    <Badge variant={item.severity === "critical" ? "destructive" : "outline"}>{item.severity}</Badge>
+                    <span className="font-mono">{item.shipmentNumber || `#${item.shipmentId}`}</span>
+                    <span>{renderHealthType(item.type)}</span>
+                    <span className="text-muted-foreground">{item.detail}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Filters */}
       <div className="space-y-2">

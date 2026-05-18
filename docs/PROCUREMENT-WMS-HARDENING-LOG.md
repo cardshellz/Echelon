@@ -1260,3 +1260,32 @@ Next step:
 - Continue Phase 6 with landed-cost health monitoring so stale provisional lots,
   finalized-but-not-pushed shipments, and allocation warning states are visible
   outside a single shipment detail page.
+
+### 2026-05-18 - Phase 6 Slice 5: Landed Cost Health Monitoring
+
+Scope:
+
+- Added a procurement landed-cost health endpoint that scans costing/closed
+  inbound shipments and reports allocation blockers, allocation warnings,
+  missing finalized landed-cost snapshots, finalized costs that still need to
+  push to provisional lots, and stale provisional lots left after shipment
+  close.
+- Reused the allocation status read model from Slice 4 so shipment-list health
+  and shipment-detail allocation explainability stay aligned.
+- Surfaced landed-cost health on the Inbound Shipments page with critical and
+  warning counts, issue category totals, and issue rows that link directly to
+  the affected shipment detail.
+- Added unit coverage for stale provisional lots, finalized-not-pushed
+  shipments, and the health route contract.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+
+Next step:
+
+- Continue Phase 6 by deciding whether landed-cost health should remain
+  read-only or gain targeted one-click recovery actions for safe cases such as
+  finalized costs ready to push to lots.

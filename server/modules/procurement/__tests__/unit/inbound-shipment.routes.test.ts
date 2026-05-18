@@ -87,6 +87,7 @@ function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
     removeCost: vi.fn(),
     runAllocation: vi.fn(),
     getAllocationStatus: vi.fn(),
+    getLandedCostHealth: vi.fn(),
     finalizeAllocations: vi.fn(),
     getShipmentsByPo: vi.fn(),
     pushLandedCostsToLots: vi.fn(),
@@ -166,6 +167,33 @@ describe("inbound shipment routes", () => {
       offset: 5,
     });
     expect(body).toEqual({ shipments: [{ id: 11, shipmentNumber: "S-11" }], total: 1 });
+  });
+
+  it("returns landed cost health summary", async () => {
+    const health = {
+      status: "critical",
+      scannedShipments: 1,
+      critical: 1,
+      warning: 0,
+      counts: {
+        allocationBlockers: 0,
+        allocationWarnings: 0,
+        pendingFinalization: 0,
+        finalizedNotPushed: 0,
+        staleProvisionalLots: 1,
+      },
+      items: [{ id: "stale_provisional_lots-1", shipmentId: 1 }],
+    };
+    const shipmentTracking = buildShipmentTrackingMock({
+      getLandedCostHealth: vi.fn().mockResolvedValue(health),
+    });
+    server = await startServer(buildApp(shipmentTracking));
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/procurement/landed-cost-health?limit=50");
+
+    expect(status).toBe(200);
+    expect(shipmentTracking.getLandedCostHealth).toHaveBeenCalledWith({ limit: 50 });
+    expect(body).toEqual(health);
   });
 
   it("marks shipments delivered and sends the arrival notification", async () => {

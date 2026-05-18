@@ -14,6 +14,18 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   // Shipment CRUD
 
+  app.get("/api/procurement/landed-cost-health", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const result = await shipmentTracking.getLandedCostHealth({
+        limit: req.query.limit ? Number(req.query.limit) : undefined,
+      });
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/inbound-shipments", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const filters: any = {};
