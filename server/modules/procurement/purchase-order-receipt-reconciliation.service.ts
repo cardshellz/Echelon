@@ -48,6 +48,10 @@ export type ReceiptReconciliationResult = {
   skippedLines: number;
   autoMatchedLines: number;
   issues: ReceiptReconciliationIssue[];
+  poStatusUpdate?: {
+    legacyStatus: "partially_received" | "received";
+    physicalStatus: "receiving" | "received";
+  } | null;
 };
 
 export async function findOpenPoLineByProduct(
@@ -259,9 +263,17 @@ export async function reconcilePurchaseOrderReceipt(params: {
   }
 
   await recalculateTotals(poId);
-  await updatePurchaseOrderReceiptStatus(storage, poId, po);
+  const poStatusUpdate = await updatePurchaseOrderReceiptStatus(storage, poId, po);
 
-  return { purchaseOrderId: poId, appliedLines, existingReceiptLines, skippedLines, autoMatchedLines, issues };
+  return {
+    purchaseOrderId: poId,
+    appliedLines,
+    existingReceiptLines,
+    skippedLines,
+    autoMatchedLines,
+    issues,
+    poStatusUpdate,
+  };
 }
 
 function resolveReceiptUnitCosts(receivingLine: ReceivingReconciliationLine, poLine: any) {
@@ -320,7 +332,7 @@ async function updatePurchaseOrderReceiptStatus(
   storage: PoReceiptReconciliationStorage,
   poId: number,
   po: any,
-) {
+): Promise<ReceiptReconciliationResult["poStatusUpdate"]> {
   const allLines = await storage.getPurchaseOrderLines(poId);
   const activeLines = allLines.filter(
     (line: any) =>
@@ -330,10 +342,17 @@ async function updatePurchaseOrderReceiptStatus(
   const someReceived = activeLines.some((line: any) =>
     line.status === "received" || line.status === "partially_received",
   );
+  const physicalStatus = po.physicalStatus ?? null;
 
-  if (allReceived && po.status !== "received" && po.status !== "closed") {
+  if (
+    activeLines.length > 0 &&
+    allReceived &&
+    (po.status !== "received" || physicalStatus !== "received") &&
+    po.status !== "closed"
+  ) {
     await storage.updatePurchaseOrderStatusWithHistory(poId, {
       status: "received",
+      physicalStatus: "received",
       actualDeliveryDate: new Date(),
     }, {
       fromStatus: po.status,
@@ -341,17 +360,28 @@ async function updatePurchaseOrderReceiptStatus(
       changedBy: undefined,
       notes: "All lines fully received",
     });
-  } else if (
+    return { legacyStatus: "received", physicalStatus: "received" };
+  }
+
+  if (
     someReceived &&
-    po.status !== "partially_received" &&
-    po.status !== "received" &&
-    po.status !== "closed"
+    (
+      po.status !== "partially_received" ||
+      !["receiving", "received"].includes(physicalStatus)
+    ) &&
+    !["received", "closed", "cancelled"].includes(po.status)
   ) {
-    await storage.updatePurchaseOrderStatusWithHistory(poId, { status: "partially_received" }, {
+    await storage.updatePurchaseOrderStatusWithHistory(poId, {
+      status: "partially_received",
+      physicalStatus: "receiving",
+    }, {
       fromStatus: po.status,
       toStatus: "partially_received",
       changedBy: undefined,
       notes: "Partial receipt",
     });
+    return { legacyStatus: "partially_received", physicalStatus: "receiving" };
   }
+
+  return null;
 }
