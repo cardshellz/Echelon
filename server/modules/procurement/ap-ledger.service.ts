@@ -16,6 +16,7 @@ import {
   vendors,
   inboundFreightCosts,
   inboundShipments,
+  auditEvents,
 } from "@shared/schema";
 import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
 import { format } from "date-fns";
@@ -156,6 +157,19 @@ function buildApLedgerOutcome(input: {
     affectedPurchaseOrderIds,
     message: `${input.command.replace(/_/g, " ")} completed.${poPart}`,
   };
+}
+
+async function appendApLedgerCommandAudit(outcome: ApLedgerCommandOutcome, actor?: string): Promise<void> {
+  await db.insert(auditEvents).values({
+    level: "AUDIT",
+    actor: actor ?? "system",
+    action: `ap_ledger.${outcome.command}`,
+    target: `${outcome.entityType}:${outcome.entityId ?? "unknown"}`,
+    changes: null,
+    context: {
+      ...outcome,
+    },
+  });
 }
 
 async function runPoFinancialDetectionHooks(poId: number): Promise<void> {
@@ -987,18 +1001,21 @@ function requireCommandReason(reason: string | undefined): string {
 }
 
 export async function executeApLedgerCommand(command: ApLedgerCommand, input: ApLedgerCommandInput = {}) {
+  const actor = input.userId ?? input.payment?.createdBy;
   switch (command) {
     case "approve_invoice": {
       const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
       const invoice = await approveInvoice(invoiceId, input.userId);
       const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
-      return attachApLedgerOutcome(invoice, buildApLedgerOutcome({
+      const outcome = buildApLedgerOutcome({
         command,
         entityType: "invoice",
         entityId: invoiceId,
         affectedInvoiceIds: [invoiceId],
         affectedPurchaseOrderIds,
-      }));
+      });
+      await appendApLedgerCommandAudit(outcome, actor);
+      return attachApLedgerOutcome(invoice, outcome);
     }
     case "dispute_invoice": {
       const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
@@ -1008,13 +1025,15 @@ export async function executeApLedgerCommand(command: ApLedgerCommand, input: Ap
         input.userId,
       );
       const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
-      return attachApLedgerOutcome(invoice, buildApLedgerOutcome({
+      const outcome = buildApLedgerOutcome({
         command,
         entityType: "invoice",
         entityId: invoiceId,
         affectedInvoiceIds: [invoiceId],
         affectedPurchaseOrderIds,
-      }));
+      });
+      await appendApLedgerCommandAudit(outcome, actor);
+      return attachApLedgerOutcome(invoice, outcome);
     }
     case "void_invoice": {
       const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
@@ -1024,13 +1043,15 @@ export async function executeApLedgerCommand(command: ApLedgerCommand, input: Ap
         input.userId,
       );
       const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
-      return attachApLedgerOutcome(invoice, buildApLedgerOutcome({
+      const outcome = buildApLedgerOutcome({
         command,
         entityType: "invoice",
         entityId: invoiceId,
         affectedInvoiceIds: [invoiceId],
         affectedPurchaseOrderIds,
-      }));
+      });
+      await appendApLedgerCommandAudit(outcome, actor);
+      return attachApLedgerOutcome(invoice, outcome);
     }
     case "record_payment":
       if (!input.payment) {
@@ -1040,14 +1061,16 @@ export async function executeApLedgerCommand(command: ApLedgerCommand, input: Ap
         const payment = await recordPayment(input.payment);
         const affectedInvoiceIds = uniqueNumbers(input.payment.allocations.map((allocation) => allocation.vendorInvoiceId));
         const affectedPurchaseOrderIds = await getPoIdsForInvoices(affectedInvoiceIds);
-        return attachApLedgerOutcome(payment, buildApLedgerOutcome({
+        const outcome = buildApLedgerOutcome({
           command,
           entityType: "payment",
           entityId: payment.id,
           affectedInvoiceIds,
           affectedPaymentIds: [payment.id],
           affectedPurchaseOrderIds,
-        }));
+        });
+        await appendApLedgerCommandAudit(outcome, actor);
+        return attachApLedgerOutcome(payment, outcome);
       }
     case "void_payment": {
       const paymentId = requireCommandId(input.paymentId, "paymentId");
@@ -1058,16 +1081,18 @@ export async function executeApLedgerCommand(command: ApLedgerCommand, input: Ap
         input.userId,
       );
       const affectedPurchaseOrderIds = await getPoIdsForInvoices(affectedInvoiceIds);
+      const outcome = buildApLedgerOutcome({
+        command,
+        entityType: "payment",
+        entityId: paymentId,
+        affectedInvoiceIds,
+        affectedPaymentIds: [paymentId],
+        affectedPurchaseOrderIds,
+      });
+      await appendApLedgerCommandAudit(outcome, actor);
       return {
         ok: true,
-        apLedgerOutcome: buildApLedgerOutcome({
-          command,
-          entityType: "payment",
-          entityId: paymentId,
-          affectedInvoiceIds,
-          affectedPaymentIds: [paymentId],
-          affectedPurchaseOrderIds,
-        }),
+        apLedgerOutcome: outcome,
       };
     }
     default: {
@@ -1191,6 +1216,41 @@ export async function getApSummary() {
     recentPayments,
     recentlyPaid,
   };
+}
+
+export async function listApLedgerCommandAudit(limit = 12) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 12, 1), 50);
+  const rows = await db
+    .select({
+      id: auditEvents.id,
+      timestamp: auditEvents.timestamp,
+      actor: auditEvents.actor,
+      action: auditEvents.action,
+      target: auditEvents.target,
+      context: auditEvents.context,
+    })
+    .from(auditEvents)
+    .where(like(auditEvents.action, "ap_ledger.%"))
+    .orderBy(desc(auditEvents.timestamp))
+    .limit(safeLimit);
+
+  return rows.map((row) => {
+    const context = (row.context ?? {}) as Partial<ApLedgerCommandOutcome>;
+    return {
+      id: row.id,
+      timestamp: row.timestamp,
+      actor: row.actor,
+      action: row.action,
+      target: row.target,
+      command: context.command ?? row.action.replace(/^ap_ledger\./, ""),
+      entityType: context.entityType,
+      entityId: context.entityId,
+      affectedInvoiceIds: context.affectedInvoiceIds ?? [],
+      affectedPaymentIds: context.affectedPaymentIds ?? [],
+      affectedPurchaseOrderIds: context.affectedPurchaseOrderIds ?? [],
+      message: context.message ?? row.action,
+    };
+  });
 }
 
 // ─── Invoice Lines ────────────────────────────────────────────────────────────
