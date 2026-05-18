@@ -68,6 +68,13 @@ export type ApLedgerCommandInput = {
   payment?: RecordApPaymentInput;
 };
 
+type ApLedgerDbClient = Pick<typeof db, "select" | "insert" | "update">;
+
+type RecomputePoFinancialAggregatesOptions = {
+  client?: ApLedgerDbClient;
+  runDetection?: boolean;
+};
+
 // ─── PO Financial Aggregate Recompute ───────────────────────────────────────
 //
 // Called after any invoice or payment write that can affect a PO's financial
@@ -81,12 +88,36 @@ export type ApLedgerCommandInput = {
 /**
  * Return all PO IDs linked to a given invoice via vendor_invoice_po_links.
  */
-async function getPoIdsForInvoice(invoiceId: number): Promise<number[]> {
-  const rows = await db
+async function getPoIdsForInvoice(invoiceId: number, client: ApLedgerDbClient = db): Promise<number[]> {
+  const rows = await client
     .select({ purchaseOrderId: vendorInvoicePoLinks.purchaseOrderId })
     .from(vendorInvoicePoLinks)
     .where(eq(vendorInvoicePoLinks.vendorInvoiceId, invoiceId));
-  return rows.map((r) => r.purchaseOrderId);
+  return rows.map((r: { purchaseOrderId: number }) => r.purchaseOrderId);
+}
+
+async function runPoFinancialDetectionHooks(poId: number): Promise<void> {
+  try {
+    await detectOverpaid(poId);
+    await detectPastDue(poId);
+  } catch (detectionErr) {
+    console.error("[po-exceptions] detection hook failed in recomputePoFinancialAggregates:", detectionErr);
+  }
+}
+
+async function runPoFinancialDetectionHooksForMany(poIds: Iterable<number>): Promise<void> {
+  for (const poId of new Set(poIds)) {
+    await runPoFinancialDetectionHooks(poId);
+  }
+}
+
+async function recomputePoFinancialAggregatesForMany(
+  poIds: Iterable<number>,
+  client: ApLedgerDbClient,
+): Promise<void> {
+  for (const poId of new Set(poIds)) {
+    await recomputePoFinancialAggregates(poId, { client, runDetection: false });
+  }
 }
 
 /**
@@ -99,9 +130,14 @@ async function getPoIdsForInvoice(invoiceId: number): Promise<number[]> {
  * Timestamps (firstInvoicedAt, firstPaidAt, fullyPaidAt) are only stamped
  * on first occurrence — never overwritten once set.
  */
-export async function recomputePoFinancialAggregates(poId: number): Promise<void> {
+export async function recomputePoFinancialAggregates(
+  poId: number,
+  options: RecomputePoFinancialAggregatesOptions = {},
+): Promise<void> {
+  const client = options.client ?? db;
+
   // Sum from non-voided invoices linked to this PO.
-  const invoiceRows = await db
+  const invoiceRows = await client
     .select({
       invoicedAmountCents: vendorInvoices.invoicedAmountCents,
       paidAmountCents: vendorInvoices.paidAmountCents,
@@ -125,7 +161,7 @@ export async function recomputePoFinancialAggregates(poId: number): Promise<void
   const outstanding = invoicedTotal > paidTotal ? invoicedTotal - paidTotal : BigInt(0);
 
   // Fetch current PO state for timestamp preservation and status tracking.
-  const [po] = await db
+  const [po] = await client
     .select({
       financialStatus: purchaseOrders.financialStatus,
       firstInvoicedAt: purchaseOrders.firstInvoicedAt,
@@ -176,20 +212,13 @@ export async function recomputePoFinancialAggregates(poId: number): Promise<void
     patch.fullyPaidAt = now;
   }
 
-  await db.update(purchaseOrders).set(patch).where(eq(purchaseOrders.id, poId));
+  await client.update(purchaseOrders).set(patch).where(eq(purchaseOrders.id, poId));
 
   // ── Exception detection hooks (event-driven, Phase 1) ──────────────────
   // Run after the DB write so detection reads fresh aggregates.
   // Non-blocking: detection failures should not roll back the recompute.
-  try {
-    // Overpaid: triggers when paid > invoiced.
-    if (Number(patch.paidTotalCents ?? 0) > Number(patch.invoicedTotalCents ?? 0)) {
-      await detectOverpaid(poId);
-    }
-    // Past-due: lazy check on every financial recompute.
-    await detectPastDue(poId);
-  } catch (detectionErr) {
-    console.error("[po-exceptions] detection hook failed in recomputePoFinancialAggregates:", detectionErr);
+  if (options.runDetection !== false) {
+    await runPoFinancialDetectionHooks(poId);
   }
 }
 
@@ -229,9 +258,9 @@ async function generatePaymentNumber(): Promise<string> {
 
 // ─── Invoice Balance Recalculation ────────────────────────────────────────────
 
-async function recalculateInvoiceBalance(invoiceId: number): Promise<void> {
+async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbClient = db): Promise<void> {
   // Sum all non-voided payment allocations
-  const allocResult = await db
+  const allocResult = await client
     .select({ total: sql<number>`COALESCE(SUM(${apPaymentAllocations.appliedAmountCents}), 0)` })
     .from(apPaymentAllocations)
     .innerJoin(apPayments, eq(apPaymentAllocations.apPaymentId, apPayments.id))
@@ -244,7 +273,7 @@ async function recalculateInvoiceBalance(invoiceId: number): Promise<void> {
 
   const paidAmount = Number(allocResult[0]?.total ?? 0);
 
-  const [invoice] = await db
+  const [invoice] = await client
     .select({ invoicedAmountCents: vendorInvoices.invoicedAmountCents, status: vendorInvoices.status })
     .from(vendorInvoices)
     .where(eq(vendorInvoices.id, invoiceId));
@@ -266,7 +295,7 @@ async function recalculateInvoiceBalance(invoiceId: number): Promise<void> {
     }
   }
 
-  await db
+  await client
     .update(vendorInvoices)
     .set({
       paidAmountCents: paidAmount,
@@ -523,63 +552,77 @@ export async function updateInvoice(
 // ─── Invoice Status Transitions ───────────────────────────────────────────────
 
 export async function approveInvoice(id: number, userId?: string) {
-  const [inv] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-  if (!inv || !["received", "disputed"].includes(inv.status)) {
-    throw new Error("Invoice must be in received or disputed status to approve");
-  }
+  const affectedPoIds: number[] = [];
+  const updated = await db.transaction(async (tx: ApLedgerDbClient) => {
+    const [inv] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
+    if (!inv || !["received", "disputed"].includes(inv.status)) {
+      throw new Error("Invoice must be in received or disputed status to approve");
+    }
 
-  const [updated] = await db
-    .update(vendorInvoices)
-    .set({ status: "approved", approvedAt: new Date(), approvedBy: userId, updatedBy: userId, updatedAt: new Date() })
-    .where(eq(vendorInvoices.id, id))
-    .returning();
+    const [invoice] = await tx
+      .update(vendorInvoices)
+      .set({ status: "approved", approvedAt: new Date(), approvedBy: userId, updatedBy: userId, updatedAt: new Date() })
+      .where(eq(vendorInvoices.id, id))
+      .returning();
 
-  // Recompute PO financial aggregates (approval can change effective financial status).
-  for (const poId of await getPoIdsForInvoice(id)) {
-    await recomputePoFinancialAggregates(poId);
-  }
+    const poIds = await getPoIdsForInvoice(id, tx);
+    affectedPoIds.push(...poIds);
+    await recomputePoFinancialAggregatesForMany(poIds, tx);
+
+    return invoice;
+  });
+
+  await runPoFinancialDetectionHooksForMany(affectedPoIds);
 
   return updated;
 }
 
 export async function disputeInvoice(id: number, reason: string, userId?: string) {
-  const [inv] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-  if (!inv || !["received", "approved", "partially_paid"].includes(inv.status)) {
-    throw new Error("Cannot dispute invoice in its current status");
-  }
+  const affectedPoIds: number[] = [];
+  const updated = await db.transaction(async (tx: ApLedgerDbClient) => {
+    const [inv] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
+    if (!inv || !["received", "approved", "partially_paid"].includes(inv.status)) {
+      throw new Error("Cannot dispute invoice in its current status");
+    }
 
-  const [updated] = await db
-    .update(vendorInvoices)
-    .set({ status: "disputed", disputeReason: reason, updatedBy: userId, updatedAt: new Date() })
-    .where(eq(vendorInvoices.id, id))
-    .returning();
+    const [invoice] = await tx
+      .update(vendorInvoices)
+      .set({ status: "disputed", disputeReason: reason, updatedBy: userId, updatedAt: new Date() })
+      .where(eq(vendorInvoices.id, id))
+      .returning();
+    const poIds = await getPoIdsForInvoice(id, tx);
+    affectedPoIds.push(...poIds);
+    await recomputePoFinancialAggregatesForMany(poIds, tx);
 
-  // Recompute PO financials — disputed status affects financial_status derivation.
-  for (const poId of await getPoIdsForInvoice(id)) {
-    await recomputePoFinancialAggregates(poId);
-  }
+    return invoice;
+  });
+
+  await runPoFinancialDetectionHooksForMany(affectedPoIds);
 
   return updated;
 }
 
 export async function voidInvoice(id: number, reason: string, userId?: string) {
-  const [inv] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-  if (!inv || inv.status === "voided") throw new Error("Invoice is already voided");
-  if (inv.paidAmountCents > 0) throw new Error("Cannot void an invoice with payments applied — void the payments first");
+  const affectedPoIds: number[] = [];
+  const updated = await db.transaction(async (tx: ApLedgerDbClient) => {
+    const [inv] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
+    if (!inv || inv.status === "voided") throw new Error("Invoice is already voided");
+    if (inv.paidAmountCents > 0) throw new Error("Cannot void an invoice with payments applied — void the payments first");
 
-  // Capture PO links before the void so we can recompute after.
-  const linkedPoIds = await getPoIdsForInvoice(id);
+    const linkedPoIds = await getPoIdsForInvoice(id, tx);
 
-  const [updated] = await db
-    .update(vendorInvoices)
-    .set({ status: "voided", internalNotes: `${inv.internalNotes ? inv.internalNotes + "\n" : ""}VOIDED: ${reason}`, updatedBy: userId, updatedAt: new Date() })
-    .where(eq(vendorInvoices.id, id))
-    .returning();
+    const [invoice] = await tx
+      .update(vendorInvoices)
+      .set({ status: "voided", internalNotes: `${inv.internalNotes ? inv.internalNotes + "\n" : ""}VOIDED: ${reason}`, updatedBy: userId, updatedAt: new Date() })
+      .where(eq(vendorInvoices.id, id))
+      .returning();
+    affectedPoIds.push(...linkedPoIds);
+    await recomputePoFinancialAggregatesForMany(linkedPoIds, tx);
 
-  // Voiding removes this invoice from the aggregate pool — recompute.
-  for (const poId of linkedPoIds) {
-    await recomputePoFinancialAggregates(poId);
-  }
+    return invoice;
+  });
+
+  await runPoFinancialDetectionHooksForMany(affectedPoIds);
 
   return updated;
 }
@@ -708,6 +751,7 @@ export async function getPaymentsForPo(purchaseOrderId: number) {
 
 export async function recordPayment(data: RecordApPaymentInput) {
   const paymentNumber = await generatePaymentNumber();
+  const affectedPoIds = new Set<number>();
 
   // Validate allocations sum <= total
   const allocTotal = data.allocations.reduce((s, a) => s + a.appliedAmountCents, 0);
@@ -717,24 +761,47 @@ export async function recordPayment(data: RecordApPaymentInput) {
 
   let payment;
   try {
-    [payment] = await db
-      .insert(apPayments)
-      .values({
-        paymentNumber,
-        vendorId: data.vendorId,
-        paymentDate: data.paymentDate,
-        paymentMethod: data.paymentMethod,
-        referenceNumber: data.referenceNumber,
-        checkNumber: data.checkNumber,
-        bankAccountLabel: data.bankAccountLabel,
-        totalAmountCents: data.totalAmountCents,
-        currency: data.currency ?? "USD",
-        status: data.status ?? "completed",
-        notes: data.notes,
-        createdBy: data.createdBy,
-        updatedBy: data.createdBy,
-      })
-      .returning();
+    payment = await db.transaction(async (tx: ApLedgerDbClient) => {
+      const [inserted] = await tx
+        .insert(apPayments)
+        .values({
+          paymentNumber,
+          vendorId: data.vendorId,
+          paymentDate: data.paymentDate,
+          paymentMethod: data.paymentMethod,
+          referenceNumber: data.referenceNumber,
+          checkNumber: data.checkNumber,
+          bankAccountLabel: data.bankAccountLabel,
+          totalAmountCents: data.totalAmountCents,
+          currency: data.currency ?? "USD",
+          status: data.status ?? "completed",
+          notes: data.notes,
+          createdBy: data.createdBy,
+          updatedBy: data.createdBy,
+        })
+        .returning();
+
+      if (data.allocations.length > 0) {
+        await tx.insert(apPaymentAllocations).values(
+          data.allocations.map((a) => ({
+            apPaymentId: inserted.id,
+            vendorInvoiceId: a.vendorInvoiceId,
+            appliedAmountCents: a.appliedAmountCents,
+            notes: a.notes,
+          }))
+        );
+
+        for (const alloc of data.allocations) {
+          await recalculateInvoiceBalance(alloc.vendorInvoiceId, tx);
+          const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId, tx);
+          for (const poId of poIds) affectedPoIds.add(poId);
+        }
+
+        await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
+      }
+
+      return inserted;
+    });
   } catch (error: any) {
     if (error?.code === "23505") {
       throw new ApLedgerError(
@@ -745,29 +812,7 @@ export async function recordPayment(data: RecordApPaymentInput) {
     throw error;
   }
 
-  if (data.allocations.length > 0) {
-    await db.insert(apPaymentAllocations).values(
-      data.allocations.map((a) => ({
-        apPaymentId: payment.id,
-        vendorInvoiceId: a.vendorInvoiceId,
-        appliedAmountCents: a.appliedAmountCents,
-        notes: a.notes,
-      }))
-    );
-
-    // Recalculate balance on each affected invoice and recompute PO aggregates.
-    // Collect all affected PO IDs (deduplicated) across all allocations so we
-    // don't recompute the same PO multiple times (Rule #6).
-    const affectedPoIds = new Set<number>();
-    for (const alloc of data.allocations) {
-      await recalculateInvoiceBalance(alloc.vendorInvoiceId);
-      const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId);
-      for (const poId of poIds) affectedPoIds.add(poId);
-    }
-    for (const poId of affectedPoIds) {
-      await recomputePoFinancialAggregates(poId);
-    }
-  }
+  await runPoFinancialDetectionHooksForMany(affectedPoIds);
 
   return payment;
 }
@@ -838,31 +883,29 @@ export async function listPayments(filters: {
 }
 
 export async function voidPayment(id: number, reason: string, userId?: string) {
-  const [payment] = await db.select().from(apPayments).where(eq(apPayments.id, id));
-  if (!payment || payment.status === "voided") throw new Error("Payment is already voided");
-
-  await db
-    .update(apPayments)
-    .set({ status: "voided", voidedAt: new Date(), voidedBy: userId, voidReason: reason, updatedBy: userId, updatedAt: new Date() })
-    .where(eq(apPayments.id, id));
-
-  // Get affected invoices and recalculate their balances.
-  const affectedAllocs = await db
-    .select({ vendorInvoiceId: apPaymentAllocations.vendorInvoiceId })
-    .from(apPaymentAllocations)
-    .where(eq(apPaymentAllocations.apPaymentId, id));
-
   const affectedPoIds = new Set<number>();
-  for (const alloc of affectedAllocs) {
-    await recalculateInvoiceBalance(alloc.vendorInvoiceId);
-    const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId);
-    for (const poId of poIds) affectedPoIds.add(poId);
-  }
+  await db.transaction(async (tx: ApLedgerDbClient) => {
+    const [payment] = await tx.select().from(apPayments).where(eq(apPayments.id, id));
+    if (!payment || payment.status === "voided") throw new Error("Payment is already voided");
 
-  // Recompute PO financial aggregates — voiding a payment reverses paid amounts.
-  for (const poId of affectedPoIds) {
-    await recomputePoFinancialAggregates(poId);
-  }
+    await tx
+      .update(apPayments)
+      .set({ status: "voided", voidedAt: new Date(), voidedBy: userId, voidReason: reason, updatedBy: userId, updatedAt: new Date() })
+      .where(eq(apPayments.id, id));
+    const affectedAllocs = await tx
+      .select({ vendorInvoiceId: apPaymentAllocations.vendorInvoiceId })
+      .from(apPaymentAllocations)
+      .where(eq(apPaymentAllocations.apPaymentId, id));
+
+    for (const alloc of affectedAllocs) {
+      await recalculateInvoiceBalance(alloc.vendorInvoiceId, tx);
+      const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId, tx);
+      for (const poId of poIds) affectedPoIds.add(poId);
+    }
+    await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
+  });
+
+  await runPoFinancialDetectionHooksForMany(affectedPoIds);
 }
 
 // ─── AP Summary / Aging ───────────────────────────────────────────────────────

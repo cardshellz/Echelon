@@ -1402,3 +1402,31 @@ Next step:
 - Continue Phase 7 by making AP command side effects more atomic and
   operator-visible, starting with invoice status transitions and payment voids
   because they alter invoice balances and PO financial aggregates.
+
+### 2026-05-18 - Phase 7 Slice 2: AP Ledger Atomic Side Effects
+
+Scope:
+
+- Made AP ledger side-effect helpers transaction-aware so invoice balance
+  recalculation and PO financial aggregate recomputation can run on the same
+  client as the mutation that triggered them.
+- Wrapped invoice approval, invoice dispute, invoice void, payment recording,
+  and payment voiding in transactions so status, allocation, invoice balance,
+  and PO aggregate writes commit or roll back together.
+- Deferred PO exception detection hooks until after transaction commit, keeping
+  aggregate writes atomic while preserving overpaid and past-due monitoring.
+- Added focused AP service coverage proving payment record and payment void
+  side effects flow through one transaction before detection hooks run.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 7 by making AP ledger outcomes more operator-visible, starting
+  with command responses and admin surfaces that should show which invoices,
+  payments, and linked POs were affected by a mutation.
