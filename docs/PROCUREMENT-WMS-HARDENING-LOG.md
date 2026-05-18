@@ -1178,3 +1178,31 @@ Next step:
 - Run landed-cost push tests and typecheck, then continue Phase 6 with
   allocation/finalization idempotency and operator visibility around skipped
   landed-cost pushes.
+
+### 2026-05-18 - Phase 6 Slice 2: Landed Cost Finalization Idempotency
+
+Scope:
+
+- Restricted landed-cost finalization to shipments in `costing` or `closed`
+  status, matching the operator lifecycle and preventing premature snapshot
+  finalization.
+- Made repeated landed-cost finalization idempotent when the recomputed
+  snapshots match the existing finalized snapshots, avoiding delete/recreate
+  churn and timestamp drift.
+- Preserved closed-shipment late-cost behavior: changed closed costs still
+  create landed cost adjustments and refresh snapshots.
+- Added focused service coverage for invalid status, no-op retry, and changed
+  closed-cost adjustment behavior.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check` with Windows line-ending warnings only.
+
+Next step:
+
+- Continue Phase 6 with operator visibility for skipped landed-cost pushes and
+  then tighten allocation explainability/status reporting in the inbound
+  shipment UI/API.
