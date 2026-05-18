@@ -32,12 +32,35 @@ import {
   recordWebhookReceived,
   type WebhookInboxReceipt,
 } from "./webhook-inbox.service";
+import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const LOG_PREFIX = "[OMS Shopify Webhook]";
+
+async function ensureOmsOrderQueuedForWmsSync(
+  wmsSyncService: any,
+  omsOrderId: number,
+  label: string,
+): Promise<void> {
+  try {
+    const wmsOrderId = await wmsSyncService.syncOmsOrderToWms(omsOrderId);
+    if (!wmsOrderId) {
+      throw new Error("syncOmsOrderToWms returned no WMS order id");
+    }
+    console.log(`${LOG_PREFIX} Synced ${label} to WMS (wms=${wmsOrderId})`);
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+    console.error(`${LOG_PREFIX} WMS sync failed for ${label}: ${message}`);
+    await enqueueOmsWmsSyncRetry(
+      db,
+      omsOrderId,
+      error instanceof Error ? error : new Error(message),
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types for injected services
@@ -1129,12 +1152,11 @@ export function registerOmsWebhooks(
       if (!wmsSyncService) {
         throw new Error("wmsSyncService required; legacy createWmsOrderFromShopify fallback removed (§6 C9b)");
       }
-      try {
-        await wmsSyncService.syncOmsOrderToWms(omsOrder.id);
-        console.log(`${LOG_PREFIX} Synced ${shopifyOrder.name} to WMS`);
-      } catch (e: any) {
-        console.error(`${LOG_PREFIX} WMS sync failed for ${shopifyOrder.name}: ${e.message}`);
-      }
+      await ensureOmsOrderQueuedForWmsSync(
+        wmsSyncService,
+        omsOrder.id,
+        shopifyOrder.name || externalOrderId,
+      );
 
       // OMS-level reservation (delegates to WMS reservation service)
       try {
@@ -1143,6 +1165,17 @@ export function registerOmsWebhooks(
       } catch (e: any) {
         console.error(`${LOG_PREFIX} Post-ingest processing failed for ${shopifyOrder.name}: ${e.message}`);
       }
+
+      // The post-ingest reservation / warehouse assignment path changes
+      // the exact state WMS needs. Run the idempotent sync once more and
+      // persist a retry if it cannot create/find the WMS order. This is the
+      // hard guarantee against OMS orders getting stuck after assignment
+      // with no WMS row and no retry handle.
+      await ensureOmsOrderQueuedForWmsSync(
+        wmsSyncService,
+        omsOrder.id,
+        shopifyOrder.name || externalOrderId,
+      );
 
       // C22b — populate Shopify fulfillment-order line item IDs at ingest
       // (§6 Group E D2/D4). Failure is non-fatal: C22c's Path B fallback
