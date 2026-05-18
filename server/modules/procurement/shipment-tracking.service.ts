@@ -1155,37 +1155,122 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
    * Called when closing the shipment or manually triggered.
    */
   async function pushLandedCostsToLots(shipmentId: number) {
+    const shipment = await getShipment(shipmentId);
+    if (shipment.status === "cancelled") {
+      throw new ShipmentTrackingError("Cannot push landed costs for a cancelled shipment");
+    }
+
     const lots = await storage.getProvisionalLotsByShipment(shipmentId);
-    if (lots.length === 0) return { updated: 0 };
+    if (lots.length === 0) return { updated: 0, total: 0, skipped: [] };
 
     const lines = await storage.getInboundShipmentLines(shipmentId);
+    const finalizedCostByVariant = new Map<number, {
+      landedUnitCostCents: number;
+      poUnitCostCents: number;
+      lineIds: number[];
+    }>();
+    const ambiguousVariantIds = new Set<number>();
+    const unfinalizedVariantIds = new Set<number>();
+
+    for (const line of lines) {
+      const variantId = Number(line.productVariantId);
+      if (!Number.isInteger(variantId) || variantId <= 0) continue;
+
+      const snapshots = await storage.getLandedCostSnapshots(line.id);
+      const snapshot = snapshots[0];
+      if (!snapshot || snapshot.landedUnitCostCents == null) {
+        unfinalizedVariantIds.add(variantId);
+        continue;
+      }
+
+      const landedUnitCostCents = Number(snapshot.landedUnitCostCents);
+      if (!Number.isFinite(landedUnitCostCents)) {
+        unfinalizedVariantIds.add(variantId);
+        continue;
+      }
+
+      const poUnitCostCents = Number(snapshot.poUnitCostCents ?? 0);
+      const existing = finalizedCostByVariant.get(variantId);
+      if (existing) {
+        existing.lineIds.push(line.id);
+        if (existing.landedUnitCostCents !== landedUnitCostCents) {
+          ambiguousVariantIds.add(variantId);
+        }
+      } else {
+        finalizedCostByVariant.set(variantId, {
+          landedUnitCostCents,
+          poUnitCostCents: Number.isFinite(poUnitCostCents) ? poUnitCostCents : 0,
+          lineIds: [line.id],
+        });
+      }
+    }
+
     let updated = 0;
+    const skipped: Array<{
+      lotId: number;
+      productVariantId: number | null;
+      reason: string;
+      lineIds?: number[];
+    }> = [];
 
     for (const lot of lots) {
-      // Find the matching shipment line via PO line or variant
-      const matchingLine = lines.find(l =>
-        l.productVariantId === lot.productVariantId,
-      );
+      const variantId = Number(lot.productVariantId);
+      if (!Number.isInteger(variantId) || variantId <= 0) {
+        skipped.push({
+          lotId: lot.id,
+          productVariantId: lot.productVariantId ?? null,
+          reason: "invalid_lot_variant",
+        });
+        continue;
+      }
 
-      if (!matchingLine?.landedUnitCostCents) continue;
+      const finalizedCost = finalizedCostByVariant.get(variantId);
+      if (ambiguousVariantIds.has(variantId)) {
+        skipped.push({
+          lotId: lot.id,
+          productVariantId: lot.productVariantId,
+          reason: "ambiguous_variant_landed_cost",
+          lineIds: finalizedCost?.lineIds,
+        });
+        continue;
+      }
+
+      if (unfinalizedVariantIds.has(variantId)) {
+        skipped.push({
+          lotId: lot.id,
+          productVariantId: lot.productVariantId,
+          reason: "landed_cost_not_finalized",
+          lineIds: finalizedCost?.lineIds,
+        });
+        continue;
+      }
+
+      if (!finalizedCost) {
+        skipped.push({
+          lotId: lot.id,
+          productVariantId: lot.productVariantId,
+          reason: "no_matching_finalized_landed_cost",
+        });
+        continue;
+      }
 
       // Update the lot with finalized landed cost
       await storage.updateInventoryLot(lot.id, {
-        unitCostCents: matchingLine.landedUnitCostCents,
+        unitCostCents: finalizedCost.landedUnitCostCents,
         costProvisional: 0,
       });
 
       // Also update COGS columns (landed_cost_cents, total_unit_cost_cents)
       try {
-        const poUnitCost = (lot as any).po_unit_cost_cents || (lot as any).unitCostCents || 0;
-        const landedPerPiece = matchingLine.landedUnitCostCents - Number(poUnitCost);
+        const poUnitCost = finalizedCost.poUnitCostCents || (lot as any).po_unit_cost_cents || (lot as any).unitCostCents || 0;
+        const landedPerPiece = finalizedCost.landedUnitCostCents - Number(poUnitCost);
         const landedCostCents = Math.max(0, landedPerPiece);
         
         // Use raw SQL to update COGS columns that may not be in the ORM yet
         await (storage as any).db?.execute?.(sqlTag`
           UPDATE inventory_lots SET
             landed_cost_cents = ${landedCostCents},
-            total_unit_cost_cents = ${matchingLine.landedUnitCostCents},
+            total_unit_cost_cents = ${finalizedCost.landedUnitCostCents},
             cost_source = CASE
               WHEN cost_source = 'po' THEN 'po_landed'
               ELSE cost_source
@@ -1199,7 +1284,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       updated++;
     }
 
-    return { updated, total: lots.length };
+    return { updated, total: lots.length, skipped };
   }
 
   /**
