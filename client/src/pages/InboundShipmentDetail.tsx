@@ -118,6 +118,28 @@ const ALLOCATION_METHOD_OPTIONS = [
   { value: "by_line_count", label: "By Line Count" },
 ];
 
+type LandedCostPushResult = {
+  updated: number;
+  total: number;
+  skipped?: Array<{
+    lotId: number;
+    productVariantId: number | null;
+    reason: string;
+    lineIds?: number[];
+  }>;
+};
+
+const LANDED_COST_SKIP_LABELS: Record<string, string> = {
+  ambiguous_variant_landed_cost: "Ambiguous same-SKU landed cost",
+  invalid_lot_variant: "Invalid lot variant",
+  landed_cost_not_finalized: "Landed cost not finalized",
+  no_matching_finalized_landed_cost: "No finalized landed cost match",
+};
+
+function formatLandedCostSkipReason(reason: string) {
+  return LANDED_COST_SKIP_LABELS[reason] || reason.replace(/_/g, " ");
+}
+
 const PAYMENT_STATUS_BADGES: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive"; className?: string }> = {
   unlinked: { label: "—", variant: "outline" },
   unpaid: { label: "Unpaid", variant: "outline", className: "border-amber-500 text-amber-600" },
@@ -168,6 +190,7 @@ export default function InboundShipmentDetail() {
   const [showAddCostDialog, setShowAddCostDialog] = useState(false);
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
+  const [lastLandedCostPush, setLastLandedCostPush] = useState<LandedCostPushResult | null>(null);
 
   // Edit line dialog state
   const [editDialogLine, setEditDialogLine] = useState<any | null>(null);
@@ -538,6 +561,29 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       toast({ title: "Finalized", description: "Landed costs finalized and snapshotted" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const pushCostsToLotsMutation = useMutation({
+    mutationFn: async (): Promise<LandedCostPushResult> => {
+      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/push-costs-to-lots`);
+      return res.json();
+    },
+    onSuccess: (result) => {
+      setLastLandedCostPush(result);
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      const skippedCount = result.skipped?.length ?? 0;
+      toast({
+        title: skippedCount > 0 ? "Landed cost push needs review" : "Landed costs pushed",
+        description:
+          skippedCount > 0
+            ? `${result.updated} lot${result.updated === 1 ? "" : "s"} updated, ${skippedCount} skipped`
+            : `${result.updated} lot${result.updated === 1 ? "" : "s"} updated`,
+        variant: skippedCount > 0 ? "destructive" : "default",
+      });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1371,7 +1417,48 @@ export default function InboundShipmentDetail() {
                 {finalizeMutation.isPending ? "Finalizing..." : "Finalize"}
               </Button>
             )}
+            {["costing", "closed"].includes(shipment.status) && (
+              <Button
+                variant="outline"
+                onClick={() => pushCostsToLotsMutation.mutate()}
+                disabled={pushCostsToLotsMutation.isPending}
+                className="min-h-[44px]"
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${pushCostsToLotsMutation.isPending ? "animate-spin" : ""}`} />
+                {pushCostsToLotsMutation.isPending ? "Pushing..." : "Push Costs to Lots"}
+              </Button>
+            )}
           </div>
+
+          {lastLandedCostPush && (
+            <Card className={lastLandedCostPush.skipped?.length ? "border-amber-300 bg-amber-50/60 dark:bg-amber-950/10" : "border-green-300 bg-green-50/60 dark:bg-green-950/10"}>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <Badge variant={lastLandedCostPush.skipped?.length ? "outline" : "secondary"}>
+                    {lastLandedCostPush.updated} updated
+                  </Badge>
+                  <Badge variant={lastLandedCostPush.skipped?.length ? "destructive" : "outline"}>
+                    {lastLandedCostPush.skipped?.length ?? 0} skipped
+                  </Badge>
+                  <span className="text-muted-foreground">{lastLandedCostPush.total} provisional lots checked</span>
+                </div>
+                {lastLandedCostPush.skipped && lastLandedCostPush.skipped.length > 0 && (
+                  <div className="space-y-2">
+                    {lastLandedCostPush.skipped.map((item) => (
+                      <div key={`${item.lotId}-${item.reason}`} className="flex flex-wrap items-center gap-2 text-sm">
+                        <AlertTriangle className="h-4 w-4 text-amber-600" />
+                        <span className="font-medium">Lot {item.lotId}</span>
+                        <span>{formatLandedCostSkipReason(item.reason)}</span>
+                        {item.lineIds && item.lineIds.length > 0 && (
+                          <span className="text-muted-foreground">Lines {item.lineIds.join(", ")}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <Table>

@@ -238,4 +238,33 @@ describe("inbound shipment routes", () => {
     expect(mocks.apLedger.enrichCostsWithInvoiceInfo).toHaveBeenCalledWith(12);
     expect(body).toEqual([{ id: 22, amountCents: 1200, invoiceNumber: "INV-22" }]);
   });
+
+  it("returns landed cost push-to-lots results with skipped reasons", async () => {
+    const pushResult = {
+      updated: 1,
+      total: 2,
+      skipped: [
+        {
+          lotId: 501,
+          productVariantId: 10,
+          reason: "landed_cost_not_finalized",
+          lineIds: [11],
+        },
+      ],
+    };
+    const shipmentTracking = buildShipmentTrackingMock({
+      pushLandedCostsToLots: vi.fn().mockResolvedValue(pushResult),
+    });
+    server = await startServer(buildApp(shipmentTracking));
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/inbound-shipments/12/push-costs-to-lots",
+    );
+
+    expect(status).toBe(200);
+    expect(shipmentTracking.pushLandedCostsToLots).toHaveBeenCalledWith(12);
+    expect(body).toEqual(pushResult);
+  });
 });

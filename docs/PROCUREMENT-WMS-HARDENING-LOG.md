@@ -1206,3 +1206,28 @@ Next step:
 - Continue Phase 6 with operator visibility for skipped landed-cost pushes and
   then tighten allocation explainability/status reporting in the inbound
   shipment UI/API.
+
+### 2026-05-18 - Phase 6 Slice 3: Landed Cost Push Operator Visibility
+
+Scope:
+
+- Added an operator-facing push-to-lots action in the inbound shipment
+  allocation tab for shipments in `costing` or `closed` status.
+- Surfaced the push result inline, including updated/skipped counts, total
+  provisional lots checked, and per-lot skipped reasons.
+- Preserved the backend landed-cost push result contract and added route
+  coverage for skipped reasons.
+- Kept the push endpoint as the source of truth for whether lots were updated
+  or skipped.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check` with Windows line-ending warnings only.
+
+Next step:
+
+- Continue Phase 6 by tightening allocation explainability/status reporting in
+  the inbound shipment UI/API, then move toward landed-cost health monitoring.
