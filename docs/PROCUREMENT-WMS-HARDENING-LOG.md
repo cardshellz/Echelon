@@ -1010,3 +1010,43 @@ Next step:
 
 - Move to Phase 3: receiving orchestration, starting with receipt close and PO
   reconciliation drift prevention.
+
+### 2026-05-17 - Phase 3 Slice 1: Receiving Close Reconciliation Boundary
+
+Scope:
+
+- Promoted PO receipt reconciliation from a fire-and-forget-style follow-up into
+  a structured receiving orchestration result.
+- `reconcilePurchaseOrderReceipt` now reports applied rows, idempotent existing
+  receipt rows, unresolved skipped rows, auto-match count, and explicit issue
+  details.
+- `ReceivingService.close` now returns the PO reconciliation outcome as part of
+  the close response.
+- PO-linked receiving close now rejects incomplete reconciliation with a 409
+  orchestration error instead of allowing unmatched or ambiguous receiving lines
+  to disappear into logs.
+- Idempotent close retries remain safe: an existing `po_receipts` row counts as
+  reconciled and does not re-post inventory or fail the close.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/receiving.routes.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- Inventory posting and PO reconciliation are still not one shared database
+  transaction. This slice makes reconciliation failure visible and retry-safe,
+  but the next Phase 3 slice should move toward an explicit recovery record or
+  deeper transaction boundary for the inventory/PO close pair.
+- Receipt close route idempotency uses the existing HTTP idempotency middleware;
+  create-receipt idempotency already reuses an active existing draft/open
+  receipt, but needs race-condition coverage around simultaneous create calls.
+
+Next step:
+
+- Continue Phase 3 by adding stronger idempotency/concurrency protection around
+  create receipt and close receipt, then add recovery/exception records for any
+  reconciliation failure that occurs after inventory posting.

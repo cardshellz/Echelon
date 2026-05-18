@@ -68,7 +68,16 @@ describe("ReceivingService - close reconciliation semantics", () => {
       getReceivingLines: vi.fn().mockResolvedValue(lines),
     };
     const inventoryCore = { receiveInventory: vi.fn() };
-    const purchasing = { onReceivingOrderClosed: vi.fn().mockResolvedValue(undefined) };
+    const purchasing = {
+      onReceivingOrderClosed: vi.fn().mockResolvedValue({
+        purchaseOrderId: 1,
+        appliedLines: 1,
+        existingReceiptLines: 0,
+        skippedLines: 0,
+        autoMatchedLines: 0,
+        issues: [],
+      }),
+    };
     const service = new ReceivingService(
       {} as any,
       inventoryCore as any,

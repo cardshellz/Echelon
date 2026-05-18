@@ -1859,7 +1859,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     receivingOrderId: number,
     receivingLines: ReceivingReconciliationLine[],
   ) {
-    await reconcilePurchaseOrderReceipt({
+    return await reconcilePurchaseOrderReceipt({
       storage,
       receivingOrderId,
       receivingLines,
