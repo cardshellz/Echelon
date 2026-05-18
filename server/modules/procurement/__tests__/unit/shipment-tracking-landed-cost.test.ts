@@ -4,6 +4,7 @@ import { createShipmentTrackingService } from "../../shipment-tracking.service";
 function buildStorage(overrides: Record<string, any> = {}) {
   return {
     db: { execute: vi.fn().mockResolvedValue({}) },
+    getInboundShipments: vi.fn().mockResolvedValue([]),
     getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
     getProvisionalLotsByShipment: vi.fn().mockResolvedValue([]),
     getInboundShipmentLines: vi.fn().mockResolvedValue([]),
@@ -100,6 +101,82 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
     expect(result.issues[0]).toEqual(expect.objectContaining({
       code: "allocation_basis_fallback",
       severity: "warning",
+    }));
+  });
+});
+
+describe("ShipmentTrackingService.getLandedCostHealth", () => {
+  it("reports closed shipments with stale provisional lots", async () => {
+    const storage = buildStorage({
+      getInboundShipments: vi.fn().mockResolvedValue([
+        { id: 1, shipmentNumber: "INB-1", status: "closed", allocationMethodDefault: "by_volume" },
+      ]),
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed", allocationMethodDefault: "by_volume" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5, totalVolumeCbm: "1" },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 500 },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 500 },
+      ]),
+      getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
+        { id: 501, productVariantId: 10, costProvisional: 1 },
+      ]),
+      getLandedCostSnapshots: vi.fn().mockResolvedValue([
+        { inboundShipmentLineId: 11, landedUnitCostCents: 110 },
+      ]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getLandedCostHealth({ limit: 25 });
+
+    expect(storage.getInboundShipments).toHaveBeenCalledWith({ status: ["costing", "closed"], limit: 25 });
+    expect(result.status).toBe("critical");
+    expect(result.counts.staleProvisionalLots).toBe(1);
+    expect(result.items[0]).toEqual(expect.objectContaining({
+      type: "stale_provisional_lots",
+      severity: "critical",
+      shipmentId: 1,
+      provisionalLotCount: 1,
+      action: "push_costs_to_lots",
+    }));
+  });
+
+  it("reports finalized costing shipments that still need costs pushed to lots", async () => {
+    const storage = buildStorage({
+      getInboundShipments: vi.fn().mockResolvedValue([
+        { id: 1, shipmentNumber: "INB-1", status: "costing", allocationMethodDefault: "by_volume" },
+      ]),
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5, totalVolumeCbm: "1" },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 500 },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 500 },
+      ]),
+      getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
+        { id: 501, productVariantId: 10, costProvisional: 1 },
+      ]),
+      getLandedCostSnapshots: vi.fn().mockResolvedValue([
+        { inboundShipmentLineId: 11, landedUnitCostCents: 110 },
+      ]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getLandedCostHealth();
+
+    expect(result.status).toBe("warning");
+    expect(result.counts.finalizedNotPushed).toBe(1);
+    expect(result.items[0]).toEqual(expect.objectContaining({
+      type: "finalized_not_pushed",
+      severity: "warning",
+      shipmentId: 1,
+      action: "push_costs_to_lots",
     }));
   });
 });
