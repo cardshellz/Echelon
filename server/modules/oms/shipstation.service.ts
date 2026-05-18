@@ -2027,16 +2027,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         );
         return { processed: false };
       }
-
-      // Idempotency: terminal shipment states are not re-applied.
-      // Matches shipment-level semantics introduced in C11 (see
-      // PUSHABLE_SHIPMENT_STATUSES invariant in §6 Commit 11).
-      if (shipmentRow.status === "shipped") {
-        console.log(
-          `[ShipStation Webhook] WMS shipment ${shipmentId} already shipped — skipping`,
-        );
-        return { processed: false };
-      }
       if (shipmentRow.status === "cancelled") {
         console.log(
           `[ShipStation Webhook] WMS shipment ${shipmentId} is cancelled — skipping`,
@@ -2082,17 +2072,23 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       }
       omsOrderId = parsedOmsPointer;
 
-      // 1. Update the shipment row itself. This is the
-      //    shipment-native primary source of truth.
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments SET
-          status = 'shipped',
-          carrier = ${carrier},
-          tracking_number = ${trackingNumber},
-          shipped_at = ${now},
-          updated_at = ${now}
-        WHERE id = ${shipmentId}
-      `);
+      if (shipmentRow.status === "shipped") {
+        console.log(
+          `[ShipStation Webhook] WMS shipment ${shipmentId} already shipped - running repair cascade`,
+        );
+      } else {
+        // 1. Update the shipment row itself. This is the
+        //    shipment-native primary source of truth.
+        await db.execute(sql`
+          UPDATE wms.outbound_shipments SET
+            status = 'shipped',
+            carrier = ${carrier},
+            tracking_number = ${trackingNumber},
+            shipped_at = ${now},
+            updated_at = ${now}
+          WHERE id = ${shipmentId}
+        `);
+      }
 
       // 2. Cascade to the owning wms.orders row. Multi-shipment
       //    semantics (§6 Commit 15+) will replace this with

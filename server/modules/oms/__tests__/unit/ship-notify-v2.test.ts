@@ -737,6 +737,36 @@ describe("processShipNotify :: SHIP_NOTIFY_V2 disabled → legacy path", () => {
     );
   });
 
+  it("flag off + already-shipped shipment-id replay runs repair push", async () => {
+    process.env.SHIP_NOTIFY_V2 = "false";
+
+    const shipmentPayload = makeShipmentPayload({
+      orderKey: "echelon-wms-shp-501",
+    });
+    const mock = makeDb([
+      { rows: [{ id: 501, order_id: 900, status: "shipped" }] },
+      {
+        rows: [
+          {
+            id: 900,
+            warehouse_status: "completed",
+            oms_fulfillment_order_id: "789",
+          },
+        ],
+      },
+    ]);
+    const pushTrackingForShipment = vi.fn(async () => true);
+    mock.db.__fulfillmentPush = { pushTrackingForShipment };
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const processed = await createShipStationService(mock.db).processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+    expect(pushTrackingForShipment).toHaveBeenCalledWith(501);
+  });
+
   it("flag set to a random non-'true' value is treated as OFF (safe default)", async () => {
     process.env.SHIP_NOTIFY_V2 = "1"; // not the exact literal "true"
 
