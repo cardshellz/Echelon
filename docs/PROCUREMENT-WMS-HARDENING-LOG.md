@@ -1314,3 +1314,29 @@ Next step:
 - Continue Phase 6 by reviewing whether remaining landed-cost health issue
   types need additional guardrail copy, admin filters, or escalation into the
   procurement dashboard.
+
+### 2026-05-18 - Phase 6 Slice 7: Procurement Dashboard Landed Cost Escalation
+
+Scope:
+
+- Surfaced landed-cost health on the Purchasing Dashboard when the shared
+  health read model reports a warning or critical state.
+- Reused `/api/procurement/landed-cost-health` so dashboard escalation,
+  inbound shipment health, and shipment detail review stay aligned.
+- Added compact command-center counts for allocation blockers, allocation
+  warnings, pending finalization, finalized costs ready to push, and stale
+  provisional lots.
+- Linked each surfaced health item to the affected inbound shipment detail and
+  kept safe recovery actions owned by the Inbound Shipments health panel.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+
+Next step:
+
+- Continue Phase 6 by deciding whether shipment list filters are enough for
+  landed-cost follow-up, then move to the next procurement/WMS hardening area if
+  no additional guardrails are needed.
