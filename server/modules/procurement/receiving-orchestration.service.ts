@@ -24,6 +24,18 @@ export type ReceivingCloseReconciliation =
   | ReceivingCloseReconciliationResult
   | ReceivingCloseReconciliationSkipped;
 
+export type ReceivingReconciliationFailureInput = {
+  purchaseOrderId: number;
+  receivingOrderId: number;
+  userId?: string | null;
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+export type ReceivingReconciliationFailureReporter = (
+  input: ReceivingReconciliationFailureInput,
+) => Promise<unknown>;
+
 export class ReceivingOrchestrationError extends Error {
   statusCode = 409;
 
@@ -49,16 +61,29 @@ export async function reconcileLinkedPurchaseOrder(params: {
   receivingOrder: Record<string, any>;
   receivingLines: any[];
   purchasing: ReceivingOrchestrationPurchasing | null;
+  userId?: string | null;
+  recordReconciliationFailure?: ReceivingReconciliationFailureReporter | null;
 }): Promise<ReceivingCloseReconciliation> {
-  const { receivingOrderId, receivingOrder, receivingLines, purchasing } = params;
+  const {
+    receivingOrderId,
+    receivingOrder,
+    receivingLines,
+    purchasing,
+    userId,
+    recordReconciliationFailure,
+  } = params;
   if (!receivingOrder.purchaseOrderId) {
     return { required: false, reason: "not_po_linked" };
   }
   if (!purchasing) {
-    throw new ReceivingOrchestrationError(
-      "PO reconciliation service is unavailable for this receiving close.",
-      { receivingOrderId, purchaseOrderId: receivingOrder.purchaseOrderId },
-    );
+    return await failReconciliation({
+      receivingOrderId,
+      purchaseOrderId: receivingOrder.purchaseOrderId,
+      message: "PO reconciliation service is unavailable for this receiving close.",
+      userId,
+      details: { reason: "purchasing_unavailable" },
+      recordReconciliationFailure,
+    });
   }
 
   const reconciliationLines = buildPoReconciliationLines(receivingLines).filter(
@@ -68,30 +93,52 @@ export async function reconcileLinkedPurchaseOrder(params: {
     return { required: false, reason: "no_received_lines" };
   }
 
-  const result = await purchasing.onReceivingOrderClosed(
-    receivingOrderId,
-    reconciliationLines,
-  );
+  let result: ReceiptReconciliationResult | void;
+  try {
+    result = await purchasing.onReceivingOrderClosed(
+      receivingOrderId,
+      reconciliationLines,
+    );
+  } catch (error: any) {
+    return await failReconciliation({
+      receivingOrderId,
+      purchaseOrderId: receivingOrder.purchaseOrderId,
+      message: error?.message || "PO reconciliation failed for this receiving close.",
+      userId,
+      details: {
+        expectedReceiptLines: reconciliationLines.length,
+        errorName: error?.name,
+        cause: error?.message,
+      },
+      recordReconciliationFailure,
+    });
+  }
 
   if (!result) {
-    throw new ReceivingOrchestrationError(
-      "PO reconciliation did not return a result for this receiving close.",
-      { receivingOrderId, purchaseOrderId: receivingOrder.purchaseOrderId },
-    );
+    return await failReconciliation({
+      receivingOrderId,
+      purchaseOrderId: receivingOrder.purchaseOrderId,
+      message: "PO reconciliation did not return a result for this receiving close.",
+      userId,
+      details: { expectedReceiptLines: reconciliationLines.length },
+      recordReconciliationFailure,
+    });
   }
 
   const reconciledLines = result.appliedLines + result.existingReceiptLines;
   if (result.skippedLines > 0 || result.issues.length > 0 || reconciledLines < reconciliationLines.length) {
-    throw new ReceivingOrchestrationError(
-      "PO reconciliation is incomplete for this receiving close.",
-      {
-        receivingOrderId,
-        purchaseOrderId: receivingOrder.purchaseOrderId,
+    return await failReconciliation({
+      receivingOrderId,
+      purchaseOrderId: receivingOrder.purchaseOrderId,
+      message: "PO reconciliation is incomplete for this receiving close.",
+      userId,
+      details: {
         expectedReceiptLines: reconciliationLines.length,
         reconciledLines,
         reconciliation: result,
       },
-    );
+      recordReconciliationFailure,
+    });
   }
 
   return {
@@ -99,4 +146,38 @@ export async function reconcileLinkedPurchaseOrder(params: {
     required: true,
     expectedReceiptLines: reconciliationLines.length,
   };
+}
+
+async function failReconciliation(params: {
+  receivingOrderId: number;
+  purchaseOrderId: number;
+  message: string;
+  userId?: string | null;
+  details?: Record<string, unknown>;
+  recordReconciliationFailure?: ReceivingReconciliationFailureReporter | null;
+}): Promise<never> {
+  const details = {
+    receivingOrderId: params.receivingOrderId,
+    purchaseOrderId: params.purchaseOrderId,
+    ...(params.details ?? {}),
+  };
+
+  if (params.recordReconciliationFailure) {
+    try {
+      await params.recordReconciliationFailure({
+        purchaseOrderId: params.purchaseOrderId,
+        receivingOrderId: params.receivingOrderId,
+        userId: params.userId,
+        message: params.message,
+        details,
+      });
+    } catch (error) {
+      console.warn(
+        `[Receiving] Failed to record PO reconciliation exception for receiving order ${params.receivingOrderId}:`,
+        error,
+      );
+    }
+  }
+
+  throw new ReceivingOrchestrationError(params.message, details);
 }

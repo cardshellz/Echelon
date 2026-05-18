@@ -1716,6 +1716,31 @@ export function createPurchasingService(db: any, storage: Storage) {
   // ── RECEIVING INTEGRATION ───────────────────────────────────────
 
   async function createReceiptFromPO(purchaseOrderId: number, userId?: string) {
+    return await db.transaction(async (tx: any) => {
+      if (typeof tx.execute === "function") {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            hashtext('procurement.create_receipt_from_po'),
+            ${purchaseOrderId}
+          )
+        `);
+      }
+      return await createReceiptFromPOUnlocked(purchaseOrderId, userId);
+    });
+  }
+
+  async function getReusableReceiptForPO(purchaseOrderId: number) {
+    const existingReceipts =
+      typeof storage.getReceivingOrdersForPurchaseOrder === "function"
+        ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId)
+        : [];
+
+    return existingReceipts.find((receipt: any) =>
+      ["draft", "open", "receiving", "verified"].includes(receipt.status),
+    );
+  }
+
+  async function createReceiptFromPOUnlocked(purchaseOrderId: number, userId?: string) {
     const po = await storage.getPurchaseOrderById(purchaseOrderId);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
 
@@ -1724,14 +1749,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot create receipt for PO in '${po.status}' status`, 400);
     }
 
-    const existingReceipts =
-      typeof storage.getReceivingOrdersForPurchaseOrder === "function"
-        ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId)
-        : [];
-    const reusableReceipt = existingReceipts.find((receipt: any) =>
-      ["draft", "open", "receiving", "verified"].includes(receipt.status),
-    );
-
+    const reusableReceipt = await getReusableReceiptForPO(purchaseOrderId);
     if (reusableReceipt) {
       return { ...reusableReceipt, reusedExisting: true };
     }
@@ -1767,6 +1785,11 @@ export function createPurchasingService(db: any, storage: Storage) {
       });
     } catch (error: any) {
       if (error?.code === "23505") {
+        const conflictReceipt = await getReusableReceiptForPO(purchaseOrderId);
+        if (conflictReceipt) {
+          return { ...conflictReceipt, reusedExisting: true };
+        }
+
         throw new PurchasingError(
           `Receipt number '${receiptNumber}' already in use by an active record.`,
           409,

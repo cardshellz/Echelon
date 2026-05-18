@@ -103,6 +103,71 @@ describe("receiving-orchestration.service", () => {
     })).rejects.toBeInstanceOf(ReceivingOrchestrationError);
   });
 
+  it("records a PO exception when close reconciliation is incomplete", async () => {
+    const recordReconciliationFailure = vi.fn().mockResolvedValue(undefined);
+    const purchasing = {
+      onReceivingOrderClosed: vi.fn().mockResolvedValue(successfulReconciliation({
+        appliedLines: 0,
+        skippedLines: 1,
+        issues: [{
+          receivingLineId: 10,
+          reason: "unlinked_receiving_line",
+          detail: "Receiving line 10 is not linked to a purchase order line",
+        }],
+      })),
+    };
+
+    await expect(reconcileLinkedPurchaseOrder({
+      receivingOrderId: 9,
+      receivingOrder: { id: 9, purchaseOrderId: 1 },
+      receivingLines: [{ id: 10, receivedQty: 3 }],
+      purchasing,
+      userId: "user-1",
+      recordReconciliationFailure,
+    })).rejects.toBeInstanceOf(ReceivingOrchestrationError);
+
+    expect(recordReconciliationFailure).toHaveBeenCalledWith(expect.objectContaining({
+      purchaseOrderId: 1,
+      receivingOrderId: 9,
+      userId: "user-1",
+      message: "PO reconciliation is incomplete for this receiving close.",
+      details: expect.objectContaining({
+        receivingOrderId: 9,
+        purchaseOrderId: 1,
+        expectedReceiptLines: 1,
+        reconciledLines: 0,
+      }),
+    }));
+  });
+
+  it("records a PO exception when purchasing reconciliation throws", async () => {
+    const recordReconciliationFailure = vi.fn().mockResolvedValue(undefined);
+    const purchasing = {
+      onReceivingOrderClosed: vi.fn().mockRejectedValue(new Error("PO reconcile failed")),
+    };
+
+    await expect(reconcileLinkedPurchaseOrder({
+      receivingOrderId: 9,
+      receivingOrder: { id: 9, purchaseOrderId: 1 },
+      receivingLines: [{ id: 10, purchaseOrderLineId: 20, receivedQty: 3 }],
+      purchasing,
+      userId: "user-1",
+      recordReconciliationFailure,
+    })).rejects.toThrow("PO reconcile failed");
+
+    expect(recordReconciliationFailure).toHaveBeenCalledWith(expect.objectContaining({
+      purchaseOrderId: 1,
+      receivingOrderId: 9,
+      userId: "user-1",
+      message: "PO reconcile failed",
+      details: expect.objectContaining({
+        expectedReceiptLines: 1,
+        errorName: "Error",
+        cause: "PO reconcile failed",
+      }),
+    }));
+  });
+
   it("rejects PO-linked receipt close when purchasing reconciliation is unavailable", async () => {
     await expect(reconcileLinkedPurchaseOrder({
       receivingOrderId: 9,

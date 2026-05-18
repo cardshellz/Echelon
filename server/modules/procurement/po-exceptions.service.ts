@@ -25,6 +25,7 @@ import {
   vendorInvoicePoLinks,
   vendorInvoiceLines,
   EXCEPTION_KINDS,
+  RECEIPT_RECONCILIATION_FAILED_KIND,
   type ExceptionKind,
   type ExceptionSeverity,
   type ExceptionStatus,
@@ -95,6 +96,31 @@ export interface UpsertExceptionInput {
   message?: string;
   payload?: Record<string, unknown>;
   detectedBy?: string;
+}
+
+export interface RecordReceivingReconciliationFailureInput {
+  poId: number;
+  receivingOrderId: number;
+  userId?: string | null;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export async function recordReceivingReconciliationFailure(
+  input: RecordReceivingReconciliationFailureInput,
+): Promise<PoException> {
+  return await upsertException({
+    poId: input.poId,
+    kind: RECEIPT_RECONCILIATION_FAILED_KIND,
+    severity: "error",
+    title: `Receipt reconciliation failed - RCV #${input.receivingOrderId}`,
+    message: input.message,
+    payload: {
+      receivingOrderId: input.receivingOrderId,
+      ...(input.details ?? {}),
+    },
+    detectedBy: input.userId ?? "system",
+  });
 }
 
 /**
