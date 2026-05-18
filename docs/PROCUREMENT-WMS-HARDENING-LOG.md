@@ -1459,3 +1459,31 @@ Next step:
 
 - Continue Phase 7 by adding AP command history/audit visibility for recent
   mutations so operators can review what changed after the toast disappears.
+
+### 2026-05-18 - Phase 7 Slice 4: AP Ledger Command Audit History
+
+Scope:
+
+- Added durable AP command audit entries for invoice approval, invoice dispute,
+  invoice void, payment record, and payment void outcomes.
+- Reused the shared `audit_events` table instead of creating AP-only history,
+  keeping AP command visibility aligned with the existing application audit
+  model.
+- Added `GET /api/ap/command-events` so operators can retrieve recent AP
+  command history without depending on transient success toasts.
+- Added a Recent AP Activity panel to AP Payments showing when the command ran,
+  which command ran, who ran it, the operator message, and affected linked POs.
+- Expanded AP service and route tests to prove command outcomes write audit
+  rows and that the new read endpoint returns recent command events.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+
+Next step:
+
+- Finish validating this slice with the broader procurement/AP regression set,
+  then continue Phase 7 by deciding whether AP command idempotency/retry
+  protection needs its own slice before moving from AP hardening into the next
+  procurement engine area.

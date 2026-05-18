@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
     voidPayment: vi.fn(),
     executeApLedgerCommand: vi.fn(),
     getApSummary: vi.fn(),
+    listApLedgerCommandAudit: vi.fn(),
   },
 }));
 
@@ -257,5 +258,38 @@ describe("AP ledger routes", () => {
     expect(status).toBe(200);
     expect(mocks.apLedger.getApSummary).toHaveBeenCalled();
     expect(body).toEqual({ totalOpenCents: 12345 });
+  });
+
+  it("returns recent AP command audit events", async () => {
+    mocks.apLedger.listApLedgerCommandAudit.mockResolvedValue([
+      {
+        id: 1,
+        command: "record_payment",
+        actor: "test-user",
+        affectedInvoiceIds: [12],
+        affectedPaymentIds: [21],
+        affectedPurchaseOrderIds: [55],
+        message: "record payment completed. Updated 1 linked PO.",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/ap/command-events?limit=5");
+
+    expect(status).toBe(200);
+    expect(mocks.apLedger.listApLedgerCommandAudit).toHaveBeenCalledWith(5);
+    expect(body).toEqual({
+      events: [
+        {
+          id: 1,
+          command: "record_payment",
+          actor: "test-user",
+          affectedInvoiceIds: [12],
+          affectedPaymentIds: [21],
+          affectedPurchaseOrderIds: [55],
+          message: "record payment completed. Updated 1 linked PO.",
+        },
+      ],
+    });
   });
 });

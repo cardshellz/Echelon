@@ -354,5 +354,13 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
+  app.get("/api/ap/command-events", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const events = await apLedger.listApLedgerCommandAudit(req.query.limit ? Number(req.query.limit) : undefined);
+      res.json({ events });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 
 }

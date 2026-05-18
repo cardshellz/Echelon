@@ -2,7 +2,7 @@ import { dollarsToCents } from "@shared/utils/money";
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -57,6 +57,14 @@ const STATUS_COLORS: Record<string, string> = {
   voided: "bg-slate-100 text-slate-400",
 };
 
+const COMMAND_LABELS: Record<string, string> = {
+  approve_invoice: "Invoice approved",
+  dispute_invoice: "Invoice disputed",
+  void_invoice: "Invoice voided",
+  record_payment: "Payment recorded",
+  void_payment: "Payment voided",
+};
+
 export default function APPayments() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -79,6 +87,10 @@ export default function APPayments() {
 
   const { data, isLoading } = useQuery<{ payments: any[] }>({
     queryKey: ["/api/ap-payments"],
+  });
+
+  const { data: auditData, isLoading: isAuditLoading } = useQuery<{ events: any[] }>({
+    queryKey: ["/api/ap/command-events?limit=8"],
   });
 
   const { data: vendorsData } = useQuery<any>({ queryKey: ["/api/vendors"] });
@@ -182,6 +194,7 @@ export default function APPayments() {
       p.checkNumber?.toLowerCase().includes(q)
     );
   });
+  const auditEvents = auditData?.events ?? [];
 
   // Filter open invoices by selected vendor in new payment dialog
   const vendorOpenInvoices = openInvoices.filter((inv: any) =>
@@ -261,6 +274,49 @@ export default function APPayments() {
                           <XCircle className="h-3.5 w-3.5" />
                         </Button>
                       )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recent AP Activity</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {isAuditLoading ? (
+            <div className="flex items-center justify-center h-24">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary" />
+            </div>
+          ) : auditEvents.length === 0 ? (
+            <div className="px-4 py-8 text-sm text-muted-foreground">No recent AP command activity.</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>When</TableHead>
+                  <TableHead>Action</TableHead>
+                  <TableHead>Actor</TableHead>
+                  <TableHead>Linked POs</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {auditEvents.map((event: any) => (
+                  <TableRow key={event.id}>
+                    <TableCell className="text-sm whitespace-nowrap">{formatDate(event.timestamp)}</TableCell>
+                    <TableCell>
+                      <div className="font-medium">{COMMAND_LABELS[event.command] ?? event.command}</div>
+                      <div className="text-xs text-muted-foreground">{event.message}</div>
+                    </TableCell>
+                    <TableCell className="text-sm">{event.actor}</TableCell>
+                    <TableCell className="text-sm font-mono">
+                      {(event.affectedPurchaseOrderIds ?? []).length
+                        ? event.affectedPurchaseOrderIds.join(", ")
+                        : "-"}
                     </TableCell>
                   </TableRow>
                 ))}

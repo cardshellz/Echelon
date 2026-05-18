@@ -57,11 +57,20 @@ const tables = vi.hoisted(() => ({
   vendors: { id: "vendors.id", name: "vendors.name", code: "vendors.code" },
   inboundFreightCosts: { id: "inbound_freight_costs.id" },
   inboundShipments: { id: "inbound_shipments.id" },
+  auditEvents: {
+    id: "audit_events.id",
+    timestamp: "audit_events.timestamp",
+    actor: "audit_events.actor",
+    action: "audit_events.action",
+    target: "audit_events.target",
+    context: "audit_events.context",
+  },
 }));
 
 const mocks = vi.hoisted(() => ({
   db: {
     select: vi.fn(),
+    insert: vi.fn(),
     transaction: vi.fn(),
   },
   detectOverpaid: vi.fn(),
@@ -121,6 +130,7 @@ describe("AP ledger atomic side effects", () => {
     mocks.detectOverpaid.mockResolvedValue(undefined);
     mocks.detectPastDue.mockResolvedValue(undefined);
     mocks.db.select.mockReturnValue(makeSelectChain([]));
+    mocks.db.insert.mockReturnValue({ values: vi.fn(() => Promise.resolve([])) });
   });
 
   it("records payment, allocations, invoice balance, and PO aggregate inside one transaction", async () => {
@@ -186,6 +196,7 @@ describe("AP ledger atomic side effects", () => {
       affectedPaymentIds: [21],
       affectedPurchaseOrderIds: [7],
     });
+    expect(mocks.db.insert).toHaveBeenCalledWith(tables.auditEvents);
   });
 
   it("voids payment, reverses invoice balance, and recomputes PO aggregate inside one transaction", async () => {
