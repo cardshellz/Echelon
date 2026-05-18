@@ -27,6 +27,7 @@ interface CandidateOrder {
   oms_order_id: number;
   external_order_number: string | null;
   external_order_id: string;
+  current_fulfillment_status: string | null;
 }
 
 interface ShopifyLineItem {
@@ -237,7 +238,8 @@ async function loadCandidates(pool: Pool, flags: Flags): Promise<CandidateOrder[
     SELECT DISTINCT
       oo.id AS oms_order_id,
       oo.external_order_number,
-      oo.external_order_id
+      oo.external_order_id,
+      oo.fulfillment_status AS current_fulfillment_status
     FROM oms.oms_orders oo
     JOIN oms.oms_order_lines ol ON ol.order_id = oo.id
     WHERE oo.fulfillment_status = 'fulfilled'
@@ -312,6 +314,7 @@ async function applyPlans(
   candidate: CandidateOrder,
   shopifyOrder: ShopifyOrder,
   plans: LinePlan[],
+  headerChanged: boolean,
   execute: boolean,
 ): Promise<void> {
   if (!execute) return;
@@ -328,13 +331,15 @@ async function applyPlans(
       `, [plan.lineId, plan.nextStatus, plan.nextFulfillableQuantity]);
     }
 
-    await pool.query(`
-      UPDATE oms.oms_orders
-      SET fulfillment_status = $2::varchar,
-          status = CASE WHEN $2::varchar = 'fulfilled' THEN 'shipped' ELSE status END,
-          updated_at = NOW()
-      WHERE id = $1
-    `, [candidate.oms_order_id, normalizeOrderStatus(shopifyOrder.fulfillment_status)]);
+    if (headerChanged) {
+      await pool.query(`
+        UPDATE oms.oms_orders
+        SET fulfillment_status = $2::varchar,
+            status = CASE WHEN $2::varchar = 'fulfilled' THEN 'shipped' ELSE status END,
+            updated_at = NOW()
+        WHERE id = $1
+      `, [candidate.oms_order_id, normalizeOrderStatus(shopifyOrder.fulfillment_status)]);
+    }
 
     await pool.query(`
       INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
@@ -345,6 +350,7 @@ async function applyPlans(
         source: "backfill-shopify-oms-line-fulfillment-status",
         externalOrderId: candidate.external_order_id,
         updatedLines: plans.length,
+        updatedHeader: headerChanged,
       }),
     ]);
 
@@ -407,14 +413,22 @@ async function main(): Promise<void> {
           }
 
           const plans = await buildLinePlans(pool, candidate, shopifyOrder);
-          if (plans.length === 0) continue;
+          const nextOrderFulfillmentStatus = normalizeOrderStatus(
+            shopifyOrder.fulfillment_status,
+          );
+          const headerChanged =
+            candidate.current_fulfillment_status !== nextOrderFulfillmentStatus;
+          if (plans.length === 0 && !headerChanged) continue;
 
           stats.plannedOrders++;
           stats.plannedLines += plans.length;
           console.log(
             `[Shopify line backfill] ${flags.execute ? "UPDATE" : "PLAN"} ` +
             `oms=${candidate.oms_order_id} order=${candidate.external_order_number ?? candidate.external_order_id} ` +
-            `lines=${plans.length}`,
+            `lines=${plans.length}` +
+            (headerChanged
+              ? ` header=${candidate.current_fulfillment_status ?? "null"} -> ${nextOrderFulfillmentStatus}`
+              : ""),
           );
           for (const plan of plans.slice(0, 5)) {
             console.log(
@@ -424,7 +438,14 @@ async function main(): Promise<void> {
             );
           }
 
-          await applyPlans(pool, candidate, shopifyOrder, plans, flags.execute);
+          await applyPlans(
+            pool,
+            candidate,
+            shopifyOrder,
+            plans,
+            headerChanged,
+            flags.execute,
+          );
           if (flags.execute) stats.updatedOrders++;
         } catch (error: any) {
           stats.errors++;
