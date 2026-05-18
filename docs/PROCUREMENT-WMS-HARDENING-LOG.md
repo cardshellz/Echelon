@@ -1289,3 +1289,28 @@ Next step:
 - Continue Phase 6 by deciding whether landed-cost health should remain
   read-only or gain targeted one-click recovery actions for safe cases such as
   finalized costs ready to push to lots.
+
+### 2026-05-18 - Phase 6 Slice 6: Landed Cost Health Safe Recovery Action
+
+Scope:
+
+- Added a one-click recovery action to the Inbound Shipments landed-cost health
+  panel for health items whose action is `push_costs_to_lots`.
+- Reused the existing `POST /api/inbound-shipments/:id/push-costs-to-lots`
+  endpoint so lot updates and skipped-reason handling remain owned by the
+  landed-cost push service.
+- Refreshed landed-cost health and inbound shipment list data after a recovery
+  push, and surfaced the updated/skipped outcome in the operator toast.
+- Kept non-safe health items as review-only links into shipment detail.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+
+Next step:
+
+- Continue Phase 6 by reviewing whether remaining landed-cost health issue
+  types need additional guardrail copy, admin filters, or escalation into the
+  procurement dashboard.

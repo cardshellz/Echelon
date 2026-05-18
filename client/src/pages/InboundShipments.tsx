@@ -83,6 +83,16 @@ type LandedCostHealth = {
     warningCount?: number;
   }>;
 };
+type LandedCostPushResult = {
+  updated: number;
+  total: number;
+  skipped?: Array<{
+    lotId: number;
+    productVariantId: number | null;
+    reason: string;
+    lineIds?: number[];
+  }>;
+};
 type InboundShipment = {
   id: number;
   shipmentNumber: string;
@@ -207,6 +217,36 @@ export default function InboundShipments() {
       setNewShipment({ mode: "sea_fcl", carrierName: "", forwarderName: "", originPort: "", destinationPort: "", warehouseId: 0, eta: "", notes: "" });
       toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created as draft` });
       navigate(`/shipments/${shipment.id}`);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const pushCostsToLotsMutation = useMutation({
+    mutationFn: async (shipmentId: number): Promise<LandedCostPushResult> => {
+      const res = await fetch(`/api/inbound-shipments/${shipmentId}/push-costs-to-lots`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to push landed costs");
+      }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/procurement/landed-cost-health"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      const skippedCount = result.skipped?.length ?? 0;
+      toast({
+        title: skippedCount > 0 ? "Landed cost push needs review" : "Landed costs pushed",
+        description:
+          skippedCount > 0
+            ? `${result.updated} lot${result.updated === 1 ? "" : "s"} updated, ${skippedCount} skipped`
+            : `${result.updated} lot${result.updated === 1 ? "" : "s"} updated`,
+        variant: skippedCount > 0 ? "destructive" : "default",
+      });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -360,17 +400,33 @@ export default function InboundShipments() {
             {landedCostHealth.items.length > 0 && (
               <div className="space-y-2">
                 {landedCostHealth.items.slice(0, 5).map((item) => (
-                  <button
+                  <div
                     key={item.id}
-                    type="button"
-                    onClick={() => navigate(`/shipments/${item.shipmentId}`)}
-                    className="w-full text-left flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-accent"
+                    className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm"
                   >
                     <Badge variant={item.severity === "critical" ? "destructive" : "outline"}>{item.severity}</Badge>
                     <span className="font-mono">{item.shipmentNumber || `#${item.shipmentId}`}</span>
                     <span>{renderHealthType(item.type)}</span>
-                    <span className="text-muted-foreground">{item.detail}</span>
-                  </button>
+                    <span className="text-muted-foreground flex-1 min-w-[220px]">{item.detail}</span>
+                    <div className="ml-auto flex gap-2">
+                      {item.action === "push_costs_to_lots" && (
+                        <Button
+                          size="sm"
+                          onClick={() => pushCostsToLotsMutation.mutate(item.shipmentId)}
+                          disabled={pushCostsToLotsMutation.isPending}
+                        >
+                          {pushCostsToLotsMutation.isPending ? "Pushing..." : "Push Costs"}
+                        </Button>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => navigate(`/shipments/${item.shipmentId}`)}
+                      >
+                        Review
+                      </Button>
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
