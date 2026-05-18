@@ -321,8 +321,8 @@ async function applyPlans(
     for (const plan of plans) {
       await pool.query(`
         UPDATE oms.oms_order_lines
-        SET fulfillment_status = $2,
-            fulfillable_quantity = $3,
+        SET fulfillment_status = $2::varchar,
+            fulfillable_quantity = $3::integer,
             updated_at = NOW()
         WHERE id = $1
       `, [plan.lineId, plan.nextStatus, plan.nextFulfillableQuantity]);
@@ -330,8 +330,8 @@ async function applyPlans(
 
     await pool.query(`
       UPDATE oms.oms_orders
-      SET fulfillment_status = $2,
-          status = CASE WHEN $2 = 'fulfilled' THEN 'shipped' ELSE status END,
+      SET fulfillment_status = $2::varchar,
+          status = CASE WHEN $2::varchar = 'fulfilled' THEN 'shipped' ELSE status END,
           updated_at = NOW()
       WHERE id = $1
     `, [candidate.oms_order_id, normalizeOrderStatus(shopifyOrder.fulfillment_status)]);
