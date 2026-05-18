@@ -1186,8 +1186,10 @@ export const EXCEPTION_KINDS = [
   'overpaid',
   'past_due',
   'vendor_reissued_invoice',
+  'receipt_reconciliation_failed',
 ] as const;
 export type ExceptionKind = typeof EXCEPTION_KINDS[number];
+export const RECEIPT_RECONCILIATION_FAILED_KIND: ExceptionKind = 'receipt_reconciliation_failed';
 
 export const EXCEPTION_SEVERITIES = ['info', 'warn', 'error'] as const;
 export type ExceptionSeverity = typeof EXCEPTION_SEVERITIES[number];

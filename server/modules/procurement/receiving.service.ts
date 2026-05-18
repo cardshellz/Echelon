@@ -23,6 +23,7 @@ import {
 } from "@shared/utils/money";
 import {
   type ReceivingCloseReconciliation,
+  type ReceivingReconciliationFailureReporter,
   reconcileLinkedPurchaseOrder,
 } from "./receiving-orchestration.service";
 import type { ReceiptReconciliationResult } from "./purchase-order-receipt-reconciliation.service";
@@ -268,14 +269,17 @@ export class ReceivingService {
     private storage: Storage,
     private purchasing: Purchasing | null = null,
     private shipmentTracking: ShipmentTracking | null = null,
+    private reconciliationFailureReporter: ReceivingReconciliationFailureReporter | null = null,
   ) {}
 
-  private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[]) {
+  private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[], userId?: string | null) {
     return await reconcileLinkedPurchaseOrder({
       receivingOrderId: orderId,
       receivingOrder: order,
       receivingLines: lines,
       purchasing: this.purchasing,
+      userId,
+      recordReconciliationFailure: this.reconciliationFailureReporter,
     });
   }
 
@@ -413,7 +417,7 @@ export class ReceivingService {
 
     if (order.status === "closed") {
       const closedLines = await this.storage.getReceivingLines(orderId);
-      const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, order, closedLines);
+      const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, order, closedLines, userId);
       return this.buildCloseResult(order, closedLines, undefined, poReconciliation);
     }
 
@@ -667,7 +671,7 @@ export class ReceivingService {
     });
 
     const closedLines = await this.storage.getReceivingLines(orderId);
-    const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines);
+    const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines, userId);
 
     return this.buildCloseResult(
       updated,
@@ -1080,6 +1084,15 @@ export function createReceivingService(
   storage: Storage,
   purchasing?: Purchasing | null,
   shipmentTracking?: ShipmentTracking | null,
+  reconciliationFailureReporter?: ReceivingReconciliationFailureReporter | null,
 ) {
-  return new ReceivingService(db, inventoryCore, channelSync, storage, purchasing ?? null, shipmentTracking ?? null);
+  return new ReceivingService(
+    db,
+    inventoryCore,
+    channelSync,
+    storage,
+    purchasing ?? null,
+    shipmentTracking ?? null,
+    reconciliationFailureReporter ?? null,
+  );
 }

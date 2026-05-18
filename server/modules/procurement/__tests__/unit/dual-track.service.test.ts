@@ -91,6 +91,7 @@ function buildMockDb() {
         };
       }),
     }),
+    execute: vi.fn().mockResolvedValue({ rows: [] }),
   };
   mockDb.transaction = vi.fn(async (fn: any) => fn(mockDb));
 
@@ -311,10 +312,12 @@ describe("transitionFinancial", () => {
 describe("createReceiptFromPO — receipt idempotency", () => {
   let svc: ReturnType<typeof createPurchasingService>;
   let storage: ReturnType<typeof buildMockStorage>;
+  let mockDb: ReturnType<typeof buildMockDb>;
 
   beforeEach(() => {
     storage = buildMockStorage();
-    svc = createPurchasingService(buildMockDb(), storage);
+    mockDb = buildMockDb();
+    svc = createPurchasingService(mockDb, storage);
   });
 
   it("returns an active existing receipt instead of creating a duplicate", async () => {
@@ -336,6 +339,86 @@ describe("createReceiptFromPO — receipt idempotency", () => {
       reusedExisting: true,
     });
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+    expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
+  });
+
+  it("serializes receipt creation with a PO-scoped advisory transaction lock", async () => {
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent" }));
+    storage.getReceivingOrdersForPurchaseOrder.mockResolvedValue([]);
+    storage.getPurchaseOrderLines.mockResolvedValue([
+      {
+        id: 100,
+        productVariantId: 5,
+        productId: 50,
+        sku: "SKU-5",
+        productName: "Variant 5",
+        orderQty: 10,
+        receivedQty: 0,
+        cancelledQty: 0,
+        unitsPerUom: 1,
+        status: "open",
+        lineType: "product",
+      },
+    ]);
+    storage.generateReceiptNumber.mockResolvedValue("RCV-TEST-001");
+    storage.createReceivingOrder.mockResolvedValue({
+      id: 88,
+      receiptNumber: "RCV-TEST-001",
+      purchaseOrderId: 1,
+      status: "draft",
+    });
+
+    const result = await svc.createReceiptFromPO(1, "user-1");
+
+    expect(mockDb.transaction).toHaveBeenCalledOnce();
+    expect(mockDb.execute).toHaveBeenCalledOnce();
+    expect((mockDb.execute as any).mock.invocationCallOrder[0]).toBeLessThan(
+      (storage.createReceivingOrder as any).mock.invocationCallOrder[0],
+    );
+    expect(result).toMatchObject({
+      id: 88,
+      receiptNumber: "RCV-TEST-001",
+    });
+  });
+
+  it("re-checks and reuses an active receipt after a create race unique conflict", async () => {
+    const existingReceipt = {
+      id: 89,
+      receiptNumber: "RCV-TEST-089",
+      purchaseOrderId: 1,
+      status: "draft",
+    };
+
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent" }));
+    storage.getReceivingOrdersForPurchaseOrder
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([existingReceipt]);
+    storage.getPurchaseOrderLines.mockResolvedValue([
+      {
+        id: 100,
+        productVariantId: 5,
+        productId: 50,
+        sku: "SKU-5",
+        productName: "Variant 5",
+        orderQty: 10,
+        receivedQty: 0,
+        cancelledQty: 0,
+        unitsPerUom: 1,
+        status: "open",
+        lineType: "product",
+      },
+    ]);
+    storage.generateReceiptNumber.mockResolvedValue("RCV-TEST-001");
+    storage.createReceivingOrder.mockRejectedValue({ code: "23505" });
+
+    const result = await svc.createReceiptFromPO(1, "user-1");
+
+    expect(result).toMatchObject({
+      id: 89,
+      receiptNumber: "RCV-TEST-089",
+      reusedExisting: true,
+    });
+    expect(storage.createReceivingOrder).toHaveBeenCalledOnce();
     expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
   });
 });

@@ -147,16 +147,25 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const purchasing = {
       onReceivingOrderClosed: vi.fn().mockRejectedValue(new Error("PO reconcile failed")),
     };
+    const reconciliationFailureReporter = vi.fn().mockResolvedValue(undefined);
     const service = new ReceivingService(
       db as any,
       inventoryCore as any,
       channelSync as any,
       mockStorage as any,
       purchasing as any,
+      null,
+      reconciliationFailureReporter,
     );
 
     await expect(service.close(10, "user-1")).rejects.toThrow("PO reconcile failed");
     expect(inventoryCore.receiveInventory).toHaveBeenCalledOnce();
     expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledOnce();
+    expect(reconciliationFailureReporter).toHaveBeenCalledWith(expect.objectContaining({
+      purchaseOrderId: 1,
+      receivingOrderId: 10,
+      userId: "user-1",
+      message: "PO reconcile failed",
+    }));
   });
 });

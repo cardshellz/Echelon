@@ -52,6 +52,7 @@ import { createSyncSettingsService } from "../modules/channels/sync-settings.ser
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
+import { recordReceivingReconciliationFailure } from "../modules/procurement/po-exceptions.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createShipStationService } from "../modules/oms/shipstation.service";
@@ -135,7 +136,15 @@ export function createServices(db: any) {
     ...procurementStorage,
     ...catalogStorage,
     ...warehouseStorage,
-  }, purchasing, shipmentTracking);
+  }, purchasing, shipmentTracking, async (input) => {
+    await recordReceivingReconciliationFailure({
+      poId: input.purchaseOrderId,
+      receivingOrderId: input.receivingOrderId,
+      userId: input.userId,
+      message: input.message,
+      details: input.details,
+    });
+  });
 
   // Standalone (imports from Shopify)
   const productImport = createProductImportService();

@@ -1050,3 +1050,42 @@ Next step:
 - Continue Phase 3 by adding stronger idempotency/concurrency protection around
   create receipt and close receipt, then add recovery/exception records for any
   reconciliation failure that occurs after inventory posting.
+
+### 2026-05-18 - Phase 3 Slice 2: Receiving Idempotency and Recovery Visibility
+
+Scope:
+
+- Serialized `createReceiptFromPO` with a PO-scoped advisory transaction lock so
+  simultaneous create-receipt calls for the same PO run through one
+  create-or-reuse decision at a time.
+- Kept active receipt reuse as the first behavior, and added a second active
+  receipt lookup after a unique create conflict so concurrent callers can safely
+  reuse the receipt created by the winner instead of failing.
+- Added `receipt_reconciliation_failed` as a PO exception kind, with a migration
+  that extends the existing `po_exceptions` kind check constraint.
+- Wired receiving close reconciliation failures into the PO exception system:
+  missing reconciliation service, no reconciliation result, incomplete
+  reconciliation, and thrown reconciliation errors now record a visible PO
+  exception before the close returns a 409 orchestration error.
+- Preserved inventory-posting behavior and idempotent closed-receipt retry
+  semantics from Slice 1.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/po-exceptions.service.test.ts server/modules/procurement/__tests__/unit/receiving.routes.test.ts server/modules/procurement/__tests__/unit/receiving-orchestration.service.test.ts server/modules/procurement/__tests__/unit/receiving-semantics.test.ts server/modules/procurement/__tests__/unit/dual-track.service.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Remaining risk:
+
+- Inventory posting and PO reconciliation still do not share one database
+  transaction. This slice makes the failure explicit, idempotent, and visible
+  for recovery; a deeper transaction boundary can be considered after the rest
+  of receiving orchestration is stabilized.
+
+Next step:
+
+- Continue Phase 3 by hardening receiving variance and landed-cost touchpoints
+  that feed PO/AP accuracy, then move into the demand and purchasing
+  recommendation engine once the purchasing system is operationally reliable.
