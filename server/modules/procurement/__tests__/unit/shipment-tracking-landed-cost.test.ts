@@ -7,11 +7,107 @@ function buildStorage(overrides: Record<string, any> = {}) {
     getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
     getProvisionalLotsByShipment: vi.fn().mockResolvedValue([]),
     getInboundShipmentLines: vi.fn().mockResolvedValue([]),
+    getInboundFreightCosts: vi.fn().mockResolvedValue([]),
+    deleteAllocationsForShipment: vi.fn().mockResolvedValue(undefined),
+    bulkCreateInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
+    updateInboundShipmentLine: vi.fn().mockResolvedValue({}),
+    getAllocationsForLine: vi.fn().mockResolvedValue([]),
+    getInboundFreightCostById: vi.fn().mockResolvedValue(null),
+    getPurchaseOrderLineById: vi.fn().mockResolvedValue(null),
     getLandedCostSnapshots: vi.fn().mockResolvedValue([]),
+    deleteLandedCostSnapshotsForShipment: vi.fn().mockResolvedValue(undefined),
+    bulkCreateLandedCostSnapshots: vi.fn().mockResolvedValue([]),
+    createLandedCostAdjustment: vi.fn().mockResolvedValue({}),
     updateInventoryLot: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as any;
 }
+
+const finalizedSnapshot = {
+  inboundShipmentLineId: 11,
+  purchaseOrderLineId: 21,
+  productVariantId: 10,
+  poUnitCostCents: 100,
+  freightAllocatedCents: 0,
+  dutyAllocatedCents: 0,
+  insuranceAllocatedCents: 0,
+  otherAllocatedCents: 0,
+  totalLandedCostCents: 500,
+  landedUnitCostCents: 100,
+  qty: 5,
+};
+
+describe("ShipmentTrackingService.finalizeAllocations", () => {
+  it("rejects finalization outside costing or closed status", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "delivered" }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    await expect(service.finalizeAllocations(1, "user-1")).rejects.toThrow(
+      "Landed costs can only be finalized while shipment is in costing or closed status",
+    );
+    expect(storage.getInboundShipmentLines).not.toHaveBeenCalled();
+  });
+
+  it("does not delete and recreate matching finalized snapshots on retry", async () => {
+    const storage = buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5 },
+      ]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, unitCostCents: 100 }),
+      getLandedCostSnapshots: vi.fn().mockResolvedValue([finalizedSnapshot]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.finalizeAllocations(1, "user-1");
+
+    expect(result).toEqual({ finalized: 1, unchanged: true, adjustments: 0 });
+    expect(storage.deleteLandedCostSnapshotsForShipment).not.toHaveBeenCalled();
+    expect(storage.bulkCreateLandedCostSnapshots).not.toHaveBeenCalled();
+    expect(storage.createLandedCostAdjustment).not.toHaveBeenCalled();
+  });
+
+  it("records an adjustment and refreshes snapshots when closed shipment costs change", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5 },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 50 },
+      ]),
+      getAllocationsForLine: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, allocatedCents: 50 },
+      ]),
+      getInboundFreightCostById: vi.fn().mockResolvedValue({ id: 31, costType: "freight" }),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, unitCostCents: 100 }),
+      getLandedCostSnapshots: vi.fn().mockResolvedValue([finalizedSnapshot]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.finalizeAllocations(1, "user-1");
+
+    expect(storage.createLandedCostAdjustment).toHaveBeenCalledWith({
+      inboundShipmentLineId: 11,
+      purchaseOrderLineId: 21,
+      adjustmentAmountCents: 50,
+      reason: "Post-close landed cost reallocation",
+      createdBy: "user-1",
+    });
+    expect(storage.deleteLandedCostSnapshotsForShipment).toHaveBeenCalledWith(1);
+    expect(storage.bulkCreateLandedCostSnapshots).toHaveBeenCalledWith([
+      expect.objectContaining({
+        inboundShipmentLineId: 11,
+        purchaseOrderLineId: 21,
+        freightAllocatedCents: 50,
+        totalLandedCostCents: 550,
+        landedUnitCostCents: 110,
+      }),
+    ]);
+    expect(result).toEqual({ finalized: 1, unchanged: false, adjustments: 1 });
+  });
+});
 
 describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
   it("rejects cancelled shipments", async () => {

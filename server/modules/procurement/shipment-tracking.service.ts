@@ -1059,8 +1059,38 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     return "other";
   }
 
+  function nullableNumber(value: unknown): number | null {
+    if (value == null) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function sameNullableNumber(left: unknown, right: unknown): boolean {
+    return nullableNumber(left) === nullableNumber(right);
+  }
+
+  function landedSnapshotMatches(existing: any, next: InsertLandedCostSnapshot): boolean {
+    return (
+      sameNullableNumber(existing.inboundShipmentLineId, (next as any).inboundShipmentLineId) &&
+      sameNullableNumber(existing.purchaseOrderLineId, (next as any).purchaseOrderLineId) &&
+      sameNullableNumber(existing.productVariantId, (next as any).productVariantId) &&
+      sameNullableNumber(existing.poUnitCostCents, (next as any).poUnitCostCents) &&
+      sameNullableNumber(existing.freightAllocatedCents, (next as any).freightAllocatedCents) &&
+      sameNullableNumber(existing.dutyAllocatedCents, (next as any).dutyAllocatedCents) &&
+      sameNullableNumber(existing.insuranceAllocatedCents, (next as any).insuranceAllocatedCents) &&
+      sameNullableNumber(existing.otherAllocatedCents, (next as any).otherAllocatedCents) &&
+      sameNullableNumber(existing.totalLandedCostCents, (next as any).totalLandedCostCents) &&
+      sameNullableNumber(existing.landedUnitCostCents, (next as any).landedUnitCostCents) &&
+      sameNullableNumber(existing.qty, (next as any).qty)
+    );
+  }
+
   async function finalizeAllocations(shipmentId: number, userId?: string) {
     const shipment = await getShipment(shipmentId);
+    if (!["costing", "closed"].includes(shipment.status)) {
+      throw new ShipmentTrackingError("Landed costs can only be finalized while shipment is in costing or closed status");
+    }
+
     const lines = await storage.getInboundShipmentLines(shipmentId);
 
     if (lines.length === 0) {
@@ -1082,10 +1112,8 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       }
     }
 
-    // Delete existing snapshots and create new ones
-    await storage.deleteLandedCostSnapshotsForShipment(shipmentId);
-
     const snapshots: InsertLandedCostSnapshot[] = [];
+    const adjustments: any[] = [];
 
     for (const line of updatedLines) {
       // Get per-category breakdown
@@ -1118,7 +1146,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         if (oldSnap && oldSnap.totalLandedCostCents !== totalLandedCostCents) {
           const adjustmentCents = totalLandedCostCents - oldSnap.totalLandedCostCents;
           
-          await storage.createLandedCostAdjustment({
+          adjustments.push({
             inboundShipmentLineId: line.id,
             purchaseOrderLineId: line.purchaseOrderLineId,
             adjustmentAmountCents: adjustmentCents,
@@ -1144,8 +1172,23 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       } as any);
     }
 
+    const unchanged =
+      snapshots.length === updatedLines.length &&
+      snapshots.every((snapshot: any) => {
+        const oldSnap = oldSnapshotsByLine.get(snapshot.inboundShipmentLineId);
+        return oldSnap && landedSnapshotMatches(oldSnap, snapshot);
+      });
+
+    if (unchanged) {
+      return { finalized: snapshots.length, unchanged: true, adjustments: 0 };
+    }
+
+    await storage.deleteLandedCostSnapshotsForShipment(shipmentId);
+    for (const adjustment of adjustments) {
+      await storage.createLandedCostAdjustment(adjustment);
+    }
     await storage.bulkCreateLandedCostSnapshots(snapshots);
-    return { finalized: snapshots.length };
+    return { finalized: snapshots.length, unchanged: false, adjustments: adjustments.length };
   }
 
   // ─── Receiving integration ─────────────────────────────────────
