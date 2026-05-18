@@ -50,6 +50,30 @@ interface DashboardData {
   } | null;
 }
 
+type LandedCostHealth = {
+  status: "healthy" | "warning" | "critical";
+  scannedShipments: number;
+  critical: number;
+  warning: number;
+  counts: {
+    allocationBlockers: number;
+    allocationWarnings: number;
+    pendingFinalization: number;
+    finalizedNotPushed: number;
+    staleProvisionalLots: number;
+  };
+  items: Array<{
+    id: string;
+    type: string;
+    severity: "critical" | "warning";
+    shipmentId: number;
+    shipmentNumber: string | null;
+    shipmentStatus: string;
+    detail: string;
+    action: string;
+  }>;
+};
+
 function formatCents(cents: number): string {
   if (cents >= 100000) return `$${(cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -72,6 +96,10 @@ function formatRelativeTime(dateStr: string): string {
   return `${days}d ago`;
 }
 
+function formatHealthType(type: string): string {
+  return type.replace(/_/g, " ");
+}
+
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
   sent: { label: "Sent", className: "bg-blue-50 text-blue-700 border-blue-200" },
   acknowledged: { label: "Acknowledged", className: "bg-purple-50 text-purple-700 border-purple-200" },
@@ -87,6 +115,16 @@ export default function PurchasingDashboard() {
 
   const { data, isLoading } = useQuery<DashboardData>({
     queryKey: ["/api/purchasing/dashboard"],
+    refetchInterval: 5 * 60 * 1000,
+  });
+
+  const { data: landedCostHealth } = useQuery<LandedCostHealth>({
+    queryKey: ["/api/procurement/landed-cost-health"],
+    queryFn: async () => {
+      const res = await fetch("/api/procurement/landed-cost-health?limit=25", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch landed cost health");
+      return res.json();
+    },
     refetchInterval: 5 * 60 * 1000,
   });
 
@@ -145,6 +183,16 @@ export default function PurchasingDashboard() {
   }
 
   const health = data.healthBreakdown;
+  const showLandedCostHealth = landedCostHealth && landedCostHealth.status !== "healthy";
+  const landedCostCounts = landedCostHealth
+    ? [
+        { label: "Allocation blockers", value: landedCostHealth.counts.allocationBlockers },
+        { label: "Allocation warnings", value: landedCostHealth.counts.allocationWarnings },
+        { label: "Needs finalization", value: landedCostHealth.counts.pendingFinalization },
+        { label: "Ready to push", value: landedCostHealth.counts.finalizedNotPushed },
+        { label: "Stale provisional lots", value: landedCostHealth.counts.staleProvisionalLots },
+      ]
+    : [];
 
   return (
     <div className="flex flex-col h-full">
@@ -197,6 +245,74 @@ export default function PurchasingDashboard() {
               <Button variant="ghost" size="sm" onClick={() => navigate("/reorder-analysis")}>View Skipped</Button>
             </div>
           </div>
+        )}
+
+        {showLandedCostHealth && landedCostHealth && (
+          <Card className={landedCostHealth.status === "critical" ? "border-red-300 bg-red-50/40" : "border-amber-300 bg-amber-50/40"}>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className={`mt-0.5 rounded-full p-1.5 ${landedCostHealth.status === "critical" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+                    <AlertTriangle className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm font-semibold">Landed Cost Health</h2>
+                      <Badge variant={landedCostHealth.status === "critical" ? "destructive" : "outline"} className="text-[10px] uppercase">
+                        {landedCostHealth.status}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {landedCostHealth.critical} critical / {landedCostHealth.warning} warning across {landedCostHealth.scannedShipments} shipments
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Inbound costs need attention before receiving history, lots, and financial reporting can be treated as final.
+                    </p>
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" className="self-start lg:self-center" onClick={() => navigate("/shipments")}>
+                  Open Inbound
+                  <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                {landedCostCounts.map((row) => (
+                  <div key={row.label} className="rounded-md border bg-background/80 p-2">
+                    <div className="text-lg font-bold">{row.value}</div>
+                    <div className="text-[10px] text-muted-foreground">{row.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="space-y-2">
+                {landedCostHealth.items.slice(0, 3).map((item) => (
+                  <div key={item.id} className="flex flex-col gap-2 rounded-md border bg-background/90 p-2.5 md:flex-row md:items-center">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={item.severity === "critical" ? "destructive" : "outline"} className="text-[10px]">
+                          {formatHealthType(item.type)}
+                        </Badge>
+                        <span className="font-mono text-[11px] text-primary font-semibold">
+                          {item.shipmentNumber ?? `Shipment ${item.shipmentId}`}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{item.shipmentStatus}</span>
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1 truncate">{item.detail}</div>
+                    </div>
+                    <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(`/shipments/${item.shipmentId}`)}>
+                      Review
+                    </Button>
+                  </div>
+                ))}
+                {landedCostHealth.items.length > 3 && (
+                  <Button variant="ghost" size="sm" className="text-[11px] text-muted-foreground h-7" onClick={() => navigate("/shipments")}>
+                    + {landedCostHealth.items.length - 3} more landed-cost health items
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {/* KPI Cards */}
