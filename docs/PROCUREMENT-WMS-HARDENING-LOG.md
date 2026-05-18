@@ -1147,3 +1147,34 @@ Next step:
 - Run the receiving cost provenance tests and typecheck, then continue into the
   dedicated inbound shipment and landed cost phase once this receiving guard is
   merged.
+
+### 2026-05-18 - Phase 6 Slice 1: Landed Cost Push Provenance Guards
+
+Scope:
+
+- Started the inbound shipment and landed cost phase after receiving close
+  provenance was stabilized.
+- Changed landed-cost push-to-lots to use finalized landed cost snapshots as the
+  source of truth instead of mutable inbound shipment line cost fields.
+- Kept push-to-lots idempotent for already-finalized lots, and added explicit
+  skipped reasons when provisional lots cannot be safely updated.
+- Prevented same-variant shipment lines with different finalized landed costs
+  from being pushed by variant-only matching, because the current inventory lot
+  schema does not retain purchase order line identity.
+- Blocked landed-cost push for cancelled shipments.
+- Added unit coverage for finalized snapshot push, missing finalized snapshot,
+  and ambiguous same-variant cost cases.
+
+Verification:
+
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase1.test.ts server/modules/procurement/__tests__/unit/shipment-invoices-phase2.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts`
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check` with Windows line-ending warnings only.
+
+Next step:
+
+- Run landed-cost push tests and typecheck, then continue Phase 6 with
+  allocation/finalization idempotency and operator visibility around skipped
+  landed-cost pushes.
