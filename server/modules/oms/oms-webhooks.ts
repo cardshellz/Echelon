@@ -762,6 +762,7 @@ export const __test__ = {
   applyShopifyRefundCascade,
   extractRefundLineAdjustments,
   RefundsCreateBadPayloadError,
+  mapShopifyLineFulfillmentStatus,
 };
 
 function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
@@ -854,6 +855,28 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
     lineItems,
   };
+}
+
+function mapShopifyLineFulfillmentStatus(
+  lineItem: any,
+  orderFulfillmentStatus?: string | null,
+): "fulfilled" | "partial" | "unfulfilled" {
+  const rawStatus = String(lineItem?.fulfillment_status ?? "").trim().toLowerCase();
+  if (rawStatus === "fulfilled") return "fulfilled";
+  if (rawStatus === "partial" || rawStatus === "partially_fulfilled") return "partial";
+  if (rawStatus === "unfulfilled") return "unfulfilled";
+
+  const rawOrderStatus = String(orderFulfillmentStatus ?? "").trim().toLowerCase();
+  const fulfillableQuantity = Number(lineItem?.fulfillable_quantity);
+  if (
+    rawOrderStatus === "fulfilled" &&
+    Number.isFinite(fulfillableQuantity) &&
+    fulfillableQuantity <= 0
+  ) {
+    return "fulfilled";
+  }
+
+  return "unfulfilled";
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,6 +1269,10 @@ export function registerOmsWebhooks(
           }
 
           if (existingLine) {
+            const fulfillmentStatus = mapShopifyLineFulfillmentStatus(
+              item,
+              shopifyOrder.fulfillment_status,
+            );
             // Update existing line
             await db
               .update(omsOrderLines)
@@ -1253,11 +1280,19 @@ export function registerOmsWebhooks(
                 sku: item.sku || existingLine.sku,
                 title: item.title || existingLine.title,
                 quantity: item.quantity ?? existingLine.quantity,
+                fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                  ? Number(item.fulfillable_quantity)
+                  : existingLine.fulfillableQuantity,
+                fulfillmentStatus,
                 totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
                 productVariantId: productVariantId || existingLine.productVariantId,
               })
               .where(eq(omsOrderLines.id, existingLine.id));
           } else {
+            const fulfillmentStatus = mapShopifyLineFulfillmentStatus(
+              item,
+              shopifyOrder.fulfillment_status,
+            );
             // Insert new line
             await db.insert(omsOrderLines).values({
               orderId: existing.id,
@@ -1267,6 +1302,11 @@ export function registerOmsWebhooks(
               title: item.title,
               variantTitle: item.variant_title,
               quantity: item.quantity || 1,
+              fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                ? Number(item.fulfillable_quantity)
+                : null,
+              fulfillmentStatus,
+              requiresShipping: item.requires_shipping ?? true,
               totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
             }).onConflictDoNothing();
           }
