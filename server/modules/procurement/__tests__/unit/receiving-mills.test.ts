@@ -127,7 +127,11 @@ interface LineFixture {
 function buildService(
   lines: LineFixture[],
   poLines: Record<number, { unitCostMills?: number | null; unitCostCents?: number | null }> = {},
-  opts: { shipmentLandedCost?: number | null } = {},
+  opts: {
+    shipmentLandedCost?: number | null;
+    shipmentLandedCostError?: Error;
+    inboundShipmentId?: number | null;
+  } = {},
 ) {
   const updateReceivingLineCalls: Array<{ id: number; updates: any }> = [];
   const receiveInventoryCalls: Array<any> = [];
@@ -135,7 +139,13 @@ function buildService(
   const storage = {
     getReceivingOrderById: vi
       .fn()
-      .mockResolvedValue({ id: 1, status: "open", vendorId: null, purchaseOrderId: 123 }),
+      .mockResolvedValue({
+        id: 1,
+        status: "open",
+        vendorId: null,
+        purchaseOrderId: 123,
+        inboundShipmentId: opts.inboundShipmentId ?? null,
+      }),
     getReceivingLines: vi.fn().mockResolvedValue(lines),
     updateReceivingOrder: vi.fn().mockResolvedValue({}),
     updateReceivingLine: vi.fn((id: number, updates: any) => {
@@ -167,9 +177,13 @@ function buildService(
   } as any;
 
   const shipmentTracking =
-    opts.shipmentLandedCost !== undefined
+    opts.shipmentLandedCost !== undefined || opts.shipmentLandedCostError
       ? {
-          getLandedCostForPoLine: vi.fn().mockResolvedValue(opts.shipmentLandedCost),
+          getLandedCostForPoLine: vi.fn(() =>
+            opts.shipmentLandedCostError
+              ? Promise.reject(opts.shipmentLandedCostError)
+              : Promise.resolve(opts.shipmentLandedCost),
+          ),
         }
       : null;
 
@@ -283,16 +297,68 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
         },
       ],
       { 42: { unitCostMills: 10000 } }, // $1.0000 on PO
-      { shipmentLandedCost: 250 }, // landed $2.50 after freight allocation
+      { shipmentLandedCost: 250, inboundShipmentId: 77 }, // landed $2.50 after freight allocation
     );
 
     await svc.close(1, "u1");
 
     // inventoryCore sees landed cost (250c).
     expect(receiveInventoryCalls[0].unitCostCents).toBe(250);
+    expect(receiveInventoryCalls[0].inboundShipmentId).toBe(77);
+    expect(receiveInventoryCalls[0].costProvisional).toBe(0);
     const putaway = updateReceivingLineCalls.find((c) => c.id === 505 && c.updates.putawayComplete === 1);
     expect(putaway!.updates.unitCost).toBe(250);
     expect(putaway!.updates.unitCostMills).toBe(25000); // centsToMills(250)
+  });
+
+  it("marks shipment-linked receipt provisional when landed cost is not finalized", async () => {
+    const { svc, updateReceivingLineCalls, receiveInventoryCalls } = buildService(
+      [
+        {
+          id: 507,
+          receivedQty: 3,
+          productVariantId: 11,
+          putawayLocationId: 22,
+          purchaseOrderLineId: 42,
+        },
+      ],
+      { 42: { unitCostMills: 10000 } },
+      { shipmentLandedCost: null, inboundShipmentId: 77 },
+    );
+
+    await svc.close(1, "u1");
+
+    expect(receiveInventoryCalls[0].unitCostCents).toBe(100);
+    expect(receiveInventoryCalls[0].inboundShipmentId).toBe(77);
+    expect(receiveInventoryCalls[0].costProvisional).toBe(1);
+    const putaway = updateReceivingLineCalls.find((c) => c.id === 507 && c.updates.putawayComplete === 1);
+    expect(putaway!.updates.unitCost).toBe(100);
+    expect(putaway!.updates.unitCostMills).toBe(10000);
+  });
+
+  it("marks shipment-linked receipt provisional when landed cost lookup fails", async () => {
+    const { svc, updateReceivingLineCalls, receiveInventoryCalls } = buildService(
+      [
+        {
+          id: 508,
+          receivedQty: 3,
+          productVariantId: 11,
+          putawayLocationId: 22,
+          purchaseOrderLineId: 42,
+        },
+      ],
+      { 42: { unitCostMills: 10000 } },
+      { shipmentLandedCostError: new Error("landed cost unavailable"), inboundShipmentId: 77 },
+    );
+
+    await svc.close(1, "u1");
+
+    expect(receiveInventoryCalls[0].unitCostCents).toBe(100);
+    expect(receiveInventoryCalls[0].inboundShipmentId).toBe(77);
+    expect(receiveInventoryCalls[0].costProvisional).toBe(1);
+    const putaway = updateReceivingLineCalls.find((c) => c.id === 508 && c.updates.putawayComplete === 1);
+    expect(putaway!.updates.unitCost).toBe(100);
+    expect(putaway!.updates.unitCostMills).toBe(10000);
   });
 
   it("regression: service still writes canonical half-up rounding for 350 mills", async () => {
