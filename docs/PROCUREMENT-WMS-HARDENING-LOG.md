@@ -1487,3 +1487,35 @@ Next step:
   then continue Phase 7 by deciding whether AP command idempotency/retry
   protection needs its own slice before moving from AP hardening into the next
   procurement engine area.
+
+### 2026-05-18 - Phase 7 Slice 5: AP Invoice Command Idempotency
+
+Scope:
+
+- Required idempotency keys for AP invoice approval, invoice dispute, and
+  invoice void routes so all AP command-bound financial mutations now share
+  retry protection at the HTTP boundary.
+- Kept the existing AP payment create and payment void idempotency behavior
+  unchanged.
+- Updated the AP invoice detail UI to send a fresh idempotency key with
+  approve, dispute, and void commands.
+- Invalidated recent AP command history after invoice and payment commands so
+  the Recent AP Activity panel refreshes after command mutations.
+- Expanded AP route coverage to assert all five AP command mutations register
+  idempotency protection.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Phase 7 now has a shared AP command boundary, atomic side effects, operator
+  command outcomes, command audit history, and idempotency protection for the
+  command mutations. Continue by reviewing whether invoice creation/editing
+  needs the same command treatment, or move into the next procurement engine
+  area if AP lifecycle hardening is sufficient for the forecast/purchasing
+  foundation.

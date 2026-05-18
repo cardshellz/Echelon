@@ -88,7 +88,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoices/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/approve", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
     try {
       const invoice = await apLedger.executeApLedgerCommand("approve_invoice", {
         invoiceId: Number(req.params.id),
@@ -100,7 +100,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoices/:id/dispute", requirePermission("purchasing", "edit"), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/dispute", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
     try {
       const { reason } = req.body;
       const invoice = await apLedger.executeApLedgerCommand("dispute_invoice", {
@@ -114,7 +114,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoices/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/void", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
     try {
       const { reason } = req.body;
       const invoice = await apLedger.executeApLedgerCommand("void_invoice", {

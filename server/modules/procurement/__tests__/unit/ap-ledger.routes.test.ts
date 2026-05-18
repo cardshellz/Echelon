@@ -4,37 +4,42 @@ import type { Express, Request, Response, NextFunction } from "express";
 import http from "http";
 import { AddressInfo } from "net";
 
-const mocks = vi.hoisted(() => ({
-  apLedger: {
-    listInvoices: vi.fn(),
-    generateInvoiceNumber: vi.fn(),
-    createInvoice: vi.fn(),
-    getInvoiceById: vi.fn(),
-    updateInvoice: vi.fn(),
-    approveInvoice: vi.fn(),
-    disputeInvoice: vi.fn(),
-    voidInvoice: vi.fn(),
-    linkPoToInvoice: vi.fn(),
-    unlinkPoFromInvoice: vi.fn(),
-    getInvoicesForPo: vi.fn(),
-    importLinesFromPO: vi.fn(),
-    addInvoiceLine: vi.fn(),
-    updateInvoiceLine: vi.fn(),
-    removeInvoiceLine: vi.fn(),
-    runInvoiceMatch: vi.fn(),
-    addAttachment: vi.fn(),
-    getAttachments: vi.fn(),
-    getAttachmentById: vi.fn(),
-    removeAttachment: vi.fn(),
-    listPayments: vi.fn(),
-    recordPayment: vi.fn(),
-    getPaymentById: vi.fn(),
-    voidPayment: vi.fn(),
-    executeApLedgerCommand: vi.fn(),
-    getApSummary: vi.fn(),
-    listApLedgerCommandAudit: vi.fn(),
-  },
-}));
+const mocks = vi.hoisted(() => {
+  const idempotencyMiddleware = vi.fn((_req: any, _res: any, next: any) => next());
+  return {
+    idempotencyMiddleware,
+    requireIdempotency: vi.fn(() => idempotencyMiddleware),
+    apLedger: {
+      listInvoices: vi.fn(),
+      generateInvoiceNumber: vi.fn(),
+      createInvoice: vi.fn(),
+      getInvoiceById: vi.fn(),
+      updateInvoice: vi.fn(),
+      approveInvoice: vi.fn(),
+      disputeInvoice: vi.fn(),
+      voidInvoice: vi.fn(),
+      linkPoToInvoice: vi.fn(),
+      unlinkPoFromInvoice: vi.fn(),
+      getInvoicesForPo: vi.fn(),
+      importLinesFromPO: vi.fn(),
+      addInvoiceLine: vi.fn(),
+      updateInvoiceLine: vi.fn(),
+      removeInvoiceLine: vi.fn(),
+      runInvoiceMatch: vi.fn(),
+      addAttachment: vi.fn(),
+      getAttachments: vi.fn(),
+      getAttachmentById: vi.fn(),
+      removeAttachment: vi.fn(),
+      listPayments: vi.fn(),
+      recordPayment: vi.fn(),
+      getPaymentById: vi.fn(),
+      voidPayment: vi.fn(),
+      executeApLedgerCommand: vi.fn(),
+      getApSummary: vi.fn(),
+      listApLedgerCommandAudit: vi.fn(),
+    },
+  };
+});
 
 vi.mock("../../../../routes/middleware", () => {
   const pass = (req: Request, _res: Response, next: NextFunction) => {
@@ -51,7 +56,7 @@ vi.mock("../../../../routes/middleware", () => {
 });
 
 vi.mock("../../../../middleware/idempotency", () => ({
-  requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  requireIdempotency: mocks.requireIdempotency,
 }));
 
 vi.mock("../../ap-ledger.service", () => ({
@@ -99,6 +104,12 @@ describe("AP ledger routes", () => {
   afterEach(async () => {
     if (server) await server.close();
     server = undefined;
+  });
+
+  it("requires idempotency for AP command mutations", () => {
+    buildApp();
+
+    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(5);
   });
 
   it("lists vendor invoices with parsed filters", async () => {
