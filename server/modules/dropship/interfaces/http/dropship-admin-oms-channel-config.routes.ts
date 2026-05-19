@@ -42,6 +42,23 @@ export function registerDropshipAdminOmsChannelConfigRoutes(
       }
     },
   );
+
+  app.post(
+    "/api/dropship/admin/oms-channel-config/default-source",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.ensureDefault({
+          ...req.body,
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.status(result.idempotentReplay ? 200 : 201).json(result);
+      } catch (error) {
+        return sendDropshipOmsChannelConfigError(res, error);
+      }
+    },
+  );
 }
 
 function resolveIdempotencyKey(req: Request): string {
@@ -101,6 +118,7 @@ function statusForDropshipOmsChannelConfigError(code: string): number {
       return 400;
     case "DROPSHIP_OMS_CHANNEL_CONFIG_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_OMS_CHANNEL_NOT_ACTIVE":
+    case "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE":
       return 409;
     case "DROPSHIP_OMS_CHANNEL_NOT_FOUND":
       return 404;

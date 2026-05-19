@@ -22,6 +22,7 @@ import {
   Truck,
   Wallet,
 } from "lucide-react";
+import { useLocation, useSearch } from "wouter";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -49,7 +50,8 @@ import {
   buildAdminDogfoodReadinessUrl,
   buildAdminDogfoodLaunchStatusUrl,
   buildAdminOmsChannelConfigUrl,
-  buildAdminOmsChannelConfigureInput,
+  buildAdminOmsChannelDefaultSourceInput,
+  buildAdminOmsChannelDefaultSourceUrl,
   buildAdminListingPushJobsUrl,
   buildAdminListingPushJobRetryInput,
   buildAdminNotificationEventsUrl,
@@ -120,6 +122,7 @@ import {
   type DropshipOrderDetailResponse,
   type DropshipAdminOmsChannelConfigResponse,
   type DropshipAdminOmsChannelConfigureResponse,
+  type DropshipOmsChannelOption,
   type DropshipAdminReturnCreateResponse,
   type DropshipAdminReturnInspectionResponse,
   type DropshipAdminReturnPolicyCreateResponse,
@@ -208,6 +211,21 @@ type DropshipOpsTabValue =
   | "audit";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
+
+const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
+  "overview",
+  "dogfood",
+  "catalog",
+  "shipping",
+  "order-intake",
+  "wallet-ops",
+  "stores",
+  "listing-pushes",
+  "tracking-pushes",
+  "notifications",
+  "returns",
+  "audit",
+]);
 
 interface DropshipOpsSearchSignal {
   tab: DropshipOpsSearchableTab;
@@ -600,8 +618,25 @@ const adminWorkerSweepOptions: Array<{
   },
 ];
 
+function isDropshipOpsTabValue(value: string | null): value is DropshipOpsTabValue {
+  return value !== null && dropshipOpsTabValues.has(value as DropshipOpsTabValue);
+}
+
+function parseDropshipOpsTab(searchString: string): DropshipOpsTabValue {
+  const normalizedSearch = searchString.startsWith("?") ? searchString.slice(1) : searchString;
+  const tab = new URLSearchParams(normalizedSearch).get("tab");
+  return isDropshipOpsTabValue(tab) ? tab : "overview";
+}
+
+function buildDropshipTabHref(tab: DropshipOpsTabValue): string {
+  return `/dropship?tab=${encodeURIComponent(tab)}`;
+}
+
 export default function Dropship() {
-  const [activeTab, setActiveTab] = useState<DropshipOpsTabValue>("overview");
+  const [, navigate] = useLocation();
+  const searchString = useSearch();
+  const locationTab = useMemo(() => parseDropshipOpsTab(searchString), [searchString]);
+  const [activeTab, setActiveTab] = useState<DropshipOpsTabValue>(locationTab);
   const [opsSearchSignal, setOpsSearchSignal] = useState<DropshipOpsSearchSignal | null>(null);
   const [auditSearch, setAuditSearch] = useState("");
   const [auditSeverity, setAuditSeverity] = useState<AuditSeverityFilter>("all");
@@ -628,6 +663,10 @@ export default function Dropship() {
 
   const overview = overviewQuery.data?.overview;
 
+  useEffect(() => {
+    setActiveTab(locationTab);
+  }, [locationTab]);
+
   function applyAuditFilters() {
     setAppliedAuditFilters({
       search: auditSearch,
@@ -635,7 +674,7 @@ export default function Dropship() {
     });
   }
 
-function refreshAll() {
+  function refreshAll() {
     void overviewQuery.refetch();
     void auditQuery.refetch();
   }
@@ -643,6 +682,13 @@ function refreshAll() {
   function openSmokeOpsSearch(input: Omit<DropshipOpsSearchSignal, "nonce">) {
     setOpsSearchSignal({ ...input, nonce: Date.now() });
     setActiveTab(input.tab);
+    navigate(buildDropshipTabHref(input.tab));
+  }
+
+  function selectTab(value: string) {
+    const nextTab = isDropshipOpsTabValue(value) ? value : "overview";
+    setActiveTab(nextTab);
+    navigate(buildDropshipTabHref(nextTab));
   }
 
   return (
@@ -687,7 +733,7 @@ function refreshAll() {
       </div>
 
       <div className="flex-1 overflow-auto p-4 md:p-6">
-        <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as DropshipOpsTabValue)} className="flex min-h-0 flex-1 flex-col">
+        <Tabs value={activeTab} onValueChange={selectTab} className="flex min-h-0 flex-1 flex-col">
           <TabsList className="mb-5 h-auto w-full justify-start overflow-x-auto rounded-none border-b bg-transparent p-0">
             <TabsTrigger
               value="overview"
@@ -875,7 +921,6 @@ function DogfoodReadinessTab({
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<DogfoodReadinessStatusFilter>("all");
   const [platform, setPlatform] = useState<StoreConnectionPlatformFilter>("all");
-  const [selectedOmsChannelId, setSelectedOmsChannelId] = useState("");
   const [omsMessage, setOmsMessage] = useState("");
   const [omsError, setOmsError] = useState("");
   const [isSavingOmsChannel, setIsSavingOmsChannel] = useState(false);
@@ -921,35 +966,23 @@ function DogfoodReadinessTab({
   const launchGate = launchStatus?.launchGate ?? readinessQuery.data?.launchGate ?? null;
   const omsConfig = omsChannelConfigQuery.data?.config ?? null;
 
-  useEffect(() => {
-    if (!omsConfig || selectedOmsChannelId) return;
-    const defaultChannelId = omsConfig.currentChannelId
-      ?? omsConfig.channels.find((channel) => channel.status === "active")?.channelId
-      ?? null;
-    if (defaultChannelId !== null) {
-      setSelectedOmsChannelId(String(defaultChannelId));
-    }
-  }, [omsConfig, selectedOmsChannelId]);
-
   function applyReadinessFilters() {
     setAppliedFilters({ search, status, platform });
   }
 
-  async function saveOmsChannel() {
+  async function ensureOmsSource() {
     setIsSavingOmsChannel(true);
     setOmsError("");
     setOmsMessage("");
     try {
-      const input = buildAdminOmsChannelConfigureInput({
-        channelId: selectedOmsChannelId,
-        idempotencyKey: createDropshipIdempotencyKey("admin-oms-channel"),
+      const input = buildAdminOmsChannelDefaultSourceInput({
+        idempotencyKey: createDropshipIdempotencyKey("admin-oms-source"),
       });
-      const response = await putJson<DropshipAdminOmsChannelConfigureResponse>(
-        omsChannelConfigUrl,
+      const response = await postJson<DropshipAdminOmsChannelConfigureResponse>(
+        buildAdminOmsChannelDefaultSourceUrl(),
         input,
       );
-      setSelectedOmsChannelId(String(response.selectedChannel.channelId));
-      setOmsMessage(`Internal Dropship OMS channel set to ${response.selectedChannel.name}.`);
+      setOmsMessage(`Dropship OMS source set to ${dropshipOmsSourceLabel(response.selectedChannel)}.`);
       await Promise.all([
         omsChannelConfigQuery.refetch(),
         readinessQuery.refetch(),
@@ -958,7 +991,7 @@ function DogfoodReadinessTab({
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
     } catch (caught) {
-      setOmsError(caught instanceof Error ? caught.message : "Dropship OMS channel save failed.");
+      setOmsError(caught instanceof Error ? caught.message : "Dropship OMS source setup failed.");
     } finally {
       setIsSavingOmsChannel(false);
     }
@@ -1022,9 +1055,7 @@ function DogfoodReadinessTab({
         config={omsConfig}
         isLoading={omsChannelConfigQuery.isLoading || omsChannelConfigQuery.isFetching}
         isSaving={isSavingOmsChannel}
-        selectedChannelId={selectedOmsChannelId}
-        onSave={saveOmsChannel}
-        onSelectChannel={setSelectedOmsChannelId}
+        onEnsureDefaultSource={ensureOmsSource}
       />
 
       <SystemReadinessPanel
@@ -3921,20 +3952,23 @@ function activeRateTableCount(config: DropshipShippingConfigOverview | undefined
   return config?.rateTables.filter((table) => table.status === "active").length ?? 0;
 }
 
+function dropshipOmsSourceLabel(channel: DropshipOmsChannelOption): string {
+  const provider = formatStatus(channel.provider);
+  return channel.name.trim().toLowerCase() === provider.trim().toLowerCase()
+    ? channel.name
+    : `${channel.name} (${provider})`;
+}
+
 function OmsChannelConfigPanel({
   config,
   isLoading,
   isSaving,
-  onSave,
-  onSelectChannel,
-  selectedChannelId,
+  onEnsureDefaultSource,
 }: {
   config: DropshipOmsChannelConfigOverview | null;
   isLoading: boolean;
   isSaving: boolean;
-  selectedChannelId: string;
-  onSelectChannel: (channelId: string) => void;
-  onSave: () => void;
+  onEnsureDefaultSource: () => void;
 }) {
   if (isLoading && !config) {
     return (
@@ -3945,11 +3979,8 @@ function OmsChannelConfigPanel({
     );
   }
 
-  const activeChannels = config?.channels.filter((channel) => channel.status === "active") ?? [];
   const markedChannels = config?.channels.filter((channel) => channel.isDropshipOmsChannel) ?? [];
   const currentChannel = config?.channels.find((channel) => channel.channelId === config.currentChannelId) ?? null;
-  const selectedChannel = config?.channels.find((channel) => String(channel.channelId) === selectedChannelId) ?? null;
-  const hasSelection = selectedChannelId.trim().length > 0;
   const hasAmbiguousConfig = (config?.currentChannelCount ?? 0) > 1;
 
   return (
@@ -3957,47 +3988,35 @@ function OmsChannelConfigPanel({
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold">Internal Dropship OMS channel</h2>
+            <h2 className="text-lg font-semibold">Dropship OMS source</h2>
             <Badge variant="outline" className={omsChannelConfigTone(config)}>
               {omsChannelConfigLabel(config)}
             </Badge>
           </div>
           <div className="mt-2 text-sm text-muted-foreground">
             {currentChannel
-              ? `${currentChannel.name} is the active order-intake channel.`
+              ? `${dropshipOmsSourceLabel(currentChannel)} is the internal Echelon source used after marketplace intake.`
               : hasAmbiguousConfig
-                ? `${config?.currentChannelCount ?? 0} active channels are marked. Choose one to remove ambiguity.`
-                : "No active Dropship OMS channel is marked."}
+                ? `${config?.currentChannelCount ?? 0} active sources are marked. Choose one to remove ambiguity.`
+                : "No active Dropship OMS source is marked."}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Vendor eBay and Shopify stores connect separately under Store Connections. This source only tags accepted dropship orders inside Echelon.
           </div>
           {markedChannels.length > 0 && (
             <div className="mt-1 text-xs text-muted-foreground">
-              Marked: {markedChannels.map((channel) => `${channel.name} (${formatStatus(channel.status)})`).join(", ")}
+              Marked: {markedChannels.map((channel) => `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`).join(", ")}
             </div>
           )}
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-          <div className="min-w-0 sm:w-80">
-            <label className="text-sm font-medium">Channel</label>
-            <Select value={selectedChannelId} onValueChange={onSelectChannel} disabled={activeChannels.length === 0}>
-              <SelectTrigger className="mt-2">
-                <SelectValue placeholder="Select active channel" />
-              </SelectTrigger>
-              <SelectContent>
-                {activeChannels.map((channel) => (
-                  <SelectItem key={channel.channelId} value={String(channel.channelId)}>
-                    {channel.name} / {formatStatus(channel.provider)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
           <Button
             className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-            disabled={!hasSelection || isSaving || activeChannels.length === 0}
-            onClick={onSave}
+            disabled={isSaving}
+            onClick={onEnsureDefaultSource}
           >
             <Save className="h-4 w-4" />
-            {isSaving ? "Saving" : selectedChannel?.isDropshipOmsChannel ? "Confirm channel" : "Set channel"}
+            {isSaving ? "Saving" : currentChannel ? "Repair source" : "Create source"}
           </Button>
         </div>
       </div>

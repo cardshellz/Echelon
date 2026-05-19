@@ -9,6 +9,41 @@ vi.hoisted(() => {
 const now = new Date("2026-05-03T18:30:00.000Z");
 
 describe("PgDropshipOmsChannelConfigRepository", () => {
+  it("creates or repairs the dedicated default OMS source before marking it", async () => {
+    const { pool, query } = makePool(async (sql) => {
+      if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
+        return { rows: [{ id: 100 }] };
+      }
+      if (sql.includes("WITH existing AS") && sql.includes("INSERT INTO channels.channels")) {
+        return { rows: [{ id: 7 }] };
+      }
+      if (sql.includes("UPDATE channels.channels") && sql.includes("RETURNING")) {
+        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+      }
+      if (sql.includes("FROM channels.channels c")) {
+        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+      }
+      return { rows: [] };
+    });
+    const repository = new PgDropshipOmsChannelConfigRepository(pool);
+
+    const result = await repository.ensureDefault({
+      idempotencyKey: "oms-source-config-001",
+      requestHash: "hash-source-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+      now,
+    });
+
+    const sql = query.mock.calls.map((call) => String(call[0])).join("\n\n");
+    expect(result.selectedChannel.channelId).toBe(7);
+    expect(result.config.currentChannelId).toBe(7);
+    expect(sql).toContain("INSERT INTO channels.channels");
+    expect(sql).toContain("sync_mode = 'dry_run'");
+    expect(sql).toContain("#- '{dropship,role}'");
+    expect(sql).toContain("INSERT INTO dropship.dropship_audit_events");
+    expect(sql).toContain("COMMIT");
+  });
+
   it("atomically clears previous OMS markers before marking the selected active channel", async () => {
     const { pool, query } = makePool(async (sql) => {
       if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
@@ -67,6 +102,31 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
       actor: { actorType: "admin", actorId: "admin-1" },
       now,
     })).rejects.toMatchObject({ code: "DROPSHIP_OMS_CHANNEL_NOT_ACTIVE" });
+
+    const sql = query.mock.calls.map((call) => String(call[0])).join("\n\n");
+    expect(sql).toContain("ROLLBACK");
+    expect(sql).not.toContain("'{dropship,role}',\n                 to_jsonb('oms'::text)");
+  });
+
+  it("rejects marketplace sales channels as the Dropship OMS source", async () => {
+    const { pool, query } = makePool(async (sql) => {
+      if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
+        return { rows: [{ id: 103 }] };
+      }
+      if (sql.includes("SELECT id, name, type, provider, status") && sql.includes("FOR UPDATE")) {
+        return { rows: [{ id: 9, name: "Ebay", type: "ebay", provider: "ebay", status: "active" }] };
+      }
+      return { rows: [] };
+    });
+    const repository = new PgDropshipOmsChannelConfigRepository(pool);
+
+    await expect(repository.configure({
+      channelId: 9,
+      idempotencyKey: "oms-channel-config-003",
+      requestHash: "hash-3",
+      actor: { actorType: "admin", actorId: "admin-1" },
+      now,
+    })).rejects.toMatchObject({ code: "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE" });
 
     const sql = query.mock.calls.map((call) => String(call[0])).join("\n\n");
     expect(sql).toContain("ROLLBACK");

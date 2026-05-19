@@ -2447,6 +2447,21 @@ export function buildAdminOmsChannelConfigUrl(): string {
   return "/api/dropship/admin/oms-channel-config";
 }
 
+export function buildAdminOmsChannelDefaultSourceUrl(): string {
+  return "/api/dropship/admin/oms-channel-config/default-source";
+}
+
+export function buildAdminOmsChannelDefaultSourceInput(input: {
+  idempotencyKey: string;
+}): { idempotencyKey: string } {
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("idempotencyKey must be between 8 and 200 characters.");
+  }
+
+  return { idempotencyKey };
+}
+
 export function buildAdminOmsChannelConfigureInput(input: {
   channelId: string | number;
   idempotencyKey: string;
