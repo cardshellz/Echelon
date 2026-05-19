@@ -47,6 +47,27 @@ interface DashboardData {
     linesAdded: number;
     skippedNoVendor: number;
     skippedExcluded: number;
+    skippedOnOrder: number;
+    summaryJson?: {
+      recommendationSummary?: {
+        actionableCount?: number;
+      };
+      skippedReasonCounts?: Record<string, number>;
+      actionableRecommendations?: Array<{
+        sku: string;
+        productName: string;
+        suggestedOrderQty: number;
+        orderUomLabel: string;
+        preferredVendorName: string | null;
+        explanation: string;
+      }>;
+      skippedRecommendations?: Array<{
+        sku: string;
+        productName: string;
+        skippedReason: string | null;
+        explanation: string;
+      }>;
+    } | null;
   } | null;
 }
 
@@ -661,7 +682,9 @@ export default function PurchasingDashboard() {
                     {[
                       { label: "Items analyzed", value: data.lastAutoDraftRun.itemsAnalyzed },
                       { label: "POs created/updated", value: `${data.lastAutoDraftRun.posCreated}/${data.lastAutoDraftRun.posUpdated}` },
+                      { label: "Actionable", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.actionableCount ?? data.lastAutoDraftRun.linesAdded },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
+                      { label: "Skipped (on order)", value: data.lastAutoDraftRun.skippedOnOrder },
                       { label: "Excluded SKUs", value: data.lastAutoDraftRun.skippedExcluded },
                       { label: "Next run", value: "Tonight 2:00am" },
                     ].map((row) => (
@@ -671,6 +694,24 @@ export default function PurchasingDashboard() {
                       </div>
                     ))}
                   </div>
+                  {data.lastAutoDraftRun.summaryJson?.actionableRecommendations?.length ? (
+                    <div className="mt-3 pt-3 border-t">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                        Top Recommendation
+                      </div>
+                      {data.lastAutoDraftRun.summaryJson.actionableRecommendations.slice(0, 1).map((item) => (
+                        <div key={item.sku} className="text-xs rounded border bg-muted/30 p-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-semibold truncate">{item.sku}</span>
+                            <span className="text-muted-foreground whitespace-nowrap">
+                              {item.suggestedOrderQty} {item.orderUomLabel}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{item.explanation}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </>
               ) : (
                 <div className="text-xs text-muted-foreground">Never run</div>
