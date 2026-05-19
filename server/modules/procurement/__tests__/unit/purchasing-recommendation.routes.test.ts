@@ -102,6 +102,7 @@ describe("purchasing recommendation routes", () => {
     mocks.db.select.mockReturnValue({ from: vi.fn().mockResolvedValue([]) });
     mocks.runAutoDraftJob.mockResolvedValue(undefined);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
       includeOrderSoon: false,
       skipOnOpenPo: true,
       skipNoVendor: true,
@@ -307,6 +308,9 @@ describe("purchasing recommendation routes", () => {
             actionableCount: 1,
             skippedNoVendor: 1,
           }),
+          settings: expect.objectContaining({
+            autoDraftMode: "draft_po",
+          }),
           actionableRecommendations: [
             expect.objectContaining({
               sku: "AUTO-1",
@@ -340,5 +344,113 @@ describe("purchasing recommendation routes", () => {
         },
       },
     });
+  });
+
+  it("records direct auto-draft recommendations without PO mutations in review-only mode", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "review_only",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 42,
+        variant_id: 420,
+        base_sku: "AUTO-1",
+        product_name: "Auto Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 5,
+        order_uom_level: 2,
+        preferred_vendor_id: 7,
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run");
+
+    expect(status).toBe(200);
+    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
+    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
+      1001,
+      expect.objectContaining({
+        status: "success",
+        itemsAnalyzed: 1,
+        posCreated: 0,
+        posUpdated: 0,
+        linesAdded: 0,
+        skippedNoVendor: 0,
+        summaryJson: expect.objectContaining({
+          recommendationSummary: expect.objectContaining({
+            actionableCount: 1,
+          }),
+          settings: expect.objectContaining({
+            autoDraftMode: "review_only",
+          }),
+          actionableRecommendations: [
+            expect.objectContaining({
+              sku: "AUTO-1",
+              suggestedOrderQty: 1,
+            }),
+          ],
+          poMutations: [],
+        }),
+      }),
+    );
+    expect(body).toMatchObject({
+      success: true,
+      pos: [],
+      count: 0,
+      itemsDrafted: 0,
+      reviewOnly: true,
+      recommendationSummary: {
+        actionableCount: 1,
+      },
+      recommendationRun: {
+        id: 1001,
+        detail: {
+          settings: {
+            autoDraftMode: "review_only",
+          },
+          poMutations: [],
+        },
+      },
+    });
+  });
+
+  it("updates auto-draft mode settings", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      autoDraftMode: "review_only",
+    });
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(mocks.procurement.updateAutoDraftSettings).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        autoDraftMode: "review_only",
+      }),
+    );
+  });
+
+  it("rejects invalid auto-draft modes", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      autoDraftMode: "mutate_everything",
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: "autoDraftMode must be one of: draft_po, review_only" });
+    expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
   });
 });

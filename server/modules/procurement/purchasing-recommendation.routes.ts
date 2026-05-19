@@ -18,6 +18,10 @@ import {
 } from "./purchasing-recommendation.run-detail";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
+function shouldCreateDraftPos(settings: AutoDraftRecommendationSettings): boolean {
+  return settings.autoDraftMode !== "review_only";
+}
+
 async function loadPurchasingRecommendationDefaults(): Promise<PurchasingRecommendationDefaults> {
   const defaultsQuery = await db.execute(sql`
     SELECT key, value FROM warehouse.echelon_settings
@@ -151,7 +155,8 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
 
       let result: any[] = [];
       const poMutations: PurchasingRecommendationRunPoMutation[] = [];
-      if (itemsToOrder.length > 0) {
+      const createDraftPos = shouldCreateDraftPos(settings);
+      if (createDraftPos && itemsToOrder.length > 0) {
         result = await purchasing.createPOFromReorder(itemsToOrder, userId);
         for (const po of result) {
           if (po?.vendorId && po?.id) {
@@ -176,7 +181,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         itemsAnalyzed: rawRows.length,
         posCreated: result.length,
         posUpdated: 0,
-        linesAdded: itemsToOrder.length,
+        linesAdded: createDraftPos ? itemsToOrder.length : 0,
         skippedNoVendor: recommendationResult.summary.skippedNoVendor,
         skippedOnOrder: recommendationResult.summary.skippedOnOrder,
         skippedExcluded: recommendationResult.summary.excludedCount,
@@ -188,7 +193,8 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         success: true,
         pos: result,
         count: result.length,
-        itemsDrafted: itemsToOrder.length,
+        itemsDrafted: createDraftPos ? itemsToOrder.length : 0,
+        reviewOnly: !createDraftPos,
         recommendationSummary: recommendationResult.summary,
         recommendationRun: {
           id: runRecord.id,
@@ -438,8 +444,12 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
   // PATCH /api/purchasing/auto-draft-settings
   app.patch("/api/purchasing/auto-draft-settings", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { includeOrderSoon, skipOnOpenPo, skipNoVendor } = req.body;
+      const { autoDraftMode, includeOrderSoon, skipOnOpenPo, skipNoVendor } = req.body;
+      if (autoDraftMode !== undefined && !["draft_po", "review_only"].includes(autoDraftMode)) {
+        return res.status(400).json({ error: "autoDraftMode must be one of: draft_po, review_only" });
+      }
       await storage.updateAutoDraftSettings(undefined, {
+        autoDraftMode,
         includeOrderSoon,
         skipOnOpenPo,
         skipNoVendor,

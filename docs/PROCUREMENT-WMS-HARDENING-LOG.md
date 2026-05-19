@@ -1648,3 +1648,38 @@ Next step:
 
 - Continue Phase 8 with review-only auto-draft mode so autopilot can generate
   auditable recommendations without mutating POs.
+
+### 2026-05-18 - Phase 8 Slice 3: Review-Only Auto-Draft Mode
+
+Scope:
+
+- Added an explicit `auto_draft_mode` warehouse setting with `draft_po` as the
+  default/current behavior and `review_only` as the non-mutating recommendation
+  run mode.
+- Added schema and migration coverage for the new setting, including a database
+  check constraint for the allowed modes.
+- Updated the scheduled auto-draft job and legacy direct auto-draft endpoint to
+  honor review-only mode by generating and persisting recommendation run detail
+  without creating or updating purchase orders.
+- Kept review-only runs operationally visible by storing recommendation detail,
+  counts, skipped reasons, settings, and empty PO mutations in
+  `auto_draft_runs.summary_json`.
+- Added the admin settings control in the purchasing exclusion/rules modal and
+  surfaced the latest run mode on the purchasing dashboard.
+- Preserved partial settings updates so changing one auto-draft setting does not
+  reset the other settings.
+- Added route coverage for the review-only direct endpoint behavior and mode
+  validation.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 8 with recommendation run history/listing or deeper skipped
+  reason review so purchasing recommendations can be audited before enabling
+  stronger autopilot behavior.

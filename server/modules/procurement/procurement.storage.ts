@@ -1648,6 +1648,7 @@ export const procurementMethods: IProcurementStorage = {
   async getAutoDraftSettings(warehouseId?: number): Promise<any> {
     const rows = await db.execute(sql`
       SELECT
+        COALESCE(auto_draft_mode, 'draft_po') AS auto_draft_mode,
         COALESCE(auto_draft_include_order_soon, false) AS include_order_soon,
         COALESCE(auto_draft_skip_on_open_po, true) AS skip_on_open_po,
         COALESCE(auto_draft_skip_no_vendor, true) AS skip_no_vendor
@@ -1656,6 +1657,7 @@ export const procurementMethods: IProcurementStorage = {
     `);
     const row = (rows.rows as any[])[0];
     return {
+      autoDraftMode: row?.auto_draft_mode === "review_only" ? "review_only" : "draft_po",
       includeOrderSoon: row?.include_order_soon ?? false,
       skipOnOpenPo: row?.skip_on_open_po ?? true,
       skipNoVendor: row?.skip_no_vendor ?? true,
@@ -1663,11 +1665,16 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async updateAutoDraftSettings(warehouseId: number | undefined, settings: any): Promise<void> {
+    const autoDraftMode =
+      settings.autoDraftMode === "review_only" || settings.autoDraftMode === "draft_po"
+        ? settings.autoDraftMode
+        : null;
     await db.execute(sql`
       UPDATE warehouse_settings SET
-        auto_draft_include_order_soon = ${settings.includeOrderSoon ?? false},
-        auto_draft_skip_on_open_po = ${settings.skipOnOpenPo ?? true},
-        auto_draft_skip_no_vendor = ${settings.skipNoVendor ?? true}
+        auto_draft_mode = COALESCE(${autoDraftMode}, auto_draft_mode),
+        auto_draft_include_order_soon = COALESCE(${settings.includeOrderSoon ?? null}, auto_draft_include_order_soon),
+        auto_draft_skip_on_open_po = COALESCE(${settings.skipOnOpenPo ?? null}, auto_draft_skip_on_open_po),
+        auto_draft_skip_no_vendor = COALESCE(${settings.skipNoVendor ?? null}, auto_draft_skip_no_vendor)
     `);
   },
 

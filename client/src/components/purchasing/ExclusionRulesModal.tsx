@@ -34,6 +34,7 @@ interface RulesData {
 }
 
 interface AutoDraftSettings {
+  autoDraftMode: "draft_po" | "review_only";
   includeOrderSoon: boolean;
   skipOnOpenPo: boolean;
   skipNoVendor: boolean;
@@ -129,6 +130,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft-settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
     },
   });
 
@@ -250,6 +252,24 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
           <div>
             <span className="text-xs font-semibold block mb-3">Auto-Draft Behavior</span>
             <div className="space-y-3">
+              <div>
+                <h4 className="text-sm font-medium mb-1">Run mode</h4>
+                <p className="text-[11px] text-muted-foreground mb-2">
+                  Recommendation only records an auditable run without creating or updating draft POs.
+                </p>
+                <Select
+                  value={settings?.autoDraftMode ?? "draft_po"}
+                  onValueChange={(v) => updateSettingsMutation.mutate({ autoDraftMode: v as AutoDraftSettings["autoDraftMode"] })}
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="draft_po">Create draft POs</SelectItem>
+                    <SelectItem value="review_only">Recommendation only</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <h4 className="text-sm font-medium">Include "Order Soon" items in auto-draft</h4>

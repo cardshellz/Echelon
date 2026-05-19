@@ -61,6 +61,7 @@ export interface PurchasingRecommendationDefaults {
 }
 
 export interface AutoDraftRecommendationSettings {
+  autoDraftMode?: "draft_po" | "review_only";
   includeOrderSoon?: boolean;
   skipOnOpenPo?: boolean;
   skipNoVendor?: boolean;
