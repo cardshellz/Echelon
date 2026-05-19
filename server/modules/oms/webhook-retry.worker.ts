@@ -33,6 +33,42 @@ let retryWorkerStartedAt: Date | null = null;
 let retryWorkerLastRunAt: Date | null = null;
 let retryWorkerLastSuccessAt: Date | null = null;
 let retryWorkerLastError: string | null = null;
+
+async function getSourceInboxReplayHeaders(
+  dbArg: any,
+  sourceInboxId: number | null | undefined,
+): Promise<Record<string, string>> {
+  const inboxId = Number(sourceInboxId);
+  if (!Number.isInteger(inboxId) || inboxId <= 0) return {};
+
+  const result = await dbArg.execute(sql`
+    SELECT headers, source_domain
+    FROM oms.webhook_inbox
+    WHERE id = ${inboxId}
+    LIMIT 1
+  `);
+  const row = result?.rows?.[0];
+  const headers = (row?.headers ?? {}) as Record<string, unknown>;
+  const replayHeaders: Record<string, string> = {};
+
+  for (const key of [
+    "x-shopify-shop-domain",
+    "x-shopify-topic",
+    "x-shopify-webhook-id",
+    "x-shopify-triggered-at",
+  ]) {
+    const value = headers[key];
+    if (typeof value === "string" && value.length > 0) {
+      replayHeaders[key] = value;
+    }
+  }
+
+  if (!replayHeaders["x-shopify-shop-domain"] && row?.source_domain) {
+    replayHeaders["x-shopify-shop-domain"] = String(row.source_domain);
+  }
+
+  return replayHeaders;
+}
 let retryWorkerLastSkippedAt: Date | null = null;
 let retryWorkerRunInFlight = false;
 let retryWorkerTimer: ReturnType<typeof setInterval> | null = null;
@@ -1469,6 +1505,7 @@ async function processPendingWebhooks() {
           ? "/api/shopify/webhooks"
           : "/api/oms/webhooks";
         const url = `http://127.0.0.1:${process.env.PORT || 5000}${basePath}/${item.topic}`;
+        const sourceHeaders = await getSourceInboxReplayHeaders(defaultDb, item.sourceInboxId);
         const payloadDomain = (item.payload as any)?.shop_domain || process.env.SHOPIFY_SHOP_DOMAIN || "echelon-wms.myshopify.com";
 
         const res = await fetch(url, {
@@ -1477,6 +1514,7 @@ async function processPendingWebhooks() {
             "Content-Type": "application/json",
             "x-internal-retry": secret,
             "x-shopify-shop-domain": payloadDomain,
+            ...sourceHeaders,
           },
           body: JSON.stringify(item.payload),
         });
