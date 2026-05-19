@@ -28,6 +28,9 @@ const mocks = vi.hoisted(() => ({
     select: vi.fn(),
   },
   runAutoDraftJob: vi.fn(),
+  purchasingService: {
+    createPOFromReorder: vi.fn(),
+  },
 }));
 
 vi.mock("../../../../routes/middleware", () => {
@@ -60,6 +63,7 @@ import {
 function buildApp(): Express {
   const app = express();
   app.use(express.json());
+  app.locals.services = { purchasing: mocks.purchasingService };
   registerPurchasingRecommendationRoutes(app);
   registerPurchasingRecommendationAdminRoutes(app);
   return app;
@@ -95,6 +99,12 @@ describe("purchasing recommendation routes", () => {
     mocks.db.execute.mockResolvedValue({ rows: [] });
     mocks.db.select.mockReturnValue({ from: vi.fn().mockResolvedValue([]) });
     mocks.runAutoDraftJob.mockResolvedValue(undefined);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+    });
+    mocks.purchasingService.createPOFromReorder.mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -106,6 +116,9 @@ describe("purchasing recommendation routes", () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(10);
     mocks.procurement.getReorderAnalysisData.mockResolvedValue([
       {
+        product_id: 1,
+        base_sku: "CRIT",
+        product_name: "Critical Product",
         total_pieces: 3,
         total_reserved_pieces: 1,
         total_outbound_pieces: 10,
@@ -115,6 +128,9 @@ describe("purchasing recommendation routes", () => {
         unit_cost_cents: 250,
       },
       {
+        product_id: 2,
+        base_sku: "IDLE",
+        product_name: "Idle Product",
         total_pieces: 200,
         total_reserved_pieces: 0,
         total_outbound_pieces: 1,
@@ -216,5 +232,68 @@ describe("purchasing recommendation routes", () => {
       triggeredByUser: "admin-user",
     });
     expect(body).toEqual({ message: "Auto-draft job started" });
+  });
+
+  it("uses the shared recommendation engine for direct auto-draft items", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 42,
+        variant_id: 420,
+        base_sku: "AUTO-1",
+        product_name: "Auto Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 5,
+        order_uom_level: 2,
+        preferred_vendor_id: 7,
+      },
+      {
+        product_id: 43,
+        variant_id: 430,
+        base_sku: "NO-VENDOR",
+        product_name: "No Vendor",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 5,
+        order_uom_level: 2,
+      },
+    ]);
+    mocks.purchasingService.createPOFromReorder.mockResolvedValue([{ id: 9 }]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run");
+
+    expect(status).toBe(200);
+    expect(mocks.purchasingService.createPOFromReorder).toHaveBeenCalledWith(
+      [
+        {
+          productId: 42,
+          productVariantId: 420,
+          suggestedQty: 1,
+          vendorId: 7,
+        },
+      ],
+      "admin-user",
+    );
+    expect(body).toMatchObject({
+      success: true,
+      count: 1,
+      itemsDrafted: 1,
+      recommendationSummary: {
+        actionableCount: 1,
+        skippedNoVendor: 1,
+      },
+    });
   });
 });

@@ -27,16 +27,16 @@ live operational observations.
 
 Started: 2026-05-16
 
-Current phase: Phase 7 - AP Financial Command Boundary
+Current phase: Phase 8 - Purchasing Recommendation Engine Foundation
 
 Current objective:
 
-- Centralize AP invoice and payment lifecycle mutations behind a shared command
-  vocabulary.
-- Keep public AP URLs stable while financial actions gain one service boundary
-  for validation, audit, idempotency, and retry semantics.
-- Finish financial state hardening before demand forecasting depends on AP,
-  landed-cost, and PO payment state.
+- Unify reorder analysis, purchasing KPIs, and auto-draft eligibility behind one
+  explainable recommendation engine.
+- Keep PO creation downstream of recommendation generation so autopilot can run
+  in review-only or draft-producing modes.
+- Make every recommendation and skip decision visible enough for the later
+  demand forecast engine to plug into this boundary.
 
 ## Baseline Decisions
 
@@ -1581,3 +1581,37 @@ Next step:
 - Finish validating this slice with the broader procurement/AP regression set,
   then close Phase 7 unless another concrete AP lifecycle duplicate or drift
   gap appears.
+
+### 2026-05-18 - Phase 8 Slice 1: Purchasing Recommendation Engine Foundation
+
+Scope:
+
+- Started Phase 8 after closing AP lifecycle hardening by adding a shared
+  `generatePurchasingRecommendations(...)` engine for reorder classification,
+  recommendation quantities, UOM rounding, vendor visibility, confidence, skip
+  reasons, and explanation text.
+- Wired purchasing KPIs, reorder analysis, the legacy direct auto-draft endpoint,
+  the purchasing dashboard read model, and the scheduled auto-draft job through
+  the shared engine instead of duplicating reorder math in each path.
+- Enriched the reorder read query with preferred vendor id/name, vendor unit
+  cost, and vendor lead time so recommendation output can explain vendor choice
+  and use vendor-specific lead time when present.
+- Kept PO creation downstream: the engine only emits recommendations and
+  actionable/skipped decisions; existing PO creation paths still own draft PO
+  mutation.
+- Added focused engine and route coverage for explainable order-now output,
+  exclusion skips, no-vendor auto-draft blocking, and direct auto-draft item
+  selection.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 8 by adding persistent recommendation run/audit detail or
+  review-only auto-draft mode, whichever is the next largest blocker to making
+  autopilot purchasing explainable.
