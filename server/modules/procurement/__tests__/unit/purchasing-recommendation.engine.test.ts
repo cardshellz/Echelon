@@ -73,6 +73,8 @@ describe("purchasing recommendation engine", () => {
         estimatedCostCents: 125,
         lastCostCents: 120,
       },
+      qualityControls: [],
+      autopilotBlockers: [],
       demandBasis: {
         lookbackDays: 30,
         periodUsagePieces: 60,
@@ -153,6 +155,13 @@ describe("purchasing recommendation engine", () => {
         autoDraftEligible: false,
         reason: "not_actionable",
       },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({
+          area: "vendor",
+          severity: "block",
+          code: "missing_vendor",
+        }),
+      ]),
       actionable: false,
     });
   });
@@ -271,7 +280,20 @@ describe("purchasing recommendation engine", () => {
         autoDraftEligible: false,
         reason: "medium_confidence_review",
         label: "Review before auto-draft",
+        detail: expect.stringContaining("Thin demand history"),
       },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({
+          area: "demand",
+          severity: "review",
+          code: "thin_history",
+        }),
+        expect.objectContaining({
+          area: "lead_time",
+          severity: "review",
+          code: "default_lead_time",
+        }),
+      ]),
       confidenceFactors: expect.arrayContaining([
         "Limited demand history in the lookback window.",
         "Lead time uses the default fallback.",
@@ -331,7 +353,15 @@ describe("purchasing recommendation engine", () => {
       qualityGate: {
         autoDraftEligible: false,
         reason: "medium_confidence_review",
+        detail: expect.stringContaining("Falling demand"),
       },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({
+          area: "demand",
+          severity: "review",
+          code: "falling_demand",
+        }),
+      ]),
       demandBasis: {
         demandQuality: "normal",
         demandTrend: "falling",
@@ -398,6 +428,18 @@ describe("purchasing recommendation engine", () => {
         estimatedCostCents: 225,
         lastCostCents: 225,
       },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({
+          area: "supplier_cost",
+          severity: "review",
+          code: "last_purchase_cost",
+        }),
+        expect.objectContaining({
+          area: "supplier_cost",
+          severity: "review",
+          code: "stale_supplier_cost",
+        }),
+      ]),
       confidenceFactors: expect.arrayContaining([
         "Preferred vendor cost uses last purchase fallback.",
         "Preferred vendor cost was last verified over 365 days ago.",

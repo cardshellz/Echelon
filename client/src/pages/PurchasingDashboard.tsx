@@ -47,6 +47,14 @@ interface RecommendationForecastProvenance {
   latestDemandAt?: string | null;
 }
 
+interface RecommendationQualityControl {
+  area: "demand" | "lead_time" | "supplier_cost" | "vendor";
+  severity: "review" | "block";
+  code: string;
+  label: string;
+  detail: string;
+}
+
 interface DashboardData {
   stockouts: number;
   orderNow: number;
@@ -91,6 +99,8 @@ interface DashboardData {
         preferredVendorName: string | null;
         explanation: string;
         forecastProvenance?: RecommendationForecastProvenance;
+        qualityControls?: RecommendationQualityControl[];
+        autopilotBlockers?: RecommendationQualityControl[];
       }>;
       skippedRecommendations?: Array<{
         sku: string;
@@ -128,6 +138,8 @@ interface AutoDraftRunHistoryItem {
     preferredVendorName: string | null;
     explanation: string;
     forecastProvenance?: RecommendationForecastProvenance;
+    qualityControls?: RecommendationQualityControl[];
+    autopilotBlockers?: RecommendationQualityControl[];
   } | null;
 }
 
@@ -212,6 +224,13 @@ function formatRecommendationForecast(provenance?: RecommendationForecastProvena
       : `${provenance.periodUsagePieces ?? 0} pcs`;
   const trend = provenance.demandTrend ? provenance.demandTrend.replace(/_/g, " ") : "trend n/a";
   return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}`;
+}
+
+function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
+  if (!controls?.length) return null;
+  const labels = controls.slice(0, 2).map((control) => control.label).join(", ");
+  const remainder = controls.length > 2 ? ` +${controls.length - 2} more` : "";
+  return `${controls.some((control) => control.severity === "block") ? "Blocked" : "Review"}: ${labels}${remainder}`;
 }
 
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
@@ -824,6 +843,11 @@ export default function PurchasingDashboard() {
                           <p className="text-[11px] text-muted-foreground mt-1 truncate">
                             {formatRecommendationForecast(item.forecastProvenance)}
                           </p>
+                          {formatQualityControlSummary(item.autopilotBlockers) ? (
+                            <p className="text-[11px] text-amber-700 mt-1 truncate">
+                              {formatQualityControlSummary(item.autopilotBlockers)}
+                            </p>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -857,6 +881,9 @@ export default function PurchasingDashboard() {
                               <div className="mt-1 truncate text-[11px]">
                                 <span className="font-mono font-semibold text-primary">{run.topActionableRecommendation.sku}</span>
                                 <span className="text-muted-foreground"> · {run.topActionableRecommendation.suggestedOrderQty} {run.topActionableRecommendation.orderUomLabel}</span>
+                                {formatQualityControlSummary(run.topActionableRecommendation.autopilotBlockers) ? (
+                                  <span className="text-amber-700"> - {formatQualityControlSummary(run.topActionableRecommendation.autopilotBlockers)}</span>
+                                ) : null}
                               </div>
                             ) : null}
                             {run.status === "error" && run.errorMessage ? (

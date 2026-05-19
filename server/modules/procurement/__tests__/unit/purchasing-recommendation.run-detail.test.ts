@@ -105,6 +105,18 @@ describe("purchasing recommendation run detail", () => {
         autoDraftEligible: false,
         reason: "medium_confidence_review",
       },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({
+          area: "lead_time",
+          severity: "review",
+          code: "product_lead_time_fallback",
+        }),
+        expect.objectContaining({
+          area: "supplier_cost",
+          severity: "review",
+          code: "missing_supplier_cost",
+        }),
+      ]),
     });
     expect(detail.skippedRecommendations[0]).toMatchObject({
       sku: "NO-VENDOR",
@@ -113,6 +125,13 @@ describe("purchasing recommendation run detail", () => {
         action: "assign_vendor",
         severity: "critical",
       },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({
+          area: "vendor",
+          severity: "block",
+          code: "missing_vendor",
+        }),
+      ]),
     });
   });
 });
