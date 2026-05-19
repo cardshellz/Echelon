@@ -38,10 +38,42 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
     expect(result.selectedChannel.channelId).toBe(7);
     expect(result.config.currentChannelId).toBe(7);
     expect(sql).toContain("INSERT INTO channels.channels");
-    expect(sql).toContain("sync_mode = 'dry_run'");
+    expect(sql).not.toContain("sync_mode = 'dry_run'");
     expect(sql).toContain("#- '{dropship,role}'");
     expect(sql).toContain("INSERT INTO dropship.dropship_audit_events");
     expect(sql).toContain("COMMIT");
+  });
+
+  it("does not count a marked marketplace sales channel as the current OMS source", async () => {
+    const { pool } = makePool(async (sql) => {
+      if (sql.includes("FROM channels.channels c")) {
+        return {
+          rows: [
+            makeChannelRow({
+              id: 9,
+              name: "Ebay",
+              type: "ebay",
+              provider: "ebay",
+              channel_role_marked: true,
+              channel_flag_marked: true,
+            }),
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const repository = new PgDropshipOmsChannelConfigRepository(pool);
+
+    const result = await repository.getOverview({ generatedAt: now });
+
+    expect(result.currentChannelId).toBeNull();
+    expect(result.currentChannelCount).toBe(0);
+    expect(result.channels[0]).toMatchObject({
+      channelId: 9,
+      type: "ebay",
+      provider: "ebay",
+      isDropshipOmsChannel: true,
+    });
   });
 
   it("atomically clears previous OMS markers before marking the selected active channel", async () => {

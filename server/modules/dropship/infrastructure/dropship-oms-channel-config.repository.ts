@@ -148,7 +148,7 @@ async function loadOverviewWithClient(
 ): Promise<DropshipOmsChannelConfigOverview> {
   const channels = await listChannelOptionsWithClient(client);
   const activeMarkedChannels = channels.filter((channel) => (
-    channel.status === "active" && channel.isDropshipOmsChannel
+    isValidDropshipOmsSource(channel)
   ));
   return {
     currentChannelId: activeMarkedChannels.length === 1 ? activeMarkedChannels[0]!.channelId : null,
@@ -156,6 +156,13 @@ async function loadOverviewWithClient(
     channels,
     generatedAt,
   };
+}
+
+function isValidDropshipOmsSource(channel: DropshipOmsChannelOption): boolean {
+  return channel.status === "active"
+    && channel.type === DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE
+    && channel.provider === DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER
+    && channel.isDropshipOmsChannel;
 }
 
 async function listChannelOptionsWithClient(client: PoolClient): Promise<DropshipOmsChannelOption[]> {
@@ -218,13 +225,9 @@ async function ensureDefaultDropshipOmsChannel(client: PoolClient, now: Date): P
      ),
      inserted AS (
        INSERT INTO channels.channels
-         (name, type, provider, status, is_default, priority,
-          allocation_pct, allocation_fixed_qty, sync_enabled, sync_mode,
-          sweep_interval_minutes, shipping_config, created_at, updated_at)
+         (name, type, provider, status, shipping_config, created_at, updated_at)
        SELECT
-         $1, $2, $3, 'active', 0, 0,
-         NULL, NULL, false, 'dry_run',
-         15, '{}'::jsonb, $4, $4
+         $1, $2, $3, 'active', '{}'::jsonb, $4, $4
        WHERE NOT EXISTS (SELECT 1 FROM existing)
        RETURNING id
      ),
@@ -236,8 +239,6 @@ async function ensureDefaultDropshipOmsChannel(client: PoolClient, now: Date): P
      )
      UPDATE channels.channels c
      SET status = 'active',
-         sync_enabled = false,
-         sync_mode = 'dry_run',
          updated_at = $4
      FROM selected
      WHERE c.id = selected.id
