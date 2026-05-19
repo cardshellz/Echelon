@@ -12,6 +12,10 @@ import {
   type PurchasingRecommendationProductMeta,
   type PurchasingRecommendationRawRow,
 } from "../modules/procurement/purchasing-recommendation.engine";
+import {
+  buildPurchasingRecommendationRunDetail,
+  type PurchasingRecommendationRunPoMutation,
+} from "../modules/procurement/purchasing-recommendation.run-detail";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import {
   purchaseOrders,
@@ -45,6 +49,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
   let skippedNoVendor = 0;
   let skippedOnOrder = 0;
   let skippedExcluded = 0;
+  let recommendationRunDetail: ReturnType<typeof buildPurchasingRecommendationRunDetail> | null = null;
 
   try {
     // Get settings
@@ -121,6 +126,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
     }
 
     const today = new Date().toISOString().split("T")[0];
+    const poMutations: PurchasingRecommendationRunPoMutation[] = [];
 
     // Process each vendor group
     for (const [vendorId, items] of vendorGroups) {
@@ -170,6 +176,12 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
           await storage.bulkCreatePurchaseOrderLines(newLines as any);
           linesAdded += newLines.length;
         }
+        poMutations.push({
+          vendorId,
+          poId,
+          action: "updated",
+          linesAdded: newLines.length,
+        });
       } else {
         // Create new draft PO
         const po = await purchasing.createPO({
@@ -208,11 +220,23 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
           await storage.bulkCreatePurchaseOrderLines(lineData as any);
           linesAdded += lineData.length;
         }
+        poMutations.push({
+          vendorId,
+          poId,
+          action: "created",
+          linesAdded: lineData.length,
+        });
       }
 
       // Recalculate totals
       await purchasing.recalculateTotals(poId);
     }
+
+    recommendationRunDetail = buildPurchasingRecommendationRunDetail(recommendationResult, {
+      lookbackDays,
+      settings,
+      poMutations,
+    });
 
     // Mark success
     await storage.updateAutoDraftRun(runRecord.id, {
@@ -224,6 +248,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
       skippedNoVendor,
       skippedOnOrder,
       skippedExcluded,
+      summaryJson: recommendationRunDetail,
       finishedAt: new Date(),
     });
 
@@ -240,6 +265,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
       skippedNoVendor,
       skippedOnOrder,
       skippedExcluded,
+      summaryJson: recommendationRunDetail,
       finishedAt: new Date(),
     });
     throw error;

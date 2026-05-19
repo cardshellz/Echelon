@@ -12,6 +12,10 @@ import {
   type PurchasingRecommendationProductMeta,
   type PurchasingRecommendationRawRow,
 } from "./purchasing-recommendation.engine";
+import {
+  buildPurchasingRecommendationRunDetail,
+  type PurchasingRecommendationRunPoMutation,
+} from "./purchasing-recommendation.run-detail";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
 async function loadPurchasingRecommendationDefaults(): Promise<PurchasingRecommendationDefaults> {
@@ -115,8 +119,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
   });
 
   app.post("/api/purchasing/auto-draft-run", requirePermission("inventory", "adjust"), async (req, res) => {
+    let runRecord: any | null = null;
     try {
       const { purchasing } = app.locals.services;
+      const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
+      runRecord = await storage.createAutoDraftRun({
+        triggeredBy: "manual",
+        triggeredByUser: userId,
+        status: "running",
+      });
       const configuredLookback = await storage.getVelocityLookbackDays();
       const rawRows = await storage.getReorderAnalysisData(configuredLookback);
       const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
@@ -138,25 +149,60 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           vendorId: item.preferredVendorId ?? undefined,
         }));
 
+      let result: any[] = [];
+      const poMutations: PurchasingRecommendationRunPoMutation[] = [];
       if (itemsToOrder.length > 0) {
-        const result = await purchasing.createPOFromReorder(itemsToOrder, req.session?.user?.id || 'SYSTEM');
-        res.json({
-          success: true,
-          pos: result,
-          count: result.length,
-          itemsDrafted: itemsToOrder.length,
-          recommendationSummary: recommendationResult.summary,
-        });
-      } else {
-        res.json({
-          success: true,
-          count: 0,
-          itemsDrafted: 0,
-          recommendationSummary: recommendationResult.summary,
-        });
+        result = await purchasing.createPOFromReorder(itemsToOrder, userId);
+        for (const po of result) {
+          if (po?.vendorId && po?.id) {
+            poMutations.push({
+              vendorId: Number(po.vendorId),
+              poId: Number(po.id),
+              action: "upserted",
+              linesAdded: 0,
+            });
+          }
+        }
       }
 
-    } catch (error) {
+      const runDetail = buildPurchasingRecommendationRunDetail(recommendationResult, {
+        lookbackDays: configuredLookback,
+        settings,
+        poMutations,
+      });
+
+      await storage.updateAutoDraftRun(runRecord.id, {
+        status: "success",
+        itemsAnalyzed: rawRows.length,
+        posCreated: result.length,
+        posUpdated: 0,
+        linesAdded: itemsToOrder.length,
+        skippedNoVendor: recommendationResult.summary.skippedNoVendor,
+        skippedOnOrder: recommendationResult.summary.skippedOnOrder,
+        skippedExcluded: recommendationResult.summary.excludedCount,
+        summaryJson: runDetail,
+        finishedAt: new Date(),
+      });
+
+      res.json({
+        success: true,
+        pos: result,
+        count: result.length,
+        itemsDrafted: itemsToOrder.length,
+        recommendationSummary: recommendationResult.summary,
+        recommendationRun: {
+          id: runRecord.id,
+          detail: runDetail,
+        },
+      });
+    } catch (error: any) {
+      if (runRecord?.id) {
+        await storage.updateAutoDraftRun(runRecord.id, {
+          status: "error",
+          errorMessage: error?.message || "Unknown error",
+          finishedAt: new Date(),
+        });
+      }
       console.error("Error running auto-draft:", error);
       res.status(500).json({ error: "Failed to run auto-draft" });
     }

@@ -1874,6 +1874,8 @@ export const procurementMethods: IProcurementStorage = {
         linesAdded: lastAutoDraftRun.linesAdded || lastAutoDraftRun.lines_added || 0,
         skippedNoVendor: lastAutoDraftRun.skippedNoVendor || lastAutoDraftRun.skipped_no_vendor || 0,
         skippedExcluded: lastAutoDraftRun.skippedExcluded || lastAutoDraftRun.skipped_excluded || 0,
+        skippedOnOrder: lastAutoDraftRun.skippedOnOrder || lastAutoDraftRun.skipped_on_order || 0,
+        summaryJson: lastAutoDraftRun.summaryJson || lastAutoDraftRun.summary_json || null,
       } : null,
     };
   },

@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
     deleteReorderExclusionRule: vi.fn(),
     setProductReorderExcluded: vi.fn(),
     getLatestAutoDraftRun: vi.fn(),
+    createAutoDraftRun: vi.fn(),
+    updateAutoDraftRun: vi.fn(),
     getAutoDraftSettings: vi.fn(),
     updateAutoDraftSettings: vi.fn(),
   },
@@ -104,6 +106,8 @@ describe("purchasing recommendation routes", () => {
       skipOnOpenPo: true,
       skipNoVendor: true,
     });
+    mocks.procurement.createAutoDraftRun.mockResolvedValue({ id: 1001 });
+    mocks.procurement.updateAutoDraftRun.mockResolvedValue(undefined);
     mocks.purchasingService.createPOFromReorder.mockResolvedValue([]);
   });
 
@@ -286,6 +290,39 @@ describe("purchasing recommendation routes", () => {
       ],
       "admin-user",
     );
+    expect(mocks.procurement.createAutoDraftRun).toHaveBeenCalledWith({
+      triggeredBy: "manual",
+      triggeredByUser: "admin-user",
+      status: "running",
+    });
+    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
+      1001,
+      expect.objectContaining({
+        status: "success",
+        itemsAnalyzed: 2,
+        linesAdded: 1,
+        skippedNoVendor: 1,
+        summaryJson: expect.objectContaining({
+          recommendationSummary: expect.objectContaining({
+            actionableCount: 1,
+            skippedNoVendor: 1,
+          }),
+          actionableRecommendations: [
+            expect.objectContaining({
+              sku: "AUTO-1",
+              suggestedOrderQty: 1,
+              explanation: expect.any(String),
+            }),
+          ],
+          skippedRecommendations: [
+            expect.objectContaining({
+              sku: "NO-VENDOR",
+              skippedReason: "no_vendor",
+            }),
+          ],
+        }),
+      }),
+    );
     expect(body).toMatchObject({
       success: true,
       count: 1,
@@ -293,6 +330,14 @@ describe("purchasing recommendation routes", () => {
       recommendationSummary: {
         actionableCount: 1,
         skippedNoVendor: 1,
+      },
+      recommendationRun: {
+        id: 1001,
+        detail: {
+          recommendationSummary: {
+            actionableCount: 1,
+          },
+        },
       },
     });
   });
