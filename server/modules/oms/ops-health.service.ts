@@ -95,6 +95,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   const [
     flowReconciliationIssues,
     failedInbox,
+    wmsPendingItemsWithoutShipment,
     staleProcessingInbox,
     deadRetries,
     staleDueRetries,
@@ -120,6 +121,52 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         FROM oms.webhook_inbox
         WHERE status IN ('failed', 'dead')
         ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.order_items oi
+        JOIN wms.orders wo ON wo.id = oi.order_id
+        WHERE COALESCE(oi.requires_shipping, 1) <> 0
+          AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          AND oi.status NOT IN ('cancelled', 'completed')
+          AND wo.warehouse_status NOT IN ('cancelled')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+            WHERE osi.order_item_id = oi.id
+              AND os.status NOT IN ('voided', 'cancelled')
+          )
+      `,
+      sql`
+        SELECT oi.id AS wms_item_id,
+               oi.order_id AS wms_order_id,
+               wo.order_number,
+               wo.warehouse_status,
+               oi.oms_order_line_id,
+               oi.sku,
+               oi.quantity,
+               oi.fulfilled_quantity,
+               oi.status,
+               oi.requires_shipping
+        FROM wms.order_items oi
+        JOIN wms.orders wo ON wo.id = oi.order_id
+        WHERE COALESCE(oi.requires_shipping, 1) <> 0
+          AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          AND oi.status NOT IN ('cancelled', 'completed')
+          AND wo.warehouse_status NOT IN ('cancelled')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+            WHERE osi.order_item_id = oi.id
+              AND os.status NOT IN ('voided', 'cancelled')
+          )
+        ORDER BY wo.updated_at DESC NULLS LAST, oi.id DESC
         LIMIT 10
       `,
     ),
@@ -475,6 +522,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: wmsWithoutShipment.count,
       message: "Ready WMS orders have no outbound shipment row.",
       sample: wmsWithoutShipment.sample,
+    }),
+    issue({
+      code: "WMS_PENDING_ITEM_WITHOUT_SHIPMENT",
+      severity: "critical",
+      count: wmsPendingItemsWithoutShipment.count,
+      message: "Shippable WMS order items are pending but not attached to an active shipment.",
+      sample: wmsPendingItemsWithoutShipment.sample,
     }),
     issue({
       code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",

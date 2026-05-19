@@ -564,13 +564,13 @@ export class WmsSyncService {
       existingItems.map((item) => item.omsOrderLineId).filter((id): id is number => id != null),
     );
     const missingLines = omsLines.filter((line) => !existingOmsLineIds.has(line.id));
-    if (missingLines.length === 0) return { insertedItems: 0, updatedShipments: 0 };
 
     const insertedItems: {
       id: number;
       omsOrderLineId: number | null;
       productId: number | null;
       quantity: number;
+      requiresShipping: boolean;
     }[] = [];
 
     for (const line of missingLines) {
@@ -609,9 +609,75 @@ export class WmsSyncService {
           omsOrderLineId: wmsOrderItems.omsOrderLineId,
           productId: wmsOrderItems.productId,
           quantity: wmsOrderItems.quantity,
+          requiresShipping: wmsOrderItems.requiresShipping,
         });
-      if (inserted) insertedItems.push(inserted);
+      if (inserted) {
+        insertedItems.push({
+          ...inserted,
+          requiresShipping: Number((inserted as any).requiresShipping ?? 0) !== 0,
+        });
+      }
     }
+
+    const orphanItemResult = await db.execute<{
+      id: number;
+      oms_order_line_id: number | null;
+      product_id: number | null;
+      quantity: number;
+    }>(sql`
+      SELECT
+        oi.id,
+        oi.oms_order_line_id,
+        oi.product_id,
+        GREATEST(COALESCE(oi.quantity, 0) - COALESCE(oi.fulfilled_quantity, 0), 0)::int AS quantity
+      FROM wms.order_items oi
+      WHERE oi.order_id = ${wmsOrderId}
+        AND COALESCE(oi.requires_shipping, 1) <> 0
+        AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+        AND oi.status NOT IN ('cancelled', 'completed')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+          WHERE osi.order_item_id = oi.id
+            AND os.status NOT IN ('voided', 'cancelled')
+        )
+    `);
+    const shippableShipmentItems = (orphanItemResult.rows ?? [])
+      .map((row) => ({
+        id: Number(row.id),
+        omsOrderLineId: row.oms_order_line_id == null ? null : Number(row.oms_order_line_id),
+        productId: row.product_id == null ? null : Number(row.product_id),
+        quantity: Number(row.quantity ?? 0),
+      }))
+      .filter((item) => Number.isInteger(item.id) && item.id > 0 && item.quantity > 0);
+
+    if (shippableShipmentItems.length === 0) {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+
+    await db.execute(sql`
+      UPDATE wms.orders w
+         SET warehouse_status = CASE
+               WHEN w.warehouse_status IN ('cancelled') THEN w.warehouse_status
+               ELSE 'ready'
+             END,
+             item_count = agg.item_count,
+             unit_count = agg.unit_count,
+             picked_count = agg.picked_count,
+             updated_at = NOW()
+        FROM (
+          SELECT
+            order_id,
+            COUNT(*)::int AS item_count,
+            COALESCE(SUM(quantity), 0)::int AS unit_count,
+            COALESCE(SUM(picked_quantity), 0)::int AS picked_count
+          FROM wms.order_items
+          WHERE order_id = ${wmsOrderId}
+          GROUP BY order_id
+        ) agg
+       WHERE w.id = agg.order_id
+    `);
 
     const plannedShipments = await db
       .select({ id: outboundShipments.id })
@@ -619,7 +685,7 @@ export class WmsSyncService {
       .where(and(eq(outboundShipments.orderId, wmsOrderId), eq(outboundShipments.status, "planned")));
     let updatedShipments = 0;
     for (const shipment of plannedShipments) {
-      for (const item of insertedItems) {
+      for (const item of shippableShipmentItems) {
         const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
         if (!line || line.requiresShipping === false) continue;
         await db.insert(outboundShipmentItems).values({
@@ -639,6 +705,36 @@ export class WmsSyncService {
       } catch (err: any) {
         console.error(
           `[WMS Sync] failed to enqueue ShipStation retry for reconciled shipment ${shipment.id}: ${err?.message ?? String(err)}`,
+        );
+      }
+    }
+
+    if (updatedShipments === 0) {
+      const [wmsOrder] = await db
+        .select({ channelId: wmsOrders.channelId })
+        .from(wmsOrders)
+        .where(eq(wmsOrders.id, wmsOrderId))
+        .limit(1);
+      const created = await createShipmentForOrder(
+        db,
+        wmsOrderId,
+        wmsOrder?.channelId ?? null,
+        shippableShipmentItems.map((item) => ({
+          id: item.id,
+          quantity: item.quantity ?? 0,
+          productVariantId: item.productId,
+        })),
+      );
+      updatedShipments += shippableShipmentItems.length;
+      try {
+        await enqueueShipStationShipmentPushRetry(
+          db,
+          created.shipmentId,
+          new Error("WMS line reconciliation created shipment for added order item"),
+        );
+      } catch (err: any) {
+        console.error(
+          `[WMS Sync] failed to enqueue ShipStation retry for reconciled shipment ${created.shipmentId}: ${err?.message ?? String(err)}`,
         );
       }
     }

@@ -18,4 +18,30 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/db\.insert\(outboundShipmentItems\)\.values/);
     expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationShipmentPushRetry/);
   });
+
+  it("creates a new shipment when missing shippable lines have no planned shipment", () => {
+    expect(WMS_SYNC_SRC).toMatch(/const orphanItemResult = await db\.execute/);
+    expect(WMS_SYNC_SRC).toMatch(/const shippableShipmentItems = \(orphanItemResult\.rows/);
+    expect(WMS_SYNC_SRC).toMatch(/if \(updatedShipments === 0\)/);
+    expect(WMS_SYNC_SRC).toMatch(/createShipmentForOrder\(/);
+    expect(WMS_SYNC_SRC).toMatch(/WMS line reconciliation created shipment for added order item/);
+  });
+
+  it("repairs existing pending WMS items that are not on an active shipment", () => {
+    expect(WMS_SYNC_SRC).toMatch(/FROM wms\.order_items oi/);
+    expect(WMS_SYNC_SRC).toMatch(/os\.status NOT IN \('voided', 'cancelled'\)/);
+    expect(WMS_SYNC_SRC).not.toMatch(/if \(missingLines\.length === 0\) return/);
+  });
+
+  it("reopens WMS work when reconciliation adds shippable demand", () => {
+    expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders[\s\S]*ELSE 'ready'/);
+  });
+
+  it("recomputes WMS aggregate counts after reconciliation changes order items", () => {
+    expect(WMS_SYNC_SRC).toMatch(/item_count = agg\.item_count/);
+    expect(WMS_SYNC_SRC).toMatch(/unit_count = agg\.unit_count/);
+    expect(WMS_SYNC_SRC).toMatch(/picked_count = agg\.picked_count/);
+    expect(WMS_SYNC_SRC).toMatch(/COUNT\(\*\)::int AS item_count/);
+    expect(WMS_SYNC_SRC).toMatch(/COALESCE\(SUM\(quantity\), 0\)::int AS unit_count/);
+  });
 });
