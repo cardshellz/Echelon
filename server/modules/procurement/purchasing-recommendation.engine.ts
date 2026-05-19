@@ -15,6 +15,13 @@ export type PurchasingRecommendationSkipReason =
 
 export type PurchasingRecommendationConfidence = "low" | "medium" | "high";
 export type PurchasingRecommendationDemandQuality = "no_recent_demand" | "thin_history" | "normal";
+export type PurchasingRecommendationDemandTrend =
+  | "not_available"
+  | "no_recent_demand"
+  | "new_demand"
+  | "rising"
+  | "stable"
+  | "falling";
 export type PurchasingRecommendationLeadTimeSource = "vendor_product" | "product" | "default";
 export type PurchasingRecommendationSafetyStockSource = "product" | "default";
 export type PurchasingRecommendationOrderUomSource = "variant" | "default_each";
@@ -36,6 +43,10 @@ export interface PurchasingRecommendationRawRow {
   total_pieces?: number | string | null;
   total_reserved_pieces?: number | string | null;
   total_outbound_pieces?: number | string | null;
+  previous_outbound_pieces?: number | string | null;
+  demand_order_count?: number | string | null;
+  demand_active_days?: number | string | null;
+  latest_demand_at?: string | Date | null;
   on_order_pieces?: number | string | null;
   open_po_count?: number | string | null;
   earliest_expected?: string | Date | null;
@@ -134,8 +145,13 @@ export interface PurchasingRecommendationItem {
   demandBasis: {
     lookbackDays: number;
     periodUsagePieces: number;
+    priorPeriodUsagePieces: number | null;
     avgDailyUsagePieces: number;
     demandQuality: PurchasingRecommendationDemandQuality;
+    demandTrend: PurchasingRecommendationDemandTrend;
+    demandOrderCount: number | null;
+    demandActiveDays: number | null;
+    latestDemandAt: string | Date | null;
   };
   leadTimeBasis: {
     leadTimeDays: number;
@@ -148,8 +164,13 @@ export interface PurchasingRecommendationItem {
     demandSource: "recent_order_velocity";
     demandWindowDays: number;
     demandQuality: PurchasingRecommendationDemandQuality;
+    demandTrend: PurchasingRecommendationDemandTrend;
     periodUsagePieces: number;
+    priorPeriodUsagePieces: number | null;
     avgDailyUsagePieces: number;
+    demandOrderCount: number | null;
+    demandActiveDays: number | null;
+    latestDemandAt: string | Date | null;
     leadTimeSource: PurchasingRecommendationLeadTimeSource;
     safetyStockSource: PurchasingRecommendationSafetyStockSource;
     orderUomSource: PurchasingRecommendationOrderUomSource;
@@ -343,17 +364,22 @@ function buildExplanation(input: {
 
 function buildConfidence(input: {
   demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
   leadTimeSource: PurchasingRecommendationLeadTimeSource;
   hasVendor: boolean;
 }): PurchasingRecommendationConfidence {
   if (input.demandQuality === "no_recent_demand") return "low";
   if (input.demandQuality === "thin_history") return "medium";
+  if (input.demandTrend === "new_demand" || input.demandTrend === "falling") return "medium";
   if (!input.hasVendor || input.leadTimeSource === "default") return "medium";
   return "high";
 }
 
 function buildConfidenceFactors(input: {
   demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
+  demandOrderCount: number | null;
+  demandActiveDays: number | null;
   leadTimeSource: PurchasingRecommendationLeadTimeSource;
   safetyStockSource: PurchasingRecommendationSafetyStockSource;
   hasVendor: boolean;
@@ -367,6 +393,22 @@ function buildConfidenceFactors(input: {
     factors.push("Limited demand history in the lookback window.");
   } else {
     factors.push("Recent demand history is sufficient for velocity-based forecasting.");
+  }
+
+  if (input.demandOrderCount !== null || input.demandActiveDays !== null) {
+    factors.push(
+      `Demand sample includes ${input.demandOrderCount ?? 0} order${input.demandOrderCount === 1 ? "" : "s"} across ${input.demandActiveDays ?? 0} active day${input.demandActiveDays === 1 ? "" : "s"}.`,
+    );
+  }
+
+  if (input.demandTrend === "new_demand") {
+    factors.push("Demand is new versus the prior lookback window.");
+  } else if (input.demandTrend === "rising") {
+    factors.push("Demand is rising versus the prior lookback window.");
+  } else if (input.demandTrend === "falling") {
+    factors.push("Demand is falling versus the prior lookback window.");
+  } else if (input.demandTrend === "stable") {
+    factors.push("Demand is stable versus the prior lookback window.");
   }
 
   if (input.leadTimeSource === "vendor_product") {
@@ -394,10 +436,32 @@ function buildConfidenceFactors(input: {
   return factors;
 }
 
-function classifyDemandQuality(periodUsage: number, lookbackDays: number): PurchasingRecommendationDemandQuality {
+function classifyDemandQuality(
+  periodUsage: number,
+  lookbackDays: number,
+  demandOrderCount: number | null,
+  demandActiveDays: number | null,
+): PurchasingRecommendationDemandQuality {
   if (periodUsage <= 0) return "no_recent_demand";
+  if ((demandOrderCount !== null && demandOrderCount <= 1) || (demandActiveDays !== null && demandActiveDays <= 1)) {
+    return "thin_history";
+  }
   if (periodUsage < 3 || lookbackDays < 14) return "thin_history";
   return "normal";
+}
+
+function classifyDemandTrend(
+  periodUsage: number,
+  priorPeriodUsage: number | null,
+): PurchasingRecommendationDemandTrend {
+  if (periodUsage <= 0) return "no_recent_demand";
+  if (priorPeriodUsage === null) return "not_available";
+  if (priorPeriodUsage <= 0) return "new_demand";
+
+  const ratio = periodUsage / priorPeriodUsage;
+  if (ratio >= 1.5) return "rising";
+  if (ratio <= 0.5) return "falling";
+  return "stable";
 }
 
 function buildReviewSignal(input: {
@@ -490,6 +554,10 @@ export function generatePurchasingRecommendations(
     const totalOnHand = asNumber(row.total_pieces);
     const totalReserved = asNumber(row.total_reserved_pieces);
     const periodUsage = asNumber(row.total_outbound_pieces);
+    const priorPeriodUsage = row.previous_outbound_pieces == null ? null : asNumber(row.previous_outbound_pieces);
+    const demandOrderCount = row.demand_order_count == null ? null : asNumber(row.demand_order_count);
+    const demandActiveDays = row.demand_active_days == null ? null : asNumber(row.demand_active_days);
+    const latestDemandAt = row.latest_demand_at ?? null;
     const onOrderPieces = asNumber(row.on_order_pieces);
     const available = totalOnHand - totalReserved;
     const avgDailyUsage = lookbackDays > 0 ? periodUsage / lookbackDays : 0;
@@ -538,7 +606,8 @@ export function generatePurchasingRecommendations(
         ? null
         : asNumber(row.estimated_cost_cents ?? row.unit_cost_cents);
     const hasVendor = Boolean(preferredVendorId);
-    const demandQuality = classifyDemandQuality(periodUsage, lookbackDays);
+    const demandQuality = classifyDemandQuality(periodUsage, lookbackDays, demandOrderCount, demandActiveDays);
+    const demandTrend = classifyDemandTrend(periodUsage, priorPeriodUsage);
 
     let skippedReason: PurchasingRecommendationSkipReason | null = null;
     if (isExcluded(row, meta, rules)) {
@@ -623,8 +692,13 @@ export function generatePurchasingRecommendations(
       demandBasis: {
         lookbackDays,
         periodUsagePieces: periodUsage,
+        priorPeriodUsagePieces: priorPeriodUsage,
         avgDailyUsagePieces: Math.round(avgDailyUsage * 100) / 100,
         demandQuality,
+        demandTrend,
+        demandOrderCount,
+        demandActiveDays,
+        latestDemandAt,
       },
       leadTimeBasis: {
         leadTimeDays,
@@ -637,19 +711,28 @@ export function generatePurchasingRecommendations(
         demandSource: "recent_order_velocity",
         demandWindowDays: lookbackDays,
         demandQuality,
+        demandTrend,
         periodUsagePieces: periodUsage,
+        priorPeriodUsagePieces: priorPeriodUsage,
         avgDailyUsagePieces: Math.round(avgDailyUsage * 100) / 100,
+        demandOrderCount,
+        demandActiveDays,
+        latestDemandAt,
         leadTimeSource,
         safetyStockSource,
         orderUomSource,
       },
       confidence: buildConfidence({
         demandQuality,
+        demandTrend,
         leadTimeSource,
         hasVendor,
       }),
       confidenceFactors: buildConfidenceFactors({
         demandQuality,
+        demandTrend,
+        demandOrderCount,
+        demandActiveDays,
         leadTimeSource,
         safetyStockSource,
         hasVendor,

@@ -14,6 +14,10 @@ describe("purchasing recommendation engine", () => {
           total_pieces: 12,
           total_reserved_pieces: 2,
           total_outbound_pieces: 60,
+          previous_outbound_pieces: 50,
+          demand_order_count: 12,
+          demand_active_days: 10,
+          latest_demand_at: "2026-05-18T12:00:00.000Z",
           on_order_pieces: 0,
           open_po_count: 0,
           lead_time_days: 14,
@@ -47,14 +51,21 @@ describe("purchasing recommendation engine", () => {
       confidence: "high",
       confidenceFactors: expect.arrayContaining([
         "Recent demand history is sufficient for velocity-based forecasting.",
+        "Demand sample includes 12 orders across 10 active days.",
+        "Demand is stable versus the prior lookback window.",
         "Vendor-specific lead time is configured.",
         "Product safety stock is configured.",
       ]),
       demandBasis: {
         lookbackDays: 30,
         periodUsagePieces: 60,
+        priorPeriodUsagePieces: 50,
         avgDailyUsagePieces: 2,
         demandQuality: "normal",
+        demandTrend: "stable",
+        demandOrderCount: 12,
+        demandActiveDays: 10,
+        latestDemandAt: "2026-05-18T12:00:00.000Z",
       },
       leadTimeBasis: {
         leadTimeDays: 5,
@@ -67,6 +78,11 @@ describe("purchasing recommendation engine", () => {
         demandSource: "recent_order_velocity",
         demandWindowDays: 30,
         demandQuality: "normal",
+        demandTrend: "stable",
+        priorPeriodUsagePieces: 50,
+        demandOrderCount: 12,
+        demandActiveDays: 10,
+        latestDemandAt: "2026-05-18T12:00:00.000Z",
         leadTimeSource: "vendor_product",
         safetyStockSource: "product",
         orderUomSource: "variant",
@@ -231,6 +247,51 @@ describe("purchasing recommendation engine", () => {
         safetyStockSource: "default",
         orderUomSource: "default_each",
       },
+    });
+  });
+
+  it("downgrades confidence when current demand is falling against the prior period", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 60,
+          variant_id: 601,
+          base_sku: "FALLING",
+          product_name: "Falling Demand Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 60,
+          previous_outbound_pieces: 150,
+          demand_order_count: 15,
+          demand_active_days: 12,
+          on_order_pieces: 0,
+          lead_time_days: 3,
+          vendor_lead_time_days: 2,
+          safety_stock_days: 1,
+          order_uom_units: 10,
+          preferred_vendor_id: 10,
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      confidence: "medium",
+      demandBasis: {
+        demandQuality: "normal",
+        demandTrend: "falling",
+        priorPeriodUsagePieces: 150,
+      },
+      forecastProvenance: {
+        demandTrend: "falling",
+        priorPeriodUsagePieces: 150,
+        demandOrderCount: 15,
+        demandActiveDays: 12,
+      },
+      confidenceFactors: expect.arrayContaining([
+        "Demand sample includes 15 orders across 12 active days.",
+        "Demand is falling versus the prior lookback window.",
+      ]),
     });
   });
 });

@@ -1272,6 +1272,10 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
         COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
         COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
+        COALESCE(vel.previous_outbound_pieces, 0)::bigint AS previous_outbound_pieces,
+        COALESCE(vel.demand_order_count, 0)::int AS demand_order_count,
+        COALESCE(vel.demand_active_days, 0)::int AS demand_active_days,
+        vel.latest_demand_at,
         inv.variant_count,
         order_uom.variant_id,
         order_uom.units_per_variant AS order_uom_units,
@@ -1298,14 +1302,43 @@ export const procurementMethods: IProcurementStorage = {
       ) inv ON inv.product_id = p.id
       LEFT JOIN (
         SELECT pv.product_id,
-               SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
+               SUM(
+                 CASE
+                   WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                   THEN oi.quantity * pv.units_per_variant
+                   ELSE 0
+                 END
+               ) AS total_outbound_pieces,
+               SUM(
+                 CASE
+                   WHEN o.order_placed_at <= NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                    AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays * 2})
+                   THEN oi.quantity * pv.units_per_variant
+                   ELSE 0
+                 END
+               ) AS previous_outbound_pieces,
+               COUNT(DISTINCT CASE
+                 WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                 THEN oi.order_id
+                 ELSE NULL
+               END) AS demand_order_count,
+               COUNT(DISTINCT CASE
+                 WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                 THEN DATE(o.order_placed_at)
+                 ELSE NULL
+               END) AS demand_active_days,
+               MAX(CASE
+                 WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                 THEN o.order_placed_at
+                 ELSE NULL
+               END) AS latest_demand_at
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
         JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'
           AND oi.status != 'cancelled'
-          AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+          AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays * 2})
         GROUP BY pv.product_id
       ) vel ON vel.product_id = p.id
       LEFT JOIN LATERAL (

@@ -1772,3 +1772,32 @@ Next step:
 
 - Continue Phase 8 by hardening demand forecast input quality and seasonality
   signals before moving purchasing recommendations closer to autopilot.
+
+### 2026-05-19 - Phase 8 Slice 7: Demand Input Quality and Trend Signals
+
+Scope:
+
+- Extended the reorder analysis source query to return prior-period demand,
+  order-count sample size, active demand days, and latest demand timestamp.
+- Added demand trend classification to the purchasing recommendation engine so
+  recommendations can distinguish stable, rising, falling, new, and no-recent
+  demand against the prior lookback window.
+- Tightened demand quality classification so single-order or single-day demand
+  samples are treated as thin history even when total units are non-zero.
+- Folded demand sample size and prior-period trend into confidence factors and
+  confidence scoring before stronger autopilot behavior is enabled.
+- Persisted the expanded demand basis in forecast provenance and surfaced the
+  sample/trend summary in reorder analysis.
+- Expanded focused engine coverage for stable demand provenance and falling
+  demand confidence downgrade.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+
+Next step:
+
+- Continue Phase 8 by hardening supplier cost and lead-time quality controls so
+  recommendation confidence can account for stale or provisional vendor data.
