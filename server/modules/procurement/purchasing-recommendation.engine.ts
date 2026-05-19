@@ -25,6 +25,12 @@ export type PurchasingRecommendationDemandTrend =
 export type PurchasingRecommendationLeadTimeSource = "vendor_product" | "product" | "default";
 export type PurchasingRecommendationSafetyStockSource = "product" | "default";
 export type PurchasingRecommendationOrderUomSource = "variant" | "default_each";
+export type PurchasingRecommendationSupplierCostSource =
+  | "vendor_unit_cost_mills"
+  | "vendor_unit_cost_cents"
+  | "last_purchase_cost"
+  | "missing";
+export type PurchasingRecommendationSupplierCostQuality = "current" | "stale" | "unverified" | "missing";
 export type PurchasingRecommendationReviewAction =
   | "create_po"
   | "assign_vendor"
@@ -57,9 +63,14 @@ export interface PurchasingRecommendationRawRow {
   order_uom_level?: number | string | null;
   order_uom_sku?: string | null;
   last_received_at?: string | Date | null;
+  vendor_product_id?: number | string | null;
   preferred_vendor_id?: number | string | null;
   preferred_vendor_name?: string | null;
   estimated_cost_cents?: number | string | null;
+  estimated_cost_mills?: number | string | null;
+  last_cost_cents?: number | string | null;
+  vendor_product_last_purchased_at?: string | Date | null;
+  vendor_product_updated_at?: string | Date | null;
   unit_cost_cents?: number | string | null;
 }
 
@@ -131,6 +142,15 @@ export interface PurchasingRecommendationItem {
   preferredVendorId: number | null;
   preferredVendorName: string | null;
   estimatedCostCents: number | null;
+  supplierBasis: {
+    vendorProductId: number | null;
+    costSource: PurchasingRecommendationSupplierCostSource;
+    costQuality: PurchasingRecommendationSupplierCostQuality;
+    estimatedCostCents: number | null;
+    lastCostCents: number | null;
+    lastPurchasedAt: string | Date | null;
+    vendorProductUpdatedAt: string | Date | null;
+  };
   currentSupply: {
     onHandPieces: number;
     reservedPieces: number;
@@ -229,6 +249,11 @@ function asNumber(value: unknown, fallback = 0): number {
 function asPositiveInt(value: unknown, fallback: number): number {
   const parsed = Math.trunc(asNumber(value, fallback));
   return parsed > 0 ? parsed : fallback;
+}
+
+function asPositiveNumberOrNull(value: unknown): number | null {
+  const parsed = asNumber(value, NaN);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function getMeta(
@@ -366,12 +391,15 @@ function buildConfidence(input: {
   demandQuality: PurchasingRecommendationDemandQuality;
   demandTrend: PurchasingRecommendationDemandTrend;
   leadTimeSource: PurchasingRecommendationLeadTimeSource;
+  costQuality: PurchasingRecommendationSupplierCostQuality;
+  costSource: PurchasingRecommendationSupplierCostSource;
   hasVendor: boolean;
 }): PurchasingRecommendationConfidence {
   if (input.demandQuality === "no_recent_demand") return "low";
   if (input.demandQuality === "thin_history") return "medium";
   if (input.demandTrend === "new_demand" || input.demandTrend === "falling") return "medium";
-  if (!input.hasVendor || input.leadTimeSource === "default") return "medium";
+  if (!input.hasVendor || input.leadTimeSource !== "vendor_product") return "medium";
+  if (input.costQuality !== "current" || input.costSource === "last_purchase_cost") return "medium";
   return "high";
 }
 
@@ -382,6 +410,8 @@ function buildConfidenceFactors(input: {
   demandActiveDays: number | null;
   leadTimeSource: PurchasingRecommendationLeadTimeSource;
   safetyStockSource: PurchasingRecommendationSafetyStockSource;
+  costSource: PurchasingRecommendationSupplierCostSource;
+  costQuality: PurchasingRecommendationSupplierCostQuality;
   hasVendor: boolean;
   orderUomSource: PurchasingRecommendationOrderUomSource;
 }): string[] {
@@ -415,8 +445,29 @@ function buildConfidenceFactors(input: {
     factors.push("Vendor-specific lead time is configured.");
   } else if (input.leadTimeSource === "product") {
     factors.push("Product lead time is configured.");
+    if (input.hasVendor) factors.push("Preferred vendor-specific lead time is missing.");
   } else {
     factors.push("Lead time uses the default fallback.");
+  }
+
+  if (input.hasVendor) {
+    if (input.costSource === "missing") {
+      factors.push("Preferred vendor cost is missing.");
+    } else if (input.costSource === "last_purchase_cost") {
+      factors.push("Preferred vendor cost uses last purchase fallback.");
+    } else if (input.costSource === "vendor_unit_cost_mills") {
+      factors.push("Preferred vendor cost uses mills precision.");
+    } else {
+      factors.push("Preferred vendor cost is configured in cents.");
+    }
+
+    if (input.costQuality === "current") {
+      factors.push("Preferred vendor cost was verified recently.");
+    } else if (input.costQuality === "stale") {
+      factors.push("Preferred vendor cost was last verified over 365 days ago.");
+    } else if (input.costQuality === "unverified") {
+      factors.push("Preferred vendor cost age could not be verified.");
+    }
   }
 
   if (input.safetyStockSource === "product") {
@@ -434,6 +485,61 @@ function buildConfidenceFactors(input: {
   }
 
   return factors;
+}
+
+function mostRecentDate(...values: Array<string | Date | null | undefined>): Date | null {
+  let latest: Date | null = null;
+  for (const value of values) {
+    if (!value) continue;
+    const parsed = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(parsed.getTime())) continue;
+    if (!latest || parsed.getTime() > latest.getTime()) latest = parsed;
+  }
+  return latest;
+}
+
+function resolveSupplierCost(input: {
+  estimatedCostMills: number | null;
+  estimatedCostCents: number | null;
+  unitCostCents: number | null;
+  lastCostCents: number | null;
+  lastPurchasedAt: string | Date | null;
+  vendorProductUpdatedAt: string | Date | null;
+}): {
+  estimatedCostCents: number | null;
+  costSource: PurchasingRecommendationSupplierCostSource;
+  costQuality: PurchasingRecommendationSupplierCostQuality;
+} {
+  let estimatedCostCents: number | null = null;
+  let costSource: PurchasingRecommendationSupplierCostSource = "missing";
+
+  if (input.estimatedCostMills !== null) {
+    estimatedCostCents = Math.round(input.estimatedCostMills / 100);
+    costSource = "vendor_unit_cost_mills";
+  } else if (input.estimatedCostCents !== null || input.unitCostCents !== null) {
+    estimatedCostCents = input.estimatedCostCents ?? input.unitCostCents;
+    costSource = "vendor_unit_cost_cents";
+  } else if (input.lastCostCents !== null) {
+    estimatedCostCents = input.lastCostCents;
+    costSource = "last_purchase_cost";
+  }
+
+  if (estimatedCostCents === null || costSource === "missing") {
+    return { estimatedCostCents: null, costSource: "missing", costQuality: "missing" };
+  }
+
+  const verificationDate = mostRecentDate(input.lastPurchasedAt, input.vendorProductUpdatedAt);
+  if (!verificationDate) {
+    return { estimatedCostCents, costSource, costQuality: "unverified" };
+  }
+
+  const ageMs = Date.now() - verificationDate.getTime();
+  const staleMs = 365 * 24 * 60 * 60 * 1000;
+  return {
+    estimatedCostCents,
+    costSource,
+    costQuality: ageMs > staleMs ? "stale" : "current",
+  };
 }
 
 function classifyDemandQuality(
@@ -601,10 +707,17 @@ export function generatePurchasingRecommendations(
     });
     const preferredVendorId = row.preferred_vendor_id == null ? null : asNumber(row.preferred_vendor_id);
     const preferredVendorName = row.preferred_vendor_name ?? null;
-    const estimatedCostCents =
-      row.estimated_cost_cents == null && row.unit_cost_cents == null
-        ? null
-        : asNumber(row.estimated_cost_cents ?? row.unit_cost_cents);
+    const vendorProductId = row.vendor_product_id == null ? null : asNumber(row.vendor_product_id);
+    const lastCostCents = asPositiveNumberOrNull(row.last_cost_cents);
+    const supplierCost = resolveSupplierCost({
+      estimatedCostMills: asPositiveNumberOrNull(row.estimated_cost_mills),
+      estimatedCostCents: asPositiveNumberOrNull(row.estimated_cost_cents),
+      unitCostCents: asPositiveNumberOrNull(row.unit_cost_cents),
+      lastCostCents,
+      lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,
+      vendorProductUpdatedAt: row.vendor_product_updated_at ?? null,
+    });
+    const estimatedCostCents = supplierCost.estimatedCostCents;
     const hasVendor = Boolean(preferredVendorId);
     const demandQuality = classifyDemandQuality(periodUsage, lookbackDays, demandOrderCount, demandActiveDays);
     const demandTrend = classifyDemandTrend(periodUsage, priorPeriodUsage);
@@ -678,6 +791,15 @@ export function generatePurchasingRecommendations(
       preferredVendorId,
       preferredVendorName,
       estimatedCostCents,
+      supplierBasis: {
+        vendorProductId,
+        costSource: supplierCost.costSource,
+        costQuality: supplierCost.costQuality,
+        estimatedCostCents,
+        lastCostCents,
+        lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,
+        vendorProductUpdatedAt: row.vendor_product_updated_at ?? null,
+      },
       currentSupply: {
         onHandPieces: totalOnHand,
         reservedPieces: totalReserved,
@@ -726,6 +848,8 @@ export function generatePurchasingRecommendations(
         demandQuality,
         demandTrend,
         leadTimeSource,
+        costQuality: supplierCost.costQuality,
+        costSource: supplierCost.costSource,
         hasVendor,
       }),
       confidenceFactors: buildConfidenceFactors({
@@ -735,6 +859,8 @@ export function generatePurchasingRecommendations(
         demandActiveDays,
         leadTimeSource,
         safetyStockSource,
+        costSource: supplierCost.costSource,
+        costQuality: supplierCost.costQuality,
         hasVendor,
         orderUomSource,
       }),

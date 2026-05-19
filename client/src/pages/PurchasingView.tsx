@@ -78,6 +78,15 @@ interface ReorderItem {
     safetyStockSource: "product" | "default";
     orderUomSource: "variant" | "default_each";
   };
+  supplierBasis?: {
+    vendorProductId: number | null;
+    costSource: "vendor_unit_cost_mills" | "vendor_unit_cost_cents" | "last_purchase_cost" | "missing";
+    costQuality: "current" | "stale" | "unverified" | "missing";
+    estimatedCostCents: number | null;
+    lastCostCents: number | null;
+    lastPurchasedAt?: string | null;
+    vendorProductUpdatedAt?: string | null;
+  };
   actionable?: boolean;
   skippedReason?: string | null;
   explanation?: string;
@@ -230,7 +239,15 @@ export default function PurchasingView() {
       provenance.demandOrderCount != null && provenance.demandActiveDays != null
         ? `${provenance.demandOrderCount} orders/${provenance.demandActiveDays}d`
         : `${provenance.periodUsagePieces} pcs/${provenance.demandWindowDays}d`;
-    return `${demandLabel} · ${sampleLabel}${trendLabel ? ` · ${trendLabel}` : ""} · ${leadLabel}`;
+    const costLabel =
+      item.supplierBasis?.costQuality === "current"
+        ? "cost current"
+        : item.supplierBasis?.costQuality === "stale"
+          ? "cost stale"
+          : item.supplierBasis?.costQuality === "unverified"
+            ? "cost unverified"
+            : "cost missing";
+    return `${demandLabel} · ${sampleLabel}${trendLabel ? ` · ${trendLabel}` : ""} · ${leadLabel} · ${costLabel}`;
   };
 
   const confidenceClass = (confidence?: string) => {

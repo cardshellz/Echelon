@@ -25,9 +25,12 @@ describe("purchasing recommendation engine", () => {
           safety_stock_days: 2,
           order_uom_units: 10,
           order_uom_level: 3,
+          vendor_product_id: 770,
           preferred_vendor_id: 77,
           preferred_vendor_name: "Vendor",
-          estimated_cost_cents: 125,
+          estimated_cost_mills: 12500,
+          last_cost_cents: 120,
+          vendor_product_updated_at: new Date().toISOString(),
         },
       ],
       defaults: { leadTimeDays: 14, safetyStockDays: 7 },
@@ -54,8 +57,17 @@ describe("purchasing recommendation engine", () => {
         "Demand sample includes 12 orders across 10 active days.",
         "Demand is stable versus the prior lookback window.",
         "Vendor-specific lead time is configured.",
+        "Preferred vendor cost uses mills precision.",
+        "Preferred vendor cost was verified recently.",
         "Product safety stock is configured.",
       ]),
+      supplierBasis: {
+        vendorProductId: 770,
+        costSource: "vendor_unit_cost_mills",
+        costQuality: "current",
+        estimatedCostCents: 125,
+        lastCostCents: 120,
+      },
       demandBasis: {
         lookbackDays: 30,
         periodUsagePieces: 60,
@@ -291,6 +303,51 @@ describe("purchasing recommendation engine", () => {
       confidenceFactors: expect.arrayContaining([
         "Demand sample includes 15 orders across 12 active days.",
         "Demand is falling versus the prior lookback window.",
+      ]),
+    });
+  });
+
+  it("downgrades confidence and exposes stale last-purchase supplier cost fallback", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 70,
+          variant_id: 701,
+          base_sku: "STALE-COST",
+          product_name: "Stale Supplier Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 60,
+          previous_outbound_pieces: 55,
+          demand_order_count: 12,
+          demand_active_days: 10,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 4,
+          safety_stock_days: 2,
+          order_uom_units: 10,
+          vendor_product_id: 7010,
+          preferred_vendor_id: 10,
+          last_cost_cents: 225,
+          vendor_product_last_purchased_at: "2024-01-01T00:00:00.000Z",
+          vendor_product_updated_at: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      confidence: "medium",
+      estimatedCostCents: 225,
+      supplierBasis: {
+        vendorProductId: 7010,
+        costSource: "last_purchase_cost",
+        costQuality: "stale",
+        estimatedCostCents: 225,
+        lastCostCents: 225,
+      },
+      confidenceFactors: expect.arrayContaining([
+        "Preferred vendor cost uses last purchase fallback.",
+        "Preferred vendor cost was last verified over 365 days ago.",
       ]),
     });
   });

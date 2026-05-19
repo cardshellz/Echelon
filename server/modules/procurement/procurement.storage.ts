@@ -1265,9 +1265,14 @@ export const procurementMethods: IProcurementStorage = {
         p.name AS product_name,
         p.lead_time_days,
         p.safety_stock_days,
+        preferred_vendor.vendor_product_id,
         preferred_vendor.vendor_id AS preferred_vendor_id,
         preferred_vendor.vendor_name AS preferred_vendor_name,
         preferred_vendor.unit_cost_cents AS estimated_cost_cents,
+        preferred_vendor.unit_cost_mills AS estimated_cost_mills,
+        preferred_vendor.last_cost_cents,
+        preferred_vendor.last_purchased_at AS vendor_product_last_purchased_at,
+        preferred_vendor.updated_at AS vendor_product_updated_at,
         preferred_vendor.lead_time_days AS vendor_lead_time_days,
         COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
         COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
@@ -1350,9 +1355,14 @@ export const procurementMethods: IProcurementStorage = {
       ) order_uom ON true
       LEFT JOIN LATERAL (
         SELECT
+          vp.id AS vendor_product_id,
           vp.vendor_id,
           v.name AS vendor_name,
           vp.unit_cost_cents,
+          vp.unit_cost_mills,
+          vp.last_cost_cents,
+          vp.last_purchased_at,
+          vp.updated_at,
           vp.lead_time_days,
           vp.product_variant_id
         FROM procurement.vendor_products vp
