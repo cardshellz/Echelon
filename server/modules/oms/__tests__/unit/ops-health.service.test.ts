@@ -16,6 +16,9 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(
       /code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"[\s\S]*severity: "critical"/,
     );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "WMS_PENDING_ITEM_WITHOUT_SHIPMENT"[\s\S]*severity: "critical"/,
+    );
   });
 
   it("only reports missing shipments and ShipStation pushes for shippable work", () => {
@@ -26,6 +29,12 @@ describe("ops-health.service :: fulfillment alert severity", () => {
 
   it("treats voided-only ShipStation shipments as missing shipment work", () => {
     expect(OPS_HEALTH_SRC).toMatch(/WHERE os\.order_id = wo\.id\s+AND os\.status <> 'voided'/);
+  });
+
+  it("surfaces pending WMS items that are not attached to active shipments", () => {
+    expect(OPS_HEALTH_SRC).toMatch(/WMS_PENDING_ITEM_WITHOUT_SHIPMENT/);
+    expect(OPS_HEALTH_SRC).toMatch(/FROM wms\.order_items oi/);
+    expect(OPS_HEALTH_SRC).toMatch(/os\.status NOT IN \('voided', 'cancelled'\)/);
   });
 
   it("surfaces on-hold shipments as explicit warehouse review warnings", () => {

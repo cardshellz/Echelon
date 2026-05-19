@@ -1379,6 +1379,34 @@ export function registerOmsWebhooks(
               customer_email = ${shopifyOrder.email || null}
             WHERE id = ${wmsOrderId}
           `);
+
+          if (wmsSyncService) {
+            await ensureOmsOrderQueuedForWmsSync(
+              wmsSyncService,
+              existing.id,
+              shopifyOrder.name || externalOrderId,
+            );
+          } else {
+            await enqueueOmsWmsSyncRetry(
+              db,
+              existing.id,
+              new Error("orders/updated could not reconcile WMS lines because wmsSyncService is unavailable"),
+            );
+          }
+        } else if (shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid") {
+          if (wmsSyncService) {
+            await ensureOmsOrderQueuedForWmsSync(
+              wmsSyncService,
+              existing.id,
+              shopifyOrder.name || externalOrderId,
+            );
+          } else {
+            await enqueueOmsWmsSyncRetry(
+              db,
+              existing.id,
+              new Error("orders/updated saw paid shippable work but wmsSyncService is unavailable"),
+            );
+          }
         }
       }
 
