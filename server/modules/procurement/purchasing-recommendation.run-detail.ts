@@ -40,6 +40,9 @@ function increment(map: Record<string, number>, key: string | null | undefined) 
 function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const demandQualityCounts: Record<string, number> = {};
   const demandTrendCounts: Record<string, number> = {};
+  const shortWindowDemandQualityCounts: Record<string, number> = {};
+  const shortWindowDemandTrendCounts: Record<string, number> = {};
+  const demandAccelerationSignalCounts: Record<string, number> = {};
   const forecastMethodCounts: Record<string, number> = {};
   const qualityControlCounts: Record<string, number> = {};
   const qualityControlAreaCounts: Record<string, number> = {};
@@ -56,6 +59,9 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     const provenance = item.forecastProvenance;
     increment(demandQualityCounts, provenance.demandQuality);
     increment(demandTrendCounts, provenance.demandTrend);
+    increment(shortWindowDemandQualityCounts, provenance.demandWindowDiagnostics.shortWindow.demandQuality);
+    increment(shortWindowDemandTrendCounts, provenance.demandWindowDiagnostics.shortWindow.demandTrend);
+    increment(demandAccelerationSignalCounts, provenance.demandWindowDiagnostics.accelerationSignal);
     increment(forecastMethodCounts, provenance.forecastMethod);
     for (const control of item.qualityControls) {
       increment(qualityControlCounts, control.code);
@@ -84,6 +90,9 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     forecastMethodCounts,
     demandQualityCounts,
     demandTrendCounts,
+    shortWindowDemandQualityCounts,
+    shortWindowDemandTrendCounts,
+    demandAccelerationSignalCounts,
     qualityControlCounts,
     qualityControlAreaCounts,
     qualityControlSeverityCounts,

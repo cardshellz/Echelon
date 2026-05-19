@@ -1253,6 +1253,7 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getReorderAnalysisData(lookbackDays: number): Promise<any[]> {
+    const shortWindowDays = Math.max(1, Math.min(7, Math.trunc(Number(lookbackDays) || 30)));
     // Boundary note: reads inventory_levels directly instead of atpService.getAtpPerVariant().
     // This is intentional — the reorder query needs bulk aggregation across ALL products in one
     // query (N+1 atpService calls would be prohibitively slow), and it needs per-location detail
@@ -1281,6 +1282,12 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(vel.demand_order_count, 0)::int AS demand_order_count,
         COALESCE(vel.demand_active_days, 0)::int AS demand_active_days,
         vel.latest_demand_at,
+        ${shortWindowDays}::int AS short_window_days,
+        COALESCE(vel.short_outbound_pieces, 0)::bigint AS short_outbound_pieces,
+        COALESCE(vel.previous_short_outbound_pieces, 0)::bigint AS previous_short_outbound_pieces,
+        COALESCE(vel.short_demand_order_count, 0)::int AS short_demand_order_count,
+        COALESCE(vel.short_demand_active_days, 0)::int AS short_demand_active_days,
+        vel.short_latest_demand_at,
         inv.variant_count,
         order_uom.variant_id,
         order_uom.units_per_variant AS order_uom_units,
@@ -1327,16 +1334,46 @@ export const procurementMethods: IProcurementStorage = {
                  THEN oi.order_id
                  ELSE NULL
                END) AS demand_order_count,
-               COUNT(DISTINCT CASE
-                 WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
-                 THEN DATE(o.order_placed_at)
-                 ELSE NULL
-               END) AS demand_active_days,
-               MAX(CASE
-                 WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
-                 THEN o.order_placed_at
-                 ELSE NULL
-               END) AS latest_demand_at
+                COUNT(DISTINCT CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                  THEN DATE(o.order_placed_at)
+                  ELSE NULL
+                END) AS demand_active_days,
+                MAX(CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                  THEN o.order_placed_at
+                  ELSE NULL
+                END) AS latest_demand_at,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${shortWindowDays})
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS short_outbound_pieces,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at <= NOW() - MAKE_INTERVAL(days => ${shortWindowDays})
+                     AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${shortWindowDays * 2})
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS previous_short_outbound_pieces,
+                COUNT(DISTINCT CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${shortWindowDays})
+                  THEN oi.order_id
+                  ELSE NULL
+                END) AS short_demand_order_count,
+                COUNT(DISTINCT CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${shortWindowDays})
+                  THEN DATE(o.order_placed_at)
+                  ELSE NULL
+                END) AS short_demand_active_days,
+                MAX(CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${shortWindowDays})
+                  THEN o.order_placed_at
+                  ELSE NULL
+                END) AS short_latest_demand_at
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
         JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true

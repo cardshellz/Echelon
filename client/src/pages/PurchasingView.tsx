@@ -87,6 +87,17 @@ interface ReorderItem {
     leadTimeSource: "vendor_product" | "product" | "default";
     safetyStockSource: "product" | "default";
     orderUomSource: "variant" | "default_each";
+    demandWindowDiagnostics?: {
+      shortWindow?: {
+        lookbackDays?: number;
+        periodUsagePieces?: number;
+        avgDailyUsagePieces?: number;
+        demandQuality?: "no_recent_demand" | "thin_history" | "normal";
+        demandTrend?: "not_available" | "no_recent_demand" | "new_demand" | "rising" | "stable" | "falling";
+      };
+      accelerationRatio?: number | null;
+      accelerationSignal?: "not_available" | "accelerating" | "steady" | "decelerating";
+    };
   };
   supplierBasis?: {
     vendorProductId: number | null;
@@ -267,6 +278,13 @@ export default function PurchasingView() {
         ? `${provenance.demandOrderCount} orders/${provenance.demandActiveDays}d`
         : `${provenance.periodUsagePieces} pcs/${provenance.demandWindowDays}d`;
     const usageLabel = `${provenance.avgDailyUsagePieces.toLocaleString(undefined, { maximumFractionDigits: 2 })} pcs/day`;
+    const shortWindow = provenance.demandWindowDiagnostics?.shortWindow;
+    const shortWindowLabel = shortWindow
+      ? ` - ${shortWindow.lookbackDays ?? 7}d ${Number(shortWindow.avgDailyUsagePieces ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}/day`
+      : "";
+    const accelerationLabel = provenance.demandWindowDiagnostics?.accelerationSignal
+      ? ` - ${provenance.demandWindowDiagnostics.accelerationSignal.replace(/_/g, " ")}`
+      : "";
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -275,7 +293,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${trendLabel ? ` - ${trendLabel}` : ""} - ${leadLabel} - ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel} - ${leadLabel} - ${costLabel}`;
   };
 
   const getAutopilotBlockers = (item: ReorderItem) => {

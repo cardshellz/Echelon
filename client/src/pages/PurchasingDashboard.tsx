@@ -29,6 +29,9 @@ interface ForecastDiagnostics {
   forecastMethodCounts: Record<string, number>;
   demandQualityCounts: Record<string, number>;
   demandTrendCounts: Record<string, number>;
+  shortWindowDemandQualityCounts?: Record<string, number>;
+  shortWindowDemandTrendCounts?: Record<string, number>;
+  demandAccelerationSignalCounts?: Record<string, number>;
   qualityControlCounts?: Record<string, number>;
   qualityControlAreaCounts?: Record<string, number>;
   qualityControlSeverityCounts?: Record<string, number>;
@@ -52,6 +55,17 @@ interface RecommendationForecastProvenance {
   demandOrderCount?: number | null;
   demandActiveDays?: number | null;
   latestDemandAt?: string | null;
+  demandWindowDiagnostics?: {
+    shortWindow?: {
+      lookbackDays?: number;
+      periodUsagePieces?: number;
+      avgDailyUsagePieces?: number;
+      demandQuality?: string;
+      demandTrend?: string;
+    };
+    accelerationRatio?: number | null;
+    accelerationSignal?: string;
+  };
 }
 
 interface RecommendationQualityControl {
@@ -232,7 +246,9 @@ function formatRecommendationForecast(provenance?: RecommendationForecastProvena
       ? `${provenance.demandOrderCount} orders/${provenance.demandActiveDays} active days`
       : `${provenance.periodUsagePieces ?? 0} pcs`;
   const trend = provenance.demandTrend ? provenance.demandTrend.replace(/_/g, " ") : "trend n/a";
-  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}`;
+  const acceleration = provenance.demandWindowDiagnostics?.accelerationSignal;
+  const accelerationLabel = acceleration ? ` - ${acceleration.replace(/_/g, " ")}` : "";
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}`;
 }
 
 function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
@@ -824,6 +840,7 @@ export default function PurchasingDashboard() {
                       { label: "Needs review", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0 },
                       { label: "Forecast model", value: formatForecastDiagnostics(lastRunForecastDiagnostics) },
                       { label: "Demand trend", value: topCountLabel(lastRunForecastDiagnostics?.demandTrendCounts) },
+                      { label: "Short-window signal", value: topCountLabel(lastRunForecastDiagnostics?.demandAccelerationSignalCounts) },
                       { label: "Top quality blocker", value: topCountLabel(lastRunForecastDiagnostics?.autopilotBlockerCounts), warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Blocked items", value: lastRunForecastDiagnostics?.autopilotBlockerItemCount ?? 0, warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },

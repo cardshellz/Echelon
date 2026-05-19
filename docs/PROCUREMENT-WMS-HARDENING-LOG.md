@@ -2047,3 +2047,34 @@ Next step:
 - Continue Phase 9 by adding the first non-mutating forecast engine improvement,
   likely side-by-side short/standard window demand diagnostics or seasonality
   candidates, before allowing the recommendation math itself to change.
+
+### 2026-05-19 - Phase 9 Slice 5: Demand Window Diagnostics
+
+Scope:
+
+- Added a non-mutating short-window demand diagnostic beside the existing
+  standard lookback forecast so operators can see short-term acceleration or
+  deceleration before the recommendation math changes.
+- Extended the procurement reorder data query with seven-day demand usage,
+  prior seven-day usage, order count, active demand days, and latest short-window
+  demand timestamp.
+- Added forecast-engine window comparison output with acceleration ratio and
+  signal while preserving the existing standard-window forecast basis as the
+  only input to reorder-point math.
+- Persisted short-window demand quality, short-window trend, and acceleration
+  signal counts in saved run-detail forecast diagnostics.
+- Surfaced the acceleration signal in purchasing forecast basis text and
+  dashboard run summaries so operators can compare standard demand quality with
+  current short-term movement.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+
+Next step:
+
+- Continue Phase 9 by adding seasonality or longer-baseline candidate
+  diagnostics, still read-only, before deciding whether the PO recommendation
+  engine should use anything beyond the current standard velocity model.

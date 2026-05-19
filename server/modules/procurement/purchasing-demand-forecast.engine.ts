@@ -8,6 +8,12 @@ export type PurchasingDemandForecastTrend =
   | "falling";
 export type PurchasingDemandForecastSource = "recent_order_velocity";
 export type PurchasingDemandForecastMethod = "recent_order_velocity_v1";
+export type PurchasingDemandForecastWindowLabel = "standard" | "short";
+export type PurchasingDemandForecastAccelerationSignal =
+  | "not_available"
+  | "accelerating"
+  | "steady"
+  | "decelerating";
 
 export interface PurchasingDemandForecastInput {
   lookbackDays: number | string | null | undefined;
@@ -31,6 +37,17 @@ export interface PurchasingDemandForecastBasis {
   demandOrderCount: number | null;
   demandActiveDays: number | null;
   latestDemandAt: string | Date | null;
+}
+
+export interface PurchasingDemandForecastWindowSnapshot extends PurchasingDemandForecastBasis {
+  label: PurchasingDemandForecastWindowLabel;
+}
+
+export interface PurchasingDemandForecastWindowDiagnostics {
+  standardWindow: PurchasingDemandForecastWindowSnapshot;
+  shortWindow: PurchasingDemandForecastWindowSnapshot;
+  accelerationRatio: number | null;
+  accelerationSignal: PurchasingDemandForecastAccelerationSignal;
 }
 
 function asNumber(value: unknown, fallback = 0): number {
@@ -114,5 +131,53 @@ export function buildPurchasingDemandForecastBasis(
     demandOrderCount,
     demandActiveDays,
     latestDemandAt: input.latestDemandAt ?? null,
+  };
+}
+
+function toWindowSnapshot(
+  label: PurchasingDemandForecastWindowLabel,
+  basis: PurchasingDemandForecastBasis,
+): PurchasingDemandForecastWindowSnapshot {
+  return {
+    label,
+    ...basis,
+  };
+}
+
+function classifyAccelerationSignal(input: {
+  standardAvgDailyUsagePieces: number;
+  shortAvgDailyUsagePieces: number;
+}): {
+  accelerationRatio: number | null;
+  accelerationSignal: PurchasingDemandForecastAccelerationSignal;
+} {
+  if (input.standardAvgDailyUsagePieces <= 0 && input.shortAvgDailyUsagePieces <= 0) {
+    return { accelerationRatio: null, accelerationSignal: "not_available" };
+  }
+  if (input.standardAvgDailyUsagePieces <= 0 && input.shortAvgDailyUsagePieces > 0) {
+    return { accelerationRatio: null, accelerationSignal: "accelerating" };
+  }
+
+  const ratio = input.shortAvgDailyUsagePieces / input.standardAvgDailyUsagePieces;
+  const roundedRatio = Math.round(ratio * 100) / 100;
+  if (ratio >= 1.5) return { accelerationRatio: roundedRatio, accelerationSignal: "accelerating" };
+  if (ratio <= 0.5) return { accelerationRatio: roundedRatio, accelerationSignal: "decelerating" };
+  return { accelerationRatio: roundedRatio, accelerationSignal: "steady" };
+}
+
+export function buildPurchasingDemandForecastWindowDiagnostics(input: {
+  standardWindow: PurchasingDemandForecastBasis;
+  shortWindow: PurchasingDemandForecastBasis;
+}): PurchasingDemandForecastWindowDiagnostics {
+  const acceleration = classifyAccelerationSignal({
+    standardAvgDailyUsagePieces: input.standardWindow.avgDailyUsagePieces,
+    shortAvgDailyUsagePieces: input.shortWindow.avgDailyUsagePieces,
+  });
+
+  return {
+    standardWindow: toWindowSnapshot("standard", input.standardWindow),
+    shortWindow: toWindowSnapshot("short", input.shortWindow),
+    accelerationRatio: acceleration.accelerationRatio,
+    accelerationSignal: acceleration.accelerationSignal,
   };
 }
