@@ -45,6 +45,11 @@ describe("purchasing recommendation engine", () => {
       preferredVendorId: 77,
       estimatedCostCents: 125,
       confidence: "high",
+      reviewSignal: {
+        action: "create_po",
+        severity: "critical",
+        label: "Create PO",
+      },
       actionable: true,
       skippedReason: null,
     });
@@ -74,6 +79,10 @@ describe("purchasing recommendation engine", () => {
     expect(result.skippedItems[0]).toMatchObject({
       productId: 20,
       skippedReason: "excluded",
+      reviewSignal: {
+        action: "review_exclusion",
+        severity: "info",
+      },
       actionable: false,
     });
   });
@@ -105,9 +114,52 @@ describe("purchasing recommendation engine", () => {
       suggestedOrderQty: 2,
       actionable: false,
       skippedReason: "no_vendor",
+      reviewSignal: {
+        action: "assign_vendor",
+        severity: "critical",
+        label: "Assign preferred vendor",
+      },
     });
     expect(result.summary).toMatchObject({
       skippedNoVendor: 1,
+      actionableCount: 0,
+    });
+  });
+
+  it("explains recommendations skipped because open PO supply covers demand", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 10,
+      rows: [
+        {
+          product_id: 40,
+          base_sku: "ON-ORDER",
+          product_name: "On Order Product",
+          total_pieces: 1,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 20,
+          on_order_pieces: 20,
+          open_po_count: 2,
+          lead_time_days: 2,
+          safety_stock_days: 1,
+          order_uom_units: 5,
+          order_uom_level: 2,
+          preferred_vendor_id: 7,
+        },
+      ],
+      autoDraftSettings: { skipOnOpenPo: true },
+    });
+
+    expect(result.items[0]).toMatchObject({
+      status: "on_order",
+      actionable: false,
+      skippedReason: "already_on_order",
+      reviewSignal: {
+        action: "review_open_po",
+        severity: "info",
+      },
+    });
+    expect(result.summary).toMatchObject({
+      skippedOnOrder: 1,
       actionableCount: 0,
     });
   });

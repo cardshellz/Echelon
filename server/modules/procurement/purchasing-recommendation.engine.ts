@@ -14,6 +14,14 @@ export type PurchasingRecommendationSkipReason =
   | "zero_suggested_quantity";
 
 export type PurchasingRecommendationConfidence = "low" | "medium" | "high";
+export type PurchasingRecommendationReviewAction =
+  | "create_po"
+  | "assign_vendor"
+  | "review_open_po"
+  | "review_exclusion"
+  | "monitor"
+  | "none";
+export type PurchasingRecommendationReviewSeverity = "critical" | "warning" | "info";
 
 export interface PurchasingRecommendationRawRow {
   product_id: number | string;
@@ -131,6 +139,12 @@ export interface PurchasingRecommendationItem {
   };
   confidence: PurchasingRecommendationConfidence;
   explanation: string;
+  reviewSignal: {
+    action: PurchasingRecommendationReviewAction;
+    severity: PurchasingRecommendationReviewSeverity;
+    label: string;
+    detail: string;
+  };
   actionable: boolean;
   skippedReason: PurchasingRecommendationSkipReason | null;
 }
@@ -320,6 +334,74 @@ function buildConfidence(input: {
   return "high";
 }
 
+function buildReviewSignal(input: {
+  status: PurchasingRecommendationStatus;
+  skippedReason: PurchasingRecommendationSkipReason | null;
+  suggestedOrderQty: number;
+  suggestedOrderPieces: number;
+  orderUomLabel: string;
+  openPoCount: number;
+  onOrderPieces: number;
+  actionable: boolean;
+}): PurchasingRecommendationItem["reviewSignal"] {
+  const demandSeverity: PurchasingRecommendationReviewSeverity =
+    input.status === "stockout" || input.status === "order_now" ? "critical" : "warning";
+
+  if (input.actionable) {
+    return {
+      action: "create_po",
+      severity: demandSeverity,
+      label: "Create PO",
+      detail: `Create or review a PO for ${input.suggestedOrderQty} ${input.orderUomLabel} (${input.suggestedOrderPieces} pieces).`,
+    };
+  }
+
+  switch (input.skippedReason) {
+    case "no_vendor":
+      return {
+        action: "assign_vendor",
+        severity: demandSeverity,
+        label: "Assign preferred vendor",
+        detail: "Add a preferred vendor before auto-draft can create a PO for this recommendation.",
+      };
+    case "already_on_order":
+      return {
+        action: "review_open_po",
+        severity: "info",
+        label: "Review inbound PO",
+        detail: `Open PO coverage is present (${input.onOrderPieces} pieces across ${input.openPoCount} open PO line${input.openPoCount === 1 ? "" : "s"}). Confirm ETA if demand has changed.`,
+      };
+    case "excluded":
+      return {
+        action: "review_exclusion",
+        severity: "info",
+        label: "Review exclusion",
+        detail: "This item is excluded by reorder policy. Remove the exclusion if it should be considered for purchasing.",
+      };
+    case "zero_suggested_quantity":
+      return {
+        action: "monitor",
+        severity: "info",
+        label: "Monitor",
+        detail: "Effective supply covers the reorder point, so no purchase quantity is currently recommended.",
+      };
+    case "not_actionable_status":
+      return {
+        action: "monitor",
+        severity: "info",
+        label: "Monitor",
+        detail: "Inventory is not currently in an auto-draftable reorder state.",
+      };
+    default:
+      return {
+        action: "none",
+        severity: "info",
+        label: "No action",
+        detail: "No purchasing action is required.",
+      };
+  }
+}
+
 export function generatePurchasingRecommendations(
   options: GeneratePurchasingRecommendationsOptions,
 ): PurchasingRecommendationResult {
@@ -387,10 +469,10 @@ export function generatePurchasingRecommendations(
     let skippedReason: PurchasingRecommendationSkipReason | null = null;
     if (isExcluded(row, meta, rules)) {
       skippedReason = "excluded";
-    } else if (!isActionableStatus(status, settings)) {
-      skippedReason = "not_actionable_status";
     } else if (settings.skipOnOpenPo && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
       skippedReason = "already_on_order";
+    } else if (!isActionableStatus(status, settings)) {
+      skippedReason = "not_actionable_status";
     } else if (suggestedOrderQty <= 0) {
       skippedReason = "zero_suggested_quantity";
     } else if (options.requireVendor && settings.skipNoVendor !== false && !hasVendor) {
@@ -411,6 +493,16 @@ export function generatePurchasingRecommendations(
       suggestedOrderPieces,
       orderUomLabel,
       skippedReason,
+    });
+    const reviewSignal = buildReviewSignal({
+      status,
+      skippedReason,
+      suggestedOrderQty,
+      suggestedOrderPieces,
+      orderUomLabel,
+      openPoCount: asNumber(row.open_po_count),
+      onOrderPieces,
+      actionable,
     });
 
     const item: PurchasingRecommendationItem = {
@@ -471,6 +563,7 @@ export function generatePurchasingRecommendations(
         hasVendor,
       }),
       explanation,
+      reviewSignal,
       actionable,
       skippedReason,
     };

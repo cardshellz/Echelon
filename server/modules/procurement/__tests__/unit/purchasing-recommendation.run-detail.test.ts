@@ -67,10 +67,18 @@ describe("purchasing recommendation run detail", () => {
       sku: "ORDER-ME",
       suggestedOrderQty: 1,
       preferredVendorName: "Vendor",
+      reviewSignal: {
+        action: "create_po",
+        severity: "critical",
+      },
     });
     expect(detail.skippedRecommendations[0]).toMatchObject({
       sku: "NO-VENDOR",
       skippedReason: "no_vendor",
+      reviewSignal: {
+        action: "assign_vendor",
+        severity: "critical",
+      },
     });
   });
 });
