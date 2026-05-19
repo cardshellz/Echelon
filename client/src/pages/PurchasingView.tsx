@@ -61,10 +61,20 @@ interface ReorderItem {
   onOrderPieces: number;
   openPoCount: number;
   status: string;
+  actionable?: boolean;
+  skippedReason?: string | null;
+  explanation?: string;
+  reviewSignal?: {
+    action: "create_po" | "assign_vendor" | "review_open_po" | "review_exclusion" | "monitor" | "none";
+    severity: "critical" | "warning" | "info";
+    label: string;
+    detail: string;
+  };
 }
 
 interface ReorderAnalysis {
   items: ReorderItem[];
+  skippedItems: ReorderItem[];
   lookbackDays: number;
 }
 
@@ -157,6 +167,13 @@ export default function PurchasingView() {
     }
     return sortDir === "asc" ? aVal - bVal : bVal - aVal;
   });
+  const reviewQueue = (analysis?.skippedItems ?? [])
+    .filter((item) => item.reviewSignal && !["monitor", "none"].includes(item.reviewSignal.action))
+    .sort((a, b) => {
+      const priority = { critical: 0, warning: 1, info: 2 };
+      return (priority[a.reviewSignal?.severity ?? "info"] ?? 2) - (priority[b.reviewSignal?.severity ?? "info"] ?? 2);
+    })
+    .slice(0, 8);
 
   const SortIcon = ({ field }: { field: string }) => {
     if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground ml-1" />;
@@ -165,6 +182,22 @@ export default function PurchasingView() {
 
   const formatCurrency = (cents: number) => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format((cents || 0) / 100);
+  };
+
+  const handleReviewAction = (item: ReorderItem) => {
+    switch (item.reviewSignal?.action) {
+      case "assign_vendor":
+        navigate("/suppliers");
+        break;
+      case "review_open_po":
+        navigate("/purchase-orders");
+        break;
+      case "review_exclusion":
+        navigate("/purchasing");
+        break;
+      default:
+        navigate("/purchase-orders");
+    }
   };
 
   return (
@@ -253,6 +286,46 @@ export default function PurchasingView() {
             </CardContent>
           </Card>
         </div>
+
+        {reviewQueue.length > 0 && (
+          <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
+              <CardTitle className="text-lg">Recommendation Review Queue</CardTitle>
+              <CardDescription>Skipped purchasing recommendations that need operator action before autopilot can use them.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                {reviewQueue.map((item) => {
+                  const severityClass =
+                    item.reviewSignal?.severity === "critical"
+                      ? "bg-red-50 text-red-700 border-red-200"
+                      : item.reviewSignal?.severity === "warning"
+                        ? "bg-amber-50 text-amber-700 border-amber-200"
+                        : "bg-blue-50 text-blue-700 border-blue-200";
+                  return (
+                    <div key={`${item.productId}-${item.skippedReason}`} className="rounded-md border bg-white dark:bg-zinc-900 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs font-semibold text-primary truncate">{item.sku}</span>
+                            <Badge variant="outline" className={`text-[10px] ${severityClass}`}>
+                              {item.reviewSignal?.label}
+                            </Badge>
+                          </div>
+                          <div className="mt-1 text-sm font-medium truncate">{item.productName}</div>
+                          <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.reviewSignal?.detail}</p>
+                        </div>
+                        <Button size="sm" variant="outline" className="h-7 text-[11px] flex-shrink-0" onClick={() => handleReviewAction(item)}>
+                          Review
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* DATA TABLE */}
         <Card className="dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">

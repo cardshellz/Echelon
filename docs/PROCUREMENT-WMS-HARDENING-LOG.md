@@ -1711,3 +1711,33 @@ Next step:
 
 - Continue Phase 8 by tightening skipped-reason review and recommendation
   explainability before enabling stronger autopilot behavior.
+
+### 2026-05-19 - Phase 8 Slice 5: Skipped-Reason Review Signals
+
+Scope:
+
+- Added structured recommendation review signals to the purchasing
+  recommendation engine so actionable and skipped recommendations carry a
+  stable operator action, severity, label, and detail.
+- Corrected skip-reason ordering so open PO coverage is classified as
+  `already_on_order` instead of being buried under generic non-actionable
+  status.
+- Persisted review signals in recommendation run detail for both actionable and
+  skipped recommendation samples.
+- Added a Recommendation Review Queue to the reorder analysis page that shows
+  blocked recommendations with concrete operator actions such as assign vendor,
+  review open PO, or review exclusion.
+- Expanded focused engine and run-detail coverage for create-PO, assign-vendor,
+  review-exclusion, and review-open-PO signals.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 8 by improving recommendation confidence inputs and demand
+  forecast provenance before stronger autopilot behavior is enabled.

@@ -60,6 +60,7 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     estimatedCostCents: item.estimatedCostCents,
     confidence: item.confidence,
     explanation: item.explanation,
+    reviewSignal: item.reviewSignal,
   };
 }
 
