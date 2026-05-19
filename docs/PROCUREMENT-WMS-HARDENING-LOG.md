@@ -1921,3 +1921,34 @@ Next step:
 
 - Move into Phase 9 demand forecast foundations now that recommendation-driven
   PO mutation paths are bounded by the shared engine and approval gate.
+
+### 2026-05-19 - Phase 9 Slice 1: Demand Forecast Basis Foundation
+
+Scope:
+
+- Added a dedicated purchasing demand forecast engine for the existing
+  recent-order velocity model instead of leaving demand quality and trend logic
+  embedded inside PO recommendation generation.
+- Standardized forecast provenance with an explicit
+  `recent_order_velocity_v1` method, version, source, lookback window, usage,
+  prior-period usage, demand sample counts, active demand days, latest demand
+  timestamp, demand quality, and demand trend.
+- Updated purchasing recommendations to consume the shared forecast basis while
+  preserving the current reorder math, review signals, quality gate, and
+  auto-draft policy behavior.
+- Added focused unit coverage for forecast basis normalization, no-demand vs
+  thin-history classification, trend classification, and recommendation
+  provenance.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 9 by exposing richer forecast diagnostics in the operator
+  recommendation/run-detail surfaces before changing the forecast algorithm
+  itself.

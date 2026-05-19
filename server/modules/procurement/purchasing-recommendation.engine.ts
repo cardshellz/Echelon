@@ -1,3 +1,10 @@
+import {
+  buildPurchasingDemandForecastBasis,
+  type PurchasingDemandForecastMethod,
+  type PurchasingDemandForecastQuality,
+  type PurchasingDemandForecastTrend,
+} from "./purchasing-demand-forecast.engine";
+
 export type PurchasingRecommendationStatus =
   | "stockout"
   | "order_now"
@@ -14,14 +21,8 @@ export type PurchasingRecommendationSkipReason =
   | "zero_suggested_quantity";
 
 export type PurchasingRecommendationConfidence = "low" | "medium" | "high";
-export type PurchasingRecommendationDemandQuality = "no_recent_demand" | "thin_history" | "normal";
-export type PurchasingRecommendationDemandTrend =
-  | "not_available"
-  | "no_recent_demand"
-  | "new_demand"
-  | "rising"
-  | "stable"
-  | "falling";
+export type PurchasingRecommendationDemandQuality = PurchasingDemandForecastQuality;
+export type PurchasingRecommendationDemandTrend = PurchasingDemandForecastTrend;
 export type PurchasingRecommendationLeadTimeSource = "vendor_product" | "product" | "default";
 export type PurchasingRecommendationSafetyStockSource = "product" | "default";
 export type PurchasingRecommendationOrderUomSource = "variant" | "default_each";
@@ -189,6 +190,8 @@ export interface PurchasingRecommendationItem {
     reorderPointPieces: number;
   };
   forecastProvenance: {
+    forecastMethod: PurchasingDemandForecastMethod;
+    forecastVersion: 1;
     demandSource: "recent_order_velocity";
     demandWindowDays: number;
     demandQuality: PurchasingRecommendationDemandQuality;
@@ -561,34 +564,6 @@ function resolveSupplierCost(input: {
   };
 }
 
-function classifyDemandQuality(
-  periodUsage: number,
-  lookbackDays: number,
-  demandOrderCount: number | null,
-  demandActiveDays: number | null,
-): PurchasingRecommendationDemandQuality {
-  if (periodUsage <= 0) return "no_recent_demand";
-  if ((demandOrderCount !== null && demandOrderCount <= 1) || (demandActiveDays !== null && demandActiveDays <= 1)) {
-    return "thin_history";
-  }
-  if (periodUsage < 3 || lookbackDays < 14) return "thin_history";
-  return "normal";
-}
-
-function classifyDemandTrend(
-  periodUsage: number,
-  priorPeriodUsage: number | null,
-): PurchasingRecommendationDemandTrend {
-  if (periodUsage <= 0) return "no_recent_demand";
-  if (priorPeriodUsage === null) return "not_available";
-  if (priorPeriodUsage <= 0) return "new_demand";
-
-  const ratio = periodUsage / priorPeriodUsage;
-  if (ratio >= 1.5) return "rising";
-  if (ratio <= 0.5) return "falling";
-  return "stable";
-}
-
 function buildReviewSignal(input: {
   status: PurchasingRecommendationStatus;
   skippedReason: PurchasingRecommendationSkipReason | null;
@@ -724,14 +699,23 @@ export function generatePurchasingRecommendations(
     const productVariantId = row.variant_id == null ? undefined : asNumber(row.variant_id);
     const totalOnHand = asNumber(row.total_pieces);
     const totalReserved = asNumber(row.total_reserved_pieces);
-    const periodUsage = asNumber(row.total_outbound_pieces);
-    const priorPeriodUsage = row.previous_outbound_pieces == null ? null : asNumber(row.previous_outbound_pieces);
-    const demandOrderCount = row.demand_order_count == null ? null : asNumber(row.demand_order_count);
-    const demandActiveDays = row.demand_active_days == null ? null : asNumber(row.demand_active_days);
-    const latestDemandAt = row.latest_demand_at ?? null;
+    const demandForecast = buildPurchasingDemandForecastBasis({
+      lookbackDays,
+      periodUsagePieces: row.total_outbound_pieces,
+      priorPeriodUsagePieces: row.previous_outbound_pieces,
+      demandOrderCount: row.demand_order_count,
+      demandActiveDays: row.demand_active_days,
+      latestDemandAt: row.latest_demand_at ?? null,
+    });
+    const periodUsage = demandForecast.periodUsagePieces;
+    const priorPeriodUsage = demandForecast.priorPeriodUsagePieces;
+    const demandOrderCount = demandForecast.demandOrderCount;
+    const demandActiveDays = demandForecast.demandActiveDays;
+    const latestDemandAt = demandForecast.latestDemandAt;
+    const avgDailyUsage = demandForecast.avgDailyUsagePieces;
+    const roundedAvgDailyUsage = Math.round(avgDailyUsage * 100) / 100;
     const onOrderPieces = asNumber(row.on_order_pieces);
     const available = totalOnHand - totalReserved;
-    const avgDailyUsage = lookbackDays > 0 ? periodUsage / lookbackDays : 0;
     const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
     const vendorLeadTime = row.vendor_lead_time_days == null ? null : asNumber(row.vendor_lead_time_days, NaN);
     const productLeadTime = row.lead_time_days == null ? null : asNumber(row.lead_time_days, NaN);
@@ -784,8 +768,8 @@ export function generatePurchasingRecommendations(
     });
     const estimatedCostCents = supplierCost.estimatedCostCents;
     const hasVendor = Boolean(preferredVendorId);
-    const demandQuality = classifyDemandQuality(periodUsage, lookbackDays, demandOrderCount, demandActiveDays);
-    const demandTrend = classifyDemandTrend(periodUsage, priorPeriodUsage);
+    const demandQuality = demandForecast.demandQuality;
+    const demandTrend = demandForecast.demandTrend;
 
     let skippedReason: PurchasingRecommendationSkipReason | null = null;
     if (isExcluded(row, meta, rules)) {
@@ -845,7 +829,7 @@ export function generatePurchasingRecommendations(
       totalReserved,
       available,
       periodUsage,
-      avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
+      avgDailyUsage: roundedAvgDailyUsage,
       daysOfSupply,
       leadTimeDays,
       safetyStockDays,
@@ -888,7 +872,7 @@ export function generatePurchasingRecommendations(
         lookbackDays,
         periodUsagePieces: periodUsage,
         priorPeriodUsagePieces: priorPeriodUsage,
-        avgDailyUsagePieces: Math.round(avgDailyUsage * 100) / 100,
+        avgDailyUsagePieces: roundedAvgDailyUsage,
         demandQuality,
         demandTrend,
         demandOrderCount,
@@ -903,13 +887,15 @@ export function generatePurchasingRecommendations(
         reorderPointPieces: reorderPoint,
       },
       forecastProvenance: {
+        forecastMethod: demandForecast.method,
+        forecastVersion: demandForecast.version,
         demandSource: "recent_order_velocity",
         demandWindowDays: lookbackDays,
         demandQuality,
         demandTrend,
         periodUsagePieces: periodUsage,
         priorPeriodUsagePieces: priorPeriodUsage,
-        avgDailyUsagePieces: Math.round(avgDailyUsage * 100) / 100,
+        avgDailyUsagePieces: roundedAvgDailyUsage,
         demandOrderCount,
         demandActiveDays,
         latestDemandAt,

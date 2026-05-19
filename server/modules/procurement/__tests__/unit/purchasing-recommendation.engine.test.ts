@@ -92,6 +92,8 @@ describe("purchasing recommendation engine", () => {
         reorderPointPieces: 14,
       },
       forecastProvenance: {
+        forecastMethod: "recent_order_velocity_v1",
+        forecastVersion: 1,
         demandSource: "recent_order_velocity",
         demandWindowDays: 30,
         demandQuality: "normal",
