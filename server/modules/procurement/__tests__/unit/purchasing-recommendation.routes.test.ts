@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     deleteReorderExclusionRule: vi.fn(),
     setProductReorderExcluded: vi.fn(),
     getLatestAutoDraftRun: vi.fn(),
+    getRecentAutoDraftRuns: vi.fn(),
     createAutoDraftRun: vi.fn(),
     updateAutoDraftRun: vi.fn(),
     getAutoDraftSettings: vi.fn(),
@@ -109,6 +110,7 @@ describe("purchasing recommendation routes", () => {
     });
     mocks.procurement.createAutoDraftRun.mockResolvedValue({ id: 1001 });
     mocks.procurement.updateAutoDraftRun.mockResolvedValue(undefined);
+    mocks.procurement.getRecentAutoDraftRuns.mockResolvedValue([]);
     mocks.purchasingService.createPOFromReorder.mockResolvedValue([]);
   });
 
@@ -237,6 +239,87 @@ describe("purchasing recommendation routes", () => {
       triggeredByUser: "admin-user",
     });
     expect(body).toEqual({ message: "Auto-draft job started" });
+  });
+
+  it("returns normalized recent auto-draft recommendation runs", async () => {
+    mocks.procurement.getRecentAutoDraftRuns.mockResolvedValue([
+      {
+        id: 55,
+        runAt: "2026-05-19T01:00:00.000Z",
+        triggeredBy: "manual",
+        triggeredByUser: "admin-user",
+        status: "success",
+        itemsAnalyzed: 10,
+        posCreated: 0,
+        posUpdated: 0,
+        linesAdded: 0,
+        skippedNoVendor: 2,
+        skippedOnOrder: 1,
+        skippedExcluded: 3,
+        errorMessage: null,
+        finishedAt: "2026-05-19T01:00:02.000Z",
+        summaryJson: {
+          settings: { autoDraftMode: "review_only" },
+          recommendationSummary: { actionableCount: 4 },
+          actionableRecommendations: [
+            {
+              sku: "ORDER-ME",
+              productName: "Order Me",
+              suggestedOrderQty: 2,
+              orderUomLabel: "Case",
+              preferredVendorName: "Vendor",
+              explanation: "Below reorder point.",
+            },
+          ],
+          skippedRecommendations: [
+            {
+              sku: "NO-VENDOR",
+              productName: "No Vendor",
+              skippedReason: "no_vendor",
+              explanation: "No preferred vendor.",
+            },
+          ],
+          poMutations: [],
+        },
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/auto-draft/runs?limit=999");
+
+    expect(status).toBe(200);
+    expect(mocks.procurement.getRecentAutoDraftRuns).toHaveBeenCalledWith(50);
+    expect(body).toMatchObject({
+      limit: 50,
+      runs: [
+        {
+          id: 55,
+          runAt: "2026-05-19T01:00:00.000Z",
+          triggeredBy: "manual",
+          triggeredByUser: "admin-user",
+          status: "success",
+          itemsAnalyzed: 10,
+          posCreated: 0,
+          posUpdated: 0,
+          linesAdded: 0,
+          skippedNoVendor: 2,
+          skippedOnOrder: 1,
+          skippedExcluded: 3,
+          mode: "review_only",
+          actionableCount: 4,
+          poMutationCount: 0,
+          topActionableRecommendation: {
+            sku: "ORDER-ME",
+            suggestedOrderQty: 2,
+            preferredVendorName: "Vendor",
+          },
+          topSkippedRecommendation: {
+            sku: "NO-VENDOR",
+            skippedReason: "no_vendor",
+          },
+        },
+      ],
+    });
   });
 
   it("uses the shared recommendation engine for direct auto-draft items", async () => {
