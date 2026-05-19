@@ -18,4 +18,22 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/db\.insert\(outboundShipmentItems\)\.values/);
     expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationShipmentPushRetry/);
   });
+
+  it("creates a new shipment when missing shippable lines have no planned shipment", () => {
+    expect(WMS_SYNC_SRC).toMatch(/const orphanItemResult = await db\.execute/);
+    expect(WMS_SYNC_SRC).toMatch(/const shippableShipmentItems = \(orphanItemResult\.rows/);
+    expect(WMS_SYNC_SRC).toMatch(/if \(updatedShipments === 0\)/);
+    expect(WMS_SYNC_SRC).toMatch(/createShipmentForOrder\(/);
+    expect(WMS_SYNC_SRC).toMatch(/WMS line reconciliation created shipment for added order item/);
+  });
+
+  it("repairs existing pending WMS items that are not on an active shipment", () => {
+    expect(WMS_SYNC_SRC).toMatch(/FROM wms\.order_items oi/);
+    expect(WMS_SYNC_SRC).toMatch(/os\.status NOT IN \('voided', 'cancelled'\)/);
+    expect(WMS_SYNC_SRC).not.toMatch(/if \(missingLines\.length === 0\) return/);
+  });
+
+  it("reopens WMS work when reconciliation adds shippable demand", () => {
+    expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders[\s\S]*ELSE 'ready'/);
+  });
 });
