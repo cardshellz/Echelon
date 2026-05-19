@@ -216,7 +216,21 @@ export const orderMethods: IOrderStorage = {
         OR (o.source = 'shopify' AND o.source_table_id = oms.id::text)
       )
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
-        AND (oms.status IS NULL OR oms.status NOT IN ('cancelled', 'refunded', 'shipped'))
+        AND (
+          oms.status IS NULL
+          OR oms.status NOT IN ('cancelled', 'refunded', 'shipped')
+          OR (
+            oms.status = 'shipped'
+            AND EXISTS (
+              SELECT 1
+              FROM wms.order_items open_items
+              WHERE open_items.order_id = o.id
+                AND COALESCE(open_items.requires_shipping, 1) <> 0
+                AND COALESCE(open_items.quantity, 0) > COALESCE(open_items.fulfilled_quantity, 0)
+                AND open_items.status NOT IN ('cancelled', 'completed', 'short')
+            )
+          )
+        )
         AND (oms.financial_status IS NULL OR oms.financial_status NOT IN ('refunded', 'voided'))
         AND (
           -- Ready/in_progress orders: show in pick queue

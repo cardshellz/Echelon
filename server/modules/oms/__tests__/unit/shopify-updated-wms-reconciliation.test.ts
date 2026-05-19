@@ -17,4 +17,13 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/orders\/updated could not reconcile WMS lines because wmsSyncService is unavailable/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/orders\/updated saw paid shippable work but wmsSyncService is unavailable/);
   });
+
+  it("persists normalized Shopify pricing when orders/updated adds or changes lines", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(/const normalizedLineItems = normalizeShopifyLineItems\(/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/const normalizedLineMap = new Map/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/paidPriceCents: normalizedLine\?\.paidPriceCents/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/totalPriceCents: normalizedLine\?\.totalCents/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/planDiscountCents: normalizedLine\?\.planDiscountCents/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/couponDiscountCents: normalizedLine\?\.couponDiscountCents/);
+  });
 });

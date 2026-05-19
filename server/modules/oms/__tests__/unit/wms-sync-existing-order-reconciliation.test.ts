@@ -50,4 +50,12 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/if \(shippableShipmentItems\.length === 0\)[\s\S]*return \{ insertedItems: insertedItems\.length, updatedShipments: 0 \};/);
     expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders w[\s\S]*if \(shippableShipmentItems\.length === 0\)/);
   });
+
+  it("refreshes existing WMS item pricing from OMS lines before ShipStation push", () => {
+    expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.order_items oi/);
+    expect(WMS_SYNC_SRC).toMatch(/unit_price_cents = COALESCE\(ol\.paid_price_cents, 0\)/);
+    expect(WMS_SYNC_SRC).toMatch(/paid_price_cents = COALESCE\(ol\.paid_price_cents, 0\)/);
+    expect(WMS_SYNC_SRC).toMatch(/total_price_cents = COALESCE\(ol\.total_price_cents, 0\)/);
+    expect(WMS_SYNC_SRC).toMatch(/oi\.oms_order_line_id = ol\.id/);
+  });
 });
