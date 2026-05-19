@@ -39,6 +39,11 @@ export type PurchasingRecommendationReviewAction =
   | "monitor"
   | "none";
 export type PurchasingRecommendationReviewSeverity = "critical" | "warning" | "info";
+export type PurchasingRecommendationQualityGateReason =
+  | "high_confidence"
+  | "medium_confidence_review"
+  | "low_confidence_review"
+  | "not_actionable";
 
 export interface PurchasingRecommendationRawRow {
   product_id: number | string;
@@ -204,6 +209,12 @@ export interface PurchasingRecommendationItem {
     label: string;
     detail: string;
   };
+  qualityGate: {
+    autoDraftEligible: boolean;
+    reason: PurchasingRecommendationQualityGateReason;
+    label: string;
+    detail: string;
+  };
   actionable: boolean;
   skippedReason: PurchasingRecommendationSkipReason | null;
 }
@@ -219,6 +230,11 @@ export interface PurchasingRecommendationSummary {
   skippedNoVendor: number;
   skippedOnOrder: number;
   actionableCount: number;
+  highConfidenceCount: number;
+  mediumConfidenceCount: number;
+  lowConfidenceCount: number;
+  autoDraftEligibleCount: number;
+  autoDraftReviewRequiredCount: number;
 }
 
 export interface PurchasingRecommendationResult {
@@ -638,6 +654,39 @@ function buildReviewSignal(input: {
   }
 }
 
+function buildQualityGate(input: {
+  actionable: boolean;
+  confidence: PurchasingRecommendationConfidence;
+  skippedReason: PurchasingRecommendationSkipReason | null;
+}): PurchasingRecommendationItem["qualityGate"] {
+  if (!input.actionable) {
+    return {
+      autoDraftEligible: false,
+      reason: "not_actionable",
+      label: "Not auto-draftable",
+      detail: input.skippedReason
+        ? "This recommendation is blocked by an operator review condition."
+        : "This recommendation is not currently in an auto-draftable reorder state.",
+    };
+  }
+
+  if (input.confidence === "high") {
+    return {
+      autoDraftEligible: true,
+      reason: "high_confidence",
+      label: "Auto-draft eligible",
+      detail: "This recommendation passed the high-confidence quality gate for automated PO drafting.",
+    };
+  }
+
+  return {
+    autoDraftEligible: false,
+    reason: input.confidence === "medium" ? "medium_confidence_review" : "low_confidence_review",
+    label: "Review before auto-draft",
+    detail: "This recommendation is actionable, but confidence is not high enough for automated PO drafting.",
+  };
+}
+
 export function generatePurchasingRecommendations(
   options: GeneratePurchasingRecommendationsOptions,
 ): PurchasingRecommendationResult {
@@ -761,6 +810,14 @@ export function generatePurchasingRecommendations(
       actionable,
     });
 
+    const confidence = buildConfidence({
+      demandQuality,
+      demandTrend,
+      leadTimeSource,
+      costQuality: supplierCost.costQuality,
+      costSource: supplierCost.costSource,
+      hasVendor,
+    });
     const item: PurchasingRecommendationItem = {
       recommendationId: `${productId}:${productVariantId ?? "product"}:${lookbackDays}`,
       productId,
@@ -844,14 +901,7 @@ export function generatePurchasingRecommendations(
         safetyStockSource,
         orderUomSource,
       },
-      confidence: buildConfidence({
-        demandQuality,
-        demandTrend,
-        leadTimeSource,
-        costQuality: supplierCost.costQuality,
-        costSource: supplierCost.costSource,
-        hasVendor,
-      }),
+      confidence,
       confidenceFactors: buildConfidenceFactors({
         demandQuality,
         demandTrend,
@@ -866,6 +916,11 @@ export function generatePurchasingRecommendations(
       }),
       explanation,
       reviewSignal,
+      qualityGate: buildQualityGate({
+        actionable,
+        confidence,
+        skippedReason,
+      }),
       actionable,
       skippedReason,
     };
@@ -891,6 +946,13 @@ export function generatePurchasingRecommendations(
     skippedNoVendor: skippedItems.filter((item) => item.skippedReason === "no_vendor").length,
     skippedOnOrder: skippedItems.filter((item) => item.skippedReason === "already_on_order").length,
     actionableCount: visibleItems.filter((item) => item.actionable).length,
+    highConfidenceCount: visibleItems.filter((item) => item.confidence === "high").length,
+    mediumConfidenceCount: visibleItems.filter((item) => item.confidence === "medium").length,
+    lowConfidenceCount: visibleItems.filter((item) => item.confidence === "low").length,
+    autoDraftEligibleCount: visibleItems.filter((item) => item.qualityGate.autoDraftEligible).length,
+    autoDraftReviewRequiredCount: visibleItems.filter(
+      (item) => item.actionable && !item.qualityGate.autoDraftEligible,
+    ).length,
   };
 
   return {

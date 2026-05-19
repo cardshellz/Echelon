@@ -333,13 +333,19 @@ describe("purchasing recommendation routes", () => {
         total_pieces: 0,
         total_reserved_pieces: 0,
         total_outbound_pieces: 30,
+        previous_outbound_pieces: 28,
+        demand_order_count: 10,
+        demand_active_days: 8,
         on_order_pieces: 0,
         open_po_count: 0,
         lead_time_days: 3,
+        vendor_lead_time_days: 3,
         safety_stock_days: 1,
         order_uom_units: 5,
         order_uom_level: 2,
         preferred_vendor_id: 7,
+        estimated_cost_mills: 12500,
+        vendor_product_updated_at: new Date().toISOString(),
       },
       {
         product_id: 43,
@@ -389,6 +395,9 @@ describe("purchasing recommendation routes", () => {
         summaryJson: expect.objectContaining({
           recommendationSummary: expect.objectContaining({
             actionableCount: 1,
+            highConfidenceCount: 1,
+            autoDraftEligibleCount: 1,
+            autoDraftReviewRequiredCount: 0,
             skippedNoVendor: 1,
           }),
           settings: expect.objectContaining({
@@ -399,6 +408,10 @@ describe("purchasing recommendation routes", () => {
               sku: "AUTO-1",
               suggestedOrderQty: 1,
               explanation: expect.any(String),
+              qualityGate: expect.objectContaining({
+                autoDraftEligible: true,
+                reason: "high_confidence",
+              }),
             }),
           ],
           skippedRecommendations: [
@@ -416,6 +429,9 @@ describe("purchasing recommendation routes", () => {
       itemsDrafted: 1,
       recommendationSummary: {
         actionableCount: 1,
+        highConfidenceCount: 1,
+        autoDraftEligibleCount: 1,
+        autoDraftReviewRequiredCount: 0,
         skippedNoVendor: 1,
       },
       recommendationRun: {
@@ -423,6 +439,88 @@ describe("purchasing recommendation routes", () => {
         detail: {
           recommendationSummary: {
             actionableCount: 1,
+            autoDraftEligibleCount: 1,
+          },
+        },
+      },
+    });
+  });
+
+  it("keeps medium-confidence direct auto-draft recommendations in review without PO mutations", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 42,
+        variant_id: 420,
+        base_sku: "REVIEW-1",
+        product_name: "Review Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 30,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 5,
+        order_uom_level: 2,
+        preferred_vendor_id: 7,
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run");
+
+    expect(status).toBe(200);
+    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
+    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
+      1001,
+      expect.objectContaining({
+        status: "success",
+        itemsAnalyzed: 1,
+        linesAdded: 0,
+        summaryJson: expect.objectContaining({
+          recommendationSummary: expect.objectContaining({
+            actionableCount: 1,
+            mediumConfidenceCount: 1,
+            autoDraftEligibleCount: 0,
+            autoDraftReviewRequiredCount: 1,
+          }),
+          settings: expect.objectContaining({
+            autoDraftMode: "draft_po",
+          }),
+          actionableRecommendations: [
+            expect.objectContaining({
+              sku: "REVIEW-1",
+              suggestedOrderQty: 1,
+              qualityGate: expect.objectContaining({
+                autoDraftEligible: false,
+                reason: "medium_confidence_review",
+              }),
+            }),
+          ],
+          poMutations: [],
+        }),
+      }),
+    );
+    expect(body).toMatchObject({
+      success: true,
+      pos: [],
+      count: 0,
+      itemsDrafted: 0,
+      reviewOnly: false,
+      recommendationSummary: {
+        actionableCount: 1,
+        mediumConfidenceCount: 1,
+        autoDraftEligibleCount: 0,
+        autoDraftReviewRequiredCount: 1,
+      },
+      recommendationRun: {
+        id: 1001,
+        detail: {
+          recommendationSummary: {
+            actionableCount: 1,
+            autoDraftEligibleCount: 0,
+            autoDraftReviewRequiredCount: 1,
           },
         },
       },
@@ -473,6 +571,8 @@ describe("purchasing recommendation routes", () => {
         summaryJson: expect.objectContaining({
           recommendationSummary: expect.objectContaining({
             actionableCount: 1,
+            autoDraftEligibleCount: 0,
+            autoDraftReviewRequiredCount: 1,
           }),
           settings: expect.objectContaining({
             autoDraftMode: "review_only",
@@ -481,6 +581,10 @@ describe("purchasing recommendation routes", () => {
             expect.objectContaining({
               sku: "AUTO-1",
               suggestedOrderQty: 1,
+              qualityGate: expect.objectContaining({
+                autoDraftEligible: false,
+                reason: "medium_confidence_review",
+              }),
             }),
           ],
           poMutations: [],
@@ -495,6 +599,8 @@ describe("purchasing recommendation routes", () => {
       reviewOnly: true,
       recommendationSummary: {
         actionableCount: 1,
+        autoDraftEligibleCount: 0,
+        autoDraftReviewRequiredCount: 1,
       },
       recommendationRun: {
         id: 1001,

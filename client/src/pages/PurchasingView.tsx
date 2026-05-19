@@ -96,11 +96,25 @@ interface ReorderItem {
     label: string;
     detail: string;
   };
+  qualityGate?: {
+    autoDraftEligible: boolean;
+    reason: "high_confidence" | "medium_confidence_review" | "low_confidence_review" | "not_actionable";
+    label: string;
+    detail: string;
+  };
 }
 
 interface ReorderAnalysis {
   items: ReorderItem[];
   skippedItems: ReorderItem[];
+  summary?: {
+    actionableCount: number;
+    highConfidenceCount: number;
+    mediumConfidenceCount: number;
+    lowConfidenceCount: number;
+    autoDraftEligibleCount: number;
+    autoDraftReviewRequiredCount: number;
+  };
   lookbackDays: number;
 }
 
@@ -358,6 +372,39 @@ export default function PurchasingView() {
             </CardContent>
           </Card>
         </div>
+
+        {analysis?.summary && (
+          <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
+              <CardTitle className="text-lg">Autopilot Quality Gate</CardTitle>
+              <CardDescription>Recommendation confidence and PO draft eligibility</CardDescription>
+            </CardHeader>
+            <CardContent className="p-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 rounded-md border border-zinc-200 dark:border-zinc-800 overflow-hidden divide-y md:divide-y-0 md:divide-x divide-zinc-200 dark:divide-zinc-800">
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Eligible</div>
+                  <div className="text-2xl font-bold text-green-700">{analysis.summary.autoDraftEligibleCount}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Needs Review</div>
+                  <div className="text-2xl font-bold text-amber-700">{analysis.summary.autoDraftReviewRequiredCount}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">High Confidence</div>
+                  <div className="text-2xl font-bold">{analysis.summary.highConfidenceCount}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Medium</div>
+                  <div className="text-2xl font-bold">{analysis.summary.mediumConfidenceCount}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Low</div>
+                  <div className="text-2xl font-bold">{analysis.summary.lowConfidenceCount}</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {reviewQueue.length > 0 && (
           <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">

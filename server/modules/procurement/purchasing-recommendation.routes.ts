@@ -202,7 +202,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
 
       const itemsToOrder = recommendationResult.items
-        .filter((item) => item.actionable)
+        .filter((item) => item.qualityGate.autoDraftEligible)
         .map((item) => ({
           productId: item.productId,
           productVariantId: item.productVariantId ?? item.productId,
