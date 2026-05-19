@@ -1264,6 +1264,22 @@ export async function importLinesFromPO(invoiceId: number, purchaseOrderId: numb
 
   if (poLines.length === 0) return [];
 
+  const poLineIds = poLines.map((line) => line.id);
+  const existingImportedLines = await db
+    .select({ purchaseOrderLineId: vendorInvoiceLines.purchaseOrderLineId })
+    .from(vendorInvoiceLines)
+    .where(
+      and(
+        eq(vendorInvoiceLines.vendorInvoiceId, invoiceId),
+        inArray(vendorInvoiceLines.purchaseOrderLineId, poLineIds),
+      ),
+    );
+  const importedPoLineIds = new Set(
+    existingImportedLines
+      .map((line) => line.purchaseOrderLineId)
+      .filter((id): id is number => typeof id === "number"),
+  );
+
   // Get current max line number on this invoice
   const existing = await db
     .select({ maxLine: sql<number>`COALESCE(MAX(${vendorInvoiceLines.lineNumber}), 0)` })
@@ -1274,6 +1290,7 @@ export async function importLinesFromPO(invoiceId: number, purchaseOrderId: numb
   const newLines = [];
   for (const pol of poLines) {
     if (pol.status === "cancelled") continue;
+    if (importedPoLineIds.has(pol.id)) continue;
     lineNum++;
     const unitCost = Number(pol.unitCostCents || 0);
     const qty = pol.orderQty;

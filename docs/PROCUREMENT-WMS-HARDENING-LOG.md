@@ -1550,3 +1550,34 @@ Next step:
   then either harden AP invoice line/link writes or close Phase 7 and move into
   the next procurement engine area for forecasting and purchasing
   recommendations.
+
+### 2026-05-18 - Phase 7 Slice 7: AP Invoice Line and PO-Link Idempotency
+
+Scope:
+
+- Required idempotency keys for duplicate-prone AP invoice line writes:
+  linking a PO to an invoice, importing lines from a PO, and adding a manual
+  invoice line.
+- Updated AP invoice detail to send idempotency keys for PO-link and manual
+  line-add actions.
+- Made `importLinesFromPO(...)` skip PO lines that are already present on the
+  invoice so repeated link/import calls cannot duplicate PO-backed invoice
+  lines even outside the browser retry path.
+- Left invoice line edits, line deletes, and invoice matching outside this
+  slice because they reapply or remove existing state rather than creating
+  duplicate financial rows.
+- Expanded AP route and service coverage for idempotency registration and
+  repeated PO-line import behavior.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Finish validating this slice with the broader procurement/AP regression set,
+  then close Phase 7 unless another concrete AP lifecycle duplicate or drift
+  gap appears.
