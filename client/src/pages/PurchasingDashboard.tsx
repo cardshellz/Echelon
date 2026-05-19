@@ -51,9 +51,12 @@ interface DashboardData {
     summaryJson?: {
       settings?: {
         autoDraftMode?: "draft_po" | "review_only";
+        approvalPolicy?: "high_confidence_only";
       };
       recommendationSummary?: {
         actionableCount?: number;
+        autoDraftEligibleCount?: number;
+        autoDraftReviewRequiredCount?: number;
       };
       skippedReasonCounts?: Record<string, number>;
       actionableRecommendations?: Array<{
@@ -82,6 +85,8 @@ interface AutoDraftRunHistoryItem {
   mode: "draft_po" | "review_only";
   itemsAnalyzed: number;
   actionableCount: number;
+  autoDraftEligibleCount: number;
+  autoDraftReviewRequiredCount: number;
   posCreated: number;
   posUpdated: number;
   linesAdded: number;
@@ -731,6 +736,8 @@ export default function PurchasingDashboard() {
                       },
                       { label: "POs created/updated", value: `${data.lastAutoDraftRun.posCreated}/${data.lastAutoDraftRun.posUpdated}` },
                       { label: "Actionable", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.actionableCount ?? data.lastAutoDraftRun.linesAdded },
+                      { label: "Eligible to draft", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? data.lastAutoDraftRun.linesAdded },
+                      { label: "Needs review", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0 },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
                       { label: "Skipped (on order)", value: data.lastAutoDraftRun.skippedOnOrder },
                       { label: "Excluded SKUs", value: data.lastAutoDraftRun.skippedExcluded },
@@ -779,7 +786,7 @@ export default function PurchasingDashboard() {
                             </div>
                             <div className="mt-1 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
                               <span>{run.itemsAnalyzed} analyzed</span>
-                              <span>{run.actionableCount} actionable</span>
+                              <span>{run.autoDraftEligibleCount} eligible</span>
                               <span>{run.posCreated + run.posUpdated} PO changes</span>
                             </div>
                             {run.topActionableRecommendation ? (
