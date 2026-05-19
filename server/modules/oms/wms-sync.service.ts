@@ -657,13 +657,26 @@ export class WmsSyncService {
     }
 
     await db.execute(sql`
-      UPDATE wms.orders
+      UPDATE wms.orders w
          SET warehouse_status = CASE
-               WHEN warehouse_status IN ('cancelled') THEN warehouse_status
+               WHEN w.warehouse_status IN ('cancelled') THEN w.warehouse_status
                ELSE 'ready'
              END,
+             item_count = agg.item_count,
+             unit_count = agg.unit_count,
+             picked_count = agg.picked_count,
              updated_at = NOW()
-       WHERE id = ${wmsOrderId}
+        FROM (
+          SELECT
+            order_id,
+            COUNT(*)::int AS item_count,
+            COALESCE(SUM(quantity), 0)::int AS unit_count,
+            COALESCE(SUM(picked_quantity), 0)::int AS picked_count
+          FROM wms.order_items
+          WHERE order_id = ${wmsOrderId}
+          GROUP BY order_id
+        ) agg
+       WHERE w.id = agg.order_id
     `);
 
     const plannedShipments = await db
