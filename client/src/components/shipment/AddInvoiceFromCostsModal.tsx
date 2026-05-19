@@ -22,7 +22,6 @@ import {
 } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
 
 import { format } from "date-fns";
 import { ArrowLeft, Loader2 } from "lucide-react";
@@ -60,6 +59,14 @@ interface AddInvoiceFromCostsModalProps {
 
 function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+function createShipmentInvoiceIdempotencyKey(prefix: string): string {
+  return (
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? (crypto as any).randomUUID()
+      : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  ) as string;
 }
 
 export function AddInvoiceFromCostsModal({
@@ -140,11 +147,16 @@ export function AddInvoiceFromCostsModal({
         notes: notes.trim() || undefined,
       };
 
-      const res = await apiRequest(
-        "POST",
-        `/api/inbound-shipments/${shipmentId}/create-invoice`,
-        payload,
-      );
+      const idempotencyKey = createShipmentInvoiceIdempotencyKey("shipment-invoice-create");
+      const res = await fetch(`/api/inbound-shipments/${shipmentId}/create-invoice`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
       return res.json();
     },
     onSuccess: () => {
