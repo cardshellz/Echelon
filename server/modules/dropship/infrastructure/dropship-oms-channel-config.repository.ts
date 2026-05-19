@@ -213,36 +213,41 @@ async function loadChannelOptionByIdWithClient(
 }
 
 async function ensureDefaultDropshipOmsChannel(client: PoolClient, now: Date): Promise<number> {
-  const result = await client.query<{ id: number }>(
-    `WITH existing AS (
-       SELECT id
-       FROM channels.channels
-       WHERE LOWER(name) = LOWER($1)
-         AND type = $2
-         AND provider = $3
-       ORDER BY id ASC
-       LIMIT 1
-     ),
-     inserted AS (
-       INSERT INTO channels.channels
-         (name, type, provider, status, shipping_config, created_at, updated_at)
-       SELECT
-         $1, $2, $3, 'active', '{}'::jsonb, $4, $4
-       WHERE NOT EXISTS (SELECT 1 FROM existing)
-       RETURNING id
-     ),
-     selected AS (
-       SELECT id FROM inserted
-       UNION ALL
-       SELECT id FROM existing
-       LIMIT 1
-     )
-     UPDATE channels.channels c
-     SET status = 'active',
-         updated_at = $4
-     FROM selected
-     WHERE c.id = selected.id
-     RETURNING c.id`,
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('dropship_oms_default_channel'))");
+
+  const existing = await client.query<{ id: number }>(
+    `SELECT id
+     FROM channels.channels
+     WHERE LOWER(name) = LOWER($1)
+       AND type = $2
+       AND provider = $3
+     ORDER BY id ASC
+     LIMIT 1`,
+    [
+      DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
+      DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
+      DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
+    ],
+  );
+  const existingId = existing.rows[0]?.id;
+  if (existingId) {
+    const updated = await client.query<{ id: number }>(
+      `UPDATE channels.channels
+       SET status = 'active',
+           shipping_config = COALESCE(shipping_config, '{}'::jsonb),
+           updated_at = $2
+       WHERE id = $1
+       RETURNING id`,
+      [existingId, now],
+    );
+    return requiredRow(updated.rows[0], "Dropship OMS default source repair did not return a channel.").id;
+  }
+
+  const inserted = await client.query<{ id: number }>(
+    `INSERT INTO channels.channels
+       (name, type, provider, status, shipping_config, created_at, updated_at)
+     VALUES ($1, $2, $3, 'active', '{}'::jsonb, $4, $4)
+     RETURNING id`,
     [
       DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
       DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
@@ -250,7 +255,7 @@ async function ensureDefaultDropshipOmsChannel(client: PoolClient, now: Date): P
       now,
     ],
   );
-  return requiredRow(result.rows[0], "Dropship OMS default source ensure did not return a channel.").id;
+  return requiredRow(inserted.rows[0], "Dropship OMS default source create did not return a channel.").id;
 }
 
 async function lockConfiguredChannel(client: PoolClient, channelId: number): Promise<{
