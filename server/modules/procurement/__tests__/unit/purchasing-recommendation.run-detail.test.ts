@@ -74,6 +74,15 @@ describe("purchasing recommendation run detail", () => {
         demandTrendCounts: {
           not_available: 2,
         },
+        shortWindowDemandQualityCounts: {
+          normal: 2,
+        },
+        shortWindowDemandTrendCounts: {
+          not_available: 2,
+        },
+        demandAccelerationSignalCounts: {
+          steady: 2,
+        },
         qualityControlCounts: {
           product_lead_time_fallback: 2,
           missing_supplier_cost: 1,

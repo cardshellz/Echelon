@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildPurchasingDemandForecastBasis } from "../../purchasing-demand-forecast.engine";
+import {
+  buildPurchasingDemandForecastBasis,
+  buildPurchasingDemandForecastWindowDiagnostics,
+} from "../../purchasing-demand-forecast.engine";
 
 describe("purchasing demand forecast engine", () => {
   it("builds an auditable recent-order velocity forecast basis", () => {
@@ -98,6 +101,36 @@ describe("purchasing demand forecast engine", () => {
       demandTrend: "not_available",
       demandOrderCount: 5,
       demandActiveDays: 3,
+    });
+  });
+
+  it("compares short-window demand against the standard forecast without changing the basis", () => {
+    const standardWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 30,
+      periodUsagePieces: 60,
+      priorPeriodUsagePieces: 55,
+      demandOrderCount: 18,
+      demandActiveDays: 12,
+    });
+    const shortWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 7,
+      periodUsagePieces: 35,
+      priorPeriodUsagePieces: 14,
+      demandOrderCount: 9,
+      demandActiveDays: 6,
+    });
+
+    expect(buildPurchasingDemandForecastWindowDiagnostics({ standardWindow, shortWindow })).toEqual({
+      standardWindow: {
+        label: "standard",
+        ...standardWindow,
+      },
+      shortWindow: {
+        label: "short",
+        ...shortWindow,
+      },
+      accelerationRatio: 2.5,
+      accelerationSignal: "accelerating",
     });
   });
 });

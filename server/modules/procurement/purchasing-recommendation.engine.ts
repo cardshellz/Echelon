@@ -1,8 +1,10 @@
 import {
   buildPurchasingDemandForecastBasis,
+  buildPurchasingDemandForecastWindowDiagnostics,
   type PurchasingDemandForecastMethod,
   type PurchasingDemandForecastQuality,
   type PurchasingDemandForecastTrend,
+  type PurchasingDemandForecastWindowDiagnostics,
 } from "./purchasing-demand-forecast.engine";
 
 export type PurchasingRecommendationStatus =
@@ -73,6 +75,12 @@ export interface PurchasingRecommendationRawRow {
   demand_order_count?: number | string | null;
   demand_active_days?: number | string | null;
   latest_demand_at?: string | Date | null;
+  short_window_days?: number | string | null;
+  short_outbound_pieces?: number | string | null;
+  previous_short_outbound_pieces?: number | string | null;
+  short_demand_order_count?: number | string | null;
+  short_demand_active_days?: number | string | null;
+  short_latest_demand_at?: string | Date | null;
   on_order_pieces?: number | string | null;
   open_po_count?: number | string | null;
   earliest_expected?: string | Date | null;
@@ -219,6 +227,7 @@ export interface PurchasingRecommendationItem {
     leadTimeSource: PurchasingRecommendationLeadTimeSource;
     safetyStockSource: PurchasingRecommendationSafetyStockSource;
     orderUomSource: PurchasingRecommendationOrderUomSource;
+    demandWindowDiagnostics: PurchasingDemandForecastWindowDiagnostics;
   };
   confidence: PurchasingRecommendationConfidence;
   confidenceFactors: string[];
@@ -849,6 +858,25 @@ export function generatePurchasingRecommendations(
       demandActiveDays: row.demand_active_days,
       latestDemandAt: row.latest_demand_at ?? null,
     });
+    const hasShortWindowInput =
+      row.short_window_days !== undefined ||
+      row.short_outbound_pieces !== undefined ||
+      row.previous_short_outbound_pieces !== undefined ||
+      row.short_demand_order_count !== undefined ||
+      row.short_demand_active_days !== undefined ||
+      row.short_latest_demand_at !== undefined;
+    const shortDemandForecast = buildPurchasingDemandForecastBasis({
+      lookbackDays: hasShortWindowInput ? row.short_window_days : lookbackDays,
+      periodUsagePieces: hasShortWindowInput ? row.short_outbound_pieces : row.total_outbound_pieces,
+      priorPeriodUsagePieces: hasShortWindowInput ? row.previous_short_outbound_pieces : row.previous_outbound_pieces,
+      demandOrderCount: hasShortWindowInput ? row.short_demand_order_count : row.demand_order_count,
+      demandActiveDays: hasShortWindowInput ? row.short_demand_active_days : row.demand_active_days,
+      latestDemandAt: hasShortWindowInput ? row.short_latest_demand_at ?? null : row.latest_demand_at ?? null,
+    });
+    const demandWindowDiagnostics = buildPurchasingDemandForecastWindowDiagnostics({
+      standardWindow: demandForecast,
+      shortWindow: shortDemandForecast,
+    });
     const periodUsage = demandForecast.periodUsagePieces;
     const priorPeriodUsage = demandForecast.priorPeriodUsagePieces;
     const demandOrderCount = demandForecast.demandOrderCount;
@@ -1056,6 +1084,7 @@ export function generatePurchasingRecommendations(
         leadTimeSource,
         safetyStockSource,
         orderUomSource,
+        demandWindowDiagnostics,
       },
       confidence,
       confidenceFactors: buildConfidenceFactors({
