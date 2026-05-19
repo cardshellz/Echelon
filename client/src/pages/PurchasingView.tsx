@@ -64,6 +64,8 @@ interface ReorderItem {
   confidence?: "low" | "medium" | "high";
   confidenceFactors?: string[];
   forecastProvenance?: {
+    forecastMethod?: "recent_order_velocity_v1";
+    forecastVersion?: number;
     demandSource: "recent_order_velocity";
     demandWindowDays: number;
     demandQuality: "no_recent_demand" | "thin_history" | "normal";
@@ -227,6 +229,7 @@ export default function PurchasingView() {
   const formatProvenance = (item: ReorderItem) => {
     const provenance = item.forecastProvenance;
     if (!provenance) return "Forecast basis unavailable";
+    const methodLabel = (provenance.forecastMethod ?? provenance.demandSource).replace(/_/g, " ");
     const demandLabel =
       provenance.demandQuality === "normal"
         ? "Demand stable"
@@ -253,6 +256,7 @@ export default function PurchasingView() {
       provenance.demandOrderCount != null && provenance.demandActiveDays != null
         ? `${provenance.demandOrderCount} orders/${provenance.demandActiveDays}d`
         : `${provenance.periodUsagePieces} pcs/${provenance.demandWindowDays}d`;
+    const usageLabel = `${provenance.avgDailyUsagePieces.toLocaleString(undefined, { maximumFractionDigits: 2 })} pcs/day`;
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -261,7 +265,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${demandLabel} · ${sampleLabel}${trendLabel ? ` · ${trendLabel}` : ""} · ${leadLabel} · ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${trendLabel ? ` - ${trendLabel}` : ""} - ${leadLabel} - ${costLabel}`;
   };
 
   const confidenceClass = (confidence?: string) => {

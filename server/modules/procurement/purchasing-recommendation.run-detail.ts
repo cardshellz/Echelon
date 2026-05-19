@@ -24,6 +24,7 @@ export interface PurchasingRecommendationRunDetail {
   lookbackDays: number;
   settings: AutoDraftRecommendationSettings;
   recommendationSummary: PurchasingRecommendationResult["summary"];
+  forecastDiagnostics: ReturnType<typeof buildForecastDiagnostics>;
   statusCounts: Record<string, number>;
   skippedReasonCounts: Record<string, number>;
   actionableRecommendations: Array<ReturnType<typeof summarizeRecommendation>>;
@@ -34,6 +35,42 @@ export interface PurchasingRecommendationRunDetail {
 function increment(map: Record<string, number>, key: string | null | undefined) {
   if (!key) return;
   map[key] = (map[key] ?? 0) + 1;
+}
+
+function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
+  const demandQualityCounts: Record<string, number> = {};
+  const demandTrendCounts: Record<string, number> = {};
+  const forecastMethodCounts: Record<string, number> = {};
+  let totalPeriodUsagePieces = 0;
+  let avgDailyUsageTotal = 0;
+  let latestDemandAt: string | Date | null = null;
+
+  for (const item of result.items) {
+    const provenance = item.forecastProvenance;
+    increment(demandQualityCounts, provenance.demandQuality);
+    increment(demandTrendCounts, provenance.demandTrend);
+    increment(forecastMethodCounts, provenance.forecastMethod);
+    totalPeriodUsagePieces += provenance.periodUsagePieces;
+    avgDailyUsageTotal += provenance.avgDailyUsagePieces;
+
+    if (provenance.latestDemandAt) {
+      const current = new Date(provenance.latestDemandAt).getTime();
+      const latest = latestDemandAt ? new Date(latestDemandAt).getTime() : Number.NEGATIVE_INFINITY;
+      if (Number.isFinite(current) && current > latest) latestDemandAt = provenance.latestDemandAt;
+    }
+  }
+
+  const recommendationCount = result.items.length;
+  return {
+    recommendationCount,
+    forecastMethodCounts,
+    demandQualityCounts,
+    demandTrendCounts,
+    totalPeriodUsagePieces,
+    avgDailyUsagePieces:
+      recommendationCount > 0 ? Math.round((avgDailyUsageTotal / recommendationCount) * 100) / 100 : 0,
+    latestDemandAt,
+  };
 }
 
 function summarizeRecommendation(item: PurchasingRecommendationItem) {
@@ -88,6 +125,7 @@ export function buildPurchasingRecommendationRunDetail(
     lookbackDays: options.lookbackDays,
     settings: options.settings ?? {},
     recommendationSummary: result.summary,
+    forecastDiagnostics: buildForecastDiagnostics(result),
     statusCounts,
     skippedReasonCounts,
     actionableRecommendations: result.items
