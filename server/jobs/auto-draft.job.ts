@@ -31,6 +31,10 @@ interface AutoDraftOptions {
   triggeredByUser?: string;
 }
 
+function shouldCreateDraftPos(settings: { autoDraftMode?: string }): boolean {
+  return settings.autoDraftMode !== "review_only";
+}
+
 export async function runAutoDraftJob(options: AutoDraftOptions) {
   const storage = procurementMethods;
   const purchasing = createPurchasingService(db, storage as any);
@@ -127,9 +131,10 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
 
     const today = new Date().toISOString().split("T")[0];
     const poMutations: PurchasingRecommendationRunPoMutation[] = [];
+    const createDraftPos = shouldCreateDraftPos(settings);
 
     // Process each vendor group
-    for (const [vendorId, items] of vendorGroups) {
+    for (const [vendorId, items] of createDraftPos ? vendorGroups : []) {
       if (!vendorId) continue; // Skip no-vendor items (already counted)
 
       // Check if a draft PO already exists today for this vendor

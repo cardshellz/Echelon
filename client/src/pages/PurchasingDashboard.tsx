@@ -49,6 +49,9 @@ interface DashboardData {
     skippedExcluded: number;
     skippedOnOrder: number;
     summaryJson?: {
+      settings?: {
+        autoDraftMode?: "draft_po" | "review_only";
+      };
       recommendationSummary?: {
         actionableCount?: number;
       };
@@ -681,6 +684,12 @@ export default function PurchasingDashboard() {
                   <div className="space-y-1.5">
                     {[
                       { label: "Items analyzed", value: data.lastAutoDraftRun.itemsAnalyzed },
+                      {
+                        label: "Mode",
+                        value: data.lastAutoDraftRun.summaryJson?.settings?.autoDraftMode === "review_only"
+                          ? "Recommendation only"
+                          : "Create draft POs",
+                      },
                       { label: "POs created/updated", value: `${data.lastAutoDraftRun.posCreated}/${data.lastAutoDraftRun.posUpdated}` },
                       { label: "Actionable", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.actionableCount ?? data.lastAutoDraftRun.linesAdded },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
