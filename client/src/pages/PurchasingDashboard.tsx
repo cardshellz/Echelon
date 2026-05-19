@@ -74,6 +74,36 @@ interface DashboardData {
   } | null;
 }
 
+interface AutoDraftRunHistoryItem {
+  id: number;
+  runAt: string;
+  triggeredBy: string | null;
+  status: string;
+  mode: "draft_po" | "review_only";
+  itemsAnalyzed: number;
+  actionableCount: number;
+  posCreated: number;
+  posUpdated: number;
+  linesAdded: number;
+  skippedNoVendor: number;
+  skippedOnOrder: number;
+  skippedExcluded: number;
+  errorMessage: string | null;
+  topActionableRecommendation: {
+    sku: string;
+    productName: string;
+    suggestedOrderQty: number;
+    orderUomLabel: string;
+    preferredVendorName: string | null;
+    explanation: string;
+  } | null;
+}
+
+interface AutoDraftRunHistoryResponse {
+  limit: number;
+  runs: AutoDraftRunHistoryItem[];
+}
+
 type LandedCostHealth = {
   status: "healthy" | "warning" | "critical";
   scannedShipments: number;
@@ -142,6 +172,11 @@ export default function PurchasingDashboard() {
     refetchInterval: 5 * 60 * 1000,
   });
 
+  const { data: autoDraftRunHistory } = useQuery<AutoDraftRunHistoryResponse>({
+    queryKey: ["/api/purchasing/auto-draft/runs?limit=5"],
+    refetchInterval: 5 * 60 * 1000,
+  });
+
   const { data: landedCostHealth } = useQuery<LandedCostHealth>({
     queryKey: ["/api/procurement/landed-cost-health"],
     queryFn: async () => {
@@ -168,7 +203,10 @@ export default function PurchasingDashboard() {
     },
     onSuccess: () => {
       toast({ title: "Auto-draft started", description: "Refresh in a minute to see results." });
-      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] }), 15000);
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/runs?limit=5"] });
+      }, 15000);
     },
     onError: (err: Error) => {
       toast({ title: "Failed", description: err.message, variant: "destructive" });
@@ -217,6 +255,7 @@ export default function PurchasingDashboard() {
         { label: "Stale provisional lots", value: landedCostHealth.counts.staleProvisionalLots },
       ]
     : [];
+  const recentAutoDraftRuns = autoDraftRunHistory?.runs ?? [];
 
   return (
     <div className="flex flex-col h-full">
@@ -719,6 +758,42 @@ export default function PurchasingDashboard() {
                           <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{item.explanation}</p>
                         </div>
                       ))}
+                    </div>
+                  ) : null}
+                  {recentAutoDraftRuns.length > 0 ? (
+                    <div className="mt-3 pt-3 border-t">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                        Recent Runs
+                      </div>
+                      <div className="space-y-2">
+                        {recentAutoDraftRuns.slice(0, 5).map((run) => (
+                          <div key={run.id} className="rounded border bg-muted/20 p-2 text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className={`h-2 w-2 rounded-full flex-shrink-0 ${run.status === "success" ? "bg-green-500" : run.status === "running" ? "bg-blue-500" : "bg-red-500"}`} />
+                                <span className="font-medium truncate">{formatRelativeTime(run.runAt)}</span>
+                              </div>
+                              <span className="text-[11px] text-muted-foreground whitespace-nowrap">
+                                {run.mode === "review_only" ? "Recommendation only" : "Draft POs"}
+                              </span>
+                            </div>
+                            <div className="mt-1 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
+                              <span>{run.itemsAnalyzed} analyzed</span>
+                              <span>{run.actionableCount} actionable</span>
+                              <span>{run.posCreated + run.posUpdated} PO changes</span>
+                            </div>
+                            {run.topActionableRecommendation ? (
+                              <div className="mt-1 truncate text-[11px]">
+                                <span className="font-mono font-semibold text-primary">{run.topActionableRecommendation.sku}</span>
+                                <span className="text-muted-foreground"> · {run.topActionableRecommendation.suggestedOrderQty} {run.topActionableRecommendation.orderUomLabel}</span>
+                              </div>
+                            ) : null}
+                            {run.status === "error" && run.errorMessage ? (
+                              <div className="mt-1 truncate text-[11px] text-red-600">{run.errorMessage}</div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
                 </>

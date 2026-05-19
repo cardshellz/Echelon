@@ -229,6 +229,7 @@ export interface IProcurementStorage {
   getTotalExcludedProducts(): Promise<number>;
   setProductReorderExcluded(productId: number, excluded: boolean): Promise<void>;
   getLatestAutoDraftRun(): Promise<any | undefined>;
+  getRecentAutoDraftRuns(limit?: number): Promise<any[]>;
   createAutoDraftRun(data: any): Promise<any>;
   updateAutoDraftRun(id: number, updates: any): Promise<void>;
   getDashboardData(lookbackDays: number): Promise<any>;
@@ -1634,6 +1635,14 @@ export const procurementMethods: IProcurementStorage = {
   async getLatestAutoDraftRun(): Promise<any | undefined> {
     const [run] = await db.select().from(autoDraftRuns).orderBy(desc(autoDraftRuns.runAt)).limit(1);
     return run;
+  },
+
+  async getRecentAutoDraftRuns(limit: number = 10): Promise<any[]> {
+    const safeLimit = Math.max(1, Math.min(50, Math.trunc(limit)));
+    return await db.select()
+      .from(autoDraftRuns)
+      .orderBy(desc(autoDraftRuns.runAt))
+      .limit(safeLimit);
   },
 
   async createAutoDraftRun(data: any): Promise<any> {

@@ -22,6 +22,63 @@ function shouldCreateDraftPos(settings: AutoDraftRecommendationSettings): boolea
   return settings.autoDraftMode !== "review_only";
 }
 
+function parseRunHistoryLimit(value: unknown): number {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10;
+  return Math.min(parsed, 50);
+}
+
+function parseSummaryJson(value: unknown): any {
+  if (!value) return null;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return value;
+}
+
+function numberField(row: any, camel: string, snake: string): number {
+  return Number(row?.[camel] ?? row?.[snake] ?? 0) || 0;
+}
+
+function normalizeAutoDraftRun(row: any) {
+  const summaryJson = parseSummaryJson(row?.summaryJson ?? row?.summary_json);
+  const actionableRecommendations = Array.isArray(summaryJson?.actionableRecommendations)
+    ? summaryJson.actionableRecommendations
+    : [];
+  const skippedRecommendations = Array.isArray(summaryJson?.skippedRecommendations)
+    ? summaryJson.skippedRecommendations
+    : [];
+  const poMutations = Array.isArray(summaryJson?.poMutations)
+    ? summaryJson.poMutations
+    : [];
+
+  return {
+    id: Number(row?.id),
+    runAt: row?.runAt ?? row?.run_at,
+    triggeredBy: row?.triggeredBy ?? row?.triggered_by ?? null,
+    triggeredByUser: row?.triggeredByUser ?? row?.triggered_by_user ?? null,
+    status: row?.status,
+    itemsAnalyzed: numberField(row, "itemsAnalyzed", "items_analyzed"),
+    posCreated: numberField(row, "posCreated", "pos_created"),
+    posUpdated: numberField(row, "posUpdated", "pos_updated"),
+    linesAdded: numberField(row, "linesAdded", "lines_added"),
+    skippedNoVendor: numberField(row, "skippedNoVendor", "skipped_no_vendor"),
+    skippedOnOrder: numberField(row, "skippedOnOrder", "skipped_on_order"),
+    skippedExcluded: numberField(row, "skippedExcluded", "skipped_excluded"),
+    errorMessage: row?.errorMessage ?? row?.error_message ?? null,
+    finishedAt: row?.finishedAt ?? row?.finished_at ?? null,
+    mode: summaryJson?.settings?.autoDraftMode === "review_only" ? "review_only" : "draft_po",
+    actionableCount: Number(summaryJson?.recommendationSummary?.actionableCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
+    poMutationCount: poMutations.length,
+    topActionableRecommendation: actionableRecommendations[0] ?? null,
+    topSkippedRecommendation: skippedRecommendations[0] ?? null,
+  };
+}
+
 async function loadPurchasingRecommendationDefaults(): Promise<PurchasingRecommendationDefaults> {
   const defaultsQuery = await db.execute(sql`
     SELECT key, value FROM warehouse.echelon_settings
@@ -407,6 +464,21 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching auto-draft status:", error);
       res.status(500).json({ error: "Failed to fetch auto-draft status" });
+    }
+  });
+
+  // GET /api/purchasing/auto-draft/runs
+  app.get("/api/purchasing/auto-draft/runs", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = parseRunHistoryLimit(req.query.limit);
+      const runs = await storage.getRecentAutoDraftRuns(limit);
+      res.json({
+        limit,
+        runs: runs.map(normalizeAutoDraftRun),
+      });
+    } catch (error) {
+      console.error("Error fetching auto-draft run history:", error);
+      res.status(500).json({ error: "Failed to fetch auto-draft run history" });
     }
   });
 
