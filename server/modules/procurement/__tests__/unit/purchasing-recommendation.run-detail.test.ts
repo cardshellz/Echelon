@@ -53,6 +53,8 @@ describe("purchasing recommendation run detail", () => {
       lookbackDays: 30,
       recommendationSummary: {
         actionableCount: 1,
+        autoDraftEligibleCount: 0,
+        autoDraftReviewRequiredCount: 1,
         skippedNoVendor: 1,
       },
       statusCounts: {
@@ -83,6 +85,10 @@ describe("purchasing recommendation run detail", () => {
       reviewSignal: {
         action: "create_po",
         severity: "critical",
+      },
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "medium_confidence_review",
       },
     });
     expect(detail.skippedRecommendations[0]).toMatchObject({

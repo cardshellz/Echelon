@@ -1831,3 +1831,35 @@ Next step:
 - Continue Phase 8 by adding an operator-facing quality summary or gating
   policy for high-confidence review-only recommendations before enabling any
   broader auto-draft behavior.
+
+### 2026-05-19 - Phase 8 Slice 9: Autopilot Quality Gate Summary
+
+Scope:
+
+- Added a shared recommendation quality gate that marks only high-confidence
+  actionable recommendations as auto-draft eligible.
+- Updated direct auto-draft to use the shared quality gate for PO mutations
+  while keeping medium and low confidence actionable recommendations visible
+  for operator review.
+- Added summary counts for high, medium, and low confidence recommendations,
+  auto-draft eligible recommendations, and actionable recommendations requiring
+  review.
+- Persisted quality gate detail in recommendation run summaries for audit and
+  run-history inspection.
+- Surfaced an Autopilot Quality Gate summary on reorder analysis so operators
+  can see what can draft automatically versus what needs review.
+- Expanded focused engine, route, and run-detail tests for quality gate
+  behavior.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 8 by adding explicit approval policy controls for when the
+  quality gate can move from review-only recommendation visibility to PO draft
+  creation.

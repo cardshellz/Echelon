@@ -40,6 +40,11 @@ describe("purchasing recommendation engine", () => {
       totalProducts: 1,
       belowReorderPoint: 1,
       actionableCount: 1,
+      highConfidenceCount: 1,
+      mediumConfidenceCount: 0,
+      lowConfidenceCount: 0,
+      autoDraftEligibleCount: 1,
+      autoDraftReviewRequiredCount: 0,
     });
     expect(result.items[0]).toMatchObject({
       recommendationId: "10:101:30",
@@ -104,6 +109,11 @@ describe("purchasing recommendation engine", () => {
         severity: "critical",
         label: "Create PO",
       },
+      qualityGate: {
+        autoDraftEligible: true,
+        reason: "high_confidence",
+        label: "Auto-draft eligible",
+      },
       actionable: true,
       skippedReason: null,
     });
@@ -136,6 +146,10 @@ describe("purchasing recommendation engine", () => {
       reviewSignal: {
         action: "review_exclusion",
         severity: "info",
+      },
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "not_actionable",
       },
       actionable: false,
     });
@@ -173,10 +187,16 @@ describe("purchasing recommendation engine", () => {
         severity: "critical",
         label: "Assign preferred vendor",
       },
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "not_actionable",
+      },
     });
     expect(result.summary).toMatchObject({
       skippedNoVendor: 1,
       actionableCount: 0,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 0,
     });
   });
 
@@ -211,10 +231,16 @@ describe("purchasing recommendation engine", () => {
         action: "review_open_po",
         severity: "info",
       },
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "not_actionable",
+      },
     });
     expect(result.summary).toMatchObject({
       skippedOnOrder: 1,
       actionableCount: 0,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 0,
     });
   });
 
@@ -239,6 +265,11 @@ describe("purchasing recommendation engine", () => {
 
     expect(result.items[0]).toMatchObject({
       confidence: "medium",
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "medium_confidence_review",
+        label: "Review before auto-draft",
+      },
       confidenceFactors: expect.arrayContaining([
         "Limited demand history in the lookback window.",
         "Lead time uses the default fallback.",
@@ -259,6 +290,12 @@ describe("purchasing recommendation engine", () => {
         safetyStockSource: "default",
         orderUomSource: "default_each",
       },
+    });
+    expect(result.summary).toMatchObject({
+      actionableCount: 1,
+      mediumConfidenceCount: 1,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 1,
     });
   });
 
@@ -289,6 +326,10 @@ describe("purchasing recommendation engine", () => {
 
     expect(result.items[0]).toMatchObject({
       confidence: "medium",
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "medium_confidence_review",
+      },
       demandBasis: {
         demandQuality: "normal",
         demandTrend: "falling",
@@ -304,6 +345,12 @@ describe("purchasing recommendation engine", () => {
         "Demand sample includes 15 orders across 12 active days.",
         "Demand is falling versus the prior lookback window.",
       ]),
+    });
+    expect(result.summary).toMatchObject({
+      actionableCount: 1,
+      mediumConfidenceCount: 1,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 1,
     });
   });
 
@@ -338,6 +385,10 @@ describe("purchasing recommendation engine", () => {
     expect(result.items[0]).toMatchObject({
       confidence: "medium",
       estimatedCostCents: 225,
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "medium_confidence_review",
+      },
       supplierBasis: {
         vendorProductId: 7010,
         costSource: "last_purchase_cost",
@@ -349,6 +400,12 @@ describe("purchasing recommendation engine", () => {
         "Preferred vendor cost uses last purchase fallback.",
         "Preferred vendor cost was last verified over 365 days ago.",
       ]),
+    });
+    expect(result.summary).toMatchObject({
+      actionableCount: 1,
+      mediumConfidenceCount: 1,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 1,
     });
   });
 });
