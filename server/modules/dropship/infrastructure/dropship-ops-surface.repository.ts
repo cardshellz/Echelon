@@ -1538,13 +1538,13 @@ function buildDogfoodChecks(input: {
   return [
     {
       key: "dropship_oms_channel",
-      label: "Dropship OMS channel",
+      label: "Dropship OMS source",
       status: input.dropshipOmsChannelCount === 1 ? "ready" : "blocked",
       message: input.dropshipOmsChannelCount === 1 && input.dropshipOmsChannelId !== null
-        ? `Dropship OMS channel ${input.dropshipOmsChannelId} is configured.`
+        ? `Dropship OMS source ${input.dropshipOmsChannelId} is configured.`
         : input.dropshipOmsChannelCount === 0
-          ? "No active Dropship OMS channel is marked in channel configuration."
-          : `${input.dropshipOmsChannelCount} active Dropship OMS channels are marked; exactly one is required.`,
+          ? "No active Dropship OMS source is marked in channel configuration."
+          : `${input.dropshipOmsChannelCount} active Dropship OMS sources are marked; exactly one is required.`,
     },
     {
       key: "vendor_entitlement",

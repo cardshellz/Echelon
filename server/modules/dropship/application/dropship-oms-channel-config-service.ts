@@ -16,6 +16,17 @@ const configureDropshipOmsChannelInputSchema = z.object({
   actor: commandActorSchema,
 }).strict();
 
+const ensureDefaultDropshipOmsChannelInputSchema = z.object({
+  idempotencyKey: idempotencyKeySchema,
+  actor: commandActorSchema,
+}).strict();
+
+const defaultDropshipOmsChannelPayload = {
+  name: "Dropship OMS",
+  type: "internal",
+  provider: "manual",
+} as const;
+
 export interface DropshipOmsChannelOption {
   channelId: number;
   name: string;
@@ -42,6 +53,7 @@ export interface DropshipOmsChannelConfigMutationResult {
 
 export interface DropshipOmsChannelConfigRepository {
   getOverview(input: { generatedAt: Date }): Promise<DropshipOmsChannelConfigOverview>;
+  ensureDefault(input: DropshipOmsChannelConfigCommandContext): Promise<DropshipOmsChannelConfigMutationResult>;
   configure(
     input: NormalizedConfigureDropshipOmsChannelInput & DropshipOmsChannelConfigCommandContext,
   ): Promise<DropshipOmsChannelConfigMutationResult>;
@@ -58,6 +70,7 @@ export interface DropshipOmsChannelConfigCommandContext {
 }
 
 export type ConfigureDropshipOmsChannelInput = z.infer<typeof configureDropshipOmsChannelInputSchema>;
+export type EnsureDefaultDropshipOmsChannelInput = z.infer<typeof ensureDefaultDropshipOmsChannelInputSchema>;
 export type NormalizedConfigureDropshipOmsChannelInput = Omit<ConfigureDropshipOmsChannelInput, "idempotencyKey" | "actor">;
 
 export class DropshipOmsChannelConfigService {
@@ -69,6 +82,33 @@ export class DropshipOmsChannelConfigService {
 
   async getOverview(): Promise<DropshipOmsChannelConfigOverview> {
     return this.deps.repository.getOverview({ generatedAt: this.deps.clock.now() });
+  }
+
+  async ensureDefault(input: unknown): Promise<DropshipOmsChannelConfigMutationResult> {
+    const parsed = ensureDefaultDropshipOmsChannelInputSchema.parse(input);
+    const result = await this.deps.repository.ensureDefault({
+      idempotencyKey: parsed.idempotencyKey.trim(),
+      requestHash: hashDropshipOmsChannelConfigCommand(
+        "dropship_oms_default_channel_ensured",
+        defaultDropshipOmsChannelPayload,
+      ),
+      actor: parsed.actor,
+      now: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: result.idempotentReplay
+        ? "DROPSHIP_OMS_DEFAULT_CHANNEL_REPLAYED"
+        : "DROPSHIP_OMS_DEFAULT_CHANNEL_ENSURED",
+      message: result.idempotentReplay
+        ? "Dropship OMS default channel ensure command was replayed by idempotency key."
+        : "Dropship OMS default channel ensure command completed.",
+      context: {
+        channelId: result.selectedChannel.channelId,
+        currentChannelCount: result.config.currentChannelCount,
+        idempotentReplay: result.idempotentReplay,
+      },
+    });
+    return result;
   }
 
   async configure(input: unknown): Promise<DropshipOmsChannelConfigMutationResult> {

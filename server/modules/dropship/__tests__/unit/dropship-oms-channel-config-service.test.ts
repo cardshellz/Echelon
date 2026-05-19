@@ -34,6 +34,28 @@ describe("DropshipOmsChannelConfigService", () => {
     });
   });
 
+  it("ensures the dedicated default source through the repository", async () => {
+    const repository = new FakeOmsChannelConfigRepository();
+    const service = new DropshipOmsChannelConfigService({
+      repository,
+      clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+
+    const result = await service.ensureDefault({
+      idempotencyKey: "oms-source-001",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.selectedChannel.channelId).toBe(7);
+    expect(repository.lastEnsureDefaultInput).toMatchObject({
+      idempotencyKey: "oms-source-001",
+      requestHash: expect.any(String),
+      now,
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+  });
+
   it("hashes semantically equivalent command payloads deterministically", () => {
     const first = hashDropshipOmsChannelConfigCommand("dropship_oms_channel_configured", {
       channelId: 7,
@@ -65,31 +87,43 @@ describe("DropshipOmsChannelConfigService", () => {
 });
 
 class FakeOmsChannelConfigRepository implements DropshipOmsChannelConfigRepository {
+  lastEnsureDefaultInput: Parameters<DropshipOmsChannelConfigRepository["ensureDefault"]>[0] | null = null;
   lastConfigureInput: Parameters<DropshipOmsChannelConfigRepository["configure"]>[0] | null = null;
 
   async getOverview(input: Parameters<DropshipOmsChannelConfigRepository["getOverview"]>[0]): Promise<DropshipOmsChannelConfigOverview> {
     return makeOverview(input.generatedAt);
   }
 
+  async ensureDefault(
+    input: Parameters<DropshipOmsChannelConfigRepository["ensureDefault"]>[0],
+  ): Promise<DropshipOmsChannelConfigMutationResult> {
+    this.lastEnsureDefaultInput = input;
+    return makeMutationResult(input.now, 7);
+  }
+
   async configure(
     input: Parameters<DropshipOmsChannelConfigRepository["configure"]>[0],
   ): Promise<DropshipOmsChannelConfigMutationResult> {
     this.lastConfigureInput = input;
-    return {
-      config: makeOverview(input.now),
-      selectedChannel: {
-        channelId: input.channelId,
-        name: "Dropship OMS",
-        type: "internal",
-        provider: "manual",
-        status: "active",
-        isDropshipOmsChannel: true,
-        markerSources: ["channel.shipping_config.dropship.omsChannel"],
-        updatedAt: input.now,
-      },
-      idempotentReplay: false,
-    };
+    return makeMutationResult(input.now, input.channelId);
   }
+}
+
+function makeMutationResult(generatedAt: Date, channelId: number): DropshipOmsChannelConfigMutationResult {
+  return {
+    config: makeOverview(generatedAt),
+    selectedChannel: {
+      channelId,
+      name: "Dropship OMS",
+      type: "internal",
+      provider: "manual",
+      status: "active",
+      isDropshipOmsChannel: true,
+      markerSources: ["channel.shipping_config.dropship.omsChannel"],
+      updatedAt: generatedAt,
+    },
+    idempotentReplay: false,
+  };
 }
 
 function makeOverview(generatedAt: Date): DropshipOmsChannelConfigOverview {

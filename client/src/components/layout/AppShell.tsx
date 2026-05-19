@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Link, useLocation } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import {
   LayoutDashboard,
   Package,
@@ -71,6 +71,32 @@ function isNavGroup(entry: NavEntry): entry is NavGroup {
   return 'children' in entry;
 }
 
+function navPath(href: string): string {
+  const [path] = href.split(/[?#]/, 1);
+  return path || "/";
+}
+
+function navHrefHasQueryOrHash(href: string): boolean {
+  return href.includes("?") || href.includes("#");
+}
+
+function navHrefBelongsToLocation(pathname: string, href: string): boolean {
+  const hrefPath = navPath(href);
+  return pathname === hrefPath || (hrefPath !== "/" && pathname.startsWith(`${hrefPath}/`));
+}
+
+function isNavHrefActive(pathname: string, currentHref: string, href: string): boolean {
+  if (href === "/dropship?tab=overview" && pathname === "/dropship" && currentHref === "/dropship") {
+    return true;
+  }
+
+  if (navHrefHasQueryOrHash(href)) {
+    return currentHref === href;
+  }
+
+  return navHrefBelongsToLocation(pathname, href);
+}
+
 // --- Navigation structure ---
 
 const navStructure: NavEntry[] = [
@@ -137,8 +163,26 @@ const navStructure: NavEntry[] = [
       { label: "Channels", icon: Store, href: "/channels" },
       { label: "Allocation", icon: Layers, href: "/channel-allocation" },
       { label: "Sync Log", icon: History, href: "/sync-log" },
-      { label: "Dropship Network", icon: Globe, href: "/dropship" },
       { label: "Subscriptions", icon: Crown, href: "/subscriptions" },
+    ],
+  },
+  {
+    label: "Dropship",
+    icon: Globe,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Overview", icon: LayoutDashboard, href: "/dropship?tab=overview" },
+      { label: "Launch Readiness", icon: Shield, href: "/dropship?tab=dogfood" },
+      { label: "Catalog Exposure", icon: Package, href: "/dropship?tab=catalog" },
+      { label: "Shipping Config", icon: Truck, href: "/dropship?tab=shipping" },
+      { label: "Store Connections", icon: Store, href: "/dropship?tab=stores" },
+      { label: "Order Intake", icon: ClipboardList, href: "/dropship?tab=order-intake" },
+      { label: "Listing Pushes", icon: Tag, href: "/dropship?tab=listing-pushes" },
+      { label: "Tracking Pushes", icon: Truck, href: "/dropship?tab=tracking-pushes" },
+      { label: "Wallet Ops", icon: CreditCard, href: "/dropship?tab=wallet-ops" },
+      { label: "Returns", icon: RotateCcw, href: "/dropship?tab=returns" },
+      { label: "Notifications", icon: Bell, href: "/dropship?tab=notifications" },
+      { label: "Audit", icon: History, href: "/dropship?tab=audit" },
     ],
   },
   {
@@ -167,6 +211,9 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   onExpand?: () => void;
 }) => {
   const [location] = useLocation();
+  const search = useSearch();
+  const locationPath = navPath(location);
+  const currentHref = search ? `${locationPath}?${search}` : locationPath;
   const { user, logout } = useAuth();
 
   // Find which group contains the active route
@@ -174,24 +221,23 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
     for (const entry of navStructure) {
       if (!isNavGroup(entry)) continue;
       for (const child of entry.children) {
-        if (pathname === child.href) return entry.label;
-        if (child.href !== '/' && pathname.startsWith(child.href + '/')) return entry.label;
+        if (navHrefBelongsToLocation(pathname, child.href)) return entry.label;
       }
     }
     return null;
   };
 
   const [expandedGroup, setExpandedGroup] = useState<string | null>(
-    () => getActiveGroupLabel(location)
+    () => getActiveGroupLabel(locationPath)
   );
 
   // Auto-expand group when navigating to a page in a different group
   useEffect(() => {
-    const activeLabel = getActiveGroupLabel(location);
+    const activeLabel = getActiveGroupLabel(locationPath);
     if (activeLabel) {
       setExpandedGroup(activeLabel);
     }
-  }, [location]);
+  }, [locationPath]);
 
   // Role-based filtering
   const isVisible = (roles?: string[]) => {
@@ -237,7 +283,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
 
             // Standalone link (Dashboard)
             if (!isNavGroup(entry)) {
-              const isActive = location === entry.href;
+              const isActive = isNavHrefActive(locationPath, currentHref, entry.href);
               const Icon = entry.icon;
               return (
                 <Link
@@ -265,7 +311,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
             const GroupIcon = entry.icon;
             const isOpen = expandedGroup === entry.label;
             const hasActiveChild = visibleChildren.some(child =>
-              location === child.href || (child.href !== '/' && location.startsWith(child.href + '/'))
+              navHrefBelongsToLocation(locationPath, child.href)
             );
 
             // Collapsed mode: show group icon only
@@ -317,7 +363,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
                 <CollapsibleContent>
                   <div className="relative ml-[22px] pl-2 border-l border-sidebar-border/30 space-y-0.5 pb-0.5">
                     {visibleChildren.map((child) => {
-                      const isActive = location === child.href;
+                      const isActive = isNavHrefActive(locationPath, currentHref, child.href);
                       const ChildIcon = child.icon;
                       return (
                         <Link

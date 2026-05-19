@@ -31,6 +31,10 @@ interface AdminCommandRow {
   entity_id: string | null;
 }
 
+const DEFAULT_DROPSHIP_OMS_CHANNEL_NAME = "Dropship OMS";
+const DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE = "internal";
+const DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER = "manual";
+
 export class PgDropshipOmsChannelConfigRepository implements DropshipOmsChannelConfigRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
 
@@ -38,6 +42,42 @@ export class PgDropshipOmsChannelConfigRepository implements DropshipOmsChannelC
     const client = await this.dbPool.connect();
     try {
       return await loadOverviewWithClient(client, input.generatedAt);
+    } finally {
+      client.release();
+    }
+  }
+
+  async ensureDefault(
+    input: DropshipOmsChannelConfigCommandContext,
+  ): Promise<DropshipOmsChannelConfigMutationResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const command = await claimAdminConfigCommand(client, "dropship_oms_default_channel_ensured", input);
+      if (command.idempotentReplay) {
+        const selectedChannel = await loadChannelOptionByIdWithClient(
+          client,
+          parseEntityId(command.entityId, "channels.channels"),
+        );
+        const config = await loadOverviewWithClient(client, input.now);
+        await client.query("COMMIT");
+        return { config, selectedChannel, idempotentReplay: true };
+      }
+
+      const ensuredChannelId = await ensureDefaultDropshipOmsChannel(client, input.now);
+      await clearExistingDropshipOmsMarkers(client, input.now);
+      const selectedChannel = await markDropshipOmsChannel(client, {
+        channelId: ensuredChannelId,
+        ...input,
+      });
+      await completeAdminConfigCommand(client, command.commandId, "channels.channels", selectedChannel.channelId, input.now);
+      await recordAdminOmsChannelAuditEvent(client, input, selectedChannel);
+      const config = await loadOverviewWithClient(client, input.now);
+      await client.query("COMMIT");
+      return { config, selectedChannel, idempotentReplay: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
     } finally {
       client.release();
     }
@@ -68,6 +108,20 @@ export class PgDropshipOmsChannelConfigRepository implements DropshipOmsChannelC
           {
             channelId: input.channelId,
             status: selectedBeforeUpdate.status,
+          },
+        );
+      }
+      if (
+        selectedBeforeUpdate.type !== DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE
+        || selectedBeforeUpdate.provider !== DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER
+      ) {
+        throw new DropshipError(
+          "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE",
+          "Dropship OMS source must be an internal/manual channel, not a marketplace sales channel.",
+          {
+            channelId: input.channelId,
+            type: selectedBeforeUpdate.type,
+            provider: selectedBeforeUpdate.provider,
           },
         );
       }
@@ -149,6 +203,53 @@ async function loadChannelOptionByIdWithClient(
     throw new DropshipError("DROPSHIP_OMS_CHANNEL_NOT_FOUND", "Dropship OMS channel was not found.", { channelId });
   }
   return channel;
+}
+
+async function ensureDefaultDropshipOmsChannel(client: PoolClient, now: Date): Promise<number> {
+  const result = await client.query<{ id: number }>(
+    `WITH existing AS (
+       SELECT id
+       FROM channels.channels
+       WHERE LOWER(name) = LOWER($1)
+         AND type = $2
+         AND provider = $3
+       ORDER BY id ASC
+       LIMIT 1
+     ),
+     inserted AS (
+       INSERT INTO channels.channels
+         (name, type, provider, status, is_default, priority,
+          allocation_pct, allocation_fixed_qty, sync_enabled, sync_mode,
+          sweep_interval_minutes, shipping_config, created_at, updated_at)
+       SELECT
+         $1, $2, $3, 'active', 0, 0,
+         NULL, NULL, false, 'dry_run',
+         15, '{}'::jsonb, $4, $4
+       WHERE NOT EXISTS (SELECT 1 FROM existing)
+       RETURNING id
+     ),
+     selected AS (
+       SELECT id FROM inserted
+       UNION ALL
+       SELECT id FROM existing
+       LIMIT 1
+     )
+     UPDATE channels.channels c
+     SET status = 'active',
+         sync_enabled = false,
+         sync_mode = 'dry_run',
+         updated_at = $4
+     FROM selected
+     WHERE c.id = selected.id
+     RETURNING c.id`,
+    [
+      DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
+      DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
+      DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
+      now,
+    ],
+  );
+  return requiredRow(result.rows[0], "Dropship OMS default source ensure did not return a channel.").id;
 }
 
 async function lockConfiguredChannel(client: PoolClient, channelId: number): Promise<{
