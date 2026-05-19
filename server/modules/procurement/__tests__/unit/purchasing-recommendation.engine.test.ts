@@ -1,0 +1,114 @@
+import { describe, expect, it } from "vitest";
+import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+
+describe("purchasing recommendation engine", () => {
+  it("produces an explainable actionable recommendation using vendor lead time and order UOM", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 10,
+          variant_id: 101,
+          base_sku: "SKU-CASE",
+          product_name: "Case Product",
+          total_pieces: 12,
+          total_reserved_pieces: 2,
+          total_outbound_pieces: 60,
+          on_order_pieces: 0,
+          open_po_count: 0,
+          lead_time_days: 14,
+          vendor_lead_time_days: 5,
+          safety_stock_days: 2,
+          order_uom_units: 10,
+          order_uom_level: 3,
+          preferred_vendor_id: 77,
+          preferred_vendor_name: "Vendor",
+          estimated_cost_cents: 125,
+        },
+      ],
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+    });
+
+    expect(result.summary).toMatchObject({
+      totalProducts: 1,
+      belowReorderPoint: 1,
+      actionableCount: 1,
+    });
+    expect(result.items[0]).toMatchObject({
+      recommendationId: "10:101:30",
+      status: "order_now",
+      leadTimeDays: 5,
+      reorderPoint: 14,
+      suggestedOrderQty: 1,
+      suggestedOrderPieces: 10,
+      orderUomLabel: "Case",
+      preferredVendorId: 77,
+      estimatedCostCents: 125,
+      confidence: "high",
+      actionable: true,
+      skippedReason: null,
+    });
+    expect(result.items[0].explanation).toContain("Recommend 1 Case");
+  });
+
+  it("keeps excluded products out of visible recommendations and reports the skip", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 20,
+          base_sku: "DROP-1",
+          product_name: "Dropship Item",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 30,
+          order_uom_units: 1,
+        },
+      ],
+      productMetaById: new Map([[20, { sku: "DROP-1", category: "dropship" }]]),
+      exclusionRules: [{ field: "category", value: "dropship" }],
+    });
+
+    expect(result.items).toEqual([]);
+    expect(result.summary.excludedCount).toBe(1);
+    expect(result.skippedItems[0]).toMatchObject({
+      productId: 20,
+      skippedReason: "excluded",
+      actionable: false,
+    });
+  });
+
+  it("marks auto-draft recommendations blocked when preferred vendor is required", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 10,
+      rows: [
+        {
+          product_id: 30,
+          base_sku: "NO-VENDOR",
+          product_name: "No Vendor Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 20,
+          on_order_pieces: 0,
+          lead_time_days: 2,
+          safety_stock_days: 1,
+          order_uom_units: 5,
+          order_uom_level: 2,
+        },
+      ],
+      autoDraftSettings: { skipNoVendor: true },
+      requireVendor: true,
+    });
+
+    expect(result.items[0]).toMatchObject({
+      status: "stockout",
+      suggestedOrderQty: 2,
+      actionable: false,
+      skippedReason: "no_vendor",
+    });
+    expect(result.summary).toMatchObject({
+      skippedNoVendor: 1,
+      actionableCount: 0,
+    });
+  });
+});

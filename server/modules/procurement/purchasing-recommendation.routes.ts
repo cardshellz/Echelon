@@ -4,7 +4,57 @@ import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
 import { procurementStorage } from "../procurement";
 import { inventoryStorage } from "../inventory";
+import {
+  generatePurchasingRecommendations,
+  type AutoDraftRecommendationSettings,
+  type PurchasingRecommendationDefaults,
+  type PurchasingRecommendationExclusionRule,
+  type PurchasingRecommendationProductMeta,
+  type PurchasingRecommendationRawRow,
+} from "./purchasing-recommendation.engine";
 const storage = { ...procurementStorage, ...inventoryStorage };
+
+async function loadPurchasingRecommendationDefaults(): Promise<PurchasingRecommendationDefaults> {
+  const defaultsQuery = await db.execute(sql`
+    SELECT key, value FROM warehouse.echelon_settings
+    WHERE key IN ('default_lead_time_days','default_safety_stock_days')
+  `);
+  const defaultsMap = new Map<string, string>();
+  for (const row of defaultsQuery.rows as any[]) defaultsMap.set(row.key, row.value);
+
+  return {
+    leadTimeDays: Number.parseInt(defaultsMap.get("default_lead_time_days") ?? "14", 10) || 14,
+    safetyStockDays: Number.parseInt(defaultsMap.get("default_safety_stock_days") ?? "7", 10) || 7,
+  };
+}
+
+async function loadPurchasingRecommendationContext(): Promise<{
+  defaults: PurchasingRecommendationDefaults;
+  rules: PurchasingRecommendationExclusionRule[];
+  productMetaById: Map<number, PurchasingRecommendationProductMeta>;
+}> {
+  const { products: productsTable, reorderExclusionRules: exclRules } = await import("../../storage/base");
+  const [defaults, rules, metaRows] = await Promise.all([
+    loadPurchasingRecommendationDefaults(),
+    db.select().from(exclRules),
+    db.execute(sql`
+      SELECT id, category, brand, product_type, sku, tags, reorder_excluded
+      FROM ${productsTable}
+      WHERE is_active = true
+    `),
+  ]);
+
+  const productMetaById = new Map<number, PurchasingRecommendationProductMeta>();
+  for (const row of metaRows.rows as any[]) {
+    productMetaById.set(Number(row.id), row);
+  }
+
+  return {
+    defaults,
+    rules: rules as PurchasingRecommendationExclusionRule[],
+    productMetaById,
+  };
+}
 
 export function registerPurchasingRecommendationRoutes(app: Express) {
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
@@ -12,56 +62,32 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     try {
       const configuredLookback = await storage.getVelocityLookbackDays();
       const rawRows = await storage.getReorderAnalysisData(configuredLookback);
-
-      // Global defaults for lead time / safety stock when product is unconfigured.
-      // See procurement.storage.getDashboardData for the same hierarchy.
-      const defaultsQuery = await db.execute(sql`
-        SELECT key, value FROM warehouse.echelon_settings
-        WHERE key IN ('default_lead_time_days','default_safety_stock_days')
-      `);
-      const defaultsMap = new Map<string, string>();
-      for (const row of defaultsQuery.rows as any[]) defaultsMap.set(row.key, row.value);
-      const defaultLeadTimeDays =
-        Number.parseInt(defaultsMap.get("default_lead_time_days") ?? "14", 10) || 14;
-      const defaultSafetyStockDays =
-        Number.parseInt(defaultsMap.get("default_safety_stock_days") ?? "7", 10) || 7;
+      const context = await loadPurchasingRecommendationContext();
+      const recommendationResult = generatePurchasingRecommendations({
+        rows: rawRows as PurchasingRecommendationRawRow[],
+        lookbackDays: configuredLookback,
+        ...context,
+      });
 
       let criticalRestocks = 0;
       let upcomingRestocks = 0;
       let idleCapitalCents = 0;
 
-      rawRows.forEach((r: any) => {
-        const totalOnHand = Number(r.total_pieces) || 0;
-        const totalReserved = Number(r.total_reserved_pieces) || 0;
-        const totalOutbound = Number(r.total_outbound_pieces) || 0;
-        const onOrderPieces = Number(r.on_order_pieces) || 0;
-        const leadTimeDays =
-          r.lead_time_days == null || Number.isNaN(Number(r.lead_time_days))
-            ? defaultLeadTimeDays
-            : Number(r.lead_time_days);
-        const safetyStockDays =
-          r.safety_stock_days == null || Number.isNaN(Number(r.safety_stock_days))
-            ? defaultSafetyStockDays
-            : Number(r.safety_stock_days);
-        const costCents = Number(r.unit_cost_cents) || 0;
-        
-        const available = totalOnHand - totalReserved;
-        const avgDailyUsage = configuredLookback > 0 ? totalOutbound / configuredLookback : 0;
-        const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
-        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-        const effectiveSupply = available + onOrderPieces;
+      for (const item of recommendationResult.items) {
+        const effectiveSupply = item.currentSupply.effectiveSupplyPieces;
+        const avgDailyUsage = item.demandBasis.avgDailyUsagePieces;
+        const costCents = item.estimatedCostCents ?? 0;
 
-        // KPI Calculations
-        if (effectiveSupply < reorderPoint) {
+        if (effectiveSupply < item.reorderPoint) {
           criticalRestocks++;
-        } else if (effectiveSupply < (reorderPoint + (14 * avgDailyUsage)) && avgDailyUsage > 0) {
+        } else if (effectiveSupply < item.reorderPoint + 14 * avgDailyUsage && avgDailyUsage > 0) {
           upcomingRestocks++;
         }
 
-        if (daysOfSupply > 180 && totalOnHand > 0) {
-          idleCapitalCents += (totalOnHand * costCents);
+        if (item.daysOfSupply > 180 && item.totalOnHand > 0) {
+          idleCapitalCents += item.totalOnHand * costCents;
         }
-      });
+      }
 
       // Pipeline Value Calculation
       const openPoSummary = await storage.getOpenPoSummaryReport();
@@ -93,48 +119,41 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const { purchasing } = app.locals.services;
       const configuredLookback = await storage.getVelocityLookbackDays();
       const rawRows = await storage.getReorderAnalysisData(configuredLookback);
-      
-      const itemsToOrder: Array<{
-        productId: number;
-        productVariantId: number;
-        suggestedQty: number;
-      }> = [];
-
-      rawRows.forEach((r: any) => {
-        const totalOnHand = Number(r.total_pieces) || 0;
-        const totalReserved = Number(r.total_reserved_pieces) || 0;
-        const totalOutbound = Number(r.total_outbound_pieces) || 0;
-        const onOrderPieces = Number(r.on_order_pieces) || 0;
-        const leadTimeDays = Number(r.lead_time_days) || 0;
-        const safetyStockDays = Number(r.safety_stock_days) || 0;
-        
-        const available = totalOnHand - totalReserved;
-        const avgDailyUsage = configuredLookback > 0 ? totalOutbound / configuredLookback : 0;
-        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-        const effectiveSupply = available + onOrderPieces;
-
-        if (effectiveSupply < reorderPoint) {
-            const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
-            const orderUomUnits = Number(r.order_uom_units) || 1;
-            const suggestedOrderQty = orderUomUnits > 1
-                ? Math.ceil(rawOrderQtyPieces / orderUomUnits)
-                : Math.ceil(rawOrderQtyPieces);
-            
-            if (suggestedOrderQty > 0) {
-                itemsToOrder.push({
-                    productId: r.product_id,
-                    productVariantId: r.highest_hierarchy_variant_id || r.product_variant_id, // Default to highest UOM
-                    suggestedQty: suggestedOrderQty,
-                });
-            }
-        }
+      const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
+      const context = await loadPurchasingRecommendationContext();
+      const recommendationResult = generatePurchasingRecommendations({
+        rows: rawRows as PurchasingRecommendationRawRow[],
+        lookbackDays: configuredLookback,
+        autoDraftSettings: settings,
+        requireVendor: Boolean(settings.skipNoVendor),
+        ...context,
       });
+
+      const itemsToOrder = recommendationResult.items
+        .filter((item) => item.actionable)
+        .map((item) => ({
+          productId: item.productId,
+          productVariantId: item.productVariantId ?? item.productId,
+          suggestedQty: item.suggestedOrderQty,
+          vendorId: item.preferredVendorId ?? undefined,
+        }));
 
       if (itemsToOrder.length > 0) {
         const result = await purchasing.createPOFromReorder(itemsToOrder, req.session?.user?.id || 'SYSTEM');
-        res.json({ success: true, pos: result, count: result.length, itemsDrafted: itemsToOrder.length });
+        res.json({
+          success: true,
+          pos: result,
+          count: result.length,
+          itemsDrafted: itemsToOrder.length,
+          recommendationSummary: recommendationResult.summary,
+        });
       } else {
-        res.json({ success: true, count: 0, itemsDrafted: 0 });
+        res.json({
+          success: true,
+          count: 0,
+          itemsDrafted: 0,
+          recommendationSummary: recommendationResult.summary,
+        });
       }
 
     } catch (error) {
@@ -153,123 +172,19 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       // Product-level query: aggregate inventory and velocity in base units (pieces)
       // Also fetch the highest-level variant (ordering UOM) for rounding order quantities
       const rawRows = await storage.getReorderAnalysisData(lookbackDays);
-
-      // Apply exclusion filtering (reorder_excluded flag + exclusion rules)
-      const { db } = await import("../../db");
-      const { products: productsTable, reorderExclusionRules: exclRules } = await import("../../storage/base");
-      const { sql: sqlFn } = await import("drizzle-orm");
-      const allRules = await db.select().from(exclRules);
-      const excludedIds = new Set<number>();
-      if (allRules.length > 0) {
-        const metaRows = await db.execute(sqlFn`SELECT id, category, brand, product_type, sku, reorder_excluded FROM ${productsTable} WHERE is_active = true`);
-        for (const pm of metaRows.rows as any[]) {
-          if (pm.reorder_excluded) { excludedIds.add(pm.id); continue; }
-          for (const r of allRules) {
-            const val = String(r.value).toLowerCase();
-            let match = false;
-            switch (r.field) {
-              case "category": match = (pm.category || "").toLowerCase() === val; break;
-              case "brand": match = (pm.brand || "").toLowerCase() === val; break;
-              case "product_type": match = (pm.product_type || "").toLowerCase() === val; break;
-              case "sku_prefix": match = (pm.sku || "").toLowerCase().startsWith(val); break;
-              case "sku_exact": match = (pm.sku || "").toLowerCase() === val; break;
-            }
-            if (match) { excludedIds.add(pm.id); break; }
-          }
-        }
-      }
-      const rowsToProcess = allRules.length > 0 ? rawRows.filter((r: any) => !excludedIds.has(r.product_id)) : rawRows;
-      const excludedCount = rawRows.length - rowsToProcess.length;
-
-      const HIERARCHY_LABELS: Record<number, string> = { 1: "Pack", 2: "Box", 3: "Case", 4: "Skid" };
-
-      const items = rowsToProcess.map((r: any) => {
-        const totalOnHand = Number(r.total_pieces);
-        const totalReserved = Number(r.total_reserved_pieces);
-        const totalOutbound = Number(r.total_outbound_pieces);
-        const onOrderPieces = Number(r.on_order_pieces);
-        const openPoCount = Number(r.open_po_count);
-        const earliestExpectedDate = r.earliest_expected || null;
-        const leadTimeDays = Number(r.lead_time_days);
-        const safetyStockDays = Number(r.safety_stock_days);
-        const available = totalOnHand - totalReserved;
-        const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
-        const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
-        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-
-        // Effective supply = available (unreserved) + on order
-        const effectiveSupply = available + onOrderPieces;
-        const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
-
-        // Round up to ordering UOM (highest hierarchy variant)
-        const orderUomUnits = Number(r.order_uom_units) || 1;
-        const orderUomLevel = Number(r.order_uom_level) || 0;
-        const orderUomLabel = HIERARCHY_LABELS[orderUomLevel] || (orderUomUnits > 1 ? `${orderUomUnits}pk` : "pcs");
-        const suggestedOrderQty = orderUomUnits > 1
-          ? Math.ceil(rawOrderQtyPieces / orderUomUnits) // in ordering units (cases, boxes, etc.)
-          : Math.ceil(rawOrderQtyPieces); // fallback: pieces
-        const suggestedOrderPieces = suggestedOrderQty * orderUomUnits;
-
-        // On-order qty in ordering UOM
-        const onOrderQty = orderUomUnits > 1
-          ? Math.floor(onOrderPieces / orderUomUnits)
-          : onOrderPieces;
-
-        let status: string;
-        // Stockout = no available pieces regardless of velocity
-        if (available <= 0) {
-          status = "stockout";
-        } else if (avgDailyUsage === 0) {
-          status = "no_movement";
-        } else if (available <= reorderPoint && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
-          // Below reorder point but on-order covers the gap
-          status = "on_order";
-        } else if (available <= reorderPoint) {
-          status = "order_now";
-        } else if (daysOfSupply <= leadTimeDays * 1.5) {
-          status = "order_soon";
-        } else {
-          status = "ok";
-        }
-
-        return {
-          productId: r.product_id,
-          productVariantId: r.variant_id ? Number(r.variant_id) : undefined,
-          sku: r.base_sku || r.product_name,
-          productName: r.product_name,
-          variantCount: Number(r.variant_count || 0),
-          totalOnHand,
-          totalReserved,
-          available,
-          periodUsage: totalOutbound,
-          avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
-          daysOfSupply,
-          leadTimeDays,
-          safetyStockDays,
-          reorderPoint,
-          suggestedOrderQty,
-          suggestedOrderPieces,
-          orderUomUnits,
-          orderUomLabel,
-          onOrderQty,
-          onOrderPieces,
-          openPoCount,
-          earliestExpectedDate,
-          status,
-          lastReceivedAt: r.last_received_at,
-        };
+      const context = await loadPurchasingRecommendationContext();
+      const recommendationResult = generatePurchasingRecommendations({
+        rows: rawRows as PurchasingRecommendationRawRow[],
+        lookbackDays,
+        ...context,
       });
 
-      const summary = {
-        totalProducts: items.length,
-        outOfStock: items.filter((i) => i.status === "stockout").length,
-        belowReorderPoint: items.filter((i) => i.status === "order_now").length,
-        orderSoon: items.filter((i) => i.status === "order_soon").length,
-        noMovement: items.filter((i) => i.status === "no_movement").length,
-        totalOnHand: items.reduce((s, i) => s + i.totalOnHand, 0),
-      };
-
-      res.json({ items, summary: { ...summary, excludedCount }, lookbackDays });
+      res.json({
+        items: recommendationResult.items,
+        summary: recommendationResult.summary,
+        skippedItems: recommendationResult.skippedItems,
+        lookbackDays,
+      });
     } catch (error) {
       console.error("Error fetching reorder analysis:", error);
       res.status(500).json({ error: "Failed to fetch reorder analysis" });

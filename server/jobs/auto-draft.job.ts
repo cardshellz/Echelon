@@ -7,20 +7,19 @@
 
 import { db } from "../db";
 import { procurementMethods } from "../modules/procurement/procurement.storage";
+import {
+  generatePurchasingRecommendations,
+  type PurchasingRecommendationProductMeta,
+  type PurchasingRecommendationRawRow,
+} from "../modules/procurement/purchasing-recommendation.engine";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import {
   purchaseOrders,
-  purchaseOrderLines,
-  vendors,
-  vendorProducts,
   reorderExclusionRules,
-  autoDraftRuns,
   products,
   sql,
   eq,
   and,
-  inArray,
-  desc,
 } from "../storage/base";
 
 interface AutoDraftOptions {
@@ -56,6 +55,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
 
     // Get reorder analysis data
     const rawData = await storage.getReorderAnalysisData(lookbackDays);
+    itemsAnalyzed = rawData.length;
 
     // Get exclusion rules
     const rules = await db.select().from(reorderExclusionRules);
@@ -65,44 +65,23 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
       SELECT id, category, brand, product_type, sku, tags, reorder_excluded
       FROM catalog.products WHERE is_active = true
     `);
-    const productMeta = new Map<number, any>();
+    const productMeta = new Map<number, PurchasingRecommendationProductMeta>();
     for (const pm of productMetaRows.rows as any[]) {
       productMeta.set(pm.id, pm);
     }
 
-    const isExcluded = (row: any): boolean => {
-      const meta = productMeta.get(row.product_id) || {};
-      if (meta.reorder_excluded) return true;
-      for (const r of rules) {
-        const val = String(r.value).toLowerCase();
-        switch (r.field) {
-          case "category":
-            if ((meta.category || "").toLowerCase() === val) return true;
-            break;
-          case "brand":
-            if ((meta.brand || "").toLowerCase() === val) return true;
-            break;
-          case "product_type":
-            if ((meta.product_type || "").toLowerCase() === val) return true;
-            break;
-          case "sku_prefix":
-            if ((meta.sku || "").toLowerCase().startsWith(val)) return true;
-            break;
-          case "sku_exact":
-            if ((meta.sku || "").toLowerCase() === val) return true;
-            break;
-          case "tag":
-            try {
-              const tags = Array.isArray(meta.tags) ? meta.tags.map((t: string) => t.toLowerCase()) : [];
-              if (tags.includes(val)) return true;
-            } catch (_) {}
-            break;
-        }
-      }
-      return false;
-    };
+    const recommendationResult = generatePurchasingRecommendations({
+      rows: rawData as PurchasingRecommendationRawRow[],
+      lookbackDays,
+      productMetaById: productMeta,
+      exclusionRules: rules,
+      autoDraftSettings: settings,
+      requireVendor: Boolean(settings.skipNoVendor),
+    });
+    skippedExcluded = recommendationResult.summary.excludedCount;
+    skippedNoVendor = recommendationResult.summary.skippedNoVendor;
+    skippedOnOrder = recommendationResult.summary.skippedOnOrder;
 
-    // Classify and filter items
     const eligibleItems: Array<{
       productId: number;
       productVariantId: number;
@@ -115,89 +94,23 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
       openPoCount: number;
       status: string;
       preferredVendorId: number | null;
-    }> = [];
-
-    for (const r of rawData) {
-      itemsAnalyzed++;
-
-      // Check exclusion
-      if (isExcluded(r)) {
-        skippedExcluded++;
-        continue;
-      }
-
-      // Calculate status
-      const totalOnHand = Number(r.total_pieces);
-      const totalReserved = Number(r.total_reserved_pieces);
-      const totalOutbound = Number(r.total_outbound_pieces);
-      const onOrderPieces = Number(r.on_order_pieces);
-      const available = totalOnHand - totalReserved;
-      const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
-      const leadTimeDays = Number(r.lead_time_days);
-      const safetyStockDays = Number(r.safety_stock_days);
-      const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-      const effectiveSupply = available + onOrderPieces;
-      const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
-      const orderUomUnits = Number(r.order_uom_units) || 1;
-      const suggestedOrderQty = orderUomUnits > 1 ? Math.ceil(rawOrderQtyPieces / orderUomUnits) : Math.ceil(rawOrderQtyPieces);
-
-      let status: string;
-      if (available <= 0) {
-        status = "stockout";
-      } else if (avgDailyUsage === 0) {
-        status = "no_movement";
-      } else if (available <= reorderPoint && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
-        status = "on_order";
-      } else if (available <= reorderPoint) {
-        status = "order_now";
-      } else if (available / avgDailyUsage <= leadTimeDays * 1.5) {
-        status = "order_soon";
-      } else {
-        status = "ok";
-      }
-
-      // Only include stockout + order_now (optionally order_soon)
-      const includeStatuses = ["stockout", "order_now"];
-      if (settings.includeOrderSoon) includeStatuses.push("order_soon");
-      if (!includeStatuses.includes(status)) continue;
-
-      // Skip items already on open PO (if setting enabled)
-      if (settings.skipOnOpenPo && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
-        skippedOnOrder++;
-        continue;
-      }
-
-      // Look up preferred vendor
-      const [preferredVendor] = await db.select()
-        .from(vendorProducts)
-        .where(and(
-          eq(vendorProducts.productId, r.product_id),
-          eq(vendorProducts.isPreferred, 1),
-          eq(vendorProducts.isActive, 1),
-        ))
-        .limit(1);
-
-      if (!preferredVendor) {
-        if (settings.skipNoVendor) {
-          skippedNoVendor++;
-          continue;
-        }
-      }
-
-      eligibleItems.push({
-        productId: r.product_id,
-        productVariantId: r.variant_id ? Number(r.variant_id) : r.product_id,
-        sku: r.base_sku || r.product_name,
-        productName: r.product_name,
-        suggestedOrderQty,
-        suggestedOrderPieces: suggestedOrderQty * orderUomUnits,
-        orderUomUnits,
-        onOrderPieces,
-        openPoCount: Number(r.open_po_count),
-        status,
-        preferredVendorId: preferredVendor?.vendorId ?? null,
-      });
-    }
+      estimatedCostCents: number | null;
+    }> = recommendationResult.items
+      .filter((item) => item.actionable)
+      .map((item) => ({
+        productId: item.productId,
+        productVariantId: item.productVariantId ?? item.productId,
+        sku: item.sku,
+        productName: item.productName,
+        suggestedOrderQty: item.suggestedOrderQty,
+        suggestedOrderPieces: item.suggestedOrderPieces,
+        orderUomUnits: item.orderUomUnits,
+        onOrderPieces: item.onOrderPieces,
+        openPoCount: item.openPoCount,
+        status: item.status,
+        preferredVendorId: item.preferredVendorId,
+        estimatedCostCents: item.estimatedCostCents,
+      }));
 
     // Group by vendor
     const vendorGroups = new Map<number | null, typeof eligibleItems>();
@@ -237,7 +150,6 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
         const newLines = items
           .filter((item) => !existingProductIds.has(item.productVariantId))
           .map((item, idx) => {
-            const preferredVendorProduct = null; // Could look up cost
             return {
               purchaseOrderId: poId,
               lineNumber: existingLines.length + idx + 1,
@@ -248,8 +160,8 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
               orderQty: item.suggestedOrderQty,
               unitOfMeasure: item.orderUomUnits > 1 ? "case" : "each",
               unitsPerUom: item.orderUomUnits,
-              unitCostCents: 0,
-              lineTotalCents: 0,
+              unitCostCents: item.estimatedCostCents ?? 0,
+              lineTotalCents: (item.estimatedCostCents ?? 0) * item.suggestedOrderQty,
               status: "open",
             };
           });
@@ -287,8 +199,8 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
           orderQty: item.suggestedOrderQty,
           unitOfMeasure: item.orderUomUnits > 1 ? "case" : "each",
           unitsPerUom: item.orderUomUnits,
-          unitCostCents: 0,
-          lineTotalCents: 0,
+          unitCostCents: item.estimatedCostCents ?? 0,
+          lineTotalCents: (item.estimatedCostCents ?? 0) * item.suggestedOrderQty,
           status: "open",
         }));
 

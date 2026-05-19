@@ -60,6 +60,11 @@ import {
   products,
   eq, and, or, inArray, sql, desc, asc, lte, like, ilike,
 } from "../../storage/base";
+import {
+  generatePurchasingRecommendations,
+  type PurchasingRecommendationProductMeta,
+  type PurchasingRecommendationRawRow,
+} from "./purchasing-recommendation.engine";
 
 export interface IProcurementStorage {
   getAllVendors(): Promise<Vendor[]>;
@@ -1259,6 +1264,10 @@ export const procurementMethods: IProcurementStorage = {
         p.name AS product_name,
         p.lead_time_days,
         p.safety_stock_days,
+        preferred_vendor.vendor_id AS preferred_vendor_id,
+        preferred_vendor.vendor_name AS preferred_vendor_name,
+        preferred_vendor.unit_cost_cents AS estimated_cost_cents,
+        preferred_vendor.lead_time_days AS vendor_lead_time_days,
         COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
         COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
         COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
@@ -1305,6 +1314,27 @@ export const procurementMethods: IProcurementStorage = {
         ORDER BY pv.hierarchy_level DESC
         LIMIT 1
       ) order_uom ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          vp.vendor_id,
+          v.name AS vendor_name,
+          vp.unit_cost_cents,
+          vp.lead_time_days,
+          vp.product_variant_id
+        FROM procurement.vendor_products vp
+        JOIN procurement.vendors v ON v.id = vp.vendor_id
+        WHERE vp.product_id = p.id
+          AND vp.is_preferred = 1
+          AND vp.is_active = 1
+        ORDER BY
+          CASE
+            WHEN vp.product_variant_id = order_uom.variant_id THEN 0
+            WHEN vp.product_variant_id IS NULL THEN 1
+            ELSE 2
+          END,
+          vp.id
+        LIMIT 1
+      ) preferred_vendor ON true
       LEFT JOIN (
         SELECT pv.product_id,
                SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
@@ -1665,116 +1695,29 @@ export const procurementMethods: IProcurementStorage = {
     const defaultSafetyStockDays =
       Number.parseInt(defaultsMap.get("default_safety_stock_days") ?? "7", 10) || 7;
 
-    const isExcluded = (row: any): boolean => {
-      // Check per-product flag
-      if (row.reorder_excluded) return true;
-      // Check rules
-      for (const r of rules) {
-        const val = String(r.value).toLowerCase();
-        switch (r.field) {
-          case "category":
-            if ((row.category || "").toLowerCase() === val) return true;
-            break;
-          case "brand":
-            if ((row.brand || "").toLowerCase() === val) return true;
-            break;
-          case "product_type":
-            if ((row.product_type || "").toLowerCase() === val) return true;
-            break;
-          case "sku_prefix":
-            if ((row.base_sku || "").toLowerCase().startsWith(val)) return true;
-            break;
-          case "sku_exact":
-            if ((row.base_sku || "").toLowerCase() === val) return true;
-            break;
-        }
-      }
-      return false;
-    };
-
     // Enrich raw rows with product fields for exclusion check
     const enrichedRows = await db.execute(sql`
-      SELECT p.id, p.category, p.brand, p.product_type, p.reorder_excluded
+      SELECT p.id, p.category, p.brand, p.product_type, p.sku, p.tags, p.reorder_excluded
       FROM ${products} p
       WHERE p.is_active = true
     `);
-    const productMeta = new Map<number, any>();
+    const productMeta = new Map<number, PurchasingRecommendationProductMeta>();
     for (const pm of enrichedRows.rows as any[]) {
       productMeta.set(pm.id, pm);
     }
 
-    // Classify items
-    const HIERARCHY_LABELS: Record<number, string> = { 1: "Pack", 2: "Box", 3: "Case", 4: "Skid" };
+    const recommendationResult = generatePurchasingRecommendations({
+      rows: rawRows as PurchasingRecommendationRawRow[],
+      lookbackDays,
+      productMetaById: productMeta,
+      exclusionRules: rules,
+      defaults: {
+        leadTimeDays: defaultLeadTimeDays,
+        safetyStockDays: defaultSafetyStockDays,
+      },
+    });
 
-    const items = rawRows
-      .map((r: any) => {
-        const meta = productMeta.get(r.product_id) || {};
-        const totalOnHand = Number(r.total_pieces);
-        const totalReserved = Number(r.total_reserved_pieces);
-        const totalOutbound = Number(r.total_outbound_pieces);
-        const onOrderPieces = Number(r.on_order_pieces);
-        const available = totalOnHand - totalReserved;
-        const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
-        const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
-        // Per-product value wins; fall back to the global default from
-        // echelon_settings if the product has no value configured.
-        const rawLeadTime = r.lead_time_days;
-        const rawSafety = r.safety_stock_days;
-        const leadTimeDays =
-          rawLeadTime == null || Number.isNaN(Number(rawLeadTime))
-            ? defaultLeadTimeDays
-            : Number(rawLeadTime);
-        const safetyStockDays =
-          rawSafety == null || Number.isNaN(Number(rawSafety))
-            ? defaultSafetyStockDays
-            : Number(rawSafety);
-        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-        const effectiveSupply = available + onOrderPieces;
-        const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
-        const orderUomUnits = Number(r.order_uom_units) || 1;
-        const orderUomLevel = Number(r.order_uom_level) || 0;
-        const orderUomLabel = HIERARCHY_LABELS[orderUomLevel] || (orderUomUnits > 1 ? `${orderUomUnits}pk` : "pcs");
-        const suggestedOrderQty = orderUomUnits > 1 ? Math.ceil(rawOrderQtyPieces / orderUomUnits) : Math.ceil(rawOrderQtyPieces);
-        const suggestedOrderPieces = suggestedOrderQty * orderUomUnits;
-
-        let status: string;
-        if (available <= 0) {
-          status = "stockout";
-        } else if (avgDailyUsage === 0) {
-          status = "no_movement";
-        } else if (available <= reorderPoint && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
-          status = "on_order";
-        } else if (available <= reorderPoint) {
-          status = "order_now";
-        } else if (daysOfSupply <= leadTimeDays * 1.5) {
-          status = "order_soon";
-        } else {
-          status = "ok";
-        }
-
-        return {
-          productId: r.product_id,
-          sku: r.base_sku || r.product_name,
-          productName: r.product_name,
-          totalOnHand,
-          available,
-          daysOfSupply,
-          suggestedOrderQty,
-          suggestedOrderPieces,
-          orderUomUnits,
-          orderUomLabel,
-          onOrderPieces,
-          openPoCount: Number(r.open_po_count),
-          earliestExpectedDate: r.earliest_expected || null,
-          status,
-          _excluded: isExcluded({ ...r, ...meta }),
-          preferredVendorId: r.preferred_vendor_id ? Number(r.preferred_vendor_id) : null,
-          preferredVendorName: r.preferred_vendor_name || null,
-          estimatedCostCents: r.estimated_cost_cents ? Number(r.estimated_cost_cents) : null,
-        };
-      });
-
-    const activeItems = items.filter((i: any) => !i._excluded);
+    const activeItems = recommendationResult.items;
 
     // Categorize
     const stockoutItems = activeItems.filter((i: any) => i.status === "stockout");
