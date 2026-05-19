@@ -14,6 +14,10 @@ export type PurchasingRecommendationSkipReason =
   | "zero_suggested_quantity";
 
 export type PurchasingRecommendationConfidence = "low" | "medium" | "high";
+export type PurchasingRecommendationDemandQuality = "no_recent_demand" | "thin_history" | "normal";
+export type PurchasingRecommendationLeadTimeSource = "vendor_product" | "product" | "default";
+export type PurchasingRecommendationSafetyStockSource = "product" | "default";
+export type PurchasingRecommendationOrderUomSource = "variant" | "default_each";
 export type PurchasingRecommendationReviewAction =
   | "create_po"
   | "assign_vendor"
@@ -131,13 +135,27 @@ export interface PurchasingRecommendationItem {
     lookbackDays: number;
     periodUsagePieces: number;
     avgDailyUsagePieces: number;
+    demandQuality: PurchasingRecommendationDemandQuality;
   };
   leadTimeBasis: {
     leadTimeDays: number;
+    leadTimeSource: PurchasingRecommendationLeadTimeSource;
     safetyStockDays: number;
+    safetyStockSource: PurchasingRecommendationSafetyStockSource;
     reorderPointPieces: number;
   };
+  forecastProvenance: {
+    demandSource: "recent_order_velocity";
+    demandWindowDays: number;
+    demandQuality: PurchasingRecommendationDemandQuality;
+    periodUsagePieces: number;
+    avgDailyUsagePieces: number;
+    leadTimeSource: PurchasingRecommendationLeadTimeSource;
+    safetyStockSource: PurchasingRecommendationSafetyStockSource;
+    orderUomSource: PurchasingRecommendationOrderUomSource;
+  };
   confidence: PurchasingRecommendationConfidence;
+  confidenceFactors: string[];
   explanation: string;
   reviewSignal: {
     action: PurchasingRecommendationReviewAction;
@@ -324,14 +342,62 @@ function buildExplanation(input: {
 }
 
 function buildConfidence(input: {
-  avgDailyUsage: number;
-  periodUsage: number;
-  leadTimeFromDefault: boolean;
+  demandQuality: PurchasingRecommendationDemandQuality;
+  leadTimeSource: PurchasingRecommendationLeadTimeSource;
   hasVendor: boolean;
 }): PurchasingRecommendationConfidence {
-  if (input.avgDailyUsage <= 0 || input.periodUsage <= 0) return "low";
-  if (!input.hasVendor || input.leadTimeFromDefault) return "medium";
+  if (input.demandQuality === "no_recent_demand") return "low";
+  if (input.demandQuality === "thin_history") return "medium";
+  if (!input.hasVendor || input.leadTimeSource === "default") return "medium";
   return "high";
+}
+
+function buildConfidenceFactors(input: {
+  demandQuality: PurchasingRecommendationDemandQuality;
+  leadTimeSource: PurchasingRecommendationLeadTimeSource;
+  safetyStockSource: PurchasingRecommendationSafetyStockSource;
+  hasVendor: boolean;
+  orderUomSource: PurchasingRecommendationOrderUomSource;
+}): string[] {
+  const factors: string[] = [];
+
+  if (input.demandQuality === "no_recent_demand") {
+    factors.push("No recent demand in the lookback window.");
+  } else if (input.demandQuality === "thin_history") {
+    factors.push("Limited demand history in the lookback window.");
+  } else {
+    factors.push("Recent demand history is sufficient for velocity-based forecasting.");
+  }
+
+  if (input.leadTimeSource === "vendor_product") {
+    factors.push("Vendor-specific lead time is configured.");
+  } else if (input.leadTimeSource === "product") {
+    factors.push("Product lead time is configured.");
+  } else {
+    factors.push("Lead time uses the default fallback.");
+  }
+
+  if (input.safetyStockSource === "product") {
+    factors.push("Product safety stock is configured.");
+  } else {
+    factors.push("Safety stock uses the default fallback.");
+  }
+
+  if (!input.hasVendor) {
+    factors.push("Preferred vendor is missing.");
+  }
+
+  if (input.orderUomSource === "default_each") {
+    factors.push("Order UOM defaults to each because no higher ordering unit is configured.");
+  }
+
+  return factors;
+}
+
+function classifyDemandQuality(periodUsage: number, lookbackDays: number): PurchasingRecommendationDemandQuality {
+  if (periodUsage <= 0) return "no_recent_demand";
+  if (periodUsage < 3 || lookbackDays < 14) return "thin_history";
+  return "normal";
 }
 
 function buildReviewSignal(input: {
@@ -430,12 +496,18 @@ export function generatePurchasingRecommendations(
     const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
     const vendorLeadTime = row.vendor_lead_time_days == null ? null : asNumber(row.vendor_lead_time_days, NaN);
     const productLeadTime = row.lead_time_days == null ? null : asNumber(row.lead_time_days, NaN);
-    const leadTimeFromDefault = !Number.isFinite(vendorLeadTime ?? NaN) && !Number.isFinite(productLeadTime ?? NaN);
+    const leadTimeSource: PurchasingRecommendationLeadTimeSource = Number.isFinite(vendorLeadTime ?? NaN)
+      ? "vendor_product"
+      : Number.isFinite(productLeadTime ?? NaN)
+        ? "product"
+        : "default";
     const leadTimeDays = Number.isFinite(vendorLeadTime ?? NaN)
       ? Number(vendorLeadTime)
       : Number.isFinite(productLeadTime ?? NaN)
         ? Number(productLeadTime)
         : defaults.leadTimeDays;
+    const safetyStockSource: PurchasingRecommendationSafetyStockSource =
+      row.safety_stock_days == null || Number.isNaN(Number(row.safety_stock_days)) ? "default" : "product";
     const safetyStockDays =
       row.safety_stock_days == null || Number.isNaN(Number(row.safety_stock_days))
         ? defaults.safetyStockDays
@@ -445,6 +517,7 @@ export function generatePurchasingRecommendations(
     const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
     const orderUomUnits = asPositiveInt(row.order_uom_units, 1);
     const orderUomLevel = asNumber(row.order_uom_level);
+    const orderUomSource: PurchasingRecommendationOrderUomSource = asNumber(row.order_uom_units) > 0 ? "variant" : "default_each";
     const orderUomLabel = HIERARCHY_LABELS[orderUomLevel] || (orderUomUnits > 1 ? `${orderUomUnits}pk` : "pcs");
     const suggestedOrderQty =
       orderUomUnits > 1 ? Math.ceil(rawOrderQtyPieces / orderUomUnits) : Math.ceil(rawOrderQtyPieces);
@@ -465,6 +538,7 @@ export function generatePurchasingRecommendations(
         ? null
         : asNumber(row.estimated_cost_cents ?? row.unit_cost_cents);
     const hasVendor = Boolean(preferredVendorId);
+    const demandQuality = classifyDemandQuality(periodUsage, lookbackDays);
 
     let skippedReason: PurchasingRecommendationSkipReason | null = null;
     if (isExcluded(row, meta, rules)) {
@@ -550,17 +624,36 @@ export function generatePurchasingRecommendations(
         lookbackDays,
         periodUsagePieces: periodUsage,
         avgDailyUsagePieces: Math.round(avgDailyUsage * 100) / 100,
+        demandQuality,
       },
       leadTimeBasis: {
         leadTimeDays,
+        leadTimeSource,
         safetyStockDays,
+        safetyStockSource,
         reorderPointPieces: reorderPoint,
       },
+      forecastProvenance: {
+        demandSource: "recent_order_velocity",
+        demandWindowDays: lookbackDays,
+        demandQuality,
+        periodUsagePieces: periodUsage,
+        avgDailyUsagePieces: Math.round(avgDailyUsage * 100) / 100,
+        leadTimeSource,
+        safetyStockSource,
+        orderUomSource,
+      },
       confidence: buildConfidence({
-        avgDailyUsage,
-        periodUsage,
-        leadTimeFromDefault,
+        demandQuality,
+        leadTimeSource,
         hasVendor,
+      }),
+      confidenceFactors: buildConfidenceFactors({
+        demandQuality,
+        leadTimeSource,
+        safetyStockSource,
+        hasVendor,
+        orderUomSource,
       }),
       explanation,
       reviewSignal,

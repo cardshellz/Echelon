@@ -45,6 +45,32 @@ describe("purchasing recommendation engine", () => {
       preferredVendorId: 77,
       estimatedCostCents: 125,
       confidence: "high",
+      confidenceFactors: expect.arrayContaining([
+        "Recent demand history is sufficient for velocity-based forecasting.",
+        "Vendor-specific lead time is configured.",
+        "Product safety stock is configured.",
+      ]),
+      demandBasis: {
+        lookbackDays: 30,
+        periodUsagePieces: 60,
+        avgDailyUsagePieces: 2,
+        demandQuality: "normal",
+      },
+      leadTimeBasis: {
+        leadTimeDays: 5,
+        leadTimeSource: "vendor_product",
+        safetyStockDays: 2,
+        safetyStockSource: "product",
+        reorderPointPieces: 14,
+      },
+      forecastProvenance: {
+        demandSource: "recent_order_velocity",
+        demandWindowDays: 30,
+        demandQuality: "normal",
+        leadTimeSource: "vendor_product",
+        safetyStockSource: "product",
+        orderUomSource: "variant",
+      },
       reviewSignal: {
         action: "create_po",
         severity: "critical",
@@ -161,6 +187,50 @@ describe("purchasing recommendation engine", () => {
     expect(result.summary).toMatchObject({
       skippedOnOrder: 1,
       actionableCount: 0,
+    });
+  });
+
+  it("downgrades confidence and records default forecast provenance for thin history", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 50,
+          base_sku: "THIN",
+          product_name: "Thin History Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 2,
+          on_order_pieces: 0,
+          order_uom_units: null,
+          preferred_vendor_id: 10,
+        },
+      ],
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+    });
+
+    expect(result.items[0]).toMatchObject({
+      confidence: "medium",
+      confidenceFactors: expect.arrayContaining([
+        "Limited demand history in the lookback window.",
+        "Lead time uses the default fallback.",
+        "Safety stock uses the default fallback.",
+        "Order UOM defaults to each because no higher ordering unit is configured.",
+      ]),
+      demandBasis: {
+        demandQuality: "thin_history",
+        periodUsagePieces: 2,
+      },
+      leadTimeBasis: {
+        leadTimeSource: "default",
+        safetyStockSource: "default",
+      },
+      forecastProvenance: {
+        demandQuality: "thin_history",
+        leadTimeSource: "default",
+        safetyStockSource: "default",
+        orderUomSource: "default_each",
+      },
     });
   });
 });

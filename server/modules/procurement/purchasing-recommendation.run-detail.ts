@@ -59,6 +59,8 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     orderUomLabel: item.orderUomLabel,
     estimatedCostCents: item.estimatedCostCents,
     confidence: item.confidence,
+    confidenceFactors: item.confidenceFactors,
+    forecastProvenance: item.forecastProvenance,
     explanation: item.explanation,
     reviewSignal: item.reviewSignal,
   };
