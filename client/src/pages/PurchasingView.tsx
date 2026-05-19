@@ -67,8 +67,13 @@ interface ReorderItem {
     demandSource: "recent_order_velocity";
     demandWindowDays: number;
     demandQuality: "no_recent_demand" | "thin_history" | "normal";
+    demandTrend?: "not_available" | "no_recent_demand" | "new_demand" | "rising" | "stable" | "falling";
     periodUsagePieces: number;
+    priorPeriodUsagePieces?: number | null;
     avgDailyUsagePieces: number;
+    demandOrderCount?: number | null;
+    demandActiveDays?: number | null;
+    latestDemandAt?: string | null;
     leadTimeSource: "vendor_product" | "product" | "default";
     safetyStockSource: "product" | "default";
     orderUomSource: "variant" | "default_each";
@@ -211,7 +216,21 @@ export default function PurchasingView() {
         : provenance.leadTimeSource === "product"
           ? "product lead"
           : "default lead";
-    return `${demandLabel} · ${provenance.periodUsagePieces} pcs/${provenance.demandWindowDays}d · ${leadLabel}`;
+    const trendLabel =
+      provenance.demandTrend === "rising"
+        ? "rising"
+        : provenance.demandTrend === "falling"
+          ? "falling"
+          : provenance.demandTrend === "stable"
+            ? "stable"
+            : provenance.demandTrend === "new_demand"
+              ? "new"
+              : null;
+    const sampleLabel =
+      provenance.demandOrderCount != null && provenance.demandActiveDays != null
+        ? `${provenance.demandOrderCount} orders/${provenance.demandActiveDays}d`
+        : `${provenance.periodUsagePieces} pcs/${provenance.demandWindowDays}d`;
+    return `${demandLabel} · ${sampleLabel}${trendLabel ? ` · ${trendLabel}` : ""} · ${leadLabel}`;
   };
 
   const confidenceClass = (confidence?: string) => {
