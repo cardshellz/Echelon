@@ -1134,16 +1134,15 @@ export function registerOmsWebhooks(
       // Check if newly created (within last 5 seconds)
       const isNew = omsOrder.createdAt && (Date.now() - new Date(omsOrder.createdAt).getTime()) < 5000;
       if (!isNew) {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already exists in OMS (id=${omsOrder.id}), skipping`);
-        await markInboxSucceeded(inbox.receipt);
-        acknowledgeProcessed(req, res);
-        return;
+        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already exists in OMS (id=${omsOrder.id}), ensuring routing`);
       }
 
       // Enrich with member tier (non-blocking, logs errors)
-      enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || '').catch(err => {
-        console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
-      });
+      if (isNew) {
+        enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || '').catch(err => {
+          console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
+        });
+      }
 
       // Sync to WMS via sync service. §6 C9b: legacy
       // createWmsOrderFromShopify fallback removed (unreachable in
@@ -1158,12 +1157,20 @@ export function registerOmsWebhooks(
         shopifyOrder.name || externalOrderId,
       );
 
-      // OMS-level reservation (delegates to WMS reservation service)
-      try {
-        await omsService.reserveInventory(omsOrder.id);
-        await omsService.assignWarehouse(omsOrder.id);
-      } catch (e: any) {
-        console.error(`${LOG_PREFIX} Post-ingest processing failed for ${shopifyOrder.name}: ${e.message}`);
+      // OMS-level reservation (delegates to WMS reservation service).
+      // A near-simultaneous orders/updated webhook can create the OMS order
+      // before orders/paid finishes. In that case, do not treat "already
+      // exists" as routed; if no warehouse is assigned yet, finish the paid
+      // routing path now.
+      if (!omsOrder.warehouseId) {
+        try {
+          await omsService.reserveInventory(omsOrder.id);
+          await omsService.assignWarehouse(omsOrder.id);
+        } catch (e: any) {
+          console.error(`${LOG_PREFIX} Post-ingest processing failed for ${shopifyOrder.name}: ${e.message}`);
+        }
+      } else {
+        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already has warehouse_id=${omsOrder.warehouseId}`);
       }
 
       // The post-ingest reservation / warehouse assignment path changes
@@ -1202,8 +1209,10 @@ export function registerOmsWebhooks(
         );
       }
 
-      console.log(`${LOG_PREFIX} ✅ Processed new order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
-      pushToMissionControl(omsOrder.id, "order.created");
+      console.log(`${LOG_PREFIX} ✅ Processed ${isNew ? "new" : "existing"} order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
+      if (isNew) {
+        pushToMissionControl(omsOrder.id, "order.created");
+      }
       
       // M18: Trigger real-time backfill bridge
       await db.execute(sql`NOTIFY shopify_order_ingested`);
