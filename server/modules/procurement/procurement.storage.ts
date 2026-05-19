@@ -1710,6 +1710,7 @@ export const procurementMethods: IProcurementStorage = {
     const row = (rows.rows as any[])[0];
     return {
       autoDraftMode: row?.auto_draft_mode === "review_only" ? "review_only" : "draft_po",
+      approvalPolicy: "high_confidence_only",
       includeOrderSoon: row?.include_order_soon ?? false,
       skipOnOpenPo: row?.skip_on_open_po ?? true,
       skipNoVendor: row?.skip_no_vendor ?? true,

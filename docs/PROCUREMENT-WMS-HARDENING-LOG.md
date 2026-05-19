@@ -1863,3 +1863,34 @@ Next step:
 - Continue Phase 8 by adding explicit approval policy controls for when the
   quality gate can move from review-only recommendation visibility to PO draft
   creation.
+
+### 2026-05-19 - Phase 8 Slice 10: Scheduled Autopilot Approval Policy
+
+Scope:
+
+- Added a shared auto-draft approval policy helper so direct auto-draft and the
+  scheduled job use the same high-confidence quality gate.
+- Corrected the scheduled auto-draft job so it creates or updates draft POs
+  only for recommendations that pass the quality gate, while medium and low
+  confidence actionable recommendations remain in the run detail for review.
+- Exposed the fixed `high_confidence_only` approval policy through auto-draft
+  settings so the active autopilot rule is visible to admin clients.
+- Added API validation for unsupported approval policies rather than silently
+  accepting future or invalid mutation modes.
+- Surfaced eligible/review counts in the purchasing dashboard run summary and
+  explained the quality gate policy in the reorder exclusions/settings modal.
+- Added focused scheduled-job coverage proving only gate-passing
+  recommendations create PO lines.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Wrap Phase 8 by reviewing the remaining auto-draft and recommendation
+  surfaces for any legacy path that can still mutate POs outside the shared
+  recommendation engine, then move into Phase 9 demand forecast foundations.

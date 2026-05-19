@@ -99,8 +99,11 @@ export interface PurchasingRecommendationDefaults {
   safetyStockDays: number;
 }
 
+export type AutoDraftApprovalPolicy = "high_confidence_only";
+
 export interface AutoDraftRecommendationSettings {
   autoDraftMode?: "draft_po" | "review_only";
+  approvalPolicy?: AutoDraftApprovalPolicy;
   includeOrderSoon?: boolean;
   skipOnOpenPo?: boolean;
   skipNoVendor?: boolean;
@@ -685,6 +688,19 @@ function buildQualityGate(input: {
     label: "Review before auto-draft",
     detail: "This recommendation is actionable, but confidence is not high enough for automated PO drafting.",
   };
+}
+
+export function getAutoDraftApprovalPolicy(settings?: AutoDraftRecommendationSettings): AutoDraftApprovalPolicy {
+  return settings?.approvalPolicy === "high_confidence_only" ? "high_confidence_only" : "high_confidence_only";
+}
+
+export function passesAutoDraftApprovalPolicy(
+  item: PurchasingRecommendationItem,
+  settings?: AutoDraftRecommendationSettings,
+): boolean {
+  const policy = getAutoDraftApprovalPolicy(settings);
+  if (policy === "high_confidence_only") return item.qualityGate.autoDraftEligible;
+  return false;
 }
 
 export function generatePurchasingRecommendations(

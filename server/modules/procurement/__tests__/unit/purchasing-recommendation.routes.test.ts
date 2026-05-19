@@ -104,6 +104,7 @@ describe("purchasing recommendation routes", () => {
     mocks.runAutoDraftJob.mockResolvedValue(undefined);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_only",
       includeOrderSoon: false,
       skipOnOpenPo: true,
       skipNoVendor: true,
@@ -260,7 +261,7 @@ describe("purchasing recommendation routes", () => {
         finishedAt: "2026-05-19T01:00:02.000Z",
         summaryJson: {
           settings: { autoDraftMode: "review_only" },
-          recommendationSummary: { actionableCount: 4 },
+          recommendationSummary: { actionableCount: 4, autoDraftEligibleCount: 2, autoDraftReviewRequiredCount: 2 },
           actionableRecommendations: [
             {
               sku: "ORDER-ME",
@@ -307,6 +308,8 @@ describe("purchasing recommendation routes", () => {
           skippedExcluded: 3,
           mode: "review_only",
           actionableCount: 4,
+          autoDraftEligibleCount: 2,
+          autoDraftReviewRequiredCount: 2,
           poMutationCount: 0,
           topActionableRecommendation: {
             sku: "ORDER-ME",
@@ -531,6 +534,7 @@ describe("purchasing recommendation routes", () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "review_only",
+      approvalPolicy: "high_confidence_only",
       includeOrderSoon: false,
       skipOnOpenPo: true,
       skipNoVendor: true,
@@ -619,6 +623,7 @@ describe("purchasing recommendation routes", () => {
 
     const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
       autoDraftMode: "review_only",
+      approvalPolicy: "high_confidence_only",
     });
 
     expect(status).toBe(200);
@@ -627,6 +632,7 @@ describe("purchasing recommendation routes", () => {
       undefined,
       expect.objectContaining({
         autoDraftMode: "review_only",
+        approvalPolicy: "high_confidence_only",
       }),
     );
   });
@@ -640,6 +646,18 @@ describe("purchasing recommendation routes", () => {
 
     expect(status).toBe(400);
     expect(body).toEqual({ error: "autoDraftMode must be one of: draft_po, review_only" });
+    expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported auto-draft approval policies", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      approvalPolicy: "medium_confidence",
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: "approvalPolicy must be high_confidence_only" });
     expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
   });
 });

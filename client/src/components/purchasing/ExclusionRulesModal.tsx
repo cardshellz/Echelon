@@ -35,6 +35,7 @@ interface RulesData {
 
 interface AutoDraftSettings {
   autoDraftMode: "draft_po" | "review_only";
+  approvalPolicy: "high_confidence_only";
   includeOrderSoon: boolean;
   skipOnOpenPo: boolean;
   skipNoVendor: boolean;
@@ -255,7 +256,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
               <div>
                 <h4 className="text-sm font-medium mb-1">Run mode</h4>
                 <p className="text-[11px] text-muted-foreground mb-2">
-                  Recommendation only records an auditable run without creating or updating draft POs.
+                  Create draft POs only uses recommendations that pass the quality gate. Recommendation only records an auditable run without PO changes.
                 </p>
                 <Select
                   value={settings?.autoDraftMode ?? "draft_po"}
@@ -269,6 +270,14 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
                     <SelectItem value="review_only">Recommendation only</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="rounded-md border bg-muted/40 p-3">
+                <h4 className="text-sm font-medium">Quality gate policy</h4>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  {settings?.approvalPolicy === "high_confidence_only" || !settings?.approvalPolicy
+                    ? "Only high-confidence actionable recommendations can create or update draft POs. Medium and low confidence recommendations stay in review."
+                    : "Only recommendations allowed by the configured quality gate can create or update draft POs."}
+                </p>
               </div>
               <div className="flex items-center justify-between gap-4">
                 <div>

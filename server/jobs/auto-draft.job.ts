@@ -9,6 +9,8 @@ import { db } from "../db";
 import { procurementMethods } from "../modules/procurement/procurement.storage";
 import {
   generatePurchasingRecommendations,
+  passesAutoDraftApprovalPolicy,
+  type AutoDraftRecommendationSettings,
   type PurchasingRecommendationProductMeta,
   type PurchasingRecommendationRawRow,
 } from "../modules/procurement/purchasing-recommendation.engine";
@@ -31,7 +33,7 @@ interface AutoDraftOptions {
   triggeredByUser?: string;
 }
 
-function shouldCreateDraftPos(settings: { autoDraftMode?: string }): boolean {
+function shouldCreateDraftPos(settings: AutoDraftRecommendationSettings): boolean {
   return settings.autoDraftMode !== "review_only";
 }
 
@@ -105,7 +107,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
       preferredVendorId: number | null;
       estimatedCostCents: number | null;
     }> = recommendationResult.items
-      .filter((item) => item.actionable)
+      .filter((item) => passesAutoDraftApprovalPolicy(item, settings))
       .map((item) => ({
         productId: item.productId,
         productVariantId: item.productVariantId ?? item.productId,

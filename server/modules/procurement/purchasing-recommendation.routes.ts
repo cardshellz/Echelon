@@ -6,6 +6,7 @@ import { procurementStorage } from "../procurement";
 import { inventoryStorage } from "../inventory";
 import {
   generatePurchasingRecommendations,
+  passesAutoDraftApprovalPolicy,
   type AutoDraftRecommendationSettings,
   type PurchasingRecommendationDefaults,
   type PurchasingRecommendationExclusionRule,
@@ -72,7 +73,14 @@ function normalizeAutoDraftRun(row: any) {
     errorMessage: row?.errorMessage ?? row?.error_message ?? null,
     finishedAt: row?.finishedAt ?? row?.finished_at ?? null,
     mode: summaryJson?.settings?.autoDraftMode === "review_only" ? "review_only" : "draft_po",
+    approvalPolicy: summaryJson?.settings?.approvalPolicy === "high_confidence_only"
+      ? "high_confidence_only"
+      : "high_confidence_only",
     actionableCount: Number(summaryJson?.recommendationSummary?.actionableCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
+    autoDraftEligibleCount:
+      Number(summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
+    autoDraftReviewRequiredCount:
+      Number(summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0) || 0,
     poMutationCount: poMutations.length,
     topActionableRecommendation: actionableRecommendations[0] ?? null,
     topSkippedRecommendation: skippedRecommendations[0] ?? null,
@@ -202,7 +210,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
 
       const itemsToOrder = recommendationResult.items
-        .filter((item) => item.qualityGate.autoDraftEligible)
+        .filter((item) => passesAutoDraftApprovalPolicy(item, settings))
         .map((item) => ({
           productId: item.productId,
           productVariantId: item.productVariantId ?? item.productId,
@@ -516,12 +524,16 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
   // PATCH /api/purchasing/auto-draft-settings
   app.patch("/api/purchasing/auto-draft-settings", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { autoDraftMode, includeOrderSoon, skipOnOpenPo, skipNoVendor } = req.body;
+      const { autoDraftMode, approvalPolicy, includeOrderSoon, skipOnOpenPo, skipNoVendor } = req.body;
       if (autoDraftMode !== undefined && !["draft_po", "review_only"].includes(autoDraftMode)) {
         return res.status(400).json({ error: "autoDraftMode must be one of: draft_po, review_only" });
       }
+      if (approvalPolicy !== undefined && approvalPolicy !== "high_confidence_only") {
+        return res.status(400).json({ error: "approvalPolicy must be high_confidence_only" });
+      }
       await storage.updateAutoDraftSettings(undefined, {
         autoDraftMode,
+        approvalPolicy,
         includeOrderSoon,
         skipOnOpenPo,
         skipNoVendor,
