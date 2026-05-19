@@ -45,6 +45,20 @@ export type PurchasingRecommendationQualityGateReason =
   | "medium_confidence_review"
   | "low_confidence_review"
   | "not_actionable";
+export type PurchasingRecommendationQualityControlArea =
+  | "demand"
+  | "lead_time"
+  | "supplier_cost"
+  | "vendor";
+export type PurchasingRecommendationQualityControlSeverity = "review" | "block";
+
+export interface PurchasingRecommendationQualityControl {
+  area: PurchasingRecommendationQualityControlArea;
+  severity: PurchasingRecommendationQualityControlSeverity;
+  code: string;
+  label: string;
+  detail: string;
+}
 
 export interface PurchasingRecommendationRawRow {
   product_id: number | string;
@@ -208,6 +222,8 @@ export interface PurchasingRecommendationItem {
   };
   confidence: PurchasingRecommendationConfidence;
   confidenceFactors: string[];
+  qualityControls: PurchasingRecommendationQualityControl[];
+  autopilotBlockers: PurchasingRecommendationQualityControl[];
   explanation: string;
   reviewSignal: {
     action: PurchasingRecommendationReviewAction;
@@ -425,6 +441,124 @@ function buildConfidence(input: {
   return "high";
 }
 
+function buildQualityControls(input: {
+  lookbackDays: number;
+  demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
+  demandOrderCount: number | null;
+  demandActiveDays: number | null;
+  leadTimeSource: PurchasingRecommendationLeadTimeSource;
+  costQuality: PurchasingRecommendationSupplierCostQuality;
+  costSource: PurchasingRecommendationSupplierCostSource;
+  hasVendor: boolean;
+}): PurchasingRecommendationQualityControl[] {
+  const controls: PurchasingRecommendationQualityControl[] = [];
+  const demandSample =
+    input.demandOrderCount !== null || input.demandActiveDays !== null
+      ? ` Sample: ${input.demandOrderCount ?? 0} order${input.demandOrderCount === 1 ? "" : "s"} across ${input.demandActiveDays ?? 0} active day${input.demandActiveDays === 1 ? "" : "s"}.`
+      : "";
+
+  if (input.demandQuality === "no_recent_demand") {
+    controls.push({
+      area: "demand",
+      severity: "block",
+      code: "no_recent_demand",
+      label: "No recent demand",
+      detail: `No units shipped in the ${input.lookbackDays}-day demand window.${demandSample}`,
+    });
+  } else if (input.demandQuality === "thin_history") {
+    controls.push({
+      area: "demand",
+      severity: "review",
+      code: "thin_history",
+      label: "Thin demand history",
+      detail: `Demand history is too sparse for fully automated purchasing.${demandSample}`,
+    });
+  } else if (input.demandTrend === "new_demand") {
+    controls.push({
+      area: "demand",
+      severity: "review",
+      code: "new_demand",
+      label: "New demand pattern",
+      detail: "Current demand has no matching prior-period baseline yet.",
+    });
+  } else if (input.demandTrend === "falling") {
+    controls.push({
+      area: "demand",
+      severity: "review",
+      code: "falling_demand",
+      label: "Falling demand",
+      detail: "Current demand is lower than the prior lookback window, so the reorder quantity needs operator review.",
+    });
+  }
+
+  if (input.leadTimeSource === "default") {
+    controls.push({
+      area: "lead_time",
+      severity: "review",
+      code: "default_lead_time",
+      label: "Default lead time",
+      detail: "Vendor and product lead time are missing, so the forecast used the default lead-time fallback.",
+    });
+  } else if (input.leadTimeSource === "product") {
+    controls.push({
+      area: "lead_time",
+      severity: "review",
+      code: "product_lead_time_fallback",
+      label: "Vendor lead time missing",
+      detail: "The forecast used product-level lead time because vendor-specific lead time is not configured.",
+    });
+  }
+
+  if (!input.hasVendor) {
+    controls.push({
+      area: "vendor",
+      severity: "block",
+      code: "missing_vendor",
+      label: "Missing preferred vendor",
+      detail: "Assign a preferred vendor before automated PO drafting can evaluate supplier cost and lead time.",
+    });
+  } else if (input.costSource === "missing" || input.costQuality === "missing") {
+    controls.push({
+      area: "supplier_cost",
+      severity: "review",
+      code: "missing_supplier_cost",
+      label: "Missing supplier cost",
+      detail: "Preferred vendor cost is missing, so landed cost and PO value need review before automation.",
+    });
+  } else {
+    if (input.costSource === "last_purchase_cost") {
+      controls.push({
+        area: "supplier_cost",
+        severity: "review",
+        code: "last_purchase_cost",
+        label: "Last purchase cost fallback",
+        detail: "Preferred vendor cost fell back to the last purchase cost instead of an active vendor-product cost.",
+      });
+    }
+
+    if (input.costQuality === "stale") {
+      controls.push({
+        area: "supplier_cost",
+        severity: "review",
+        code: "stale_supplier_cost",
+        label: "Stale supplier cost",
+        detail: "Preferred vendor cost has not been verified in over 365 days.",
+      });
+    } else if (input.costQuality === "unverified") {
+      controls.push({
+        area: "supplier_cost",
+        severity: "review",
+        code: "unverified_supplier_cost",
+        label: "Unverified supplier cost",
+        detail: "Preferred vendor cost exists, but its verification date is unknown.",
+      });
+    }
+  }
+
+  return controls;
+}
+
 function buildConfidenceFactors(input: {
   demandQuality: PurchasingRecommendationDemandQuality;
   demandTrend: PurchasingRecommendationDemandTrend;
@@ -636,15 +770,21 @@ function buildQualityGate(input: {
   actionable: boolean;
   confidence: PurchasingRecommendationConfidence;
   skippedReason: PurchasingRecommendationSkipReason | null;
+  autopilotBlockers: PurchasingRecommendationQualityControl[];
 }): PurchasingRecommendationItem["qualityGate"] {
+  const primaryBlocker = input.autopilotBlockers[0];
   if (!input.actionable) {
+    const detail = primaryBlocker
+      ? `${primaryBlocker.label}: ${primaryBlocker.detail}`
+      : input.skippedReason
+        ? "This recommendation is blocked by an operator review condition."
+        : "This recommendation is not currently in an auto-draftable reorder state.";
+
     return {
       autoDraftEligible: false,
       reason: "not_actionable",
       label: "Not auto-draftable",
-      detail: input.skippedReason
-        ? "This recommendation is blocked by an operator review condition."
-        : "This recommendation is not currently in an auto-draftable reorder state.",
+      detail,
     };
   }
 
@@ -661,7 +801,9 @@ function buildQualityGate(input: {
     autoDraftEligible: false,
     reason: input.confidence === "medium" ? "medium_confidence_review" : "low_confidence_review",
     label: "Review before auto-draft",
-    detail: "This recommendation is actionable, but confidence is not high enough for automated PO drafting.",
+    detail: primaryBlocker
+      ? `${primaryBlocker.label}: ${primaryBlocker.detail}`
+      : "This recommendation is actionable, but confidence is not high enough for automated PO drafting.",
   };
 }
 
@@ -818,6 +960,18 @@ export function generatePurchasingRecommendations(
       costSource: supplierCost.costSource,
       hasVendor,
     });
+    const qualityControls = buildQualityControls({
+      lookbackDays,
+      demandQuality,
+      demandTrend,
+      demandOrderCount,
+      demandActiveDays,
+      leadTimeSource,
+      costQuality: supplierCost.costQuality,
+      costSource: supplierCost.costSource,
+      hasVendor,
+    });
+    const autopilotBlockers = qualityControls;
     const item: PurchasingRecommendationItem = {
       recommendationId: `${productId}:${productVariantId ?? "product"}:${lookbackDays}`,
       productId,
@@ -916,12 +1070,15 @@ export function generatePurchasingRecommendations(
         hasVendor,
         orderUomSource,
       }),
+      qualityControls,
+      autopilotBlockers,
       explanation,
       reviewSignal,
       qualityGate: buildQualityGate({
         actionable,
         confidence,
         skippedReason,
+        autopilotBlockers,
       }),
       actionable,
       skippedReason,

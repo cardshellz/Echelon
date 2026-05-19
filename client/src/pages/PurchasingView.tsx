@@ -40,6 +40,14 @@ interface DashboardKPIs {
   lastComputedAt: string;
 }
 
+interface RecommendationQualityControl {
+  area: "demand" | "lead_time" | "supplier_cost" | "vendor";
+  severity: "review" | "block";
+  code: string;
+  label: string;
+  detail: string;
+}
+
 interface ReorderItem {
   productId: number;
   productVariantId?: number;
@@ -89,6 +97,8 @@ interface ReorderItem {
     lastPurchasedAt?: string | null;
     vendorProductUpdatedAt?: string | null;
   };
+  qualityControls?: RecommendationQualityControl[];
+  autopilotBlockers?: RecommendationQualityControl[];
   actionable?: boolean;
   skippedReason?: string | null;
   explanation?: string;
@@ -266,6 +276,20 @@ export default function PurchasingView() {
             ? "cost unverified"
             : "cost missing";
     return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${trendLabel ? ` - ${trendLabel}` : ""} - ${leadLabel} - ${costLabel}`;
+  };
+
+  const getAutopilotBlockers = (item: ReorderItem) => {
+    return item.autopilotBlockers?.length
+      ? item.autopilotBlockers
+      : item.qualityControls?.filter((control) => control.severity === "review" || control.severity === "block") ?? [];
+  };
+
+  const formatAutopilotBlockers = (item: ReorderItem) => {
+    const blockers = getAutopilotBlockers(item);
+    if (!blockers.length) return null;
+    const labels = blockers.slice(0, 2).map((control) => control.label).join(", ");
+    const remainder = blockers.length > 2 ? ` +${blockers.length - 2} more` : "";
+    return `${blockers.some((control) => control.severity === "block") ? "Blocked" : "Review"}: ${labels}${remainder}`;
   };
 
   const confidenceClass = (confidence?: string) => {
@@ -500,6 +524,7 @@ export default function PurchasingView() {
                     let progressColor = "bg-green-500";
                     if (healthPct < 25) progressColor = "bg-red-500";
                     else if (healthPct < 75) progressColor = "bg-amber-500";
+                    const autopilotBlockerText = formatAutopilotBlockers(item);
 
                     return (
                       <TableRow key={item.productId} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
@@ -532,6 +557,9 @@ export default function PurchasingView() {
                             </Badge>
                           </div>
                           <div className="text-[11px] text-zinc-500 mt-1">{formatProvenance(item)}</div>
+                          {autopilotBlockerText ? (
+                            <div className="text-[11px] text-amber-700 mt-1">{autopilotBlockerText}</div>
+                          ) : null}
                         </TableCell>
                         <TableCell className="text-right">
                           <Badge variant="outline" className={`${cfg.bg} ${cfg.text} border-transparent gap-1 font-medium`}>

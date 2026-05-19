@@ -99,6 +99,8 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     confidenceFactors: item.confidenceFactors,
     forecastProvenance: item.forecastProvenance,
     supplierBasis: item.supplierBasis,
+    qualityControls: item.qualityControls,
+    autopilotBlockers: item.autopilotBlockers,
     qualityGate: item.qualityGate,
     explanation: item.explanation,
     reviewSignal: item.reviewSignal,

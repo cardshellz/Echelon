@@ -1986,3 +1986,36 @@ Next step:
   recommendation confidence, so operators can see whether bad demand data,
   sparse history, missing lead time, or supplier cost risk is what blocked
   autopilot.
+
+### 2026-05-19 - Phase 9 Slice 3: Forecast Input Quality Controls
+
+Scope:
+
+- Added structured recommendation quality controls independent of the existing
+  confidence score, covering demand input quality, demand trend risk, missing
+  vendor lead time, missing vendors, and supplier cost freshness/source risk.
+- Added `autopilotBlockers` to each recommendation and run-detail summary so
+  high-confidence policy failures are explainable without reverse-engineering
+  confidence factors.
+- Updated the quality gate detail to name the primary blocker when an actionable
+  recommendation is held for review, while preserving the existing
+  high-confidence-only auto-draft behavior.
+- Surfaced blocker summaries in reorder analysis and auto-draft run history so
+  operators can see whether demand data, lead time, vendor setup, or supplier
+  cost risk caused the hold.
+- Expanded recommendation engine and run-detail tests around thin history,
+  falling demand, missing vendor, supplier cost fallback, and saved run-detail
+  blocker payloads.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+
+Next step:
+
+- Continue Phase 9 by rolling these quality controls into API-level forecast
+  diagnostics and then evaluate the next forecast engine improvement, likely
+  richer demand windows or seasonality handling, without changing PO mutation
+  behavior first.
