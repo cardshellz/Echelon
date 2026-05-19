@@ -61,6 +61,7 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     confidence: item.confidence,
     confidenceFactors: item.confidenceFactors,
     forecastProvenance: item.forecastProvenance,
+    supplierBasis: item.supplierBasis,
     explanation: item.explanation,
     reviewSignal: item.reviewSignal,
   };
