@@ -67,6 +67,19 @@ describe("purchasing recommendation run detail", () => {
       sku: "ORDER-ME",
       suggestedOrderQty: 1,
       preferredVendorName: "Vendor",
+      confidenceFactors: expect.arrayContaining([
+        "Recent demand history is sufficient for velocity-based forecasting.",
+      ]),
+      forecastProvenance: {
+        demandSource: "recent_order_velocity",
+        demandWindowDays: 30,
+        demandQuality: "normal",
+        periodUsagePieces: 30,
+        avgDailyUsagePieces: 1,
+        leadTimeSource: "product",
+        safetyStockSource: "product",
+        orderUomSource: "variant",
+      },
       reviewSignal: {
         action: "create_po",
         severity: "critical",

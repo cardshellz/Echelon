@@ -61,6 +61,18 @@ interface ReorderItem {
   onOrderPieces: number;
   openPoCount: number;
   status: string;
+  confidence?: "low" | "medium" | "high";
+  confidenceFactors?: string[];
+  forecastProvenance?: {
+    demandSource: "recent_order_velocity";
+    demandWindowDays: number;
+    demandQuality: "no_recent_demand" | "thin_history" | "normal";
+    periodUsagePieces: number;
+    avgDailyUsagePieces: number;
+    leadTimeSource: "vendor_product" | "product" | "default";
+    safetyStockSource: "product" | "default";
+    orderUomSource: "variant" | "default_each";
+  };
   actionable?: boolean;
   skippedReason?: string | null;
   explanation?: string;
@@ -182,6 +194,30 @@ export default function PurchasingView() {
 
   const formatCurrency = (cents: number) => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format((cents || 0) / 100);
+  };
+
+  const formatProvenance = (item: ReorderItem) => {
+    const provenance = item.forecastProvenance;
+    if (!provenance) return "Forecast basis unavailable";
+    const demandLabel =
+      provenance.demandQuality === "normal"
+        ? "Demand stable"
+        : provenance.demandQuality === "thin_history"
+          ? "Thin demand"
+          : "No recent demand";
+    const leadLabel =
+      provenance.leadTimeSource === "vendor_product"
+        ? "vendor lead"
+        : provenance.leadTimeSource === "product"
+          ? "product lead"
+          : "default lead";
+    return `${demandLabel} · ${provenance.periodUsagePieces} pcs/${provenance.demandWindowDays}d · ${leadLabel}`;
+  };
+
+  const confidenceClass = (confidence?: string) => {
+    if (confidence === "high") return "bg-green-50 text-green-700 border-green-200";
+    if (confidence === "medium") return "bg-amber-50 text-amber-700 border-amber-200";
+    return "bg-zinc-50 text-zinc-600 border-zinc-200";
   };
 
   const handleReviewAction = (item: ReorderItem) => {
@@ -350,6 +386,7 @@ export default function PurchasingView() {
                   </TableHead>
                   <TableHead className="text-right">Reorder Pt</TableHead>
                   <TableHead className="text-right">Supply</TableHead>
+                  <TableHead>Forecast Basis</TableHead>
                   <TableHead className="text-right cursor-pointer font-semibold" onClick={() => handleSort("status")}>
                     <div className="flex justify-end items-center">Status <SortIcon field="status" /></div>
                   </TableHead>
@@ -358,11 +395,11 @@ export default function PurchasingView() {
               <TableBody>
                 {isLoadingAnalysis ? (
                    <TableRow>
-                     <TableCell colSpan={8} className="text-center py-12 text-zinc-500">Loading telemetry data...</TableCell>
+                     <TableCell colSpan={9} className="text-center py-12 text-zinc-500">Loading telemetry data...</TableCell>
                    </TableRow>
                 ) : filtered.length === 0 ? (
                    <TableRow>
-                     <TableCell colSpan={8} className="text-center py-12 text-zinc-500">No data matching current criteria.</TableCell>
+                     <TableCell colSpan={9} className="text-center py-12 text-zinc-500">No data matching current criteria.</TableCell>
                    </TableRow>
                 ) : (
                   filtered.map((item) => {
@@ -400,6 +437,14 @@ export default function PurchasingView() {
                         <TableCell className="text-right font-mono text-zinc-500">{item.reorderPoint.toLocaleString()}</TableCell>
                         <TableCell className="text-right text-xs">
                           {item.daysOfSupply >= 9999 ? "∞" : `${item.daysOfSupply}d`}
+                        </TableCell>
+                        <TableCell className="text-xs min-w-[190px]">
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline" className={`text-[10px] capitalize ${confidenceClass(item.confidence)}`}>
+                              {item.confidence ?? "low"} confidence
+                            </Badge>
+                          </div>
+                          <div className="text-[11px] text-zinc-500 mt-1">{formatProvenance(item)}</div>
                         </TableCell>
                         <TableCell className="text-right">
                           <Badge variant="outline" className={`${cfg.bg} ${cfg.text} border-transparent gap-1 font-medium`}>
