@@ -29,6 +29,13 @@ interface ForecastDiagnostics {
   forecastMethodCounts: Record<string, number>;
   demandQualityCounts: Record<string, number>;
   demandTrendCounts: Record<string, number>;
+  qualityControlCounts?: Record<string, number>;
+  qualityControlAreaCounts?: Record<string, number>;
+  qualityControlSeverityCounts?: Record<string, number>;
+  autopilotBlockerCounts?: Record<string, number>;
+  autopilotBlockerAreaCounts?: Record<string, number>;
+  autopilotBlockerSeverityCounts?: Record<string, number>;
+  autopilotBlockerItemCount?: number;
   totalPeriodUsagePieces: number;
   avgDailyUsagePieces: number;
   latestDemandAt: string | null;
@@ -213,7 +220,9 @@ function topCountLabel(counts?: Record<string, number> | null): string {
 function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): string {
   if (!diagnostics) return "No forecast diagnostics";
   const topMethod = Object.entries(diagnostics.forecastMethodCounts ?? {}).sort((a, b) => b[1] - a[1])[0]?.[0];
-  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs`;
+  const blocker = topCountLabel(diagnostics.autopilotBlockerCounts);
+  const blockerLabel = blocker === "None" ? "no blockers" : blocker;
+  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}`;
 }
 
 function formatRecommendationForecast(provenance?: RecommendationForecastProvenance): string {
@@ -815,6 +824,8 @@ export default function PurchasingDashboard() {
                       { label: "Needs review", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0 },
                       { label: "Forecast model", value: formatForecastDiagnostics(lastRunForecastDiagnostics) },
                       { label: "Demand trend", value: topCountLabel(lastRunForecastDiagnostics?.demandTrendCounts) },
+                      { label: "Top quality blocker", value: topCountLabel(lastRunForecastDiagnostics?.autopilotBlockerCounts), warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
+                      { label: "Blocked items", value: lastRunForecastDiagnostics?.autopilotBlockerItemCount ?? 0, warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
                       { label: "Skipped (on order)", value: data.lastAutoDraftRun.skippedOnOrder },
                       { label: "Excluded SKUs", value: data.lastAutoDraftRun.skippedExcluded },
