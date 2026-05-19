@@ -114,6 +114,23 @@ describe("validateShipmentForPush :: happy path", () => {
     ).not.toThrow();
   });
 
+  it("accepts partial shipments whose lines do not equal the full order total", () => {
+    expect(() =>
+      validateShipmentForPush(
+        okShipment(),
+        okOrder({
+          total_cents: 4600,
+          shipping_cents: 799,
+          tax_cents: 0,
+          is_partial_shipment: true,
+        }),
+        [
+          okItem({ id: 1, unit_price_cents: 279, qty: 2 }),
+        ],
+      ),
+    ).not.toThrow();
+  });
+
   it("accepts per-unit rounding deltas on multi-quantity lines", () => {
     expect(() =>
       validateShipmentForPush(
@@ -429,8 +446,9 @@ describe("pushShipment :: happy path", () => {
     expect(result.shipstationOrderId).toBe(555000);
     expect(result.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
 
-    // 6 db calls: shipment, order, non-shipping aggregate, items, channel config, UPDATE.
-    expect(mock.getCallCount()).toBe(6);
+    // 7 db calls: shipment, order, non-shipping aggregate, items,
+    // shippable shipment-scope aggregate, channel config, UPDATE.
+    expect(mock.getCallCount()).toBe(7);
 
     // One fetch call to /orders/createorder.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -559,15 +577,15 @@ describe("pushShipment :: happy path", () => {
     // Same 4-call sequence as a fresh push — voided re-push doesn't
     // add any reads/writes; the single UPDATE simply also NULLs the
     // void columns.
-    expect(mock.getCallCount()).toBe(6);
+    expect(mock.getCallCount()).toBe(7);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Inspect the UPDATE's SQL text: must set status='queued' and must
     // also clear voided_at + voided_reason so stale void state cannot
     // survive a successful re-label push.
-    // The mock stores execute calls in order; index 1 is the UPDATE because
-    // index 0 is the channel config SELECT inside resolveShipStationIds.
-    const updateQuery = mock.execute.mock.calls[2][0] as any;
+    // The mock stores execute calls in order; index 3 is the UPDATE after
+    // non-shipping aggregate, shippable-scope aggregate, and channel config.
+    const updateQuery = mock.execute.mock.calls[3][0] as any;
     const chunks: unknown[] = updateQuery?.queryChunks ?? [];
     const sqlText = chunks
       .map((c) => {
@@ -686,8 +704,8 @@ describe("pushShipment :: error cases", () => {
     await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
       shipstationOrderId: 42,
     });
-    // Five calls fired: we went past the status gate.
-    expect(mock.getCallCount()).toBe(6);
+    // Seven calls fired: we went past the status gate.
+    expect(mock.getCallCount()).toBe(7);
   });
 
   it("throws when the wms order is not found", async () => {
@@ -740,7 +758,7 @@ describe("pushShipment :: error cases", () => {
 
     // UPDATE must NOT be called on API failure.
     // Assert exactly 4 database calls occurred (shipment, order, items, channel config).
-    expect(mock.getCallCount()).toBe(5);
+    expect(mock.getCallCount()).toBe(6);
   });
 
   it("rejects invalid shipmentId (zero / negative / float) up front", async () => {

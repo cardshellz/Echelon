@@ -173,6 +173,7 @@ export interface WmsOrderRow {
   discount_cents: number;
   total_cents: number;
   non_shipping_total_cents?: number;
+  is_partial_shipment?: boolean;
   currency: string;
   order_placed_at: Date | string | null;
   external_order_id: string | null;
@@ -335,6 +336,7 @@ export function validateShipmentForPush(
     | "discount_cents"
     | "total_cents"
     | "non_shipping_total_cents"
+    | "is_partial_shipment"
     | "shipping_address"
     | "customer_email"
   >,
@@ -415,9 +417,12 @@ export function validateShipmentForPush(
     });
   }
 
-  // 4. Sum of line extensions + shipping + tax - discount must reconcile
-  //    with order-level total_cents within 1¢ per line. Tolerance accounts
-  //    for channel-side rounding (e.g. tax distributed per-line).
+  // 4. For full-order shipments, sum of line extensions + shipping + tax
+  //    must reconcile with order-level total_cents within 1¢ per line.
+  //    Partial shipments intentionally skip full-order total validation:
+  //    an edited Shopify order can create a later shipment for only the
+  //    newly-added line while the WMS order total still represents the full
+  //    order across all shipments.
   const totalCents = order.total_cents;
 
   if (
@@ -457,8 +462,9 @@ export function validateShipmentForPush(
     actualTotalCents: order.total_cents,
   };
 
-  const matchesExclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, roundingToleranceUnits, 5);
-  const matchesInclusive = isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, roundingToleranceUnits, 5);
+  const isPartialShipment = order.is_partial_shipment === true;
+  const matchesExclusive = isPartialShipment || isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, roundingToleranceUnits, 5);
+  const matchesInclusive = isPartialShipment || isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, roundingToleranceUnits, 5);
 
   if (!matchesExclusive && !matchesInclusive) {
     throw new ShipStationPushError(
@@ -2793,6 +2799,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     // ─── 4. Validate (throws ShipStationPushError on violation) ─────
+    const shippableTotalsResult: any = await db.execute(sql`
+      SELECT
+        COALESCE(SUM(oi.quantity), 0)::int AS order_shippable_qty,
+        COALESCE(SUM(osi.qty), 0)::int AS shipment_shippable_qty
+      FROM wms.order_items oi
+      LEFT JOIN wms.outbound_shipment_items osi
+        ON osi.order_item_id = oi.id
+       AND osi.shipment_id = ${shipmentId}
+      WHERE oi.order_id = ${orderRow.id}
+        AND COALESCE(oi.requires_shipping, 1) = 1
+    `);
+    const orderShippableQty = Number(shippableTotalsResult?.rows?.[0]?.order_shippable_qty ?? 0);
+    const shipmentShippableQty = Number(shippableTotalsResult?.rows?.[0]?.shipment_shippable_qty ?? 0);
+    orderRow.is_partial_shipment = shipmentShippableQty > 0 && shipmentShippableQty < orderShippableQty;
+
     validateShipmentForPush(shipmentRow, orderRow, itemRows);
 
     // ─── 5. Build SS payload ────────────────────────────────────────
