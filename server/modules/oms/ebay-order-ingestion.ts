@@ -25,6 +25,7 @@ import {
   markWebhookSucceeded,
   recordWebhookReceived,
 } from "./webhook-inbox.service";
+import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -33,6 +34,34 @@ import {
 const EBAY_CHANNEL_ID = 67;
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes — NON-NEGOTIABLE
 const POLL_WINDOW_MINUTES = 240; // Look back 4 hours each poll (deploys/restarts shouldn't drop orders)
+
+async function ensureEbayOrderQueuedForWmsSync(
+  wmsSyncService: WmsSyncService | null,
+  omsOrderId: number,
+  externalOrderId: string,
+): Promise<void> {
+  if (!wmsSyncService) {
+    const err = new Error(
+      "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
+    );
+    await enqueueOmsWmsSyncRetry(db, omsOrderId, err);
+    throw err;
+  }
+
+  try {
+    const wmsOrderId = await wmsSyncService.syncOmsOrderToWms(omsOrderId);
+    if (!wmsOrderId) {
+      await enqueueOmsWmsSyncRetry(
+        db,
+        omsOrderId,
+        `eBay WMS sync returned no WMS order for ${externalOrderId}`,
+      );
+    }
+  } catch (err: any) {
+    await enqueueOmsWmsSyncRetry(db, omsOrderId, err);
+    console.error(`[eBay Orders] WMS sync failed for ${externalOrderId}: ${err.message}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // eBay Order → OMS OrderData mapping
@@ -263,30 +292,24 @@ export async function pollEbayOrders(
           }
         }
 
-        // If this was a new order (not a duplicate), sync to WMS for fulfillment
-        if (isNew) {
-          // Sync OMS → WMS (single path — plan §6 C10)
-          if (!_wmsSyncService) {
-            throw new Error(
-              "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
-            );
-          }
-          try {
-            await _wmsSyncService.syncOmsOrderToWms(result.id);
-          } catch (e: any) {
-            console.error(`[eBay Orders] WMS sync failed for ${ebayOrder.orderId}: ${e.message}`);
-          }
+        // If this was a new order, or an existing order that never got
+        // routed, run the fulfillment path. Polling can see an order after a
+        // webhook inserted it, so "already existed" must not mean "already
+        // reached WMS".
+        if (isNew || !result.warehouseId) {
+          await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, ebayOrder.orderId);
 
-          // OMS-level reservation (delegates to WMS reservation service)
-          try {
-            await omsService.reserveInventory(result.id);
-            await omsService.assignWarehouse(result.id);
-          } catch (e: any) {
-            console.error(`[eBay Orders] Post-ingest processing failed for ${ebayOrder.orderId}: ${e.message}`);
+          if (!result.warehouseId) {
+            // OMS-level reservation (delegates to WMS reservation service)
+            try {
+              await omsService.reserveInventory(result.id);
+              await omsService.assignWarehouse(result.id);
+            } catch (e: any) {
+              console.error(`[eBay Orders] Post-ingest processing failed for ${ebayOrder.orderId}: ${e.message}`);
+            }
           }
 
-          // ShipStation push handled by wmsSyncService.syncOmsOrderToWms()
-
+          await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, ebayOrder.orderId);
           totalIngested++;
         }
       } catch (err: any) {
@@ -337,26 +360,19 @@ export async function reingestEbayOrder(
   const wasCreated =
     result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
 
-  if (wasCreated) {
-    // Full post-ingest pipeline: WMS sync, reserve, assign, push.
-    if (!_wmsSyncService) {
-      throw new Error(
-        "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
-      );
-    }
-    try {
-      await _wmsSyncService.syncOmsOrderToWms(result.id);
-    } catch (err: any) {
-      console.error(`[eBay Reingest] WMS sync failed for ${orderId}: ${err.message}`);
+  if (wasCreated || !result.warehouseId) {
+    await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
+
+    if (!result.warehouseId) {
+      try {
+        await omsService.reserveInventory(result.id);
+        await omsService.assignWarehouse(result.id);
+      } catch (err: any) {
+        console.error(`[eBay Reingest] Post-ingest (reserve/assign) failed for ${orderId}: ${err.message}`);
+      }
     }
 
-    try {
-      await omsService.reserveInventory(result.id);
-      await omsService.assignWarehouse(result.id);
-    } catch (err: any) {
-      console.error(`[eBay Reingest] Post-ingest (reserve/assign) failed for ${orderId}: ${err.message}`);
-    }
-    // ShipStation push handled by wmsSyncService.syncOmsOrderToWms()
+    await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
   }
 
   return {
@@ -431,29 +447,23 @@ export function createEbayOrderWebhookHandler(
             const orderData = mapEbayOrderToOrderData(ebayOrder);
             const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
 
-            // Post-ingest if newly created — mirrors the polling path (plan §6 C10)
+            // Post-ingest if newly created, or if a prior delivery inserted
+            // the OMS order but did not finish routing it to WMS.
             const isNew = result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
-            if (isNew) {
-              // Sync OMS → WMS (single path — plan §6 C10)
-              if (!_wmsSyncService) {
-                throw new Error(
-                  "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
-                );
-              }
-              try {
-                await _wmsSyncService.syncOmsOrderToWms(result.id);
-              } catch (e: any) {
-                console.error(`[eBay Webhook] WMS sync failed for ${orderId}: ${e.message}`);
+            if (isNew || !result.warehouseId) {
+              await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
+
+              if (!result.warehouseId) {
+                // OMS-level reservation (delegates to WMS reservation service)
+                try {
+                  await omsService.reserveInventory(result.id);
+                  await omsService.assignWarehouse(result.id);
+                } catch (e: any) {
+                  console.error(`[eBay Webhook] Post-ingest processing failed for ${orderId}: ${e.message}`);
+                }
               }
 
-              // OMS-level reservation (delegates to WMS reservation service)
-              try {
-                await omsService.reserveInventory(result.id);
-                await omsService.assignWarehouse(result.id);
-              } catch (e: any) {
-                console.error(`[eBay Webhook] Post-ingest processing failed for ${orderId}: ${e.message}`);
-              }
-              // ShipStation push handled by wmsSyncService.syncOmsOrderToWms()
+              await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
             }
 
             console.log(`[eBay Webhook] Processed order ${orderId}`);
