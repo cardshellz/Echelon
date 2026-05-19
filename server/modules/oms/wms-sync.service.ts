@@ -619,6 +619,18 @@ export class WmsSyncService {
       }
     }
 
+    await db.execute(sql`
+      UPDATE wms.order_items oi
+         SET unit_price_cents = COALESCE(ol.paid_price_cents, 0),
+             paid_price_cents = COALESCE(ol.paid_price_cents, 0),
+             total_price_cents = COALESCE(ol.total_price_cents, 0),
+             updated_at = NOW()
+        FROM oms.oms_order_lines ol
+       WHERE oi.order_id = ${wmsOrderId}
+         AND oi.oms_order_line_id = ol.id
+         AND ol.order_id = ${omsOrderId}
+    `);
+
     const orphanItemResult = await db.execute<{
       id: number;
       oms_order_line_id: number | null;

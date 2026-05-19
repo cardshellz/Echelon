@@ -1285,6 +1285,15 @@ export function registerOmsWebhooks(
       // Update line items if changed
       const newLineItems = (shopifyOrder.line_items || []) as any[];
       if (newLineItems.length > 0) {
+        const normalizedLineItems = normalizeShopifyLineItems(
+          newLineItems,
+          shopifyOrder.discount_applications || [],
+          shopifyOrder.order_number,
+        );
+        const normalizedLineMap = new Map(
+          normalizedLineItems.map((line) => [line.externalLineItemId, line]),
+        );
+
         // Get existing OMS lines
         const existingLines = await db
           .select()
@@ -1298,6 +1307,7 @@ export function registerOmsWebhooks(
         for (const item of newLineItems) {
           const lineId = String(item.id);
           const existingLine = existingLineMap.get(lineId);
+          const normalizedLine = normalizedLineMap.get(lineId);
 
           // Resolve variant
           let productVariantId: number | null = null;
@@ -1326,7 +1336,12 @@ export function registerOmsWebhooks(
                   ? Number(item.fulfillable_quantity)
                   : existingLine.fulfillableQuantity,
                 fulfillmentStatus,
-                totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
+                requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? existingLine.requiresShipping,
+                paidPriceCents: normalizedLine?.paidPriceCents ?? existingLine.paidPriceCents,
+                totalPriceCents: normalizedLine?.totalCents ?? existingLine.totalPriceCents,
+                totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
+                planDiscountCents: normalizedLine?.planDiscountCents ?? existingLine.planDiscountCents,
+                couponDiscountCents: normalizedLine?.couponDiscountCents ?? existingLine.couponDiscountCents,
                 productVariantId: productVariantId || existingLine.productVariantId,
               })
               .where(eq(omsOrderLines.id, existingLine.id));
@@ -1343,13 +1358,20 @@ export function registerOmsWebhooks(
               sku: item.sku,
               title: item.title,
               variantTitle: item.variant_title,
+              name: normalizedLine?.name ?? item.name ?? item.title,
+              vendor: normalizedLine?.vendor ?? item.vendor,
+              externalProductId: normalizedLine?.externalProductId ?? (item.product_id ? String(item.product_id) : null),
               quantity: item.quantity || 1,
               fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
                 ? Number(item.fulfillable_quantity)
                 : null,
               fulfillmentStatus,
-              requiresShipping: item.requires_shipping ?? true,
-              totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
+              requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? true,
+              paidPriceCents: normalizedLine?.paidPriceCents ?? 0,
+              totalPriceCents: normalizedLine?.totalCents ?? 0,
+              totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
+              planDiscountCents: normalizedLine?.planDiscountCents ?? 0,
+              couponDiscountCents: normalizedLine?.couponDiscountCents ?? 0,
             }).onConflictDoNothing();
           }
         }
