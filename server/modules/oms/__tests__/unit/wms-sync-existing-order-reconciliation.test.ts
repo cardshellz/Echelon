@@ -57,5 +57,7 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/paid_price_cents = COALESCE\(ol\.paid_price_cents, 0\)/);
     expect(WMS_SYNC_SRC).toMatch(/total_price_cents = COALESCE\(ol\.total_price_cents, 0\)/);
     expect(WMS_SYNC_SRC).toMatch(/oi\.oms_order_line_id = ol\.id/);
+    const orderItemsPriceUpdate = WMS_SYNC_SRC.match(/UPDATE wms\.order_items oi[\s\S]*?AND ol\.order_id = \$\{omsOrderId\}/)?.[0] ?? "";
+    expect(orderItemsPriceUpdate).not.toContain("updated_at");
   });
 });

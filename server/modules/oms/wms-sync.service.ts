@@ -623,8 +623,7 @@ export class WmsSyncService {
       UPDATE wms.order_items oi
          SET unit_price_cents = COALESCE(ol.paid_price_cents, 0),
              paid_price_cents = COALESCE(ol.paid_price_cents, 0),
-             total_price_cents = COALESCE(ol.total_price_cents, 0),
-             updated_at = NOW()
+             total_price_cents = COALESCE(ol.total_price_cents, 0)
         FROM oms.oms_order_lines ol
        WHERE oi.order_id = ${wmsOrderId}
          AND oi.oms_order_line_id = ol.id
