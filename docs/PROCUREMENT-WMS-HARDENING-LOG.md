@@ -2078,3 +2078,36 @@ Next step:
 - Continue Phase 9 by adding seasonality or longer-baseline candidate
   diagnostics, still read-only, before deciding whether the PO recommendation
   engine should use anything beyond the current standard velocity model.
+
+### 2026-05-19 - Phase 9 Slice 6: Demand Baseline Diagnostics
+
+Scope:
+
+- Added a non-mutating long-window demand baseline beside the existing
+  standard and short demand windows so operators can see whether current
+  velocity is above, near, or below a broader sales baseline before forecast
+  math changes.
+- Extended the procurement reorder data query with long-window usage, prior
+  long-window usage, order count, active demand days, latest demand timestamp,
+  and a widened demand scan horizon that covers the longest comparison window.
+- Added forecast-engine baseline ratio and signal output while preserving the
+  standard-window forecast basis as the only input to reorder-point and
+  auto-draft decisions.
+- Persisted long-window demand quality, long-window trend, and baseline signal
+  counts in saved recommendation run-detail forecast diagnostics.
+- Surfaced the baseline signal in purchasing forecast basis text and dashboard
+  run summaries so operators can compare short-term acceleration with the
+  longer demand baseline.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 9 by adding true seasonality or supplier-cycle diagnostics on
+  top of the now-visible short/standard/long demand windows, still without
+  mutating PO recommendation math until the diagnostics prove useful.

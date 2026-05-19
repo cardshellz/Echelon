@@ -31,7 +31,10 @@ interface ForecastDiagnostics {
   demandTrendCounts: Record<string, number>;
   shortWindowDemandQualityCounts?: Record<string, number>;
   shortWindowDemandTrendCounts?: Record<string, number>;
+  longWindowDemandQualityCounts?: Record<string, number>;
+  longWindowDemandTrendCounts?: Record<string, number>;
   demandAccelerationSignalCounts?: Record<string, number>;
+  demandBaselineSignalCounts?: Record<string, number>;
   qualityControlCounts?: Record<string, number>;
   qualityControlAreaCounts?: Record<string, number>;
   qualityControlSeverityCounts?: Record<string, number>;
@@ -63,8 +66,17 @@ interface RecommendationForecastProvenance {
       demandQuality?: string;
       demandTrend?: string;
     };
+    longWindow?: {
+      lookbackDays?: number;
+      periodUsagePieces?: number;
+      avgDailyUsagePieces?: number;
+      demandQuality?: string;
+      demandTrend?: string;
+    };
     accelerationRatio?: number | null;
     accelerationSignal?: string;
+    baselineRatio?: number | null;
+    baselineSignal?: string;
   };
 }
 
@@ -248,7 +260,9 @@ function formatRecommendationForecast(provenance?: RecommendationForecastProvena
   const trend = provenance.demandTrend ? provenance.demandTrend.replace(/_/g, " ") : "trend n/a";
   const acceleration = provenance.demandWindowDiagnostics?.accelerationSignal;
   const accelerationLabel = acceleration ? ` - ${acceleration.replace(/_/g, " ")}` : "";
-  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}`;
+  const baseline = provenance.demandWindowDiagnostics?.baselineSignal;
+  const baselineLabel = baseline ? ` - ${baseline.replace(/_/g, " ")}` : "";
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}`;
 }
 
 function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
@@ -841,6 +855,7 @@ export default function PurchasingDashboard() {
                       { label: "Forecast model", value: formatForecastDiagnostics(lastRunForecastDiagnostics) },
                       { label: "Demand trend", value: topCountLabel(lastRunForecastDiagnostics?.demandTrendCounts) },
                       { label: "Short-window signal", value: topCountLabel(lastRunForecastDiagnostics?.demandAccelerationSignalCounts) },
+                      { label: "Baseline signal", value: topCountLabel(lastRunForecastDiagnostics?.demandBaselineSignalCounts) },
                       { label: "Top quality blocker", value: topCountLabel(lastRunForecastDiagnostics?.autopilotBlockerCounts), warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Blocked items", value: lastRunForecastDiagnostics?.autopilotBlockerItemCount ?? 0, warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },

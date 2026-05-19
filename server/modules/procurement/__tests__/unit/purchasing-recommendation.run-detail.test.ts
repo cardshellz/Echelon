@@ -80,8 +80,17 @@ describe("purchasing recommendation run detail", () => {
         shortWindowDemandTrendCounts: {
           not_available: 2,
         },
+        longWindowDemandQualityCounts: {
+          normal: 2,
+        },
+        longWindowDemandTrendCounts: {
+          not_available: 2,
+        },
         demandAccelerationSignalCounts: {
           steady: 2,
+        },
+        demandBaselineSignalCounts: {
+          near_baseline: 2,
         },
         qualityControlCounts: {
           product_lead_time_fallback: 2,
