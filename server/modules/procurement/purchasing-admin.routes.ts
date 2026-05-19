@@ -229,13 +229,11 @@ export function registerPurchasingAdminRoutes(app: Express) {
   // Reorder to PO
 
   app.post("/api/purchasing/create-po-from-reorder", requirePermission("purchasing", "create"), async (req, res) => {
-    try {
-      const pos = await purchasing.createPOFromReorder(req.body.items, req.session.user?.id);
-      res.status(201).json({ purchaseOrders: pos });
-    } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
+    res.status(410).json({
+      error: "Direct reorder PO creation has been removed",
+      message:
+        "Use the purchasing recommendation engine auto-draft endpoints so PO creation is governed by exclusion rules, confidence, and the active approval policy.",
+    });
   });
 
 }

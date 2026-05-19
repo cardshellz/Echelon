@@ -184,4 +184,23 @@ describe("purchasing admin routes", () => {
     expect(purchasing.getApprovalTiers).toHaveBeenCalledOnce();
     expect(body).toEqual({ tiers: [{ id: 1, name: "Manager" }] });
   });
+
+  it("rejects direct reorder PO creation outside the recommendation engine", async () => {
+    const purchasing = buildPurchasingMock({
+      createPOFromReorder: vi.fn().mockResolvedValue([{ id: 99 }]),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/create-po-from-reorder", {
+      items: [{ productId: 1, productVariantId: 11, suggestedQty: 1, vendorId: 7 }],
+    });
+
+    expect(status).toBe(410);
+    expect(body).toEqual({
+      error: "Direct reorder PO creation has been removed",
+      message:
+        "Use the purchasing recommendation engine auto-draft endpoints so PO creation is governed by exclusion rules, confidence, and the active approval policy.",
+    });
+    expect(purchasing.createPOFromReorder).not.toHaveBeenCalled();
+  });
 });

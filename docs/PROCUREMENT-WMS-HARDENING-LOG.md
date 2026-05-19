@@ -1894,3 +1894,30 @@ Next step:
 - Wrap Phase 8 by reviewing the remaining auto-draft and recommendation
   surfaces for any legacy path that can still mutate POs outside the shared
   recommendation engine, then move into Phase 9 demand forecast foundations.
+
+### 2026-05-19 - Phase 8 Slice 11: Recommendation PO Mutation Wrap Audit
+
+Scope:
+
+- Audited remaining purchasing recommendation and auto-draft mutation surfaces
+  after the scheduled approval-policy gate landed.
+- Found one legacy endpoint, `/api/purchasing/create-po-from-reorder`, that
+  accepted arbitrary posted reorder items and called `createPOFromReorder`
+  directly, bypassing recommendation confidence, skipped reasons, exclusions,
+  and the active approval policy.
+- Removed that mutation path by returning `410 Gone` with guidance to use the
+  purchasing recommendation engine auto-draft endpoints instead.
+- Added route coverage proving the legacy endpoint does not call the
+  purchasing service.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/jobs/__tests__/unit/auto-draft.job.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Move into Phase 9 demand forecast foundations now that recommendation-driven
+  PO mutation paths are bounded by the shared engine and approval gate.
