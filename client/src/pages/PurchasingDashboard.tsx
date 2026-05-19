@@ -24,6 +24,29 @@ import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
 
+interface ForecastDiagnostics {
+  recommendationCount: number;
+  forecastMethodCounts: Record<string, number>;
+  demandQualityCounts: Record<string, number>;
+  demandTrendCounts: Record<string, number>;
+  totalPeriodUsagePieces: number;
+  avgDailyUsagePieces: number;
+  latestDemandAt: string | null;
+}
+
+interface RecommendationForecastProvenance {
+  forecastMethod?: string;
+  forecastVersion?: number;
+  demandWindowDays?: number;
+  demandQuality?: string;
+  demandTrend?: string;
+  periodUsagePieces?: number;
+  avgDailyUsagePieces?: number;
+  demandOrderCount?: number | null;
+  demandActiveDays?: number | null;
+  latestDemandAt?: string | null;
+}
+
 interface DashboardData {
   stockouts: number;
   orderNow: number;
@@ -58,6 +81,7 @@ interface DashboardData {
         autoDraftEligibleCount?: number;
         autoDraftReviewRequiredCount?: number;
       };
+      forecastDiagnostics?: ForecastDiagnostics | null;
       skippedReasonCounts?: Record<string, number>;
       actionableRecommendations?: Array<{
         sku: string;
@@ -66,6 +90,7 @@ interface DashboardData {
         orderUomLabel: string;
         preferredVendorName: string | null;
         explanation: string;
+        forecastProvenance?: RecommendationForecastProvenance;
       }>;
       skippedRecommendations?: Array<{
         sku: string;
@@ -87,6 +112,7 @@ interface AutoDraftRunHistoryItem {
   actionableCount: number;
   autoDraftEligibleCount: number;
   autoDraftReviewRequiredCount: number;
+  forecastDiagnostics: ForecastDiagnostics | null;
   posCreated: number;
   posUpdated: number;
   linesAdded: number;
@@ -101,6 +127,7 @@ interface AutoDraftRunHistoryItem {
     orderUomLabel: string;
     preferredVendorName: string | null;
     explanation: string;
+    forecastProvenance?: RecommendationForecastProvenance;
   } | null;
 }
 
@@ -157,6 +184,34 @@ function formatRelativeTime(dateStr: string): string {
 
 function formatHealthType(type: string): string {
   return type.replace(/_/g, " ");
+}
+
+function formatForecastMethod(method?: string | null): string {
+  if (!method) return "No forecast method";
+  return method.replace(/_/g, " ");
+}
+
+function topCountLabel(counts?: Record<string, number> | null): string {
+  if (!counts) return "None";
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  if (!top) return "None";
+  return `${top[0].replace(/_/g, " ")} (${top[1]})`;
+}
+
+function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): string {
+  if (!diagnostics) return "No forecast diagnostics";
+  const topMethod = Object.entries(diagnostics.forecastMethodCounts ?? {}).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs`;
+}
+
+function formatRecommendationForecast(provenance?: RecommendationForecastProvenance): string {
+  if (!provenance) return "Forecast basis unavailable";
+  const sample =
+    provenance.demandOrderCount != null && provenance.demandActiveDays != null
+      ? `${provenance.demandOrderCount} orders/${provenance.demandActiveDays} active days`
+      : `${provenance.periodUsagePieces ?? 0} pcs`;
+  const trend = provenance.demandTrend ? provenance.demandTrend.replace(/_/g, " ") : "trend n/a";
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}`;
 }
 
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
@@ -261,6 +316,7 @@ export default function PurchasingDashboard() {
       ]
     : [];
   const recentAutoDraftRuns = autoDraftRunHistory?.runs ?? [];
+  const lastRunForecastDiagnostics = data.lastAutoDraftRun?.summaryJson?.forecastDiagnostics ?? null;
 
   return (
     <div className="flex flex-col h-full">
@@ -738,6 +794,8 @@ export default function PurchasingDashboard() {
                       { label: "Actionable", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.actionableCount ?? data.lastAutoDraftRun.linesAdded },
                       { label: "Eligible to draft", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? data.lastAutoDraftRun.linesAdded },
                       { label: "Needs review", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0 },
+                      { label: "Forecast model", value: formatForecastDiagnostics(lastRunForecastDiagnostics) },
+                      { label: "Demand trend", value: topCountLabel(lastRunForecastDiagnostics?.demandTrendCounts) },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
                       { label: "Skipped (on order)", value: data.lastAutoDraftRun.skippedOnOrder },
                       { label: "Excluded SKUs", value: data.lastAutoDraftRun.skippedExcluded },
@@ -763,6 +821,9 @@ export default function PurchasingDashboard() {
                             </span>
                           </div>
                           <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{item.explanation}</p>
+                          <p className="text-[11px] text-muted-foreground mt-1 truncate">
+                            {formatRecommendationForecast(item.forecastProvenance)}
+                          </p>
                         </div>
                       ))}
                     </div>
@@ -788,6 +849,9 @@ export default function PurchasingDashboard() {
                               <span>{run.itemsAnalyzed} analyzed</span>
                               <span>{run.autoDraftEligibleCount} eligible</span>
                               <span>{run.posCreated + run.posUpdated} PO changes</span>
+                            </div>
+                            <div className="mt-1 truncate text-[11px] text-muted-foreground">
+                              {formatForecastDiagnostics(run.forecastDiagnostics)}
                             </div>
                             {run.topActionableRecommendation ? (
                               <div className="mt-1 truncate text-[11px]">

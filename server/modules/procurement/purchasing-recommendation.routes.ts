@@ -81,6 +81,7 @@ function normalizeAutoDraftRun(row: any) {
       Number(summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
     autoDraftReviewRequiredCount:
       Number(summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0) || 0,
+    forecastDiagnostics: summaryJson?.forecastDiagnostics ?? null,
     poMutationCount: poMutations.length,
     topActionableRecommendation: actionableRecommendations[0] ?? null,
     topSkippedRecommendation: skippedRecommendations[0] ?? null,

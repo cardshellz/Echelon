@@ -1952,3 +1952,37 @@ Next step:
 - Continue Phase 9 by exposing richer forecast diagnostics in the operator
   recommendation/run-detail surfaces before changing the forecast algorithm
   itself.
+
+### 2026-05-19 - Phase 9 Slice 2: Forecast Diagnostics Operator Surface
+
+Scope:
+
+- Added aggregate forecast diagnostics to purchasing recommendation run detail
+  so each auto-draft run records forecast method counts, demand quality counts,
+  demand trend counts, total period usage, average daily usage, and latest
+  demand timestamp.
+- Exposed those diagnostics through normalized auto-draft run history responses
+  so the dashboard can summarize why a run's recommendations were trusted or
+  held for review.
+- Updated the purchasing dashboard auto-draft card and recent-run list to show
+  the forecast model, dominant demand quality, dominant trend, and total demand
+  sample instead of only PO mutation counts.
+- Expanded reorder-analysis forecast basis text to include the explicit
+  forecast method and average daily usage while preserving existing confidence,
+  supplier, and lead-time signals.
+- Added focused run-detail and route coverage for forecast diagnostics in saved
+  recommendation audit payloads.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue Phase 9 by separating forecast input quality controls from PO
+  recommendation confidence, so operators can see whether bad demand data,
+  sparse history, missing lead time, or supplier cost risk is what blocked
+  autopilot.

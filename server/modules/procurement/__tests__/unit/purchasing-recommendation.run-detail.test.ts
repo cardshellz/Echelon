@@ -63,6 +63,21 @@ describe("purchasing recommendation run detail", () => {
       skippedReasonCounts: {
         no_vendor: 1,
       },
+      forecastDiagnostics: {
+        recommendationCount: 2,
+        forecastMethodCounts: {
+          recent_order_velocity_v1: 2,
+        },
+        demandQualityCounts: {
+          normal: 2,
+        },
+        demandTrendCounts: {
+          not_available: 2,
+        },
+        totalPeriodUsagePieces: 60,
+        avgDailyUsagePieces: 1,
+        latestDemandAt: null,
+      },
       poMutations: [{ vendorId: 7, poId: 99, action: "created", linesAdded: 1 }],
     });
     expect(detail.actionableRecommendations[0]).toMatchObject({

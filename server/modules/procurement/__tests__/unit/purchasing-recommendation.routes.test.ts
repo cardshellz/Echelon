@@ -262,6 +262,15 @@ describe("purchasing recommendation routes", () => {
         summaryJson: {
           settings: { autoDraftMode: "review_only" },
           recommendationSummary: { actionableCount: 4, autoDraftEligibleCount: 2, autoDraftReviewRequiredCount: 2 },
+          forecastDiagnostics: {
+            recommendationCount: 4,
+            forecastMethodCounts: { recent_order_velocity_v1: 4 },
+            demandQualityCounts: { normal: 3, thin_history: 1 },
+            demandTrendCounts: { stable: 2, rising: 1, not_available: 1 },
+            totalPeriodUsagePieces: 120,
+            avgDailyUsagePieces: 1,
+            latestDemandAt: "2026-05-18T12:00:00.000Z",
+          },
           actionableRecommendations: [
             {
               sku: "ORDER-ME",
@@ -310,6 +319,11 @@ describe("purchasing recommendation routes", () => {
           actionableCount: 4,
           autoDraftEligibleCount: 2,
           autoDraftReviewRequiredCount: 2,
+          forecastDiagnostics: {
+            recommendationCount: 4,
+            forecastMethodCounts: { recent_order_velocity_v1: 4 },
+            demandQualityCounts: { normal: 3, thin_history: 1 },
+          },
           poMutationCount: 0,
           topActionableRecommendation: {
             sku: "ORDER-ME",
