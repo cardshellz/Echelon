@@ -36,4 +36,12 @@ describe("wms-sync existing order reconciliation", () => {
   it("reopens WMS work when reconciliation adds shippable demand", () => {
     expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders[\s\S]*ELSE 'ready'/);
   });
+
+  it("recomputes WMS aggregate counts after reconciliation changes order items", () => {
+    expect(WMS_SYNC_SRC).toMatch(/item_count = agg\.item_count/);
+    expect(WMS_SYNC_SRC).toMatch(/unit_count = agg\.unit_count/);
+    expect(WMS_SYNC_SRC).toMatch(/picked_count = agg\.picked_count/);
+    expect(WMS_SYNC_SRC).toMatch(/COUNT\(\*\)::int AS item_count/);
+    expect(WMS_SYNC_SRC).toMatch(/COALESCE\(SUM\(quantity\), 0\)::int AS unit_count/);
+  });
 });
