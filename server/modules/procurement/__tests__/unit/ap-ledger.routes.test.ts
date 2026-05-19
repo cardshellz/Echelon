@@ -109,7 +109,7 @@ describe("AP ledger routes", () => {
   it("requires idempotency for duplicate-prone AP invoice and payment writes", () => {
     buildApp();
 
-    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(6);
+    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(9);
   });
 
   it("lists vendor invoices with parsed filters", async () => {

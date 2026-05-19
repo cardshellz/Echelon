@@ -128,7 +128,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoices/:id/po-links", requirePermission("purchasing", "edit"), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/po-links", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
     try {
       const { purchaseOrderId, allocatedAmountCents, notes } = req.body;
       if (!purchaseOrderId) return res.status(400).json({ error: "purchaseOrderId is required" });
@@ -159,7 +159,7 @@ export function registerApLedgerRoutes(app: Express) {
 
   // Invoice lines
 
-  app.post("/api/vendor-invoices/:id/lines/from-po", requirePermission("purchasing", "edit"), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/lines/from-po", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
     try {
       const { purchaseOrderId } = req.body;
       if (!purchaseOrderId) return res.status(400).json({ error: "purchaseOrderId is required" });
@@ -170,7 +170,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoices/:id/lines", requirePermission("purchasing", "edit"), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/lines", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
     try {
       const line = await apLedger.addInvoiceLine(Number(req.params.id), req.body);
       res.status(201).json(line);

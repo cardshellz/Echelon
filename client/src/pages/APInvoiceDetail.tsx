@@ -258,11 +258,17 @@ export default function APInvoiceDetail() {
   });
 
   const linkPoMutation = useMutation({
-    mutationFn: () => fetch(`/api/vendor-invoices/${invoiceId}/po-links`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ purchaseOrderId: parseInt(linkPoId) }),
-    }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    mutationFn: () => {
+      const idempotencyKey = createApCommandIdempotencyKey("ap-invoice-link-po");
+      return fetch(`/api/vendor-invoices/${invoiceId}/po-links`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({ purchaseOrderId: parseInt(linkPoId) }),
+      }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
+    },
     onSuccess: () => { invalidate(); setShowLinkPoDialog(false); setLinkPoId(""); toast({ title: "PO linked & lines imported" }); },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
@@ -338,17 +344,23 @@ export default function APInvoiceDetail() {
   // ── Line Mutations ──
 
   const addLineMutation = useMutation({
-    mutationFn: () => fetch(`/api/vendor-invoices/${invoiceId}/lines`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sku: newLine.sku || undefined,
-        productName: newLine.productName || undefined,
-        description: newLine.description || undefined,
-        qtyInvoiced: parseInt(newLine.qtyInvoiced) || 1,
-        unitCostCents: dollarsToCents(newLine.unitCostDollars || "0"),
-      }),
-    }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    mutationFn: () => {
+      const idempotencyKey = createApCommandIdempotencyKey("ap-invoice-add-line");
+      return fetch(`/api/vendor-invoices/${invoiceId}/lines`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({
+          sku: newLine.sku || undefined,
+          productName: newLine.productName || undefined,
+          description: newLine.description || undefined,
+          qtyInvoiced: parseInt(newLine.qtyInvoiced) || 1,
+          unitCostCents: dollarsToCents(newLine.unitCostDollars || "0"),
+        }),
+      }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
+    },
     onSuccess: () => {
       invalidate();
       setShowAddLineDialog(false);
