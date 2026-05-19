@@ -50,6 +50,14 @@ function isOverdue(dueDate: string | null | undefined, status: string) {
   return new Date(dueDate) < new Date();
 }
 
+function createInvoiceIdempotencyKey(prefix: string): string {
+  return (
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? (crypto as any).randomUUID()
+      : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  ) as string;
+}
+
 export default function APInvoices() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -100,9 +108,13 @@ export default function APInvoices() {
 
   const createMutation = useMutation({
     mutationFn: async (body: any) => {
+      const idempotencyKey = createInvoiceIdempotencyKey("ap-invoice-create");
       const res = await fetch("/api/vendor-invoices", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error((await res.json()).error);

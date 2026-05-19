@@ -1191,9 +1191,17 @@ export default function PurchaseOrderDetail() {
 
   const createInvoiceMutation = useMutation({
     mutationFn: async () => {
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `po-invoice-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
       const res = await fetch("/api/vendor-invoices", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
         body: JSON.stringify({
           vendorId: po.vendorId,
           invoiceNumber: invoiceForm.invoiceNumber,

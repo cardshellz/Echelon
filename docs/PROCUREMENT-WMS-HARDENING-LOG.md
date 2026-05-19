@@ -1519,3 +1519,34 @@ Next step:
   needs the same command treatment, or move into the next procurement engine
   area if AP lifecycle hardening is sufficient for the forecast/purchasing
   foundation.
+
+### 2026-05-18 - Phase 7 Slice 6: AP Invoice Creation Idempotency
+
+Scope:
+
+- Required idempotency keys for manual vendor invoice creation so browser
+  retries cannot create duplicate supplier invoices.
+- Required idempotency keys for shipment-cost invoice creation, covering the
+  landed-cost to AP bridge.
+- Updated all current invoice creation UI entry points to send idempotency
+  keys: AP Invoices, PO detail invoice creation, and shipment cost invoice
+  creation.
+- Left invoice header edits outside this slice because `PATCH
+  /api/vendor-invoices/:id` reapplies the same field update rather than
+  creating duplicate financial records.
+- Expanded AP and inbound shipment route tests to assert idempotency coverage
+  on invoice creation paths.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Finish validating this slice with the broader procurement/AP regression set,
+  then either harden AP invoice line/link writes or close Phase 7 and move into
+  the next procurement engine area for forecasting and purchasing
+  recommendations.

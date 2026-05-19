@@ -46,7 +46,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoices", requirePermission("purchasing", "create"), async (req, res) => {
+  app.post("/api/vendor-invoices", requirePermission("purchasing", "create"), requireIdempotency(), async (req, res) => {
     try {
       const body = req.body;
       if (!body.vendorId || !body.invoiceNumber) {

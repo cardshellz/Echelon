@@ -5,6 +5,8 @@ import http from "http";
 import { AddressInfo } from "net";
 
 const mocks = vi.hoisted(() => ({
+  idempotencyMiddleware: vi.fn((_req: any, _res: any, next: any) => next()),
+  requireIdempotency: vi.fn(),
   apLedger: {
     getShipmentCostPaymentStatus: vi.fn(),
     enrichCostsWithInvoiceInfo: vi.fn(),
@@ -20,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
+mocks.requireIdempotency.mockReturnValue(mocks.idempotencyMiddleware);
+
 vi.mock("../../../../routes/middleware", () => {
   const pass = (req: Request, _res: Response, next: NextFunction) => {
     (req as any).session = { user: { id: "test-user" } };
@@ -29,6 +33,10 @@ vi.mock("../../../../routes/middleware", () => {
     requirePermission: () => pass,
   };
 });
+
+vi.mock("../../../../middleware/idempotency", () => ({
+  requireIdempotency: mocks.requireIdempotency,
+}));
 
 vi.mock("../../shipment-tracking.service", () => ({
   ShipmentTrackingError: class ShipmentTrackingError extends Error {
@@ -136,6 +144,12 @@ describe("inbound shipment routes", () => {
   afterEach(async () => {
     if (server) await server.close();
     server = undefined;
+  });
+
+  it("requires idempotency for shipment cost invoice creation", () => {
+    buildApp(buildShipmentTrackingMock());
+
+    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(1);
   });
 
   it("lists inbound shipments with parsed filters", async () => {

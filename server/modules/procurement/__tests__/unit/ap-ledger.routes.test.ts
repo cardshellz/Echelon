@@ -106,10 +106,10 @@ describe("AP ledger routes", () => {
     server = undefined;
   });
 
-  it("requires idempotency for AP command mutations", () => {
+  it("requires idempotency for duplicate-prone AP invoice and payment writes", () => {
     buildApp();
 
-    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(5);
+    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(6);
   });
 
   it("lists vendor invoices with parsed filters", async () => {

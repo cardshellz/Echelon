@@ -1,6 +1,7 @@
 ﻿import type { Express } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../routes/middleware";
+import { requireIdempotency } from "../../middleware/idempotency";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
 import * as notificationService from "../notifications/notifications.service";
@@ -303,7 +304,7 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   // Shipment cost to AP bridge
 
-  app.post("/api/inbound-shipments/:id/create-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
+  app.post("/api/inbound-shipments/:id/create-invoice", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
     try {
       const { vendorId, invoiceNumber, invoiceDate, dueDate, costRowIds, lineOverrides, notes } = req.body;
       if (!vendorId) return res.status(400).json({ error: "vendorId is required" });
