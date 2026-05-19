@@ -588,6 +588,8 @@ function dogfoodReadinessSql(): string {
         SELECT DISTINCT c.id
         FROM channels.channels c
         WHERE c.status = 'active'
+          AND c.type = 'internal'
+          AND c.provider = 'manual'
           AND (
             LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms'
             OR COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true'

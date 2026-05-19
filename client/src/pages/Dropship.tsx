@@ -39,7 +39,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import {
   allDropshipListingInventoryModes,
   allDropshipListingModes,
@@ -734,81 +734,6 @@ export default function Dropship() {
 
       <div className="flex-1 overflow-auto p-4 md:p-6">
         <Tabs value={activeTab} onValueChange={selectTab} className="flex min-h-0 flex-1 flex-col">
-          <TabsList className="mb-5 h-auto w-full justify-start overflow-x-auto rounded-none border-b bg-transparent p-0">
-            <TabsTrigger
-              value="overview"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Overview
-            </TabsTrigger>
-            <TabsTrigger
-              value="dogfood"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Dogfood readiness
-            </TabsTrigger>
-            <TabsTrigger
-              value="catalog"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Catalog exposure
-            </TabsTrigger>
-            <TabsTrigger
-              value="shipping"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Shipping config
-            </TabsTrigger>
-            <TabsTrigger
-              value="order-intake"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Order intake
-            </TabsTrigger>
-            <TabsTrigger
-              value="wallet-ops"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Wallet ops
-            </TabsTrigger>
-            <TabsTrigger
-              value="stores"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Store connections
-            </TabsTrigger>
-            <TabsTrigger
-              value="listing-pushes"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Listing pushes
-            </TabsTrigger>
-            <TabsTrigger
-              value="tracking-pushes"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Tracking pushes
-            </TabsTrigger>
-            <TabsTrigger
-              value="notifications"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Notifications
-            </TabsTrigger>
-            <TabsTrigger
-              value="returns"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Returns
-            </TabsTrigger>
-            <TabsTrigger
-              value="audit"
-              className="rounded-none border-b-2 border-transparent px-4 py-2 data-[state=active]:border-[#C060E0] data-[state=active]:bg-transparent"
-            >
-              Audit events
-            </TabsTrigger>
-          </TabsList>
-
           <TabsContent value="overview" className="m-0 space-y-5">
             {overviewQuery.isLoading ? (
               <OverviewSkeleton />

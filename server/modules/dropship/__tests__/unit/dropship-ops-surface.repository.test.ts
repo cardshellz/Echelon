@@ -186,6 +186,8 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_package_profiles");
     expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_rate_table_rows");
     expect(String(query.mock.calls[0]?.[0])).toContain("zr_rate.zone = rr.destination_zone");
+    expect(String(query.mock.calls[0]?.[0])).toContain("c.type = 'internal'");
+    expect(String(query.mock.calls[0]?.[0])).toContain("c.provider = 'manual'");
     expect(String(query.mock.calls[0]?.[0])).toContain("c.shipping_config #>> '{dropship,role}'");
     expect(String(query.mock.calls[0]?.[0])).toContain("cc.metadata #>> '{features,dropshipOms}'");
     expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");

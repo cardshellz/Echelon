@@ -23,7 +23,7 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
   it("uses an explicitly configured active channel id", async () => {
     process.env.DROPSHIP_OMS_CHANNEL_ID = "42";
     const query = vi.fn(async () => ({
-      rows: [{ id: 42, status: "active" }],
+      rows: [{ id: 42, status: "active", type: "internal", provider: "manual" }],
     }));
     const client = { query } as unknown as PoolClient;
 
@@ -33,15 +33,30 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
     expect(query.mock.calls[0]?.[1]).toEqual([42]);
   });
 
+  it("rejects an explicitly configured marketplace sales channel", async () => {
+    process.env.DROPSHIP_OMS_CHANNEL_ID = "42";
+    const query = vi.fn(async () => ({
+      rows: [{ id: 42, status: "active", type: "ebay", provider: "ebay" }],
+    }));
+    const client = { query } as unknown as PoolClient;
+
+    await expect(resolveDropshipOmsChannelIdWithClient(client)).rejects.toMatchObject({
+      code: "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE",
+      context: { channelId: 42, type: "ebay", provider: "ebay" },
+    });
+  });
+
   it("resolves one active channel marked by dropship OMS feature config", async () => {
     const query = vi.fn(async () => ({
-      rows: [{ id: 77, status: "active" }],
+      rows: [{ id: 77, status: "active", type: "internal", provider: "manual" }],
     }));
     const client = { query } as unknown as PoolClient;
 
     await expect(resolveDropshipOmsChannelIdWithClient(client)).resolves.toBe(77);
 
     const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("c.type = 'internal'");
+    expect(sql).toContain("c.provider = 'manual'");
     expect(sql).toContain("c.shipping_config #>> '{dropship,role}'");
     expect(sql).toContain("channels.channel_connections");
     expect(sql).toContain("cc.metadata #>> '{features,dropshipOms}'");
@@ -50,8 +65,8 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
   it("rejects ambiguous Dropship OMS feature config", async () => {
     const query = vi.fn(async () => ({
       rows: [
-        { id: 77, status: "active" },
-        { id: 88, status: "active" },
+        { id: 77, status: "active", type: "internal", provider: "manual" },
+        { id: 88, status: "active", type: "internal", provider: "manual" },
       ],
     }));
     const client = { query } as unknown as PoolClient;

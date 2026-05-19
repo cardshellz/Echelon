@@ -50,6 +50,8 @@ interface OrderIntakeRow {
 interface ChannelRow {
   id: number;
   status: string;
+  type: string;
+  provider: string;
 }
 
 const IMMUTABLE_INTAKE_STATUSES: readonly DropshipOrderIntakeStatus[] = [
@@ -314,7 +316,7 @@ export async function resolveDropshipOmsChannelIdWithClient(client: PoolClient):
   );
   if (configuredId) {
     const result = await client.query<ChannelRow>(
-      `SELECT id, status
+      `SELECT id, status, type, provider
        FROM channels.channels
        WHERE id = $1
        LIMIT 1`,
@@ -335,13 +337,22 @@ export async function resolveDropshipOmsChannelIdWithClient(client: PoolClient):
         { channelId: configuredId, status: channel.status },
       );
     }
+    if (channel.type !== "internal" || channel.provider !== "manual") {
+      throw new DropshipError(
+        "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE",
+        "Configured Dropship OMS channel must be an internal/manual source.",
+        { channelId: configuredId, type: channel.type, provider: channel.provider },
+      );
+    }
     return channel.id;
   }
 
   const result = await client.query<ChannelRow>(
-    `SELECT c.id, c.status
+    `SELECT c.id, c.status, c.type, c.provider
      FROM channels.channels c
      WHERE c.status = 'active'
+       AND c.type = 'internal'
+       AND c.provider = 'manual'
        AND (
          LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms'
          OR COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true'
