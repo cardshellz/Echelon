@@ -74,6 +74,35 @@ describe("purchasing recommendation run detail", () => {
         demandTrendCounts: {
           not_available: 2,
         },
+        qualityControlCounts: {
+          product_lead_time_fallback: 2,
+          missing_supplier_cost: 1,
+          missing_vendor: 1,
+        },
+        qualityControlAreaCounts: {
+          lead_time: 2,
+          supplier_cost: 1,
+          vendor: 1,
+        },
+        qualityControlSeverityCounts: {
+          review: 3,
+          block: 1,
+        },
+        autopilotBlockerCounts: {
+          product_lead_time_fallback: 2,
+          missing_supplier_cost: 1,
+          missing_vendor: 1,
+        },
+        autopilotBlockerAreaCounts: {
+          lead_time: 2,
+          supplier_cost: 1,
+          vendor: 1,
+        },
+        autopilotBlockerSeverityCounts: {
+          review: 3,
+          block: 1,
+        },
+        autopilotBlockerItemCount: 2,
         totalPeriodUsagePieces: 60,
         avgDailyUsagePieces: 1,
         latestDemandAt: null,

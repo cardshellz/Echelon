@@ -2019,3 +2019,31 @@ Next step:
   diagnostics and then evaluate the next forecast engine improvement, likely
   richer demand windows or seasonality handling, without changing PO mutation
   behavior first.
+
+### 2026-05-19 - Phase 9 Slice 4: API Quality-Control Diagnostics
+
+Scope:
+
+- Expanded saved purchasing forecast diagnostics with aggregate quality-control
+  and autopilot-blocker counts by code, area, and severity.
+- Added an item count for recommendations carrying autopilot blockers so the
+  API can distinguish a single noisy blocker from broad forecast input risk.
+- Preserved recommendation and PO mutation behavior; this slice only makes the
+  existing blocker data visible at the run-summary/API layer.
+- Updated auto-draft run normalization coverage so recent-run API responses keep
+  the new blocker diagnostics intact for dashboard consumers.
+- Updated the purchasing dashboard auto-draft card and recent-run summaries to
+  show the top quality blocker alongside forecast model, demand quality, demand
+  trend, and demand sample size.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+
+Next step:
+
+- Continue Phase 9 by adding the first non-mutating forecast engine improvement,
+  likely side-by-side short/standard window demand diagnostics or seasonality
+  candidates, before allowing the recommendation math itself to change.

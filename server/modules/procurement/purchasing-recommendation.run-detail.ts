@@ -41,15 +41,33 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const demandQualityCounts: Record<string, number> = {};
   const demandTrendCounts: Record<string, number> = {};
   const forecastMethodCounts: Record<string, number> = {};
+  const qualityControlCounts: Record<string, number> = {};
+  const qualityControlAreaCounts: Record<string, number> = {};
+  const qualityControlSeverityCounts: Record<string, number> = {};
+  const autopilotBlockerCounts: Record<string, number> = {};
+  const autopilotBlockerAreaCounts: Record<string, number> = {};
+  const autopilotBlockerSeverityCounts: Record<string, number> = {};
   let totalPeriodUsagePieces = 0;
   let avgDailyUsageTotal = 0;
   let latestDemandAt: string | Date | null = null;
+  let autopilotBlockerItemCount = 0;
 
   for (const item of result.items) {
     const provenance = item.forecastProvenance;
     increment(demandQualityCounts, provenance.demandQuality);
     increment(demandTrendCounts, provenance.demandTrend);
     increment(forecastMethodCounts, provenance.forecastMethod);
+    for (const control of item.qualityControls) {
+      increment(qualityControlCounts, control.code);
+      increment(qualityControlAreaCounts, control.area);
+      increment(qualityControlSeverityCounts, control.severity);
+    }
+    if (item.autopilotBlockers.length > 0) autopilotBlockerItemCount += 1;
+    for (const blocker of item.autopilotBlockers) {
+      increment(autopilotBlockerCounts, blocker.code);
+      increment(autopilotBlockerAreaCounts, blocker.area);
+      increment(autopilotBlockerSeverityCounts, blocker.severity);
+    }
     totalPeriodUsagePieces += provenance.periodUsagePieces;
     avgDailyUsageTotal += provenance.avgDailyUsagePieces;
 
@@ -66,6 +84,13 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     forecastMethodCounts,
     demandQualityCounts,
     demandTrendCounts,
+    qualityControlCounts,
+    qualityControlAreaCounts,
+    qualityControlSeverityCounts,
+    autopilotBlockerCounts,
+    autopilotBlockerAreaCounts,
+    autopilotBlockerSeverityCounts,
+    autopilotBlockerItemCount,
     totalPeriodUsagePieces,
     avgDailyUsagePieces:
       recommendationCount > 0 ? Math.round((avgDailyUsageTotal / recommendationCount) * 100) / 100 : 0,
