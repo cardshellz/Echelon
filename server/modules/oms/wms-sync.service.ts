@@ -652,15 +652,19 @@ export class WmsSyncService {
       }))
       .filter((item) => Number.isInteger(item.id) && item.id > 0 && item.quantity > 0);
 
-    if (shippableShipmentItems.length === 0) {
-      return { insertedItems: insertedItems.length, updatedShipments: 0 };
-    }
-
     await db.execute(sql`
       UPDATE wms.orders w
          SET warehouse_status = CASE
                WHEN w.warehouse_status IN ('cancelled') THEN w.warehouse_status
-               ELSE 'ready'
+               WHEN EXISTS (
+                 SELECT 1
+                 FROM wms.order_items pending_items
+                 WHERE pending_items.order_id = w.id
+                   AND COALESCE(pending_items.requires_shipping, 1) <> 0
+                   AND COALESCE(pending_items.quantity, 0) > COALESCE(pending_items.fulfilled_quantity, 0)
+                   AND pending_items.status NOT IN ('cancelled', 'completed')
+               ) THEN 'ready'
+               ELSE w.warehouse_status
              END,
              item_count = agg.item_count,
              unit_count = agg.unit_count,
@@ -678,6 +682,10 @@ export class WmsSyncService {
         ) agg
        WHERE w.id = agg.order_id
     `);
+
+    if (shippableShipmentItems.length === 0) {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
 
     const plannedShipments = await db
       .select({ id: outboundShipments.id })
