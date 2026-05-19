@@ -2914,6 +2914,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       WHERE id = ${shipmentId}
     `);
 
+    await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
+
     console.log(
       `[ShipStation] Pushed WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})`,
     );

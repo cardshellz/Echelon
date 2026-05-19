@@ -446,9 +446,10 @@ describe("pushShipment :: happy path", () => {
     expect(result.shipstationOrderId).toBe(555000);
     expect(result.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
 
-    // 7 db calls: shipment, order, non-shipping aggregate, items,
-    // shippable shipment-scope aggregate, channel config, UPDATE.
-    expect(mock.getCallCount()).toBe(7);
+    // 9 db calls: shipment, order, non-shipping aggregate, items,
+    // shippable shipment-scope aggregate, channel config, UPDATE,
+    // then shipment-rollup order + shipment status reads.
+    expect(mock.getCallCount()).toBe(9);
 
     // One fetch call to /orders/createorder.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -577,7 +578,7 @@ describe("pushShipment :: happy path", () => {
     // Same 4-call sequence as a fresh push — voided re-push doesn't
     // add any reads/writes; the single UPDATE simply also NULLs the
     // void columns.
-    expect(mock.getCallCount()).toBe(7);
+    expect(mock.getCallCount()).toBe(9);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Inspect the UPDATE's SQL text: must set status='queued' and must
@@ -704,8 +705,8 @@ describe("pushShipment :: error cases", () => {
     await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
       shipstationOrderId: 42,
     });
-    // Seven calls fired: we went past the status gate.
-    expect(mock.getCallCount()).toBe(7);
+    // Nine calls fired: we went past the status gate and rollup reads.
+    expect(mock.getCallCount()).toBe(9);
   });
 
   it("throws when the wms order is not found", async () => {
