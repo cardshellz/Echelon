@@ -56,10 +56,14 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const autopilotBlockerCounts: Record<string, number> = {};
   const autopilotBlockerAreaCounts: Record<string, number> = {};
   const autopilotBlockerSeverityCounts: Record<string, number> = {};
+  const supplierCycleSignalCounts: Record<string, number> = {};
   let totalPeriodUsagePieces = 0;
   let avgDailyUsageTotal = 0;
   let latestDemandAt: string | Date | null = null;
   let autopilotBlockerItemCount = 0;
+  let openPoPastDueCount = 0;
+  let supplyCoverageRatioTotal = 0;
+  let supplyCoverageRatioCount = 0;
 
   for (const item of result.items) {
     const provenance = item.forecastProvenance;
@@ -76,6 +80,12 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     increment(demandAccelerationSignalCounts, provenance.demandWindowDiagnostics.accelerationSignal);
     increment(demandBaselineSignalCounts, provenance.demandWindowDiagnostics.baselineSignal);
     increment(demandSeasonalitySignalCounts, provenance.demandWindowDiagnostics.seasonalSignal);
+    increment(supplierCycleSignalCounts, item.supplierCycleDiagnostics.signal);
+    if (item.supplierCycleDiagnostics.signal === "open_supply_past_due") openPoPastDueCount += 1;
+    if (item.supplierCycleDiagnostics.supplyCoverageRatio != null) {
+      supplyCoverageRatioTotal += item.supplierCycleDiagnostics.supplyCoverageRatio;
+      supplyCoverageRatioCount += 1;
+    }
     increment(forecastMethodCounts, provenance.forecastMethod);
     for (const control of item.qualityControls) {
       increment(qualityControlCounts, control.code);
@@ -113,6 +123,10 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     demandAccelerationSignalCounts,
     demandBaselineSignalCounts,
     demandSeasonalitySignalCounts,
+    supplierCycleSignalCounts,
+    supplierCycleOpenPoPastDueCount: openPoPastDueCount,
+    avgSupplierCycleSupplyCoverageRatio:
+      supplyCoverageRatioCount > 0 ? Math.round((supplyCoverageRatioTotal / supplyCoverageRatioCount) * 100) / 100 : null,
     qualityControlCounts,
     qualityControlAreaCounts,
     qualityControlSeverityCounts,
@@ -153,6 +167,7 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     confidenceFactors: item.confidenceFactors,
     forecastProvenance: item.forecastProvenance,
     supplierBasis: item.supplierBasis,
+    supplierCycleDiagnostics: item.supplierCycleDiagnostics,
     qualityControls: item.qualityControls,
     autopilotBlockers: item.autopilotBlockers,
     qualityGate: item.qualityGate,

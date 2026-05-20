@@ -91,6 +91,11 @@ describe("purchasing recommendation engine", () => {
         estimatedCostCents: 125,
         lastCostCents: 120,
       },
+      supplierCycleDiagnostics: {
+        signal: "no_supplier_cycle_data",
+        supplyCoverageRatio: 0.71,
+        openPoCoverageRatio: null,
+      },
       qualityControls: [],
       autopilotBlockers: [],
       demandBasis: {
@@ -297,6 +302,11 @@ describe("purchasing recommendation engine", () => {
       status: "on_order",
       actionable: false,
       skippedReason: "already_on_order",
+      supplierCycleDiagnostics: {
+        signal: "open_supply_covers_cycle",
+        supplyCoverageRatio: 3.5,
+        openPoCoverageRatio: 3.33,
+      },
       reviewSignal: {
         action: "review_open_po",
         severity: "info",

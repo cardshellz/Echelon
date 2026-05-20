@@ -38,6 +38,9 @@ interface ForecastDiagnostics {
   demandAccelerationSignalCounts?: Record<string, number>;
   demandBaselineSignalCounts?: Record<string, number>;
   demandSeasonalitySignalCounts?: Record<string, number>;
+  supplierCycleSignalCounts?: Record<string, number>;
+  supplierCycleOpenPoPastDueCount?: number;
+  avgSupplierCycleSupplyCoverageRatio?: number | null;
   qualityControlCounts?: Record<string, number>;
   qualityControlAreaCounts?: Record<string, number>;
   qualityControlSeverityCounts?: Record<string, number>;
@@ -100,6 +103,16 @@ interface RecommendationQualityControl {
   detail: string;
 }
 
+interface RecommendationSupplierCycleDiagnostics {
+  signal: string;
+  detail: string;
+  cycleDays: number;
+  supplyCoverageRatio: number | null;
+  openPoCoverageRatio: number | null;
+  daysUntilEarliestExpected: number | null;
+  daysSinceLastReceipt: number | null;
+}
+
 interface DashboardData {
   stockouts: number;
   orderNow: number;
@@ -144,6 +157,7 @@ interface DashboardData {
         preferredVendorName: string | null;
         explanation: string;
         forecastProvenance?: RecommendationForecastProvenance;
+        supplierCycleDiagnostics?: RecommendationSupplierCycleDiagnostics;
         qualityControls?: RecommendationQualityControl[];
         autopilotBlockers?: RecommendationQualityControl[];
       }>;
@@ -263,7 +277,10 @@ function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): st
   return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}`;
 }
 
-function formatRecommendationForecast(provenance?: RecommendationForecastProvenance): string {
+function formatRecommendationForecast(
+  provenance?: RecommendationForecastProvenance,
+  supplierCycleDiagnostics?: RecommendationSupplierCycleDiagnostics,
+): string {
   if (!provenance) return "Forecast basis unavailable";
   const sample =
     provenance.demandOrderCount != null && provenance.demandActiveDays != null
@@ -276,7 +293,8 @@ function formatRecommendationForecast(provenance?: RecommendationForecastProvena
   const baselineLabel = baseline ? ` - ${baseline.replace(/_/g, " ")}` : "";
   const seasonal = provenance.demandWindowDiagnostics?.seasonalSignal;
   const seasonalLabel = seasonal && seasonal !== "not_available" ? ` - ${seasonal.replace(/_/g, " ")}` : "";
-  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}`;
+  const cycleLabel = supplierCycleDiagnostics ? ` - cycle ${supplierCycleDiagnostics.signal.replace(/_/g, " ")}` : "";
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}`;
 }
 
 function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
@@ -871,6 +889,7 @@ export default function PurchasingDashboard() {
                       { label: "Short-window signal", value: topCountLabel(lastRunForecastDiagnostics?.demandAccelerationSignalCounts) },
                       { label: "Baseline signal", value: topCountLabel(lastRunForecastDiagnostics?.demandBaselineSignalCounts) },
                       { label: "Seasonality signal", value: topCountLabel(lastRunForecastDiagnostics?.demandSeasonalitySignalCounts) },
+                      { label: "Supplier cycle", value: topCountLabel(lastRunForecastDiagnostics?.supplierCycleSignalCounts), warn: Boolean(lastRunForecastDiagnostics?.supplierCycleOpenPoPastDueCount) },
                       { label: "Top quality blocker", value: topCountLabel(lastRunForecastDiagnostics?.autopilotBlockerCounts), warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Blocked items", value: lastRunForecastDiagnostics?.autopilotBlockerItemCount ?? 0, warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
@@ -899,7 +918,7 @@ export default function PurchasingDashboard() {
                           </div>
                           <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{item.explanation}</p>
                           <p className="text-[11px] text-muted-foreground mt-1 truncate">
-                            {formatRecommendationForecast(item.forecastProvenance)}
+                            {formatRecommendationForecast(item.forecastProvenance, item.supplierCycleDiagnostics)}
                           </p>
                           {formatQualityControlSummary(item.autopilotBlockers) ? (
                             <p className="text-[11px] text-amber-700 mt-1 truncate">
