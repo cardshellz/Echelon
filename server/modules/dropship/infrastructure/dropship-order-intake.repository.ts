@@ -49,6 +49,7 @@ interface OrderIntakeRow {
 
 interface ChannelRow {
   id: number;
+  name: string;
   status: string;
   type: string;
   provider: string;
@@ -316,7 +317,7 @@ export async function resolveDropshipOmsChannelIdWithClient(client: PoolClient):
   );
   if (configuredId) {
     const result = await client.query<ChannelRow>(
-      `SELECT id, status, type, provider
+      `SELECT id, name, status, type, provider
        FROM channels.channels
        WHERE id = $1
        LIMIT 1`,
@@ -337,37 +338,28 @@ export async function resolveDropshipOmsChannelIdWithClient(client: PoolClient):
         { channelId: configuredId, status: channel.status },
       );
     }
-    if (channel.type !== "internal" || channel.provider !== "manual") {
+    if (
+      channel.name.trim().toLowerCase() !== "dropship oms"
+      || channel.type !== "internal"
+      || channel.provider !== "manual"
+    ) {
       throw new DropshipError(
         "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE",
-        "Configured Dropship OMS channel must be an internal/manual source.",
-        { channelId: configuredId, type: channel.type, provider: channel.provider },
+        "Configured Dropship OMS channel must be the static internal Dropship OMS channel.",
+        { channelId: configuredId, name: channel.name, type: channel.type, provider: channel.provider },
       );
     }
     return channel.id;
   }
 
   const result = await client.query<ChannelRow>(
-    `SELECT c.id, c.status, c.type, c.provider
+    `SELECT c.id, c.name, c.status, c.type, c.provider
      FROM channels.channels c
-     WHERE c.status = 'active'
+     WHERE LOWER(c.name) = LOWER('Dropship OMS')
+       AND c.status = 'active'
        AND c.type = 'internal'
        AND c.provider = 'manual'
-       AND (
-         LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms'
-         OR COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true'
-         OR EXISTS (
-           SELECT 1
-           FROM channels.channel_connections cc
-           WHERE cc.channel_id = c.id
-             AND (
-               LOWER(COALESCE(cc.metadata #>> '{dropship,role}', '')) = 'oms'
-               OR COALESCE(cc.metadata #>> '{features,dropshipOms}', 'false') = 'true'
-               OR COALESCE(cc.metadata #>> '{features,dropship_oms}', 'false') = 'true'
-             )
-         )
-       )
-     ORDER BY c.priority DESC, c.id ASC
+     ORDER BY c.id ASC
      LIMIT 2`,
   );
   if (result.rows.length > 1) {
@@ -387,8 +379,13 @@ export async function resolveDropshipOmsChannelIdWithClient(client: PoolClient):
       "Dropship OMS channel must be explicitly configured before recording order intake.",
       {
         envChannelId: "DROPSHIP_OMS_CHANNEL_ID",
-        channelShippingConfig: { dropship: { role: "oms" } },
-        channelConnectionMetadata: { features: { dropshipOms: true } },
+        internalChannel: {
+          table: "channels.channels",
+          name: "Dropship OMS",
+          type: "internal",
+          provider: "manual",
+          status: "active",
+        },
       },
     );
   }

@@ -9,7 +9,7 @@ vi.hoisted(() => {
 const now = new Date("2026-05-03T18:30:00.000Z");
 
 describe("PgDropshipOmsChannelConfigRepository", () => {
-  it("creates or repairs the dedicated default OMS source before marking it", async () => {
+  it("creates or initializes the static internal dropship channel before marking it", async () => {
     const { pool, query } = makePool(async (sql) => {
       if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
         return { rows: [{ id: 100 }] };
@@ -21,10 +21,10 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
         return { rows: [{ id: 7 }] };
       }
       if (sql.includes("UPDATE channels.channels") && sql.includes("RETURNING")) {
-        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+        return { rows: [makeChannelRow({ id: 7, internal_dropship_channel: true, channel_role_marked: true, channel_flag_marked: true })] };
       }
       if (sql.includes("FROM channels.channels c")) {
-        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+        return { rows: [makeChannelRow({ id: 7, internal_dropship_channel: true, channel_role_marked: true, channel_flag_marked: true })] };
       }
       return { rows: [] };
     });
@@ -49,7 +49,7 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
     expect(sql).toContain("COMMIT");
   });
 
-  it("repairs an existing default OMS source without inserting a duplicate", async () => {
+  it("initializes an existing static internal dropship channel without inserting a duplicate", async () => {
     const { pool, query } = makePool(async (sql) => {
       if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
         return { rows: [{ id: 104 }] };
@@ -61,10 +61,10 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
         return { rows: [{ id: 7 }] };
       }
       if (sql.includes("UPDATE channels.channels") && sql.includes("RETURNING")) {
-        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+        return { rows: [makeChannelRow({ id: 7, internal_dropship_channel: true, channel_role_marked: true, channel_flag_marked: true })] };
       }
       if (sql.includes("FROM channels.channels c")) {
-        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+        return { rows: [makeChannelRow({ id: 7, internal_dropship_channel: true, channel_role_marked: true, channel_flag_marked: true })] };
       }
       return { rows: [] };
     });
@@ -113,6 +113,39 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
       channelId: 9,
       type: "ebay",
       provider: "ebay",
+      isInternalDropshipChannel: false,
+      isDropshipOmsChannel: true,
+    });
+  });
+
+  it("does not treat legacy internal/manual markers on a non-static channel as the current OMS source", async () => {
+    const { pool } = makePool(async (sql) => {
+      if (sql.includes("FROM channels.channels c")) {
+        return {
+          rows: [
+            makeChannelRow({
+              id: 7,
+              name: "Legacy OMS",
+              type: "internal",
+              provider: "manual",
+              internal_dropship_channel: false,
+              channel_role_marked: true,
+              channel_flag_marked: true,
+            }),
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const repository = new PgDropshipOmsChannelConfigRepository(pool);
+
+    const result = await repository.getOverview({ generatedAt: now });
+
+    expect(result.currentChannelId).toBeNull();
+    expect(result.currentChannelCount).toBe(0);
+    expect(result.channels[0]).toMatchObject({
+      channelId: 7,
+      isInternalDropshipChannel: false,
       isDropshipOmsChannel: true,
     });
   });
@@ -129,7 +162,7 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
         return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
       }
       if (sql.includes("FROM channels.channels c")) {
-        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+        return { rows: [makeChannelRow({ id: 7, internal_dropship_channel: true, channel_role_marked: true, channel_flag_marked: true })] };
       }
       return { rows: [] };
     });
@@ -181,7 +214,7 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
     expect(sql).not.toContain("'{dropship,role}',\n                 to_jsonb('oms'::text)");
   });
 
-  it("rejects marketplace sales channels as the Dropship OMS source", async () => {
+  it("rejects marketplace sales channels as the internal dropship channel", async () => {
     const { pool, query } = makePool(async (sql) => {
       if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
         return { rows: [{ id: 103 }] };
@@ -234,6 +267,7 @@ function makeChannelRow(overrides: Partial<Record<keyof ChannelRowForTest, unkno
     provider: "manual",
     status: "active",
     updated_at: now,
+    internal_dropship_channel: false,
     channel_role_marked: false,
     channel_flag_marked: false,
     connection_role_marked: false,
@@ -249,6 +283,7 @@ interface ChannelRowForTest {
   provider: string;
   status: string;
   updated_at: Date;
+  internal_dropship_channel: boolean;
   channel_role_marked: boolean;
   channel_flag_marked: boolean;
   connection_role_marked: boolean;

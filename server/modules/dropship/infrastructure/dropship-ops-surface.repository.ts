@@ -582,29 +582,16 @@ function dogfoodReadinessSql(): string {
     LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = v.id
     LEFT JOIN dropship.dropship_auto_reload_settings ars ON ars.vendor_id = v.id
     LEFT JOIN LATERAL (
-      SELECT MIN(marked_channels.id) AS channel_id,
+      SELECT MIN(internal_channels.id) AS channel_id,
              COUNT(*) AS channel_count
       FROM (
-        SELECT DISTINCT c.id
+        SELECT c.id
         FROM channels.channels c
-        WHERE c.status = 'active'
+        WHERE LOWER(c.name) = LOWER('Dropship OMS')
+          AND c.status = 'active'
           AND c.type = 'internal'
           AND c.provider = 'manual'
-          AND (
-            LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms'
-            OR COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true'
-            OR EXISTS (
-              SELECT 1
-              FROM channels.channel_connections cc
-              WHERE cc.channel_id = c.id
-                AND (
-                  LOWER(COALESCE(cc.metadata #>> '{dropship,role}', '')) = 'oms'
-                  OR COALESCE(cc.metadata #>> '{features,dropshipOms}', 'false') = 'true'
-                  OR COALESCE(cc.metadata #>> '{features,dropship_oms}', 'false') = 'true'
-                )
-            )
-          )
-      ) marked_channels
+      ) internal_channels
     ) dropship_oms ON true
     LEFT JOIN LATERAL (
       SELECT
@@ -1540,13 +1527,13 @@ function buildDogfoodChecks(input: {
   return [
     {
       key: "dropship_oms_channel",
-      label: "Dropship OMS source",
+      label: "Internal dropship channel",
       status: input.dropshipOmsChannelCount === 1 ? "ready" : "blocked",
       message: input.dropshipOmsChannelCount === 1 && input.dropshipOmsChannelId !== null
-        ? `Dropship OMS source ${input.dropshipOmsChannelId} is configured.`
+        ? `Internal dropship channel ${input.dropshipOmsChannelId} is initialized.`
         : input.dropshipOmsChannelCount === 0
-          ? "No active Dropship OMS source is marked in channel configuration."
-          : `${input.dropshipOmsChannelCount} active Dropship OMS sources are marked; exactly one is required.`,
+          ? "Internal dropship channel is missing."
+          : `${input.dropshipOmsChannelCount} active internal dropship channels exist; exactly one is required.`,
     },
     {
       key: "vendor_entitlement",

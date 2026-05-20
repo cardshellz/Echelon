@@ -17,6 +17,7 @@ interface OmsChannelRow {
   provider: string;
   status: string;
   updated_at: Date;
+  internal_dropship_channel: boolean;
   channel_role_marked: boolean;
   channel_flag_marked: boolean;
   connection_role_marked: boolean;
@@ -66,10 +67,11 @@ export class PgDropshipOmsChannelConfigRepository implements DropshipOmsChannelC
 
       const ensuredChannelId = await ensureDefaultDropshipOmsChannel(client, input.now);
       await clearExistingDropshipOmsMarkers(client, input.now);
-      const selectedChannel = await markDropshipOmsChannel(client, {
+      await markDropshipOmsChannel(client, {
         channelId: ensuredChannelId,
         ...input,
       });
+      const selectedChannel = await loadChannelOptionByIdWithClient(client, ensuredChannelId);
       await completeAdminConfigCommand(client, command.commandId, "channels.channels", selectedChannel.channelId, input.now);
       await recordAdminOmsChannelAuditEvent(client, input, selectedChannel);
       const config = await loadOverviewWithClient(client, input.now);
@@ -112,14 +114,16 @@ export class PgDropshipOmsChannelConfigRepository implements DropshipOmsChannelC
         );
       }
       if (
-        selectedBeforeUpdate.type !== DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE
+        selectedBeforeUpdate.name.trim().toLowerCase() !== DEFAULT_DROPSHIP_OMS_CHANNEL_NAME.toLowerCase()
+        || selectedBeforeUpdate.type !== DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE
         || selectedBeforeUpdate.provider !== DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER
       ) {
         throw new DropshipError(
           "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE",
-          "Dropship OMS source must be an internal/manual channel, not a marketplace sales channel.",
+          "Dropship OMS channel must be the static internal Dropship OMS channel, not a marketplace sales channel or arbitrary internal channel.",
           {
             channelId: input.channelId,
+            name: selectedBeforeUpdate.name,
             type: selectedBeforeUpdate.type,
             provider: selectedBeforeUpdate.provider,
           },
@@ -127,7 +131,8 @@ export class PgDropshipOmsChannelConfigRepository implements DropshipOmsChannelC
       }
 
       await clearExistingDropshipOmsMarkers(client, input.now);
-      const selectedChannel = await markDropshipOmsChannel(client, input);
+      await markDropshipOmsChannel(client, input);
+      const selectedChannel = await loadChannelOptionByIdWithClient(client, input.channelId);
       await completeAdminConfigCommand(client, command.commandId, "channels.channels", selectedChannel.channelId, input.now);
       await recordAdminOmsChannelAuditEvent(client, input, selectedChannel);
       const config = await loadOverviewWithClient(client, input.now);
@@ -162,7 +167,7 @@ function isValidDropshipOmsSource(channel: DropshipOmsChannelOption): boolean {
   return channel.status === "active"
     && channel.type === DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE
     && channel.provider === DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER
-    && channel.isDropshipOmsChannel;
+    && channel.isInternalDropshipChannel;
 }
 
 async function listChannelOptionsWithClient(client: PoolClient): Promise<DropshipOmsChannelOption[]> {
@@ -174,6 +179,9 @@ async function listChannelOptionsWithClient(client: PoolClient): Promise<Dropshi
        c.provider,
        c.status,
        c.updated_at,
+       LOWER(c.name) = LOWER($1)
+         AND c.type = $2
+         AND c.provider = $3 AS internal_dropship_channel,
        LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms' AS channel_role_marked,
        COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true' AS channel_flag_marked,
        EXISTS (
@@ -196,6 +204,11 @@ async function listChannelOptionsWithClient(client: PoolClient): Promise<Dropshi
        CASE WHEN c.status = 'active' THEN 0 ELSE 1 END,
        c.name ASC,
        c.id ASC`,
+    [
+      DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
+      DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
+      DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
+    ],
   );
   return result.rows.map(mapOmsChannelRow);
 }
@@ -377,6 +390,7 @@ async function markDropshipOmsChannel(
        provider,
        status,
        updated_at,
+       true AS internal_dropship_channel,
        LOWER(COALESCE(shipping_config #>> '{dropship,role}', '')) = 'oms' AS channel_role_marked,
        COALESCE(shipping_config #>> '{dropship,omsChannel}', 'false') = 'true' AS channel_flag_marked,
        false AS connection_role_marked,
@@ -497,6 +511,7 @@ async function recordAdminOmsChannelAuditEvent(
 
 function mapOmsChannelRow(row: OmsChannelRow): DropshipOmsChannelOption {
   const markerSources = [
+    row.internal_dropship_channel ? "channels.channels.dropship_oms" : null,
     row.channel_role_marked ? "channel.shipping_config.dropship.role" : null,
     row.channel_flag_marked ? "channel.shipping_config.dropship.omsChannel" : null,
     row.connection_role_marked ? "channel_connection.metadata.dropship.role" : null,
@@ -508,6 +523,7 @@ function mapOmsChannelRow(row: OmsChannelRow): DropshipOmsChannelOption {
     type: row.type,
     provider: row.provider,
     status: row.status,
+    isInternalDropshipChannel: row.internal_dropship_channel,
     isDropshipOmsChannel: markerSources.length > 0,
     markerSources,
     updatedAt: row.updated_at,

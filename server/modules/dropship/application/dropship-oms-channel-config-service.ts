@@ -33,6 +33,7 @@ export interface DropshipOmsChannelOption {
   type: string;
   provider: string;
   status: string;
+  isInternalDropshipChannel: boolean;
   isDropshipOmsChannel: boolean;
   markerSources: string[];
   updatedAt: Date;
