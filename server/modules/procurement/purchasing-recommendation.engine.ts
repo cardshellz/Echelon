@@ -81,6 +81,12 @@ export interface PurchasingRecommendationRawRow {
   short_demand_order_count?: number | string | null;
   short_demand_active_days?: number | string | null;
   short_latest_demand_at?: string | Date | null;
+  long_window_days?: number | string | null;
+  long_outbound_pieces?: number | string | null;
+  previous_long_outbound_pieces?: number | string | null;
+  long_demand_order_count?: number | string | null;
+  long_demand_active_days?: number | string | null;
+  long_latest_demand_at?: string | Date | null;
   on_order_pieces?: number | string | null;
   open_po_count?: number | string | null;
   earliest_expected?: string | Date | null;
@@ -873,9 +879,25 @@ export function generatePurchasingRecommendations(
       demandActiveDays: hasShortWindowInput ? row.short_demand_active_days : row.demand_active_days,
       latestDemandAt: hasShortWindowInput ? row.short_latest_demand_at ?? null : row.latest_demand_at ?? null,
     });
+    const hasLongWindowInput =
+      row.long_window_days !== undefined ||
+      row.long_outbound_pieces !== undefined ||
+      row.previous_long_outbound_pieces !== undefined ||
+      row.long_demand_order_count !== undefined ||
+      row.long_demand_active_days !== undefined ||
+      row.long_latest_demand_at !== undefined;
+    const longDemandForecast = buildPurchasingDemandForecastBasis({
+      lookbackDays: hasLongWindowInput ? row.long_window_days : lookbackDays,
+      periodUsagePieces: hasLongWindowInput ? row.long_outbound_pieces : row.total_outbound_pieces,
+      priorPeriodUsagePieces: hasLongWindowInput ? row.previous_long_outbound_pieces : row.previous_outbound_pieces,
+      demandOrderCount: hasLongWindowInput ? row.long_demand_order_count : row.demand_order_count,
+      demandActiveDays: hasLongWindowInput ? row.long_demand_active_days : row.demand_active_days,
+      latestDemandAt: hasLongWindowInput ? row.long_latest_demand_at ?? null : row.latest_demand_at ?? null,
+    });
     const demandWindowDiagnostics = buildPurchasingDemandForecastWindowDiagnostics({
       standardWindow: demandForecast,
       shortWindow: shortDemandForecast,
+      longWindow: longDemandForecast,
     });
     const periodUsage = demandForecast.periodUsagePieces;
     const priorPeriodUsage = demandForecast.priorPeriodUsagePieces;

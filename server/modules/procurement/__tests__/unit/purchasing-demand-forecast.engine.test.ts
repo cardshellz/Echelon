@@ -129,8 +129,56 @@ describe("purchasing demand forecast engine", () => {
         label: "short",
         ...shortWindow,
       },
+      longWindow: {
+        label: "long",
+        ...standardWindow,
+      },
       accelerationRatio: 2.5,
       accelerationSignal: "accelerating",
+      baselineRatio: 1,
+      baselineSignal: "near_baseline",
+    });
+  });
+
+  it("compares the standard forecast against a longer baseline without changing the basis", () => {
+    const standardWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 30,
+      periodUsagePieces: 120,
+      priorPeriodUsagePieces: 90,
+      demandOrderCount: 24,
+      demandActiveDays: 18,
+    });
+    const shortWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 7,
+      periodUsagePieces: 28,
+      priorPeriodUsagePieces: 21,
+      demandOrderCount: 8,
+      demandActiveDays: 5,
+    });
+    const longWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 90,
+      periodUsagePieces: 180,
+      priorPeriodUsagePieces: 210,
+      demandOrderCount: 45,
+      demandActiveDays: 30,
+    });
+
+    expect(
+      buildPurchasingDemandForecastWindowDiagnostics({
+        standardWindow,
+        shortWindow,
+        longWindow,
+      }),
+    ).toMatchObject({
+      longWindow: {
+        label: "long",
+        lookbackDays: 90,
+        avgDailyUsagePieces: 2,
+        demandQuality: "normal",
+        demandTrend: "stable",
+      },
+      baselineRatio: 2,
+      baselineSignal: "above_baseline",
     });
   });
 });

@@ -95,8 +95,17 @@ interface ReorderItem {
         demandQuality?: "no_recent_demand" | "thin_history" | "normal";
         demandTrend?: "not_available" | "no_recent_demand" | "new_demand" | "rising" | "stable" | "falling";
       };
+      longWindow?: {
+        lookbackDays?: number;
+        periodUsagePieces?: number;
+        avgDailyUsagePieces?: number;
+        demandQuality?: "no_recent_demand" | "thin_history" | "normal";
+        demandTrend?: "not_available" | "no_recent_demand" | "new_demand" | "rising" | "stable" | "falling";
+      };
       accelerationRatio?: number | null;
       accelerationSignal?: "not_available" | "accelerating" | "steady" | "decelerating";
+      baselineRatio?: number | null;
+      baselineSignal?: "not_available" | "above_baseline" | "near_baseline" | "below_baseline";
     };
   };
   supplierBasis?: {
@@ -285,6 +294,12 @@ export default function PurchasingView() {
     const accelerationLabel = provenance.demandWindowDiagnostics?.accelerationSignal
       ? ` - ${provenance.demandWindowDiagnostics.accelerationSignal.replace(/_/g, " ")}`
       : "";
+    const longWindow = provenance.demandWindowDiagnostics?.longWindow;
+    const baselineLabel = provenance.demandWindowDiagnostics?.baselineSignal
+      ? ` - baseline ${provenance.demandWindowDiagnostics.baselineSignal.replace(/_/g, " ")}${
+          longWindow?.lookbackDays ? ` (${longWindow.lookbackDays}d)` : ""
+        }`
+      : "";
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -293,7 +308,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel} - ${leadLabel} - ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel} - ${leadLabel} - ${costLabel}`;
   };
 
   const getAutopilotBlockers = (item: ReorderItem) => {

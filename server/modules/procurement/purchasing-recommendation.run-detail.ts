@@ -42,7 +42,10 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const demandTrendCounts: Record<string, number> = {};
   const shortWindowDemandQualityCounts: Record<string, number> = {};
   const shortWindowDemandTrendCounts: Record<string, number> = {};
+  const longWindowDemandQualityCounts: Record<string, number> = {};
+  const longWindowDemandTrendCounts: Record<string, number> = {};
   const demandAccelerationSignalCounts: Record<string, number> = {};
+  const demandBaselineSignalCounts: Record<string, number> = {};
   const forecastMethodCounts: Record<string, number> = {};
   const qualityControlCounts: Record<string, number> = {};
   const qualityControlAreaCounts: Record<string, number> = {};
@@ -61,7 +64,10 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     increment(demandTrendCounts, provenance.demandTrend);
     increment(shortWindowDemandQualityCounts, provenance.demandWindowDiagnostics.shortWindow.demandQuality);
     increment(shortWindowDemandTrendCounts, provenance.demandWindowDiagnostics.shortWindow.demandTrend);
+    increment(longWindowDemandQualityCounts, provenance.demandWindowDiagnostics.longWindow.demandQuality);
+    increment(longWindowDemandTrendCounts, provenance.demandWindowDiagnostics.longWindow.demandTrend);
     increment(demandAccelerationSignalCounts, provenance.demandWindowDiagnostics.accelerationSignal);
+    increment(demandBaselineSignalCounts, provenance.demandWindowDiagnostics.baselineSignal);
     increment(forecastMethodCounts, provenance.forecastMethod);
     for (const control of item.qualityControls) {
       increment(qualityControlCounts, control.code);
@@ -92,7 +98,10 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     demandTrendCounts,
     shortWindowDemandQualityCounts,
     shortWindowDemandTrendCounts,
+    longWindowDemandQualityCounts,
+    longWindowDemandTrendCounts,
     demandAccelerationSignalCounts,
+    demandBaselineSignalCounts,
     qualityControlCounts,
     qualityControlAreaCounts,
     qualityControlSeverityCounts,

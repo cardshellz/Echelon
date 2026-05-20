@@ -1253,7 +1253,10 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getReorderAnalysisData(lookbackDays: number): Promise<any[]> {
-    const shortWindowDays = Math.max(1, Math.min(7, Math.trunc(Number(lookbackDays) || 30)));
+    const normalizedLookbackDays = Math.max(1, Math.trunc(Number(lookbackDays) || 30));
+    const shortWindowDays = Math.max(1, Math.min(7, normalizedLookbackDays));
+    const longWindowDays = Math.max(90, normalizedLookbackDays * 3);
+    const demandScanWindowDays = Math.max(normalizedLookbackDays * 2, shortWindowDays * 2, longWindowDays * 2);
     // Boundary note: reads inventory_levels directly instead of atpService.getAtpPerVariant().
     // This is intentional — the reorder query needs bulk aggregation across ALL products in one
     // query (N+1 atpService calls would be prohibitively slow), and it needs per-location detail
@@ -1288,6 +1291,12 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(vel.short_demand_order_count, 0)::int AS short_demand_order_count,
         COALESCE(vel.short_demand_active_days, 0)::int AS short_demand_active_days,
         vel.short_latest_demand_at,
+        ${longWindowDays}::int AS long_window_days,
+        COALESCE(vel.long_outbound_pieces, 0)::bigint AS long_outbound_pieces,
+        COALESCE(vel.previous_long_outbound_pieces, 0)::bigint AS previous_long_outbound_pieces,
+        COALESCE(vel.long_demand_order_count, 0)::int AS long_demand_order_count,
+        COALESCE(vel.long_demand_active_days, 0)::int AS long_demand_active_days,
+        vel.long_latest_demand_at,
         inv.variant_count,
         order_uom.variant_id,
         order_uom.units_per_variant AS order_uom_units,
@@ -1316,31 +1325,31 @@ export const procurementMethods: IProcurementStorage = {
         SELECT pv.product_id,
                SUM(
                  CASE
-                   WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                   WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
                    THEN oi.quantity * pv.units_per_variant
                    ELSE 0
                  END
                ) AS total_outbound_pieces,
                SUM(
                  CASE
-                   WHEN o.order_placed_at <= NOW() - MAKE_INTERVAL(days => ${lookbackDays})
-                    AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays * 2})
+                   WHEN o.order_placed_at <= NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
+                    AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays * 2})
                    THEN oi.quantity * pv.units_per_variant
                    ELSE 0
                  END
                ) AS previous_outbound_pieces,
                COUNT(DISTINCT CASE
-                 WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                 WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
                  THEN oi.order_id
                  ELSE NULL
                END) AS demand_order_count,
                 COUNT(DISTINCT CASE
-                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
                   THEN DATE(o.order_placed_at)
                   ELSE NULL
                 END) AS demand_active_days,
                 MAX(CASE
-                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
                   THEN o.order_placed_at
                   ELSE NULL
                 END) AS latest_demand_at,
@@ -1373,14 +1382,44 @@ export const procurementMethods: IProcurementStorage = {
                   WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${shortWindowDays})
                   THEN o.order_placed_at
                   ELSE NULL
-                END) AS short_latest_demand_at
+                END) AS short_latest_demand_at,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${longWindowDays})
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS long_outbound_pieces,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at <= NOW() - MAKE_INTERVAL(days => ${longWindowDays})
+                     AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${longWindowDays * 2})
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS previous_long_outbound_pieces,
+                COUNT(DISTINCT CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${longWindowDays})
+                  THEN oi.order_id
+                  ELSE NULL
+                END) AS long_demand_order_count,
+                COUNT(DISTINCT CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${longWindowDays})
+                  THEN DATE(o.order_placed_at)
+                  ELSE NULL
+                END) AS long_demand_active_days,
+                MAX(CASE
+                  WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${longWindowDays})
+                  THEN o.order_placed_at
+                  ELSE NULL
+                END) AS long_latest_demand_at
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
         JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'
           AND oi.status != 'cancelled'
-          AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays * 2})
+          AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${demandScanWindowDays})
         GROUP BY pv.product_id
       ) vel ON vel.product_id = p.id
       LEFT JOIN LATERAL (
