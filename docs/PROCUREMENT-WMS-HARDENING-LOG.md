@@ -2234,3 +2234,32 @@ Next step:
 - Review candidate-score behavior against live purchasing output, then decide
   whether candidate-score approval thresholds should become guarded admin
   settings before any score-driven PO draft behavior is enabled.
+
+### 2026-05-20 - Phase 9 Slice 11: Candidate Score Threshold Settings
+
+Scope:
+
+- Added persisted candidate score band thresholds to warehouse settings with
+  defaults matching the existing read-only behavior: review candidate at 60 and
+  strong candidate at 80.
+- Added migration constraints so candidate score thresholds stay within 0-100
+  and the review threshold cannot exceed the strong threshold.
+- Extended `/api/purchasing/auto-draft-settings` to return and validate the
+  candidate score thresholds, and added the controls to the existing purchasing
+  exclusions/settings modal.
+- Updated recommendation candidate banding to use the configured thresholds
+  while keeping PO mutation behavior unchanged: auto-draft eligibility still
+  uses the existing high-confidence quality gate.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 9 by reviewing whether candidate score should remain
+  diagnostics-only or be introduced as an explicit, disabled-by-default
+  auto-draft approval policy after live threshold behavior is validated.

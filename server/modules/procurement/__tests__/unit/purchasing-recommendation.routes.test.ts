@@ -108,6 +108,8 @@ describe("purchasing recommendation routes", () => {
       includeOrderSoon: false,
       skipOnOpenPo: true,
       skipNoVendor: true,
+      candidateScoreStrongThreshold: 80,
+      candidateScoreReviewThreshold: 60,
     });
     mocks.procurement.createAutoDraftRun.mockResolvedValue({ id: 1001 });
     mocks.procurement.updateAutoDraftRun.mockResolvedValue(undefined);
@@ -561,6 +563,8 @@ describe("purchasing recommendation routes", () => {
       includeOrderSoon: false,
       skipOnOpenPo: true,
       skipNoVendor: true,
+      candidateScoreStrongThreshold: 80,
+      candidateScoreReviewThreshold: 60,
     });
     mocks.procurement.getReorderAnalysisData.mockResolvedValue([
       {
@@ -647,6 +651,8 @@ describe("purchasing recommendation routes", () => {
     const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
       autoDraftMode: "review_only",
       approvalPolicy: "high_confidence_only",
+      candidateScoreStrongThreshold: 85,
+      candidateScoreReviewThreshold: 65,
     });
 
     expect(status).toBe(200);
@@ -656,8 +662,23 @@ describe("purchasing recommendation routes", () => {
       expect.objectContaining({
         autoDraftMode: "review_only",
         approvalPolicy: "high_confidence_only",
+        candidateScoreStrongThreshold: 85,
+        candidateScoreReviewThreshold: 65,
       }),
     );
+  });
+
+  it("rejects invalid candidate score threshold settings", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      candidateScoreStrongThreshold: 55,
+      candidateScoreReviewThreshold: 70,
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: "candidateScoreReviewThreshold must be less than or equal to candidateScoreStrongThreshold" });
+    expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
   });
 
   it("rejects invalid auto-draft modes", async () => {

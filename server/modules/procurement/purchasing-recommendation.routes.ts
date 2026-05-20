@@ -29,6 +29,14 @@ function parseRunHistoryLimit(value: unknown): number {
   return Math.min(parsed, 50);
 }
 
+function parseCandidateScoreThreshold(value: unknown, fieldName: string): number | undefined | { error: string } {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) {
+    return { error: `${fieldName} must be an integer between 0 and 100` };
+  }
+  return value;
+}
+
 function parseSummaryJson(value: unknown): any {
   if (!value) return null;
   if (typeof value === "string") {
@@ -525,12 +533,34 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
   // PATCH /api/purchasing/auto-draft-settings
   app.patch("/api/purchasing/auto-draft-settings", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { autoDraftMode, approvalPolicy, includeOrderSoon, skipOnOpenPo, skipNoVendor } = req.body;
+      const {
+        autoDraftMode,
+        approvalPolicy,
+        includeOrderSoon,
+        skipOnOpenPo,
+        skipNoVendor,
+        candidateScoreStrongThreshold,
+        candidateScoreReviewThreshold,
+      } = req.body;
       if (autoDraftMode !== undefined && !["draft_po", "review_only"].includes(autoDraftMode)) {
         return res.status(400).json({ error: "autoDraftMode must be one of: draft_po, review_only" });
       }
       if (approvalPolicy !== undefined && approvalPolicy !== "high_confidence_only") {
         return res.status(400).json({ error: "approvalPolicy must be high_confidence_only" });
+      }
+      const parsedStrongThreshold = parseCandidateScoreThreshold(candidateScoreStrongThreshold, "candidateScoreStrongThreshold");
+      if (typeof parsedStrongThreshold === "object") {
+        return res.status(400).json(parsedStrongThreshold);
+      }
+      const parsedReviewThreshold = parseCandidateScoreThreshold(candidateScoreReviewThreshold, "candidateScoreReviewThreshold");
+      if (typeof parsedReviewThreshold === "object") {
+        return res.status(400).json(parsedReviewThreshold);
+      }
+      const currentSettings = await storage.getAutoDraftSettings();
+      const nextStrongThreshold = parsedStrongThreshold ?? currentSettings.candidateScoreStrongThreshold ?? 80;
+      const nextReviewThreshold = parsedReviewThreshold ?? currentSettings.candidateScoreReviewThreshold ?? 60;
+      if (nextReviewThreshold > nextStrongThreshold) {
+        return res.status(400).json({ error: "candidateScoreReviewThreshold must be less than or equal to candidateScoreStrongThreshold" });
       }
       await storage.updateAutoDraftSettings(undefined, {
         autoDraftMode,
@@ -538,6 +568,8 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         includeOrderSoon,
         skipOnOpenPo,
         skipNoVendor,
+        candidateScoreStrongThreshold: parsedStrongThreshold,
+        candidateScoreReviewThreshold: parsedReviewThreshold,
       });
       res.json({ ok: true });
     } catch (error) {
