@@ -535,6 +535,7 @@ export const orderMethods: IOrderStorage = {
           eq(orders.id, orderId),
           or(
             eq(orders.warehouseStatus, "ready"),
+            eq(orders.warehouseStatus, "partially_shipped"),
             and(
               eq(orders.warehouseStatus, "in_progress"),
               isNull(orders.assignedPickerId)
