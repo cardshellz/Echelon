@@ -1,543 +1,430 @@
-# Dropship Dogfood Test Plan
+# Dropship Dogfood Checklist
 
 Last updated: 2026-05-20
 
-Audience: Card Shellz internal operators dogfooding the Dropship v2 program.
+Primary admin surface: Echelon internal admin at `/dropship`.
 
-Primary surface: Echelon internal admin at `/dropship`.
+Customer-facing portal: `/dropship-portal`.
 
-Customer-facing portal: `/dropship-portal`. Do not use the portal as the first dogfood control surface.
+Use this document as the working checklist for the first internal dropship dogfood run. Check each row as it passes. If a row fails or needs follow-up, leave it unchecked and add an exception ID in the `Exception / correction needed` column and in the `Exception Log`.
 
-## Scope
-
-This plan verifies one complete dropship flow from admin readiness through marketplace listing, order intake, wallet handling, WMS fulfillment, ShipStation shipment, marketplace tracking push, notifications, and return handling.
-
-The first dogfood pass should use:
-
-- One vendor membership.
-- One marketplace store connection.
-- One low-risk SKU or variant.
-- One small test order.
-- One real fulfillment path through WMS and ShipStation.
-
-Expand to additional SKUs, split shipments, and multiple stores only after the first path is clean.
-
-## Safety Rules
-
-- Start in Echelon internal admin at `/dropship`.
-- Use the `Dogfood readiness` tab before testing any marketplace flow.
-- Stop if the dogfood launch gate is blocked.
-- Do not run manual worker sweeps unless you are intentionally testing that specific worker.
-- Do not retry financial, inventory, fulfillment, or marketplace actions blindly. First capture the failing record IDs and audit event.
-- Use one controlled vendor/store/SKU until the first full path is proven.
-- Do not use broad catalog exposure until a single-SKU exposure path has passed.
-- Do not continue using a test order if money, inventory, fulfillment, or tracking state is unclear.
-
-## Prerequisites
-
-Before starting, confirm:
-
-- The latest Echelon main deployment is live.
-- The static internal `Dropship OMS` source/channel initialization is deployed.
-- You can log in to Echelon as an `admin` or `lead`.
-- The vendor has a Shellz Club identity and the required `.ops` entitlement.
-- The vendor has exactly one dogfood store connection for the first test.
-- Marketplace OAuth is configured for the selected platform.
-- Token encryption config is present in production.
-- ShipStation API credentials are present.
-- ShipStation webhook security is configured.
-- Email notification config is present.
-- At least one catalog item is eligible for controlled exposure.
-- Shipping config has boxes, package profiles, rate tables, markup policy, insurance policy, and return policy configured enough for the test SKU.
-- Wallet funding is available or the manual credit path is ready for a controlled test.
-
-## Test Record
-
-Fill this in as you test. These IDs are the evidence trail.
+## Run Header
 
 | Field | Value |
 | --- | --- |
-| Test started at |  |
+| Run date |  |
 | Tester |  |
 | Environment URL |  |
+| Echelon deploy/version/commit |  |
+| Vendor name |  |
 | Vendor member ID |  |
 | Store connection ID |  |
-| Platform | eBay / Shopify |
+| Marketplace | eBay / Shopify |
+| Test SKU |  |
 | Product ID |  |
 | Product variant ID |  |
-| SKU |  |
 | Marketplace listing ID |  |
 | External order ID |  |
 | Dropship intake ID |  |
 | OMS order ID |  |
 | WMS order ID |  |
 | ShipStation order ID |  |
-| Shipment ID |  |
-| Tracking number |  |
-| Tracking push ID |  |
-| Notification event IDs |  |
+| Shipment ID(s) |  |
+| Tracking number(s) |  |
+| Tracking push ID(s) |  |
+| Notification event ID(s) |  |
 | Return/RMA ID |  |
-| Final result | Pass / Fail |
+| Final result | Pass / Fail / Blocked |
 
-## Phase 0: Admin Readiness
+## Severity Guide
 
-Goal: prove the admin control surface is ready before touching marketplace flows.
+| Severity | Meaning | Action |
+| --- | --- | --- |
+| P0 | Money, inventory, fulfillment, customer tracking, or data security is wrong or ambiguous. | Stop the run. Do not retry blindly. Fix before continuing. |
+| P1 | The dogfood path is blocked or cannot be trusted without manual intervention. | Stop the affected phase. Fix before broader dogfood. |
+| P2 | Operator-visible problem, confusing UI, missing evidence, or retry issue that does not corrupt state. | Record and decide whether it blocks dogfood expansion. |
+| P3 | Cosmetic, wording, or low-risk usability issue. | Record and batch later unless it creates operator confusion. |
 
-Steps:
+## Hard Stop Rules
 
-1. Open Echelon internal admin at `/dropship`.
-2. Open `Dogfood readiness`.
-3. Confirm the `Dropship OMS source` panel is ready.
-4. If the source is missing, run the source initialization action once.
-5. Confirm `System readiness` has no blockers.
-6. Confirm the dogfood launch gate is not blocked.
-7. Confirm at least one vendor/store row is ready for dogfood.
-8. Record any warnings that remain.
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | STOP-01 | Dogfood launch gate is not blocked before marketplace testing starts. |  |  |
+| [ ] | STOP-02 | Token encryption and OAuth configuration are present. |  |  |
+| [ ] | STOP-03 | ShipStation credentials and webhook security are configured. |  |  |
+| [ ] | STOP-04 | Test vendor and store connection identity are known and correct. |  |  |
+| [ ] | STOP-05 | Test catalog exposure is narrow. Do not use broad catalog exposure for the first pass. |  |  |
+| [ ] | STOP-06 | No unclear wallet, inventory, fulfillment, or tracking state exists before retrying any action. |  |  |
+| [ ] | STOP-07 | Manual worker sweeps are only run for a specific stuck record with captured evidence. |  |  |
 
-Pass criteria:
+## Master Checklist
+
+| Done | Phase | Required before moving on | Blocking exception |
+| --- | --- | --- | --- |
+| [ ] | 0. Readiness | Internal source, system readiness, launch gate, and one ready vendor/store are clean. |  |
+| [ ] | 1. Vendor and store | Vendor identity, entitlement, OAuth, and order/listing config are correct. |  |
+| [ ] | 2. Catalog exposure | Exactly the intended SKU or variant is exposed. |  |
+| [ ] | 3. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. |  |
+| [ ] | 4. Listing push | One marketplace listing is created and mapped back to Echelon identity. |  |
+| [ ] | 5. Order intake | One external marketplace order ingests once with correct vendor/store/line identity. |  |
+| [ ] | 6. Wallet and acceptance | Funding/hold/debit behavior is traceable and order acceptance is idempotent. |  |
+| [ ] | 7. OMS and WMS | Accepted order creates correct OMS and WMS records. |  |
+| [ ] | 8. ShipStation | Shipment ingests back into WMS/OMS and inventory is recorded. |  |
+| [ ] | 9. Tracking push | Marketplace customer-facing tracking is correct. |  |
+| [ ] | 10. Split shipment | Multiple shipments preserve correct item-level tracking. Required only if in dogfood scope. |  |
+| [ ] | 11. Notifications | Required vendor/internal notification events are visible and retryable. |  |
+| [ ] | 12. Returns | Return policy, fault, inspection, and credit behavior are correct. Required only if in dogfood scope. |  |
+| [ ] | 13. Audit and exit | Evidence trail is complete and final readiness reflects the run. |  |
+
+## Phase 0: Readiness
+
+Goal: prove the internal admin control surface is ready before touching marketplace flows.
+
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | READY-01 | Open Echelon internal admin at `/dropship`. | Screenshot / URL: |  |
+| [ ] | READY-02 | Open `Dogfood readiness`. |  |  |
+| [ ] | READY-03 | Confirm `Dropship OMS source` is ready. | Source status: |  |
+| [ ] | READY-04 | If source is missing, run the source initialization action once. | Result: |  |
+| [ ] | READY-05 | Confirm `System readiness` has no blockers. | Blockers count: |  |
+| [ ] | READY-06 | Confirm launch gate is not blocked. | Gate status: |  |
+| [ ] | READY-07 | Confirm one vendor/store row is ready for dogfood. | Vendor/store row: |  |
+| [ ] | READY-08 | Record any remaining warnings. | Warning IDs/count: |  |
+
+Phase pass criteria:
 
 - Internal source is ready.
 - No launch-blocking readiness checks remain.
-- One vendor/store row is available for controlled testing.
+- One vendor/store row is ready for controlled testing.
 
-Stop conditions:
+## Phase 1: Vendor And Store Connection
 
-- Missing token vault config.
-- Missing OAuth config for the selected platform.
-- Missing ShipStation credentials or webhook security.
-- Missing email config if notification testing is in scope.
-- Launch gate is blocked.
+Goal: prove the selected vendor and marketplace store are the intended dogfood target.
 
-## Phase 1: Catalog Exposure
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | STORE-01 | Confirm vendor has Shellz Club identity. | Member ID: |  |
+| [ ] | STORE-02 | Confirm vendor has required `.ops` entitlement. | Entitlement evidence: |  |
+| [ ] | STORE-03 | Open `Store connections`. |  |  |
+| [ ] | STORE-04 | Confirm selected store connection belongs to the intended vendor. | Store connection ID: |  |
+| [ ] | STORE-05 | Confirm marketplace platform is correct. | eBay / Shopify: |  |
+| [ ] | STORE-06 | Confirm external store identity matches the vendor account. | External store/account ID: |  |
+| [ ] | STORE-07 | Confirm OAuth status is healthy. | OAuth status: |  |
+| [ ] | STORE-08 | Confirm order processing config is present. | Config ID/status: |  |
+| [ ] | STORE-09 | Confirm listing config is present if listing push is in scope. | Config ID/status: |  |
+
+Phase pass criteria:
+
+- Store connection is active and tied to the correct vendor.
+- OAuth is valid.
+- Listing and order processing configuration match the intended platform.
+
+## Phase 2: Catalog Exposure
 
 Goal: expose exactly the intended catalog item to the vendor.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | CAT-01 | Open `Catalog exposure`. |  |  |
+| [ ] | CAT-02 | Create a narrow include rule for one product, SKU, or variant. | Rule ID/scope: |  |
+| [ ] | CAT-03 | Do not use `Entire catalog` for the first dogfood pass. | Confirmed: |  |
+| [ ] | CAT-04 | Save the rule set. | Save result: |  |
+| [ ] | CAT-05 | Use preview to confirm intended row is exposed. | Product/variant/SKU: |  |
+| [ ] | CAT-06 | Confirm unrelated rows remain blocked. | Blocked count/sample: |  |
+| [ ] | CAT-07 | Confirm Echelon SKU/product variant identity is available for the row. | Product variant ID: |  |
+| [ ] | CAT-08 | Confirm ATP is available and believable for the test quantity. | ATP value: |  |
 
-1. Open `Catalog exposure`.
-2. Create a narrow include rule for one product, SKU, or variant.
-3. Avoid `Entire catalog` for the first dogfood pass.
-4. Save the rule set.
-5. Use the preview table to confirm the intended row is exposed.
-6. Confirm unrelated rows remain blocked.
-7. Record product ID, product variant ID, and SKU.
-
-Pass criteria:
+Phase pass criteria:
 
 - Exactly the intended product or variant is exposed.
-- The preview explains blocked rows clearly.
-- Echelon remains the source of truth for SKU, inventory, and product identity.
+- Unrelated catalog remains blocked.
+- Echelon remains the source of truth for product, SKU, variant, and inventory identity.
 
-Stop conditions:
+## Phase 3: Shipping Configuration
 
-- The preview exposes broad unintended catalog.
-- The intended SKU has no usable variant identity where variant identity is required.
-- ATP is unavailable or unclear for the test SKU.
+Goal: prove the test SKU can calculate shipping and use the intended policy stack.
 
-## Phase 2: Shipping Configuration
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | SHIPCFG-01 | Open `Shipping config`. |  |  |
+| [ ] | SHIPCFG-02 | Confirm package or carton data applies to the test SKU. | Package/profile ID: |  |
+| [ ] | SHIPCFG-03 | Confirm box configuration exists. | Box ID/name: |  |
+| [ ] | SHIPCFG-04 | Confirm rate table covers the test destination. | Rate table/zone: |  |
+| [ ] | SHIPCFG-05 | Confirm markup policy is configured. | Policy ID: |  |
+| [ ] | SHIPCFG-06 | Confirm insurance policy is configured. | Policy ID / fee: |  |
+| [ ] | SHIPCFG-07 | Confirm return policy is configured. | Policy ID: |  |
+| [ ] | SHIPCFG-08 | Record the quoted or expected shipping charge. | Amount: |  |
 
-Goal: prove the test SKU can calculate a shipping charge and fulfillment policy before order intake.
+Phase pass criteria:
 
-Steps:
-
-1. Open `Shipping config`.
-2. Confirm at least one box/package profile applies to the SKU.
-3. Confirm rate table coverage for the destination you will use.
-4. Confirm markup and insurance policies are configured.
-5. Confirm return policy is configured.
-6. Record any assumptions in the test record.
-
-Pass criteria:
-
-- The test SKU has enough package and rate data for a deterministic shipping quote.
-- Insurance fee behavior is configured.
-- Return policy behavior is configured.
-
-Stop conditions:
-
-- Missing package/carton data blocks a quote.
-- No rate table applies to the test destination.
-- Shipping fee behavior is unclear.
-
-## Phase 3: Store Connection
-
-Goal: prove the vendor store connection is ready before listing or order intake.
-
-Steps:
-
-1. Open `Store connections`.
-2. Find the selected vendor/store connection.
-3. Confirm platform, external store identity, and status.
-4. Confirm OAuth status is healthy.
-5. Confirm listing configuration is present if listing push is in scope.
-6. Confirm order processing config is present.
-7. Record store connection ID.
-
-Pass criteria:
-
-- Store connection is active.
-- OAuth is valid.
-- Order processing config is ready.
-- Listing config is ready if listing pushes are being tested.
-
-Stop conditions:
-
-- OAuth is missing or expired.
-- Store identity does not match the intended vendor account.
-- Store connection status is not active.
+- Shipping quote path has package data and rate coverage.
+- Markup, insurance, and return policies are explicit.
+- No hardcoded shipping behavior is needed for this test.
 
 ## Phase 4: Listing Push
 
-Goal: list the exposed SKU to the vendor marketplace store.
+Goal: create one marketplace listing and prove it maps back to Echelon identity.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | LIST-01 | Trigger listing push through the normal admin path. | Trigger action/time: |  |
+| [ ] | LIST-02 | Open `Listing pushes`. |  |  |
+| [ ] | LIST-03 | Confirm listing job is created. | Job ID: |  |
+| [ ] | LIST-04 | Confirm job moves through queued/processing/succeeded. | Final status: |  |
+| [ ] | LIST-05 | Confirm external marketplace listing exists. | Marketplace listing ID: |  |
+| [ ] | LIST-06 | Confirm external listing maps to Echelon SKU/product variant. | Mapping evidence: |  |
+| [ ] | LIST-07 | Confirm listing push audit event exists. | Audit event ID: |  |
 
-1. Use the vendor/store listing path for the selected SKU.
-2. Trigger the listing push through the normal UI path.
-3. Open `Listing pushes`.
-4. Confirm the job is queued, processing, then succeeded.
-5. Confirm the external marketplace listing exists.
-6. Record marketplace listing ID and listing push job ID.
-
-Pass criteria:
+Phase pass criteria:
 
 - Listing push completes without manual database intervention.
-- External listing maps back to the Echelon SKU/product variant.
-- Listing push audit events are understandable.
-
-Stop conditions:
-
-- Listing push fails without a retryable reason.
-- External listing identity is not stored.
-- SKU mapping is ambiguous.
+- Marketplace listing identity is stored.
+- Listing maps to the correct Echelon SKU/product variant.
 
 ## Phase 5: Order Intake
 
-Goal: ingest a marketplace order from the vendor store into dropship order intake.
+Goal: ingest one marketplace order into dropship order intake exactly once.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | ORDER-01 | Place one small marketplace test order for the listed SKU. | Marketplace order ID: |  |
+| [ ] | ORDER-02 | Open `Order intake`. |  |  |
+| [ ] | ORDER-03 | Find intake row by external order ID, platform, or store connection. | Intake ID: |  |
+| [ ] | ORDER-04 | Confirm vendor identity is correct. | Vendor/member ID: |  |
+| [ ] | ORDER-05 | Confirm store connection identity is correct. | Store connection ID: |  |
+| [ ] | ORDER-06 | Confirm platform and external order ID are correct. | Platform/order ID: |  |
+| [ ] | ORDER-07 | Confirm line item SKU and quantity are correct. | SKU/qty: |  |
+| [ ] | ORDER-08 | Confirm line item maps to Echelon product variant identity. | Product variant ID: |  |
+| [ ] | ORDER-09 | Confirm duplicate intake is not created by webhook or retry behavior. | Duplicate check: |  |
+| [ ] | ORDER-10 | Confirm cancellation/exception state is absent unless expected. | Status: |  |
 
-1. Place a small marketplace test order for the listed SKU.
-2. Open `Order intake`.
-3. Find the intake row by external order ID, platform, or store connection.
-4. Confirm vendor, store connection, platform, and external order ID are correct.
-5. Confirm line item SKU and quantity are correct.
-6. Confirm order status moves through the expected intake state.
-7. Record intake ID and external order ID.
-
-Pass criteria:
+Phase pass criteria:
 
 - One intake row exists for the external order.
-- The intake row is tied to the correct vendor and store connection.
-- Line items map to Echelon SKU/product variant identity.
-- Duplicate intake is not created by retries or webhooks.
-
-Stop conditions:
-
-- Order is missing from intake.
-- Duplicate intake rows are created.
-- Line item cannot map to Echelon product identity.
-- Cancellation or exception status appears without a clear reason.
+- Vendor, store connection, platform, order ID, SKU, quantity, and variant identity are correct.
+- Duplicate intake is prevented.
 
 ## Phase 6: Wallet And Acceptance
 
-Goal: prove the order can be financially authorized and accepted into fulfillment.
+Goal: prove order funding and acceptance are traceable and idempotent.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | WALLET-01 | Review wallet or funding state for the order. | Wallet state: |  |
+| [ ] | WALLET-02 | If funding is insufficient, use controlled manual credit or confirmed funding path. | Credit/funding ID: |  |
+| [ ] | WALLET-03 | Confirm hold, debit, credit, or release is traceable. | Ledger/transaction ID: |  |
+| [ ] | WALLET-04 | Process or retry intake only after funding state is clear. | Action/time: |  |
+| [ ] | WALLET-05 | Confirm order is accepted. | Accepted status/time: |  |
+| [ ] | WALLET-06 | Confirm repeated process/retry does not create duplicate financial effects. | Idempotency evidence: |  |
+| [ ] | WALLET-07 | Confirm audit event exists for critical wallet action. | Audit event ID: |  |
 
-1. Review the order's wallet or funding state.
-2. If funding is insufficient, use a controlled manual credit or confirmed funding path.
-3. Process or retry the intake row only after funding is clear.
-4. Confirm the order is accepted.
-5. Record wallet transaction or credit evidence.
-
-Pass criteria:
+Phase pass criteria:
 
 - Funding behavior is deterministic.
-- Any hold, debit, or credit is traceable.
-- Accepted order has a clear audit trail.
-
-Stop conditions:
-
-- Funding state is unclear.
-- Order acceptance can be retried into duplicate financial effects.
-- Wallet transaction evidence is missing.
+- Wallet effects are traceable.
+- Acceptance cannot duplicate financial effects.
 
 ## Phase 7: OMS And WMS Handoff
 
-Goal: prove accepted dropship orders create the correct internal order records.
+Goal: prove accepted dropship orders create correct internal order records.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | HANDOFF-01 | Confirm accepted order has an OMS order. | OMS order ID: |  |
+| [ ] | HANDOFF-02 | Confirm OMS order has dropship source/channel tagging. | Source/channel: |  |
+| [ ] | HANDOFF-03 | Confirm WMS order exists. | WMS order ID: |  |
+| [ ] | HANDOFF-04 | Confirm OMS and WMS line items agree. | Line comparison: |  |
+| [ ] | HANDOFF-05 | Confirm SKU, quantity, and product variant identity are complete. | SKU/qty/variant: |  |
+| [ ] | HANDOFF-06 | Confirm WMS pick/pack/ship workflow can start normally. | WMS status: |  |
+| [ ] | HANDOFF-07 | Confirm blocked state is absent or operator-visible. | Blocker status: |  |
+| [ ] | HANDOFF-08 | Confirm audit event exists for handoff. | Audit event ID: |  |
 
-1. Confirm the accepted order has an OMS order ID.
-2. Confirm the OMS order has correct source/channel tagging for dropship.
-3. Confirm the WMS order exists.
-4. Confirm line items, quantities, SKU, and variant identity match the intake row.
-5. Confirm pick/pack/ship workflow can start normally.
-6. Record OMS and WMS order IDs.
-
-Pass criteria:
+Phase pass criteria:
 
 - OMS and WMS records exist.
-- Source/channel identity marks the order as dropship without pretending the customer marketplace store is the internal OMS source.
-- Line item identity is complete enough for fulfillment and inventory deduction.
-
-Stop conditions:
-
-- WMS order is missing.
-- OMS and WMS line items disagree.
-- SKU or variant identity is missing.
-- Order is blocked without an operator-visible reason.
+- Line items match.
+- Dropship source tagging is internal to Echelon and separate from vendor store connection identity.
 
 ## Phase 8: ShipStation Fulfillment
 
-Goal: prove fulfillment flows through WMS and ShipStation.
+Goal: prove fulfillment flows through WMS and ShipStation and returns cleanly.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | FULFILL-01 | Confirm WMS order is pushed or visible in ShipStation as expected. | ShipStation order ID: |  |
+| [ ] | FULFILL-02 | Ship the order in ShipStation. | Shipment ID: |  |
+| [ ] | FULFILL-03 | Record carrier, service, and tracking number. | Carrier/service/tracking: |  |
+| [ ] | FULFILL-04 | Confirm ShipStation webhook is ingested. | Webhook/inbox ID: |  |
+| [ ] | FULFILL-05 | Confirm WMS shipment status updates. | WMS status: |  |
+| [ ] | FULFILL-06 | Confirm OMS fulfillment status updates. | OMS status: |  |
+| [ ] | FULFILL-07 | Confirm shipment line items preserve SKU/variant identity. | Line evidence: |  |
+| [ ] | FULFILL-08 | Confirm inventory shipment recording occurs. | Inventory movement ID: |  |
+| [ ] | FULFILL-09 | Confirm no duplicate shipment is created by webhook retry. | Duplicate check: |  |
 
-1. Confirm the WMS order is pushed or visible in ShipStation as expected.
-2. Ship the order in ShipStation.
-3. For first dogfood, use one shipment unless split-shipment testing is intentional.
-4. Record ShipStation order ID, shipment ID, carrier, service, and tracking number.
-5. Confirm the ShipStation webhook is ingested.
-6. Confirm WMS shipment status updates.
-7. Confirm OMS fulfillment status updates.
-8. Confirm inventory shipment recording occurs.
-
-Pass criteria:
+Phase pass criteria:
 
 - ShipStation shipment is ingested once.
-- WMS and OMS statuses update correctly.
-- Inventory movement is recorded.
-- Shipment line items preserve SKU/variant identity.
+- WMS and OMS status update correctly.
+- Inventory shipment recording is not skipped.
 
-Stop conditions:
+## Phase 9: Tracking Push
 
-- Webhook is missing.
-- Webhook fails without retry visibility.
-- OMS is shipped but WMS is not, or the reverse.
-- Inventory deduction is skipped.
+Goal: prove customer-visible tracking is pushed back to the marketplace.
 
-## Phase 9: Split Shipment Test
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | TRACK-01 | Open `Tracking pushes`. |  |  |
+| [ ] | TRACK-02 | Find tracking push row for the test shipment. | Tracking push ID: |  |
+| [ ] | TRACK-03 | Confirm push moves through queued/processing/completed. | Final status: |  |
+| [ ] | TRACK-04 | Confirm carrier and tracking number are correct. | Carrier/tracking: |  |
+| [ ] | TRACK-05 | For Shopify, confirm customer-visible fulfillment/tracking. | Shopify evidence: |  |
+| [ ] | TRACK-06 | For eBay, confirm order fulfillment/tracking is visible. | eBay evidence: |  |
+| [ ] | TRACK-07 | Confirm retry path is visible if push fails. | Retry status: |  |
+| [ ] | TRACK-08 | Confirm audit event exists for tracking push. | Audit event ID: |  |
 
-Goal: prove multiple shipments on one order are preserved and pushed correctly.
+Phase pass criteria:
 
-Run this only after the single-shipment path passes.
+- Marketplace order shows the correct tracking.
+- Push completion matches the actual marketplace customer view.
+- Failures are visible and retryable.
 
-Steps:
+## Phase 10: Split Shipment Test
 
-1. Create a test order with at least two line items or quantities that can be split.
-2. Ship part of the order in ShipStation.
-3. Confirm WMS records a partial shipment.
-4. Confirm OMS remains partially fulfilled.
-5. Confirm marketplace tracking push includes only the shipped items.
-6. Ship the remaining item or quantity.
-7. Confirm WMS and OMS move to fully shipped.
-8. Confirm marketplace tracking shows each tracking number against the correct items.
+Run this only after the single-shipment path passes. Required if split shipments are in dogfood launch scope.
 
-Pass criteria:
+Goal: prove multiple shipments on one order are preserved and pushed with correct item associations.
+
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | SPLIT-01 | Create a test order with at least two shippable lines or quantities. | External order ID: |  |
+| [ ] | SPLIT-02 | Ship only part of the order in ShipStation. | First shipment ID: |  |
+| [ ] | SPLIT-03 | Confirm WMS records partial shipment only. | WMS status: |  |
+| [ ] | SPLIT-04 | Confirm OMS remains partially fulfilled. | OMS status: |  |
+| [ ] | SPLIT-05 | Confirm marketplace tracking push includes only shipped items. | Push/item evidence: |  |
+| [ ] | SPLIT-06 | Ship remaining line or quantity. | Second shipment ID: |  |
+| [ ] | SPLIT-07 | Confirm WMS and OMS move to fully shipped only after final shipment. | Final statuses: |  |
+| [ ] | SPLIT-08 | Confirm marketplace shows each tracking number against correct item(s). | Marketplace evidence: |  |
+| [ ] | SPLIT-09 | Confirm second shipment does not overwrite first tracking record. | Tracking comparison: |  |
+
+Phase pass criteria:
 
 - Multiple shipments are represented as separate shipment records.
-- Partial shipment does not mark the full order complete too early.
-- eBay or Shopify receives item-specific tracking.
-- Final order status becomes fully shipped only after all shipped quantities are accounted for.
-
-Stop conditions:
-
-- First shipment closes the whole order incorrectly.
-- Tracking is pushed without item association.
-- Second shipment overwrites the first tracking record.
-- Marketplace customer view cannot distinguish the shipments.
-
-## Phase 10: Tracking Push
-
-Goal: prove tracking is communicated back to the marketplace.
-
-Steps:
-
-1. Open `Tracking pushes`.
-2. Find the push row for the test shipment.
-3. Confirm queued, processing, and completed states.
-4. Verify the marketplace order shows tracking.
-5. For Shopify, confirm customer-visible fulfillment/tracking.
-6. For eBay, confirm fulfillment/tracking is visible on the eBay order.
-7. Record tracking push ID.
-
-Pass criteria:
-
-- Tracking push completes.
-- Marketplace order shows the correct carrier/tracking.
-- Split-shipment item associations are correct if tested.
-
-Stop conditions:
-
-- Push fails and retry reason is unclear.
-- Marketplace shows no tracking after completed push.
-- Wrong shipment, carrier, tracking, or line item is pushed.
+- Partial shipment does not close the full order early.
+- Marketplace tracking is item-specific.
 
 ## Phase 11: Notifications
 
-Goal: prove operational and vendor-facing notifications fire for meaningful events.
+Goal: prove required vendor and internal notifications are visible and retryable.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | NOTIFY-01 | Open `Notifications`. |  |  |
+| [ ] | NOTIFY-02 | Confirm notification events exist for tested order lifecycle. | Event IDs: |  |
+| [ ] | NOTIFY-03 | Confirm event payload points to correct vendor/store/order. | Payload evidence: |  |
+| [ ] | NOTIFY-04 | Confirm failed notifications are visible. | Failure evidence: |  |
+| [ ] | NOTIFY-05 | Confirm failed notifications are retryable. | Retry evidence: |  |
+| [ ] | NOTIFY-06 | Confirm vendor receives expected notice if delivery is enabled. | Delivery evidence: |  |
+| [ ] | NOTIFY-07 | Confirm audit event exists for notification action. | Audit event ID: |  |
 
-1. Open `Notifications`.
-2. Confirm events exist for the tested order lifecycle.
-3. Confirm failed notifications are visible and retryable.
-4. Confirm the vendor receives expected notices if vendor notification delivery is enabled.
-5. Record notification event IDs.
+Phase pass criteria:
 
-Pass criteria:
-
-- Notification events are created for important state changes.
-- Failures are visible in admin.
-- Retry behavior is explicit.
-
-Stop conditions:
-
-- No notification event appears for a required event.
-- Failure is silent.
-- Notification content points to the wrong order, store, or vendor.
+- Important state changes create notification events.
+- Failures are visible and retryable.
+- Notification identity is correct.
 
 ## Phase 12: Returns
 
-Goal: prove the return policy and inspection/credit workflow can be tested safely.
+Run this after order, fulfillment, and tracking pass. Required if returns are in dogfood launch scope.
 
-Run this after order, fulfillment, and tracking pass.
+Goal: prove return policy, fault, inspection, and credit/release behavior.
 
-Steps:
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | RETURN-01 | Open `Returns`. |  |  |
+| [ ] | RETURN-02 | Create or ingest controlled return/RMA for the test order. | RMA ID: |  |
+| [ ] | RETURN-03 | Confirm return policy selection is correct. | Policy ID: |  |
+| [ ] | RETURN-04 | Confirm fault classification is explicit. | Fault type: |  |
+| [ ] | RETURN-05 | If item inspection applies, complete inspection once. | Inspection ID/result: |  |
+| [ ] | RETURN-06 | Confirm credit/release behavior follows inspection result where inspection applies. | Credit/release ID: |  |
+| [ ] | RETURN-07 | For lost package, misdelivery, or carrier fault, confirm no item inspection is incorrectly required. | Outcome evidence: |  |
+| [ ] | RETURN-08 | Confirm vendor/customer/marketplace fault fees follow policy. | Fee evidence: |  |
+| [ ] | RETURN-09 | Confirm audit event exists for return action. | Audit event ID: |  |
 
-1. Open `Returns`.
-2. Create or ingest a controlled return/RMA for the test order.
-3. Confirm return policy selection is correct.
-4. Confirm fault classification is correct.
-5. If item inspection occurs, complete inspection once.
-6. Confirm credit/release behavior after inspection when warranted.
-7. For lost package, misdelivery, or carrier-fault cases, confirm the insurance-pool policy is represented correctly.
-8. Record RMA ID and final outcome.
-
-Pass criteria:
+Phase pass criteria:
 
 - Return state is visible.
 - Fault classification is explicit.
-- Vendor/customer/marketplace fault fees are applied according to policy.
-- Inspection result drives credit/release where inspection applies.
+- Credit/release behavior follows the configured policy.
 
-Stop conditions:
+## Phase 13: Audit And Exit
 
-- Return policy is missing.
-- Fault classification cannot be recorded.
-- Credit/release can occur without the required state.
-- A lost package scenario incorrectly waits for item inspection.
+Goal: prove the dogfood run has a usable evidence trail and no unresolved launch blockers.
 
-## Phase 13: Audit Evidence
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | AUDIT-01 | Open `Audit events`. |  |  |
+| [ ] | AUDIT-02 | Search by vendor/store/order/listing/tracking IDs. | Search terms: |  |
+| [ ] | AUDIT-03 | Confirm catalog exposure audit evidence exists. | Audit event ID: |  |
+| [ ] | AUDIT-04 | Confirm listing push audit evidence exists. | Audit event ID: |  |
+| [ ] | AUDIT-05 | Confirm order intake audit evidence exists. | Audit event ID: |  |
+| [ ] | AUDIT-06 | Confirm wallet audit evidence exists. | Audit event ID: |  |
+| [ ] | AUDIT-07 | Confirm WMS/ShipStation handoff audit evidence exists. | Audit event ID: |  |
+| [ ] | AUDIT-08 | Confirm tracking push audit evidence exists. | Audit event ID: |  |
+| [ ] | AUDIT-09 | Confirm notification/return audit evidence exists if tested. | Audit event ID: |  |
+| [ ] | AUDIT-10 | Return to `Dogfood readiness` and confirm final readiness state. | Final gate status: |  |
+| [ ] | AUDIT-11 | Confirm all P0/P1 exceptions are resolved or explicitly accepted before broader dogfood. | Exception IDs: |  |
 
-Goal: prove dogfood outcomes are traceable.
+Phase pass criteria:
 
-Steps:
+- Critical actions have audit evidence.
+- Final readiness reflects the run.
+- No unresolved P0/P1 exception remains.
 
-1. Open `Audit events`.
-2. Search for the test order, store connection, listing push, tracking push, and return IDs.
-3. Confirm critical actions have useful audit records.
-4. Capture unresolved errors or warnings.
-5. Return to `Dogfood readiness`.
-6. Confirm the dogfood smoke/readiness view reflects the completed test.
+## Manual Worker Sweep Checklist
 
-Pass criteria:
+Manual worker sweeps are for intentional worker testing only. Do not use them as a general "try again" button.
 
-- Key actions are audit-visible.
-- Errors are operator-visible.
-- Dogfood readiness reflects current state.
-- The final test record has enough IDs to debug later.
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | SWEEP-01 | Specific stuck record is identified. | Record ID: |  |
+| [ ] | SWEEP-02 | Current status and failure reason are captured before sweep. | Before status: |  |
+| [ ] | SWEEP-03 | Correct owning worker is known. | Worker name: |  |
+| [ ] | SWEEP-04 | Sweep is run once. | Run time/result: |  |
+| [ ] | SWEEP-05 | After status is captured. | After status: |  |
+| [ ] | SWEEP-06 | Related tab and audit events are checked. | Audit/event IDs: |  |
+| [ ] | SWEEP-07 | Sweep is not repeated unless the first result is understood. | Confirmed: |  |
 
-Stop conditions:
+## Exception Log
 
-- Critical actions leave no audit trail.
-- Dogfood readiness says ready while known blockers remain.
-- Errors are only visible in logs and not in admin.
+Use one row per issue. Reference the exception ID in the related checklist row.
 
-## Manual Worker Sweep Rules
+| Exception ID | Severity | Phase/check ID | Record IDs | What failed | Expected result | Actual result | Correction needed | Owner | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| EX-001 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
+| EX-002 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
+| EX-003 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
+| EX-004 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
+| EX-005 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
 
-Manual worker sweeps are for intentional worker testing only.
+## Final Dogfood Exit Checklist
 
-Use a manual worker sweep when:
+| Done | ID | Exit condition | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | EXIT-01 | One marketplace store completes listing, order intake, acceptance, fulfillment, tracking push, notification, and audit evidence. |  |  |
+| [ ] | EXIT-02 | Split shipment case completes correctly if split shipments are in launch scope. |  |  |
+| [ ] | EXIT-03 | Wallet funding behavior is traceable and idempotent. |  |  |
+| [ ] | EXIT-04 | ShipStation webhook ingestion is reliable for tested order(s). |  |  |
+| [ ] | EXIT-05 | Marketplace tracking is customer-visible and correct. |  |  |
+| [ ] | EXIT-06 | Return flow passes if returns are in dogfood scope. |  |  |
+| [ ] | EXIT-07 | No launch-blocking dogfood readiness checks remain. |  |  |
+| [ ] | EXIT-08 | All P0/P1 exceptions are fixed or explicitly accepted. |  |  |
+| [ ] | EXIT-09 | P2/P3 exceptions are logged with owner and follow-up. |  |  |
+| [ ] | EXIT-10 | Final test record is complete enough to debug later. |  |  |
 
-- You have a specific stuck record.
-- You have captured the record ID and current status.
-- You know which worker owns that record type.
-- You are verifying retry behavior.
-
-Do not use manual worker sweeps when:
-
-- You are only exploring the admin UI.
-- The launch gate is blocked.
-- The record has unclear money, inventory, or fulfillment state.
-- The same action may already be running.
-
-After a manual sweep:
-
-1. Record worker name.
-2. Record before and after status.
-3. Check audit events.
-4. Check the related tab for retry or failure status.
-5. Do not repeat the sweep without understanding the first result.
-
-## Failure Capture Template
-
-Use this for every failure.
-
-| Field | Value |
-| --- | --- |
-| Failed phase |  |
-| Time observed |  |
-| Admin tab |  |
-| Error message |  |
-| Entity IDs |  |
-| Expected result |  |
-| Actual result |  |
-| Retry attempted | Yes / No |
-| Worker sweep run | Yes / No |
-| Screenshot captured | Yes / No |
-| Audit event IDs |  |
-| Logs checked | Yes / No |
-| Current blocker |  |
-
-## Dogfood Exit Criteria
-
-Dogfood MVP is ready for broader internal use when:
-
-- One eBay or Shopify store completes listing, order intake, acceptance, fulfillment, tracking push, notification, and audit evidence.
-- One split-shipment case completes correctly if split shipments are in launch scope.
-- Wallet funding behavior is traceable and idempotent.
-- ShipStation webhook ingestion is reliable for the tested order.
-- Marketplace tracking is customer-visible.
-- No dogfood launch-blocking readiness checks remain.
-- Any warnings are documented with owner and follow-up.
-- No unresolved financial, inventory, fulfillment, or marketplace state ambiguity remains for the test order.
-
-## Recommended First Dogfood Sequence
-
-Use this exact order for the first live dogfood pass:
-
-1. `Dogfood readiness`: clear blockers.
-2. `Catalog exposure`: expose one SKU or variant.
-3. `Shipping config`: confirm package/rate/policy coverage.
-4. `Store connections`: confirm one vendor store is active.
-5. `Listing pushes`: list one SKU.
-6. Marketplace: place one small test order.
-7. `Order intake`: verify intake and process acceptance.
-8. `Wallet ops`: verify funding and ledger evidence.
-9. WMS: pick and fulfill the order.
-10. ShipStation: ship the order.
-11. `Tracking pushes`: verify marketplace tracking.
-12. `Notifications`: verify event delivery or retry visibility.
-13. `Audit events`: capture evidence.
-14. `Dogfood readiness`: confirm final state.
-
-## Notes For Interpreting The Internal Source
+## Internal Source Note
 
 The internal `Dropship OMS` source is a static Echelon source marker. It is not the vendor's eBay or Shopify store connection.
 
 Use it to confirm accepted dropship orders are tagged as dropship inside Echelon after marketplace intake. Vendor marketplace accounts remain separate store connections under `Store connections`.
 
-If the internal source check fails, it means the expected `channels.channels` source marker is missing or inactive. That is an internal configuration problem, not a vendor OAuth problem.
+If the internal source check fails, the expected `channels.channels` source marker is missing or inactive. Treat that as an internal configuration issue, not a vendor OAuth issue.
