@@ -1826,7 +1826,9 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(auto_draft_mode, 'draft_po') AS auto_draft_mode,
         COALESCE(auto_draft_include_order_soon, false) AS include_order_soon,
         COALESCE(auto_draft_skip_on_open_po, true) AS skip_on_open_po,
-        COALESCE(auto_draft_skip_no_vendor, true) AS skip_no_vendor
+        COALESCE(auto_draft_skip_no_vendor, true) AS skip_no_vendor,
+        COALESCE(recommendation_candidate_score_strong_threshold, 80) AS candidate_score_strong_threshold,
+        COALESCE(recommendation_candidate_score_review_threshold, 60) AS candidate_score_review_threshold
       FROM warehouse_settings
       LIMIT 1
     `);
@@ -1837,6 +1839,8 @@ export const procurementMethods: IProcurementStorage = {
       includeOrderSoon: row?.include_order_soon ?? false,
       skipOnOpenPo: row?.skip_on_open_po ?? true,
       skipNoVendor: row?.skip_no_vendor ?? true,
+      candidateScoreStrongThreshold: row?.candidate_score_strong_threshold ?? 80,
+      candidateScoreReviewThreshold: row?.candidate_score_review_threshold ?? 60,
     };
   },
 
@@ -1850,7 +1854,9 @@ export const procurementMethods: IProcurementStorage = {
         auto_draft_mode = COALESCE(${autoDraftMode}, auto_draft_mode),
         auto_draft_include_order_soon = COALESCE(${settings.includeOrderSoon ?? null}, auto_draft_include_order_soon),
         auto_draft_skip_on_open_po = COALESCE(${settings.skipOnOpenPo ?? null}, auto_draft_skip_on_open_po),
-        auto_draft_skip_no_vendor = COALESCE(${settings.skipNoVendor ?? null}, auto_draft_skip_no_vendor)
+        auto_draft_skip_no_vendor = COALESCE(${settings.skipNoVendor ?? null}, auto_draft_skip_no_vendor),
+        recommendation_candidate_score_strong_threshold = COALESCE(${settings.candidateScoreStrongThreshold ?? null}, recommendation_candidate_score_strong_threshold),
+        recommendation_candidate_score_review_threshold = COALESCE(${settings.candidateScoreReviewThreshold ?? null}, recommendation_candidate_score_review_threshold)
     `);
   },
 

@@ -155,6 +155,8 @@ export interface AutoDraftRecommendationSettings {
   includeOrderSoon?: boolean;
   skipOnOpenPo?: boolean;
   skipNoVendor?: boolean;
+  candidateScoreStrongThreshold?: number;
+  candidateScoreReviewThreshold?: number;
 }
 
 export interface GeneratePurchasingRecommendationsOptions {
@@ -331,6 +333,9 @@ const DEFAULTS: PurchasingRecommendationDefaults = {
   safetyStockDays: 7,
 };
 
+const DEFAULT_CANDIDATE_SCORE_STRONG_THRESHOLD = 80;
+const DEFAULT_CANDIDATE_SCORE_REVIEW_THRESHOLD = 60;
+
 function asNumber(value: unknown, fallback = 0): number {
   if (value === null || value === undefined || value === "") return fallback;
   const parsed = Number(value);
@@ -353,6 +358,20 @@ function roundRatio(value: number): number {
 
 function clampScore(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function normalizeCandidateScoreThresholds(settings: AutoDraftRecommendationSettings): {
+  strongThreshold: number;
+  reviewThreshold: number;
+} {
+  const strongThreshold = clampScore(
+    asNumber(settings.candidateScoreStrongThreshold, DEFAULT_CANDIDATE_SCORE_STRONG_THRESHOLD),
+  );
+  const requestedReviewThreshold = clampScore(
+    asNumber(settings.candidateScoreReviewThreshold, DEFAULT_CANDIDATE_SCORE_REVIEW_THRESHOLD),
+  );
+  const reviewThreshold = Math.min(requestedReviewThreshold, strongThreshold);
+  return { strongThreshold, reviewThreshold };
 }
 
 function getMeta(
@@ -849,6 +868,8 @@ function buildRecommendationCandidateScore(input: {
   demandTrend: PurchasingRecommendationDemandTrend;
   demandWindowDiagnostics: PurchasingDemandForecastWindowDiagnostics;
   supplierCycleDiagnostics: PurchasingRecommendationItem["supplierCycleDiagnostics"];
+  strongThreshold: number;
+  reviewThreshold: number;
 }): PurchasingRecommendationItem["recommendationCandidateScore"] {
   const demandQualityScore: Record<PurchasingRecommendationDemandQuality, number> = {
     no_recent_demand: 0,
@@ -917,9 +938,9 @@ function buildRecommendationCandidateScore(input: {
   const band: PurchasingRecommendationCandidateBand =
     input.skippedReason === "excluded" || input.skippedReason === "no_vendor" || blockControlCount > 0
       ? "blocked"
-      : input.actionable && score >= 80
+      : input.actionable && score >= input.strongThreshold
         ? "strong_candidate"
-        : score >= 60
+        : score >= input.reviewThreshold
           ? "review_candidate"
           : "watch";
 
@@ -1125,6 +1146,7 @@ export function generatePurchasingRecommendations(
   };
   const rules = options.exclusionRules ?? [];
   const settings = options.autoDraftSettings ?? {};
+  const candidateScoreThresholds = normalizeCandidateScoreThresholds(settings);
   const lookbackDays = asPositiveInt(options.lookbackDays, 30);
   const items: PurchasingRecommendationItem[] = [];
   const skippedItems: PurchasingRecommendationItem[] = [];
@@ -1350,6 +1372,8 @@ export function generatePurchasingRecommendations(
       demandTrend,
       demandWindowDiagnostics,
       supplierCycleDiagnostics,
+      strongThreshold: candidateScoreThresholds.strongThreshold,
+      reviewThreshold: candidateScoreThresholds.reviewThreshold,
     });
     const item: PurchasingRecommendationItem = {
       recommendationId: `${productId}:${productVariantId ?? "product"}:${lookbackDays}`,

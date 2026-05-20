@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, Plus, Filter } from "lucide-react";
 import {
@@ -9,6 +9,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
@@ -39,6 +40,8 @@ interface AutoDraftSettings {
   includeOrderSoon: boolean;
   skipOnOpenPo: boolean;
   skipNoVendor: boolean;
+  candidateScoreStrongThreshold: number;
+  candidateScoreReviewThreshold: number;
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -60,6 +63,8 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
   const queryClient = useQueryClient();
   const [newField, setNewField] = useState("category");
   const [newValue, setNewValue] = useState("");
+  const [candidateScoreStrongThreshold, setCandidateScoreStrongThreshold] = useState("80");
+  const [candidateScoreReviewThreshold, setCandidateScoreReviewThreshold] = useState("60");
 
   const { data: rulesData, isLoading } = useQuery<RulesData>({
     queryKey: ["/api/purchasing/exclusion-rules"],
@@ -132,12 +137,47 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft-settings"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to update settings", description: err.message, variant: "destructive" });
     },
   });
+
+  useEffect(() => {
+    if (!settings) return;
+    setCandidateScoreStrongThreshold(String(settings.candidateScoreStrongThreshold ?? 80));
+    setCandidateScoreReviewThreshold(String(settings.candidateScoreReviewThreshold ?? 60));
+  }, [settings]);
 
   const handleAddRule = () => {
     if (!newValue.trim()) return;
     addRuleMutation.mutate({ field: newField, value: newValue.trim() });
+  };
+
+  const saveCandidateThresholds = () => {
+    const strongThreshold = Number(candidateScoreStrongThreshold);
+    const reviewThreshold = Number(candidateScoreReviewThreshold);
+    if (!Number.isInteger(strongThreshold) || strongThreshold < 0 || strongThreshold > 100) {
+      toast({ title: "Invalid strong threshold", description: "Use a whole number from 0 to 100.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isInteger(reviewThreshold) || reviewThreshold < 0 || reviewThreshold > 100) {
+      toast({ title: "Invalid review threshold", description: "Use a whole number from 0 to 100.", variant: "destructive" });
+      return;
+    }
+    if (reviewThreshold > strongThreshold) {
+      toast({
+        title: "Invalid thresholds",
+        description: "Review threshold must be less than or equal to the strong threshold.",
+        variant: "destructive",
+      });
+      return;
+    }
+    updateSettingsMutation.mutate({
+      candidateScoreStrongThreshold: strongThreshold,
+      candidateScoreReviewThreshold: reviewThreshold,
+    });
   };
 
   return (
@@ -278,6 +318,51 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
                     ? "Only high-confidence actionable recommendations can create or update draft POs. Medium and low confidence recommendations stay in review."
                     : "Only recommendations allowed by the configured quality gate can create or update draft POs."}
                 </p>
+              </div>
+              <div className="rounded-md border bg-muted/40 p-3 space-y-3">
+                <div>
+                  <h4 className="text-sm font-medium">Candidate score thresholds</h4>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Controls strong and review candidate bands. Auto-draft still uses the high-confidence quality gate.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Review candidate at</label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={candidateScoreReviewThreshold}
+                      onChange={(event) => setCandidateScoreReviewThreshold(event.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Strong candidate at</label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={candidateScoreStrongThreshold}
+                      onChange={(event) => setCandidateScoreStrongThreshold(event.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={saveCandidateThresholds}
+                    disabled={updateSettingsMutation.isPending}
+                  >
+                    Save thresholds
+                  </Button>
+                </div>
               </div>
               <div className="flex items-center justify-between gap-4">
                 <div>

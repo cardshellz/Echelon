@@ -203,6 +203,57 @@ describe("purchasing recommendation engine", () => {
     expect(result.items[0].explanation).toContain("Recommend 1 Case");
   });
 
+  it("uses configurable candidate score thresholds for read-only banding", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      autoDraftSettings: {
+        candidateScoreStrongThreshold: 95,
+        candidateScoreReviewThreshold: 90,
+      },
+      rows: [
+        {
+          product_id: 11,
+          variant_id: 111,
+          base_sku: "SKU-THRESHOLD",
+          product_name: "Threshold Product",
+          total_pieces: 12,
+          total_reserved_pieces: 2,
+          total_outbound_pieces: 60,
+          previous_outbound_pieces: 50,
+          demand_order_count: 12,
+          demand_active_days: 10,
+          short_window_days: 7,
+          short_outbound_pieces: 21,
+          previous_short_outbound_pieces: 7,
+          long_window_days: 90,
+          long_outbound_pieces: 135,
+          previous_long_outbound_pieces: 150,
+          seasonal_window_days: 30,
+          seasonal_outbound_pieces: 30,
+          previous_seasonal_outbound_pieces: 45,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 5,
+          safety_stock_days: 2,
+          order_uom_units: 10,
+          order_uom_level: 3,
+          vendor_product_id: 770,
+          preferred_vendor_id: 77,
+          estimated_cost_mills: 12500,
+          vendor_product_updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    expect(result.items[0].recommendationCandidateScore).toMatchObject({
+      score: 91,
+      band: "review_candidate",
+    });
+    expect(result.items[0].qualityGate).toMatchObject({
+      autoDraftEligible: true,
+      reason: "high_confidence",
+    });
+  });
+
   it("keeps excluded products out of visible recommendations and reports the skip", () => {
     const result = generatePurchasingRecommendations({
       lookbackDays: 30,
