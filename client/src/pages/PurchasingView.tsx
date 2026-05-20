@@ -135,6 +135,16 @@ interface ReorderItem {
     daysUntilEarliestExpected: number | null;
     daysSinceLastReceipt: number | null;
   };
+  recommendationCandidateScore?: {
+    score: number;
+    band: string;
+    demandScore: number;
+    supplyScore: number;
+    readinessScore: number;
+    signals: string[];
+    blockers: string[];
+    detail: string;
+  };
   qualityControls?: RecommendationQualityControl[];
   autopilotBlockers?: RecommendationQualityControl[];
   actionable?: boolean;
@@ -329,6 +339,9 @@ export default function PurchasingView() {
     const cycleLabel = item.supplierCycleDiagnostics
       ? ` - cycle ${item.supplierCycleDiagnostics.signal.replace(/_/g, " ")}`
       : "";
+    const scoreLabel = item.recommendationCandidateScore
+      ? ` - score ${item.recommendationCandidateScore.score} ${item.recommendationCandidateScore.band.replace(/_/g, " ")}`
+      : "";
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -337,7 +350,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel} - ${leadLabel} - ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}${scoreLabel} - ${leadLabel} - ${costLabel}`;
   };
 
   const getAutopilotBlockers = (item: ReorderItem) => {

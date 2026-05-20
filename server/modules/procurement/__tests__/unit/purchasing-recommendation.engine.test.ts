@@ -96,6 +96,21 @@ describe("purchasing recommendation engine", () => {
         supplyCoverageRatio: 0.71,
         openPoCoverageRatio: null,
       },
+      recommendationCandidateScore: {
+        score: 91,
+        band: "strong_candidate",
+        demandScore: 91,
+        supplyScore: 85,
+        readinessScore: 100,
+        signals: expect.arrayContaining([
+          "status:order_now",
+          "short:accelerating",
+          "baseline:above_baseline",
+          "seasonal:above_seasonal",
+          "quality_gate:high_confidence",
+        ]),
+        blockers: [],
+      },
       qualityControls: [],
       autopilotBlockers: [],
       demandBasis: {
@@ -306,6 +321,19 @@ describe("purchasing recommendation engine", () => {
         signal: "open_supply_covers_cycle",
         supplyCoverageRatio: 3.5,
         openPoCoverageRatio: 3.33,
+      },
+      recommendationCandidateScore: {
+        score: 29,
+        band: "watch",
+        demandScore: 35,
+        supplyScore: 20,
+        readinessScore: 35,
+        blockers: expect.arrayContaining([
+          "thin_history",
+          "product_lead_time_fallback",
+          "missing_supplier_cost",
+          "skipped:already_on_order",
+        ]),
       },
       reviewSignal: {
         action: "review_open_po",

@@ -42,6 +42,11 @@ export type PurchasingRecommendationSupplierCycleSignal =
   | "receipt_aging"
   | "receipt_stale"
   | "no_supplier_cycle_data";
+export type PurchasingRecommendationCandidateBand =
+  | "strong_candidate"
+  | "review_candidate"
+  | "watch"
+  | "blocked";
 export type PurchasingRecommendationReviewAction =
   | "create_po"
   | "assign_vendor"
@@ -222,6 +227,16 @@ export interface PurchasingRecommendationItem {
     daysUntilEarliestExpected: number | null;
     daysSinceLastReceipt: number | null;
   };
+  recommendationCandidateScore: {
+    score: number;
+    band: PurchasingRecommendationCandidateBand;
+    demandScore: number;
+    supplyScore: number;
+    readinessScore: number;
+    signals: string[];
+    blockers: string[];
+    detail: string;
+  };
   demandBasis: {
     lookbackDays: number;
     periodUsagePieces: number;
@@ -334,6 +349,10 @@ function asPositiveNumberOrNull(value: unknown): number | null {
 
 function roundRatio(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function clampScore(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
 }
 
 function getMeta(
@@ -819,6 +838,118 @@ function buildSupplierCycleDiagnostics(input: {
   };
 }
 
+function buildRecommendationCandidateScore(input: {
+  status: PurchasingRecommendationStatus;
+  actionable: boolean;
+  skippedReason: PurchasingRecommendationSkipReason | null;
+  confidence: PurchasingRecommendationConfidence;
+  qualityGate: PurchasingRecommendationItem["qualityGate"];
+  qualityControls: PurchasingRecommendationQualityControl[];
+  demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
+  demandWindowDiagnostics: PurchasingDemandForecastWindowDiagnostics;
+  supplierCycleDiagnostics: PurchasingRecommendationItem["supplierCycleDiagnostics"];
+}): PurchasingRecommendationItem["recommendationCandidateScore"] {
+  const demandQualityScore: Record<PurchasingRecommendationDemandQuality, number> = {
+    no_recent_demand: 0,
+    thin_history: 35,
+    normal: 60,
+  };
+  const demandTrendAdjustment: Record<PurchasingRecommendationDemandTrend, number> = {
+    not_available: 0,
+    no_recent_demand: -30,
+    new_demand: 12,
+    rising: 15,
+    stable: 5,
+    falling: -20,
+  };
+  const demandWindow = input.demandWindowDiagnostics;
+  const demandScore = clampScore(
+    demandQualityScore[input.demandQuality] +
+      demandTrendAdjustment[input.demandTrend] +
+      (demandWindow.accelerationSignal === "accelerating" ? 10 : demandWindow.accelerationSignal === "decelerating" ? -10 : 0) +
+      (demandWindow.baselineSignal === "above_baseline" ? 8 : demandWindow.baselineSignal === "below_baseline" ? -8 : 0) +
+      (demandWindow.seasonalSignal === "above_seasonal" ? 8 : demandWindow.seasonalSignal === "below_seasonal" ? -8 : 0),
+  );
+
+  const supplyStatusScore: Record<PurchasingRecommendationStatus, number> = {
+    stockout: 100,
+    order_now: 85,
+    order_soon: 65,
+    on_order: 40,
+    ok: 20,
+    no_movement: 0,
+  };
+  const supplierCycleAdjustment: Record<PurchasingRecommendationSupplierCycleSignal, number> = {
+    open_supply_past_due: 15,
+    open_supply_covers_cycle: -20,
+    open_supply_partial: 10,
+    receipt_recent: -5,
+    receipt_aging: 5,
+    receipt_stale: 10,
+    no_supplier_cycle_data: 0,
+  };
+  const supplyScore = clampScore(
+    supplyStatusScore[input.status] + supplierCycleAdjustment[input.supplierCycleDiagnostics.signal],
+  );
+
+  const confidenceScore: Record<PurchasingRecommendationConfidence, number> = {
+    high: 90,
+    medium: 65,
+    low: 30,
+  };
+  const reviewControlCount = input.qualityControls.filter((control) => control.severity === "review").length;
+  const blockControlCount = input.qualityControls.filter((control) => control.severity === "block").length;
+  const readinessScore = clampScore(
+    (input.qualityGate.autoDraftEligible ? 100 : confidenceScore[input.confidence]) -
+      reviewControlCount * 10 -
+      blockControlCount * 35,
+  );
+
+  let score = clampScore(demandScore * 0.35 + supplyScore * 0.4 + readinessScore * 0.25);
+  if (input.skippedReason === "excluded") score = 0;
+  if (input.skippedReason === "no_vendor" || blockControlCount > 0) score = Math.min(score, 59);
+  if (input.skippedReason === "already_on_order") score = Math.min(score, 49);
+  if (input.skippedReason === "not_actionable_status" || input.skippedReason === "zero_suggested_quantity") {
+    score = Math.min(score, 39);
+  }
+
+  const band: PurchasingRecommendationCandidateBand =
+    input.skippedReason === "excluded" || input.skippedReason === "no_vendor" || blockControlCount > 0
+      ? "blocked"
+      : input.actionable && score >= 80
+        ? "strong_candidate"
+        : score >= 60
+          ? "review_candidate"
+          : "watch";
+
+  const signals = [
+    `status:${input.status}`,
+    `demand:${input.demandQuality}`,
+    `trend:${input.demandTrend}`,
+    `short:${demandWindow.accelerationSignal}`,
+    `baseline:${demandWindow.baselineSignal}`,
+    `seasonal:${demandWindow.seasonalSignal}`,
+    `supplier_cycle:${input.supplierCycleDiagnostics.signal}`,
+    `quality_gate:${input.qualityGate.reason}`,
+  ];
+  const blockers = input.qualityControls
+    .filter((control) => control.severity === "block" || control.severity === "review")
+    .map((control) => control.code);
+  if (input.skippedReason) blockers.push(`skipped:${input.skippedReason}`);
+
+  return {
+    score,
+    band,
+    demandScore,
+    supplyScore,
+    readinessScore,
+    signals,
+    blockers,
+    detail: `Read-only candidate score ${score}/100 from demand ${demandScore}, supply ${supplyScore}, and readiness ${readinessScore}.`,
+  };
+}
+
 function resolveSupplierCost(input: {
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
@@ -1202,6 +1333,24 @@ export function generatePurchasingRecommendations(
       hasVendor,
     });
     const autopilotBlockers = qualityControls;
+    const qualityGate = buildQualityGate({
+      actionable,
+      confidence,
+      skippedReason,
+      autopilotBlockers,
+    });
+    const recommendationCandidateScore = buildRecommendationCandidateScore({
+      status,
+      actionable,
+      skippedReason,
+      confidence,
+      qualityGate,
+      qualityControls,
+      demandQuality,
+      demandTrend,
+      demandWindowDiagnostics,
+      supplierCycleDiagnostics,
+    });
     const item: PurchasingRecommendationItem = {
       recommendationId: `${productId}:${productVariantId ?? "product"}:${lookbackDays}`,
       productId,
@@ -1253,6 +1402,7 @@ export function generatePurchasingRecommendations(
         earliestExpectedDate: row.earliest_expected ?? null,
       },
       supplierCycleDiagnostics,
+      recommendationCandidateScore,
       demandBasis: {
         lookbackDays,
         periodUsagePieces: periodUsage,
@@ -1306,12 +1456,7 @@ export function generatePurchasingRecommendations(
       autopilotBlockers,
       explanation,
       reviewSignal,
-      qualityGate: buildQualityGate({
-        actionable,
-        confidence,
-        skippedReason,
-        autopilotBlockers,
-      }),
+      qualityGate,
       actionable,
       skippedReason,
     };

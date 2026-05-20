@@ -2175,3 +2175,33 @@ Next step:
 - Continue Phase 9 with a read-only recommendation-candidate score that combines
   demand diagnostics, supplier-cycle diagnostics, and quality gates for operator
   review before any changes to PO mutation behavior.
+
+### 2026-05-20 - Phase 9 Slice 9: Recommendation Candidate Score
+
+Scope:
+
+- Added a read-only recommendation candidate score to each purchasing
+  recommendation, combining demand diagnostics, supply/reorder status,
+  supplier-cycle diagnostics, confidence, and quality controls into a visible
+  0-100 review signal.
+- Classified each recommendation into strong candidate, review candidate,
+  watch, or blocked bands without changing reorder quantity, recommendation
+  status, confidence, quality gates, auto-draft eligibility, or PO mutation
+  behavior.
+- Persisted recommendation candidate band counts, average candidate score, and
+  strong-candidate count in saved recommendation run-detail diagnostics.
+- Surfaced the score and band in purchasing forecast text and dashboard run
+  summaries so operators can compare candidate strength before any future
+  automation behavior uses these signals.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+
+Next step:
+
+- Continue Phase 9 with operator-facing review controls around high-scoring
+  candidate recommendations, still keeping PO mutation behavior unchanged until
+  the score has been reviewed against live purchasing results.
