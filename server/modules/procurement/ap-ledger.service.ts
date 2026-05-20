@@ -631,7 +631,13 @@ export async function approveInvoice(id: number, userId?: string) {
   const affectedPoIds: number[] = [];
   const updated = await db.transaction(async (tx: ApLedgerDbClient) => {
     const [inv] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-    if (!inv || !["received", "disputed"].includes(inv.status)) {
+    if (!inv) {
+      throw new Error("Invoice not found");
+    }
+    if (["approved", "partially_paid", "paid"].includes(inv.status)) {
+      return inv;
+    }
+    if (!["received", "disputed"].includes(inv.status)) {
       throw new Error("Invoice must be in received or disputed status to approve");
     }
 
