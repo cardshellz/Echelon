@@ -97,6 +97,11 @@ describe("purchasing recommendation run detail", () => {
         demandSeasonalitySignalCounts: {
           not_available: 2,
         },
+        supplierCycleSignalCounts: {
+          no_supplier_cycle_data: 2,
+        },
+        supplierCycleOpenPoPastDueCount: 0,
+        avgSupplierCycleSupplyCoverageRatio: 0,
         qualityControlCounts: {
           product_lead_time_fallback: 2,
           missing_supplier_cost: 1,

@@ -2147,3 +2147,31 @@ Next step:
 - Continue Phase 9 by adding supplier-cycle diagnostics or a read-only
   recommendation-candidate score that uses the now-visible demand signals for
   operator review before any PO mutation behavior changes.
+
+### 2026-05-20 - Phase 9 Slice 8: Supplier Cycle Diagnostics
+
+Scope:
+
+- Added read-only supplier-cycle diagnostics to each purchasing recommendation
+  so operators can see open PO coverage, past-due inbound supply, and receipt
+  recency beside demand forecast signals.
+- Classified supplier cycle signals as open supply past due, open supply
+  covers the reorder cycle, partial open supply, recent receipt, aging receipt,
+  stale receipt, or missing supplier-cycle data without changing recommendation
+  status, confidence, quality gates, or auto-draft behavior.
+- Persisted supplier-cycle signal counts, past-due open PO count, and average
+  supply coverage ratio in saved recommendation run-detail forecast diagnostics.
+- Surfaced supplier-cycle signal summaries in the purchasing dashboard run
+  detail and per-item forecast text in the purchasing admin views.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+
+Next step:
+
+- Continue Phase 9 with a read-only recommendation-candidate score that combines
+  demand diagnostics, supplier-cycle diagnostics, and quality gates for operator
+  review before any changes to PO mutation behavior.

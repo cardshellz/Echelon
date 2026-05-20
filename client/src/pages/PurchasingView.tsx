@@ -126,6 +126,15 @@ interface ReorderItem {
     lastPurchasedAt?: string | null;
     vendorProductUpdatedAt?: string | null;
   };
+  supplierCycleDiagnostics?: {
+    signal: string;
+    detail: string;
+    cycleDays: number;
+    supplyCoverageRatio: number | null;
+    openPoCoverageRatio: number | null;
+    daysUntilEarliestExpected: number | null;
+    daysSinceLastReceipt: number | null;
+  };
   qualityControls?: RecommendationQualityControl[];
   autopilotBlockers?: RecommendationQualityControl[];
   actionable?: boolean;
@@ -317,6 +326,9 @@ export default function PurchasingView() {
             seasonalWindow?.lookbackDays ? ` (${seasonalWindow.lookbackDays}d)` : ""
           }`
         : "";
+    const cycleLabel = item.supplierCycleDiagnostics
+      ? ` - cycle ${item.supplierCycleDiagnostics.signal.replace(/_/g, " ")}`
+      : "";
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -325,7 +337,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel} - ${leadLabel} - ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel} - ${leadLabel} - ${costLabel}`;
   };
 
   const getAutopilotBlockers = (item: ReorderItem) => {

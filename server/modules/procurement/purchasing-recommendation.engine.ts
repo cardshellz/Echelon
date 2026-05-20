@@ -34,6 +34,14 @@ export type PurchasingRecommendationSupplierCostSource =
   | "last_purchase_cost"
   | "missing";
 export type PurchasingRecommendationSupplierCostQuality = "current" | "stale" | "unverified" | "missing";
+export type PurchasingRecommendationSupplierCycleSignal =
+  | "open_supply_past_due"
+  | "open_supply_covers_cycle"
+  | "open_supply_partial"
+  | "receipt_recent"
+  | "receipt_aging"
+  | "receipt_stale"
+  | "no_supplier_cycle_data";
 export type PurchasingRecommendationReviewAction =
   | "create_po"
   | "assign_vendor"
@@ -205,6 +213,15 @@ export interface PurchasingRecommendationItem {
     openPoCount: number;
     earliestExpectedDate: string | Date | null;
   };
+  supplierCycleDiagnostics: {
+    signal: PurchasingRecommendationSupplierCycleSignal;
+    detail: string;
+    cycleDays: number;
+    supplyCoverageRatio: number | null;
+    openPoCoverageRatio: number | null;
+    daysUntilEarliestExpected: number | null;
+    daysSinceLastReceipt: number | null;
+  };
   demandBasis: {
     lookbackDays: number;
     periodUsagePieces: number;
@@ -313,6 +330,10 @@ function asPositiveInt(value: unknown, fallback: number): number {
 function asPositiveNumberOrNull(value: unknown): number | null {
   const parsed = asNumber(value, NaN);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function roundRatio(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function getMeta(
@@ -675,6 +696,129 @@ function mostRecentDate(...values: Array<string | Date | null | undefined>): Dat
   return latest;
 }
 
+function parseDate(value: string | Date | null | undefined): Date | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function toUtcDayNumber(value: Date): number {
+  return Math.floor(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()) / 86_400_000);
+}
+
+function calendarDayDiff(start: Date, end: Date): number {
+  return toUtcDayNumber(end) - toUtcDayNumber(start);
+}
+
+function formatCoverage(ratio: number | null): string {
+  return ratio == null ? "no cycle coverage" : `${ratio.toLocaleString(undefined, { maximumFractionDigits: 2 })}x cycle coverage`;
+}
+
+function buildSupplierCycleDiagnostics(input: {
+  available: number;
+  effectiveSupply: number;
+  reorderPoint: number;
+  onOrderPieces: number;
+  openPoCount: number;
+  earliestExpectedDate: string | Date | null;
+  lastReceivedAt: string | Date | null;
+  leadTimeDays: number;
+  safetyStockDays: number;
+}): PurchasingRecommendationItem["supplierCycleDiagnostics"] {
+  const cycleDays = Math.max(1, Math.ceil(input.leadTimeDays + input.safetyStockDays));
+  const supplyCoverageRatio = input.reorderPoint > 0 ? roundRatio(input.effectiveSupply / input.reorderPoint) : null;
+  const openPoCoverageRatio =
+    input.reorderPoint > 0 && input.onOrderPieces > 0 ? roundRatio(input.onOrderPieces / input.reorderPoint) : null;
+  const now = new Date();
+  const expectedDate = parseDate(input.earliestExpectedDate);
+  const lastReceivedAt = parseDate(input.lastReceivedAt);
+  const daysUntilEarliestExpected = expectedDate ? calendarDayDiff(now, expectedDate) : null;
+  const daysSinceLastReceipt = lastReceivedAt ? calendarDayDiff(lastReceivedAt, now) : null;
+  const hasOpenSupply = input.openPoCount > 0 || input.onOrderPieces > 0;
+
+  if (hasOpenSupply) {
+    if (daysUntilEarliestExpected != null && daysUntilEarliestExpected < 0) {
+      return {
+        signal: "open_supply_past_due",
+        detail: `Open PO supply is ${Math.abs(daysUntilEarliestExpected)} day${Math.abs(daysUntilEarliestExpected) === 1 ? "" : "s"} past expected date with ${formatCoverage(supplyCoverageRatio)}.`,
+        cycleDays,
+        supplyCoverageRatio,
+        openPoCoverageRatio,
+        daysUntilEarliestExpected,
+        daysSinceLastReceipt,
+      };
+    }
+
+    if (input.reorderPoint > 0 && input.effectiveSupply >= input.reorderPoint) {
+      return {
+        signal: "open_supply_covers_cycle",
+        detail: `Available plus open PO supply covers the reorder cycle (${formatCoverage(supplyCoverageRatio)}).`,
+        cycleDays,
+        supplyCoverageRatio,
+        openPoCoverageRatio,
+        daysUntilEarliestExpected,
+        daysSinceLastReceipt,
+      };
+    }
+
+    return {
+      signal: "open_supply_partial",
+      detail: `Open PO supply exists but available plus inbound supply is still below the reorder cycle (${formatCoverage(supplyCoverageRatio)}).`,
+      cycleDays,
+      supplyCoverageRatio,
+      openPoCoverageRatio,
+      daysUntilEarliestExpected,
+      daysSinceLastReceipt,
+    };
+  }
+
+  if (daysSinceLastReceipt == null) {
+    return {
+      signal: "no_supplier_cycle_data",
+      detail: "No open PO supply or recent receipt date is available for supplier-cycle review.",
+      cycleDays,
+      supplyCoverageRatio,
+      openPoCoverageRatio,
+      daysUntilEarliestExpected,
+      daysSinceLastReceipt,
+    };
+  }
+
+  if (daysSinceLastReceipt <= cycleDays) {
+    return {
+      signal: "receipt_recent",
+      detail: `Last receipt was ${daysSinceLastReceipt} day${daysSinceLastReceipt === 1 ? "" : "s"} ago, inside the ${cycleDays}-day lead plus safety cycle.`,
+      cycleDays,
+      supplyCoverageRatio,
+      openPoCoverageRatio,
+      daysUntilEarliestExpected,
+      daysSinceLastReceipt,
+    };
+  }
+
+  if (daysSinceLastReceipt <= cycleDays * 2) {
+    return {
+      signal: "receipt_aging",
+      detail: `Last receipt was ${daysSinceLastReceipt} days ago, beyond the ${cycleDays}-day lead plus safety cycle.`,
+      cycleDays,
+      supplyCoverageRatio,
+      openPoCoverageRatio,
+      daysUntilEarliestExpected,
+      daysSinceLastReceipt,
+    };
+  }
+
+  return {
+    signal: "receipt_stale",
+    detail: `Last receipt was ${daysSinceLastReceipt} days ago, more than two supplier cycles ago.`,
+    cycleDays,
+    supplyCoverageRatio,
+    openPoCoverageRatio,
+    daysUntilEarliestExpected,
+    daysSinceLastReceipt,
+  };
+}
+
 function resolveSupplierCost(input: {
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
@@ -931,6 +1075,7 @@ export function generatePurchasingRecommendations(
     const avgDailyUsage = demandForecast.avgDailyUsagePieces;
     const roundedAvgDailyUsage = Math.round(avgDailyUsage * 100) / 100;
     const onOrderPieces = asNumber(row.on_order_pieces);
+    const openPoCount = asNumber(row.open_po_count);
     const available = totalOnHand - totalReserved;
     const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
     const vendorLeadTime = row.vendor_lead_time_days == null ? null : asNumber(row.vendor_lead_time_days, NaN);
@@ -969,6 +1114,17 @@ export function generatePurchasingRecommendations(
       reorderPoint,
       onOrderPieces,
       effectiveSupply,
+    });
+    const supplierCycleDiagnostics = buildSupplierCycleDiagnostics({
+      available,
+      effectiveSupply,
+      reorderPoint,
+      onOrderPieces,
+      openPoCount,
+      earliestExpectedDate: row.earliest_expected ?? null,
+      lastReceivedAt: row.last_received_at ?? null,
+      leadTimeDays,
+      safetyStockDays,
     });
     const preferredVendorId = row.preferred_vendor_id == null ? null : asNumber(row.preferred_vendor_id);
     const preferredVendorName = row.preferred_vendor_name ?? null;
@@ -1021,7 +1177,7 @@ export function generatePurchasingRecommendations(
       suggestedOrderQty,
       suggestedOrderPieces,
       orderUomLabel,
-      openPoCount: asNumber(row.open_po_count),
+      openPoCount,
       onOrderPieces,
       actionable,
     });
@@ -1069,7 +1225,7 @@ export function generatePurchasingRecommendations(
       orderUomLabel,
       onOrderQty: orderUomUnits > 1 ? Math.floor(onOrderPieces / orderUomUnits) : onOrderPieces,
       onOrderPieces,
-      openPoCount: asNumber(row.open_po_count),
+      openPoCount,
       earliestExpectedDate: row.earliest_expected ?? null,
       status,
       lastReceivedAt: row.last_received_at ?? null,
@@ -1093,9 +1249,10 @@ export function generatePurchasingRecommendations(
       },
       openPoSupply: {
         onOrderPieces,
-        openPoCount: asNumber(row.open_po_count),
+        openPoCount,
         earliestExpectedDate: row.earliest_expected ?? null,
       },
+      supplierCycleDiagnostics,
       demandBasis: {
         lookbackDays,
         periodUsagePieces: periodUsage,
