@@ -199,6 +199,47 @@ describe("AP ledger atomic side effects", () => {
     expect(mocks.db.insert).toHaveBeenCalledWith(tables.auditEvents);
   });
 
+  it("does not fail a completed AP command when audit persistence fails", async () => {
+    const { executeApLedgerCommand } = await import("../../ap-ledger.service");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tx = buildTx([
+      [{ total: 2500 }],
+      [{ invoicedAmountCents: 2500, status: "approved" }],
+      [{ purchaseOrderId: 7 }],
+      [{ invoicedAmountCents: 2500, paidAmountCents: 2500 }],
+      [{ financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null }],
+    ]);
+    mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
+    mocks.db.select
+      .mockReturnValueOnce(makeSelectChain([]))
+      .mockReturnValueOnce(makeSelectChain([{ purchaseOrderId: 7 }]));
+    mocks.db.insert.mockReturnValueOnce({
+      values: vi.fn(() => Promise.reject(new Error('relation "audit_events" does not exist'))),
+    });
+
+    const result = await executeApLedgerCommand("record_payment", {
+      payment: {
+        vendorId: 4,
+        paymentDate: new Date("2026-05-18T12:00:00Z"),
+        paymentMethod: "ach",
+        totalAmountCents: 2500,
+        allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+        createdBy: "ops-user",
+      },
+    });
+
+    expect(result.apLedgerOutcome).toMatchObject({
+      command: "record_payment",
+      entityType: "payment",
+      entityId: 21,
+    });
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining("[AP Ledger Audit] Failed to persist audit event for record_payment"),
+    );
+
+    consoleError.mockRestore();
+  });
+
   it("voids payment, reverses invoice balance, and recomputes PO aggregate inside one transaction", async () => {
     const { voidPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([

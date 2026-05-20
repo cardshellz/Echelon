@@ -160,16 +160,22 @@ function buildApLedgerOutcome(input: {
 }
 
 async function appendApLedgerCommandAudit(outcome: ApLedgerCommandOutcome, actor?: string): Promise<void> {
-  await db.insert(auditEvents).values({
-    level: "AUDIT",
-    actor: actor ?? "system",
-    action: `ap_ledger.${outcome.command}`,
-    target: `${outcome.entityType}:${outcome.entityId ?? "unknown"}`,
-    changes: null,
-    context: {
-      ...outcome,
-    },
-  });
+  try {
+    await db.insert(auditEvents).values({
+      level: "AUDIT",
+      actor: actor ?? "system",
+      action: `ap_ledger.${outcome.command}`,
+      target: `${outcome.entityType}:${outcome.entityId ?? "unknown"}`,
+      changes: null,
+      context: {
+        ...outcome,
+      },
+    });
+  } catch (auditErr: any) {
+    console.error(
+      `[AP Ledger Audit] Failed to persist audit event for ${outcome.command}: ${auditErr?.message ?? auditErr}`,
+    );
+  }
 }
 
 async function runPoFinancialDetectionHooks(poId: number): Promise<void> {
