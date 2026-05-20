@@ -907,7 +907,7 @@ function DogfoodReadinessTab({
         buildAdminOmsChannelDefaultSourceUrl(),
         input,
       );
-      setOmsMessage(`Dropship OMS source set to ${dropshipOmsSourceLabel(response.selectedChannel)}.`);
+      setOmsMessage(`Internal dropship channel initialized as ${dropshipOmsSourceLabel(response.selectedChannel)}.`);
       await Promise.all([
         omsChannelConfigQuery.refetch(),
         readinessQuery.refetch(),
@@ -916,7 +916,7 @@ function DogfoodReadinessTab({
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
     } catch (caught) {
-      setOmsError(caught instanceof Error ? caught.message : "Dropship OMS source setup failed.");
+      setOmsError(caught instanceof Error ? caught.message : "Internal dropship channel setup failed.");
     } finally {
       setIsSavingOmsChannel(false);
     }
@@ -3878,6 +3878,9 @@ function activeRateTableCount(config: DropshipShippingConfigOverview | undefined
 }
 
 function dropshipOmsSourceLabel(channel: DropshipOmsChannelOption): string {
+  if (channel.type === "internal" && channel.provider === "manual") {
+    return channel.name;
+  }
   const provider = formatStatus(channel.provider);
   return channel.name.trim().toLowerCase() === provider.trim().toLowerCase()
     ? channel.name
@@ -3904,7 +3907,10 @@ function OmsChannelConfigPanel({
     );
   }
 
-  const markedChannels = config?.channels.filter((channel) => channel.isDropshipOmsChannel) ?? [];
+  const internalDropshipChannels = config?.channels.filter((channel) => channel.isInternalDropshipChannel) ?? [];
+  const legacyMarkedChannels = config?.channels.filter((channel) => (
+    channel.isDropshipOmsChannel && !channel.isInternalDropshipChannel
+  )) ?? [];
   const currentChannel = config?.channels.find((channel) => channel.channelId === config.currentChannelId) ?? null;
   const hasAmbiguousConfig = (config?.currentChannelCount ?? 0) > 1;
 
@@ -3913,37 +3919,44 @@ function OmsChannelConfigPanel({
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold">Dropship OMS source</h2>
+            <h2 className="text-lg font-semibold">Internal dropship channel</h2>
             <Badge variant="outline" className={omsChannelConfigTone(config)}>
               {omsChannelConfigLabel(config)}
             </Badge>
           </div>
           <div className="mt-2 text-sm text-muted-foreground">
             {currentChannel
-              ? `${dropshipOmsSourceLabel(currentChannel)} is the internal Echelon source used after marketplace intake.`
+              ? `${dropshipOmsSourceLabel(currentChannel)} is the static internal Echelon channel used to tag dropship intake rows.`
               : hasAmbiguousConfig
-                ? `${config?.currentChannelCount ?? 0} active sources are marked. Choose one to remove ambiguity.`
-                : "No active Dropship OMS source is marked."}
+                ? `${config?.currentChannelCount ?? 0} active internal dropship channels exist. This needs a data cleanup.`
+                : "The static internal dropship channel is missing."}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             Vendor eBay and Shopify stores connect separately under Store Connections. This source only tags accepted dropship orders inside Echelon.
           </div>
-          {markedChannels.length > 0 && (
+          {internalDropshipChannels.length > 0 && (
             <div className="mt-1 text-xs text-muted-foreground">
-              Marked: {markedChannels.map((channel) => `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`).join(", ")}
+              Internal channel: {internalDropshipChannels.map((channel) => `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`).join(", ")}
+            </div>
+          )}
+          {legacyMarkedChannels.length > 0 && (
+            <div className="mt-1 text-xs text-muted-foreground">
+              Legacy markers: {legacyMarkedChannels.map((channel) => `${dropshipOmsSourceLabel(channel)} (${formatStatus(channel.status)})`).join(", ")}
             </div>
           )}
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-          <Button
-            className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-            disabled={isSaving}
-            onClick={onEnsureDefaultSource}
-          >
-            <Save className="h-4 w-4" />
-            {isSaving ? "Saving" : currentChannel ? "Repair source" : "Create source"}
-          </Button>
-        </div>
+        {(!currentChannel || hasAmbiguousConfig) && (
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <Button
+              className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              disabled={isSaving}
+              onClick={onEnsureDefaultSource}
+            >
+              <Save className="h-4 w-4" />
+              {isSaving ? "Saving" : "Initialize channel"}
+            </Button>
+          </div>
+        )}
       </div>
     </section>
   );

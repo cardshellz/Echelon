@@ -23,7 +23,7 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
   it("uses an explicitly configured active channel id", async () => {
     process.env.DROPSHIP_OMS_CHANNEL_ID = "42";
     const query = vi.fn(async () => ({
-      rows: [{ id: 42, status: "active", type: "internal", provider: "manual" }],
+      rows: [{ id: 42, name: "Dropship OMS", status: "active", type: "internal", provider: "manual" }],
     }));
     const client = { query } as unknown as PoolClient;
 
@@ -36,37 +36,39 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
   it("rejects an explicitly configured marketplace sales channel", async () => {
     process.env.DROPSHIP_OMS_CHANNEL_ID = "42";
     const query = vi.fn(async () => ({
-      rows: [{ id: 42, status: "active", type: "ebay", provider: "ebay" }],
+      rows: [{ id: 42, name: "Ebay", status: "active", type: "ebay", provider: "ebay" }],
     }));
     const client = { query } as unknown as PoolClient;
 
     await expect(resolveDropshipOmsChannelIdWithClient(client)).rejects.toMatchObject({
       code: "DROPSHIP_OMS_CHANNEL_NOT_INTERNAL_SOURCE",
-      context: { channelId: 42, type: "ebay", provider: "ebay" },
+      context: { channelId: 42, name: "Ebay", type: "ebay", provider: "ebay" },
     });
   });
 
-  it("resolves one active channel marked by dropship OMS feature config", async () => {
+  it("resolves the static internal Dropship OMS channel", async () => {
     const query = vi.fn(async () => ({
-      rows: [{ id: 77, status: "active", type: "internal", provider: "manual" }],
+      rows: [{ id: 77, name: "Dropship OMS", status: "active", type: "internal", provider: "manual" }],
     }));
     const client = { query } as unknown as PoolClient;
 
     await expect(resolveDropshipOmsChannelIdWithClient(client)).resolves.toBe(77);
 
     const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("FROM channels.channels c");
+    expect(sql).toContain("LOWER(c.name) = LOWER('Dropship OMS')");
     expect(sql).toContain("c.type = 'internal'");
     expect(sql).toContain("c.provider = 'manual'");
-    expect(sql).toContain("c.shipping_config #>> '{dropship,role}'");
-    expect(sql).toContain("channels.channel_connections");
-    expect(sql).toContain("cc.metadata #>> '{features,dropshipOms}'");
+    expect(sql).not.toContain("c.shipping_config #>> '{dropship,role}'");
+    expect(sql).not.toContain("channels.channel_connections");
+    expect(sql).not.toContain("cc.metadata #>> '{features,dropshipOms}'");
   });
 
   it("rejects ambiguous Dropship OMS feature config", async () => {
     const query = vi.fn(async () => ({
       rows: [
-        { id: 77, status: "active", type: "internal", provider: "manual" },
-        { id: 88, status: "active", type: "internal", provider: "manual" },
+        { id: 77, name: "Dropship OMS", status: "active", type: "internal", provider: "manual" },
+        { id: 88, name: "Dropship OMS", status: "active", type: "internal", provider: "manual" },
       ],
     }));
     const client = { query } as unknown as PoolClient;
@@ -87,12 +89,18 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
       code: "DROPSHIP_OMS_CHANNEL_CONFIG_REQUIRED",
       context: {
         envChannelId: "DROPSHIP_OMS_CHANNEL_ID",
-        channelShippingConfig: { dropship: { role: "oms" } },
+        internalChannel: {
+          table: "channels.channels",
+          name: "Dropship OMS",
+          type: "internal",
+          provider: "manual",
+          status: "active",
+        },
       },
     });
 
     const sql = String(query.mock.calls[0]?.[0]);
-    expect(sql).not.toContain("LOWER(name)");
+    expect(sql).toContain("LOWER(c.name) = LOWER('Dropship OMS')");
     expect(sql).not.toContain("provider = $2");
   });
 
