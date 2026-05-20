@@ -87,6 +87,12 @@ export interface PurchasingRecommendationRawRow {
   long_demand_order_count?: number | string | null;
   long_demand_active_days?: number | string | null;
   long_latest_demand_at?: string | Date | null;
+  seasonal_window_days?: number | string | null;
+  seasonal_outbound_pieces?: number | string | null;
+  previous_seasonal_outbound_pieces?: number | string | null;
+  seasonal_demand_order_count?: number | string | null;
+  seasonal_demand_active_days?: number | string | null;
+  seasonal_latest_demand_at?: string | Date | null;
   on_order_pieces?: number | string | null;
   open_po_count?: number | string | null;
   earliest_expected?: string | Date | null;
@@ -894,10 +900,28 @@ export function generatePurchasingRecommendations(
       demandActiveDays: hasLongWindowInput ? row.long_demand_active_days : row.demand_active_days,
       latestDemandAt: hasLongWindowInput ? row.long_latest_demand_at ?? null : row.latest_demand_at ?? null,
     });
+    const hasSeasonalWindowInput =
+      row.seasonal_window_days !== undefined ||
+      row.seasonal_outbound_pieces !== undefined ||
+      row.previous_seasonal_outbound_pieces !== undefined ||
+      row.seasonal_demand_order_count !== undefined ||
+      row.seasonal_demand_active_days !== undefined ||
+      row.seasonal_latest_demand_at !== undefined;
+    const seasonalDemandForecast = hasSeasonalWindowInput
+      ? buildPurchasingDemandForecastBasis({
+          lookbackDays: row.seasonal_window_days,
+          periodUsagePieces: row.seasonal_outbound_pieces,
+          priorPeriodUsagePieces: row.previous_seasonal_outbound_pieces,
+          demandOrderCount: row.seasonal_demand_order_count,
+          demandActiveDays: row.seasonal_demand_active_days,
+          latestDemandAt: row.seasonal_latest_demand_at ?? null,
+        })
+      : undefined;
     const demandWindowDiagnostics = buildPurchasingDemandForecastWindowDiagnostics({
       standardWindow: demandForecast,
       shortWindow: shortDemandForecast,
       longWindow: longDemandForecast,
+      seasonalWindow: seasonalDemandForecast,
     });
     const periodUsage = demandForecast.periodUsagePieces;
     const priorPeriodUsage = demandForecast.priorPeriodUsagePieces;

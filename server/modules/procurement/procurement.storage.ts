@@ -1256,7 +1256,14 @@ export const procurementMethods: IProcurementStorage = {
     const normalizedLookbackDays = Math.max(1, Math.trunc(Number(lookbackDays) || 30));
     const shortWindowDays = Math.max(1, Math.min(7, normalizedLookbackDays));
     const longWindowDays = Math.max(90, normalizedLookbackDays * 3);
-    const demandScanWindowDays = Math.max(normalizedLookbackDays * 2, shortWindowDays * 2, longWindowDays * 2);
+    const seasonalWindowDays = normalizedLookbackDays;
+    const seasonalScanWindowDays = 365 + seasonalWindowDays * 2;
+    const demandScanWindowDays = Math.max(
+      normalizedLookbackDays * 2,
+      shortWindowDays * 2,
+      longWindowDays * 2,
+      seasonalScanWindowDays,
+    );
     // Boundary note: reads inventory_levels directly instead of atpService.getAtpPerVariant().
     // This is intentional — the reorder query needs bulk aggregation across ALL products in one
     // query (N+1 atpService calls would be prohibitively slow), and it needs per-location detail
@@ -1297,6 +1304,12 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(vel.long_demand_order_count, 0)::int AS long_demand_order_count,
         COALESCE(vel.long_demand_active_days, 0)::int AS long_demand_active_days,
         vel.long_latest_demand_at,
+        ${seasonalWindowDays}::int AS seasonal_window_days,
+        COALESCE(vel.seasonal_outbound_pieces, 0)::bigint AS seasonal_outbound_pieces,
+        COALESCE(vel.previous_seasonal_outbound_pieces, 0)::bigint AS previous_seasonal_outbound_pieces,
+        COALESCE(vel.seasonal_demand_order_count, 0)::int AS seasonal_demand_order_count,
+        COALESCE(vel.seasonal_demand_active_days, 0)::int AS seasonal_demand_active_days,
+        vel.seasonal_latest_demand_at,
         inv.variant_count,
         order_uom.variant_id,
         order_uom.units_per_variant AS order_uom_units,
@@ -1412,7 +1425,41 @@ export const procurementMethods: IProcurementStorage = {
                   WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${longWindowDays})
                   THEN o.order_placed_at
                   ELSE NULL
-                END) AS long_latest_demand_at
+                END) AS long_latest_demand_at,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at <= NOW() - INTERVAL '1 year'
+                     AND o.order_placed_at > NOW() - INTERVAL '1 year' - MAKE_INTERVAL(days => ${seasonalWindowDays})
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS seasonal_outbound_pieces,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at <= NOW() - INTERVAL '1 year' - MAKE_INTERVAL(days => ${seasonalWindowDays})
+                     AND o.order_placed_at > NOW() - INTERVAL '1 year' - MAKE_INTERVAL(days => ${seasonalWindowDays * 2})
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS previous_seasonal_outbound_pieces,
+                COUNT(DISTINCT CASE
+                  WHEN o.order_placed_at <= NOW() - INTERVAL '1 year'
+                   AND o.order_placed_at > NOW() - INTERVAL '1 year' - MAKE_INTERVAL(days => ${seasonalWindowDays})
+                  THEN oi.order_id
+                  ELSE NULL
+                END) AS seasonal_demand_order_count,
+                COUNT(DISTINCT CASE
+                  WHEN o.order_placed_at <= NOW() - INTERVAL '1 year'
+                   AND o.order_placed_at > NOW() - INTERVAL '1 year' - MAKE_INTERVAL(days => ${seasonalWindowDays})
+                  THEN DATE(o.order_placed_at)
+                  ELSE NULL
+                END) AS seasonal_demand_active_days,
+                MAX(CASE
+                  WHEN o.order_placed_at <= NOW() - INTERVAL '1 year'
+                   AND o.order_placed_at > NOW() - INTERVAL '1 year' - MAKE_INTERVAL(days => ${seasonalWindowDays})
+                  THEN o.order_placed_at
+                  ELSE NULL
+                END) AS seasonal_latest_demand_at
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
         JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true

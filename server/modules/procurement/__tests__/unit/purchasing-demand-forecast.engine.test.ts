@@ -137,6 +137,8 @@ describe("purchasing demand forecast engine", () => {
       accelerationSignal: "accelerating",
       baselineRatio: 1,
       baselineSignal: "near_baseline",
+      seasonalRatio: null,
+      seasonalSignal: "not_available",
     });
   });
 
@@ -179,6 +181,57 @@ describe("purchasing demand forecast engine", () => {
       },
       baselineRatio: 2,
       baselineSignal: "above_baseline",
+      seasonalSignal: "not_available",
+    });
+  });
+
+  it("compares the standard forecast against the same seasonal window last year", () => {
+    const standardWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 30,
+      periodUsagePieces: 90,
+      priorPeriodUsagePieces: 80,
+      demandOrderCount: 20,
+      demandActiveDays: 15,
+    });
+    const shortWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 7,
+      periodUsagePieces: 21,
+      priorPeriodUsagePieces: 14,
+      demandOrderCount: 7,
+      demandActiveDays: 5,
+    });
+    const longWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 90,
+      periodUsagePieces: 270,
+      priorPeriodUsagePieces: 240,
+      demandOrderCount: 45,
+      demandActiveDays: 30,
+    });
+    const seasonalWindow = buildPurchasingDemandForecastBasis({
+      lookbackDays: 30,
+      periodUsagePieces: 45,
+      priorPeriodUsagePieces: 50,
+      demandOrderCount: 12,
+      demandActiveDays: 9,
+    });
+
+    expect(
+      buildPurchasingDemandForecastWindowDiagnostics({
+        standardWindow,
+        shortWindow,
+        longWindow,
+        seasonalWindow,
+      }),
+    ).toMatchObject({
+      seasonalWindow: {
+        label: "seasonal",
+        lookbackDays: 30,
+        avgDailyUsagePieces: 1.5,
+        demandQuality: "normal",
+        demandTrend: "stable",
+      },
+      seasonalRatio: 2,
+      seasonalSignal: "above_seasonal",
     });
   });
 });

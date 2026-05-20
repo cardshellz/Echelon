@@ -2111,3 +2111,39 @@ Next step:
 - Continue Phase 9 by adding true seasonality or supplier-cycle diagnostics on
   top of the now-visible short/standard/long demand windows, still without
   mutating PO recommendation math until the diagnostics prove useful.
+
+### 2026-05-19 - Phase 9 Slice 7: Demand Seasonality Diagnostics
+
+Scope:
+
+- Added a non-mutating seasonal demand comparison beside the existing
+  short, standard, and long forecast windows so operators can see whether
+  current velocity is above, near, or below the same calendar-period demand
+  window from one year earlier.
+- Extended the procurement reorder data query with same-period-prior-year
+  usage, prior seasonal usage, order count, active demand days, latest seasonal
+  demand timestamp, and a widened demand scan horizon that covers the seasonal
+  comparison window.
+- Added forecast-engine seasonal ratio and signal output while preserving the
+  standard-window forecast basis as the only input to reorder-point and
+  auto-draft decisions.
+- Persisted seasonal demand quality, seasonal trend, and seasonality signal
+  counts in saved recommendation run-detail forecast diagnostics.
+- Surfaced the seasonality signal in purchasing forecast basis text and
+  dashboard run summaries so operators can compare short-term acceleration,
+  long-baseline drift, and calendar-period seasonality before changing
+  recommendation math.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed after fixture correction: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Initial broad procurement run hit a transient `bad port` failure in `purchasing-admin.routes.test.ts`; rerunning that file passed.
+- Passed on rerun: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 9 by adding supplier-cycle diagnostics or a read-only
+  recommendation-candidate score that uses the now-visible demand signals for
+  operator review before any PO mutation behavior changes.

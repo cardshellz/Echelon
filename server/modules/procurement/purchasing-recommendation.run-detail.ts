@@ -44,8 +44,11 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const shortWindowDemandTrendCounts: Record<string, number> = {};
   const longWindowDemandQualityCounts: Record<string, number> = {};
   const longWindowDemandTrendCounts: Record<string, number> = {};
+  const seasonalWindowDemandQualityCounts: Record<string, number> = {};
+  const seasonalWindowDemandTrendCounts: Record<string, number> = {};
   const demandAccelerationSignalCounts: Record<string, number> = {};
   const demandBaselineSignalCounts: Record<string, number> = {};
+  const demandSeasonalitySignalCounts: Record<string, number> = {};
   const forecastMethodCounts: Record<string, number> = {};
   const qualityControlCounts: Record<string, number> = {};
   const qualityControlAreaCounts: Record<string, number> = {};
@@ -66,8 +69,13 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     increment(shortWindowDemandTrendCounts, provenance.demandWindowDiagnostics.shortWindow.demandTrend);
     increment(longWindowDemandQualityCounts, provenance.demandWindowDiagnostics.longWindow.demandQuality);
     increment(longWindowDemandTrendCounts, provenance.demandWindowDiagnostics.longWindow.demandTrend);
+    if (provenance.demandWindowDiagnostics.seasonalWindow) {
+      increment(seasonalWindowDemandQualityCounts, provenance.demandWindowDiagnostics.seasonalWindow.demandQuality);
+      increment(seasonalWindowDemandTrendCounts, provenance.demandWindowDiagnostics.seasonalWindow.demandTrend);
+    }
     increment(demandAccelerationSignalCounts, provenance.demandWindowDiagnostics.accelerationSignal);
     increment(demandBaselineSignalCounts, provenance.demandWindowDiagnostics.baselineSignal);
+    increment(demandSeasonalitySignalCounts, provenance.demandWindowDiagnostics.seasonalSignal);
     increment(forecastMethodCounts, provenance.forecastMethod);
     for (const control of item.qualityControls) {
       increment(qualityControlCounts, control.code);
@@ -100,8 +108,11 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     shortWindowDemandTrendCounts,
     longWindowDemandQualityCounts,
     longWindowDemandTrendCounts,
+    seasonalWindowDemandQualityCounts,
+    seasonalWindowDemandTrendCounts,
     demandAccelerationSignalCounts,
     demandBaselineSignalCounts,
+    demandSeasonalitySignalCounts,
     qualityControlCounts,
     qualityControlAreaCounts,
     qualityControlSeverityCounts,

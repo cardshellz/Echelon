@@ -102,10 +102,19 @@ interface ReorderItem {
         demandQuality?: "no_recent_demand" | "thin_history" | "normal";
         demandTrend?: "not_available" | "no_recent_demand" | "new_demand" | "rising" | "stable" | "falling";
       };
+      seasonalWindow?: {
+        lookbackDays?: number;
+        periodUsagePieces?: number;
+        avgDailyUsagePieces?: number;
+        demandQuality?: "no_recent_demand" | "thin_history" | "normal";
+        demandTrend?: "not_available" | "no_recent_demand" | "new_demand" | "rising" | "stable" | "falling";
+      };
       accelerationRatio?: number | null;
       accelerationSignal?: "not_available" | "accelerating" | "steady" | "decelerating";
       baselineRatio?: number | null;
       baselineSignal?: "not_available" | "above_baseline" | "near_baseline" | "below_baseline";
+      seasonalRatio?: number | null;
+      seasonalSignal?: "not_available" | "above_seasonal" | "near_seasonal" | "below_seasonal";
     };
   };
   supplierBasis?: {
@@ -300,6 +309,14 @@ export default function PurchasingView() {
           longWindow?.lookbackDays ? ` (${longWindow.lookbackDays}d)` : ""
         }`
       : "";
+    const seasonalWindow = provenance.demandWindowDiagnostics?.seasonalWindow;
+    const seasonalLabel =
+      provenance.demandWindowDiagnostics?.seasonalSignal &&
+      provenance.demandWindowDiagnostics.seasonalSignal !== "not_available"
+        ? ` - seasonal ${provenance.demandWindowDiagnostics.seasonalSignal.replace(/_/g, " ")}${
+            seasonalWindow?.lookbackDays ? ` (${seasonalWindow.lookbackDays}d)` : ""
+          }`
+        : "";
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -308,7 +325,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel} - ${leadLabel} - ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel} - ${leadLabel} - ${costLabel}`;
   };
 
   const getAutopilotBlockers = (item: ReorderItem) => {
