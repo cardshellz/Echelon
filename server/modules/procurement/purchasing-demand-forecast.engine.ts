@@ -8,7 +8,7 @@ export type PurchasingDemandForecastTrend =
   | "falling";
 export type PurchasingDemandForecastSource = "recent_order_velocity";
 export type PurchasingDemandForecastMethod = "recent_order_velocity_v1";
-export type PurchasingDemandForecastWindowLabel = "standard" | "short" | "long";
+export type PurchasingDemandForecastWindowLabel = "standard" | "short" | "long" | "seasonal";
 export type PurchasingDemandForecastAccelerationSignal =
   | "not_available"
   | "accelerating"
@@ -19,6 +19,11 @@ export type PurchasingDemandForecastBaselineSignal =
   | "above_baseline"
   | "near_baseline"
   | "below_baseline";
+export type PurchasingDemandForecastSeasonalitySignal =
+  | "not_available"
+  | "above_seasonal"
+  | "near_seasonal"
+  | "below_seasonal";
 
 export interface PurchasingDemandForecastInput {
   lookbackDays: number | string | null | undefined;
@@ -52,10 +57,13 @@ export interface PurchasingDemandForecastWindowDiagnostics {
   standardWindow: PurchasingDemandForecastWindowSnapshot;
   shortWindow: PurchasingDemandForecastWindowSnapshot;
   longWindow: PurchasingDemandForecastWindowSnapshot;
+  seasonalWindow?: PurchasingDemandForecastWindowSnapshot;
   accelerationRatio: number | null;
   accelerationSignal: PurchasingDemandForecastAccelerationSignal;
   baselineRatio: number | null;
   baselineSignal: PurchasingDemandForecastBaselineSignal;
+  seasonalRatio: number | null;
+  seasonalSignal: PurchasingDemandForecastSeasonalitySignal;
 }
 
 function asNumber(value: unknown, fallback = 0): number {
@@ -194,10 +202,32 @@ function classifyBaselineSignal(input: {
   return { baselineRatio: roundedRatio, baselineSignal: "near_baseline" };
 }
 
+function classifySeasonalitySignal(input: {
+  standardAvgDailyUsagePieces: number;
+  seasonalAvgDailyUsagePieces: number | null;
+}): {
+  seasonalRatio: number | null;
+  seasonalSignal: PurchasingDemandForecastSeasonalitySignal;
+} {
+  if (input.seasonalAvgDailyUsagePieces === null || input.seasonalAvgDailyUsagePieces <= 0) {
+    return { seasonalRatio: null, seasonalSignal: "not_available" };
+  }
+  if (input.standardAvgDailyUsagePieces <= 0) {
+    return { seasonalRatio: 0, seasonalSignal: "below_seasonal" };
+  }
+
+  const ratio = input.standardAvgDailyUsagePieces / input.seasonalAvgDailyUsagePieces;
+  const roundedRatio = Math.round(ratio * 100) / 100;
+  if (ratio >= 1.25) return { seasonalRatio: roundedRatio, seasonalSignal: "above_seasonal" };
+  if (ratio <= 0.75) return { seasonalRatio: roundedRatio, seasonalSignal: "below_seasonal" };
+  return { seasonalRatio: roundedRatio, seasonalSignal: "near_seasonal" };
+}
+
 export function buildPurchasingDemandForecastWindowDiagnostics(input: {
   standardWindow: PurchasingDemandForecastBasis;
   shortWindow: PurchasingDemandForecastBasis;
   longWindow?: PurchasingDemandForecastBasis;
+  seasonalWindow?: PurchasingDemandForecastBasis;
 }): PurchasingDemandForecastWindowDiagnostics {
   const longWindow = input.longWindow ?? input.standardWindow;
   const acceleration = classifyAccelerationSignal({
@@ -208,14 +238,21 @@ export function buildPurchasingDemandForecastWindowDiagnostics(input: {
     standardAvgDailyUsagePieces: input.standardWindow.avgDailyUsagePieces,
     longAvgDailyUsagePieces: longWindow.avgDailyUsagePieces,
   });
+  const seasonality = classifySeasonalitySignal({
+    standardAvgDailyUsagePieces: input.standardWindow.avgDailyUsagePieces,
+    seasonalAvgDailyUsagePieces: input.seasonalWindow?.avgDailyUsagePieces ?? null,
+  });
 
   return {
     standardWindow: toWindowSnapshot("standard", input.standardWindow),
     shortWindow: toWindowSnapshot("short", input.shortWindow),
     longWindow: toWindowSnapshot("long", longWindow),
+    ...(input.seasonalWindow ? { seasonalWindow: toWindowSnapshot("seasonal", input.seasonalWindow) } : {}),
     accelerationRatio: acceleration.accelerationRatio,
     accelerationSignal: acceleration.accelerationSignal,
     baselineRatio: baseline.baselineRatio,
     baselineSignal: baseline.baselineSignal,
+    seasonalRatio: seasonality.seasonalRatio,
+    seasonalSignal: seasonality.seasonalSignal,
   };
 }

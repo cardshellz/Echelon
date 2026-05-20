@@ -33,8 +33,11 @@ interface ForecastDiagnostics {
   shortWindowDemandTrendCounts?: Record<string, number>;
   longWindowDemandQualityCounts?: Record<string, number>;
   longWindowDemandTrendCounts?: Record<string, number>;
+  seasonalWindowDemandQualityCounts?: Record<string, number>;
+  seasonalWindowDemandTrendCounts?: Record<string, number>;
   demandAccelerationSignalCounts?: Record<string, number>;
   demandBaselineSignalCounts?: Record<string, number>;
+  demandSeasonalitySignalCounts?: Record<string, number>;
   qualityControlCounts?: Record<string, number>;
   qualityControlAreaCounts?: Record<string, number>;
   qualityControlSeverityCounts?: Record<string, number>;
@@ -73,10 +76,19 @@ interface RecommendationForecastProvenance {
       demandQuality?: string;
       demandTrend?: string;
     };
+    seasonalWindow?: {
+      lookbackDays?: number;
+      periodUsagePieces?: number;
+      avgDailyUsagePieces?: number;
+      demandQuality?: string;
+      demandTrend?: string;
+    };
     accelerationRatio?: number | null;
     accelerationSignal?: string;
     baselineRatio?: number | null;
     baselineSignal?: string;
+    seasonalRatio?: number | null;
+    seasonalSignal?: string;
   };
 }
 
@@ -262,7 +274,9 @@ function formatRecommendationForecast(provenance?: RecommendationForecastProvena
   const accelerationLabel = acceleration ? ` - ${acceleration.replace(/_/g, " ")}` : "";
   const baseline = provenance.demandWindowDiagnostics?.baselineSignal;
   const baselineLabel = baseline ? ` - ${baseline.replace(/_/g, " ")}` : "";
-  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}`;
+  const seasonal = provenance.demandWindowDiagnostics?.seasonalSignal;
+  const seasonalLabel = seasonal && seasonal !== "not_available" ? ` - ${seasonal.replace(/_/g, " ")}` : "";
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}`;
 }
 
 function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
@@ -856,6 +870,7 @@ export default function PurchasingDashboard() {
                       { label: "Demand trend", value: topCountLabel(lastRunForecastDiagnostics?.demandTrendCounts) },
                       { label: "Short-window signal", value: topCountLabel(lastRunForecastDiagnostics?.demandAccelerationSignalCounts) },
                       { label: "Baseline signal", value: topCountLabel(lastRunForecastDiagnostics?.demandBaselineSignalCounts) },
+                      { label: "Seasonality signal", value: topCountLabel(lastRunForecastDiagnostics?.demandSeasonalitySignalCounts) },
                       { label: "Top quality blocker", value: topCountLabel(lastRunForecastDiagnostics?.autopilotBlockerCounts), warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Blocked items", value: lastRunForecastDiagnostics?.autopilotBlockerItemCount ?? 0, warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
