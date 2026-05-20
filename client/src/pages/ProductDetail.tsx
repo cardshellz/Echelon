@@ -95,6 +95,7 @@ interface ProductDetailData {
   name: string;
   title: string | null;
   description: string | null;
+  categoryId: number | null;
   category: string | null;
   subcategory: string | null;
   brand: string | null;
@@ -123,6 +124,13 @@ interface ProductDetailData {
 
 interface Settings {
   [key: string]: string;
+}
+
+interface ProductCategory {
+  id: number;
+  name: string;
+  slug: string;
+  isActive: boolean;
 }
 
 // --- Inline edit row for product-level channel allocation ---
@@ -792,6 +800,16 @@ export default function ProductDetail() {
   const { data: settings } = useQuery<Settings>({
     queryKey: ["/api/settings"],
   });
+
+  const { data: productCategories = [] } = useQuery<ProductCategory[]>({
+    queryKey: ["/api/product-categories"],
+    queryFn: async () => {
+      const res = await fetch("/api/product-categories");
+      if (!res.ok) throw new Error("Failed to fetch product categories");
+      return res.json();
+    },
+  });
+  const activeProductCategories = productCategories.filter((category) => category.isActive);
   const globalDefaultLeadTime = parseInt(settings?.default_lead_time_days || "120") || 120;
   const globalDefaultSafetyStock = parseInt(settings?.default_safety_stock_days || "7") || 7;
 
@@ -838,7 +856,7 @@ export default function ProductDetail() {
     title: "",
     description: "",
     bulletPoints: "",
-    category: "",
+    categoryId: "",
     subcategory: "",
     brand: "",
     manufacturer: "",
@@ -867,7 +885,7 @@ export default function ProductDetail() {
         title: product.title || "",
         description: product.description || "",
         bulletPoints: (product.bulletPoints || []).join("\n"),
-        category: product.category || "",
+        categoryId: product.categoryId ? String(product.categoryId) : "",
         subcategory: product.subcategory || "",
         brand: product.brand || "",
         manufacturer: product.manufacturer || "",
@@ -913,7 +931,7 @@ export default function ProductDetail() {
           title: contentForm.title || null,
           description: contentForm.description || null,
           bulletPoints,
-          category: contentForm.category || null,
+          categoryId: contentForm.categoryId ? Number(contentForm.categoryId) : null,
           subcategory: contentForm.subcategory || null,
           brand: contentForm.brand || null,
           manufacturer: contentForm.manufacturer || null,
@@ -1956,11 +1974,19 @@ export default function ProductDetail() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="space-y-1.5">
                       <Label className="text-xs md:text-sm">Category</Label>
-                      <Input
-                        value={contentForm.category}
-                        onChange={(e) => updateContentField("category", e.target.value)}
-                        className="h-9"
-                      />
+                      <Select
+                        value={contentForm.categoryId}
+                        onValueChange={(value) => updateContentField("categoryId", value)}
+                      >
+                        <SelectTrigger className="h-9">
+                          <SelectValue placeholder="Select category" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {activeProductCategories.map((category) => (
+                            <SelectItem key={category.id} value={String(category.id)}>{category.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                     <div className="space-y-1.5">
                       <Label className="text-xs md:text-sm">Subcategory</Label>

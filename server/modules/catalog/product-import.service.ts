@@ -13,6 +13,7 @@ import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 const storage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
+import { db, productCategories, eq, and } from "../../storage/base";
 
 // ---------------------------------------------------------------------------
 // Shopify product_type → Echelon product_type slug mapping
@@ -47,6 +48,47 @@ function resolveProductTypeSlug(shopifyType: string | null | undefined, sku?: st
   }
   
   return slug;
+}
+
+function normalizeCategorySlug(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+async function resolveImportedProductCategory(categoryName: string | null | undefined): Promise<{ categoryId: number | null; category: string | null }> {
+  const name = categoryName?.trim();
+  if (!name) {
+    return { categoryId: null, category: null };
+  }
+
+  const slug = normalizeCategorySlug(name);
+  if (!slug) {
+    return { categoryId: null, category: name };
+  }
+
+  const [existing] = await db
+    .select()
+    .from(productCategories)
+    .where(and(eq(productCategories.slug, slug), eq(productCategories.isActive, true)));
+
+  if (existing) {
+    return { categoryId: existing.id, category: existing.name };
+  }
+
+  try {
+    const [created] = await db
+      .insert(productCategories)
+      .values({ name, slug })
+      .returning();
+    return { categoryId: created.id, category: created.name };
+  } catch (error: any) {
+    if (error?.code !== "23505") throw error;
+    const [category] = await db.select().from(productCategories).where(eq(productCategories.slug, slug));
+    return category ? { categoryId: category.id, category: category.name } : { categoryId: null, category: name };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +172,15 @@ export function createProductImportService() {
       }
 
       if (echelonProduct) {
+        const productCategory = await resolveImportedProductCategory(firstVariant.productType);
+
         // Update content fields
         await storage.updateProduct(echelonProduct.id, {
           title: firstVariant.productTitle || firstVariant.title || undefined,
           description: firstVariant.description || undefined,
           brand: firstVariant.vendor || undefined,
-          category: firstVariant.productType || undefined,
+          categoryId: productCategory.categoryId,
+          category: productCategory.category,
           productType: resolveProductTypeSlug(firstVariant.productType, firstVariant.sku),
           tags: firstVariant.tags || undefined,
           status: firstVariant.status || undefined,
@@ -313,11 +358,13 @@ export function createProductImportService() {
     // Process base SKUs with variants
     for (const [baseSku, data] of Object.entries(baseSkuMap)) {
       let product = await storage.getProductBySku(baseSku);
+      const productCategory = await resolveImportedProductCategory(data.productType);
 
       if (product) {
         await storage.updateProduct(product.id, {
           name: data.baseName,
-          category: data.productType,
+          categoryId: productCategory.categoryId,
+          category: productCategory.category,
           productType: resolveProductTypeSlug(data.productType, baseSku),
           brand: data.vendor,
           description: data.description,
@@ -328,7 +375,8 @@ export function createProductImportService() {
         product = await storage.createProduct({
           sku: baseSku,
           name: data.baseName,
-          category: data.productType,
+          categoryId: productCategory.categoryId,
+          category: productCategory.category,
           productType: resolveProductTypeSlug(data.productType, baseSku),
           brand: data.vendor,
           description: data.description,
@@ -376,11 +424,13 @@ export function createProductImportService() {
     // Process standalone variants (no -P/-B/-C suffix)
     for (const sv of standaloneVariants) {
       let product = await storage.getProductBySku(sv.sku);
+      const productCategory = await resolveImportedProductCategory(sv.productType);
 
       if (product) {
         await storage.updateProduct(product.id, {
           name: sv.name,
-          category: sv.productType,
+          categoryId: productCategory.categoryId,
+          category: productCategory.category,
           brand: sv.vendor,
           description: sv.description,
           shopifyProductId: String(sv.shopifyProductId),
@@ -390,7 +440,8 @@ export function createProductImportService() {
         product = await storage.createProduct({
           sku: sv.sku,
           name: sv.name,
-          category: sv.productType,
+          categoryId: productCategory.categoryId,
+          category: productCategory.category,
           brand: sv.vendor,
           description: sv.description,
           shopifyProductId: String(sv.shopifyProductId),

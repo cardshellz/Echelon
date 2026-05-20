@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { db } from "../../db";
-import { sql, eq } from "drizzle-orm";
-import { productAssets } from "@shared/schema";
+import { and, asc, eq, sql } from "drizzle-orm";
+import { productAssets, productCategories, products } from "@shared/schema";
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
 import { inventoryStorage } from "../inventory";
@@ -11,6 +11,47 @@ import { warehouseStorage } from "../warehouse";
 import { procurementStorage } from "../procurement";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
+
+function normalizeCategorySlug(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+async function resolveProductCategory(input: { categoryId?: number | string | null; category?: string | null }) {
+  const rawCategoryId = input.categoryId;
+  if (rawCategoryId !== undefined && rawCategoryId !== null && String(rawCategoryId).trim() !== "") {
+    const categoryId = Number(rawCategoryId);
+    if (!Number.isInteger(categoryId) || categoryId <= 0) {
+      throw new Error("Invalid product category");
+    }
+    const [category] = await db
+      .select()
+      .from(productCategories)
+      .where(and(eq(productCategories.id, categoryId), eq(productCategories.isActive, true)));
+    if (!category) {
+      throw new Error("Product category does not exist or is inactive");
+    }
+    return { categoryId: category.id, category: category.name };
+  }
+
+  const rawCategory = input.category?.trim();
+  if (!rawCategory) {
+    return { categoryId: null, category: null };
+  }
+
+  const slug = normalizeCategorySlug(rawCategory);
+  const [category] = await db
+    .select()
+    .from(productCategories)
+    .where(and(eq(productCategories.slug, slug), eq(productCategories.isActive, true)));
+  if (!category) {
+    throw new Error("Product category must be selected from existing categories");
+  }
+  return { categoryId: category.id, category: category.name };
+}
 
 export async function registerProductRoutes(app: Express) {
   // ============================================================================
@@ -101,6 +142,115 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
+  app.get("/api/product-categories", requirePermission("inventory", "view"), async (_req, res) => {
+    try {
+      const categories = await db
+        .select({
+          id: productCategories.id,
+          name: productCategories.name,
+          slug: productCategories.slug,
+          description: productCategories.description,
+          sortOrder: productCategories.sortOrder,
+          isActive: productCategories.isActive,
+          createdAt: productCategories.createdAt,
+          updatedAt: productCategories.updatedAt,
+          productCount: sql<number>`count(${products.id})::int`,
+        })
+        .from(productCategories)
+        .leftJoin(products, eq(products.categoryId, productCategories.id))
+        .groupBy(
+          productCategories.id,
+          productCategories.name,
+          productCategories.slug,
+          productCategories.description,
+          productCategories.sortOrder,
+          productCategories.isActive,
+          productCategories.createdAt,
+          productCategories.updatedAt,
+        )
+        .orderBy(asc(productCategories.sortOrder), asc(productCategories.name));
+      res.json(categories);
+    } catch (error) {
+      console.error("Error fetching product categories:", error);
+      res.status(500).json({ error: "Failed to fetch product categories" });
+    }
+  });
+
+  app.post("/api/product-categories", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const name = String(req.body.name ?? "").trim();
+      if (!name) {
+        return res.status(400).json({ error: "Category name is required" });
+      }
+      const slug = normalizeCategorySlug(req.body.slug ? String(req.body.slug) : name);
+      if (!slug) {
+        return res.status(400).json({ error: "Category slug is required" });
+      }
+      const [category] = await db
+        .insert(productCategories)
+        .values({
+          name,
+          slug,
+          description: req.body.description || null,
+          sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+        })
+        .returning();
+      res.status(201).json(category);
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        return res.status(409).json({ error: "Category already exists" });
+      }
+      console.error("Error creating product category:", error);
+      res.status(500).json({ error: "Failed to create product category" });
+    }
+  });
+
+  app.patch("/api/product-categories/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid product category id" });
+      }
+      const existing = await db.select().from(productCategories).where(eq(productCategories.id, id));
+      if (!existing[0]) return res.status(404).json({ error: "Product category not found" });
+
+      const name = req.body.name !== undefined ? String(req.body.name).trim() : existing[0].name;
+      if (!name) return res.status(400).json({ error: "Category name is required" });
+      const slug = req.body.slug !== undefined
+        ? normalizeCategorySlug(String(req.body.slug))
+        : req.body.name !== undefined
+          ? normalizeCategorySlug(name)
+          : existing[0].slug;
+      if (!slug) return res.status(400).json({ error: "Category slug is required" });
+
+      const [category] = await db
+        .update(productCategories)
+        .set({
+          name,
+          slug,
+          description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
+          sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
+          isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
+          updatedAt: new Date(),
+        })
+        .where(eq(productCategories.id, id))
+        .returning();
+
+      await db
+        .update(products)
+        .set({ category: category.name, updatedAt: new Date() })
+        .where(eq(products.categoryId, category.id));
+
+      res.json(category);
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        return res.status(409).json({ error: "Category already exists" });
+      }
+      console.error("Error updating product category:", error);
+      res.status(500).json({ error: "Failed to update product category" });
+    }
+  });
+
   app.get("/api/products/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -123,7 +273,11 @@ export async function registerProductRoutes(app: Express) {
   app.post("/api/products", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const { variants, ...productData } = req.body;
-      const product = await storage.createProduct(productData);
+      const category = await resolveProductCategory(productData);
+      const product = await storage.createProduct({
+        ...productData,
+        ...category,
+      });
       
       // Create variants if provided
       if (variants && Array.isArray(variants)) {
@@ -137,7 +291,10 @@ export async function registerProductRoutes(app: Express) {
       
       const createdVariants = await storage.getProductVariantsByProductId(product.id);
       res.json({ ...product, variants: createdVariants });
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.message?.includes("category")) {
+        return res.status(400).json({ error: error.message });
+      }
       console.error("Error creating product:", error);
       res.status(500).json({ error: "Failed to create product" });
     }
@@ -165,7 +322,12 @@ export async function registerProductRoutes(app: Express) {
         }
       }
 
-      const product = await storage.updateProduct(id, updates);
+      const normalizedUpdates = { ...updates };
+      if ("categoryId" in updates || "category" in updates) {
+        Object.assign(normalizedUpdates, await resolveProductCategory(updates));
+      }
+
+      const product = await storage.updateProduct(id, normalizedUpdates);
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
       }
@@ -210,6 +372,9 @@ export async function registerProductRoutes(app: Express) {
       const existingVariants = await storage.getProductVariantsByProductId(id);
       res.json({ ...product, variants: existingVariants });
     } catch (error: any) {
+      if (error?.message?.includes("category")) {
+        return res.status(400).json({ error: error.message });
+      }
       console.error("Error updating product:", error);
       res.status(500).json({ error: "Failed to update product", detail: error?.message || String(error) });
     }
