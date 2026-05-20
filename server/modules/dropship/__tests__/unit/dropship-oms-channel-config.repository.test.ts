@@ -14,7 +14,10 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
       if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
         return { rows: [{ id: 100 }] };
       }
-      if (sql.includes("WITH existing AS") && sql.includes("INSERT INTO channels.channels")) {
+      if (sql.includes("SELECT id") && sql.includes("LOWER(name) = LOWER($1)")) {
+        return { rows: [] };
+      }
+      if (sql.includes("INSERT INTO channels.channels")) {
         return { rows: [{ id: 7 }] };
       }
       if (sql.includes("UPDATE channels.channels") && sql.includes("RETURNING")) {
@@ -37,11 +40,49 @@ describe("PgDropshipOmsChannelConfigRepository", () => {
     const sql = query.mock.calls.map((call) => String(call[0])).join("\n\n");
     expect(result.selectedChannel.channelId).toBe(7);
     expect(result.config.currentChannelId).toBe(7);
+    expect(sql).toContain("pg_advisory_xact_lock");
+    expect(sql).not.toContain("WITH existing AS");
     expect(sql).toContain("INSERT INTO channels.channels");
     expect(sql).not.toContain("sync_mode = 'dry_run'");
     expect(sql).toContain("#- '{dropship,role}'");
     expect(sql).toContain("INSERT INTO dropship.dropship_audit_events");
     expect(sql).toContain("COMMIT");
+  });
+
+  it("repairs an existing default OMS source without inserting a duplicate", async () => {
+    const { pool, query } = makePool(async (sql) => {
+      if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
+        return { rows: [{ id: 104 }] };
+      }
+      if (sql.includes("SELECT id") && sql.includes("LOWER(name) = LOWER($1)")) {
+        return { rows: [{ id: 7 }] };
+      }
+      if (sql.includes("UPDATE channels.channels") && sql.includes("SET status = 'active'")) {
+        return { rows: [{ id: 7 }] };
+      }
+      if (sql.includes("UPDATE channels.channels") && sql.includes("RETURNING")) {
+        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+      }
+      if (sql.includes("FROM channels.channels c")) {
+        return { rows: [makeChannelRow({ id: 7, channel_role_marked: true, channel_flag_marked: true })] };
+      }
+      return { rows: [] };
+    });
+    const repository = new PgDropshipOmsChannelConfigRepository(pool);
+
+    const result = await repository.ensureDefault({
+      idempotencyKey: "oms-source-config-004",
+      requestHash: "hash-source-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+      now,
+    });
+
+    const sql = query.mock.calls.map((call) => String(call[0])).join("\n\n");
+    expect(result.selectedChannel.channelId).toBe(7);
+    expect(result.config.currentChannelId).toBe(7);
+    expect(sql).toContain("pg_advisory_xact_lock");
+    expect(sql).toContain("SET status = 'active'");
+    expect(sql).not.toContain("INSERT INTO channels.channels");
   });
 
   it("does not count a marked marketplace sales channel as the current OMS source", async () => {
