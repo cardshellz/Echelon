@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, bigint, timestamp, jsonb, boolean, uniqueIndex, pgSchema } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, bigint, timestamp, jsonb, boolean, uniqueIndex, index, pgSchema } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -25,6 +25,31 @@ export type InsertProductType = z.infer<typeof insertProductTypeSchema>;
 export type ProductType = typeof productTypes.$inferSelect;
 
 // ============================================================================
+// PRODUCT CATEGORIES - Controlled product taxonomy
+// ============================================================================
+export const productCategories = catalogSchema.table("product_categories", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  name: varchar("name", { length: 100 }).notNull(),
+  slug: varchar("slug", { length: 120 }).notNull().unique(),
+  description: text("description"),
+  sortOrder: integer("sort_order").default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_product_categories_active_sort").on(table.isActive, table.sortOrder, table.name),
+]);
+
+export const insertProductCategorySchema = createInsertSchema(productCategories).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertProductCategory = z.infer<typeof insertProductCategorySchema>;
+export type ProductCategory = typeof productCategories.$inferSelect;
+
+// ============================================================================
 // PRODUCTS - Master product catalog (source of truth for product identity)
 // ============================================================================
 export const products = catalogSchema.table("products", {
@@ -34,7 +59,8 @@ export const products = catalogSchema.table("products", {
   title: varchar("title", { length: 500 }), // Display title (from Shopify product card)
   description: text("description"),
   bulletPoints: jsonb("bullet_points"), // Array of feature bullet points
-  category: varchar("category", { length: 100 }), // Product category
+  categoryId: integer("category_id").references(() => productCategories.id, { onDelete: "set null" }),
+  category: varchar("category", { length: 100 }), // Denormalized category name for channel/dropship compatibility
   subcategory: varchar("subcategory", { length: 200 }),
   brand: varchar("brand", { length: 100 }), // Brand name
   manufacturer: varchar("manufacturer", { length: 200 }),

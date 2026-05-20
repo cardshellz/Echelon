@@ -48,6 +48,7 @@ interface Product {
   name: string;
   description: string | null;
   baseUnit: string;
+  categoryId: number | null;
   category: string | null;
   brand: string | null;
   imageUrl: string | null;
@@ -60,6 +61,16 @@ interface Product {
   variants: ProductVariant[];
 }
 
+interface ProductCategory {
+  id: number;
+  name: string;
+  slug: string;
+  description: string | null;
+  sortOrder: number | null;
+  isActive: boolean;
+  productCount?: number;
+}
+
 export default function Products() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -70,11 +81,14 @@ export default function Products() {
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [productLineFilter, setProductLineFilter] = useState<string>("all");
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [categoryNameDrafts, setCategoryNameDrafts] = useState<Record<number, string>>({});
   const [newProduct, setNewProduct] = useState({
     name: "",
     sku: "",
     description: "",
-    category: "",
+    categoryId: "",
     brand: "",
     baseUnit: "piece",
   });
@@ -97,6 +111,57 @@ export default function Products() {
       const res = await fetch("/api/product-lines");
       if (!res.ok) throw new Error("Failed to fetch product lines");
       return res.json();
+    },
+  });
+
+  const { data: productCategories = [] } = useQuery<ProductCategory[]>({
+    queryKey: ["/api/product-categories"],
+    queryFn: async () => {
+      const res = await fetch("/api/product-categories");
+      if (!res.ok) throw new Error("Failed to fetch product categories");
+      return res.json();
+    },
+  });
+
+  const activeProductCategories = productCategories.filter((category) => category.isActive);
+
+  const createCategoryMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await fetch("/api/product-categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Failed to create category");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-categories"] });
+      setNewCategoryName("");
+      toast({ title: "Category created" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to create category", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const updateCategoryMutation = useMutation({
+    mutationFn: async ({ id, name, isActive }: { id: number; name?: string; isActive?: boolean }) => {
+      const res = await fetch(`/api/product-categories/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, isActive }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Failed to update category");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-categories"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      toast({ title: "Category updated" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to update category", description: err.message, variant: "destructive" });
     },
   });
 
@@ -127,7 +192,7 @@ export default function Products() {
           name: data.name,
           sku: data.sku || null,
           description: data.description || null,
-          category: data.category || null,
+          categoryId: data.categoryId ? Number(data.categoryId) : null,
           brand: data.brand || null,
           baseUnit: data.baseUnit,
         }),
@@ -139,7 +204,7 @@ export default function Products() {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       toast({ title: "Product created successfully" });
       setCreateDialogOpen(false);
-      setNewProduct({ name: "", sku: "", description: "", category: "", brand: "", baseUnit: "piece" });
+      setNewProduct({ name: "", sku: "", description: "", categoryId: "", brand: "", baseUnit: "piece" });
     },
     onError: () => {
       toast({ title: "Failed to create product", variant: "destructive" });
@@ -157,19 +222,14 @@ export default function Products() {
       (statusFilter === "inactive" && !product.isActive) ||
       (statusFilter === "archived" && product.status === "archived");
     
-    const matchesCategory = categoryFilter === "all" || 
-      product.category === categoryFilter;
+    const matchesCategory = categoryFilter === "all" ||
+      product.categoryId === Number(categoryFilter);
 
     const matchesProductLine = productLineFilter === "all" ||
       product.productLineIds?.includes(parseInt(productLineFilter));
     
     return matchesSearch && matchesStatus && matchesCategory && matchesProductLine;
   });
-
-  const categories = Array.from(new Set(products
-    .map(p => p.category)
-    .filter((c): c is string => Boolean(c))
-  ));
 
   const stats = {
     total: products.length,
@@ -190,6 +250,14 @@ export default function Products() {
           </p>
         </div>
         <div className="flex gap-2 w-full md:w-auto">
+          <Button
+            variant="outline"
+            onClick={() => setCategoryDialogOpen(true)}
+            className="min-h-[44px] flex-1 md:flex-none"
+            data-testid="btn-manage-categories"
+          >
+            Categories
+          </Button>
           <Button
             variant="outline"
             onClick={() => syncMutation.mutate()}
@@ -256,15 +324,15 @@ export default function Products() {
               <SelectItem value="archived">Archived</SelectItem>
             </SelectContent>
           </Select>
-          {categories.length > 0 && (
+          {activeProductCategories.length > 0 && (
             <Select value={categoryFilter} onValueChange={setCategoryFilter}>
               <SelectTrigger className="w-32 md:w-40 h-10" data-testid="select-category-filter">
                 <SelectValue placeholder="Category" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Categories</SelectItem>
-                {categories.map(cat => (
-                  <SelectItem key={cat} value={cat!}>{cat}</SelectItem>
+                {activeProductCategories.map(category => (
+                  <SelectItem key={category.id} value={String(category.id)}>{category.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -515,18 +583,19 @@ export default function Products() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="product-category" className="text-sm">Category</Label>
-                <Input
-                  id="product-category"
-                  value={newProduct.category}
-                  onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
-                  placeholder="e.g., Envelopes"
-                  className="h-11"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                  data-testid="input-product-category"
-                />
+                <Select
+                  value={newProduct.categoryId}
+                  onValueChange={(value) => setNewProduct({ ...newProduct, categoryId: value })}
+                >
+                  <SelectTrigger id="product-category" className="h-11" data-testid="select-product-category">
+                    <SelectValue placeholder="Select category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {activeProductCategories.map((category) => (
+                      <SelectItem key={category.id} value={String(category.id)}>{category.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="product-brand" className="text-sm">Brand</Label>
@@ -576,6 +645,70 @@ export default function Products() {
               {createMutation.isPending ? "Creating..." : "Create Product"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={categoryDialogOpen} onOpenChange={setCategoryDialogOpen}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle>Product Categories</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="flex gap-2">
+              <Input
+                value={newCategoryName}
+                onChange={(e) => setNewCategoryName(e.target.value)}
+                placeholder="New category name"
+                className="h-10"
+                data-testid="input-new-category-name"
+              />
+              <Button
+                onClick={() => createCategoryMutation.mutate(newCategoryName.trim())}
+                disabled={!newCategoryName.trim() || createCategoryMutation.isPending}
+                data-testid="btn-create-category"
+              >
+                Add
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {productCategories.map((category) => {
+                const draftName = categoryNameDrafts[category.id] ?? category.name;
+                const nameChanged = draftName.trim().length > 0 && draftName.trim() !== category.name;
+                return (
+                  <div key={category.id} className="flex items-center gap-2 rounded-md border p-2">
+                    <Input
+                      value={draftName}
+                      onChange={(e) => setCategoryNameDrafts((prev) => ({ ...prev, [category.id]: e.target.value }))}
+                      className="h-9"
+                      data-testid={`input-category-${category.id}`}
+                    />
+                    <span className="w-16 text-xs text-muted-foreground text-right">
+                      {category.productCount ?? 0} SKUs
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => updateCategoryMutation.mutate({ id: category.id, name: draftName.trim() })}
+                      disabled={!nameChanged || updateCategoryMutation.isPending}
+                    >
+                      Save
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => updateCategoryMutation.mutate({ id: category.id, isActive: !category.isActive })}
+                      disabled={updateCategoryMutation.isPending}
+                    >
+                      {category.isActive ? "Archive" : "Restore"}
+                    </Button>
+                  </div>
+                );
+              })}
+              {productCategories.length === 0 && (
+                <p className="text-sm text-muted-foreground">No categories yet.</p>
+              )}
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>
