@@ -41,6 +41,9 @@ interface ForecastDiagnostics {
   supplierCycleSignalCounts?: Record<string, number>;
   supplierCycleOpenPoPastDueCount?: number;
   avgSupplierCycleSupplyCoverageRatio?: number | null;
+  recommendationCandidateBandCounts?: Record<string, number>;
+  avgRecommendationCandidateScore?: number;
+  strongRecommendationCandidateCount?: number;
   qualityControlCounts?: Record<string, number>;
   qualityControlAreaCounts?: Record<string, number>;
   qualityControlSeverityCounts?: Record<string, number>;
@@ -113,6 +116,17 @@ interface RecommendationSupplierCycleDiagnostics {
   daysSinceLastReceipt: number | null;
 }
 
+interface RecommendationCandidateScore {
+  score: number;
+  band: string;
+  demandScore: number;
+  supplyScore: number;
+  readinessScore: number;
+  signals: string[];
+  blockers: string[];
+  detail: string;
+}
+
 interface DashboardData {
   stockouts: number;
   orderNow: number;
@@ -158,6 +172,7 @@ interface DashboardData {
         explanation: string;
         forecastProvenance?: RecommendationForecastProvenance;
         supplierCycleDiagnostics?: RecommendationSupplierCycleDiagnostics;
+        recommendationCandidateScore?: RecommendationCandidateScore;
         qualityControls?: RecommendationQualityControl[];
         autopilotBlockers?: RecommendationQualityControl[];
       }>;
@@ -197,6 +212,7 @@ interface AutoDraftRunHistoryItem {
     preferredVendorName: string | null;
     explanation: string;
     forecastProvenance?: RecommendationForecastProvenance;
+    recommendationCandidateScore?: RecommendationCandidateScore;
     qualityControls?: RecommendationQualityControl[];
     autopilotBlockers?: RecommendationQualityControl[];
   } | null;
@@ -280,6 +296,7 @@ function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): st
 function formatRecommendationForecast(
   provenance?: RecommendationForecastProvenance,
   supplierCycleDiagnostics?: RecommendationSupplierCycleDiagnostics,
+  candidateScore?: RecommendationCandidateScore,
 ): string {
   if (!provenance) return "Forecast basis unavailable";
   const sample =
@@ -294,7 +311,8 @@ function formatRecommendationForecast(
   const seasonal = provenance.demandWindowDiagnostics?.seasonalSignal;
   const seasonalLabel = seasonal && seasonal !== "not_available" ? ` - ${seasonal.replace(/_/g, " ")}` : "";
   const cycleLabel = supplierCycleDiagnostics ? ` - cycle ${supplierCycleDiagnostics.signal.replace(/_/g, " ")}` : "";
-  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}`;
+  const scoreLabel = candidateScore ? ` - score ${candidateScore.score} ${candidateScore.band.replace(/_/g, " ")}` : "";
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}${scoreLabel}`;
 }
 
 function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
@@ -890,6 +908,8 @@ export default function PurchasingDashboard() {
                       { label: "Baseline signal", value: topCountLabel(lastRunForecastDiagnostics?.demandBaselineSignalCounts) },
                       { label: "Seasonality signal", value: topCountLabel(lastRunForecastDiagnostics?.demandSeasonalitySignalCounts) },
                       { label: "Supplier cycle", value: topCountLabel(lastRunForecastDiagnostics?.supplierCycleSignalCounts), warn: Boolean(lastRunForecastDiagnostics?.supplierCycleOpenPoPastDueCount) },
+                      { label: "Candidate score", value: lastRunForecastDiagnostics?.avgRecommendationCandidateScore ?? "n/a" },
+                      { label: "Candidate band", value: topCountLabel(lastRunForecastDiagnostics?.recommendationCandidateBandCounts) },
                       { label: "Top quality blocker", value: topCountLabel(lastRunForecastDiagnostics?.autopilotBlockerCounts), warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Blocked items", value: lastRunForecastDiagnostics?.autopilotBlockerItemCount ?? 0, warn: Boolean(lastRunForecastDiagnostics?.autopilotBlockerItemCount) },
                       { label: "Skipped (no vendor)", value: data.lastAutoDraftRun.skippedNoVendor, warn: true },
@@ -918,7 +938,7 @@ export default function PurchasingDashboard() {
                           </div>
                           <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{item.explanation}</p>
                           <p className="text-[11px] text-muted-foreground mt-1 truncate">
-                            {formatRecommendationForecast(item.forecastProvenance, item.supplierCycleDiagnostics)}
+                            {formatRecommendationForecast(item.forecastProvenance, item.supplierCycleDiagnostics, item.recommendationCandidateScore)}
                           </p>
                           {formatQualityControlSummary(item.autopilotBlockers) ? (
                             <p className="text-[11px] text-amber-700 mt-1 truncate">

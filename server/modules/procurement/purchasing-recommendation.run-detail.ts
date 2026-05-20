@@ -57,6 +57,7 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const autopilotBlockerAreaCounts: Record<string, number> = {};
   const autopilotBlockerSeverityCounts: Record<string, number> = {};
   const supplierCycleSignalCounts: Record<string, number> = {};
+  const recommendationCandidateBandCounts: Record<string, number> = {};
   let totalPeriodUsagePieces = 0;
   let avgDailyUsageTotal = 0;
   let latestDemandAt: string | Date | null = null;
@@ -64,6 +65,8 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   let openPoPastDueCount = 0;
   let supplyCoverageRatioTotal = 0;
   let supplyCoverageRatioCount = 0;
+  let candidateScoreTotal = 0;
+  let strongCandidateCount = 0;
 
   for (const item of result.items) {
     const provenance = item.forecastProvenance;
@@ -81,6 +84,9 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     increment(demandBaselineSignalCounts, provenance.demandWindowDiagnostics.baselineSignal);
     increment(demandSeasonalitySignalCounts, provenance.demandWindowDiagnostics.seasonalSignal);
     increment(supplierCycleSignalCounts, item.supplierCycleDiagnostics.signal);
+    increment(recommendationCandidateBandCounts, item.recommendationCandidateScore.band);
+    candidateScoreTotal += item.recommendationCandidateScore.score;
+    if (item.recommendationCandidateScore.band === "strong_candidate") strongCandidateCount += 1;
     if (item.supplierCycleDiagnostics.signal === "open_supply_past_due") openPoPastDueCount += 1;
     if (item.supplierCycleDiagnostics.supplyCoverageRatio != null) {
       supplyCoverageRatioTotal += item.supplierCycleDiagnostics.supplyCoverageRatio;
@@ -127,6 +133,10 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     supplierCycleOpenPoPastDueCount: openPoPastDueCount,
     avgSupplierCycleSupplyCoverageRatio:
       supplyCoverageRatioCount > 0 ? Math.round((supplyCoverageRatioTotal / supplyCoverageRatioCount) * 100) / 100 : null,
+    recommendationCandidateBandCounts,
+    avgRecommendationCandidateScore:
+      recommendationCount > 0 ? Math.round((candidateScoreTotal / recommendationCount) * 100) / 100 : 0,
+    strongRecommendationCandidateCount: strongCandidateCount,
     qualityControlCounts,
     qualityControlAreaCounts,
     qualityControlSeverityCounts,
@@ -168,6 +178,7 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     forecastProvenance: item.forecastProvenance,
     supplierBasis: item.supplierBasis,
     supplierCycleDiagnostics: item.supplierCycleDiagnostics,
+    recommendationCandidateScore: item.recommendationCandidateScore,
     qualityControls: item.qualityControls,
     autopilotBlockers: item.autopilotBlockers,
     qualityGate: item.qualityGate,

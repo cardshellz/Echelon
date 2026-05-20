@@ -102,6 +102,12 @@ describe("purchasing recommendation run detail", () => {
         },
         supplierCycleOpenPoPastDueCount: 0,
         avgSupplierCycleSupplyCoverageRatio: 0,
+        recommendationCandidateBandCounts: {
+          review_candidate: 1,
+          blocked: 1,
+        },
+        avgRecommendationCandidateScore: 65.5,
+        strongRecommendationCandidateCount: 0,
         qualityControlCounts: {
           product_lead_time_fallback: 2,
           missing_supplier_cost: 1,
@@ -162,6 +168,10 @@ describe("purchasing recommendation run detail", () => {
         autoDraftEligible: false,
         reason: "medium_confidence_review",
       },
+      recommendationCandidateScore: {
+        score: 72,
+        band: "review_candidate",
+      },
       autopilotBlockers: expect.arrayContaining([
         expect.objectContaining({
           area: "lead_time",
@@ -181,6 +191,10 @@ describe("purchasing recommendation run detail", () => {
       reviewSignal: {
         action: "assign_vendor",
         severity: "critical",
+      },
+      recommendationCandidateScore: {
+        score: 59,
+        band: "blocked",
       },
       autopilotBlockers: expect.arrayContaining([
         expect.objectContaining({
