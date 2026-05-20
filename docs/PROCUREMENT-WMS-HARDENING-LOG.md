@@ -2205,3 +2205,32 @@ Next step:
 - Continue Phase 9 with operator-facing review controls around high-scoring
   candidate recommendations, still keeping PO mutation behavior unchanged until
   the score has been reviewed against live purchasing results.
+
+### 2026-05-20 - Phase 9 Slice 10: Candidate Review Controls
+
+Scope:
+
+- Added read-only candidate-band filters to the reorder analysis table so
+  operators can isolate strong candidates, review candidates, watch items, and
+  blocked recommendations without changing recommendation math.
+- Added a Candidate Score Review queue for the highest-scoring strong and
+  review candidate items, including demand, supply, and readiness score
+  breakdowns for quick operator review.
+- Added a sortable Candidate column to Inventory Burn Telemetry with score,
+  band, and component score visibility beside the existing forecast basis and
+  quality gate context.
+- Kept this slice UI-only: no PO mutation behavior, reorder quantity logic,
+  quality gates, or auto-draft eligibility changed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Review candidate-score behavior against live purchasing output, then decide
+  whether candidate-score approval thresholds should become guarded admin
+  settings before any score-driven PO draft behavior is enabled.

@@ -187,13 +187,44 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; i
   no_movement: { label: "Stagnant", bg: "bg-zinc-500/10", text: "text-zinc-500", icon: Box, priority: 4 },
 };
 
+type CandidateBandFilter = "all" | "strong_candidate" | "review_candidate" | "watch" | "blocked";
+
+const CANDIDATE_BAND_OPTIONS: Array<{ value: CandidateBandFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "strong_candidate", label: "Strong" },
+  { value: "review_candidate", label: "Review" },
+  { value: "watch", label: "Watch" },
+  { value: "blocked", label: "Blocked" },
+];
+
+function isCandidateBandFilter(value: string | null): value is CandidateBandFilter {
+  return CANDIDATE_BAND_OPTIONS.some((option) => option.value === value);
+}
+
+function formatCandidateBand(band?: string | null): string {
+  if (!band) return "Unscored";
+  return band.replace(/_/g, " ");
+}
+
+function candidateBandClass(band?: string | null): string {
+  if (band === "strong_candidate") return "bg-green-50 text-green-700 border-green-200";
+  if (band === "review_candidate") return "bg-blue-50 text-blue-700 border-blue-200";
+  if (band === "blocked") return "bg-red-50 text-red-700 border-red-200";
+  return "bg-zinc-50 text-zinc-600 border-zinc-200";
+}
+
 export default function PurchasingView() {
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [location, navigate] = useLocation();
+  const [candidateBandFilter, setCandidateBandFilter] = useState<CandidateBandFilter>(() => {
+    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    const requested = params.get("candidateBand");
+    return isCandidateBandFilter(requested) ? requested : "all";
+  });
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const [, navigate] = useLocation();
 
   const { data: kpis, isLoading: isLoadingKpis } = useQuery<DashboardKPIs>({
     queryKey: ["/api/purchasing/kpis"],
@@ -245,28 +276,51 @@ export default function PurchasingView() {
       setSortDir(sortDir === "asc" ? "desc" : "asc");
     } else {
       setSortField(field);
-      setSortDir("asc");
+      setSortDir(field === "candidateScore" ? "desc" : "asc");
     }
   };
 
-  const filtered = (analysis?.items ?? []).sort((a, b) => {
-    let aVal: any, bVal: any;
-    switch (sortField) {
-      case "sku": aVal = a.sku; bVal = b.sku; break;
-      case "onHand": aVal = a.totalOnHand; bVal = b.totalOnHand; break;
-      case "onOrder": aVal = a.onOrderPieces; bVal = b.onOrderPieces; break;
-      case "health": aVal = a.available / (a.reorderPoint || 1); bVal = b.available / (b.reorderPoint || 1); break;
-      case "status":
-        aVal = STATUS_CONFIG[a.status]?.priority ?? 99;
-        bVal = STATUS_CONFIG[b.status]?.priority ?? 99;
-        break;
-      default: aVal = a.sku; bVal = b.sku;
-    }
-    if (typeof aVal === "string") {
-      return sortDir === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-    }
-    return sortDir === "asc" ? aVal - bVal : bVal - aVal;
-  });
+  const allReorderItems = analysis?.items ?? [];
+  const candidateBandCounts = allReorderItems.reduce<Record<CandidateBandFilter, number>>(
+    (counts, item) => {
+      counts.all += 1;
+      const band = item.recommendationCandidateScore?.band;
+      if (band && isCandidateBandFilter(band) && band !== "all") counts[band] += 1;
+      return counts;
+    },
+    { all: 0, strong_candidate: 0, review_candidate: 0, watch: 0, blocked: 0 },
+  );
+  const candidateReviewQueue = allReorderItems
+    .filter((item) => {
+      const band = item.recommendationCandidateScore?.band;
+      return band === "strong_candidate" || band === "review_candidate";
+    })
+    .sort((a, b) => (b.recommendationCandidateScore?.score ?? 0) - (a.recommendationCandidateScore?.score ?? 0))
+    .slice(0, 6);
+  const filtered = allReorderItems
+    .filter((item) => candidateBandFilter === "all" || item.recommendationCandidateScore?.band === candidateBandFilter)
+    .sort((a, b) => {
+      let aVal: any, bVal: any;
+      switch (sortField) {
+        case "sku": aVal = a.sku; bVal = b.sku; break;
+        case "onHand": aVal = a.totalOnHand; bVal = b.totalOnHand; break;
+        case "onOrder": aVal = a.onOrderPieces; bVal = b.onOrderPieces; break;
+        case "candidateScore":
+          aVal = a.recommendationCandidateScore?.score ?? -1;
+          bVal = b.recommendationCandidateScore?.score ?? -1;
+          break;
+        case "health": aVal = a.available / (a.reorderPoint || 1); bVal = b.available / (b.reorderPoint || 1); break;
+        case "status":
+          aVal = STATUS_CONFIG[a.status]?.priority ?? 99;
+          bVal = STATUS_CONFIG[b.status]?.priority ?? 99;
+          break;
+        default: aVal = a.sku; bVal = b.sku;
+      }
+      if (typeof aVal === "string") {
+        return sortDir === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      return sortDir === "asc" ? aVal - bVal : bVal - aVal;
+    });
   const reviewQueue = (analysis?.skippedItems ?? [])
     .filter((item) => item.reviewSignal && !["monitor", "none"].includes(item.reviewSignal.action))
     .sort((a, b) => {
@@ -549,11 +603,70 @@ export default function PurchasingView() {
           </Card>
         )}
 
+        {candidateReviewQueue.length > 0 && (
+          <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
+              <CardTitle className="text-lg">Candidate Score Review</CardTitle>
+              <CardDescription>High-scoring purchasing candidates for operator review before score-driven automation is enabled.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-4">
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-2">
+                {candidateReviewQueue.map((item) => {
+                  const score = item.recommendationCandidateScore;
+                  const targetBand = score?.band === "strong_candidate" ? "strong_candidate" : "review_candidate";
+                  return (
+                    <div key={`${item.productId}-${item.productVariantId ?? "product"}-candidate`} className="rounded-md border bg-white dark:bg-zinc-900 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs font-semibold text-primary truncate">{item.sku}</span>
+                            <Badge variant="outline" className={`text-[10px] capitalize ${candidateBandClass(score?.band)}`}>
+                              {score?.score ?? 0} - {formatCandidateBand(score?.band)}
+                            </Badge>
+                          </div>
+                          <div className="mt-1 text-sm font-medium truncate">{item.productName}</div>
+                          <div className="mt-2 grid grid-cols-3 gap-1 text-[11px] text-zinc-500">
+                            <span>D {score?.demandScore ?? 0}</span>
+                            <span>S {score?.supplyScore ?? 0}</span>
+                            <span>R {score?.readinessScore ?? 0}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{score?.detail}</p>
+                        </div>
+                        <Button size="sm" variant="outline" className="h-7 text-[11px] flex-shrink-0" onClick={() => setCandidateBandFilter(targetBand)}>
+                          Filter
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* DATA TABLE */}
         <Card className="dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
           <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
-            <CardTitle className="text-lg">Inventory Burn Telemetry</CardTitle>
-            <CardDescription>Live health monitoring of catalog velocity against system reorder parameters.</CardDescription>
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <CardTitle className="text-lg">Inventory Burn Telemetry</CardTitle>
+                <CardDescription>Live health monitoring of catalog velocity against system reorder parameters.</CardDescription>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {CANDIDATE_BAND_OPTIONS.map((option) => (
+                  <Button
+                    key={option.value}
+                    variant={candidateBandFilter === option.value ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 text-[11px]"
+                    onClick={() => setCandidateBandFilter(option.value)}
+                  >
+                    {option.label}
+                    <span className="ml-1 text-[10px] opacity-75">{candidateBandCounts[option.value]}</span>
+                  </Button>
+                ))}
+              </div>
+            </div>
           </CardHeader>
           <div className="overflow-x-auto">
             <Table>
@@ -572,6 +685,9 @@ export default function PurchasingView() {
                   </TableHead>
                   <TableHead className="text-right">Reorder Pt</TableHead>
                   <TableHead className="text-right">Supply</TableHead>
+                  <TableHead className="w-[140px] cursor-pointer font-semibold" onClick={() => handleSort("candidateScore")}>
+                    <div className="flex items-center">Candidate <SortIcon field="candidateScore" /></div>
+                  </TableHead>
                   <TableHead>Forecast Basis</TableHead>
                   <TableHead className="text-right cursor-pointer font-semibold" onClick={() => handleSort("status")}>
                     <div className="flex justify-end items-center">Status <SortIcon field="status" /></div>
@@ -581,11 +697,11 @@ export default function PurchasingView() {
               <TableBody>
                 {isLoadingAnalysis ? (
                    <TableRow>
-                     <TableCell colSpan={9} className="text-center py-12 text-zinc-500">Loading telemetry data...</TableCell>
+                     <TableCell colSpan={10} className="text-center py-12 text-zinc-500">Loading telemetry data...</TableCell>
                    </TableRow>
                 ) : filtered.length === 0 ? (
                    <TableRow>
-                     <TableCell colSpan={9} className="text-center py-12 text-zinc-500">No data matching current criteria.</TableCell>
+                     <TableCell colSpan={10} className="text-center py-12 text-zinc-500">No data matching current criteria.</TableCell>
                    </TableRow>
                 ) : (
                   filtered.map((item) => {
@@ -600,6 +716,7 @@ export default function PurchasingView() {
                     if (healthPct < 25) progressColor = "bg-red-500";
                     else if (healthPct < 75) progressColor = "bg-amber-500";
                     const autopilotBlockerText = formatAutopilotBlockers(item);
+                    const candidateScore = item.recommendationCandidateScore;
 
                     return (
                       <TableRow key={item.productId} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
@@ -624,6 +741,20 @@ export default function PurchasingView() {
                         <TableCell className="text-right font-mono text-zinc-500">{item.reorderPoint.toLocaleString()}</TableCell>
                         <TableCell className="text-right text-xs">
                           {item.daysOfSupply >= 9999 ? "∞" : `${item.daysOfSupply}d`}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {candidateScore ? (
+                            <div className="space-y-1">
+                              <Badge variant="outline" className={`text-[10px] capitalize ${candidateBandClass(candidateScore.band)}`}>
+                                {candidateScore.score} - {formatCandidateBand(candidateScore.band)}
+                              </Badge>
+                              <div className="text-[10px] text-zinc-500">
+                                D {candidateScore.demandScore} S {candidateScore.supplyScore} R {candidateScore.readinessScore}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-zinc-400">Unscored</span>
+                          )}
                         </TableCell>
                         <TableCell className="text-xs min-w-[190px]">
                           <div className="flex items-center gap-2">
