@@ -17,6 +17,7 @@ import { inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { users as identityUsers } from "../../storage/base";
 import {
+  buildPoAutoDraftActionPlan,
   buildPoLifecycleSummary,
   type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
@@ -194,6 +195,10 @@ export function registerPurchaseOrderRoutes(app: Express) {
         vendor,
         openExceptionCount: exceptionCount.count,
         maxOpenSeverity: exceptionCount.maxSeverity,
+        autoDraftActionPlan: buildPoAutoDraftActionPlan(po, {
+          lineCount: lines.length,
+          openExceptionCount: exceptionCount.count,
+        }),
         relatedUsers,
       });
     } catch (error: any) {

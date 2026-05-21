@@ -2445,3 +2445,35 @@ Next step:
 - Continue Phase 10 with a PO detail next-action panel for auto-draft POs, so
   operators can see why a draft exists and what review, send, receive, or AP
   step is next without reconstructing the purchasing state manually.
+
+### 2026-05-21 - Phase 10 Slice 4: Auto-Draft PO Next Actions
+
+Scope:
+
+- Added read-only `autoDraftActionPlan` metadata to PO detail responses for
+  auto-drafted purchase orders.
+- Derived the action plan from the central PO lifecycle summary plus PO line
+  count and open exception count, so the guidance does not create a second PO
+  state machine.
+- Classified the next operator step across review, supplier send,
+  acknowledgement/transit, receiving, invoice creation, payment, closeout, and
+  exception-blocked states.
+- Added a PO detail next-action panel for auto-drafted POs with a primary action
+  button and compact checklist for review, supplier send, receiving, and AP
+  closeout.
+- Kept the slice presentation-only: recommendation math, approval policy,
+  auto-draft mutation behavior, PO lifecycle mutations, receiving, invoices,
+  and payments are unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 10 with stale auto-draft PO aging/escalation diagnostics, so
+  auto-created POs that remain unreviewed, unsent, unreceived, or unpaid are
+  visible before they become supplier or inventory drift.
