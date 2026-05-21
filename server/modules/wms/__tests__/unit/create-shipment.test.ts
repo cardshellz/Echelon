@@ -88,12 +88,15 @@ describe("createShipmentForOrder :: happy path", () => {
     expect(result.created).toBe(true);
     expect(Number.isInteger(result.shipmentId)).toBe(true);
 
-    // One idempotency probe plus one item-default lookup per shipment item.
-    expect(mock.getExecuteCalls()).toBe(3);
+    // One idempotency probe plus one default lookup and one idempotent
+    // shipment-item insert per shipment item.
+    expect(mock.getExecuteCalls()).toBe(5);
 
-    // Two inserts: shipment, then items.
+    // Only the shipment row uses the Drizzle insert chain. Shipment
+    // items use raw SQL guarded by NOT EXISTS so retries cannot duplicate
+    // (shipment_id, order_item_id).
     const inserts = mock.getInserts();
-    expect(inserts.length).toBe(2);
+    expect(inserts.length).toBe(1);
 
     // First insert = shipment row with the correct scalar fields.
     const shipmentInsert = inserts[0];
@@ -103,25 +106,6 @@ describe("createShipmentForOrder :: happy path", () => {
     expect(shipmentInsert.values.source).toBe(ECHELON_SYNC_SHIPMENT_SOURCE);
     expect(shipmentInsert.returning).toBe(true);
 
-    // Second insert = items batch with two rows, each carrying the
-    // shipment id returned from the first insert.
-    const itemsInsert = inserts[1];
-    expect(Array.isArray(itemsInsert.values)).toBe(true);
-    expect(itemsInsert.values.length).toBe(2);
-    expect(itemsInsert.values[0]).toEqual({
-      shipmentId: 9001,
-      orderItemId: 101,
-      productVariantId: null,
-      fromLocationId: null,
-      qty: 2,
-    });
-    expect(itemsInsert.values[1]).toEqual({
-      shipmentId: 9001,
-      orderItemId: 102,
-      productVariantId: null,
-      fromLocationId: null,
-      qty: 1,
-    });
   });
 
   it("accepts channelId=null (e.g. manual / non-channel orders)", async () => {
@@ -232,8 +216,8 @@ describe("createShipmentForOrder :: input validation", () => {
       { id: 1, quantity: 0 },
     ]);
     expect(result.created).toBe(true);
-    const itemsInsert = mock.getInserts()[1];
-    expect(itemsInsert.values[0].qty).toBe(0);
+    expect(mock.getInserts().length).toBe(1);
+    expect(mock.getExecuteCalls()).toBe(3);
   });
 });
 

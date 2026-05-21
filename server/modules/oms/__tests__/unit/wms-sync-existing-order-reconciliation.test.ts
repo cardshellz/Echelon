@@ -15,8 +15,15 @@ describe("wms-sync existing order reconciliation", () => {
 
   it("adds reconciled shippable lines to planned outbound shipments and requeues ShipStation", () => {
     expect(WMS_SYNC_SRC).toMatch(/eq\(outboundShipments\.status, "planned"\)/);
-    expect(WMS_SYNC_SRC).toMatch(/db\.insert\(outboundShipmentItems\)\.values/);
+    expect(WMS_SYNC_SRC).toMatch(/INSERT INTO wms\.outbound_shipment_items/);
+    expect(WMS_SYNC_SRC).toMatch(/WHERE NOT EXISTS \(/);
     expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationShipmentPushRetry/);
+  });
+
+  it("does not reconcile cancelled or refunded OMS orders back into WMS work", () => {
+    expect(WMS_SYNC_SRC).toMatch(/isFinalOrCancelledOmsOrder/);
+    expect(WMS_SYNC_SRC).toMatch(/cancelExistingWmsOrderForFinalOmsOrder/);
+    expect(WMS_SYNC_SRC).toMatch(/skipped WMS sync/);
   });
 
   it("creates a new shipment when missing shippable lines have no planned shipment", () => {

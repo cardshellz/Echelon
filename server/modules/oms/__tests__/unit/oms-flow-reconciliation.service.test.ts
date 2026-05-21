@@ -29,7 +29,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await collectOmsFlowReconciliationIssues(db);
 
     expect(issues).toEqual([]);
-    expect(db.execute).toHaveBeenCalledTimes(14);
+    expect(db.execute).toHaveBeenCalledTimes(16);
   });
 
   it("returns critical OMS/WMS and shipment drift issues with samples", async () => {
@@ -160,8 +160,8 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await runOmsFlowReconciliation(db);
 
     expect(issues).toHaveLength(1);
-    expect(db.execute).toHaveBeenCalledTimes(18);
-    expect(inserts).toHaveLength(1);
+    expect(db.execute).toHaveBeenCalledTimes(20);
+    expect(inserts).toHaveLength(2);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("auto-queued 2 delayed tracking push retry"),
     );
@@ -213,6 +213,53 @@ describe("oms-flow-reconciliation.service", () => {
     warn.mockRestore();
   });
 
+  it("auto-queues Shopify fulfillment retries when shipped Shopify shipments have no fulfillment id", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const inserts: unknown[] = [];
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(1))
+        .mockResolvedValueOnce(sampleRows([{ shipment_id: 1441, order_number: "#57743" }]))
+        .mockResolvedValueOnce(sampleRows([])),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (row: unknown) => {
+          inserts.push(row);
+          return undefined;
+        }),
+      })),
+    };
+
+    const issues = await runOmsFlowReconciliation(db);
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      code: "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
+      severity: "critical",
+    });
+    expect(inserts).toHaveLength(1);
+    expect((inserts[0] as any).topic).toBe("shopify_fulfillment_push");
+    expect((inserts[0] as any).payload).toEqual({ shipmentId: 1441 });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("auto-queued 1 Shopify fulfillment push retry"),
+    );
+    warn.mockRestore();
+  });
+
   it("auto-remediates missing WMS and missing shipment bridge issues through retry rows", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
@@ -231,6 +278,8 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(sampleRows([{ oms_order_id: 10 }]))
         .mockResolvedValueOnce(countRows(1))
         .mockResolvedValueOnce(sampleRows([{ wms_order_id: 20 }]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         // OMS_PAID_WITHOUT_WMS remediation SELECT + duplicate retry check + audit event.

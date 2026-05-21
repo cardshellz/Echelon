@@ -1256,11 +1256,26 @@ export function registerOmsWebhooks(
 
       const shipping = shopifyOrder.shipping_address || {};
       const now = new Date();
+      const isCancelledPayload = Boolean(shopifyOrder.cancelled_at);
+      const isFinalOmsState =
+        isCancelledPayload ||
+        existing.status === "cancelled" ||
+        existing.status === "refunded" ||
+        shopifyOrder.financial_status === "refunded" ||
+        shopifyOrder.financial_status === "voided";
 
       // Update OMS order fields
       await db
         .update(omsOrders)
         .set({
+          ...(isCancelledPayload
+            ? {
+                status: "cancelled",
+                cancelledAt: shopifyOrder.cancelled_at
+                  ? new Date(shopifyOrder.cancelled_at)
+                  : now,
+              }
+            : {}),
           financialStatus: shopifyOrder.financial_status || existing.financialStatus,
           fulfillmentStatus: shopifyOrder.fulfillment_status || existing.fulfillmentStatus,
           customerName:
@@ -1388,6 +1403,14 @@ export function registerOmsWebhooks(
           // Update WMS order shipping address
           await db.execute(sql`
             UPDATE wms.orders SET
+              warehouse_status = CASE
+                WHEN ${isFinalOmsState} THEN 'cancelled'
+                ELSE warehouse_status
+              END,
+              cancelled_at = CASE
+                WHEN ${isFinalOmsState} THEN COALESCE(cancelled_at, ${now})
+                ELSE cancelled_at
+              END,
               shipping_name = ${shipping.name || null},
               shipping_company = ${shipping.company || null},
               shipping_address = ${shipping.address1 || null},
@@ -1402,7 +1425,11 @@ export function registerOmsWebhooks(
             WHERE id = ${wmsOrderId}
           `);
 
-          if (wmsSyncService) {
+          if (isFinalOmsState) {
+            console.log(
+              `${LOG_PREFIX} orders/updated skipped WMS reconcile for final order ${shopifyOrder.name || externalOrderId}`,
+            );
+          } else if (wmsSyncService) {
             await ensureOmsOrderQueuedForWmsSync(
               wmsSyncService,
               existing.id,
@@ -1415,7 +1442,7 @@ export function registerOmsWebhooks(
               new Error("orders/updated could not reconcile WMS lines because wmsSyncService is unavailable"),
             );
           }
-        } else if (shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid") {
+        } else if (!isFinalOmsState && (shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid")) {
           if (wmsSyncService) {
             await ensureOmsOrderQueuedForWmsSync(
               wmsSyncService,
