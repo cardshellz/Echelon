@@ -447,6 +447,137 @@ describe("purchasing recommendation routes", () => {
     expect(body.items.map((item: any) => item.sku)).toContain("STALE-COST");
   });
 
+  it("returns a filtered recommendation review queue for skipped, held, and quality-review items", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 201,
+        variant_id: 2001,
+        base_sku: "QUEUE-NO-VENDOR",
+        product_name: "Queue No Vendor",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 58,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: null,
+        vendor_lead_time_days: null,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+      },
+      {
+        product_id: 202,
+        variant_id: 2002,
+        base_sku: "QUEUE-HELD",
+        product_name: "Queue Held",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 90,
+        previous_outbound_pieces: 90,
+        demand_order_count: 15,
+        demand_active_days: 15,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+      {
+        product_id: 203,
+        variant_id: 2003,
+        base_sku: "QUEUE-MISSING-COST",
+        product_name: "Queue Missing Cost",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 5,
+        vendor_lead_time_days: null,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 88,
+        preferred_vendor_name: "Vendor B",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const allQueue = await requestJson(server.url, "GET", "/api/purchasing/recommendation-review-queue?limit=10");
+
+    expect(allQueue.status).toBe(200);
+    expect(mocks.procurement.getReorderAnalysisData).toHaveBeenCalledWith(30);
+    expect(allQueue.body).toMatchObject({
+      lookbackDays: 30,
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      summary: {
+        total: 3,
+        skipped: 1,
+        heldByPolicy: 1,
+        qualityReviewRequired: 1,
+      },
+      reasonCounts: {
+        no_vendor: 1,
+        held_by_approval_policy: 1,
+        medium_confidence_review: 1,
+      },
+      actionCounts: {
+        assign_vendor: 1,
+        review_approval_policy: 1,
+        review_quality_gate: 1,
+      },
+      filteredCount: 3,
+    });
+    expect(allQueue.body.items.map((item: any) => item.kind).sort()).toEqual([
+      "held_by_policy",
+      "quality_review_required",
+      "skipped",
+    ]);
+
+    const heldQueue = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/recommendation-review-queue?kind=held_by_policy&limit=10",
+    );
+
+    expect(heldQueue.status).toBe(200);
+    expect(heldQueue.body.filteredCount).toBe(1);
+    expect(heldQueue.body.items[0]).toMatchObject({
+      kind: "held_by_policy",
+      sku: "QUEUE-HELD",
+      action: {
+        action: "review_approval_policy",
+        label: "Review policy hold",
+      },
+      reason: {
+        code: "held_by_approval_policy",
+      },
+    });
+  });
+
   it("starts the auto-draft job for an admin user without awaiting completion", async () => {
     server = await startServer(buildApp());
 

@@ -2382,3 +2382,35 @@ Next step:
 - Continue Phase 10 by adding a skipped recommendation queue/filter that lets
   operators review why recommendations were held, skipped, or blocked without
   digging through auto-draft run JSON.
+
+### 2026-05-21 - Phase 10 Slice 2: Recommendation Review Queue
+
+Scope:
+
+- Added a read-only `/api/purchasing/recommendation-review-queue` endpoint that
+  reuses the existing purchasing recommendation engine, quality gate, and active
+  auto-draft approval policy.
+- Classified recommendation output into skipped, held-by-policy, and
+  quality-review-required queue items with reason, severity, candidate-score,
+  supplier, quantity, and operator action metadata.
+- Added reason, action, and candidate-band counts so the UI can explain why
+  recommendations are not flowing into autopilot without requiring operators to
+  inspect auto-draft run JSON.
+- Replaced the Reorder Analysis skipped-only review card with a filterable
+  recommendation review queue that can show skipped setup blockers, strict
+  approval-policy holds, and quality-review candidates.
+- Kept this slice read-only: recommendation math, approval policy, auto-draft
+  mutation behavior, supplier records, and PO creation behavior are unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 10 with autopilot run-history action links or a PO detail
+  next-action panel so operators can move from diagnostics into the exact
+  supplier, recommendation, or PO workflow that needs cleanup.
