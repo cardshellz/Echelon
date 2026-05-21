@@ -214,6 +214,15 @@ describe("purchasing recommendation routes", () => {
         totalOnHand: 5,
         excludedCount: 0,
       },
+      approvalPolicyImpact: {
+        policy: "high_confidence_only",
+        candidateScoreGateActive: false,
+        qualityGateEligibleCount: 0,
+        approvalPolicyEligibleCount: 0,
+        approvalPolicyBlockedCount: 0,
+        draftMutationEligibleCount: 0,
+        heldRecommendations: [],
+      },
       items: [
         {
           productId: 5,
@@ -226,6 +235,78 @@ describe("purchasing recommendation routes", () => {
           suggestedOrderPieces: 10,
           orderUomLabel: "Box",
           status: "order_now",
+        },
+      ],
+    });
+  });
+
+  it("returns manual reorder approval-policy impact using active candidate score settings", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 6,
+        variant_id: 61,
+        base_sku: "STRICT-REVIEW",
+        product_name: "Strict Review Candidate",
+        variant_count: 1,
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 90,
+        previous_outbound_pieces: 90,
+        demand_order_count: 15,
+        demand_active_days: 15,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+
+    expect(status).toBe(200);
+    expect(body.summary.autoDraftEligibleCount).toBe(1);
+    expect(body.items[0].recommendationCandidateScore.band).toBe("review_candidate");
+    expect(body.approvalPolicyImpact).toMatchObject({
+      policy: "high_confidence_and_strong_candidate",
+      candidateScoreGateActive: true,
+      qualityGateEligibleCount: 1,
+      approvalPolicyEligibleCount: 0,
+      approvalPolicyBlockedCount: 1,
+      draftMutationEligibleCount: 0,
+      blockedCandidateBandCounts: {
+        review_candidate: 1,
+      },
+      heldRecommendations: [
+        {
+          sku: "STRICT-REVIEW",
+          productName: "Strict Review Candidate",
+          suggestedOrderQty: 1,
+          orderUomLabel: "Box",
+          recommendationCandidateScore: {
+            band: "review_candidate",
+          },
+          qualityGate: {
+            autoDraftEligible: true,
+          },
         },
       ],
     });

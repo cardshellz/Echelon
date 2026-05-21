@@ -2322,3 +2322,34 @@ Next step:
 - Continue Phase 9 by adding a read-only approval-policy impact summary to
   manual reorder analysis so operators can preview strict-policy effects before
   running auto-draft.
+
+### 2026-05-21 - Phase 9 Slice 14: Reorder Approval Policy Impact Preview
+
+Scope:
+
+- Added a read-only `approvalPolicyImpact` payload to
+  `/api/purchasing/reorder-analysis` so manual review can preview the active
+  auto-draft approval policy before an auto-draft run is executed.
+- Applied only the active approval policy and candidate-score thresholds to the
+  manual preview; PO mutation behavior and the existing reorder-analysis item
+  set remain unchanged.
+- Included quality-gate eligible, active-policy approved, active-policy held,
+  and draft-mutation eligible counts in the manual preview.
+- Included candidate-band breakdowns and compact held-recommendation samples so
+  operators can see which high-confidence SKUs the stricter strong-candidate
+  policy would keep out of draft PO mutation.
+- Surfaced the approval-policy impact card on the Reorder Analysis page,
+  including the active policy, approved count, held count, draft-eligible count,
+  and held recommendation samples.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/jobs/__tests__/unit/auto-draft.job.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+
+Next step:
+
+- Validate the live Reorder Analysis approval-policy preview against current
+  purchasing output, then close Phase 9 or move into the next hardening phase
+  for supplier recommendation workflow and operator approval controls.
