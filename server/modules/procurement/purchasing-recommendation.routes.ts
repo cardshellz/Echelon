@@ -14,6 +14,7 @@ import {
   type PurchasingRecommendationRawRow,
 } from "./purchasing-recommendation.engine";
 import {
+  buildApprovalPolicyDiagnostics,
   buildPurchasingRecommendationRunDetail,
   type PurchasingRecommendationRunPoMutation,
 } from "./purchasing-recommendation.run-detail";
@@ -109,6 +110,31 @@ function normalizeAutoDraftRun(row: any) {
     topActionableRecommendation: actionableRecommendations[0] ?? null,
     topApprovalPolicyBlockedRecommendation: approvalPolicyBlockedRecommendations[0] ?? null,
     topSkippedRecommendation: skippedRecommendations[0] ?? null,
+  };
+}
+
+function buildApprovalPolicyImpact(result: ReturnType<typeof generatePurchasingRecommendations>, settings: AutoDraftRecommendationSettings) {
+  const diagnostics = buildApprovalPolicyDiagnostics(result, settings);
+  const heldRecommendations = result.items
+    .filter((item) => item.qualityGate.autoDraftEligible && !passesAutoDraftApprovalPolicy(item, settings))
+    .slice(0, 10)
+    .map((item) => ({
+      recommendationId: item.recommendationId,
+      productId: item.productId,
+      productVariantId: item.productVariantId ?? null,
+      sku: item.sku,
+      productName: item.productName,
+      suggestedOrderQty: item.suggestedOrderQty,
+      orderUomLabel: item.orderUomLabel,
+      preferredVendorName: item.preferredVendorName,
+      recommendationCandidateScore: item.recommendationCandidateScore,
+      qualityGate: item.qualityGate,
+      explanation: item.explanation,
+    }));
+
+  return {
+    ...diagnostics,
+    heldRecommendations,
   };
 }
 
@@ -314,16 +340,25 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       // Product-level query: aggregate inventory and velocity in base units (pieces)
       // Also fetch the highest-level variant (ordering UOM) for rounding order quantities
       const rawRows = await storage.getReorderAnalysisData(lookbackDays);
+      const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
+      const approvalPolicySettings: AutoDraftRecommendationSettings = {
+        autoDraftMode: settings.autoDraftMode,
+        approvalPolicy: settings.approvalPolicy,
+        candidateScoreStrongThreshold: settings.candidateScoreStrongThreshold,
+        candidateScoreReviewThreshold: settings.candidateScoreReviewThreshold,
+      };
       const context = await loadPurchasingRecommendationContext();
       const recommendationResult = generatePurchasingRecommendations({
         rows: rawRows as PurchasingRecommendationRawRow[],
         lookbackDays,
+        autoDraftSettings: approvalPolicySettings,
         ...context,
       });
 
       res.json({
         items: recommendationResult.items,
         summary: recommendationResult.summary,
+        approvalPolicyImpact: buildApprovalPolicyImpact(recommendationResult, approvalPolicySettings),
         skippedItems: recommendationResult.skippedItems,
         lookbackDays,
       });

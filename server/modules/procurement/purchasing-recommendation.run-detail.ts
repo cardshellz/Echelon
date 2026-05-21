@@ -162,7 +162,7 @@ function incrementCandidateBand(map: Record<string, number>, item: PurchasingRec
   increment(map, item.recommendationCandidateScore.band);
 }
 
-function buildApprovalPolicyDiagnostics(
+export function buildApprovalPolicyDiagnostics(
   result: PurchasingRecommendationResult,
   settings?: AutoDraftRecommendationSettings,
 ) {

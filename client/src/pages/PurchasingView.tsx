@@ -164,6 +164,33 @@ interface ReorderItem {
   };
 }
 
+type AutoDraftApprovalPolicy = "high_confidence_only" | "high_confidence_and_strong_candidate";
+
+interface ApprovalPolicyImpact {
+  policy: AutoDraftApprovalPolicy;
+  mode: "draft_po" | "review_only";
+  candidateScoreGateActive: boolean;
+  qualityGateEligibleCount: number;
+  approvalPolicyEligibleCount: number;
+  approvalPolicyBlockedCount: number;
+  draftMutationEligibleCount: number;
+  approvedCandidateBandCounts: Record<string, number>;
+  blockedCandidateBandCounts: Record<string, number>;
+  heldRecommendations: Array<{
+    recommendationId: string;
+    productId: number;
+    productVariantId: number | null;
+    sku: string;
+    productName: string;
+    suggestedOrderQty: number;
+    orderUomLabel: string;
+    preferredVendorName: string | null;
+    explanation: string;
+    recommendationCandidateScore?: ReorderItem["recommendationCandidateScore"];
+    qualityGate?: ReorderItem["qualityGate"];
+  }>;
+}
+
 interface ReorderAnalysis {
   items: ReorderItem[];
   skippedItems: ReorderItem[];
@@ -175,6 +202,7 @@ interface ReorderAnalysis {
     autoDraftEligibleCount: number;
     autoDraftReviewRequiredCount: number;
   };
+  approvalPolicyImpact?: ApprovalPolicyImpact;
   lookbackDays: number;
 }
 
@@ -211,6 +239,12 @@ function candidateBandClass(band?: string | null): string {
   if (band === "review_candidate") return "bg-blue-50 text-blue-700 border-blue-200";
   if (band === "blocked") return "bg-red-50 text-red-700 border-red-200";
   return "bg-zinc-50 text-zinc-600 border-zinc-200";
+}
+
+function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
+  return policy === "high_confidence_and_strong_candidate"
+    ? "High confidence + strong candidate"
+    : "High confidence only";
 }
 
 export default function PurchasingView() {
@@ -328,6 +362,7 @@ export default function PurchasingView() {
       return (priority[a.reviewSignal?.severity ?? "info"] ?? 2) - (priority[b.reviewSignal?.severity ?? "info"] ?? 2);
     })
     .slice(0, 8);
+  const approvalPolicyImpact = analysis?.approvalPolicyImpact;
 
   const SortIcon = ({ field }: { field: string }) => {
     if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground ml-1" />;
@@ -559,6 +594,77 @@ export default function PurchasingView() {
                   <div className="text-2xl font-bold">{analysis.summary.lowConfidenceCount}</div>
                 </div>
               </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {approvalPolicyImpact && (
+          <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
+              <CardTitle className="text-lg">Approval Policy Impact</CardTitle>
+              <CardDescription>Read-only preview of the active auto-draft approval policy before running auto-draft.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-4 space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 rounded-md border border-zinc-200 dark:border-zinc-800 overflow-hidden divide-y md:divide-y-0 md:divide-x divide-zinc-200 dark:divide-zinc-800">
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Active Policy</div>
+                  <div className="text-sm font-semibold mt-1">{formatApprovalPolicy(approvalPolicyImpact.policy)}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Quality Eligible</div>
+                  <div className="text-2xl font-bold">{approvalPolicyImpact.qualityGateEligibleCount}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Policy Approved</div>
+                  <div className="text-2xl font-bold text-green-700">{approvalPolicyImpact.approvalPolicyEligibleCount}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Held By Policy</div>
+                  <div className="text-2xl font-bold text-amber-700">{approvalPolicyImpact.approvalPolicyBlockedCount}</div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 p-3">
+                  <div className="text-xs text-zinc-500">Draft Eligible</div>
+                  <div className="text-2xl font-bold">{approvalPolicyImpact.draftMutationEligibleCount}</div>
+                </div>
+              </div>
+
+              {approvalPolicyImpact.approvalPolicyBlockedCount > 0 && (
+                <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3">
+                  <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-amber-800">Strict policy would hold recommendations</div>
+                      <p className="text-xs text-amber-700">
+                        {approvalPolicyImpact.blockedCandidateBandCounts.review_candidate ?? 0} review candidates and{" "}
+                        {approvalPolicyImpact.blockedCandidateBandCounts.watch ?? 0} watch items would stay out of draft PO mutation.
+                      </p>
+                    </div>
+                    <Button size="sm" variant="outline" className="h-7 text-[11px] border-amber-300 text-amber-700 hover:bg-amber-100" onClick={() => setCandidateBandFilter("review_candidate")}>
+                      Review Held Items
+                    </Button>
+                  </div>
+                  {approvalPolicyImpact.heldRecommendations.length > 0 && (
+                    <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-2">
+                      {approvalPolicyImpact.heldRecommendations.slice(0, 4).map((item) => (
+                        <div key={item.recommendationId} className="rounded border bg-white/80 p-2 text-xs">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono font-semibold text-primary truncate">{item.sku}</span>
+                            {item.recommendationCandidateScore ? (
+                              <Badge variant="outline" className={`text-[10px] capitalize ${candidateBandClass(item.recommendationCandidateScore.band)}`}>
+                                {item.recommendationCandidateScore.score} - {formatCandidateBand(item.recommendationCandidateScore.band)}
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <div className="mt-1 truncate font-medium">{item.productName}</div>
+                          <div className="mt-1 text-zinc-500">
+                            {item.suggestedOrderQty} {item.orderUomLabel}
+                            {item.preferredVendorName ? ` - ${item.preferredVendorName}` : ""}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
