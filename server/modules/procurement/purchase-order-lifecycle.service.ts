@@ -143,6 +143,43 @@ export type PoLifecycleSummary = {
   nextActions: PoNextAction[];
 };
 
+export type PoAutoDraftActionPlanActionId =
+  | PoLifecycleCommand
+  | "open_lines"
+  | "open_exceptions"
+  | "create_invoice"
+  | "record_payment"
+  | "done"
+  | "cancelled";
+
+export type PoAutoDraftActionPlanStepStatus = "done" | "current" | "pending" | "blocked";
+
+export type PoAutoDraftActionPlan = {
+  kind: "auto_draft_po_next_action";
+  primaryAction: {
+    id: PoAutoDraftActionPlanActionId;
+    label: string;
+    detail: string;
+    severity: "info" | "warning" | "critical" | "success";
+    tab?: "lines" | "exceptions" | "receipts" | "invoices" | "payments" | "shipments";
+    lifecycleActionId?: PoLifecycleCommand;
+  };
+  checklist: Array<{
+    id: string;
+    label: string;
+    status: PoAutoDraftActionPlanStepStatus;
+    detail?: string;
+  }>;
+  context: {
+    lineCount: number | null;
+    openExceptionCount: number;
+    legacyStatus: string;
+    physicalStatus: PoPhysicalStatus;
+    financialStatus: PoFinancialStatus;
+    availableLifecycleActionIds: PoLifecycleCommand[];
+  };
+};
+
 const CANCELLABLE_LEGACY_STATUSES = new Set(["draft", "pending_approval", "approved", "sent", "acknowledged"]);
 
 function action(
@@ -336,6 +373,242 @@ export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSum
       allowedFinancialTransitions.length === 0,
     nextActions,
   };
+}
+
+export function buildPoAutoDraftActionPlan(
+  po: Record<string, any>,
+  context: {
+    lineCount?: number | null;
+    openExceptionCount?: number | null;
+  } = {},
+): PoAutoDraftActionPlan | null {
+  if (po.source !== "auto_draft") return null;
+
+  const lifecycle = buildPoLifecycleSummary(po);
+  const actionIds = lifecycle.nextActions.map((action) => action.id);
+  const hasAction = (...ids: PoLifecycleCommand[]) => ids.some((id) => actionIds.includes(id));
+  const lineCount = context.lineCount ?? null;
+  const openExceptionCount = Math.max(0, Number(context.openExceptionCount ?? 0) || 0);
+  const hasLines = lineCount === null || lineCount > 0;
+  const legacyStatus = lifecycle.legacyStatus;
+  const physicalStatus = lifecycle.physicalStatus;
+  const financialStatus = lifecycle.financialStatus;
+  const sentToSupplier = ["sent", "acknowledged", "shipped", "in_transit", "arrived", "receiving", "received", "short_closed"].includes(physicalStatus);
+  const receivedInventory = ["received", "short_closed"].includes(physicalStatus) || ["received", "closed"].includes(legacyStatus);
+  const isCancelled = legacyStatus === "cancelled" || physicalStatus === "cancelled";
+  const needsDraftReview = legacyStatus === "draft";
+
+  const reviewStatus: PoAutoDraftActionPlanStepStatus =
+    openExceptionCount > 0 ? "blocked" : hasLines && !needsDraftReview ? "done" : "current";
+  const sendStatus: PoAutoDraftActionPlanStepStatus =
+    isCancelled ? "blocked" : sentToSupplier ? "done" : hasAction("send", "send_to_vendor", "submit", "approve") ? "current" : "pending";
+  const receivingStatus: PoAutoDraftActionPlanStepStatus =
+    isCancelled ? "blocked" : receivedInventory ? "done" : sentToSupplier || hasAction("create_receipt") ? "current" : "pending";
+  const apStatus: PoAutoDraftActionPlanStepStatus =
+    isCancelled
+      ? "blocked"
+      : financialStatus === "paid"
+        ? "done"
+        : receivedInventory || ["invoiced", "partially_paid", "disputed"].includes(financialStatus)
+          ? "current"
+          : "pending";
+
+  const checklist: PoAutoDraftActionPlan["checklist"] = [];
+  if (openExceptionCount > 0) {
+    checklist.push({
+      id: "exceptions",
+      label: "Resolve exceptions",
+      status: "blocked",
+      detail: `${openExceptionCount} open exception${openExceptionCount === 1 ? "" : "s"} must be cleared before this PO is safe to advance.`,
+    });
+  }
+  checklist.push(
+    {
+      id: "review_lines",
+      label: "Review drafted PO",
+      status: reviewStatus,
+      detail: lineCount === null
+        ? "Confirm vendor, quantities, costs, and MOQ before sending."
+        : `${lineCount} line${lineCount === 1 ? "" : "s"} on this PO. Confirm quantities, costs, and MOQ before sending.`,
+    },
+    {
+      id: "send_supplier",
+      label: "Send to supplier",
+      status: sendStatus,
+      detail: sentToSupplier ? "Supplier send has been recorded." : "Send the reviewed PO to the vendor.",
+    },
+    {
+      id: "receive_inventory",
+      label: "Receive inventory",
+      status: receivingStatus,
+      detail: receivedInventory ? "Receiving is complete." : "Track shipment movement and create the receiving record when goods arrive.",
+    },
+    {
+      id: "ap_closeout",
+      label: "AP closeout",
+      status: apStatus,
+      detail: financialStatus === "paid" ? "Invoice and payment are complete." : "Create the vendor invoice and record payment for landed-cost and financial reporting.",
+    },
+  );
+
+  const makePrimary = (
+    primaryAction: PoAutoDraftActionPlan["primaryAction"],
+  ): PoAutoDraftActionPlan => ({
+    kind: "auto_draft_po_next_action",
+    primaryAction,
+    checklist,
+    context: {
+      lineCount,
+      openExceptionCount,
+      legacyStatus,
+      physicalStatus,
+      financialStatus,
+      availableLifecycleActionIds: actionIds,
+    },
+  });
+
+  if (openExceptionCount > 0) {
+    return makePrimary({
+      id: "open_exceptions",
+      label: "Resolve PO exceptions",
+      detail: "Clear the open exception queue before advancing this auto-drafted PO.",
+      severity: "critical",
+      tab: "exceptions",
+    });
+  }
+
+  if (isCancelled) {
+    return makePrimary({
+      id: "cancelled",
+      label: "PO cancelled",
+      detail: "This auto-drafted PO is terminal. Review history if the demand still needs a replacement PO.",
+      severity: "warning",
+    });
+  }
+
+  if (!hasLines || legacyStatus === "draft") {
+    return makePrimary({
+      id: "open_lines",
+      label: "Review drafted quantities",
+      detail: hasLines
+        ? "Confirm vendor, quantities, costs, and MOQ, then use the available send action."
+        : "This auto-drafted PO has no lines; review the recommendation source before sending.",
+      severity: hasLines ? "info" : "warning",
+      tab: "lines",
+    });
+  }
+
+  if (hasAction("approve")) {
+    return makePrimary({
+      id: "approve",
+      lifecycleActionId: "approve",
+      label: "Approve PO",
+      detail: "The reviewed auto-draft is waiting for approval before supplier send.",
+      severity: "info",
+    });
+  }
+
+  if (hasAction("send_to_vendor", "send")) {
+    const actionId = hasAction("send_to_vendor") ? "send_to_vendor" : "send";
+    return makePrimary({
+      id: actionId,
+      lifecycleActionId: actionId,
+      label: actionId === "send_to_vendor" ? "Send to vendor" : "Mark as sent",
+      detail: "The PO is approved and ready for supplier communication.",
+      severity: "info",
+    });
+  }
+
+  if (hasAction("acknowledge")) {
+    return makePrimary({
+      id: "acknowledge",
+      lifecycleActionId: "acknowledge",
+      label: "Record supplier acknowledgment",
+      detail: "Capture the vendor reference or confirmed delivery date if available.",
+      severity: "info",
+    });
+  }
+
+  if (hasAction("mark_shipped")) {
+    return makePrimary({
+      id: "mark_shipped",
+      lifecycleActionId: "mark_shipped",
+      label: "Mark shipped",
+      detail: "Update the PO once the supplier ships the goods.",
+      severity: "info",
+      tab: "shipments",
+    });
+  }
+
+  if (hasAction("mark_in_transit")) {
+    return makePrimary({
+      id: "mark_in_transit",
+      lifecycleActionId: "mark_in_transit",
+      label: "Mark in transit",
+      detail: "Update transit status or shipment tracking before receiving.",
+      severity: "info",
+      tab: "shipments",
+    });
+  }
+
+  if (hasAction("mark_arrived")) {
+    return makePrimary({
+      id: "mark_arrived",
+      lifecycleActionId: "mark_arrived",
+      label: "Mark arrived",
+      detail: "Record that goods have reached the warehouse, then receive them.",
+      severity: "info",
+      tab: "shipments",
+    });
+  }
+
+  if (hasAction("create_receipt")) {
+    return makePrimary({
+      id: "create_receipt",
+      lifecycleActionId: "create_receipt",
+      label: "Create receipt",
+      detail: "Start receiving so inventory, landed cost, and PO state stay aligned.",
+      severity: "info",
+      tab: "receipts",
+    });
+  }
+
+  if (receivedInventory && financialStatus === "unbilled") {
+    return makePrimary({
+      id: "create_invoice",
+      label: "Create vendor invoice",
+      detail: "Receiving is complete; create the invoice so AP and landed cost can reconcile.",
+      severity: "info",
+      tab: "invoices",
+    });
+  }
+
+  if (["invoiced", "partially_paid", "disputed"].includes(financialStatus)) {
+    return makePrimary({
+      id: "record_payment",
+      label: "Record payment",
+      detail: "Record payment against the linked invoice when it is paid.",
+      severity: financialStatus === "disputed" ? "warning" : "info",
+      tab: "payments",
+    });
+  }
+
+  if (hasAction("close")) {
+    return makePrimary({
+      id: "close",
+      lifecycleActionId: "close",
+      label: "Close PO",
+      detail: "The PO can be closed once receiving and finance review are complete.",
+      severity: "info",
+    });
+  }
+
+  return makePrimary({
+    id: "done",
+    label: "No next action",
+    detail: "This auto-drafted PO has no open lifecycle, receiving, or AP action from the current state.",
+    severity: financialStatus === "paid" ? "success" : "info",
+  });
 }
 
 export type LifecycleChange = {

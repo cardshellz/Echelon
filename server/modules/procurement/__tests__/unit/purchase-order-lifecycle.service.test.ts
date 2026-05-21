@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PoLifecycleError,
+  buildPoAutoDraftActionPlan,
   buildPoLifecycleSummary,
   buildFinancialTransitionChange,
   buildPhysicalTransitionChange,
@@ -195,5 +196,97 @@ describe("purchase-order-lifecycle.service", () => {
     expect(lifecycle.allowedFinancialTransitions).toEqual(["invoiced"]);
     expect(lifecycle.isTerminal).toBe(false);
     expect(lifecycle.nextActions.map((action) => action.id)).toContain("close");
+  });
+
+  it("builds read-only next-action guidance for auto-drafted POs", () => {
+    const plan = buildPoAutoDraftActionPlan(
+      {
+        id: 15,
+        source: "auto_draft",
+        status: "draft",
+        physicalStatus: "draft",
+        financialStatus: "unbilled",
+      },
+      { lineCount: 2, openExceptionCount: 0 },
+    );
+
+    expect(plan).toMatchObject({
+      kind: "auto_draft_po_next_action",
+      primaryAction: {
+        id: "open_lines",
+        label: "Review drafted quantities",
+        severity: "info",
+        tab: "lines",
+      },
+      context: {
+        lineCount: 2,
+        openExceptionCount: 0,
+        availableLifecycleActionIds: expect.arrayContaining(["submit", "send_to_vendor"]),
+      },
+    });
+    expect(plan?.checklist.map((step) => [step.id, step.status])).toEqual([
+      ["review_lines", "current"],
+      ["send_supplier", "current"],
+      ["receive_inventory", "pending"],
+      ["ap_closeout", "pending"],
+    ]);
+  });
+
+  it("prioritizes exceptions over normal auto-draft advancement guidance", () => {
+    const plan = buildPoAutoDraftActionPlan(
+      {
+        id: 16,
+        source: "auto_draft",
+        status: "approved",
+        physicalStatus: "draft",
+        financialStatus: "unbilled",
+      },
+      { lineCount: 1, openExceptionCount: 2 },
+    );
+
+    expect(plan?.primaryAction).toMatchObject({
+      id: "open_exceptions",
+      severity: "critical",
+      tab: "exceptions",
+    });
+    expect(plan?.checklist[0]).toMatchObject({
+      id: "exceptions",
+      status: "blocked",
+    });
+  });
+
+  it("moves auto-drafted received POs into AP closeout guidance", () => {
+    const plan = buildPoAutoDraftActionPlan(
+      {
+        id: 17,
+        source: "auto_draft",
+        status: "received",
+        physicalStatus: "received",
+        financialStatus: "unbilled",
+      },
+      { lineCount: 3, openExceptionCount: 0 },
+    );
+
+    expect(plan?.primaryAction).toMatchObject({
+      id: "create_invoice",
+      label: "Create vendor invoice",
+      tab: "invoices",
+    });
+    expect(plan?.checklist.map((step) => [step.id, step.status])).toContainEqual([
+      "ap_closeout",
+      "current",
+    ]);
+  });
+
+  it("does not add auto-draft guidance to manually created POs", () => {
+    expect(
+      buildPoAutoDraftActionPlan({
+        id: 18,
+        source: "manual",
+        status: "draft",
+        physicalStatus: "draft",
+        financialStatus: "unbilled",
+      }),
+    ).toBeNull();
   });
 });

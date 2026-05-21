@@ -122,6 +122,57 @@ type PoLifecycleSummary = {
   nextActions?: Array<{ id: PoLifecycleActionId }>;
 };
 
+type AutoDraftActionPlanActionId =
+  | PoLifecycleActionId
+  | "open_lines"
+  | "open_exceptions"
+  | "create_invoice"
+  | "record_payment"
+  | "done"
+  | "cancelled";
+
+type AutoDraftActionPlan = {
+  primaryAction: {
+    id: AutoDraftActionPlanActionId;
+    label: string;
+    detail: string;
+    severity: "info" | "warning" | "critical" | "success";
+    tab?: "lines" | "exceptions" | "receipts" | "invoices" | "payments" | "shipments";
+    lifecycleActionId?: PoLifecycleActionId;
+  };
+  checklist: Array<{
+    id: string;
+    label: string;
+    status: "done" | "current" | "pending" | "blocked";
+    detail?: string;
+  }>;
+  context: {
+    lineCount: number | null;
+    openExceptionCount: number;
+    availableLifecycleActionIds: PoLifecycleActionId[];
+  };
+};
+
+const AUTO_DRAFT_STEP_STYLES: Record<
+  AutoDraftActionPlan["checklist"][number]["status"],
+  string
+> = {
+  done: "border-green-200 bg-green-50 text-green-700",
+  current: "border-blue-200 bg-blue-50 text-blue-700",
+  pending: "border-muted bg-muted/40 text-muted-foreground",
+  blocked: "border-red-200 bg-red-50 text-red-700",
+};
+
+const AUTO_DRAFT_SEVERITY_STYLES: Record<
+  AutoDraftActionPlan["primaryAction"]["severity"],
+  string
+> = {
+  info: "border-blue-200 bg-blue-50 text-blue-700",
+  warning: "border-amber-200 bg-amber-50 text-amber-700",
+  critical: "border-red-200 bg-red-50 text-red-700",
+  success: "border-green-200 bg-green-50 text-green-700",
+};
+
 function stageState(
   stageIndex: number,
   currentIndex: number,
@@ -857,6 +908,7 @@ export default function PurchaseOrderDetail() {
     enabled: !!poId,
   });
   const lifecycle = (po as any)?.lifecycle as PoLifecycleSummary | undefined;
+  const autoDraftActionPlan = (po as any)?.autoDraftActionPlan as AutoDraftActionPlan | null | undefined;
   const lifecycleActionIds = new Set(
     (lifecycle?.nextActions ?? []).map((action) => action.id),
   );
@@ -1629,6 +1681,157 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  const openCreateInvoiceDialogFromPo = async () => {
+    let invoiceNumber = "";
+    try {
+      const res = await fetch("/api/vendor-invoices/next-number");
+      if (res.ok) {
+        const data = await res.json();
+        invoiceNumber = data.invoiceNumber;
+      }
+    } catch {}
+    setInvoiceForm({
+      invoiceNumber,
+      amountDollars: ((Number(po?.totalCents) || 0) / 100).toString(),
+      invoiceDate: new Date().toISOString().slice(0, 10),
+      dueDate: "",
+      notes: "",
+    });
+    setShowCreateInvoiceDialog(true);
+  };
+
+  const openPaymentDialogFromPo = () => {
+    const unpaidInvoices = invoicesData?.invoices?.filter((i: any) => i.balanceCents > 0) ?? [];
+    if (unpaidInvoices.length === 0) {
+      setShowPaymentDialog(true);
+      return;
+    }
+    const first = unpaidInvoices[0];
+    setPayment(p => ({
+      ...p,
+      invoiceId: first.id,
+      amountDollars: (first.balanceCents / 100).toFixed(2),
+    }));
+    setShowPaymentDialog(true);
+  };
+
+  const runAutoDraftPrimaryAction = async () => {
+    const action = autoDraftActionPlan?.primaryAction;
+    if (!action) return;
+    if (action.tab) setActiveTab(action.tab);
+
+    switch (action.id) {
+      case "open_lines":
+      case "open_exceptions":
+      case "done":
+      case "cancelled":
+        return;
+      case "create_invoice":
+        await openCreateInvoiceDialogFromPo();
+        return;
+      case "record_payment":
+        openPaymentDialogFromPo();
+        return;
+      case "submit":
+        submitMutation.mutate();
+        return;
+      case "approve":
+        approveMutation.mutate();
+        return;
+      case "send":
+        sendMutation.mutate();
+        return;
+      case "send_to_vendor":
+        if (po?.status === "approved") {
+          sendMutation.mutate();
+        } else if (isSoloMode) {
+          sendToVendorMutation.mutate();
+        } else {
+          submitMutation.mutate();
+        }
+        return;
+      case "acknowledge":
+        setShowAckDialog(true);
+        return;
+      case "mark_shipped":
+        markShippedMutation.mutate();
+        return;
+      case "mark_in_transit":
+        markInTransitMutation.mutate();
+        return;
+      case "mark_arrived":
+        markArrivedMutation.mutate();
+        return;
+      case "create_receipt":
+        createReceiptMutation.mutate();
+        return;
+      case "close":
+        closeMutation.mutate();
+        return;
+      case "return_to_draft":
+        returnToDraftMutation.mutate();
+        return;
+      case "cancel":
+        setShowCancelDialog(true);
+        return;
+      case "close_short":
+        return;
+    }
+  };
+
+  const autoDraftPrimaryActionPending = (() => {
+    switch (autoDraftActionPlan?.primaryAction.id) {
+      case "submit":
+        return submitMutation.isPending;
+      case "approve":
+        return approveMutation.isPending;
+      case "send":
+        return sendMutation.isPending;
+      case "send_to_vendor":
+        return po?.status === "approved" ? sendMutation.isPending : sendToVendorMutation.isPending || submitMutation.isPending;
+      case "mark_shipped":
+        return markShippedMutation.isPending;
+      case "mark_in_transit":
+        return markInTransitMutation.isPending;
+      case "mark_arrived":
+        return markArrivedMutation.isPending;
+      case "create_receipt":
+        return createReceiptMutation.isPending;
+      case "create_invoice":
+        return createInvoiceMutation.isPending;
+      case "close":
+        return closeMutation.isPending;
+      case "return_to_draft":
+        return returnToDraftMutation.isPending;
+      default:
+        return false;
+    }
+  })();
+
+  const autoDraftPrimaryButtonLabel = (() => {
+    switch (autoDraftActionPlan?.primaryAction.id) {
+      case "open_lines":
+        return "Open lines";
+      case "open_exceptions":
+        return "Open exceptions";
+      case "create_invoice":
+        return "Create invoice";
+      case "record_payment":
+        return "Record payment";
+      case "done":
+        return "No action";
+      case "cancelled":
+        return "Review history";
+      default:
+        return autoDraftActionPlan?.primaryAction.label ?? "Open";
+    }
+  })();
+
+  const autoDraftPrimaryButtonDisabled =
+    !autoDraftActionPlan ||
+    autoDraftPrimaryActionPending ||
+    ["done", "cancelled"].includes(autoDraftActionPlan.primaryAction.id);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[50vh]">
@@ -2098,6 +2301,70 @@ export default function PurchaseOrderDetail() {
             </p>
           </div>
         </div>
+      )}
+
+      {autoDraftActionPlan && (
+        <Card className="border-amber-200">
+          <CardContent className="p-4 space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-start gap-4">
+              <div className="flex-1 min-w-0 space-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Badge
+                    variant="outline"
+                    className={`text-xs ${AUTO_DRAFT_SEVERITY_STYLES[autoDraftActionPlan.primaryAction.severity]}`}
+                  >
+                    Auto-draft next action
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">
+                    {autoDraftActionPlan.context.lineCount ?? lines.length} line{(autoDraftActionPlan.context.lineCount ?? lines.length) === 1 ? "" : "s"}
+                    {autoDraftActionPlan.context.openExceptionCount > 0
+                      ? `, ${autoDraftActionPlan.context.openExceptionCount} open exception${autoDraftActionPlan.context.openExceptionCount === 1 ? "" : "s"}`
+                      : ""}
+                  </span>
+                </div>
+                <div>
+                  <h3 className="font-semibold text-base">{autoDraftActionPlan.primaryAction.label}</h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    {autoDraftActionPlan.primaryAction.detail}
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant={autoDraftActionPlan.primaryAction.severity === "critical" ? "destructive" : "default"}
+                onClick={() => void runAutoDraftPrimaryAction()}
+                disabled={autoDraftPrimaryButtonDisabled}
+                className="w-full lg:w-auto"
+              >
+                {autoDraftPrimaryActionPending ? "Working..." : autoDraftPrimaryButtonLabel}
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
+              {autoDraftActionPlan.checklist.map((step) => (
+                <div
+                  key={step.id}
+                  className={`rounded-md border px-3 py-2 text-sm ${AUTO_DRAFT_STEP_STYLES[step.status]}`}
+                >
+                  <div className="flex items-center gap-2 font-medium">
+                    {step.status === "done" ? (
+                      <CheckCircle className="h-3.5 w-3.5 flex-shrink-0" />
+                    ) : step.status === "blocked" ? (
+                      <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                    ) : (
+                      <Clock className="h-3.5 w-3.5 flex-shrink-0" />
+                    )}
+                    <span className="truncate">{step.label}</span>
+                  </div>
+                  {step.detail && (
+                    <p className="text-xs opacity-80 mt-1 line-clamp-2">
+                      {step.detail}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Phase 2: Tabs + Quick Actions side rail */}
