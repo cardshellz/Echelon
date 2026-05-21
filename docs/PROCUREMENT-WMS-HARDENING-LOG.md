@@ -2353,3 +2353,32 @@ Next step:
 - Validate the live Reorder Analysis approval-policy preview against current
   purchasing output, then close Phase 9 or move into the next hardening phase
   for supplier recommendation workflow and operator approval controls.
+
+### 2026-05-21 - Phase 10 Slice 1: Supplier Setup Gap Panel
+
+Scope:
+
+- Added a read-only `/api/purchasing/supplier-setup-gaps` endpoint that reuses
+  the existing purchasing recommendation engine and quality-control signals.
+- Aggregated missing preferred vendor, missing supplier cost, last-purchase cost
+  fallback, stale supplier cost, unverified supplier cost, default lead-time,
+  and product lead-time fallback gaps into dashboard-ready counts.
+- Returned compact SKU samples with the primary setup gap, preferred vendor,
+  candidate score, quality gate, and recommended operator action.
+- Added a supplier setup gap panel to the Purchasing Dashboard so operators can
+  see vendor/cost/lead-time blockers before trusting auto-draft output.
+- Kept this slice read-only: recommendation math, approval policy, auto-draft
+  mutation behavior, and supplier records are unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 10 by adding a skipped recommendation queue/filter that lets
+  operators review why recommendations were held, skipped, or blocked without
+  digging through auto-draft run JSON.
