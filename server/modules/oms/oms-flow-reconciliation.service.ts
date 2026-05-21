@@ -400,6 +400,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider = 'shopify'
           AND os.shopify_fulfillment_id IS NULL
+          AND COALESCE(oo.fulfillment_status, 'unfulfilled') <> 'fulfilled'
           AND NOT EXISTS (
             SELECT 1
             FROM oms.webhook_retry_queue q
@@ -425,6 +426,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider = 'shopify'
           AND os.shopify_fulfillment_id IS NULL
+          AND COALESCE(oo.fulfillment_status, 'unfulfilled') <> 'fulfilled'
           AND NOT EXISTS (
             SELECT 1
             FROM oms.webhook_retry_queue q

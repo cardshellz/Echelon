@@ -94,6 +94,14 @@ describe("oms-flow-reconciliation.service", () => {
     );
   });
 
+  it("does not queue Shopify fulfillment repair for orders OMS already considers fulfilled", () => {
+    const fulfillmentStatusGuards = OMS_FLOW_RECONCILIATION_SRC.match(
+      /COALESCE\(oo\.fulfillment_status, 'unfulfilled'\) <> 'fulfilled'/g,
+    ) ?? [];
+
+    expect(fulfillmentStatusGuards.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("logs a compact summary when scheduled reconciliation finds issues", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const db = {
