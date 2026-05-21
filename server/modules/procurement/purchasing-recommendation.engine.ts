@@ -147,7 +147,7 @@ export interface PurchasingRecommendationDefaults {
   safetyStockDays: number;
 }
 
-export type AutoDraftApprovalPolicy = "high_confidence_only";
+export type AutoDraftApprovalPolicy = "high_confidence_only" | "high_confidence_and_strong_candidate";
 
 export interface AutoDraftRecommendationSettings {
   autoDraftMode?: "draft_po" | "review_only";
@@ -1125,7 +1125,9 @@ function buildQualityGate(input: {
 }
 
 export function getAutoDraftApprovalPolicy(settings?: AutoDraftRecommendationSettings): AutoDraftApprovalPolicy {
-  return settings?.approvalPolicy === "high_confidence_only" ? "high_confidence_only" : "high_confidence_only";
+  return settings?.approvalPolicy === "high_confidence_and_strong_candidate"
+    ? "high_confidence_and_strong_candidate"
+    : "high_confidence_only";
 }
 
 export function passesAutoDraftApprovalPolicy(
@@ -1134,6 +1136,9 @@ export function passesAutoDraftApprovalPolicy(
 ): boolean {
   const policy = getAutoDraftApprovalPolicy(settings);
   if (policy === "high_confidence_only") return item.qualityGate.autoDraftEligible;
+  if (policy === "high_confidence_and_strong_candidate") {
+    return item.qualityGate.autoDraftEligible && item.recommendationCandidateScore.band === "strong_candidate";
+  }
   return false;
 }
 

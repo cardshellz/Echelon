@@ -154,7 +154,7 @@ interface DashboardData {
     summaryJson?: {
       settings?: {
         autoDraftMode?: "draft_po" | "review_only";
-        approvalPolicy?: "high_confidence_only";
+        approvalPolicy?: "high_confidence_only" | "high_confidence_and_strong_candidate";
       };
       recommendationSummary?: {
         actionableCount?: number;

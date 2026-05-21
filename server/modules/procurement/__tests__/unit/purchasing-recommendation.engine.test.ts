@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import {
+  generatePurchasingRecommendations,
+  passesAutoDraftApprovalPolicy,
+} from "../../purchasing-recommendation.engine";
 
 describe("purchasing recommendation engine", () => {
   it("produces an explainable actionable recommendation using vendor lead time and order UOM", () => {
@@ -252,6 +255,55 @@ describe("purchasing recommendation engine", () => {
       autoDraftEligible: true,
       reason: "high_confidence",
     });
+  });
+
+  it("can require a strong candidate band in the guarded auto-draft approval policy", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      autoDraftSettings: {
+        candidateScoreStrongThreshold: 95,
+        candidateScoreReviewThreshold: 90,
+      },
+      rows: [
+        {
+          product_id: 12,
+          variant_id: 112,
+          base_sku: "SKU-STRICT-POLICY",
+          product_name: "Strict Policy Product",
+          total_pieces: 12,
+          total_reserved_pieces: 2,
+          total_outbound_pieces: 60,
+          previous_outbound_pieces: 50,
+          demand_order_count: 12,
+          demand_active_days: 10,
+          short_window_days: 7,
+          short_outbound_pieces: 21,
+          previous_short_outbound_pieces: 7,
+          long_window_days: 90,
+          long_outbound_pieces: 135,
+          previous_long_outbound_pieces: 150,
+          seasonal_window_days: 30,
+          seasonal_outbound_pieces: 30,
+          previous_seasonal_outbound_pieces: 45,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 5,
+          safety_stock_days: 2,
+          order_uom_units: 10,
+          order_uom_level: 3,
+          vendor_product_id: 770,
+          preferred_vendor_id: 77,
+          estimated_cost_mills: 12500,
+          vendor_product_updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    expect(result.items[0].qualityGate.autoDraftEligible).toBe(true);
+    expect(result.items[0].recommendationCandidateScore.band).toBe("review_candidate");
+    expect(passesAutoDraftApprovalPolicy(result.items[0], { approvalPolicy: "high_confidence_only" })).toBe(true);
+    expect(passesAutoDraftApprovalPolicy(result.items[0], {
+      approvalPolicy: "high_confidence_and_strong_candidate",
+    })).toBe(false);
   });
 
   it("keeps excluded products out of visible recommendations and reports the skip", () => {
