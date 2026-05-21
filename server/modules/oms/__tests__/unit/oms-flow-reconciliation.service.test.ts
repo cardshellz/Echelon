@@ -94,6 +94,22 @@ describe("oms-flow-reconciliation.service", () => {
     );
   });
 
+  it("does not queue Shopify fulfillment repair for orders OMS already considers fulfilled", () => {
+    const fulfillmentStatusGuards = OMS_FLOW_RECONCILIATION_SRC.match(
+      /COALESCE\(oo\.fulfillment_status, 'unfulfilled'\) <> 'fulfilled'/g,
+    ) ?? [];
+
+    expect(fulfillmentStatusGuards.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("treats refunded OMS financial status as final for WMS reconciliation", () => {
+    const refundedFinancialStatusGuards = OMS_FLOW_RECONCILIATION_SRC.match(
+      /oo\.financial_status = 'refunded'/g,
+    ) ?? [];
+
+    expect(refundedFinancialStatusGuards.length).toBeGreaterThanOrEqual(5);
+  });
+
   it("logs a compact summary when scheduled reconciliation finds issues", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const db = {
