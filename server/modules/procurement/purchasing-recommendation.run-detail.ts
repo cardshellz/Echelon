@@ -1,7 +1,12 @@
 import type {
+  AutoDraftApprovalPolicy,
   AutoDraftRecommendationSettings,
   PurchasingRecommendationItem,
   PurchasingRecommendationResult,
+} from "./purchasing-recommendation.engine";
+import {
+  getAutoDraftApprovalPolicy,
+  passesAutoDraftApprovalPolicy,
 } from "./purchasing-recommendation.engine";
 
 export interface PurchasingRecommendationRunPoMutation {
@@ -24,10 +29,12 @@ export interface PurchasingRecommendationRunDetail {
   lookbackDays: number;
   settings: AutoDraftRecommendationSettings;
   recommendationSummary: PurchasingRecommendationResult["summary"];
+  approvalPolicyDiagnostics: ReturnType<typeof buildApprovalPolicyDiagnostics>;
   forecastDiagnostics: ReturnType<typeof buildForecastDiagnostics>;
   statusCounts: Record<string, number>;
   skippedReasonCounts: Record<string, number>;
   actionableRecommendations: Array<ReturnType<typeof summarizeRecommendation>>;
+  approvalPolicyBlockedRecommendations: Array<ReturnType<typeof summarizeRecommendation>>;
   skippedRecommendations: Array<ReturnType<typeof summarizeRecommendation>>;
   poMutations: PurchasingRecommendationRunPoMutation[];
 }
@@ -151,6 +158,40 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   };
 }
 
+function incrementCandidateBand(map: Record<string, number>, item: PurchasingRecommendationItem) {
+  increment(map, item.recommendationCandidateScore.band);
+}
+
+function buildApprovalPolicyDiagnostics(
+  result: PurchasingRecommendationResult,
+  settings?: AutoDraftRecommendationSettings,
+) {
+  const policy: AutoDraftApprovalPolicy = getAutoDraftApprovalPolicy(settings);
+  const mode = settings?.autoDraftMode === "review_only" ? "review_only" : "draft_po";
+  const qualityGateEligibleItems = result.items.filter((item) => item.qualityGate.autoDraftEligible);
+  const approvalPolicyEligibleItems = result.items.filter((item) => passesAutoDraftApprovalPolicy(item, settings));
+  const approvalPolicyBlockedItems = qualityGateEligibleItems.filter(
+    (item) => !passesAutoDraftApprovalPolicy(item, settings),
+  );
+  const approvedCandidateBandCounts: Record<string, number> = {};
+  const blockedCandidateBandCounts: Record<string, number> = {};
+
+  for (const item of approvalPolicyEligibleItems) incrementCandidateBand(approvedCandidateBandCounts, item);
+  for (const item of approvalPolicyBlockedItems) incrementCandidateBand(blockedCandidateBandCounts, item);
+
+  return {
+    policy,
+    mode,
+    candidateScoreGateActive: policy === "high_confidence_and_strong_candidate",
+    qualityGateEligibleCount: qualityGateEligibleItems.length,
+    approvalPolicyEligibleCount: approvalPolicyEligibleItems.length,
+    approvalPolicyBlockedCount: approvalPolicyBlockedItems.length,
+    draftMutationEligibleCount: mode === "review_only" ? 0 : approvalPolicyEligibleItems.length,
+    approvedCandidateBandCounts,
+    blockedCandidateBandCounts,
+  };
+}
+
 function summarizeRecommendation(item: PurchasingRecommendationItem) {
   return {
     recommendationId: item.recommendationId,
@@ -193,6 +234,9 @@ export function buildPurchasingRecommendationRunDetail(
 ): PurchasingRecommendationRunDetail {
   const statusCounts: Record<string, number> = {};
   const skippedReasonCounts: Record<string, number> = {};
+  const approvalPolicyBlockedItems = result.items.filter(
+    (item) => item.qualityGate.autoDraftEligible && !passesAutoDraftApprovalPolicy(item, options.settings),
+  );
 
   for (const item of result.items) {
     increment(statusCounts, item.status);
@@ -207,11 +251,15 @@ export function buildPurchasingRecommendationRunDetail(
     lookbackDays: options.lookbackDays,
     settings: options.settings ?? {},
     recommendationSummary: result.summary,
+    approvalPolicyDiagnostics: buildApprovalPolicyDiagnostics(result, options.settings),
     forecastDiagnostics: buildForecastDiagnostics(result),
     statusCounts,
     skippedReasonCounts,
     actionableRecommendations: result.items
       .filter((item) => item.actionable)
+      .slice(0, 25)
+      .map(summarizeRecommendation),
+    approvalPolicyBlockedRecommendations: approvalPolicyBlockedItems
       .slice(0, 25)
       .map(summarizeRecommendation),
     skippedRecommendations: result.skippedItems

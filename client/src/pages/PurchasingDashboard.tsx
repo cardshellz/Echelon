@@ -127,6 +127,20 @@ interface RecommendationCandidateScore {
   detail: string;
 }
 
+type AutoDraftApprovalPolicy = "high_confidence_only" | "high_confidence_and_strong_candidate";
+
+interface ApprovalPolicyDiagnostics {
+  policy: AutoDraftApprovalPolicy;
+  mode: "draft_po" | "review_only";
+  candidateScoreGateActive: boolean;
+  qualityGateEligibleCount: number;
+  approvalPolicyEligibleCount: number;
+  approvalPolicyBlockedCount: number;
+  draftMutationEligibleCount: number;
+  approvedCandidateBandCounts: Record<string, number>;
+  blockedCandidateBandCounts: Record<string, number>;
+}
+
 interface DashboardData {
   stockouts: number;
   orderNow: number;
@@ -154,13 +168,14 @@ interface DashboardData {
     summaryJson?: {
       settings?: {
         autoDraftMode?: "draft_po" | "review_only";
-        approvalPolicy?: "high_confidence_only" | "high_confidence_and_strong_candidate";
+        approvalPolicy?: AutoDraftApprovalPolicy;
       };
       recommendationSummary?: {
         actionableCount?: number;
         autoDraftEligibleCount?: number;
         autoDraftReviewRequiredCount?: number;
       };
+      approvalPolicyDiagnostics?: ApprovalPolicyDiagnostics | null;
       forecastDiagnostics?: ForecastDiagnostics | null;
       skippedReasonCounts?: Record<string, number>;
       actionableRecommendations?: Array<{
@@ -182,6 +197,17 @@ interface DashboardData {
         skippedReason: string | null;
         explanation: string;
       }>;
+      approvalPolicyBlockedRecommendations?: Array<{
+        sku: string;
+        productName: string;
+        suggestedOrderQty: number;
+        orderUomLabel: string;
+        preferredVendorName: string | null;
+        explanation: string;
+        recommendationCandidateScore?: RecommendationCandidateScore;
+        qualityControls?: RecommendationQualityControl[];
+        autopilotBlockers?: RecommendationQualityControl[];
+      }>;
     } | null;
   } | null;
 }
@@ -192,10 +218,15 @@ interface AutoDraftRunHistoryItem {
   triggeredBy: string | null;
   status: string;
   mode: "draft_po" | "review_only";
+  approvalPolicy: AutoDraftApprovalPolicy;
   itemsAnalyzed: number;
   actionableCount: number;
   autoDraftEligibleCount: number;
   autoDraftReviewRequiredCount: number;
+  approvalPolicyEligibleCount: number;
+  approvalPolicyBlockedCount: number;
+  draftMutationEligibleCount: number;
+  approvalPolicyDiagnostics: ApprovalPolicyDiagnostics | null;
   forecastDiagnostics: ForecastDiagnostics | null;
   posCreated: number;
   posUpdated: number;
@@ -212,6 +243,17 @@ interface AutoDraftRunHistoryItem {
     preferredVendorName: string | null;
     explanation: string;
     forecastProvenance?: RecommendationForecastProvenance;
+    recommendationCandidateScore?: RecommendationCandidateScore;
+    qualityControls?: RecommendationQualityControl[];
+    autopilotBlockers?: RecommendationQualityControl[];
+  } | null;
+  topApprovalPolicyBlockedRecommendation: {
+    sku: string;
+    productName: string;
+    suggestedOrderQty: number;
+    orderUomLabel: string;
+    preferredVendorName: string | null;
+    explanation: string;
     recommendationCandidateScore?: RecommendationCandidateScore;
     qualityControls?: RecommendationQualityControl[];
     autopilotBlockers?: RecommendationQualityControl[];
@@ -291,6 +333,12 @@ function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): st
   const blocker = topCountLabel(diagnostics.autopilotBlockerCounts);
   const blockerLabel = blocker === "None" ? "no blockers" : blocker;
   return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}`;
+}
+
+function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
+  return policy === "high_confidence_and_strong_candidate"
+    ? "High confidence + strong candidate"
+    : "High confidence only";
 }
 
 function formatRecommendationForecast(
@@ -425,6 +473,7 @@ export default function PurchasingDashboard() {
     : [];
   const recentAutoDraftRuns = autoDraftRunHistory?.runs ?? [];
   const lastRunForecastDiagnostics = data.lastAutoDraftRun?.summaryJson?.forecastDiagnostics ?? null;
+  const lastRunApprovalDiagnostics = data.lastAutoDraftRun?.summaryJson?.approvalPolicyDiagnostics ?? null;
 
   return (
     <div className="flex flex-col h-full">
@@ -898,9 +947,16 @@ export default function PurchasingDashboard() {
                           ? "Recommendation only"
                           : "Create draft POs",
                       },
+                      {
+                        label: "Approval policy",
+                        value: formatApprovalPolicy(data.lastAutoDraftRun.summaryJson?.settings?.approvalPolicy ?? lastRunApprovalDiagnostics?.policy),
+                      },
                       { label: "POs created/updated", value: `${data.lastAutoDraftRun.posCreated}/${data.lastAutoDraftRun.posUpdated}` },
                       { label: "Actionable", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.actionableCount ?? data.lastAutoDraftRun.linesAdded },
                       { label: "Eligible to draft", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? data.lastAutoDraftRun.linesAdded },
+                      { label: "Policy approved", value: lastRunApprovalDiagnostics?.approvalPolicyEligibleCount ?? data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? data.lastAutoDraftRun.linesAdded },
+                      { label: "Held by policy", value: lastRunApprovalDiagnostics?.approvalPolicyBlockedCount ?? 0, warn: Boolean(lastRunApprovalDiagnostics?.approvalPolicyBlockedCount) },
+                      { label: "Draft mutation eligible", value: lastRunApprovalDiagnostics?.draftMutationEligibleCount ?? data.lastAutoDraftRun.linesAdded },
                       { label: "Needs review", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0 },
                       { label: "Forecast model", value: formatForecastDiagnostics(lastRunForecastDiagnostics) },
                       { label: "Demand trend", value: topCountLabel(lastRunForecastDiagnostics?.demandTrendCounts) },
@@ -949,6 +1005,29 @@ export default function PurchasingDashboard() {
                       ))}
                     </div>
                   ) : null}
+                  {data.lastAutoDraftRun.summaryJson?.approvalPolicyBlockedRecommendations?.length ? (
+                    <div className="mt-3 pt-3 border-t">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                        Held By Approval Policy
+                      </div>
+                      {data.lastAutoDraftRun.summaryJson.approvalPolicyBlockedRecommendations.slice(0, 1).map((item) => (
+                        <div key={item.sku} className="text-xs rounded border border-amber-200 bg-amber-50/50 p-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-semibold truncate">{item.sku}</span>
+                            <span className="text-amber-700 whitespace-nowrap">
+                              {item.suggestedOrderQty} {item.orderUomLabel}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{item.explanation}</p>
+                          {item.recommendationCandidateScore ? (
+                            <p className="text-[11px] text-amber-700 mt-1 truncate">
+                              Score {item.recommendationCandidateScore.score} - {item.recommendationCandidateScore.band.replace(/_/g, " ")}
+                            </p>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   {recentAutoDraftRuns.length > 0 ? (
                     <div className="mt-3 pt-3 border-t">
                       <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
@@ -963,17 +1042,29 @@ export default function PurchasingDashboard() {
                                 <span className="font-medium truncate">{formatRelativeTime(run.runAt)}</span>
                               </div>
                               <span className="text-[11px] text-muted-foreground whitespace-nowrap">
-                                {run.mode === "review_only" ? "Recommendation only" : "Draft POs"}
+                                {run.mode === "review_only" ? "Recommendation only" : "Draft POs"} - {formatApprovalPolicy(run.approvalPolicy)}
                               </span>
                             </div>
-                            <div className="mt-1 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
+                            <div className="mt-1 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
                               <span>{run.itemsAnalyzed} analyzed</span>
                               <span>{run.autoDraftEligibleCount} eligible</span>
-                              <span>{run.posCreated + run.posUpdated} PO changes</span>
+                              <span>{run.approvalPolicyEligibleCount} policy-approved</span>
+                              <span className={run.approvalPolicyBlockedCount > 0 ? "text-amber-700" : ""}>
+                                {run.approvalPolicyBlockedCount} held
+                              </span>
+                            </div>
+                            <div className="mt-1 text-[11px] text-muted-foreground">
+                              {run.posCreated + run.posUpdated} PO changes - {run.draftMutationEligibleCount} draft-mutation eligible
                             </div>
                             <div className="mt-1 truncate text-[11px] text-muted-foreground">
                               {formatForecastDiagnostics(run.forecastDiagnostics)}
                             </div>
+                            {run.topApprovalPolicyBlockedRecommendation ? (
+                              <div className="mt-1 truncate text-[11px] text-amber-700">
+                                Held: <span className="font-mono font-semibold">{run.topApprovalPolicyBlockedRecommendation.sku}</span>
+                                <span> - score {run.topApprovalPolicyBlockedRecommendation.recommendationCandidateScore?.score ?? "n/a"}</span>
+                              </div>
+                            ) : null}
                             {run.topActionableRecommendation ? (
                               <div className="mt-1 truncate text-[11px]">
                                 <span className="font-mono font-semibold text-primary">{run.topActionableRecommendation.sku}</span>

@@ -64,12 +64,16 @@ function normalizeAutoDraftRun(row: any) {
   const actionableRecommendations = Array.isArray(summaryJson?.actionableRecommendations)
     ? summaryJson.actionableRecommendations
     : [];
+  const approvalPolicyBlockedRecommendations = Array.isArray(summaryJson?.approvalPolicyBlockedRecommendations)
+    ? summaryJson.approvalPolicyBlockedRecommendations
+    : [];
   const skippedRecommendations = Array.isArray(summaryJson?.skippedRecommendations)
     ? summaryJson.skippedRecommendations
     : [];
   const poMutations = Array.isArray(summaryJson?.poMutations)
     ? summaryJson.poMutations
     : [];
+  const approvalPolicyDiagnostics = summaryJson?.approvalPolicyDiagnostics ?? null;
 
   return {
     id: Number(row?.id),
@@ -93,9 +97,17 @@ function normalizeAutoDraftRun(row: any) {
       Number(summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
     autoDraftReviewRequiredCount:
       Number(summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0) || 0,
+    approvalPolicyEligibleCount:
+      Number(approvalPolicyDiagnostics?.approvalPolicyEligibleCount ?? summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
+    approvalPolicyBlockedCount:
+      Number(approvalPolicyDiagnostics?.approvalPolicyBlockedCount ?? 0) || 0,
+    draftMutationEligibleCount:
+      Number(approvalPolicyDiagnostics?.draftMutationEligibleCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
+    approvalPolicyDiagnostics,
     forecastDiagnostics: summaryJson?.forecastDiagnostics ?? null,
     poMutationCount: poMutations.length,
     topActionableRecommendation: actionableRecommendations[0] ?? null,
+    topApprovalPolicyBlockedRecommendation: approvalPolicyBlockedRecommendations[0] ?? null,
     topSkippedRecommendation: skippedRecommendations[0] ?? null,
   };
 }

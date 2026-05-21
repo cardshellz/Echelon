@@ -262,8 +262,19 @@ describe("purchasing recommendation routes", () => {
         errorMessage: null,
         finishedAt: "2026-05-19T01:00:02.000Z",
         summaryJson: {
-          settings: { autoDraftMode: "review_only" },
+          settings: { autoDraftMode: "review_only", approvalPolicy: "high_confidence_and_strong_candidate" },
           recommendationSummary: { actionableCount: 4, autoDraftEligibleCount: 2, autoDraftReviewRequiredCount: 2 },
+          approvalPolicyDiagnostics: {
+            policy: "high_confidence_and_strong_candidate",
+            mode: "review_only",
+            candidateScoreGateActive: true,
+            qualityGateEligibleCount: 2,
+            approvalPolicyEligibleCount: 1,
+            approvalPolicyBlockedCount: 1,
+            draftMutationEligibleCount: 0,
+            approvedCandidateBandCounts: { strong_candidate: 1 },
+            blockedCandidateBandCounts: { review_candidate: 1 },
+          },
           forecastDiagnostics: {
             recommendationCount: 4,
             forecastMethodCounts: { recent_order_velocity_v1: 4 },
@@ -298,6 +309,16 @@ describe("purchasing recommendation routes", () => {
               explanation: "No preferred vendor.",
             },
           ],
+          approvalPolicyBlockedRecommendations: [
+            {
+              sku: "REVIEW-CANDIDATE",
+              productName: "Review Candidate",
+              suggestedOrderQty: 1,
+              orderUomLabel: "Case",
+              preferredVendorName: "Vendor",
+              explanation: "High confidence but not a strong candidate.",
+            },
+          ],
           poMutations: [],
         },
       },
@@ -325,9 +346,18 @@ describe("purchasing recommendation routes", () => {
           skippedOnOrder: 1,
           skippedExcluded: 3,
           mode: "review_only",
+          approvalPolicy: "high_confidence_and_strong_candidate",
           actionableCount: 4,
           autoDraftEligibleCount: 2,
           autoDraftReviewRequiredCount: 2,
+          approvalPolicyEligibleCount: 1,
+          approvalPolicyBlockedCount: 1,
+          draftMutationEligibleCount: 0,
+          approvalPolicyDiagnostics: {
+            policy: "high_confidence_and_strong_candidate",
+            approvalPolicyEligibleCount: 1,
+            approvalPolicyBlockedCount: 1,
+          },
           forecastDiagnostics: {
             recommendationCount: 4,
             forecastMethodCounts: { recent_order_velocity_v1: 4 },
@@ -344,6 +374,11 @@ describe("purchasing recommendation routes", () => {
           topSkippedRecommendation: {
             sku: "NO-VENDOR",
             skippedReason: "no_vendor",
+          },
+          topApprovalPolicyBlockedRecommendation: {
+            sku: "REVIEW-CANDIDATE",
+            suggestedOrderQty: 1,
+            preferredVendorName: "Vendor",
           },
         },
       ],
