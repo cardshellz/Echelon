@@ -35,7 +35,6 @@
 import { sql } from "drizzle-orm";
 import {
   outboundShipments,
-  outboundShipmentItems,
   type InsertOutboundShipment,
   type InsertOutboundShipmentItem,
 } from "@shared/schema";
@@ -156,6 +155,35 @@ export interface CreateShipmentResult {
   created: boolean;
 }
 
+async function insertShipmentItemIfMissing(
+  db: DbLike,
+  values: InsertOutboundShipmentItem,
+): Promise<boolean> {
+  const result = await db.execute(sql`
+    INSERT INTO wms.outbound_shipment_items (
+      shipment_id,
+      order_item_id,
+      product_variant_id,
+      from_location_id,
+      qty
+    )
+    SELECT
+      ${values.shipmentId},
+      ${values.orderItemId},
+      ${values.productVariantId ?? null},
+      ${values.fromLocationId ?? null},
+      ${values.qty}
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM wms.outbound_shipment_items
+      WHERE shipment_id = ${values.shipmentId}
+        AND order_item_id = ${values.orderItemId}
+    )
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
+}
+
 /**
  * Create a planned outbound shipment for a just-synced WMS order.
  *
@@ -237,13 +265,17 @@ export async function createShipmentForOrder(
   // (ops dashboards, SS parity checks) even when it carries no
   // inventory.
   if (orderItems.length > 0) {
-    const itemRows: InsertOutboundShipmentItem[] = [];
+    const seenOrderItemIds = new Set<number>();
     for (const it of orderItems) {
       if (!Number.isInteger(it.id) || it.id <= 0) {
         throw new Error(
           `createShipmentForOrder: orderItem.id must be a positive integer, got ${it.id}`,
         );
       }
+      if (seenOrderItemIds.has(it.id)) {
+        continue;
+      }
+      seenOrderItemIds.add(it.id);
       if (!Number.isInteger(it.quantity) || it.quantity < 0) {
         throw new Error(
           `createShipmentForOrder: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
@@ -266,7 +298,7 @@ export async function createShipmentForOrder(
         );
       }
       const defaults = await resolveShipmentItemDefaults(db, it.id);
-      itemRows.push({
+      await insertShipmentItemIfMissing(db, {
         shipmentId,
         orderItemId: it.id,
         productVariantId: it.productVariantId ?? defaults.productVariantId,
@@ -274,8 +306,6 @@ export async function createShipmentForOrder(
         qty: it.quantity,
       });
     }
-
-    await db.insert(outboundShipmentItems).values(itemRows);
   }
 
   return { shipmentId, created: true };
@@ -433,13 +463,17 @@ export async function linkChildToParentShipment(
   // line items. Empty items is valid (gift-card / pure-membership
   // children) — shipment row is still useful for reconcile.
   if (childOrderItems.length > 0) {
-    const itemRows: InsertOutboundShipmentItem[] = [];
+    const seenOrderItemIds = new Set<number>();
     for (const it of childOrderItems) {
       if (!Number.isInteger(it.id) || it.id <= 0) {
         throw new Error(
           `linkChildToParentShipment: orderItem.id must be a positive integer, got ${it.id}`,
         );
       }
+      if (seenOrderItemIds.has(it.id)) {
+        continue;
+      }
+      seenOrderItemIds.add(it.id);
       if (!Number.isInteger(it.quantity) || it.quantity < 0) {
         throw new Error(
           `linkChildToParentShipment: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
@@ -462,7 +496,7 @@ export async function linkChildToParentShipment(
         );
       }
       const defaults = await resolveShipmentItemDefaults(db, it.id);
-      itemRows.push({
+      await insertShipmentItemIfMissing(db, {
         shipmentId,
         orderItemId: it.id,
         productVariantId: it.productVariantId ?? defaults.productVariantId,
@@ -470,8 +504,6 @@ export async function linkChildToParentShipment(
         qty: it.quantity,
       });
     }
-
-    await db.insert(outboundShipmentItems).values(itemRows);
   }
 
   return { shipmentId, created: true };

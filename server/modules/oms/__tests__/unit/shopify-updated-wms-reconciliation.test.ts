@@ -18,6 +18,13 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/orders\/updated saw paid shippable work but wmsSyncService is unavailable/);
   });
 
+  it("does not requeue WMS reconciliation after Shopify reports a final order", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(/const isCancelledPayload = Boolean\(shopifyOrder\.cancelled_at\)/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/const isFinalOmsState =/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/orders\/updated skipped WMS reconcile for final order/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/else if \(!isFinalOmsState && \(shopifyOrder\.financial_status === "paid"/);
+  });
+
   it("persists normalized Shopify pricing when orders/updated adds or changes lines", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/const normalizedLineItems = normalizeShopifyLineItems\(/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/const normalizedLineMap = new Map/);

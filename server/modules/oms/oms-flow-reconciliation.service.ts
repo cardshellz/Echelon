@@ -3,6 +3,7 @@ import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueDelayedTrackingPush,
   enqueueOmsWmsSyncRetry,
+  enqueueShopifyFulfillmentRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueWmsShipmentCreateRetry,
 } from "./webhook-retry.worker";
@@ -16,6 +17,7 @@ const REMEDIABLE_CODES = new Set([
   "OMS_FINAL_WMS_ACTIVE",
   "WMS_FINAL_OMS_OPEN",
   "SHIPMENT_SHIPPED_OMS_OPEN",
+  "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
   "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
   "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
 ]);
@@ -128,6 +130,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     omsPaidWithoutWms,
     wmsReadyWithoutShipment,
     unpushedShipStationShipments,
+    shopifyShipmentFulfillmentMissing,
   ] = await Promise.all([
     countAndSample(
       db,
@@ -381,6 +384,59 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        JOIN channels.channels c ON c.id = oo.channel_id
+        WHERE os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '10 minutes'
+          AND os.shipped_at > NOW() - INTERVAL '14 days'
+          AND c.provider = 'shopify'
+          AND os.shopify_fulfillment_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.webhook_retry_queue q
+            WHERE q.provider = 'internal'
+              AND q.topic = 'shopify_fulfillment_push'
+              AND q.status = 'pending'
+              AND q.payload->>'shipmentId' = os.id::text
+          )
+      `,
+      sql`
+        SELECT os.id AS shipment_id, os.order_id AS wms_order_id, os.shipped_at,
+               os.tracking_number, os.carrier, oo.id AS oms_order_id,
+               oo.external_order_number, os.shopify_fulfillment_id
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        JOIN channels.channels c ON c.id = oo.channel_id
+        WHERE os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '10 minutes'
+          AND os.shipped_at > NOW() - INTERVAL '14 days'
+          AND c.provider = 'shopify'
+          AND os.shopify_fulfillment_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.webhook_retry_queue q
+            WHERE q.provider = 'internal'
+              AND q.topic = 'shopify_fulfillment_push'
+              AND q.status = 'pending'
+              AND q.payload->>'shipmentId' = os.id::text
+          )
+        ORDER BY os.shipped_at ASC
+        LIMIT 10
+      `,
+    ),
   ]);
 
   const issues: OmsOpsIssue[] = [
@@ -433,6 +489,13 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       message: "Outbound shipments are old enough to have been pushed but have no ShipStation id.",
       sample: unpushedShipStationShipments.sample,
     },
+    {
+      code: "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
+      severity: "critical" as const,
+      count: shopifyShipmentFulfillmentMissing.count,
+      message: "Shopify WMS shipments are shipped but have no Shopify fulfillment id.",
+      sample: shopifyShipmentFulfillmentMissing.sample,
+    },
   ];
 
   return issues.filter((entry) => entry.count > 0);
@@ -447,6 +510,7 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
   await autoRemediateCriticalFlowIssues(dbArg, issues);
   await autoQueueStaleTrackingPushRetries(dbArg, issues);
   await autoQueueStaleShipStationPushRetries(dbArg, issues);
+  await autoQueueMissingShopifyFulfillmentRetries(dbArg, issues);
   return issues;
 }
 
@@ -612,6 +676,33 @@ async function autoQueueStaleShipStationPushRetries(
 
   if (queued > 0) {
     console.warn(`${LOG_PREFIX} auto-queued ${queued} ShipStation shipment push retry row(s)`);
+  }
+}
+
+async function autoQueueMissingShopifyFulfillmentRetries(
+  db: any,
+  issues: OmsOpsIssue[],
+): Promise<void> {
+  const issue = issues.find((entry) => entry.code === "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED");
+  if (!issue) return;
+
+  let queued = 0;
+  for (const sample of issue.sample.slice(0, AUTO_TRACKING_RETRY_LIMIT)) {
+    const shipmentId = Number((sample as any).shipment_id);
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      continue;
+    }
+
+    await enqueueShopifyFulfillmentRetry(
+      db,
+      shipmentId,
+      new Error("scheduled reconciliation: shipped Shopify shipment missing fulfillment id"),
+    );
+    queued++;
+  }
+
+  if (queued > 0) {
+    console.warn(`${LOG_PREFIX} auto-queued ${queued} Shopify fulfillment push retry row(s)`);
   }
 }
 

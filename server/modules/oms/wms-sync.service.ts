@@ -13,7 +13,6 @@ import { db } from "../../db";
 import { sql, eq, and } from "drizzle-orm";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import {
-  outboundShipmentItems,
   outboundShipments,
   productLocations,
   warehouseLocations,
@@ -110,6 +109,27 @@ export class WmsSyncService {
    */
   async syncOmsOrderToWms(omsOrderId: number): Promise<number | null> {
     try {
+      const omsOrderResult = await db
+        .select()
+        .from(omsOrders)
+        .where(eq(omsOrders.id, omsOrderId))
+        .limit(1);
+
+      if (omsOrderResult.length === 0) {
+        console.error(`[WMS Sync] OMS order ${omsOrderId} not found`);
+        return null;
+      }
+
+      const omsOrder = omsOrderResult[0];
+
+      if (this.isFinalOrCancelledOmsOrder(omsOrder)) {
+        await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
+        console.log(
+          `[WMS Sync] OMS order ${omsOrderId} is ${omsOrder.status}/${omsOrder.financialStatus}; skipped WMS sync`,
+        );
+        return null;
+      }
+
       // 1. Check if already synced (orders.source_table_id points to oms_orders.id)
       const existingWmsOrder = await db
         .select({ id: wmsOrders.id })
@@ -131,20 +151,7 @@ export class WmsSyncService {
         return wmsOrderId;
       }
 
-      // 2. Fetch OMS order + line items
-      const omsOrderResult = await db
-        .select()
-        .from(omsOrders)
-        .where(eq(omsOrders.id, omsOrderId))
-        .limit(1);
-
-      if (omsOrderResult.length === 0) {
-        console.error(`[WMS Sync] OMS order ${omsOrderId} not found`);
-        return null;
-      }
-
-      const omsOrder = omsOrderResult[0];
-
+      // 2. Fetch OMS line items
       const omsLines = await db
         .select()
         .from(omsOrderLines)
@@ -549,10 +556,44 @@ export class WmsSyncService {
     return "pending";
   }
 
+  private isFinalOrCancelledOmsOrder(omsOrder: typeof omsOrders.$inferSelect): boolean {
+    const status = String(omsOrder.status ?? "").toLowerCase();
+    const financialStatus = String(omsOrder.financialStatus ?? "").toLowerCase();
+    return (
+      status === "cancelled" ||
+      status === "refunded" ||
+      financialStatus === "refunded" ||
+      financialStatus === "voided"
+    );
+  }
+
+  private async cancelExistingWmsOrderForFinalOmsOrder(omsOrderId: number): Promise<void> {
+    await db.execute(sql`
+      UPDATE wms.orders
+         SET warehouse_status = 'cancelled',
+             cancelled_at = COALESCE(cancelled_at, NOW()),
+             updated_at = NOW()
+       WHERE source = 'oms'
+         AND oms_fulfillment_order_id = ${String(omsOrderId)}
+         AND warehouse_status NOT IN ('cancelled', 'shipped')
+    `);
+  }
+
   private async reconcileExistingWmsOrderLines(
     omsOrderId: number,
     wmsOrderId: number,
   ): Promise<{ insertedItems: number; updatedShipments: number }> {
+    const [omsOrder] = await db
+      .select()
+      .from(omsOrders)
+      .where(eq(omsOrders.id, omsOrderId))
+      .limit(1);
+
+    if (!omsOrder || this.isFinalOrCancelledOmsOrder(omsOrder)) {
+      await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
+      return { insertedItems: 0, updatedShipments: 0 };
+    }
+
     const omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
     if (omsLines.length === 0) return { insertedItems: 0, updatedShipments: 0 };
 
@@ -707,13 +748,27 @@ export class WmsSyncService {
       for (const item of shippableShipmentItems) {
         const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
         if (!line || line.requiresShipping === false) continue;
-        await db.insert(outboundShipmentItems).values({
-          shipmentId: shipment.id,
-          orderItemId: item.id,
-          productVariantId: item.productId,
-          qty: item.quantity ?? 0,
-        });
-        updatedShipments += 1;
+        const inserted: any = await db.execute(sql`
+          INSERT INTO wms.outbound_shipment_items (
+            shipment_id,
+            order_item_id,
+            product_variant_id,
+            qty
+          )
+          SELECT
+            ${shipment.id},
+            ${item.id},
+            ${item.productId},
+            ${item.quantity ?? 0}
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items
+            WHERE shipment_id = ${shipment.id}
+              AND order_item_id = ${item.id}
+          )
+          RETURNING id
+        `);
+        updatedShipments += inserted?.rows?.length ?? 0;
       }
       try {
         await enqueueShipStationShipmentPushRetry(
