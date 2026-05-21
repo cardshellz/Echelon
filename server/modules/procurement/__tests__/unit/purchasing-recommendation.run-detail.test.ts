@@ -57,6 +57,17 @@ describe("purchasing recommendation run detail", () => {
         autoDraftReviewRequiredCount: 1,
         skippedNoVendor: 1,
       },
+      approvalPolicyDiagnostics: {
+        policy: "high_confidence_only",
+        mode: "draft_po",
+        candidateScoreGateActive: false,
+        qualityGateEligibleCount: 0,
+        approvalPolicyEligibleCount: 0,
+        approvalPolicyBlockedCount: 0,
+        draftMutationEligibleCount: 0,
+        approvedCandidateBandCounts: {},
+        blockedCandidateBandCounts: {},
+      },
       statusCounts: {
         stockout: 2,
       },
@@ -203,6 +214,76 @@ describe("purchasing recommendation run detail", () => {
           code: "missing_vendor",
         }),
       ]),
+    });
+  });
+
+  it("records approval-policy outcomes separately from the high-confidence quality gate", () => {
+    const recommendations = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 3,
+          variant_id: 33,
+          base_sku: "HIGH-CONF-REVIEW-CANDIDATE",
+          product_name: "High Confidence Review Candidate",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 90,
+          previous_outbound_pieces: 90,
+          demand_order_count: 15,
+          demand_active_days: 15,
+          lead_time_days: 3,
+          vendor_lead_time_days: 3,
+          safety_stock_days: 1,
+          order_uom_units: 5,
+          order_uom_level: 2,
+          preferred_vendor_id: 7,
+          preferred_vendor_name: "Vendor",
+          estimated_cost_cents: 1200,
+          vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+        },
+      ],
+      autoDraftSettings: {
+        approvalPolicy: "high_confidence_and_strong_candidate",
+        candidateScoreStrongThreshold: 95,
+        candidateScoreReviewThreshold: 80,
+      },
+    });
+
+    const detail = buildPurchasingRecommendationRunDetail(recommendations, {
+      lookbackDays: 30,
+      settings: {
+        approvalPolicy: "high_confidence_and_strong_candidate",
+        candidateScoreStrongThreshold: 95,
+        candidateScoreReviewThreshold: 80,
+      },
+      generatedAt: new Date("2026-05-18T12:00:00.000Z"),
+    });
+
+    expect(detail.recommendationSummary.autoDraftEligibleCount).toBe(1);
+    expect(detail.approvalPolicyDiagnostics).toMatchObject({
+      policy: "high_confidence_and_strong_candidate",
+      mode: "draft_po",
+      candidateScoreGateActive: true,
+      qualityGateEligibleCount: 1,
+      approvalPolicyEligibleCount: 0,
+      approvalPolicyBlockedCount: 1,
+      draftMutationEligibleCount: 0,
+      approvedCandidateBandCounts: {},
+      blockedCandidateBandCounts: {
+        review_candidate: 1,
+      },
+    });
+    expect(detail.approvalPolicyBlockedRecommendations).toHaveLength(1);
+    expect(detail.approvalPolicyBlockedRecommendations[0]).toMatchObject({
+      sku: "HIGH-CONF-REVIEW-CANDIDATE",
+      qualityGate: {
+        autoDraftEligible: true,
+        reason: "high_confidence",
+      },
+      recommendationCandidateScore: {
+        band: "review_candidate",
+      },
     });
   });
 });

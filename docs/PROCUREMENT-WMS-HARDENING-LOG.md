@@ -2292,3 +2292,33 @@ Next step:
 - Continue Phase 9 by making approval-policy outcomes more operator-visible in
   run history and dashboard review surfaces before considering any default
   behavior change.
+
+### 2026-05-21 - Phase 9 Slice 13: Approval Policy Visibility
+
+Scope:
+
+- Added approval-policy diagnostics to recommendation run details so each
+  auto-draft run records quality-gate eligible, active-policy approved,
+  active-policy held, and draft-mutation eligible counts separately.
+- Added candidate-band breakdowns for recommendations approved by the active
+  policy versus held by the active policy.
+- Stored a compact held-by-policy recommendation sample in run details so
+  operators can see which SKU was high-confidence but failed the stricter
+  strong-candidate approval rule.
+- Extended recent auto-draft run normalization to return approval-policy
+  counts, diagnostics, and the top held recommendation.
+- Surfaced approval policy, policy-approved count, policy-held count, and
+  draft-mutation eligible count on the purchasing dashboard without changing
+  recommendation math, quality gates, or PO mutation behavior.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/jobs/__tests__/unit/auto-draft.job.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+
+Next step:
+
+- Continue Phase 9 by adding a read-only approval-policy impact summary to
+  manual reorder analysis so operators can preview strict-policy effects before
+  running auto-draft.
