@@ -206,6 +206,57 @@ interface ReorderAnalysis {
   lookbackDays: number;
 }
 
+type ReviewQueueKind = "all" | "skipped" | "held_by_policy" | "quality_review_required";
+
+interface RecommendationReviewQueueItem {
+  recommendationId: string;
+  kind: Exclude<ReviewQueueKind, "all">;
+  severity: "critical" | "warning" | "info";
+  reason: {
+    code: string;
+    label: string;
+    detail: string;
+  };
+  action: {
+    action: string;
+    label: string;
+    href: string;
+  };
+  productId: number;
+  productVariantId: number | null;
+  sku: string;
+  productName: string;
+  status: string;
+  actionable: boolean;
+  skippedReason: string | null;
+  preferredVendorId: number | null;
+  preferredVendorName: string | null;
+  suggestedOrderQty: number;
+  orderUomLabel: string;
+  candidateScore?: ReorderItem["recommendationCandidateScore"];
+  qualityGate?: ReorderItem["qualityGate"];
+  qualityControls?: RecommendationQualityControl[];
+}
+
+interface RecommendationReviewQueueResponse {
+  generatedAt: string;
+  lookbackDays: number;
+  summary: {
+    total: number;
+    skipped: number;
+    heldByPolicy: number;
+    qualityReviewRequired: number;
+    critical: number;
+    warning: number;
+    info: number;
+  };
+  reasonCounts: Record<string, number>;
+  actionCounts: Record<string, number>;
+  candidateBandCounts: Record<string, number>;
+  filteredCount: number;
+  items: RecommendationReviewQueueItem[];
+}
+
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: any; priority: number }> = {
   stockout: { label: "Stockout Imminent", bg: "bg-red-500/10", text: "text-red-500", icon: AlertTriangle, priority: 0 },
   order_now: { label: "Critical Restock", bg: "bg-orange-500/10", text: "text-orange-500", icon: AlertTriangle, priority: 1 },
@@ -225,6 +276,13 @@ const CANDIDATE_BAND_OPTIONS: Array<{ value: CandidateBandFilter; label: string 
   { value: "blocked", label: "Blocked" },
 ];
 
+const REVIEW_QUEUE_FILTERS: Array<{ value: ReviewQueueKind; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "skipped", label: "Skipped" },
+  { value: "held_by_policy", label: "Policy Holds" },
+  { value: "quality_review_required", label: "Quality Review" },
+];
+
 function isCandidateBandFilter(value: string | null): value is CandidateBandFilter {
   return CANDIDATE_BAND_OPTIONS.some((option) => option.value === value);
 }
@@ -239,6 +297,26 @@ function candidateBandClass(band?: string | null): string {
   if (band === "review_candidate") return "bg-blue-50 text-blue-700 border-blue-200";
   if (band === "blocked") return "bg-red-50 text-red-700 border-red-200";
   return "bg-zinc-50 text-zinc-600 border-zinc-200";
+}
+
+function reviewQueueSeverityClass(severity: string): string {
+  if (severity === "critical") return "bg-red-50 text-red-700 border-red-200";
+  if (severity === "warning") return "bg-amber-50 text-amber-700 border-amber-200";
+  return "bg-blue-50 text-blue-700 border-blue-200";
+}
+
+function formatReviewQueueKind(kind: string): string {
+  if (kind === "held_by_policy") return "Policy hold";
+  if (kind === "quality_review_required") return "Quality review";
+  return "Skipped";
+}
+
+function reviewQueueFilterCount(summary: RecommendationReviewQueueResponse["summary"] | undefined, filter: ReviewQueueKind): number {
+  if (!summary) return 0;
+  if (filter === "all") return summary.total;
+  if (filter === "skipped") return summary.skipped;
+  if (filter === "held_by_policy") return summary.heldByPolicy;
+  return summary.qualityReviewRequired;
 }
 
 function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
@@ -257,6 +335,7 @@ export default function PurchasingView() {
     const requested = params.get("candidateBand");
     return isCandidateBandFilter(requested) ? requested : "all";
   });
+  const [reviewQueueFilter, setReviewQueueFilter] = useState<ReviewQueueKind>("all");
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -279,6 +358,15 @@ export default function PurchasingView() {
     },
   });
 
+  const { data: recommendationReviewQueue } = useQuery<RecommendationReviewQueueResponse>({
+    queryKey: ["/api/purchasing/recommendation-review-queue"],
+    queryFn: async () => {
+      const res = await fetch("/api/purchasing/recommendation-review-queue?limit=100");
+      if (!res.ok) throw new Error("Failed to fetch recommendation review queue");
+      return res.json();
+    },
+  });
+
   const autoDraftMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch("/api/purchasing/auto-draft-run", {
@@ -291,6 +379,7 @@ export default function PurchasingView() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
       toast({
         title: "Autonomous Procurement Synced",
         description: `Successfully analyzed burn rates and updated ${data.count} Vendor POs for ${data.itemsDrafted} critical items.`,
@@ -355,13 +444,9 @@ export default function PurchasingView() {
       }
       return sortDir === "asc" ? aVal - bVal : bVal - aVal;
     });
-  const reviewQueue = (analysis?.skippedItems ?? [])
-    .filter((item) => item.reviewSignal && !["monitor", "none"].includes(item.reviewSignal.action))
-    .sort((a, b) => {
-      const priority = { critical: 0, warning: 1, info: 2 };
-      return (priority[a.reviewSignal?.severity ?? "info"] ?? 2) - (priority[b.reviewSignal?.severity ?? "info"] ?? 2);
-    })
-    .slice(0, 8);
+  const filteredReviewQueue = (recommendationReviewQueue?.items ?? [])
+    .filter((item) => reviewQueueFilter === "all" || item.kind === reviewQueueFilter)
+    .slice(0, 12);
   const approvalPolicyImpact = analysis?.approvalPolicyImpact;
 
   const SortIcon = ({ field }: { field: string }) => {
@@ -462,20 +547,14 @@ export default function PurchasingView() {
     return "bg-zinc-50 text-zinc-600 border-zinc-200";
   };
 
-  const handleReviewAction = (item: ReorderItem) => {
-    switch (item.reviewSignal?.action) {
-      case "assign_vendor":
-        navigate("/suppliers");
-        break;
-      case "review_open_po":
-        navigate("/purchase-orders");
-        break;
-      case "review_exclusion":
-        navigate("/purchasing");
-        break;
-      default:
-        navigate("/purchase-orders");
+  const handleReviewQueueAction = (item: RecommendationReviewQueueItem) => {
+    if (item.action.href.startsWith("/reorder-analysis")) {
+      const params = new URLSearchParams(item.action.href.split("?")[1] ?? "");
+      const requestedBand = params.get("candidateBand");
+      if (isCandidateBandFilter(requestedBand)) setCandidateBandFilter(requestedBand);
+      return;
     }
+    navigate(item.action.href);
   };
 
   return (
@@ -669,42 +748,72 @@ export default function PurchasingView() {
           </Card>
         )}
 
-        {reviewQueue.length > 0 && (
+        {(recommendationReviewQueue?.summary.total ?? 0) > 0 && (
           <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
             <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
-              <CardTitle className="text-lg">Recommendation Review Queue</CardTitle>
-              <CardDescription>Skipped purchasing recommendations that need operator action before autopilot can use them.</CardDescription>
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <CardTitle className="text-lg">Recommendation Review Queue</CardTitle>
+                  <CardDescription>Skipped, held, and quality-review recommendations that need operator action before autopilot can use them.</CardDescription>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {REVIEW_QUEUE_FILTERS.map((option) => (
+                    <Button
+                      key={option.value}
+                      size="sm"
+                      variant={reviewQueueFilter === option.value ? "default" : "outline"}
+                      className="h-7 text-[11px] gap-1"
+                      onClick={() => setReviewQueueFilter(option.value)}
+                    >
+                      {option.label}
+                      <span className="rounded bg-white/20 px-1">
+                        {reviewQueueFilterCount(recommendationReviewQueue?.summary, option.value)}
+                      </span>
+                    </Button>
+                  ))}
+                </div>
+              </div>
             </CardHeader>
             <CardContent className="p-4">
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                {reviewQueue.map((item) => {
-                  const severityClass =
-                    item.reviewSignal?.severity === "critical"
-                      ? "bg-red-50 text-red-700 border-red-200"
-                      : item.reviewSignal?.severity === "warning"
-                        ? "bg-amber-50 text-amber-700 border-amber-200"
-                        : "bg-blue-50 text-blue-700 border-blue-200";
-                  return (
-                    <div key={`${item.productId}-${item.skippedReason}`} className="rounded-md border bg-white dark:bg-zinc-900 p-3">
+              {filteredReviewQueue.length === 0 ? (
+                <div className="rounded-md border border-dashed bg-white dark:bg-zinc-900 p-4 text-sm text-zinc-500">
+                  No recommendations match this review filter.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                  {filteredReviewQueue.map((item) => (
+                    <div key={`${item.recommendationId}-${item.kind}`} className="rounded-md border bg-white dark:bg-zinc-900 p-3">
                       <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="font-mono text-xs font-semibold text-primary truncate">{item.sku}</span>
-                            <Badge variant="outline" className={`text-[10px] ${severityClass}`}>
-                              {item.reviewSignal?.label}
+                            <Badge variant="outline" className={`text-[10px] ${reviewQueueSeverityClass(item.severity)}`}>
+                              {item.reason.label}
                             </Badge>
+                            <Badge variant="outline" className="text-[10px] bg-zinc-50 text-zinc-600 border-zinc-200">
+                              {formatReviewQueueKind(item.kind)}
+                            </Badge>
+                            {item.candidateScore ? (
+                              <Badge variant="outline" className={`text-[10px] capitalize ${candidateBandClass(item.candidateScore.band)}`}>
+                                {item.candidateScore.score} - {formatCandidateBand(item.candidateScore.band)}
+                              </Badge>
+                            ) : null}
                           </div>
                           <div className="mt-1 text-sm font-medium truncate">{item.productName}</div>
-                          <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.reviewSignal?.detail}</p>
+                          <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.reason.detail}</p>
+                          <div className="mt-2 text-[11px] text-zinc-500">
+                            {item.suggestedOrderQty} {item.orderUomLabel}
+                            {item.preferredVendorName ? ` - ${item.preferredVendorName}` : ""}
+                          </div>
                         </div>
-                        <Button size="sm" variant="outline" className="h-7 text-[11px] flex-shrink-0" onClick={() => handleReviewAction(item)}>
-                          Review
+                        <Button size="sm" variant="outline" className="h-7 text-[11px] flex-shrink-0" onClick={() => handleReviewQueueAction(item)}>
+                          {item.action.label}
                         </Button>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         )}

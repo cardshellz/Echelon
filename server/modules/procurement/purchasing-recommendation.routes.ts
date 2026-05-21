@@ -279,6 +279,183 @@ function buildSupplierSetupGaps(result: ReturnType<typeof generatePurchasingReco
   };
 }
 
+type RecommendationReviewQueueKind = "skipped" | "held_by_policy" | "quality_review_required";
+type RecommendationReviewQueueSeverity = "critical" | "warning" | "info";
+
+const reviewQueueKindPriority: Record<RecommendationReviewQueueKind, number> = {
+  skipped: 0,
+  held_by_policy: 1,
+  quality_review_required: 2,
+};
+
+const reviewQueueSeverityPriority: Record<RecommendationReviewQueueSeverity, number> = {
+  critical: 0,
+  warning: 1,
+  info: 2,
+};
+
+function reviewQueueSeverity(item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind): RecommendationReviewQueueSeverity {
+  if (kind === "skipped") return item.reviewSignal?.severity ?? "warning";
+  if (kind === "held_by_policy") return "warning";
+  return item.autopilotBlockers?.some((control) => control.severity === "block") ? "critical" : "warning";
+}
+
+function reviewQueueAction(item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind) {
+  if (kind === "held_by_policy") {
+    const band = item.recommendationCandidateScore?.band ?? "review_candidate";
+    return {
+      action: "review_approval_policy",
+      label: "Review policy hold",
+      href: `/reorder-analysis?candidateBand=${band}`,
+    };
+  }
+
+  if (kind === "quality_review_required") {
+    const band = item.recommendationCandidateScore?.band ?? "review_candidate";
+    return {
+      action: "review_quality_gate",
+      label: "Review signal",
+      href: `/reorder-analysis?candidateBand=${band}`,
+    };
+  }
+
+  switch (item.reviewSignal?.action) {
+    case "assign_vendor":
+      return { action: "assign_vendor", label: "Assign vendor", href: "/suppliers" };
+    case "review_open_po":
+      return { action: "review_open_po", label: "Review open PO", href: "/purchase-orders" };
+    case "review_exclusion":
+      return { action: "review_exclusion", label: "Review exclusion", href: "/purchasing" };
+    case "create_po":
+      return { action: "create_po", label: "Create PO", href: "/purchase-orders" };
+    default:
+      return { action: "review_recommendation", label: "Review", href: "/reorder-analysis" };
+  }
+}
+
+function reviewQueueReason(item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind): { code: string; label: string; detail: string } {
+  if (kind === "held_by_policy") {
+    return {
+      code: "held_by_approval_policy",
+      label: "Held by approval policy",
+      detail: "This recommendation passed the quality gate but the active approval policy would keep it out of draft PO mutation.",
+    };
+  }
+
+  if (kind === "quality_review_required") {
+    return {
+      code: item.qualityGate.reason,
+      label: item.qualityGate.label,
+      detail: item.qualityGate.detail,
+    };
+  }
+
+  return {
+    code: item.skippedReason ?? "skipped",
+    label: item.reviewSignal?.label ?? "Skipped recommendation",
+    detail: item.reviewSignal?.detail ?? item.explanation,
+  };
+}
+
+function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurchasingRecommendations>, settings: AutoDraftRecommendationSettings) {
+  const entries: Array<{
+    recommendationId: string;
+    kind: RecommendationReviewQueueKind;
+    severity: RecommendationReviewQueueSeverity;
+    reason: { code: string; label: string; detail: string };
+    action: { action: string; label: string; href: string };
+    productId: number;
+    productVariantId: number | null;
+    sku: string;
+    productName: string;
+    status: string;
+    actionable: boolean;
+    skippedReason: string | null;
+    preferredVendorId: number | null;
+    preferredVendorName: string | null;
+    suggestedOrderQty: number;
+    orderUomLabel: string;
+    candidateScore: PurchasingRecommendationItem["recommendationCandidateScore"];
+    qualityGate: PurchasingRecommendationItem["qualityGate"];
+    qualityControls: PurchasingRecommendationQualityControl[];
+  }> = [];
+
+  const pushEntry = (item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind) => {
+    const severity = reviewQueueSeverity(item, kind);
+    entries.push({
+      recommendationId: item.recommendationId,
+      kind,
+      severity,
+      reason: reviewQueueReason(item, kind),
+      action: reviewQueueAction(item, kind),
+      productId: item.productId,
+      productVariantId: item.productVariantId ?? null,
+      sku: item.sku,
+      productName: item.productName,
+      status: item.status,
+      actionable: item.actionable,
+      skippedReason: item.skippedReason,
+      preferredVendorId: item.preferredVendorId,
+      preferredVendorName: item.preferredVendorName,
+      suggestedOrderQty: item.suggestedOrderQty,
+      orderUomLabel: item.orderUomLabel,
+      candidateScore: item.recommendationCandidateScore,
+      qualityGate: item.qualityGate,
+      qualityControls: item.autopilotBlockers?.length ? item.autopilotBlockers : item.qualityControls ?? [],
+    });
+  };
+
+  const skippedById = new Set<string>();
+  for (const item of result.skippedItems) {
+    if (!item.skippedReason) continue;
+    skippedById.add(item.recommendationId);
+    pushEntry(item, "skipped");
+  }
+
+  for (const item of result.items) {
+    if (skippedById.has(item.recommendationId)) continue;
+    if (item.qualityGate.autoDraftEligible && !passesAutoDraftApprovalPolicy(item, settings)) {
+      pushEntry(item, "held_by_policy");
+    } else if (item.actionable && !item.qualityGate.autoDraftEligible) {
+      pushEntry(item, "quality_review_required");
+    }
+  }
+
+  const summary = {
+    total: entries.length,
+    skipped: entries.filter((entry) => entry.kind === "skipped").length,
+    heldByPolicy: entries.filter((entry) => entry.kind === "held_by_policy").length,
+    qualityReviewRequired: entries.filter((entry) => entry.kind === "quality_review_required").length,
+    critical: entries.filter((entry) => entry.severity === "critical").length,
+    warning: entries.filter((entry) => entry.severity === "warning").length,
+    info: entries.filter((entry) => entry.severity === "info").length,
+  };
+
+  const reasonCounts: Record<string, number> = {};
+  const actionCounts: Record<string, number> = {};
+  const candidateBandCounts: Record<string, number> = {};
+  for (const entry of entries) {
+    reasonCounts[entry.reason.code] = (reasonCounts[entry.reason.code] ?? 0) + 1;
+    actionCounts[entry.action.action] = (actionCounts[entry.action.action] ?? 0) + 1;
+    const band = entry.candidateScore?.band ?? "unscored";
+    candidateBandCounts[band] = (candidateBandCounts[band] ?? 0) + 1;
+  }
+
+  return {
+    summary,
+    reasonCounts,
+    actionCounts,
+    candidateBandCounts,
+    items: entries.sort((a, b) => {
+      const severityDelta = reviewQueueSeverityPriority[a.severity] - reviewQueueSeverityPriority[b.severity];
+      if (severityDelta !== 0) return severityDelta;
+      const kindDelta = reviewQueueKindPriority[a.kind] - reviewQueueKindPriority[b.kind];
+      if (kindDelta !== 0) return kindDelta;
+      return (b.candidateScore?.score ?? 0) - (a.candidateScore?.score ?? 0);
+    }),
+  };
+}
+
 async function loadPurchasingRecommendationDefaults(): Promise<PurchasingRecommendationDefaults> {
   const defaultsQuery = await db.execute(sql`
     SELECT key, value FROM warehouse.echelon_settings
@@ -403,6 +580,44 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching supplier setup gaps:", error);
       res.status(500).json({ error: "Failed to fetch supplier setup gaps" });
+    }
+  });
+
+  app.get("/api/purchasing/recommendation-review-queue", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const configuredLookback = await storage.getVelocityLookbackDays();
+      const rawRows = await storage.getReorderAnalysisData(configuredLookback);
+      const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
+      const context = await loadPurchasingRecommendationContext();
+      const recommendationResult = generatePurchasingRecommendations({
+        rows: rawRows as PurchasingRecommendationRawRow[],
+        lookbackDays: configuredLookback,
+        autoDraftSettings: settings,
+        requireVendor: Boolean(settings.skipNoVendor),
+        ...context,
+      });
+      const queue = buildRecommendationReviewQueue(recommendationResult, settings);
+      const kind = typeof req.query.kind === "string" ? req.query.kind : "all";
+      const severity = typeof req.query.severity === "string" ? req.query.severity : "all";
+      const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 100);
+      const filteredItems = queue.items
+        .filter((item) => kind === "all" || item.kind === kind)
+        .filter((item) => severity === "all" || item.severity === severity)
+        .slice(0, limit);
+
+      res.json({
+        generatedAt: new Date().toISOString(),
+        lookbackDays: configuredLookback,
+        autoDraftMode: settings.autoDraftMode ?? "draft_po",
+        approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
+        filters: { kind, severity, limit },
+        ...queue,
+        filteredCount: filteredItems.length,
+        items: filteredItems,
+      });
+    } catch (error) {
+      console.error("Error fetching recommendation review queue:", error);
+      res.status(500).json({ error: "Failed to fetch recommendation review queue" });
     }
   });
 
