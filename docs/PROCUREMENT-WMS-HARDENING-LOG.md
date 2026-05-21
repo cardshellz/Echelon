@@ -2414,3 +2414,34 @@ Next step:
 - Continue Phase 10 with autopilot run-history action links or a PO detail
   next-action panel so operators can move from diagnostics into the exact
   supplier, recommendation, or PO workflow that needs cleanup.
+
+### 2026-05-21 - Phase 10 Slice 3: Auto-Draft Run Action Links
+
+Scope:
+
+- Added read-only `recommendedActions` metadata to normalized
+  `/api/purchasing/auto-draft/runs` responses.
+- Derived action links from existing run diagnostics for vendor assignment,
+  approval-policy holds, quality-review queues, open PO skips, purchasing
+  exclusions, draft PO review, and run errors.
+- Kept the action metadata presentation-only: auto-draft settings,
+  recommendation math, approval policy, PO mutation behavior, and purchasing
+  data are unchanged.
+- Added recent-run action buttons to the Purchasing Dashboard so operators can
+  jump from auto-draft diagnostics into suppliers, purchase orders, exclusions,
+  or filtered Reorder Analysis views.
+- Updated Reorder Analysis to honor `reviewQueue` query parameters so dashboard
+  links can open the held-policy or quality-review queue directly.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 10 with a PO detail next-action panel for auto-draft POs, so
+  operators can see why a draft exists and what review, send, receive, or AP
+  step is next without reconstructing the purchasing state manually.

@@ -258,6 +258,14 @@ interface AutoDraftRunHistoryItem {
     qualityControls?: RecommendationQualityControl[];
     autopilotBlockers?: RecommendationQualityControl[];
   } | null;
+  recommendedActions: Array<{
+    action: string;
+    label: string;
+    detail: string;
+    href: string;
+    severity: "critical" | "warning" | "info";
+    count: number;
+  }>;
 }
 
 interface AutoDraftRunHistoryResponse {
@@ -382,6 +390,12 @@ function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
   return policy === "high_confidence_and_strong_candidate"
     ? "High confidence + strong candidate"
     : "High confidence only";
+}
+
+function autoDraftActionClass(severity: string): string {
+  if (severity === "critical") return "border-red-200 bg-red-50 text-red-700 hover:bg-red-100";
+  if (severity === "warning") return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100";
+  return "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50";
 }
 
 function formatRecommendationForecast(
@@ -1206,6 +1220,23 @@ export default function PurchasingDashboard() {
                                 {formatQualityControlSummary(run.topActionableRecommendation.autopilotBlockers) ? (
                                   <span className="text-amber-700"> - {formatQualityControlSummary(run.topActionableRecommendation.autopilotBlockers)}</span>
                                 ) : null}
+                              </div>
+                            ) : null}
+                            {run.recommendedActions?.length ? (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {run.recommendedActions.slice(0, 3).map((action) => (
+                                  <Button
+                                    key={action.action}
+                                    variant="outline"
+                                    size="sm"
+                                    className={`h-7 text-[11px] px-2 ${autoDraftActionClass(action.severity)}`}
+                                    title={action.detail}
+                                    onClick={() => navigate(action.href)}
+                                  >
+                                    {action.label}
+                                    <ArrowRight className="h-3 w-3 ml-1" />
+                                  </Button>
+                                ))}
                               </div>
                             ) : null}
                             {run.status === "error" && run.errorMessage ? (

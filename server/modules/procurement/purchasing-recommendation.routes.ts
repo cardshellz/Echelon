@@ -62,6 +62,116 @@ function numberField(row: any, camel: string, snake: string): number {
   return Number(row?.[camel] ?? row?.[snake] ?? 0) || 0;
 }
 
+type AutoDraftRunRecommendedActionSeverity = "critical" | "warning" | "info";
+
+function formatCountLabel(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function buildAutoDraftRunRecommendedActions(run: any) {
+  const actions: Array<{
+    action: string;
+    label: string;
+    detail: string;
+    href: string;
+    severity: AutoDraftRunRecommendedActionSeverity;
+    count: number;
+  }> = [];
+
+  if (run.status === "error" && run.errorMessage) {
+    actions.push({
+      action: "review_run_error",
+      label: "Review run error",
+      detail: run.errorMessage,
+      href: "/purchasing",
+      severity: "critical",
+      count: 1,
+    });
+  }
+
+  if (run.skippedNoVendor > 0) {
+    actions.push({
+      action: "assign_vendors",
+      label: "Assign vendors",
+      detail: `${formatCountLabel(run.skippedNoVendor, "recommendation")} skipped because no preferred vendor was available.`,
+      href: "/suppliers",
+      severity: "critical",
+      count: run.skippedNoVendor,
+    });
+  }
+
+  if (run.approvalPolicyBlockedCount > 0) {
+    actions.push({
+      action: "review_policy_holds",
+      label: "Review policy holds",
+      detail: `${formatCountLabel(run.approvalPolicyBlockedCount, "quality-approved recommendation")} held by the active approval policy.`,
+      href: "/reorder-analysis?candidateBand=review_candidate&reviewQueue=held_by_policy",
+      severity: "warning",
+      count: run.approvalPolicyBlockedCount,
+    });
+  }
+
+  const qualityReviewCount = Math.max(
+    Number(run.autoDraftReviewRequiredCount ?? 0) || 0,
+    Number(run.forecastDiagnostics?.autopilotBlockerItemCount ?? 0) || 0,
+  );
+  if (qualityReviewCount > 0) {
+    actions.push({
+      action: "review_quality_queue",
+      label: "Review quality queue",
+      detail: `${formatCountLabel(qualityReviewCount, "recommendation")} ${qualityReviewCount === 1 ? "needs" : "need"} demand, lead-time, supplier-cost, or vendor review before autopilot can use them.`,
+      href: "/reorder-analysis?reviewQueue=quality_review_required",
+      severity: "warning",
+      count: qualityReviewCount,
+    });
+  }
+
+  if (run.skippedOnOrder > 0) {
+    actions.push({
+      action: "review_open_pos",
+      label: "Review open POs",
+      detail: `${formatCountLabel(run.skippedOnOrder, "recommendation")} skipped because stock was already on order.`,
+      href: "/purchase-orders",
+      severity: "info",
+      count: run.skippedOnOrder,
+    });
+  }
+
+  if (run.skippedExcluded > 0) {
+    actions.push({
+      action: "review_exclusions",
+      label: "Review exclusions",
+      detail: `${formatCountLabel(run.skippedExcluded, "recommendation")} skipped by purchasing exclusion rules.`,
+      href: "/purchasing",
+      severity: "info",
+      count: run.skippedExcluded,
+    });
+  }
+
+  if ((run.posCreated + run.posUpdated > 0 || run.linesAdded > 0) && run.status !== "error") {
+    actions.push({
+      action: "review_draft_pos",
+      label: "Review draft POs",
+      detail: `${run.posCreated + run.posUpdated} purchase orders changed with ${run.linesAdded} line items.`,
+      href: "/purchase-orders",
+      severity: "info",
+      count: run.posCreated + run.posUpdated,
+    });
+  }
+
+  const severityPriority: Record<AutoDraftRunRecommendedActionSeverity, number> = {
+    critical: 0,
+    warning: 1,
+    info: 2,
+  };
+
+  return actions.sort((a, b) => {
+    const severityDelta = severityPriority[a.severity] - severityPriority[b.severity];
+    if (severityDelta !== 0) return severityDelta;
+    return b.count - a.count;
+  });
+}
+
 function normalizeAutoDraftRun(row: any) {
   const summaryJson = parseSummaryJson(row?.summaryJson ?? row?.summary_json);
   const actionableRecommendations = Array.isArray(summaryJson?.actionableRecommendations)
@@ -78,7 +188,7 @@ function normalizeAutoDraftRun(row: any) {
     : [];
   const approvalPolicyDiagnostics = summaryJson?.approvalPolicyDiagnostics ?? null;
 
-  return {
+  const normalized = {
     id: Number(row?.id),
     runAt: row?.runAt ?? row?.run_at,
     triggeredBy: row?.triggeredBy ?? row?.triggered_by ?? null,
@@ -112,6 +222,11 @@ function normalizeAutoDraftRun(row: any) {
     topActionableRecommendation: actionableRecommendations[0] ?? null,
     topApprovalPolicyBlockedRecommendation: approvalPolicyBlockedRecommendations[0] ?? null,
     topSkippedRecommendation: skippedRecommendations[0] ?? null,
+  };
+
+  return {
+    ...normalized,
+    recommendedActions: buildAutoDraftRunRecommendedActions(normalized),
   };
 }
 

@@ -287,6 +287,10 @@ function isCandidateBandFilter(value: string | null): value is CandidateBandFilt
   return CANDIDATE_BAND_OPTIONS.some((option) => option.value === value);
 }
 
+function isReviewQueueKind(value: string | null): value is ReviewQueueKind {
+  return REVIEW_QUEUE_FILTERS.some((option) => option.value === value);
+}
+
 function formatCandidateBand(band?: string | null): string {
   if (!band) return "Unscored";
   return band.replace(/_/g, " ");
@@ -335,7 +339,11 @@ export default function PurchasingView() {
     const requested = params.get("candidateBand");
     return isCandidateBandFilter(requested) ? requested : "all";
   });
-  const [reviewQueueFilter, setReviewQueueFilter] = useState<ReviewQueueKind>("all");
+  const [reviewQueueFilter, setReviewQueueFilter] = useState<ReviewQueueKind>(() => {
+    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    const requested = params.get("reviewQueue");
+    return isReviewQueueKind(requested) ? requested : "all";
+  });
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -552,6 +560,8 @@ export default function PurchasingView() {
       const params = new URLSearchParams(item.action.href.split("?")[1] ?? "");
       const requestedBand = params.get("candidateBand");
       if (isCandidateBandFilter(requestedBand)) setCandidateBandFilter(requestedBand);
+      const requestedQueue = params.get("reviewQueue");
+      if (isReviewQueueKind(requestedQueue)) setReviewQueueFilter(requestedQueue);
       return;
     }
     navigate(item.action.href);
