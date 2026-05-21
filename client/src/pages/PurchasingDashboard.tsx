@@ -289,6 +289,49 @@ type LandedCostHealth = {
   }>;
 };
 
+type SupplierSetupGaps = {
+  generatedAt: string;
+  lookbackDays: number;
+  autoDraftMode: "draft_po" | "review_only";
+  approvalPolicy: AutoDraftApprovalPolicy;
+  scannedRecommendations: number;
+  skippedRecommendations: number;
+  totalGapItems: number;
+  counts: {
+    missingVendor: number;
+    missingSupplierCost: number;
+    lastPurchaseCost: number;
+    staleSupplierCost: number;
+    unverifiedSupplierCost: number;
+    defaultLeadTime: number;
+    productLeadTimeFallback: number;
+    blockedRecommendations: number;
+    reviewRecommendations: number;
+  };
+  codeCounts: Record<string, number>;
+  items: Array<{
+    recommendationId: string;
+    productId: number;
+    productVariantId: number | null;
+    sku: string;
+    productName: string;
+    status: string;
+    actionable: boolean;
+    skippedReason: string | null;
+    preferredVendorId: number | null;
+    preferredVendorName: string | null;
+    suggestedOrderQty: number;
+    orderUomLabel: string;
+    candidateScore?: RecommendationCandidateScore;
+    gaps: RecommendationQualityControl[];
+    action: {
+      action: string;
+      label: string;
+      href: string;
+    };
+  }>;
+};
+
 function formatCents(cents: number): string {
   if (cents >= 100000) return `$${(cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -403,6 +446,11 @@ export default function PurchasingDashboard() {
     refetchInterval: 5 * 60 * 1000,
   });
 
+  const { data: supplierSetupGaps } = useQuery<SupplierSetupGaps>({
+    queryKey: ["/api/purchasing/supplier-setup-gaps"],
+    refetchInterval: 5 * 60 * 1000,
+  });
+
   // Feature flag: when new PO editor is enabled, draft "Review" buttons
   // should open the inline editor (/edit) instead of the old detail page.
   const { data: procurementSettings } = useQuery<{ useNewPoEditor?: boolean }>({
@@ -422,6 +470,7 @@ export default function PurchasingDashboard() {
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/runs?limit=5"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
       }, 15000);
     },
     onError: (err: Error) => {
@@ -469,6 +518,15 @@ export default function PurchasingDashboard() {
         { label: "Needs finalization", value: landedCostHealth.counts.pendingFinalization },
         { label: "Ready to push", value: landedCostHealth.counts.finalizedNotPushed },
         { label: "Stale provisional lots", value: landedCostHealth.counts.staleProvisionalLots },
+      ]
+    : [];
+  const showSupplierSetupGaps = Boolean(supplierSetupGaps?.totalGapItems);
+  const supplierGapCounts = supplierSetupGaps
+    ? [
+        { label: "No vendor", value: supplierSetupGaps.counts.missingVendor },
+        { label: "Missing cost", value: supplierSetupGaps.counts.missingSupplierCost },
+        { label: "Verify cost", value: supplierSetupGaps.counts.lastPurchaseCost + supplierSetupGaps.counts.staleSupplierCost + supplierSetupGaps.counts.unverifiedSupplierCost },
+        { label: "Lead time", value: supplierSetupGaps.counts.defaultLeadTime + supplierSetupGaps.counts.productLeadTimeFallback },
       ]
     : [];
   const recentAutoDraftRuns = autoDraftRunHistory?.runs ?? [];
@@ -589,6 +647,82 @@ export default function PurchasingDashboard() {
                 {landedCostHealth.items.length > 3 && (
                   <Button variant="ghost" size="sm" className="text-[11px] text-muted-foreground h-7" onClick={() => navigate("/shipments")}>
                     + {landedCostHealth.items.length - 3} more landed-cost health items
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {showSupplierSetupGaps && supplierSetupGaps && (
+          <Card className={supplierSetupGaps.counts.blockedRecommendations > 0 ? "border-red-300 bg-red-50/30" : "border-amber-300 bg-amber-50/30"}>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className={`mt-0.5 rounded-full p-1.5 ${supplierSetupGaps.counts.blockedRecommendations > 0 ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+                    <Package className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm font-semibold">Supplier Setup Gaps</h2>
+                      <Badge variant={supplierSetupGaps.counts.blockedRecommendations > 0 ? "destructive" : "outline"} className="text-[10px] uppercase">
+                        {supplierSetupGaps.totalGapItems} items
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {supplierSetupGaps.counts.blockedRecommendations} blocked / {supplierSetupGaps.counts.reviewRecommendations} review from current recommendations
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Fix supplier data before trusting auto-draft output for these SKUs.
+                    </p>
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" className="self-start lg:self-center" onClick={() => navigate("/suppliers")}>
+                  Open Suppliers
+                  <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {supplierGapCounts.map((row) => (
+                  <div key={row.label} className="rounded-md border bg-background/80 p-2">
+                    <div className="text-lg font-bold">{row.value}</div>
+                    <div className="text-[10px] text-muted-foreground">{row.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="space-y-2">
+                {supplierSetupGaps.items.slice(0, 4).map((item) => (
+                  <div key={item.recommendationId} className="flex flex-col gap-2 rounded-md border bg-background/90 p-2.5 md:flex-row md:items-center">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={item.gaps.some((gap) => gap.severity === "block") ? "destructive" : "outline"} className="text-[10px]">
+                          {item.gaps[0]?.label ?? "Supplier setup"}
+                        </Badge>
+                        <span className="font-mono text-[11px] text-primary font-semibold">{item.sku}</span>
+                        <span className="text-[10px] text-muted-foreground truncate">
+                          {item.preferredVendorName ?? "No preferred vendor"}
+                        </span>
+                        {item.candidateScore ? (
+                          <span className="text-[10px] text-muted-foreground">
+                            score {item.candidateScore.score}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1 truncate">{item.productName}</div>
+                      <div className="text-[11px] text-muted-foreground mt-1 line-clamp-1">
+                        {item.gaps[0]?.detail}
+                      </div>
+                    </div>
+                    <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(item.action.href)}>
+                      {item.action.label}
+                    </Button>
+                  </div>
+                ))}
+                {supplierSetupGaps.items.length > 4 && (
+                  <Button variant="ghost" size="sm" className="text-[11px] text-muted-foreground h-7" onClick={() => navigate("/reorder-analysis")}>
+                    + {supplierSetupGaps.items.length - 4} more supplier setup items
                   </Button>
                 )}
               </div>

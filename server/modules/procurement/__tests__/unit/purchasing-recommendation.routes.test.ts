@@ -312,6 +312,141 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
+  it("summarizes supplier setup gaps from recommendation quality controls", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 80,
+      candidateScoreReviewThreshold: 60,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 101,
+        variant_id: 1001,
+        base_sku: "NO-VENDOR",
+        product_name: "No Vendor Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 58,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: null,
+        vendor_lead_time_days: null,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+      },
+      {
+        product_id: 102,
+        variant_id: 1002,
+        base_sku: "MISSING-COST",
+        product_name: "Missing Cost Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 5,
+        vendor_lead_time_days: null,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor A",
+      },
+      {
+        product_id: 103,
+        variant_id: 1003,
+        base_sku: "STALE-COST",
+        product_name: "Stale Cost Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 5,
+        vendor_lead_time_days: 4,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 88,
+        preferred_vendor_name: "Vendor B",
+        estimated_cost_cents: 250,
+        vendor_product_updated_at: "2024-01-01T00:00:00.000Z",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/supplier-setup-gaps");
+
+    expect(status).toBe(200);
+    expect(mocks.procurement.getReorderAnalysisData).toHaveBeenCalledWith(30);
+    expect(body).toMatchObject({
+      lookbackDays: 30,
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      scannedRecommendations: 3,
+      skippedRecommendations: 1,
+      totalGapItems: 3,
+      counts: {
+        missingVendor: 1,
+        missingSupplierCost: 1,
+        staleSupplierCost: 1,
+        defaultLeadTime: 1,
+        productLeadTimeFallback: 1,
+        blockedRecommendations: 1,
+        reviewRecommendations: 2,
+      },
+      codeCounts: {
+        missing_vendor: 1,
+        missing_supplier_cost: 1,
+        stale_supplier_cost: 1,
+        default_lead_time: 1,
+        product_lead_time_fallback: 1,
+      },
+    });
+    expect(body.generatedAt).toEqual(expect.any(String));
+    expect(body.items[0]).toMatchObject({
+      sku: "NO-VENDOR",
+      skippedReason: "no_vendor",
+      action: {
+        action: "assign_preferred_vendor",
+        label: "Assign vendor",
+        href: "/suppliers",
+      },
+    });
+    expect(body.items[0].gaps[0]).toMatchObject({
+      code: "missing_vendor",
+      severity: "block",
+    });
+    expect(body.items[1]).toMatchObject({
+      sku: "MISSING-COST",
+      preferredVendorName: "Vendor A",
+      action: {
+        action: "update_supplier_cost",
+        label: "Update cost",
+      },
+    });
+    expect(body.items[1].gaps[0]).toMatchObject({
+      code: "missing_supplier_cost",
+      severity: "review",
+    });
+    expect(body.items.map((item: any) => item.sku)).toContain("STALE-COST");
+  });
+
   it("starts the auto-draft job for an admin user without awaiting completion", async () => {
     server = await startServer(buildApp());
 
