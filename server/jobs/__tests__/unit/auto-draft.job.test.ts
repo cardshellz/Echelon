@@ -199,4 +199,49 @@ describe("auto-draft job", () => {
       }),
     );
   });
+
+  it("honors the stricter candidate-score approval policy before mutating draft POs", async () => {
+    mocks.storage.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+
+    await runAutoDraftJob({ triggeredBy: "scheduler" });
+
+    expect(mocks.purchasing.createPO).not.toHaveBeenCalled();
+    expect(mocks.storage.bulkCreatePurchaseOrderLines).not.toHaveBeenCalled();
+    expect(mocks.storage.updateAutoDraftRun).toHaveBeenCalledWith(
+      500,
+      expect.objectContaining({
+        status: "success",
+        itemsAnalyzed: 2,
+        posCreated: 0,
+        posUpdated: 0,
+        linesAdded: 0,
+        summaryJson: expect.objectContaining({
+          settings: expect.objectContaining({
+            approvalPolicy: "high_confidence_and_strong_candidate",
+            candidateScoreStrongThreshold: 95,
+            candidateScoreReviewThreshold: 80,
+          }),
+          actionableRecommendations: expect.arrayContaining([
+            expect.objectContaining({
+              sku: "HIGH-1",
+              qualityGate: expect.objectContaining({
+                autoDraftEligible: true,
+              }),
+              recommendationCandidateScore: expect.objectContaining({
+                band: "review_candidate",
+              }),
+            }),
+          ]),
+        }),
+      }),
+    );
+  });
 });

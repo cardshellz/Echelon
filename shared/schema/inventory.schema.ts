@@ -235,6 +235,7 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   // Velocity calculation
   velocityLookbackDays: integer("velocity_lookback_days").notNull().default(14), // Days of pick history for SKU velocity
   autoDraftMode: varchar("auto_draft_mode", { length: 20 }).notNull().default("draft_po"), // draft_po, review_only
+  autoDraftApprovalPolicy: varchar("auto_draft_approval_policy", { length: 50 }).notNull().default("high_confidence_only"),
   recommendationCandidateScoreStrongThreshold: integer("recommendation_candidate_score_strong_threshold").notNull().default(80),
   recommendationCandidateScoreReviewThreshold: integer("recommendation_candidate_score_review_threshold").notNull().default(60),
 

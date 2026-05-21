@@ -29,6 +29,12 @@ function parseRunHistoryLimit(value: unknown): number {
   return Math.min(parsed, 50);
 }
 
+function normalizeApprovalPolicy(value: unknown): AutoDraftRecommendationSettings["approvalPolicy"] {
+  return value === "high_confidence_and_strong_candidate"
+    ? "high_confidence_and_strong_candidate"
+    : "high_confidence_only";
+}
+
 function parseCandidateScoreThreshold(value: unknown, fieldName: string): number | undefined | { error: string } {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) {
@@ -81,9 +87,7 @@ function normalizeAutoDraftRun(row: any) {
     errorMessage: row?.errorMessage ?? row?.error_message ?? null,
     finishedAt: row?.finishedAt ?? row?.finished_at ?? null,
     mode: summaryJson?.settings?.autoDraftMode === "review_only" ? "review_only" : "draft_po",
-    approvalPolicy: summaryJson?.settings?.approvalPolicy === "high_confidence_only"
-      ? "high_confidence_only"
-      : "high_confidence_only",
+    approvalPolicy: normalizeApprovalPolicy(summaryJson?.settings?.approvalPolicy),
     actionableCount: Number(summaryJson?.recommendationSummary?.actionableCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
     autoDraftEligibleCount:
       Number(summaryJson?.recommendationSummary?.autoDraftEligibleCount ?? numberField(row, "linesAdded", "lines_added")) || 0,
@@ -545,8 +549,13 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       if (autoDraftMode !== undefined && !["draft_po", "review_only"].includes(autoDraftMode)) {
         return res.status(400).json({ error: "autoDraftMode must be one of: draft_po, review_only" });
       }
-      if (approvalPolicy !== undefined && approvalPolicy !== "high_confidence_only") {
-        return res.status(400).json({ error: "approvalPolicy must be high_confidence_only" });
+      if (
+        approvalPolicy !== undefined &&
+        !["high_confidence_only", "high_confidence_and_strong_candidate"].includes(approvalPolicy)
+      ) {
+        return res.status(400).json({
+          error: "approvalPolicy must be one of: high_confidence_only, high_confidence_and_strong_candidate",
+        });
       }
       const parsedStrongThreshold = parseCandidateScoreThreshold(candidateScoreStrongThreshold, "candidateScoreStrongThreshold");
       if (typeof parsedStrongThreshold === "object") {

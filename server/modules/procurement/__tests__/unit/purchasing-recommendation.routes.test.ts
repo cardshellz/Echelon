@@ -650,7 +650,7 @@ describe("purchasing recommendation routes", () => {
 
     const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
       autoDraftMode: "review_only",
-      approvalPolicy: "high_confidence_only",
+      approvalPolicy: "high_confidence_and_strong_candidate",
       candidateScoreStrongThreshold: 85,
       candidateScoreReviewThreshold: 65,
     });
@@ -661,7 +661,7 @@ describe("purchasing recommendation routes", () => {
       undefined,
       expect.objectContaining({
         autoDraftMode: "review_only",
-        approvalPolicy: "high_confidence_only",
+        approvalPolicy: "high_confidence_and_strong_candidate",
         candidateScoreStrongThreshold: 85,
         candidateScoreReviewThreshold: 65,
       }),
@@ -701,7 +701,9 @@ describe("purchasing recommendation routes", () => {
     });
 
     expect(status).toBe(400);
-    expect(body).toEqual({ error: "approvalPolicy must be high_confidence_only" });
+    expect(body).toEqual({
+      error: "approvalPolicy must be one of: high_confidence_only, high_confidence_and_strong_candidate",
+    });
     expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
   });
 });

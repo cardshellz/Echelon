@@ -36,7 +36,7 @@ interface RulesData {
 
 interface AutoDraftSettings {
   autoDraftMode: "draft_po" | "review_only";
-  approvalPolicy: "high_confidence_only";
+  approvalPolicy: "high_confidence_only" | "high_confidence_and_strong_candidate";
   includeOrderSoon: boolean;
   skipOnOpenPo: boolean;
   skipNoVendor: boolean;
@@ -312,18 +312,37 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
                 </Select>
               </div>
               <div className="rounded-md border bg-muted/40 p-3">
-                <h4 className="text-sm font-medium">Quality gate policy</h4>
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  {settings?.approvalPolicy === "high_confidence_only" || !settings?.approvalPolicy
-                    ? "Only high-confidence actionable recommendations can create or update draft POs. Medium and low confidence recommendations stay in review."
-                    : "Only recommendations allowed by the configured quality gate can create or update draft POs."}
+                <h4 className="text-sm font-medium mb-1">Approval policy</h4>
+                <p className="text-[11px] text-muted-foreground mb-2">
+                  Controls which actionable recommendations are allowed to create or update draft POs.
+                </p>
+                <Select
+                  value={settings?.approvalPolicy ?? "high_confidence_only"}
+                  onValueChange={(value) => updateSettingsMutation.mutate({
+                    approvalPolicy: value as AutoDraftSettings["approvalPolicy"],
+                  })}
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="high_confidence_only">High confidence only</SelectItem>
+                    <SelectItem value="high_confidence_and_strong_candidate">
+                      High confidence + strong candidate
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground mt-2">
+                  {settings?.approvalPolicy === "high_confidence_and_strong_candidate"
+                    ? "Draft POs require the high-confidence quality gate and the strong candidate score band."
+                    : "Draft POs require the high-confidence quality gate. Candidate score stays review-only."}
                 </p>
               </div>
               <div className="rounded-md border bg-muted/40 p-3 space-y-3">
                 <div>
                   <h4 className="text-sm font-medium">Candidate score thresholds</h4>
                   <p className="text-[11px] text-muted-foreground mt-1">
-                    Controls strong and review candidate bands. Auto-draft still uses the high-confidence quality gate.
+                    Controls strong and review candidate bands. The stricter approval policy also uses the strong band.
                   </p>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
