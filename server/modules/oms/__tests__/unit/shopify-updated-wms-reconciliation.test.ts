@@ -42,6 +42,17 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/handleAddressChangeOnShipment/);
   });
 
+  it("fans Shopify address updates out to every WMS row linked to the OMS order", () => {
+    const addressSyncBlock = OMS_WEBHOOKS_SRC.match(
+      /const wmsOrders = await db\.execute[\s\S]*?\/\/ Update line items if changed/,
+    )?.[0] ?? "";
+
+    expect(addressSyncBlock).toMatch(/const wmsOrderRows = wmsOrders\.rows/);
+    expect(addressSyncBlock).toMatch(/for \(const wmsOrderRow of wmsOrderRows\)/);
+    expect(addressSyncBlock).toMatch(/WHERE \(source = 'oms' AND oms_fulfillment_order_id = \$\{String\(existing\.id\)\}\)/);
+    expect(addressSyncBlock).not.toMatch(/LIMIT 1/);
+  });
+
   it("does not let Shopify fulfilled webhooks mark WMS shipments shipped", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/ShipStation shipment flow owns WMS shipment state/);
     const fulfilledHandler = OMS_WEBHOOKS_SRC.match(/orders\/fulfilled[\s\S]*?eventType: "shipped"/)?.[0] ?? "";
