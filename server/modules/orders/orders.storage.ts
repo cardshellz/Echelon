@@ -28,6 +28,87 @@ const SHIPMENT_DERIVED_STATUSES = new Set<OrderStatus>([
   "partially_shipped" as OrderStatus,
 ]);
 
+const WMS_ORDER_CREATE_LOCK_NAMESPACE = 917403;
+
+function getWmsOrderCreateLockKey(order: InsertOrder): string | null {
+  if (order.source === "oms" && order.omsFulfillmentOrderId) {
+    return `oms:${order.omsFulfillmentOrderId}`;
+  }
+  if (order.sourceTableId) {
+    return `source:${order.source || "unknown"}:${order.sourceTableId}`;
+  }
+  if (order.externalOrderId) {
+    return `external:${order.externalOrderId}`;
+  }
+  return null;
+}
+
+async function lockWmsOrderCreate(tx: any, order: InsertOrder): Promise<void> {
+  const lockKey = getWmsOrderCreateLockKey(order);
+  if (!lockKey) return;
+
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      ${WMS_ORDER_CREATE_LOCK_NAMESPACE},
+      hashtext(${lockKey})
+    )
+  `);
+}
+
+async function findExistingOrderForCreate(tx: any, order: InsertOrder): Promise<Order | null> {
+  if (order.source === "oms" && order.omsFulfillmentOrderId) {
+    const existingByOmsId = await tx
+      .select()
+      .from(orders)
+      .where(
+        and(
+          eq(orders.source, "oms"),
+          eq(orders.omsFulfillmentOrderId, order.omsFulfillmentOrderId),
+        ),
+      )
+      .limit(1);
+
+    if (existingByOmsId.length > 0) {
+      console.log(
+        `[ORDER CREATE] Skipping duplicate order - already exists by omsFulfillmentOrderId: ${order.omsFulfillmentOrderId}`,
+      );
+      return existingByOmsId[0];
+    }
+  }
+
+  if (order.externalOrderId) {
+    const existingByExternalId = await tx
+      .select()
+      .from(orders)
+      .where(eq(orders.externalOrderId, order.externalOrderId))
+      .limit(1);
+
+    if (existingByExternalId.length > 0) {
+      console.log(
+        `[ORDER CREATE] Skipping duplicate order - already exists by externalOrderId: ${order.externalOrderId}`,
+      );
+      return existingByExternalId[0];
+    }
+  }
+
+  if (order.sourceTableId) {
+    const existingBySourceTableId = await tx
+      .select()
+      .from(orders)
+      .where(eq(orders.sourceTableId, order.sourceTableId))
+      .limit(1);
+
+    if (existingBySourceTableId.length > 0) {
+      console.log(
+        `[ORDER CREATE] Skipping duplicate order - already exists by sourceTableId: ${order.sourceTableId}`,
+      );
+      return existingBySourceTableId[0];
+    }
+  }
+
+  return null;
+}
+
 /**
  * Recompute sort_rank from the current DB row. Called after any
  * change to priority or onHold so the flattened ShipStation sort key
@@ -452,53 +533,51 @@ export const orderMethods: IOrderStorage = {
   },
 
   async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order> {
-    if (order.externalOrderId) {
-      const existingByShopifyId = await this.getOrderByExternalId(order.externalOrderId);
-      if (existingByShopifyId) {
-        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by externalOrderId: ${order.externalOrderId}`);
-        return existingByShopifyId;
+    const create = async (tx: any): Promise<Order> => {
+      await lockWmsOrderCreate(tx, order);
+
+      const existingOrder = await findExistingOrderForCreate(tx, order);
+      if (existingOrder) return existingOrder;
+
+      // §6 C9b: route through insertWmsOrder so the non-null
+      // channelId + omsFulfillmentOrderId invariant is enforced at
+      // every caller. The `as WmsOrderInsert` cast is safe because
+      // the factory's runtime guards throw WmsOrderInvariantError if
+      // the caller contract is violated. A later commit can tighten
+      // this function's signature once all direct callers are migrated.
+      const payload = {
+        ...order,
+        itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
+      } as WmsOrderInsert;
+      const { id: newOrderId } = await insertWmsOrder(tx, payload);
+      const [newOrder] = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.id, newOrderId))
+        .limit(1);
+      if (!newOrder) {
+        throw new Error(`createOrderWithItems: failed to re-fetch inserted order ${newOrderId}`);
       }
-    }
-    if (order.sourceTableId) {
-      const existingBySourceTableId = await db.select().from(orders).where(eq(orders.sourceTableId, order.sourceTableId));
-      if (existingBySourceTableId.length > 0) {
-        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by sourceTableId: ${order.sourceTableId}`);
-        return existingBySourceTableId[0];
+
+      if (items.length > 0) {
+        const itemsWithOrderId = items.map((item: any) => {
+          const { orderId, ...rest } = item;
+          return {
+            ...rest,
+            orderId: newOrder.id,
+          };
+        });
+        await tx.insert(orderItems).values(itemsWithOrderId);
       }
-    }
-    
-    // §6 C9b: route through insertWmsOrder so the non-null
-    // channelId + omsFulfillmentOrderId invariant is enforced at
-    // every caller. The `as WmsOrderInsert` cast is safe because
-    // the factory's runtime guards throw WmsOrderInvariantError if
-    // the caller contract is violated. A later commit can tighten
-    // this function's signature once all direct callers are migrated.
-    const payload = {
-      ...order,
-      itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
-    } as WmsOrderInsert;
-    const { id: newOrderId } = await insertWmsOrder(db, payload);
-    const [newOrder] = await db
-      .select()
-      .from(orders)
-      .where(eq(orders.id, newOrderId))
-      .limit(1);
-    if (!newOrder) {
-      throw new Error(`createOrderWithItems: failed to re-fetch inserted order ${newOrderId}`);
+
+      return newOrder;
+    };
+
+    if (typeof db.transaction === "function") {
+      return db.transaction(create);
     }
 
-    if (items.length > 0) {
-      const itemsWithOrderId = items.map((item: any) => {
-        const { orderId, ...rest } = item;
-        return {
-          ...rest,
-          orderId: newOrder.id,
-        };
-      });
-      await db.insert(orderItems).values(itemsWithOrderId);
-    }
-    
-    return newOrder;
+    return create(db);
   },
 
   async claimOrder(orderId: number, pickerId: string): Promise<Order | null> {
