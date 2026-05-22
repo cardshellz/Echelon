@@ -282,7 +282,7 @@ export async function createShipmentForOrder(
         ON osi.shipment_id = os.id
       WHERE os.order_id = ${wmsOrderId}
         AND os.status NOT IN ('voided', 'cancelled')
-        AND osi.order_item_id = ANY(${orderItemIds}::int[])
+        AND osi.order_item_id = ANY(ARRAY[${sql.join(orderItemIds.map((id) => sql`${id}`), sql`, `)}]::int[])
       GROUP BY os.id, osi.order_item_id
       ORDER BY os.id
     `);
