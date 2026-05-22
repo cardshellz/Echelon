@@ -216,7 +216,7 @@ interface ReorderAnalysis {
 }
 
 type ReviewQueueKind = "all" | "skipped" | "held_by_policy" | "quality_review_required";
-type RecommendationDecisionValue = "reviewed" | "accepted_for_po" | "deferred" | "dismissed";
+type RecommendationDecisionValue = "reviewed" | "accepted_for_po" | "deferred" | "dismissed" | "po_handoff_created";
 
 interface RecommendationDecision {
   id: number;
@@ -285,6 +285,7 @@ interface RecommendationReviewQueueResponse {
   decisionCounts?: {
     reviewed: number;
     acceptedForPo: number;
+    poHandoffCreated: number;
     deferred: number;
     dismissed: number;
   };
@@ -387,6 +388,7 @@ function formatReviewQueueKind(kind: string): string {
 
 function formatRecommendationDecision(decision?: RecommendationDecisionValue | null): string {
   if (decision === "accepted_for_po") return "Accepted";
+  if (decision === "po_handoff_created") return "PO handoff";
   if (decision === "deferred") return "Deferred";
   if (decision === "dismissed") return "Dismissed";
   return "Reviewed";
@@ -394,6 +396,7 @@ function formatRecommendationDecision(decision?: RecommendationDecisionValue | n
 
 function recommendationDecisionClass(decision?: RecommendationDecisionValue | null): string {
   if (decision === "accepted_for_po") return "bg-green-50 text-green-700 border-green-200";
+  if (decision === "po_handoff_created") return "bg-purple-50 text-purple-700 border-purple-200";
   if (decision === "deferred") return "bg-blue-50 text-blue-700 border-blue-200";
   if (decision === "dismissed") return "bg-zinc-100 text-zinc-700 border-zinc-200";
   return "bg-emerald-50 text-emerald-700 border-emerald-200";
@@ -411,6 +414,10 @@ function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
   return policy === "high_confidence_and_strong_candidate"
     ? "High confidence + strong candidate"
     : "High confidence only";
+}
+
+function createPurchasingCommandIdempotencyKey(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export default function PurchasingView() {
@@ -529,6 +536,48 @@ export default function PurchasingView() {
     onError: (error: Error) => {
       toast({
         title: "Decision Not Recorded",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const acceptedRecommendationPoMutation = useMutation({
+    mutationFn: async (item: AcceptedRecommendationQueueItem) => {
+      const res = await fetch("/api/purchasing/recommendation-accepted-queue/create-po", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": createPurchasingCommandIdempotencyKey("accepted-recommendation-po"),
+        },
+        body: JSON.stringify({
+          items: [
+            {
+              recommendationId: item.recommendationId,
+              kind: item.kind,
+            },
+          ],
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? "Failed to create draft PO from accepted recommendation");
+      }
+      return res.json();
+    },
+    onSuccess: (data, item) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
+      toast({
+        title: "Draft PO Updated",
+        description: `${item.sku} handed off to ${data.count ?? 0} draft PO${data.count === 1 ? "" : "s"}.`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "PO Handoff Blocked",
         description: error.message,
         variant: "destructive",
       });
@@ -1059,9 +1108,22 @@ export default function PurchasingView() {
                           ) : null}
                         </div>
                       </div>
-                      <Button size="sm" variant="outline" className="h-7 text-[11px] flex-shrink-0" onClick={() => handleRecommendationHref(item.action.href)}>
-                        {item.action.label}
-                      </Button>
+                      <div className="flex flex-shrink-0 flex-col gap-1 sm:flex-row">
+                        <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => handleRecommendationHref(item.action.href)}>
+                          {item.action.label}
+                        </Button>
+                        {item.current ? (
+                          <Button
+                            size="sm"
+                            className="h-7 text-[11px] gap-1"
+                            disabled={acceptedRecommendationPoMutation.isPending}
+                            onClick={() => acceptedRecommendationPoMutation.mutate(item)}
+                          >
+                            <ShoppingCart className="h-3.5 w-3.5" />
+                            Draft PO
+                          </Button>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
                 ))}

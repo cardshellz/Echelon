@@ -2794,3 +2794,35 @@ Next step:
 - Add the explicit manual PO handoff from accepted recommendations, including
   idempotency protection and clear conflict behavior, before accepted decisions
   are allowed to mutate draft POs.
+
+### 2026-05-22 - Accepted Recommendation Manual PO Handoff
+
+Scope:
+
+- Added an idempotent `/api/purchasing/recommendation-accepted-queue/create-po`
+  mutation that hands selected accepted recommendations to the existing
+  `createPOFromReorder` draft PO path.
+- Kept the handoff explicit and operator-selected: stale accepted snapshots,
+  missing products, missing variants, invalid quantities, and missing vendors
+  are skipped with clear conflict reasons instead of mutating draft POs.
+- Added the `po_handoff_created` recommendation decision state so successful
+  handoffs leave an audit trail and drop out of the accepted PO review queue.
+- Added a Purchasing Dashboard `Draft PO` action for current accepted queue
+  items, sending an idempotency key and refreshing recommendation, accepted
+  queue, dashboard, and reorder-analysis data after success.
+- Kept this slice bounded to manual accepted-recommendation handoff: no
+  automatic PO mutation expansion, recommendation math, approval policy,
+  supplier setup, receiving, landed-cost, AP, or forecast model behavior
+  changed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+
+Next step:
+
+- After this handoff path is verified in PR review, continue the recommendation
+  workflow by adding clearer operator history around accepted/handoff decisions
+  or move into forecast-engine demand signal quality, depending on which gap is
+  more urgent.
