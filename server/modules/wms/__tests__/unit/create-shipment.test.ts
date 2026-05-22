@@ -17,11 +17,18 @@
  *   - Source constant is 'echelon_sync' (contract with ops dashboards).
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createShipmentForOrder,
   ECHELON_SYNC_SHIPMENT_SOURCE,
 } from "../../create-shipment";
+
+const CREATE_SHIPMENT_SRC = readFileSync(
+  fileURLToPath(new URL("../../create-shipment.ts", import.meta.url)),
+  "utf8",
+);
 
 // ─── Mock db factory ─────────────────────────────────────────────────
 
@@ -124,6 +131,14 @@ describe("createShipmentForOrder :: happy path", () => {
 // ─── Idempotency ─────────────────────────────────────────────────────
 
 describe("createShipmentForOrder :: idempotency", () => {
+  it("builds active coverage item filters as a real Postgres int array", () => {
+    expect(CREATE_SHIPMENT_SRC).toContain("ANY(ARRAY[");
+    expect(CREATE_SHIPMENT_SRC).toContain(
+      "sql.join(orderItemIds.map((id) => sql`${id}`), sql`, `)",
+    );
+    expect(CREATE_SHIPMENT_SRC).not.toContain("ANY(${orderItemIds}::int[])");
+  });
+
   it("returns existing id and performs NO insert when a planned shipment exists", async () => {
     const mock = makeMockDb(555, /* newShipmentId irrelevant */ 99999);
     const result = await createShipmentForOrder(mock.db as any, 42, 7, [
