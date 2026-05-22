@@ -2764,3 +2764,33 @@ Next step:
   recommendations should become an explicit PO review queue, a draft PO staging
   action, or a manual PO creation handoff with idempotency keys before any
   automatic mutation behavior is expanded.
+
+### 2026-05-22 - Accepted Recommendation PO Review Queue
+
+Scope:
+
+- Added a read-only `/api/purchasing/recommendation-accepted-queue` endpoint that
+  turns the latest active `accepted_for_po` decisions into an explicit PO review
+  staging queue.
+- The queue intersects accepted decisions with the current recommendation review
+  queue and flags stale accepted snapshots when a recommendation is no longer
+  present in the current engine output.
+- Returned compact current/stale/vendor counts plus action metadata so operators
+  can review accepted recommendations before any purchase order mutation.
+- Added an Accepted PO Review Queue panel to the Purchasing Dashboard, showing
+  accepted recommendation status, vendor, suggested quantity, candidate score,
+  and whether the item is current or snapshot-only.
+- Kept this slice review-only: no draft PO creation, recommendation math,
+  approval policy, supplier data, receiving, landed-cost, AP, or forecast model
+  behavior changed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+
+Next step:
+
+- Add the explicit manual PO handoff from accepted recommendations, including
+  idempotency protection and clear conflict behavior, before accepted decisions
+  are allowed to mutate draft POs.

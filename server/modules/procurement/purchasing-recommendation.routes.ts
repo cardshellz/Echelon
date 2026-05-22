@@ -555,6 +555,75 @@ function buildLatestDecisionMap(decisions: any[]) {
   return latest;
 }
 
+function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: ReturnType<typeof buildRecommendationReviewQueue>, limit: number) {
+  const latestDecisions = Array.from(buildLatestDecisionMap(decisionRows).values())
+    .filter((decision) => decision?.decision === "accepted_for_po");
+  const currentByKey = new Map(
+    queue.items.map((item) => [recommendationDecisionKey(item.recommendationId, item.kind), item]),
+  );
+
+  const items = latestDecisions
+    .map((decision) => {
+      if (!decision) return null;
+      const key = recommendationDecisionKey(decision.recommendationId, decision.kind);
+      const currentItem = currentByKey.get(key);
+      const snapshot = decision.recommendationSnapshot && typeof decision.recommendationSnapshot === "object"
+        ? decision.recommendationSnapshot as Record<string, any>
+        : {};
+      const snapshotItem = snapshot.item && typeof snapshot.item === "object" ? snapshot.item : {};
+      const sourceItem = currentItem ?? snapshotItem;
+      const candidateScore = currentItem?.candidateScore ?? snapshotItem.candidateScore ?? null;
+      const actionHref =
+        currentItem?.action?.href ??
+        (candidateScore?.band ? `/reorder-analysis?candidateBand=${candidateScore.band}&reviewQueue=${decision.kind}` : "/reorder-analysis");
+
+      return {
+        recommendationId: decision.recommendationId,
+        kind: decision.kind,
+        decision,
+        source: currentItem ? "current_recommendation" : "decision_snapshot",
+        current: Boolean(currentItem),
+        sku: sourceItem.sku ?? decision.sku,
+        productName: sourceItem.productName ?? decision.productName,
+        productId: sourceItem.productId ?? decision.productId,
+        productVariantId: sourceItem.productVariantId ?? decision.productVariantId,
+        preferredVendorId: sourceItem.preferredVendorId ?? decision.vendorId,
+        preferredVendorName: sourceItem.preferredVendorName ?? null,
+        suggestedOrderQty: Number(sourceItem.suggestedOrderQty ?? 0) || 0,
+        orderUomLabel: sourceItem.orderUomLabel ?? "units",
+        candidateScore,
+        qualityGate: currentItem?.qualityGate ?? snapshotItem.qualityGate ?? null,
+        reason: currentItem?.reason ?? snapshotItem.reason ?? null,
+        statusReason: currentItem
+          ? "Still present in the current recommendation review queue."
+          : "No longer present in the current recommendation review queue; review the accepted snapshot before creating a PO.",
+        action: {
+          action: currentItem ? "review_current_recommendation" : "review_accepted_snapshot",
+          label: currentItem ? "Review current" : "Review snapshot",
+          href: actionHref,
+        },
+      };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => {
+      const currentDelta = Number(b.current) - Number(a.current);
+      if (currentDelta !== 0) return currentDelta;
+      return new Date(b.decision?.decidedAt ?? 0).getTime() - new Date(a.decision?.decidedAt ?? 0).getTime();
+    })
+    .slice(0, limit);
+
+  const vendorIds = new Set(items.map((item: any) => item.preferredVendorId).filter(Boolean));
+  return {
+    summary: {
+      total: items.length,
+      current: items.filter((item: any) => item.current).length,
+      stale: items.filter((item: any) => !item.current).length,
+      vendorCount: vendorIds.size,
+    },
+    items,
+  };
+}
+
 export function registerPurchasingRecommendationRoutes(app: Express) {
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
   app.get("/api/purchasing/kpis", requirePermission("inventory", "view"), async (req, res) => {
@@ -694,6 +763,31 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching recommendation decisions:", error);
       res.status(500).json({ error: "Failed to fetch recommendation decisions" });
+    }
+  });
+
+  app.get("/api/purchasing/recommendation-accepted-queue", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "25"), 10) || 25, 1), 100);
+      const decisionScanLimit = Math.max(limit * 5, 100);
+      const [{ configuredLookback, settings, queue }, decisionRows] = await Promise.all([
+        loadRecommendationReviewQueueData(),
+        storage.getRecentRecommendationDecisions(decisionScanLimit),
+      ]);
+      const acceptedQueue = buildAcceptedRecommendationReviewQueue(decisionRows, queue, limit);
+
+      res.json({
+        generatedAt: new Date().toISOString(),
+        lookbackDays: configuredLookback,
+        autoDraftMode: settings.autoDraftMode ?? "draft_po",
+        approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
+        limit,
+        scannedDecisionCount: decisionRows.length,
+        ...acceptedQueue,
+      });
+    } catch (error) {
+      console.error("Error fetching accepted recommendation queue:", error);
+      res.status(500).json({ error: "Failed to fetch accepted recommendation queue" });
     }
   });
 

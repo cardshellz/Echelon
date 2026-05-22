@@ -740,6 +740,130 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
+  it("returns accepted recommendations as a PO review staging queue", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 202,
+        variant_id: 2002,
+        base_sku: "QUEUE-HELD",
+        product_name: "Queue Held",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 90,
+        previous_outbound_pieces: 90,
+        demand_order_count: 15,
+        demand_active_days: 15,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+    ]);
+    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
+      {
+        id: 91,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        decision: "accepted_for_po",
+        status: "active",
+        sku: "QUEUE-HELD",
+        productName: "Queue Held",
+        vendorId: 77,
+        decidedAt: "2026-05-22T12:00:00.000Z",
+        recommendationSnapshot: {
+          lookbackDays: 30,
+          item: {
+            sku: "QUEUE-HELD",
+            productName: "Queue Held",
+            suggestedOrderQty: 1,
+            orderUomLabel: "Case",
+            preferredVendorName: "Vendor",
+          },
+        },
+      },
+      {
+        id: 90,
+        recommendationId: "999:product:30",
+        kind: "quality_review_required",
+        decision: "accepted_for_po",
+        status: "active",
+        sku: "STALE-ACCEPTED",
+        productName: "Stale Accepted",
+        decidedAt: "2026-05-21T12:00:00.000Z",
+        recommendationSnapshot: {
+          item: {
+            sku: "STALE-ACCEPTED",
+            productName: "Stale Accepted",
+            suggestedOrderQty: 2,
+            orderUomLabel: "Each",
+            candidateScore: { score: 61, band: "review_candidate" },
+          },
+        },
+      },
+      {
+        id: 89,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        decision: "reviewed",
+        status: "active",
+        decidedAt: "2026-05-21T11:00:00.000Z",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/recommendation-accepted-queue?limit=10");
+
+    expect(status).toBe(200);
+    expect(mocks.procurement.getRecentRecommendationDecisions).toHaveBeenCalledWith(100);
+    expect(body).toMatchObject({
+      lookbackDays: 30,
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      summary: {
+        total: 2,
+        current: 1,
+        stale: 1,
+        vendorCount: 1,
+      },
+    });
+    expect(body.items[0]).toMatchObject({
+      recommendationId: "202:2002:30",
+      current: true,
+      source: "current_recommendation",
+      sku: "QUEUE-HELD",
+      preferredVendorName: "Vendor",
+      action: {
+        label: "Review current",
+      },
+    });
+    expect(body.items[1]).toMatchObject({
+      recommendationId: "999:product:30",
+      current: false,
+      source: "decision_snapshot",
+      sku: "STALE-ACCEPTED",
+      action: {
+        label: "Review snapshot",
+      },
+    });
+  });
+
   it("starts the auto-draft job for an admin user without awaiting completion", async () => {
     server = await startServer(buildApp());
 
