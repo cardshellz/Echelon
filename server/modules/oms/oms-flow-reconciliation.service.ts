@@ -141,19 +141,26 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
           OR (wo.source_table_id = oo.id::text)
         )
-        WHERE oo.status IN ('cancelled', 'shipped', 'refunded')
+        WHERE (
+            oo.status IN ('cancelled', 'shipped', 'refunded')
+            OR oo.financial_status = 'refunded'
+          )
           AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
           AND oo.updated_at < NOW() - INTERVAL '10 minutes'
       `,
       sql`
         SELECT oo.id AS oms_order_id, oo.external_order_number, oo.status AS oms_status,
-               wo.id AS wms_order_id, wo.order_number, wo.warehouse_status, oo.updated_at
+               oo.financial_status, wo.id AS wms_order_id, wo.order_number,
+               wo.warehouse_status, oo.updated_at
         FROM oms.oms_orders oo
         JOIN wms.orders wo ON (
              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
           OR (wo.source_table_id = oo.id::text)
         )
-        WHERE oo.status IN ('cancelled', 'shipped', 'refunded')
+        WHERE (
+            oo.status IN ('cancelled', 'shipped', 'refunded')
+            OR oo.financial_status = 'refunded'
+          )
           AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
           AND oo.updated_at < NOW() - INTERVAL '10 minutes'
         ORDER BY oo.updated_at ASC
@@ -208,6 +215,18 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           )
           AND NOT EXISTS (
             SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
             FROM wms.outbound_shipments os
             WHERE os.order_id = wo.id
               AND os.status <> 'voided'
@@ -225,6 +244,18 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
             WHERE oi.order_id = wo.id
               AND COALESCE(oi.requires_shipping, 1) <> 0
               AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
           )
           AND NOT EXISTS (
             SELECT 1
@@ -361,6 +392,18 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
               AND COALESCE(oi.requires_shipping, 1) <> 0
               AND COALESCE(osi.qty, 0) > 0
           )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
+          )
       `,
       sql`
         SELECT os.id AS shipment_id, os.order_id AS wms_order_id,
@@ -379,6 +422,18 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
             WHERE osi.shipment_id = os.id
               AND COALESCE(oi.requires_shipping, 1) <> 0
               AND COALESCE(osi.qty, 0) > 0
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
           )
         ORDER BY os.created_at ASC
         LIMIT 10
@@ -525,6 +580,17 @@ async function autoRemediateCriticalFlowIssues(
     inputFromSample: (sample: any) => Omit<OmsFlowRemediationInput, "operator"> | null;
   }> = [
     {
+      code: "OMS_FINAL_WMS_ACTIVE",
+      inputFromSample: (sample) => {
+        const omsOrderId = Number(sample.oms_order_id);
+        const wmsOrderId = Number(sample.wms_order_id);
+        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
+          Number.isInteger(wmsOrderId) && wmsOrderId > 0
+          ? { code: "OMS_FINAL_WMS_ACTIVE", omsOrderId, wmsOrderId }
+          : null;
+      },
+    },
+    {
       code: "OMS_PAID_WITHOUT_WMS",
       inputFromSample: (sample) => {
         const omsOrderId = Number(sample.oms_order_id ?? sample.id);
@@ -539,17 +605,6 @@ async function autoRemediateCriticalFlowIssues(
         const wmsOrderId = Number(sample.wms_order_id ?? sample.id);
         return Number.isInteger(wmsOrderId) && wmsOrderId > 0
           ? { code: "WMS_READY_WITHOUT_SHIPMENT", wmsOrderId }
-          : null;
-      },
-    },
-    {
-      code: "OMS_FINAL_WMS_ACTIVE",
-      inputFromSample: (sample) => {
-        const omsOrderId = Number(sample.oms_order_id);
-        const wmsOrderId = Number(sample.wms_order_id);
-        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
-          Number.isInteger(wmsOrderId) && wmsOrderId > 0
-          ? { code: "OMS_FINAL_WMS_ACTIVE", omsOrderId, wmsOrderId }
           : null;
       },
     },
@@ -789,6 +844,18 @@ export async function remediateOmsFlowIssue(
         )
         AND NOT EXISTS (
           SELECT 1
+          FROM oms.oms_orders oo
+          WHERE (
+              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+              OR (wo.source_table_id = oo.id::text)
+            )
+            AND (
+              oo.status IN ('cancelled', 'shipped', 'refunded')
+              OR oo.financial_status = 'refunded'
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1
           FROM wms.outbound_shipments os
           WHERE os.order_id = wo.id
             AND os.status <> 'voided'
@@ -859,6 +926,18 @@ export async function remediateOmsFlowIssue(
             AND COALESCE(oi.requires_shipping, 1) <> 0
             AND COALESCE(osi.qty, 0) > 0
         )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM oms.oms_orders oo
+          WHERE (
+              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+              OR (wo.source_table_id = oo.id::text)
+            )
+            AND (
+              oo.status IN ('cancelled', 'shipped', 'refunded')
+              OR oo.financial_status = 'refunded'
+            )
+        )
       LIMIT 1
     `);
 
@@ -915,14 +994,15 @@ export async function remediateOmsFlowIssue(
               WHEN oo.status = 'cancelled' THEN 'cancelled'
               WHEN oo.status = 'shipped' THEN 'shipped'
               WHEN oo.status = 'refunded' THEN 'cancelled'
+              WHEN oo.financial_status = 'refunded' THEN 'cancelled'
               ELSE wo.warehouse_status
             END,
             assigned_picker_id = CASE
-              WHEN oo.status IN ('cancelled', 'refunded') THEN NULL
+              WHEN oo.status IN ('cancelled', 'refunded') OR oo.financial_status = 'refunded' THEN NULL
               ELSE wo.assigned_picker_id
             END,
             cancelled_at = CASE
-              WHEN oo.status IN ('cancelled', 'refunded') THEN COALESCE(wo.cancelled_at, NOW())
+              WHEN oo.status IN ('cancelled', 'refunded') OR oo.financial_status = 'refunded' THEN COALESCE(wo.cancelled_at, NOW())
               ELSE wo.cancelled_at
             END,
             updated_at = NOW()
@@ -933,7 +1013,10 @@ export async function remediateOmsFlowIssue(
                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
             OR (wo.source_table_id = oo.id::text)
           )
-          AND oo.status IN ('cancelled', 'shipped', 'refunded')
+          AND (
+               oo.status IN ('cancelled', 'shipped', 'refunded')
+            OR oo.financial_status = 'refunded'
+          )
           AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
         RETURNING wo.id
       `);
