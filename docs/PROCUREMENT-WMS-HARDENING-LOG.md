@@ -2510,3 +2510,35 @@ Next step:
 - Continue Phase 10 with configurable stale-PO thresholds or escalation
   notifications so aging policy can move from hard-coded diagnostics to
   operator-managed autopilot controls.
+
+### 2026-05-21 - Phase 10 Slice 6: Configurable Stale PO Thresholds
+
+Scope:
+
+- Added `inventory.warehouse_settings` columns and constraints for stale
+  auto-draft PO warning and critical thresholds across review, supplier send,
+  supplier follow-up, receiving, AP closeout, exception-blocked, and closeout
+  stages.
+- Extended auto-draft settings storage and `/api/purchasing/auto-draft-settings`
+  so the stale PO thresholds round-trip with the existing autopilot controls.
+- Updated `/api/purchasing/auto-draft/stale-pos` to read configured thresholds
+  before building diagnostics, while keeping diagnostics read-only.
+- Added route validation to reject non-integer thresholds, out-of-range values,
+  and warning thresholds greater than critical thresholds.
+- Added the threshold editor to the existing purchasing controls modal so
+  operators can tune aging policy without changing code.
+- Kept this slice policy-only: auto-draft recommendation math, PO creation,
+  lifecycle commands, receiving, invoices, payments, and notification behavior
+  are unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 10 with escalation notifications for critical stale
+  auto-draft POs, using these configured thresholds as the policy source.

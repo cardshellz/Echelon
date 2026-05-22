@@ -22,7 +22,9 @@ import {
 } from "./purchasing-recommendation.run-detail";
 import {
   buildStaleAutoDraftPoDiagnostics,
+  DEFAULT_STALE_AUTO_DRAFT_PO_THRESHOLDS,
   type AutoDraftPoAgingRow,
+  type AutoDraftPoAgingThresholds,
 } from "./auto-draft-po-aging.service";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
@@ -54,6 +56,44 @@ function parseCandidateScoreThreshold(value: unknown, fieldName: string): number
     return { error: `${fieldName} must be an integer between 0 and 100` };
   }
   return value;
+}
+
+function parseStalePoThresholds(
+  value: unknown,
+  base?: Partial<AutoDraftPoAgingThresholds>,
+): AutoDraftPoAgingThresholds | undefined | { error: string } {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { error: "stalePoThresholds must be an object" };
+  }
+
+  const source = value as Record<string, unknown>;
+  const next = { ...DEFAULT_STALE_AUTO_DRAFT_PO_THRESHOLDS, ...(base ?? {}) };
+  for (const key of Object.keys(DEFAULT_STALE_AUTO_DRAFT_PO_THRESHOLDS) as Array<keyof AutoDraftPoAgingThresholds>) {
+    const raw = source[key];
+    if (raw === undefined) continue;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > 365) {
+      return { error: `stalePoThresholds.${key} must be an integer between 0 and 365` };
+    }
+    next[key] = raw;
+  }
+
+  const pairs: Array<[keyof AutoDraftPoAgingThresholds, keyof AutoDraftPoAgingThresholds]> = [
+    ["reviewPendingWarningDays", "reviewPendingCriticalDays"],
+    ["supplierSendWarningDays", "supplierSendCriticalDays"],
+    ["supplierFollowupWarningDays", "supplierFollowupCriticalDays"],
+    ["receivingWarningDays", "receivingCriticalDays"],
+    ["apCloseoutWarningDays", "apCloseoutCriticalDays"],
+    ["exceptionBlockedWarningDays", "exceptionBlockedCriticalDays"],
+    ["closeoutWarningDays", "closeoutCriticalDays"],
+  ];
+  for (const [warningKey, criticalKey] of pairs) {
+    if (next[warningKey] > next[criticalKey]) {
+      return { error: `stalePoThresholds.${warningKey} must be less than or equal to ${criticalKey}` };
+    }
+  }
+
+  return next;
 }
 
 function parseSummaryJson(value: unknown): any {
@@ -1111,7 +1151,12 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         LIMIT ${sql.raw(String(scanLimit))}
       `);
 
-      res.json(buildStaleAutoDraftPoDiagnostics(result.rows as AutoDraftPoAgingRow[], { limit, includeInfo }));
+      const settings = await storage.getAutoDraftSettings();
+      res.json(buildStaleAutoDraftPoDiagnostics(result.rows as AutoDraftPoAgingRow[], {
+        limit,
+        includeInfo,
+        thresholds: settings.stalePoThresholds,
+      }));
     } catch (error) {
       console.error("Error fetching stale auto-draft PO diagnostics:", error);
       res.status(500).json({ error: "Failed to fetch stale auto-draft PO diagnostics" });
@@ -1160,6 +1205,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold,
         candidateScoreReviewThreshold,
+        stalePoThresholds,
       } = req.body;
       if (autoDraftMode !== undefined && !["draft_po", "review_only"].includes(autoDraftMode)) {
         return res.status(400).json({ error: "autoDraftMode must be one of: draft_po, review_only" });
@@ -1181,6 +1227,10 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         return res.status(400).json(parsedReviewThreshold);
       }
       const currentSettings = await storage.getAutoDraftSettings();
+      const parsedStalePoThresholds = parseStalePoThresholds(stalePoThresholds, currentSettings.stalePoThresholds);
+      if (typeof parsedStalePoThresholds === "object" && "error" in parsedStalePoThresholds) {
+        return res.status(400).json(parsedStalePoThresholds);
+      }
       const nextStrongThreshold = parsedStrongThreshold ?? currentSettings.candidateScoreStrongThreshold ?? 80;
       const nextReviewThreshold = parsedReviewThreshold ?? currentSettings.candidateScoreReviewThreshold ?? 60;
       if (nextReviewThreshold > nextStrongThreshold) {
@@ -1194,6 +1244,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold: parsedStrongThreshold,
         candidateScoreReviewThreshold: parsedReviewThreshold,
+        stalePoThresholds: parsedStalePoThresholds,
       });
       res.json({ ok: true });
     } catch (error) {

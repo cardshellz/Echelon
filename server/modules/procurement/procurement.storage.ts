@@ -1829,7 +1829,21 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(auto_draft_skip_on_open_po, true) AS skip_on_open_po,
         COALESCE(auto_draft_skip_no_vendor, true) AS skip_no_vendor,
         COALESCE(recommendation_candidate_score_strong_threshold, 80) AS candidate_score_strong_threshold,
-        COALESCE(recommendation_candidate_score_review_threshold, 60) AS candidate_score_review_threshold
+        COALESCE(recommendation_candidate_score_review_threshold, 60) AS candidate_score_review_threshold,
+        COALESCE(auto_draft_po_review_warning_days, 2) AS auto_draft_po_review_warning_days,
+        COALESCE(auto_draft_po_review_critical_days, 5) AS auto_draft_po_review_critical_days,
+        COALESCE(auto_draft_po_supplier_send_warning_days, 2) AS auto_draft_po_supplier_send_warning_days,
+        COALESCE(auto_draft_po_supplier_send_critical_days, 5) AS auto_draft_po_supplier_send_critical_days,
+        COALESCE(auto_draft_po_supplier_followup_warning_days, 7) AS auto_draft_po_supplier_followup_warning_days,
+        COALESCE(auto_draft_po_supplier_followup_critical_days, 14) AS auto_draft_po_supplier_followup_critical_days,
+        COALESCE(auto_draft_po_receiving_warning_days, 3) AS auto_draft_po_receiving_warning_days,
+        COALESCE(auto_draft_po_receiving_critical_days, 10) AS auto_draft_po_receiving_critical_days,
+        COALESCE(auto_draft_po_ap_closeout_warning_days, 7) AS auto_draft_po_ap_closeout_warning_days,
+        COALESCE(auto_draft_po_ap_closeout_critical_days, 21) AS auto_draft_po_ap_closeout_critical_days,
+        COALESCE(auto_draft_po_exception_warning_days, 1) AS auto_draft_po_exception_warning_days,
+        COALESCE(auto_draft_po_exception_critical_days, 3) AS auto_draft_po_exception_critical_days,
+        COALESCE(auto_draft_po_closeout_warning_days, 7) AS auto_draft_po_closeout_warning_days,
+        COALESCE(auto_draft_po_closeout_critical_days, 14) AS auto_draft_po_closeout_critical_days
       FROM warehouse_settings
       LIMIT 1
     `);
@@ -1844,6 +1858,22 @@ export const procurementMethods: IProcurementStorage = {
       skipNoVendor: row?.skip_no_vendor ?? true,
       candidateScoreStrongThreshold: row?.candidate_score_strong_threshold ?? 80,
       candidateScoreReviewThreshold: row?.candidate_score_review_threshold ?? 60,
+      stalePoThresholds: {
+        reviewPendingWarningDays: row?.auto_draft_po_review_warning_days ?? 2,
+        reviewPendingCriticalDays: row?.auto_draft_po_review_critical_days ?? 5,
+        supplierSendWarningDays: row?.auto_draft_po_supplier_send_warning_days ?? 2,
+        supplierSendCriticalDays: row?.auto_draft_po_supplier_send_critical_days ?? 5,
+        supplierFollowupWarningDays: row?.auto_draft_po_supplier_followup_warning_days ?? 7,
+        supplierFollowupCriticalDays: row?.auto_draft_po_supplier_followup_critical_days ?? 14,
+        receivingWarningDays: row?.auto_draft_po_receiving_warning_days ?? 3,
+        receivingCriticalDays: row?.auto_draft_po_receiving_critical_days ?? 10,
+        apCloseoutWarningDays: row?.auto_draft_po_ap_closeout_warning_days ?? 7,
+        apCloseoutCriticalDays: row?.auto_draft_po_ap_closeout_critical_days ?? 21,
+        exceptionBlockedWarningDays: row?.auto_draft_po_exception_warning_days ?? 1,
+        exceptionBlockedCriticalDays: row?.auto_draft_po_exception_critical_days ?? 3,
+        closeoutWarningDays: row?.auto_draft_po_closeout_warning_days ?? 7,
+        closeoutCriticalDays: row?.auto_draft_po_closeout_critical_days ?? 14,
+      },
     };
   },
 
@@ -1864,7 +1894,21 @@ export const procurementMethods: IProcurementStorage = {
         auto_draft_skip_on_open_po = COALESCE(${settings.skipOnOpenPo ?? null}, auto_draft_skip_on_open_po),
         auto_draft_skip_no_vendor = COALESCE(${settings.skipNoVendor ?? null}, auto_draft_skip_no_vendor),
         recommendation_candidate_score_strong_threshold = COALESCE(${settings.candidateScoreStrongThreshold ?? null}, recommendation_candidate_score_strong_threshold),
-        recommendation_candidate_score_review_threshold = COALESCE(${settings.candidateScoreReviewThreshold ?? null}, recommendation_candidate_score_review_threshold)
+        recommendation_candidate_score_review_threshold = COALESCE(${settings.candidateScoreReviewThreshold ?? null}, recommendation_candidate_score_review_threshold),
+        auto_draft_po_review_warning_days = COALESCE(${settings.stalePoThresholds?.reviewPendingWarningDays ?? null}, auto_draft_po_review_warning_days),
+        auto_draft_po_review_critical_days = COALESCE(${settings.stalePoThresholds?.reviewPendingCriticalDays ?? null}, auto_draft_po_review_critical_days),
+        auto_draft_po_supplier_send_warning_days = COALESCE(${settings.stalePoThresholds?.supplierSendWarningDays ?? null}, auto_draft_po_supplier_send_warning_days),
+        auto_draft_po_supplier_send_critical_days = COALESCE(${settings.stalePoThresholds?.supplierSendCriticalDays ?? null}, auto_draft_po_supplier_send_critical_days),
+        auto_draft_po_supplier_followup_warning_days = COALESCE(${settings.stalePoThresholds?.supplierFollowupWarningDays ?? null}, auto_draft_po_supplier_followup_warning_days),
+        auto_draft_po_supplier_followup_critical_days = COALESCE(${settings.stalePoThresholds?.supplierFollowupCriticalDays ?? null}, auto_draft_po_supplier_followup_critical_days),
+        auto_draft_po_receiving_warning_days = COALESCE(${settings.stalePoThresholds?.receivingWarningDays ?? null}, auto_draft_po_receiving_warning_days),
+        auto_draft_po_receiving_critical_days = COALESCE(${settings.stalePoThresholds?.receivingCriticalDays ?? null}, auto_draft_po_receiving_critical_days),
+        auto_draft_po_ap_closeout_warning_days = COALESCE(${settings.stalePoThresholds?.apCloseoutWarningDays ?? null}, auto_draft_po_ap_closeout_warning_days),
+        auto_draft_po_ap_closeout_critical_days = COALESCE(${settings.stalePoThresholds?.apCloseoutCriticalDays ?? null}, auto_draft_po_ap_closeout_critical_days),
+        auto_draft_po_exception_warning_days = COALESCE(${settings.stalePoThresholds?.exceptionBlockedWarningDays ?? null}, auto_draft_po_exception_warning_days),
+        auto_draft_po_exception_critical_days = COALESCE(${settings.stalePoThresholds?.exceptionBlockedCriticalDays ?? null}, auto_draft_po_exception_critical_days),
+        auto_draft_po_closeout_warning_days = COALESCE(${settings.stalePoThresholds?.closeoutWarningDays ?? null}, auto_draft_po_closeout_warning_days),
+        auto_draft_po_closeout_critical_days = COALESCE(${settings.stalePoThresholds?.closeoutCriticalDays ?? null}, auto_draft_po_closeout_critical_days)
     `);
   },
 
