@@ -5,6 +5,8 @@ import { inventoryStorage } from "../inventory";
 import { procurementStorage } from "../procurement";
 import { buildStaleAutoDraftPoDiagnostics } from "./auto-draft-po-aging.service";
 import { fetchAutoDraftPoAgingRows } from "./auto-draft-po-aging.repository";
+import { buildInFlightPoAgingDiagnostics } from "./in-flight-po-aging.service";
+import { fetchInFlightPoAgingRows } from "./in-flight-po-aging.repository";
 import { buildProcurementHealthSummary } from "./procurement-health.service";
 import {
   generatePurchasingRecommendations,
@@ -27,9 +29,10 @@ export function registerProcurementHealthRoutes(app: Express) {
     try {
       const limit = parseHealthLimit(req.query.limit);
       const { shipmentTracking } = app.locals.services;
-      const [landedCostHealth, autoDraftRows, settings, configuredLookback, recommendationContext] = await Promise.all([
+      const [landedCostHealth, autoDraftRows, inFlightPoRows, settings, configuredLookback, recommendationContext] = await Promise.all([
         shipmentTracking.getLandedCostHealth({ limit }),
         fetchAutoDraftPoAgingRows(db, { scanLimit: 500 }),
+        fetchInFlightPoAgingRows(db, { scanLimit: 500 }),
         storage.getAutoDraftSettings(),
         storage.getVelocityLookbackDays(),
         loadPurchasingRecommendationContext(),
@@ -48,11 +51,16 @@ export function registerProcurementHealthRoutes(app: Express) {
         limit,
         thresholds: settings.stalePoThresholds,
       });
+      const inFlightPoAging = buildInFlightPoAgingDiagnostics(inFlightPoRows, {
+        limit,
+        thresholds: settings.stalePoThresholds,
+      });
 
       res.json(buildProcurementHealthSummary({
         staleAutoDraftPos,
         landedCostHealth,
         supplierSetupGaps,
+        inFlightPoAging,
       }));
     } catch (error: any) {
       console.error("Error fetching procurement health:", error);

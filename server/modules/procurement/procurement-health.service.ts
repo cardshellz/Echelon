@@ -1,4 +1,5 @@
 import type { StaleAutoDraftPoDiagnostics } from "./auto-draft-po-aging.service";
+import type { InFlightPoAgingDiagnostics } from "./in-flight-po-aging.service";
 import type { SupplierSetupGaps } from "./supplier-setup-gaps.service";
 
 export type ProcurementHealthSeverity = "critical" | "warning" | "healthy";
@@ -31,6 +32,7 @@ type LandedCostHealthLike = {
 };
 
 type SupplierSetupGapsLike = Pick<SupplierSetupGaps, "totalGapItems" | "counts">;
+type InFlightPoAgingLike = Pick<InFlightPoAgingDiagnostics, "totalAging" | "counts">;
 
 function statusFromCounts(critical: number, warning: number): ProcurementHealthSeverity {
   if (critical > 0) return "critical";
@@ -50,6 +52,7 @@ export function buildProcurementHealthSummary(input: {
   staleAutoDraftPos: StaleAutoDraftPoDiagnostics;
   landedCostHealth: LandedCostHealthLike;
   supplierSetupGaps?: SupplierSetupGapsLike;
+  inFlightPoAging?: InFlightPoAgingLike;
   generatedAt?: Date;
 }): ProcurementHealthSummary {
   const staleCritical = input.staleAutoDraftPos.counts.critical;
@@ -58,6 +61,8 @@ export function buildProcurementHealthSummary(input: {
   const landedWarning = input.landedCostHealth.warning;
   const supplierCritical = input.supplierSetupGaps?.counts.blockedRecommendations ?? 0;
   const supplierWarning = input.supplierSetupGaps?.counts.reviewRecommendations ?? 0;
+  const inFlightCritical = input.inFlightPoAging?.counts.critical ?? 0;
+  const inFlightWarning = input.inFlightPoAging?.counts.warning ?? 0;
 
   const sources: ProcurementHealthSource[] = [
     {
@@ -95,6 +100,20 @@ export function buildProcurementHealthSummary(input: {
       href: "/suppliers",
       actionLabel: "Open Suppliers",
       detail: "Vendor, supplier cost, lead-time, MOQ, or UOM gaps blocking reliable purchasing recommendations.",
+    });
+  }
+
+  if (input.inFlightPoAging) {
+    sources.push({
+      key: "in_flight_po_aging",
+      label: "In-flight PO aging",
+      status: statusFromCounts(inFlightCritical, inFlightWarning),
+      critical: inFlightCritical,
+      warning: inFlightWarning,
+      total: input.inFlightPoAging.totalAging,
+      href: "/purchase-orders",
+      actionLabel: "Open POs",
+      detail: "Non-auto-draft POs stale in supplier follow-up or receiving.",
     });
   }
 
