@@ -60,15 +60,28 @@ describe("buildProcurementHealthSummary", () => {
           reviewRecommendations: 1,
         },
       },
+      inFlightPoAging: {
+        totalAging: 2,
+        counts: {
+          critical: 1,
+          warning: 1,
+          info: 0,
+          supplierFollowupPending: 1,
+          receivingPending: 1,
+          missingEta: 0,
+          overdueEta: 2,
+          arrivedNotReceiving: 1,
+        },
+      },
       generatedAt: new Date("2026-05-10T12:00:00.000Z"),
     });
 
     expect(summary).toMatchObject({
       generatedAt: "2026-05-10T12:00:00.000Z",
       status: "critical",
-      critical: 2,
-      warning: 3,
-      total: 3,
+      critical: 3,
+      warning: 4,
+      total: 4,
       sources: [
         {
           key: "stale_auto_draft_pos",
@@ -93,6 +106,14 @@ describe("buildProcurementHealthSummary", () => {
           warning: 1,
           total: 2,
           href: "/suppliers",
+        },
+        {
+          key: "in_flight_po_aging",
+          status: "critical",
+          critical: 1,
+          warning: 1,
+          total: 2,
+          href: "/purchase-orders",
         },
       ],
     });

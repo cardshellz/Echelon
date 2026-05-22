@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   },
   db: {},
   fetchAutoDraftPoAgingRows: vi.fn(),
+  fetchInFlightPoAgingRows: vi.fn(),
   loadPurchasingRecommendationContext: vi.fn(),
   shipmentTracking: {
     getLandedCostHealth: vi.fn(),
@@ -32,6 +33,9 @@ vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.invent
 vi.mock("../../../../db", () => ({ db: mocks.db }));
 vi.mock("../../auto-draft-po-aging.repository", () => ({
   fetchAutoDraftPoAgingRows: mocks.fetchAutoDraftPoAgingRows,
+}));
+vi.mock("../../in-flight-po-aging.repository", () => ({
+  fetchInFlightPoAgingRows: mocks.fetchInFlightPoAgingRows,
 }));
 vi.mock("../../purchasing-recommendation-context.service", () => ({
   loadPurchasingRecommendationContext: mocks.loadPurchasingRecommendationContext,
@@ -71,6 +75,7 @@ describe("procurement health routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.fetchAutoDraftPoAgingRows.mockResolvedValue([]);
+    mocks.fetchInFlightPoAgingRows.mockResolvedValue([]);
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "draft_po",
@@ -139,6 +144,50 @@ describe("procurement health routes", () => {
         warning: 0,
         total: 1,
         href: "/suppliers",
+      }),
+    ]));
+  });
+
+  it("includes in-flight PO aging in the health summary", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([]);
+    mocks.fetchInFlightPoAgingRows.mockResolvedValue([
+      {
+        id: 301,
+        poNumber: "PO-301",
+        vendorId: 10,
+        vendorName: "Vendor",
+        status: "acknowledged",
+        physicalStatus: "arrived",
+        financialStatus: "unbilled",
+        lineCount: 2,
+        totalCents: 5000,
+        source: "manual",
+        orderDate: "2026-05-01T00:00:00.000Z",
+        sentToVendorAt: "2026-05-01T00:00:00.000Z",
+        expectedDeliveryDate: "2026-05-01T00:00:00.000Z",
+        confirmedDeliveryDate: null,
+        actualDeliveryDate: null,
+        firstShippedAt: null,
+        firstArrivedAt: "2026-05-01T00:00:00.000Z",
+        createdAt: "2026-05-01T00:00:00.000Z",
+        updatedAt: "2026-05-01T00:00:00.000Z",
+        openExceptionCount: 0,
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "/api/procurement/health?limit=10");
+
+    expect(status).toBe(200);
+    expect(mocks.fetchInFlightPoAgingRows).toHaveBeenCalled();
+    expect(body.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "in_flight_po_aging",
+        status: "critical",
+        critical: 1,
+        warning: 0,
+        total: 1,
+        href: "/purchase-orders",
       }),
     ]));
   });

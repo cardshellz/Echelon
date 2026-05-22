@@ -2636,3 +2636,34 @@ Next step:
 - Continue Phase 11 by adding in-flight PO supplier/receiving aging into the
   same health monitor, then decide whether any of the health sources should get
   escalation notifications or hard stop conditions.
+
+### 2026-05-22 - Phase 11 Slice 3: In-Flight PO Aging In Health Monitor
+
+Scope:
+
+- Added a read-only in-flight PO aging repository for non-auto-draft POs in
+  supplier follow-up or receiving states, excluding cancelled, received, closed,
+  and auto-draft POs so the existing auto-draft stale source remains distinct.
+- Added an in-flight PO aging diagnostics service that reuses the existing
+  stale PO threshold settings for supplier follow-up and receiving work.
+- Added in-flight PO aging as a first-class `/api/procurement/health` source,
+  counting stale supplier follow-up and stale receiving work as warning or
+  critical based on the configured thresholds.
+- Covered missing ETA, overdue ETA, and arrived-but-not-received cases without
+  changing PO lifecycle commands, receiving behavior, forecast math,
+  recommendation ranking, auto-draft PO creation, landed-cost allocation, AP,
+  or notification policies.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/in-flight-po-aging.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-escalation.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts server/modules/procurement/__tests__/unit/in-flight-po-aging.service.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Decide whether Phase 11 needs escalation notifications or hard stop
+  conditions for critical health sources, or move into the next procurement
+  hardening phase if the read-only monitor now covers the active operational
+  drift sources.

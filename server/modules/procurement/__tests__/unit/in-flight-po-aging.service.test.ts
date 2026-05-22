@@ -1,0 +1,115 @@
+import { describe, expect, it } from "vitest";
+import { buildInFlightPoAgingDiagnostics, type InFlightPoAgingRow } from "../../in-flight-po-aging.service";
+
+function row(overrides: Partial<InFlightPoAgingRow>): InFlightPoAgingRow {
+  return {
+    id: 1,
+    poNumber: "PO-TEST",
+    vendorId: 10,
+    vendorName: "Vendor",
+    status: "sent",
+    physicalStatus: "sent",
+    financialStatus: "unbilled",
+    lineCount: 1,
+    totalCents: 1000,
+    source: "manual",
+    orderDate: "2026-05-01T00:00:00.000Z",
+    sentToVendorAt: "2026-05-01T00:00:00.000Z",
+    expectedDeliveryDate: null,
+    confirmedDeliveryDate: null,
+    actualDeliveryDate: null,
+    firstShippedAt: null,
+    firstArrivedAt: null,
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-01T00:00:00.000Z",
+    openExceptionCount: 0,
+    ...overrides,
+  };
+}
+
+describe("buildInFlightPoAgingDiagnostics", () => {
+  const now = new Date("2026-05-20T00:00:00.000Z");
+
+  it("flags supplier follow-up when a non-auto-draft PO is stale without ETA", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 201,
+      sentToVendorAt: "2026-05-01T00:00:00.000Z",
+      expectedDeliveryDate: null,
+      confirmedDeliveryDate: null,
+    })], { now });
+
+    expect(result).toMatchObject({
+      scannedPos: 1,
+      totalAging: 1,
+      counts: {
+        critical: 1,
+        supplierFollowupPending: 1,
+        missingEta: 1,
+      },
+    });
+    expect(result.items[0]).toMatchObject({
+      poId: 201,
+      stage: "supplier_followup_pending",
+      severity: "critical",
+      action: {
+        action: "follow_up_supplier",
+        href: "/purchase-orders/201",
+      },
+    });
+  });
+
+  it("flags arrived POs waiting on receiving", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 202,
+      status: "acknowledged",
+      physicalStatus: "arrived",
+      firstArrivedAt: "2026-05-15T00:00:00.000Z",
+      expectedDeliveryDate: "2026-05-15T00:00:00.000Z",
+    })], { now });
+
+    expect(result).toMatchObject({
+      scannedPos: 1,
+      totalAging: 1,
+      counts: {
+        warning: 1,
+        receivingPending: 1,
+        overdueEta: 1,
+        arrivedNotReceiving: 1,
+      },
+    });
+    expect(result.items[0]).toMatchObject({
+      poId: 202,
+      stage: "receiving_pending",
+      severity: "warning",
+      action: {
+        action: "create_receipt",
+      },
+    });
+  });
+
+  it("uses legacy status when physical status has not been backfilled", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 204,
+      status: "partially_received",
+      physicalStatus: "draft",
+      expectedDeliveryDate: "2026-05-15T00:00:00.000Z",
+    })], { now });
+
+    expect(result.items[0]).toMatchObject({
+      poId: 204,
+      physicalStatus: "receiving",
+      stage: "receiving_pending",
+      severity: "warning",
+    });
+  });
+
+  it("does not report supplier POs still inside the follow-up threshold", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 203,
+      sentToVendorAt: "2026-05-18T00:00:00.000Z",
+    })], { now });
+
+    expect(result.totalAging).toBe(0);
+    expect(result.items).toHaveLength(0);
+  });
+});
