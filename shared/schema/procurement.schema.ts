@@ -1,4 +1,4 @@
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, date } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, index, date } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1117,7 +1117,47 @@ export type AutoDraftRun = typeof autoDraftRuns.$inferSelect;
 
 
 // ============================================================================
-// 24. PO EVENTS — append-only lifecycle audit stream (Spec A)
+// 24. PURCHASING RECOMMENDATION DECISIONS
+// ============================================================================
+
+export const purchasingRecommendationDecisions = procurementSchema.table("purchasing_recommendation_decisions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  recommendationId: varchar("recommendation_id", { length: 160 }).notNull(),
+  kind: varchar("kind", { length: 40 }).notNull(),
+  decision: varchar("decision", { length: 40 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("active"),
+  decisionReason: varchar("decision_reason", { length: 100 }),
+  note: text("note"),
+  source: varchar("source", { length: 40 }).notNull().default("operator"),
+  autoDraftRunId: integer("auto_draft_run_id").references(() => autoDraftRuns.id, { onDelete: "set null" }),
+  productId: integer("product_id").references(() => products.id, { onDelete: "set null" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
+  sku: varchar("sku", { length: 100 }),
+  productName: text("product_name"),
+  candidateScore: integer("candidate_score"),
+  candidateBand: varchar("candidate_band", { length: 40 }),
+  recommendationSnapshot: jsonb("recommendation_snapshot").notNull().default(sql`'{}'::jsonb`),
+  decidedBy: varchar("decided_by", { length: 255 }),
+  decidedAt: timestamp("decided_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("purch_rec_decisions_rec_kind_decided_idx").on(table.recommendationId, table.kind, table.decidedAt),
+  index("purch_rec_decisions_decision_decided_idx").on(table.decision, table.decidedAt),
+  index("purch_rec_decisions_sku_idx").on(table.sku),
+]);
+
+export const insertPurchasingRecommendationDecisionSchema = createInsertSchema(purchasingRecommendationDecisions).omit({
+  id: true,
+  decidedAt: true,
+  createdAt: true,
+});
+
+export type InsertPurchasingRecommendationDecision = z.infer<typeof insertPurchasingRecommendationDecisionSchema>;
+export type PurchasingRecommendationDecision = typeof purchasingRecommendationDecisions.$inferSelect;
+
+// ============================================================================
+// 25. PO EVENTS - append-only lifecycle audit stream (Spec A)
 // ============================================================================
 //
 // Separate from po_status_history so non-status events (edits, sends,

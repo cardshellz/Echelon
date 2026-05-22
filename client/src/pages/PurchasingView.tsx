@@ -11,16 +11,25 @@ import {
   Box,
   BrainCircuit,
   CheckCircle2,
+  Clock,
   DollarSign,
+  MoreHorizontal,
   PackageSearch,
   ShoppingCart,
-  TrendingDown
+  TrendingDown,
+  XCircle
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
 import {
   Table,
@@ -207,6 +216,25 @@ interface ReorderAnalysis {
 }
 
 type ReviewQueueKind = "all" | "skipped" | "held_by_policy" | "quality_review_required";
+type RecommendationDecisionValue = "reviewed" | "accepted_for_po" | "deferred" | "dismissed";
+
+interface RecommendationDecision {
+  id: number;
+  recommendationId: string;
+  kind: Exclude<ReviewQueueKind, "all">;
+  decision: RecommendationDecisionValue;
+  status: string;
+  decisionReason: string | null;
+  note: string | null;
+  source: string;
+  sku: string | null;
+  productName: string | null;
+  candidateScore: number | null;
+  candidateBand: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  createdAt: string | null;
+}
 
 interface RecommendationReviewQueueItem {
   recommendationId: string;
@@ -236,6 +264,7 @@ interface RecommendationReviewQueueItem {
   candidateScore?: ReorderItem["recommendationCandidateScore"];
   qualityGate?: ReorderItem["qualityGate"];
   qualityControls?: RecommendationQualityControl[];
+  latestDecision?: RecommendationDecision | null;
 }
 
 interface RecommendationReviewQueueResponse {
@@ -253,6 +282,12 @@ interface RecommendationReviewQueueResponse {
   reasonCounts: Record<string, number>;
   actionCounts: Record<string, number>;
   candidateBandCounts: Record<string, number>;
+  decisionCounts?: {
+    reviewed: number;
+    acceptedForPo: number;
+    deferred: number;
+    dismissed: number;
+  };
   filteredCount: number;
   items: RecommendationReviewQueueItem[];
 }
@@ -313,6 +348,20 @@ function formatReviewQueueKind(kind: string): string {
   if (kind === "held_by_policy") return "Policy hold";
   if (kind === "quality_review_required") return "Quality review";
   return "Skipped";
+}
+
+function formatRecommendationDecision(decision?: RecommendationDecisionValue | null): string {
+  if (decision === "accepted_for_po") return "Accepted";
+  if (decision === "deferred") return "Deferred";
+  if (decision === "dismissed") return "Dismissed";
+  return "Reviewed";
+}
+
+function recommendationDecisionClass(decision?: RecommendationDecisionValue | null): string {
+  if (decision === "accepted_for_po") return "bg-green-50 text-green-700 border-green-200";
+  if (decision === "deferred") return "bg-blue-50 text-blue-700 border-blue-200";
+  if (decision === "dismissed") return "bg-zinc-100 text-zinc-700 border-zinc-200";
+  return "bg-emerald-50 text-emerald-700 border-emerald-200";
 }
 
 function reviewQueueFilterCount(summary: RecommendationReviewQueueResponse["summary"] | undefined, filter: ReviewQueueKind): number {
@@ -400,6 +449,45 @@ export default function PurchasingView() {
         variant: "destructive"
       });
     }
+  });
+
+  const recommendationDecisionMutation = useMutation({
+    mutationFn: async ({
+      item,
+      decision,
+    }: {
+      item: RecommendationReviewQueueItem;
+      decision: RecommendationDecisionValue;
+    }) => {
+      const res = await fetch("/api/purchasing/recommendation-decisions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recommendationId: item.recommendationId,
+          kind: item.kind,
+          decision,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? "Failed to record recommendation decision");
+      }
+      return res.json();
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
+      toast({
+        title: "Recommendation Decision Recorded",
+        description: `${variables.item.sku} marked ${formatRecommendationDecision(variables.decision).toLowerCase()}.`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Decision Not Recorded",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
   });
 
   const handleSort = (field: string) => {
@@ -808,17 +896,54 @@ export default function PurchasingView() {
                                 {item.candidateScore.score} - {formatCandidateBand(item.candidateScore.band)}
                               </Badge>
                             ) : null}
+                            {item.latestDecision ? (
+                              <Badge variant="outline" className={`text-[10px] ${recommendationDecisionClass(item.latestDecision.decision)}`}>
+                                {formatRecommendationDecision(item.latestDecision.decision)}
+                              </Badge>
+                            ) : null}
                           </div>
                           <div className="mt-1 text-sm font-medium truncate">{item.productName}</div>
                           <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.reason.detail}</p>
                           <div className="mt-2 text-[11px] text-zinc-500">
                             {item.suggestedOrderQty} {item.orderUomLabel}
                             {item.preferredVendorName ? ` - ${item.preferredVendorName}` : ""}
+                            {item.latestDecision?.decidedAt ? (
+                              <span className="ml-2">
+                                Decision {new Date(item.latestDecision.decidedAt).toLocaleDateString()}
+                              </span>
+                            ) : null}
                           </div>
                         </div>
-                        <Button size="sm" variant="outline" className="h-7 text-[11px] flex-shrink-0" onClick={() => handleReviewQueueAction(item)}>
-                          {item.action.label}
-                        </Button>
+                        <div className="flex flex-shrink-0 items-center gap-1">
+                          <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => handleReviewQueueAction(item)}>
+                            {item.action.label}
+                          </Button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button size="icon" variant="outline" className="h-7 w-7" disabled={recommendationDecisionMutation.isPending}>
+                                <MoreHorizontal className="h-3.5 w-3.5" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "reviewed" })}>
+                                <CheckCircle2 className="mr-2 h-3.5 w-3.5" />
+                                Mark reviewed
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "accepted_for_po" })}>
+                                <ShoppingCart className="mr-2 h-3.5 w-3.5" />
+                                Accept for PO review
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "deferred" })}>
+                                <Clock className="mr-2 h-3.5 w-3.5" />
+                                Defer
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "dismissed" })}>
+                                <XCircle className="mr-2 h-3.5 w-3.5" />
+                                Dismiss
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
                       </div>
                     </div>
                   ))}

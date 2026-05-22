@@ -2733,3 +2733,34 @@ Next step:
   phase around forecast recommendation auditability and operator acceptance
   workflow, so recommendations become traceable decisions before more
   automation is added.
+
+### 2026-05-22 - Recommendation Decision Audit Trail
+
+Scope:
+
+- Added a persistent `procurement.purchasing_recommendation_decisions` ledger for
+  operator decisions on recommendation review queue items.
+- Added read/write APIs for recommendation decisions and enriched the existing
+  review queue response with each item's latest active decision plus decision
+  counts for the filtered queue.
+- Server-side decision recording reloads the current recommendation queue and
+  snapshots the authoritative recommendation item, active approval policy, and
+  lookback window instead of trusting client-provided recommendation details.
+- Added Purchasing Dashboard controls to mark queue items reviewed, accepted for
+  PO review, deferred, or dismissed, while keeping the existing navigation action
+  intact.
+- Kept this slice audit-only: no PO creation behavior, recommendation math,
+  approval policy, supplier data, receiving, landed-cost, AP, or forecast model
+  behavior changed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+
+Next step:
+
+- Continue the operator acceptance workflow by deciding whether accepted
+  recommendations should become an explicit PO review queue, a draft PO staging
+  action, or a manual PO creation handoff with idempotency keys before any
+  automatic mutation behavior is expanded.

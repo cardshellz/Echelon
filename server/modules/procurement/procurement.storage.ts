@@ -57,6 +57,7 @@ import {
   inboundShipmentStatusHistory,
   reorderExclusionRules,
   autoDraftRuns,
+  purchasingRecommendationDecisions,
   products,
   eq, and, or, inArray, sql, desc, asc, lte, like, ilike,
 } from "../../storage/base";
@@ -232,6 +233,9 @@ export interface IProcurementStorage {
   getRecentAutoDraftRuns(limit?: number): Promise<any[]>;
   createAutoDraftRun(data: any): Promise<any>;
   updateAutoDraftRun(id: number, updates: any): Promise<void>;
+  getRecentRecommendationDecisions(limit?: number): Promise<any[]>;
+  getLatestRecommendationDecisions(recommendationIds: string[], kinds?: string[]): Promise<any[]>;
+  createRecommendationDecision(data: any): Promise<any>;
   getDashboardData(lookbackDays: number): Promise<any>;
   getAutoDraftSettings(warehouseId?: number): Promise<any>;
   updateAutoDraftSettings(warehouseId: number | undefined, settings: any): Promise<void>;
@@ -1818,6 +1822,35 @@ export const procurementMethods: IProcurementStorage = {
 
   async updateAutoDraftRun(id: number, updates: any): Promise<void> {
     await db.update(autoDraftRuns).set(updates).where(eq(autoDraftRuns.id, id));
+  },
+
+  async getRecentRecommendationDecisions(limit: number = 25): Promise<any[]> {
+    const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    return await db.select()
+      .from(purchasingRecommendationDecisions)
+      .orderBy(desc(purchasingRecommendationDecisions.decidedAt))
+      .limit(safeLimit);
+  },
+
+  async getLatestRecommendationDecisions(recommendationIds: string[], kinds: string[] = []): Promise<any[]> {
+    const uniqueIds = Array.from(new Set(recommendationIds.map((id) => String(id).trim()).filter(Boolean)));
+    if (uniqueIds.length === 0) return [];
+
+    const conditions = [inArray(purchasingRecommendationDecisions.recommendationId, uniqueIds)];
+    const uniqueKinds = Array.from(new Set(kinds.map((kind) => String(kind).trim()).filter(Boolean)));
+    if (uniqueKinds.length > 0) {
+      conditions.push(inArray(purchasingRecommendationDecisions.kind, uniqueKinds));
+    }
+
+    return await db.select()
+      .from(purchasingRecommendationDecisions)
+      .where(and(...conditions))
+      .orderBy(desc(purchasingRecommendationDecisions.decidedAt));
+  },
+
+  async createRecommendationDecision(data: any): Promise<any> {
+    const [decision] = await db.insert(purchasingRecommendationDecisions).values(data).returning();
+    return decision;
   },
 
   async getAutoDraftSettings(warehouseId?: number): Promise<any> {

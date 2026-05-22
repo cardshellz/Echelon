@@ -306,6 +306,9 @@ function buildApprovalPolicyImpact(result: ReturnType<typeof generatePurchasingR
 
 type RecommendationReviewQueueKind = "skipped" | "held_by_policy" | "quality_review_required";
 type RecommendationReviewQueueSeverity = "critical" | "warning" | "info";
+type RecommendationDecision = "reviewed" | "accepted_for_po" | "deferred" | "dismissed";
+
+const recommendationDecisionValues: RecommendationDecision[] = ["reviewed", "accepted_for_po", "deferred", "dismissed"];
 
 const reviewQueueKindPriority: Record<RecommendationReviewQueueKind, number> = {
   skipped: 0,
@@ -318,6 +321,46 @@ const reviewQueueSeverityPriority: Record<RecommendationReviewQueueSeverity, num
   warning: 1,
   info: 2,
 };
+
+function parseReviewQueueKind(value: unknown): RecommendationReviewQueueKind | null {
+  return value === "skipped" || value === "held_by_policy" || value === "quality_review_required"
+    ? value
+    : null;
+}
+
+function parseRecommendationDecision(value: unknown): RecommendationDecision | null {
+  return recommendationDecisionValues.includes(value as RecommendationDecision) ? value as RecommendationDecision : null;
+}
+
+function recommendationDecisionKey(recommendationId: string, kind: string): string {
+  return `${recommendationId}:${kind}`;
+}
+
+function normalizeRecommendationDecision(row: any) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    recommendationId: row.recommendationId ?? row.recommendation_id,
+    kind: row.kind,
+    decision: row.decision,
+    status: row.status,
+    decisionReason: row.decisionReason ?? row.decision_reason ?? null,
+    note: row.note ?? null,
+    source: row.source,
+    autoDraftRunId: row.autoDraftRunId ?? row.auto_draft_run_id ?? null,
+    productId: row.productId ?? row.product_id ?? null,
+    productVariantId: row.productVariantId ?? row.product_variant_id ?? null,
+    vendorId: row.vendorId ?? row.vendor_id ?? null,
+    sku: row.sku ?? null,
+    productName: row.productName ?? row.product_name ?? null,
+    candidateScore: row.candidateScore ?? row.candidate_score ?? null,
+    candidateBand: row.candidateBand ?? row.candidate_band ?? null,
+    recommendationSnapshot: row.recommendationSnapshot ?? row.recommendation_snapshot ?? {},
+    decidedBy: row.decidedBy ?? row.decided_by ?? null,
+    decidedAt: row.decidedAt ?? row.decided_at ?? null,
+    createdAt: row.createdAt ?? row.created_at ?? null,
+  };
+}
 
 function reviewQueueSeverity(item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind): RecommendationReviewQueueSeverity {
   if (kind === "skipped") return item.reviewSignal?.severity ?? "warning";
@@ -481,6 +524,37 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
   };
 }
 
+async function loadRecommendationReviewQueueData() {
+  const configuredLookback = await storage.getVelocityLookbackDays();
+  const rawRows = await storage.getReorderAnalysisData(configuredLookback);
+  const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
+  const context = await loadPurchasingRecommendationContext();
+  const recommendationResult = generatePurchasingRecommendations({
+    rows: rawRows as PurchasingRecommendationRawRow[],
+    lookbackDays: configuredLookback,
+    autoDraftSettings: settings,
+    requireVendor: Boolean(settings.skipNoVendor),
+    ...context,
+  });
+
+  return {
+    configuredLookback,
+    settings,
+    queue: buildRecommendationReviewQueue(recommendationResult, settings),
+  };
+}
+
+function buildLatestDecisionMap(decisions: any[]) {
+  const latest = new Map<string, ReturnType<typeof normalizeRecommendationDecision>>();
+  for (const row of decisions) {
+    const decision = normalizeRecommendationDecision(row);
+    if (!decision || decision.status !== "active") continue;
+    const key = recommendationDecisionKey(decision.recommendationId, decision.kind);
+    if (!latest.has(key)) latest.set(key, decision);
+  }
+  return latest;
+}
+
 export function registerPurchasingRecommendationRoutes(app: Express) {
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
   app.get("/api/purchasing/kpis", requirePermission("inventory", "view"), async (req, res) => {
@@ -568,18 +642,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
 
   app.get("/api/purchasing/recommendation-review-queue", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const configuredLookback = await storage.getVelocityLookbackDays();
-      const rawRows = await storage.getReorderAnalysisData(configuredLookback);
-      const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
-      const context = await loadPurchasingRecommendationContext();
-      const recommendationResult = generatePurchasingRecommendations({
-        rows: rawRows as PurchasingRecommendationRawRow[],
-        lookbackDays: configuredLookback,
-        autoDraftSettings: settings,
-        requireVendor: Boolean(settings.skipNoVendor),
-        ...context,
-      });
-      const queue = buildRecommendationReviewQueue(recommendationResult, settings);
+      const { configuredLookback, settings, queue } = await loadRecommendationReviewQueueData();
       const kind = typeof req.query.kind === "string" ? req.query.kind : "all";
       const severity = typeof req.query.severity === "string" ? req.query.severity : "all";
       const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 100);
@@ -587,6 +650,21 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         .filter((item) => kind === "all" || item.kind === kind)
         .filter((item) => severity === "all" || item.severity === severity)
         .slice(0, limit);
+      const latestDecisionRows = await storage.getLatestRecommendationDecisions(
+        filteredItems.map((item) => item.recommendationId),
+        filteredItems.map((item) => item.kind),
+      );
+      const latestDecisionByKey = buildLatestDecisionMap(latestDecisionRows);
+      const items = filteredItems.map((item) => ({
+        ...item,
+        latestDecision: latestDecisionByKey.get(recommendationDecisionKey(item.recommendationId, item.kind)) ?? null,
+      }));
+      const decisionCounts = {
+        reviewed: items.filter((item) => item.latestDecision?.decision === "reviewed").length,
+        acceptedForPo: items.filter((item) => item.latestDecision?.decision === "accepted_for_po").length,
+        deferred: items.filter((item) => item.latestDecision?.decision === "deferred").length,
+        dismissed: items.filter((item) => item.latestDecision?.decision === "dismissed").length,
+      };
 
       res.json({
         generatedAt: new Date().toISOString(),
@@ -596,11 +674,83 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         filters: { kind, severity, limit },
         ...queue,
         filteredCount: filteredItems.length,
-        items: filteredItems,
+        decisionCounts,
+        items,
       });
     } catch (error) {
       console.error("Error fetching recommendation review queue:", error);
       res.status(500).json({ error: "Failed to fetch recommendation review queue" });
+    }
+  });
+
+  app.get("/api/purchasing/recommendation-decisions", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "25"), 10) || 25, 1), 100);
+      const rows = await storage.getRecentRecommendationDecisions(limit);
+      res.json({
+        limit,
+        decisions: rows.map(normalizeRecommendationDecision),
+      });
+    } catch (error) {
+      console.error("Error fetching recommendation decisions:", error);
+      res.status(500).json({ error: "Failed to fetch recommendation decisions" });
+    }
+  });
+
+  app.post("/api/purchasing/recommendation-decisions", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const recommendationId = typeof req.body?.recommendationId === "string" ? req.body.recommendationId.trim() : "";
+      const kind = parseReviewQueueKind(req.body?.kind);
+      const decision = parseRecommendationDecision(req.body?.decision);
+      const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 2000) : null;
+
+      if (!recommendationId) {
+        return res.status(400).json({ error: "recommendationId is required" });
+      }
+      if (!kind) {
+        return res.status(400).json({ error: "kind must be one of: skipped, held_by_policy, quality_review_required" });
+      }
+      if (!decision) {
+        return res.status(400).json({ error: `decision must be one of: ${recommendationDecisionValues.join(", ")}` });
+      }
+
+      const { configuredLookback, settings, queue } = await loadRecommendationReviewQueueData();
+      const item = queue.items.find((entry) => entry.recommendationId === recommendationId && entry.kind === kind);
+      if (!item) {
+        return res.status(404).json({ error: "Recommendation is not currently in the review queue" });
+      }
+
+      const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
+      const created = await storage.createRecommendationDecision({
+        recommendationId: item.recommendationId,
+        kind: item.kind,
+        decision,
+        status: "active",
+        decisionReason: item.reason.code,
+        note,
+        source: "operator",
+        productId: item.productId,
+        productVariantId: item.productVariantId,
+        vendorId: item.preferredVendorId,
+        sku: item.sku,
+        productName: item.productName,
+        candidateScore: item.candidateScore?.score ?? null,
+        candidateBand: item.candidateScore?.band ?? null,
+        recommendationSnapshot: {
+          lookbackDays: configuredLookback,
+          autoDraftMode: settings.autoDraftMode ?? "draft_po",
+          approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
+          item,
+        },
+        decidedBy: userId,
+      });
+
+      res.status(201).json({
+        decision: normalizeRecommendationDecision(created),
+      });
+    } catch (error) {
+      console.error("Error recording recommendation decision:", error);
+      res.status(500).json({ error: "Failed to record recommendation decision" });
     }
   });
 

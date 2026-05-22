@@ -19,6 +19,9 @@ const mocks = vi.hoisted(() => ({
     getRecentAutoDraftRuns: vi.fn(),
     createAutoDraftRun: vi.fn(),
     updateAutoDraftRun: vi.fn(),
+    getRecentRecommendationDecisions: vi.fn(),
+    getLatestRecommendationDecisions: vi.fn(),
+    createRecommendationDecision: vi.fn(),
     getAutoDraftSettings: vi.fn(),
     updateAutoDraftSettings: vi.fn(),
   },
@@ -114,6 +117,14 @@ describe("purchasing recommendation routes", () => {
     mocks.procurement.createAutoDraftRun.mockResolvedValue({ id: 1001 });
     mocks.procurement.updateAutoDraftRun.mockResolvedValue(undefined);
     mocks.procurement.getRecentAutoDraftRuns.mockResolvedValue([]);
+    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([]);
+    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([]);
+    mocks.procurement.createRecommendationDecision.mockImplementation(async (data) => ({
+      id: 5001,
+      ...data,
+      decidedAt: "2026-05-22T12:00:00.000Z",
+      createdAt: "2026-05-22T12:00:00.000Z",
+    }));
     mocks.purchasingService.createPOFromReorder.mockResolvedValue([]);
   });
 
@@ -575,6 +586,157 @@ describe("purchasing recommendation routes", () => {
       reason: {
         code: "held_by_approval_policy",
       },
+    });
+  });
+
+  it("attaches latest operator decisions to recommendation review queue items", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 202,
+        variant_id: 2002,
+        base_sku: "QUEUE-HELD",
+        product_name: "Queue Held",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 90,
+        previous_outbound_pieces: 90,
+        demand_order_count: 15,
+        demand_active_days: 15,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+    ]);
+    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([
+      {
+        id: 77,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        decision: "reviewed",
+        status: "active",
+        decisionReason: "held_by_approval_policy",
+        sku: "QUEUE-HELD",
+        decidedBy: "admin-user",
+        decidedAt: "2026-05-22T12:00:00.000Z",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/recommendation-review-queue?kind=held_by_policy&limit=10",
+    );
+
+    expect(status).toBe(200);
+    expect(mocks.procurement.getLatestRecommendationDecisions).toHaveBeenCalledWith(
+      ["202:2002:30"],
+      ["held_by_policy"],
+    );
+    expect(body.decisionCounts).toMatchObject({ reviewed: 1, acceptedForPo: 0, deferred: 0, dismissed: 0 });
+    expect(body.items[0]).toMatchObject({
+      sku: "QUEUE-HELD",
+      latestDecision: {
+        id: 77,
+        decision: "reviewed",
+        decidedBy: "admin-user",
+      },
+    });
+  });
+
+  it("records recommendation decisions with a server-side queue snapshot", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 202,
+        variant_id: 2002,
+        base_sku: "QUEUE-HELD",
+        product_name: "Queue Held",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 90,
+        previous_outbound_pieces: 90,
+        demand_order_count: 15,
+        demand_active_days: 15,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "202:2002:30",
+      kind: "held_by_policy",
+      decision: "accepted_for_po",
+      note: "Looks good for the next PO review.",
+    });
+
+    expect(status).toBe(201);
+    expect(mocks.procurement.createRecommendationDecision).toHaveBeenCalledWith(expect.objectContaining({
+      recommendationId: "202:2002:30",
+      kind: "held_by_policy",
+      decision: "accepted_for_po",
+      decisionReason: "held_by_approval_policy",
+      note: "Looks good for the next PO review.",
+      productId: 202,
+      productVariantId: 2002,
+      vendorId: 77,
+      sku: "QUEUE-HELD",
+      productName: "Queue Held",
+      candidateBand: "review_candidate",
+      decidedBy: "admin-user",
+      recommendationSnapshot: expect.objectContaining({
+        lookbackDays: 30,
+        approvalPolicy: "high_confidence_and_strong_candidate",
+        item: expect.objectContaining({
+          sku: "QUEUE-HELD",
+          kind: "held_by_policy",
+        }),
+      }),
+    }));
+    expect(body.decision).toMatchObject({
+      id: 5001,
+      recommendationId: "202:2002:30",
+      decision: "accepted_for_po",
+      sku: "QUEUE-HELD",
     });
   });
 
