@@ -340,6 +340,49 @@ type SupplierSetupGaps = {
   }>;
 };
 
+type StaleAutoDraftPoDiagnostics = {
+  generatedAt: string;
+  scannedAutoDraftPos: number;
+  totalStale: number;
+  counts: {
+    critical: number;
+    warning: number;
+    info: number;
+    reviewPending: number;
+    supplierSendPending: number;
+    supplierFollowupPending: number;
+    receivingPending: number;
+    apCloseoutPending: number;
+    exceptionBlocked: number;
+    closeoutPending: number;
+  };
+  items: Array<{
+    id: string;
+    poId: number;
+    poNumber: string;
+    vendorId: number | null;
+    vendorName: string | null;
+    status: string | null;
+    physicalStatus: string | null;
+    financialStatus: string | null;
+    stage: string;
+    stageLabel: string;
+    stageStartedAt: string | null;
+    ageDays: number;
+    severity: "critical" | "warning" | "info";
+    detail: string;
+    action: {
+      action: string;
+      label: string;
+      href: string;
+    };
+    lineCount: number | null;
+    totalCents: number | null;
+    expectedDeliveryDate: string | null;
+    openExceptionCount: number;
+  }>;
+};
+
 function formatCents(cents: number): string {
   if (cents >= 100000) return `$${(cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -396,6 +439,16 @@ function autoDraftActionClass(severity: string): string {
   if (severity === "critical") return "border-red-200 bg-red-50 text-red-700 hover:bg-red-100";
   if (severity === "warning") return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100";
   return "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50";
+}
+
+function stalePoSeverityClass(severity: string): string {
+  if (severity === "critical") return "bg-red-50 text-red-700 border-red-200";
+  if (severity === "warning") return "bg-amber-50 text-amber-700 border-amber-200";
+  return "bg-zinc-50 text-zinc-700 border-zinc-200";
+}
+
+function formatPoTrack(status?: string | null): string {
+  return status ? status.replace(/_/g, " ") : "n/a";
 }
 
 function formatRecommendationForecast(
@@ -465,6 +518,11 @@ export default function PurchasingDashboard() {
     refetchInterval: 5 * 60 * 1000,
   });
 
+  const { data: staleAutoDraftPos } = useQuery<StaleAutoDraftPoDiagnostics>({
+    queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"],
+    refetchInterval: 5 * 60 * 1000,
+  });
+
   // Feature flag: when new PO editor is enabled, draft "Review" buttons
   // should open the inline editor (/edit) instead of the old detail page.
   const { data: procurementSettings } = useQuery<{ useNewPoEditor?: boolean }>({
@@ -485,6 +543,7 @@ export default function PurchasingDashboard() {
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/runs?limit=5"] });
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"] });
       }, 15000);
     },
     onError: (err: Error) => {
@@ -541,6 +600,15 @@ export default function PurchasingDashboard() {
         { label: "Missing cost", value: supplierSetupGaps.counts.missingSupplierCost },
         { label: "Verify cost", value: supplierSetupGaps.counts.lastPurchaseCost + supplierSetupGaps.counts.staleSupplierCost + supplierSetupGaps.counts.unverifiedSupplierCost },
         { label: "Lead time", value: supplierSetupGaps.counts.defaultLeadTime + supplierSetupGaps.counts.productLeadTimeFallback },
+      ]
+    : [];
+  const showStaleAutoDraftPos = Boolean(staleAutoDraftPos?.totalStale);
+  const staleAutoDraftPoCounts = staleAutoDraftPos
+    ? [
+        { label: "Review", value: staleAutoDraftPos.counts.reviewPending + staleAutoDraftPos.counts.exceptionBlocked },
+        { label: "Supplier", value: staleAutoDraftPos.counts.supplierSendPending + staleAutoDraftPos.counts.supplierFollowupPending },
+        { label: "Receiving", value: staleAutoDraftPos.counts.receivingPending },
+        { label: "AP", value: staleAutoDraftPos.counts.apCloseoutPending + staleAutoDraftPos.counts.closeoutPending },
       ]
     : [];
   const recentAutoDraftRuns = autoDraftRunHistory?.runs ?? [];
@@ -737,6 +805,79 @@ export default function PurchasingDashboard() {
                 {supplierSetupGaps.items.length > 4 && (
                   <Button variant="ghost" size="sm" className="text-[11px] text-muted-foreground h-7" onClick={() => navigate("/reorder-analysis")}>
                     + {supplierSetupGaps.items.length - 4} more supplier setup items
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {showStaleAutoDraftPos && staleAutoDraftPos && (
+          <Card className={staleAutoDraftPos.counts.critical > 0 ? "border-red-300 bg-red-50/30" : "border-amber-300 bg-amber-50/30"}>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className={`mt-0.5 rounded-full p-1.5 ${staleAutoDraftPos.counts.critical > 0 ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+                    <Clock className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm font-semibold">Stale Auto-Draft POs</h2>
+                      <Badge variant={staleAutoDraftPos.counts.critical > 0 ? "destructive" : "outline"} className="text-[10px] uppercase">
+                        {staleAutoDraftPos.totalStale} stale
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {staleAutoDraftPos.counts.critical} critical / {staleAutoDraftPos.counts.warning} warning
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Auto-created POs that aged past review, supplier, receiving, or AP thresholds.
+                    </p>
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" className="self-start lg:self-center" onClick={() => navigate("/purchase-orders")}>
+                  Open POs
+                  <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {staleAutoDraftPoCounts.map((row) => (
+                  <div key={row.label} className="rounded-md border bg-background/80 p-2">
+                    <div className="text-lg font-bold">{row.value}</div>
+                    <div className="text-[10px] text-muted-foreground">{row.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="space-y-2">
+                {staleAutoDraftPos.items.slice(0, 4).map((item) => (
+                  <div key={item.id} className="flex flex-col gap-2 rounded-md border bg-background/90 p-2.5 md:flex-row md:items-center">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline" className={`text-[10px] ${stalePoSeverityClass(item.severity)}`}>
+                          {item.stageLabel}
+                        </Badge>
+                        <span className="font-mono text-[11px] text-primary font-semibold">{item.poNumber}</span>
+                        <span className="text-[10px] text-muted-foreground truncate">{item.vendorName ?? "No vendor"}</span>
+                        <span className="text-[10px] text-muted-foreground">{item.ageDays}d</span>
+                        {item.totalCents != null && <span className="text-[10px] text-muted-foreground">{formatCents(item.totalCents)}</span>}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1 truncate">{item.detail}</div>
+                      <div className="text-[11px] text-muted-foreground mt-1 truncate">
+                        {formatPoTrack(item.physicalStatus)} / {formatPoTrack(item.financialStatus)}
+                        {item.expectedDeliveryDate ? ` - ETA ${formatDate(item.expectedDeliveryDate)}` : ""}
+                        {item.openExceptionCount > 0 ? ` - ${item.openExceptionCount} open exception${item.openExceptionCount === 1 ? "" : "s"}` : ""}
+                      </div>
+                    </div>
+                    <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(item.action.href)}>
+                      {item.action.label}
+                    </Button>
+                  </div>
+                ))}
+                {staleAutoDraftPos.items.length > 4 && (
+                  <Button variant="ghost" size="sm" className="text-[11px] text-muted-foreground h-7" onClick={() => navigate("/purchase-orders")}>
+                    + {staleAutoDraftPos.items.length - 4} more stale auto-draft POs
                   </Button>
                 )}
               </div>

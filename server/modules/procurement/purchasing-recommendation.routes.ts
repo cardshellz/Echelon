@@ -20,6 +20,10 @@ import {
   buildPurchasingRecommendationRunDetail,
   type PurchasingRecommendationRunPoMutation,
 } from "./purchasing-recommendation.run-detail";
+import {
+  buildStaleAutoDraftPoDiagnostics,
+  type AutoDraftPoAgingRow,
+} from "./auto-draft-po-aging.service";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
 function shouldCreateDraftPos(settings: AutoDraftRecommendationSettings): boolean {
@@ -30,6 +34,12 @@ function parseRunHistoryLimit(value: unknown): number {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 10;
   return Math.min(parsed, 50);
+}
+
+function parseStalePoLimit(value: unknown): number {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 25;
+  return Math.min(parsed, 100);
 }
 
 function normalizeApprovalPolicy(value: unknown): AutoDraftRecommendationSettings["approvalPolicy"] {
@@ -1045,6 +1055,66 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching auto-draft run history:", error);
       res.status(500).json({ error: "Failed to fetch auto-draft run history" });
+    }
+  });
+
+  // GET /api/purchasing/auto-draft/stale-pos
+  app.get("/api/purchasing/auto-draft/stale-pos", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = parseStalePoLimit(req.query.limit);
+      const includeInfo = req.query.includeInfo === "true";
+      const scanLimit = 500;
+      const result = await db.execute(sql`
+        SELECT
+          po.id,
+          po.po_number AS "poNumber",
+          po.vendor_id AS "vendorId",
+          v.name AS "vendorName",
+          po.status,
+          po.physical_status AS "physicalStatus",
+          po.financial_status AS "financialStatus",
+          po.line_count AS "lineCount",
+          po.total_cents AS "totalCents",
+          po.source,
+          po.auto_draft_date AS "autoDraftDate",
+          po.order_date AS "orderDate",
+          po.approved_at AS "approvedAt",
+          po.sent_to_vendor_at AS "sentToVendorAt",
+          po.expected_delivery_date AS "expectedDeliveryDate",
+          po.confirmed_delivery_date AS "confirmedDeliveryDate",
+          po.actual_delivery_date AS "actualDeliveryDate",
+          po.first_shipped_at AS "firstShippedAt",
+          po.first_arrived_at AS "firstArrivedAt",
+          po.first_invoiced_at AS "firstInvoicedAt",
+          po.first_paid_at AS "firstPaidAt",
+          po.fully_paid_at AS "fullyPaidAt",
+          po.created_at AS "createdAt",
+          po.updated_at AS "updatedAt",
+          COALESCE(open_exceptions.open_exception_count, 0)::int AS "openExceptionCount"
+        FROM procurement.purchase_orders po
+        LEFT JOIN procurement.vendors v ON v.id = po.vendor_id
+        LEFT JOIN (
+          SELECT po_id, COUNT(*)::int AS open_exception_count
+          FROM procurement.po_exceptions
+          WHERE status IN ('open', 'acknowledged')
+          GROUP BY po_id
+        ) open_exceptions ON open_exceptions.po_id = po.id
+        WHERE po.source = 'auto_draft'
+          AND COALESCE(po.status, 'draft') <> 'cancelled'
+          AND COALESCE(po.physical_status, 'draft') <> 'cancelled'
+          AND NOT (
+            COALESCE(po.status, 'draft') = 'closed'
+            AND COALESCE(po.physical_status, 'draft') IN ('received', 'short_closed')
+            AND COALESCE(po.financial_status, 'unbilled') = 'paid'
+          )
+        ORDER BY COALESCE(po.updated_at, po.created_at) DESC
+        LIMIT ${sql.raw(String(scanLimit))}
+      `);
+
+      res.json(buildStaleAutoDraftPoDiagnostics(result.rows as AutoDraftPoAgingRow[], { limit, includeInfo }));
+    } catch (error) {
+      console.error("Error fetching stale auto-draft PO diagnostics:", error);
+      res.status(500).json({ error: "Failed to fetch stale auto-draft PO diagnostics" });
     }
   });
 

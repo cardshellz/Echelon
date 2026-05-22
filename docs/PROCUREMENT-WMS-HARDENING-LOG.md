@@ -2477,3 +2477,36 @@ Next step:
 - Continue Phase 10 with stale auto-draft PO aging/escalation diagnostics, so
   auto-created POs that remain unreviewed, unsent, unreceived, or unpaid are
   visible before they become supplier or inventory drift.
+
+### 2026-05-21 - Phase 10 Slice 5: Stale Auto-Draft PO Aging Diagnostics
+
+Scope:
+
+- Added a read-only stale auto-draft PO aging service that derives each PO's
+  current operator stage from the existing `buildPoAutoDraftActionPlan` output
+  instead of introducing a second PO state machine.
+- Classified aging across review, supplier send, supplier follow-up, receiving,
+  AP closeout, closeout, and exception-blocked stages with warning and critical
+  thresholds.
+- Added `/api/purchasing/auto-draft/stale-pos` to scan open auto-drafted POs,
+  include open PO exception counts, and return dashboard-ready severity,
+  counts, details, and PO action links.
+- Added a Purchasing Dashboard panel for stale auto-drafted POs so operators can
+  jump directly to the affected PO before autopilot-created purchasing work
+  drifts out of review, receiving, or AP closeout.
+- Kept the slice read-only: recommendation math, auto-draft mutation behavior,
+  PO lifecycle commands, receiving, invoices, payments, and supplier data are
+  unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 10 with configurable stale-PO thresholds or escalation
+  notifications so aging policy can move from hard-coded diagnostics to
+  operator-managed autopilot controls.
