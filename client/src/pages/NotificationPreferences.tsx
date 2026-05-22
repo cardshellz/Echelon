@@ -15,6 +15,7 @@ const categoryLabels: Record<string, string> = {
   receiving: "Receiving",
   picking: "Picking",
   inventory: "Inventory",
+  procurement: "Procurement",
 };
 
 export default function NotificationPreferences() {

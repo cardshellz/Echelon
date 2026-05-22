@@ -19,6 +19,7 @@ import {
   type PurchasingRecommendationRunPoMutation,
 } from "../modules/procurement/purchasing-recommendation.run-detail";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
+import { runStaleAutoDraftPoEscalationCheck } from "../modules/procurement/auto-draft-po-escalation.service";
 import {
   purchaseOrders,
   reorderExclusionRules,
@@ -260,6 +261,17 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
     });
 
     console.log(`[Auto-draft] Complete: ${itemsAnalyzed} analyzed, ${posCreated} created, ${posUpdated} updated, ${linesAdded} lines added, ${skippedNoVendor} skipped (no vendor), ${skippedExcluded} excluded`);
+
+    try {
+      const escalation = await runStaleAutoDraftPoEscalationCheck({
+        thresholds: settings.stalePoThresholds,
+      });
+      if (escalation.sent) {
+        console.warn(`[Auto-draft] Sent critical stale PO escalation for ${escalation.criticalCount} PO(s)`);
+      }
+    } catch (error: any) {
+      console.error("[Auto-draft] Stale PO escalation check failed:", error?.message ?? error);
+    }
   } catch (error: any) {
     console.error("[Auto-draft] Failed:", error);
     await storage.updateAutoDraftRun(runRecord.id, {
