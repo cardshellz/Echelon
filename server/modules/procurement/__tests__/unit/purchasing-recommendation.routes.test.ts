@@ -5,6 +5,8 @@ import http from "http";
 import { AddressInfo } from "net";
 
 const mocks = vi.hoisted(() => ({
+  idempotencyMiddleware: vi.fn((_req: Request, _res: Response, next: NextFunction) => next()),
+  requireIdempotency: vi.fn(),
   procurement: {
     getReorderAnalysisData: vi.fn(),
     getOpenPoSummaryReport: vi.fn(),
@@ -39,6 +41,8 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
+mocks.requireIdempotency.mockReturnValue(mocks.idempotencyMiddleware);
+
 vi.mock("../../../../routes/middleware", () => {
   const pass = (req: Request, _res: Response, next: NextFunction) => {
     (req as any).user = { id: "admin-user", role: "admin" };
@@ -49,6 +53,10 @@ vi.mock("../../../../routes/middleware", () => {
     requirePermission: () => pass,
   };
 });
+
+vi.mock("../../../../middleware/idempotency", () => ({
+  requireIdempotency: mocks.requireIdempotency,
+}));
 
 vi.mock("../..", () => ({ procurementStorage: mocks.procurement }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.inventory }));
@@ -861,6 +869,181 @@ describe("purchasing recommendation routes", () => {
       action: {
         label: "Review snapshot",
       },
+    });
+  });
+
+  it("creates a draft PO handoff from current accepted recommendations", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 202,
+        variant_id: 2002,
+        base_sku: "QUEUE-HELD",
+        product_name: "Queue Held",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 90,
+        previous_outbound_pieces: 90,
+        demand_order_count: 15,
+        demand_active_days: 15,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        earliest_expected: null,
+        lead_time_days: 2,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+        estimated_cost_cents: 1000,
+        vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+      },
+    ]);
+    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
+      {
+        id: 91,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        decision: "accepted_for_po",
+        status: "active",
+        sku: "QUEUE-HELD",
+        productName: "Queue Held",
+        vendorId: 77,
+        decidedAt: "2026-05-22T12:00:00.000Z",
+        recommendationSnapshot: {
+          lookbackDays: 30,
+          item: {
+            sku: "QUEUE-HELD",
+            productName: "Queue Held",
+            suggestedOrderQty: 1,
+            orderUomLabel: "Case",
+            preferredVendorName: "Vendor",
+          },
+        },
+      },
+    ]);
+    mocks.purchasingService.createPOFromReorder.mockResolvedValue([{ id: 12, vendorId: 77, status: "draft" }]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      {
+        items: [{ recommendationId: "202:2002:30", kind: "held_by_policy" }],
+      },
+    );
+
+    expect(status).toBe(201);
+    expect(mocks.purchasingService.createPOFromReorder).toHaveBeenCalledWith(
+      [
+        {
+          productId: 202,
+          productVariantId: 2002,
+          suggestedQty: 1,
+          vendorId: 77,
+        },
+      ],
+      "admin-user",
+    );
+    expect(mocks.procurement.createRecommendationDecision).toHaveBeenCalledWith(expect.objectContaining({
+      recommendationId: "202:2002:30",
+      kind: "held_by_policy",
+      decision: "po_handoff_created",
+      decisionReason: "accepted_recommendation_po_handoff",
+      productId: 202,
+      productVariantId: 2002,
+      vendorId: 77,
+      sku: "QUEUE-HELD",
+      decidedBy: "admin-user",
+      recommendationSnapshot: expect.objectContaining({
+        approvalPolicy: "high_confidence_and_strong_candidate",
+        poHandoff: { poIds: [12] },
+      }),
+    }));
+    expect(body).toMatchObject({
+      success: true,
+      count: 1,
+      itemsDrafted: 1,
+      handedOff: [
+        {
+          recommendationId: "202:2002:30",
+          kind: "held_by_policy",
+          sku: "QUEUE-HELD",
+          poIds: [12],
+        },
+      ],
+      skipped: [],
+    });
+  });
+
+  it("blocks stale accepted snapshots from draft PO handoff", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_and_strong_candidate",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 95,
+      candidateScoreReviewThreshold: 80,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([]);
+    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
+      {
+        id: 90,
+        recommendationId: "999:product:30",
+        kind: "quality_review_required",
+        decision: "accepted_for_po",
+        status: "active",
+        sku: "STALE-ACCEPTED",
+        productName: "Stale Accepted",
+        decidedAt: "2026-05-21T12:00:00.000Z",
+        recommendationSnapshot: {
+          item: {
+            sku: "STALE-ACCEPTED",
+            productName: "Stale Accepted",
+            suggestedOrderQty: 2,
+            orderUomLabel: "Each",
+            candidateScore: { score: 61, band: "review_candidate" },
+          },
+        },
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      {
+        items: [{ recommendationId: "999:product:30", kind: "quality_review_required" }],
+      },
+    );
+
+    expect(status).toBe(409);
+    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
+    expect(mocks.procurement.createRecommendationDecision).not.toHaveBeenCalled();
+    expect(body).toMatchObject({
+      error: "No current accepted recommendations are eligible for PO handoff",
+      skipped: [
+        {
+          recommendationId: "999:product:30",
+          kind: "quality_review_required",
+          sku: "STALE-ACCEPTED",
+          reason: "stale_accepted_snapshot",
+        },
+      ],
     });
   });
 

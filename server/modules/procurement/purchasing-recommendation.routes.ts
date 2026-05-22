@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../../db";
+import { requireIdempotency } from "../../middleware/idempotency";
 import { requirePermission } from "../../routes/middleware";
 import { procurementStorage } from "../procurement";
 import { inventoryStorage } from "../inventory";
@@ -306,9 +307,14 @@ function buildApprovalPolicyImpact(result: ReturnType<typeof generatePurchasingR
 
 type RecommendationReviewQueueKind = "skipped" | "held_by_policy" | "quality_review_required";
 type RecommendationReviewQueueSeverity = "critical" | "warning" | "info";
-type RecommendationDecision = "reviewed" | "accepted_for_po" | "deferred" | "dismissed";
+type RecommendationDecision = "reviewed" | "accepted_for_po" | "deferred" | "dismissed" | "po_handoff_created";
 
-const recommendationDecisionValues: RecommendationDecision[] = ["reviewed", "accepted_for_po", "deferred", "dismissed"];
+const recommendationDecisionValues: RecommendationDecision[] = [
+  "reviewed",
+  "accepted_for_po",
+  "deferred",
+  "dismissed",
+];
 
 const reviewQueueKindPriority: Record<RecommendationReviewQueueKind, number> = {
   skipped: 0,
@@ -624,6 +630,52 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
   };
 }
 
+function parseAcceptedRecommendationHandoffSelections(body: any):
+  | { selections: Array<{ recommendationId: string; kind: RecommendationReviewQueueKind; key: string }> }
+  | { error: string } {
+  const rawItems = Array.isArray(body?.items)
+    ? body.items
+    : body?.recommendationId
+      ? [body]
+      : [];
+
+  if (rawItems.length === 0) {
+    return { error: "items must include at least one accepted recommendation" };
+  }
+  if (rawItems.length > 25) {
+    return { error: "items cannot include more than 25 accepted recommendations" };
+  }
+
+  const seen = new Set<string>();
+  const selections: Array<{ recommendationId: string; kind: RecommendationReviewQueueKind; key: string }> = [];
+  for (const rawItem of rawItems) {
+    const recommendationId = typeof rawItem?.recommendationId === "string" ? rawItem.recommendationId.trim() : "";
+    const kind = parseReviewQueueKind(rawItem?.kind);
+    if (!recommendationId) {
+      return { error: "items[].recommendationId is required" };
+    }
+    if (!kind) {
+      return { error: "items[].kind must be one of: skipped, held_by_policy, quality_review_required" };
+    }
+
+    const key = recommendationDecisionKey(recommendationId, kind);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selections.push({ recommendationId, kind, key });
+  }
+
+  return { selections };
+}
+
+function buildAcceptedRecommendationHandoffSkipped(selection: { recommendationId: string; kind: RecommendationReviewQueueKind }, reason: string, item?: any) {
+  return {
+    recommendationId: selection.recommendationId,
+    kind: selection.kind,
+    sku: item?.sku ?? null,
+    reason,
+  };
+}
+
 export function registerPurchasingRecommendationRoutes(app: Express) {
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
   app.get("/api/purchasing/kpis", requirePermission("inventory", "view"), async (req, res) => {
@@ -731,6 +783,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const decisionCounts = {
         reviewed: items.filter((item) => item.latestDecision?.decision === "reviewed").length,
         acceptedForPo: items.filter((item) => item.latestDecision?.decision === "accepted_for_po").length,
+        poHandoffCreated: items.filter((item) => item.latestDecision?.decision === "po_handoff_created").length,
         deferred: items.filter((item) => item.latestDecision?.decision === "deferred").length,
         dismissed: items.filter((item) => item.latestDecision?.decision === "dismissed").length,
       };
@@ -790,6 +843,134 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       res.status(500).json({ error: "Failed to fetch accepted recommendation queue" });
     }
   });
+
+  app.post(
+    "/api/purchasing/recommendation-accepted-queue/create-po",
+    requirePermission("inventory", "adjust"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const parsed = parseAcceptedRecommendationHandoffSelections(req.body);
+        if ("error" in parsed) {
+          return res.status(400).json({ error: parsed.error });
+        }
+
+        const purchasing = app.locals.services?.purchasing;
+        if (!purchasing?.createPOFromReorder) {
+          return res.status(500).json({ error: "Purchasing service is not available" });
+        }
+
+        const decisionScanLimit = Math.max(parsed.selections.length * 10, 100);
+        const [{ configuredLookback, settings, queue }, decisionRows] = await Promise.all([
+          loadRecommendationReviewQueueData(),
+          storage.getRecentRecommendationDecisions(decisionScanLimit),
+        ]);
+        const acceptedQueue = buildAcceptedRecommendationReviewQueue(decisionRows, queue, 100);
+        const acceptedByKey = new Map(
+          acceptedQueue.items.map((item: any) => [recommendationDecisionKey(item.recommendationId, item.kind), item]),
+        );
+
+        const eligible: any[] = [];
+        const skipped: Array<ReturnType<typeof buildAcceptedRecommendationHandoffSkipped>> = [];
+        for (const selection of parsed.selections) {
+          const item = acceptedByKey.get(selection.key);
+          if (!item) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "not_accepted_or_missing"));
+            continue;
+          }
+          if (!item.current) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "stale_accepted_snapshot", item));
+            continue;
+          }
+          if (!Number.isFinite(Number(item.productId)) || Number(item.productId) <= 0) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_product", item));
+            continue;
+          }
+          if (!Number.isFinite(Number(item.productVariantId)) || Number(item.productVariantId) <= 0) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_variant", item));
+            continue;
+          }
+          if (!Number.isFinite(Number(item.suggestedOrderQty)) || Number(item.suggestedOrderQty) <= 0) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "invalid_qty", item));
+            continue;
+          }
+          if (!Number.isFinite(Number(item.preferredVendorId)) || Number(item.preferredVendorId) <= 0) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_vendor", item));
+            continue;
+          }
+          eligible.push(item);
+        }
+
+        if (eligible.length === 0) {
+          return res.status(409).json({
+            error: "No current accepted recommendations are eligible for PO handoff",
+            skipped,
+          });
+        }
+
+        const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
+        const pos = await purchasing.createPOFromReorder(
+          eligible.map((item) => ({
+            productId: Number(item.productId),
+            productVariantId: Number(item.productVariantId),
+            suggestedQty: Number(item.suggestedOrderQty),
+            vendorId: Number(item.preferredVendorId),
+          })),
+          userId,
+        );
+        const poIds = Array.from(new Set((pos ?? []).map((po: any) => Number(po?.id)).filter((id: number) => Number.isFinite(id))));
+
+        const decisions = await Promise.all(eligible.map((item) => storage.createRecommendationDecision({
+          recommendationId: item.recommendationId,
+          kind: item.kind,
+          decision: "po_handoff_created",
+          status: "active",
+          decisionReason: "accepted_recommendation_po_handoff",
+          note: null,
+          source: "operator",
+          productId: Number(item.productId),
+          productVariantId: Number(item.productVariantId),
+          vendorId: Number(item.preferredVendorId),
+          sku: item.sku,
+          productName: item.productName,
+          candidateScore: item.candidateScore?.score ?? null,
+          candidateBand: item.candidateScore?.band ?? null,
+          recommendationSnapshot: {
+            lookbackDays: configuredLookback,
+            autoDraftMode: settings.autoDraftMode ?? "draft_po",
+            approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
+            item,
+            poHandoff: {
+              poIds,
+            },
+          },
+          decidedBy: userId,
+        })));
+
+        res.status(201).json({
+          success: true,
+          count: (pos ?? []).length,
+          itemsDrafted: eligible.length,
+          pos,
+          handedOff: eligible.map((item) => ({
+            recommendationId: item.recommendationId,
+            kind: item.kind,
+            sku: item.sku,
+            poIds,
+          })),
+          skipped,
+          decisions: decisions.map(normalizeRecommendationDecision),
+        });
+      } catch (error) {
+        console.error("Error creating PO from accepted recommendation queue:", error);
+        const statusCode = Number((error as any)?.statusCode);
+        if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+          return res.status(statusCode).json({ error: (error as Error).message });
+        }
+        res.status(500).json({ error: "Failed to create PO from accepted recommendation queue" });
+      }
+    },
+  );
 
   app.post("/api/purchasing/recommendation-decisions", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
