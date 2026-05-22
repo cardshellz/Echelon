@@ -32,7 +32,10 @@ import {
   recordWebhookReceived,
   type WebhookInboxReceipt,
 } from "./webhook-inbox.service";
-import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
+import {
+  enqueueOmsWmsSyncRetry,
+  enqueueShipStationShipmentPushRetry,
+} from "./webhook-retry.worker";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -83,6 +86,7 @@ interface WmsServices {
 interface ShipStationService {
   isConfigured: () => boolean;
   pushOrder: (order: any) => Promise<any>;
+  pushShipment?: (shipmentId: number) => Promise<any>;
   markAsShipped: (shipstationOrderId: number, opts?: {
     shipDate?: Date | string;
     trackingNumber?: string | null;
@@ -928,6 +932,63 @@ export function getExternalOrderId(shopifyOrder: any): string {
   return s;
 }
 
+type CanonicalShipTo = {
+  name: string | null;
+  company: string | null;
+  address1: string | null;
+  address2: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  country: string | null;
+};
+
+function cleanString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function canonicalShipToFromShopifyUpdate(shopifyOrder: any, existing: any): CanonicalShipTo {
+  const shipping = shopifyOrder?.shipping_address && typeof shopifyOrder.shipping_address === "object"
+    ? shopifyOrder.shipping_address
+    : {};
+  const customerName =
+    `${shopifyOrder?.customer?.first_name || ""} ${shopifyOrder?.customer?.last_name || ""}`.trim();
+
+  return {
+    name: cleanString(shipping.name) || cleanString(customerName) || existing.shipToName || existing.customerName || null,
+    company: nullableString(shipping.company) ?? existing.shipToCompany ?? null,
+    address1: cleanString(shipping.address1) || existing.shipToAddress1 || null,
+    address2: nullableString(shipping.address2) ?? existing.shipToAddress2 ?? null,
+    city: cleanString(shipping.city) || existing.shipToCity || null,
+    state: cleanString(shipping.province_code) || cleanString(shipping.province) || existing.shipToState || null,
+    zip: cleanString(shipping.zip) || existing.shipToZip || null,
+    country: cleanString(shipping.country_code) || cleanString(shipping.country) || existing.shipToCountry || null,
+  };
+}
+
+function differentNullable(a: unknown, b: unknown): boolean {
+  return (a ?? null) !== (b ?? null);
+}
+
+function wmsAddressChanged(row: any, next: CanonicalShipTo): boolean {
+  return (
+    differentNullable(row.shipping_name, next.name) ||
+    differentNullable(row.shipping_company, next.company) ||
+    differentNullable(row.shipping_address, next.address1) ||
+    differentNullable(row.shipping_address2, next.address2) ||
+    differentNullable(row.shipping_city, next.city) ||
+    differentNullable(row.shipping_state, next.state) ||
+    differentNullable(row.shipping_postal_code, next.zip) ||
+    differentNullable(row.shipping_country, next.country)
+  );
+}
+
 // Register Webhook Routes
 // ---------------------------------------------------------------------------
 //
@@ -1040,6 +1101,54 @@ export function registerOmsWebhooks(
       payload: args.payload,
       lastError: args.error?.message || String(args.error),
     });
+  }
+
+  async function handleWmsAddressChange(
+    wmsOrderId: number,
+    now: Date,
+    label: string,
+  ): Promise<void> {
+    const shipmentResult: any = await db.execute(sql`
+      SELECT id
+      FROM wms.outbound_shipments
+      WHERE order_id = ${wmsOrderId}
+        AND status NOT IN ('cancelled', 'voided', 'returned', 'lost', 'on_hold')
+      ORDER BY id
+    `);
+    const shipments: Array<{ id: number }> = shipmentResult?.rows ?? [];
+    if (shipments.length === 0) return;
+
+    const rollupModule = await import("../orders/shipment-rollup");
+    for (const shipment of shipments) {
+      const result = await rollupModule.handleAddressChangeOnShipment(db, shipment.id, { now });
+      if (result.mode !== "can_repush") {
+        console.log(
+          `${LOG_PREFIX} address change for ${label} shipment ${shipment.id}: ${result.mode}`,
+        );
+        continue;
+      }
+
+      if (shipStationService?.isConfigured() && typeof shipStationService.pushShipment === "function") {
+        try {
+          await shipStationService.pushShipment(shipment.id);
+          console.log(
+            `${LOG_PREFIX} re-pushed shipment ${shipment.id} after address change for ${label}`,
+          );
+        } catch (err: any) {
+          await enqueueShipStationShipmentPushRetry(
+            db,
+            shipment.id,
+            err instanceof Error ? err : new Error(err?.message ?? String(err)),
+          );
+        }
+      } else {
+        await enqueueShipStationShipmentPushRetry(
+          db,
+          shipment.id,
+          new Error(`address changed for ${label}; ShipStation push unavailable`),
+        );
+      }
+    }
   }
 
   async function receiveShopifyWebhook(
@@ -1254,7 +1363,7 @@ export function registerOmsWebhooks(
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
 
-      const shipping = shopifyOrder.shipping_address || {};
+      const nextShipTo = canonicalShipToFromShopifyUpdate(shopifyOrder, existing);
       const now = new Date();
       const isCancelledPayload = Boolean(shopifyOrder.cancelled_at);
       const isFinalOmsState =
@@ -1279,23 +1388,87 @@ export function registerOmsWebhooks(
           financialStatus: shopifyOrder.financial_status || existing.financialStatus,
           fulfillmentStatus: shopifyOrder.fulfillment_status || existing.fulfillmentStatus,
           customerName:
-            shipping.name ||
+            nextShipTo.name ||
             `${shopifyOrder.customer?.first_name || ""} ${shopifyOrder.customer?.last_name || ""}`.trim() ||
             existing.customerName,
           customerEmail: shopifyOrder.email || existing.customerEmail,
-          shipToName: shipping.name || existing.shipToName,
-          shipToCompany: shipping.company ?? existing.shipToCompany,
-          shipToAddress1: shipping.address1 || existing.shipToAddress1,
-          shipToAddress2: shipping.address2 ?? existing.shipToAddress2,
-          shipToCity: shipping.city || existing.shipToCity,
-          shipToState: shipping.province_code || shipping.province || existing.shipToState,
-          shipToZip: shipping.zip || existing.shipToZip,
-          shipToCountry: shipping.country_code || existing.shipToCountry,
+          shipToName: nextShipTo.name,
+          shipToCompany: nextShipTo.company,
+          shipToAddress1: nextShipTo.address1,
+          shipToAddress2: nextShipTo.address2,
+          shipToCity: nextShipTo.city,
+          shipToState: nextShipTo.state,
+          shipToZip: nextShipTo.zip,
+          shipToCountry: nextShipTo.country,
           notes: shopifyOrder.note ?? existing.notes,
           rawPayload: shopifyOrder as any,
           updatedAt: now,
         })
         .where(eq(omsOrders.id, existing.id));
+
+      const wmsOrder = await db.execute<{
+        id: number;
+        shipping_name: string | null;
+        shipping_company: string | null;
+        shipping_address: string | null;
+        shipping_address2: string | null;
+        shipping_city: string | null;
+        shipping_state: string | null;
+        shipping_postal_code: string | null;
+        shipping_country: string | null;
+      }>(sql`
+        SELECT
+          id,
+          shipping_name,
+          shipping_company,
+          shipping_address,
+          shipping_address2,
+          shipping_city,
+          shipping_state,
+          shipping_postal_code,
+          shipping_country
+        FROM wms.orders
+        WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
+           OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
+        LIMIT 1
+      `);
+      const wmsOrderRow = wmsOrder.rows[0] ?? null;
+      const wmsOrderId = wmsOrderRow?.id ?? null;
+      const didWmsAddressChange = wmsOrderRow ? wmsAddressChanged(wmsOrderRow, nextShipTo) : false;
+
+      if (wmsOrderId !== null) {
+        await db.execute(sql`
+          UPDATE wms.orders SET
+            warehouse_status = CASE
+              WHEN ${isFinalOmsState} THEN 'cancelled'
+              ELSE warehouse_status
+            END,
+            cancelled_at = CASE
+              WHEN ${isFinalOmsState} THEN COALESCE(cancelled_at, ${now})
+              ELSE cancelled_at
+            END,
+            shipping_name = ${nextShipTo.name},
+            shipping_company = ${nextShipTo.company},
+            shipping_address = ${nextShipTo.address1},
+            shipping_address2 = ${nextShipTo.address2},
+            shipping_city = ${nextShipTo.city},
+            shipping_state = ${nextShipTo.state},
+            shipping_postal_code = ${nextShipTo.zip},
+            shipping_country = ${nextShipTo.country || "US"},
+            financial_status = ${shopifyOrder.financial_status || "paid"},
+            customer_name = ${nextShipTo.name || existing.customerName || null},
+            customer_email = ${shopifyOrder.email || existing.customerEmail || null}
+          WHERE id = ${wmsOrderId}
+        `);
+
+        if (didWmsAddressChange && !isFinalOmsState) {
+          await handleWmsAddressChange(
+            wmsOrderId,
+            now,
+            shopifyOrder.name || externalOrderId,
+          );
+        }
+      }
 
       // Update line items if changed
       const newLineItems = (shopifyOrder.line_items || []) as any[];
@@ -1392,39 +1565,7 @@ export function registerOmsWebhooks(
         }
 
         // Update WMS order items if they exist
-        const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM wms.orders
-          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
-             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-          LIMIT 1
-        `);
-        if (wmsOrder.rows.length > 0) {
-          const wmsOrderId = wmsOrder.rows[0].id;
-          // Update WMS order shipping address
-          await db.execute(sql`
-            UPDATE wms.orders SET
-              warehouse_status = CASE
-                WHEN ${isFinalOmsState} THEN 'cancelled'
-                ELSE warehouse_status
-              END,
-              cancelled_at = CASE
-                WHEN ${isFinalOmsState} THEN COALESCE(cancelled_at, ${now})
-                ELSE cancelled_at
-              END,
-              shipping_name = ${shipping.name || null},
-              shipping_company = ${shipping.company || null},
-              shipping_address = ${shipping.address1 || null},
-              shipping_address2 = ${shipping.address2 || null},
-              shipping_city = ${shipping.city || null},
-              shipping_state = ${shipping.province_code || shipping.province || null},
-              shipping_postal_code = ${shipping.zip || null},
-              shipping_country = ${shipping.country_code || null},
-              financial_status = ${shopifyOrder.financial_status || "paid"},
-              customer_name = ${shipping.name || existing.customerName || null},
-              customer_email = ${shopifyOrder.email || null}
-            WHERE id = ${wmsOrderId}
-          `);
-
+        if (wmsOrderId !== null) {
           if (isFinalOmsState) {
             console.log(
               `${LOG_PREFIX} orders/updated skipped WMS reconcile for final order ${shopifyOrder.name || externalOrderId}`,
@@ -1697,45 +1838,25 @@ export function registerOmsWebhooks(
         LIMIT 1
       `);
       if (wmsOrder.rows.length > 0) {
-        // If WMS order isn't shipped yet, transition it
-        await db.execute(sql`
-          UPDATE wms.orders SET
-            warehouse_status = CASE
-              WHEN warehouse_status NOT IN ('shipped', 'cancelled') THEN 'shipped'
-              ELSE warehouse_status
-            END
-          WHERE id = ${wmsOrder.rows[0].id}
-        `);
-
-        // FIX: Transition any stranded WMS shipments to 'shipped'
-        const strandedShipments = await db.execute(sql`
-          UPDATE wms.outbound_shipments SET
-            status = 'shipped',
-            tracking_number = COALESCE(tracking_number, ${trackingNumber}),
-            carrier = COALESCE(carrier, ${carrier}),
-            shipped_at = NOW()
+        const shipmentCount = await db.execute<{ count: string }>(sql`
+          SELECT COUNT(*)::text AS count
+          FROM wms.outbound_shipments
           WHERE order_id = ${wmsOrder.rows[0].id}
-            AND status NOT IN ('shipped', 'cancelled', 'voided')
-          RETURNING shipstation_order_id
         `);
-
-        // Immediately clear these stranded shipments from ShipStation
-        if (shipStationService?.isConfigured()) {
-          for (const s of strandedShipments.rows) {
-            if (s.shipstation_order_id && s.shipstation_order_id !== existing.shipstationOrderId) {
-              try {
-                await shipStationService.markAsShipped(Number(s.shipstation_order_id), {
-                  shipDate: now,
-                  trackingNumber,
-                  carrierCode: carrier?.toLowerCase() || "other",
-                  notifyCustomer: false,
-                });
-                console.log(`[OMS] Cleared stranded WMS shipment from ShipStation: ${s.shipstation_order_id}`);
-              } catch (e: any) {
-                console.error(`[OMS] Failed to mark WMS SS order shipped: ${e.message}`);
-              }
-            }
-          }
+        const hasShipmentRows = Number(shipmentCount.rows?.[0]?.count ?? 0) > 0;
+        if (!hasShipmentRows) {
+          await db.execute(sql`
+            UPDATE wms.orders SET
+              warehouse_status = CASE
+                WHEN warehouse_status NOT IN ('shipped', 'cancelled') THEN 'shipped'
+                ELSE warehouse_status
+              END
+            WHERE id = ${wmsOrder.rows[0].id}
+          `);
+        } else {
+          console.log(
+            `${LOG_PREFIX} orders/fulfilled left WMS shipments unchanged for ${shopifyOrder.name || externalOrderId}; ShipStation shipment flow owns WMS shipment state`,
+          );
         }
       }
 

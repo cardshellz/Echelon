@@ -211,6 +211,42 @@ export async function createShipmentForOrder(
   // One planned shipment per (order_id) is the invariant. Raw SQL
   // keeps the probe trivial and avoids a Drizzle query-builder chain
   // for the test mock layer.
+  const normalizedOrderItems: CreateShipmentInput[] = [];
+  const seenOrderItemIds = new Set<number>();
+  for (const it of orderItems) {
+    if (!Number.isInteger(it.id) || it.id <= 0) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.id must be a positive integer, got ${it.id}`,
+      );
+    }
+    if (seenOrderItemIds.has(it.id)) {
+      continue;
+    }
+    seenOrderItemIds.add(it.id);
+    if (!Number.isInteger(it.quantity) || it.quantity < 0) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
+      );
+    }
+    if (
+      it.productVariantId != null &&
+      (!Number.isInteger(it.productVariantId) || it.productVariantId <= 0)
+    ) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.productVariantId must be a positive integer when provided, got ${it.productVariantId}`,
+      );
+    }
+    if (
+      it.fromLocationId != null &&
+      (!Number.isInteger(it.fromLocationId) || it.fromLocationId <= 0)
+    ) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.fromLocationId must be a positive integer when provided, got ${it.fromLocationId}`,
+      );
+    }
+    normalizedOrderItems.push(it);
+  }
+
   const existing = await db.execute(sql`
     SELECT id
       FROM wms.outbound_shipments
@@ -234,6 +270,48 @@ export async function createShipmentForOrder(
   // requires_review, etc.) are left unset so the schema defaults
   // (NULL / false / 0) apply. That keeps the row shape aligned with
   // the state-machine definition in §2.4 of the plan.
+  if (normalizedOrderItems.length > 0) {
+    const orderItemIds = normalizedOrderItems.map((item) => item.id);
+    const activeCoverage = await db.execute(sql`
+      SELECT
+        os.id AS shipment_id,
+        osi.order_item_id,
+        COALESCE(SUM(osi.qty), 0)::int AS qty
+      FROM wms.outbound_shipments os
+      JOIN wms.outbound_shipment_items osi
+        ON osi.shipment_id = os.id
+      WHERE os.order_id = ${wmsOrderId}
+        AND os.status NOT IN ('voided', 'cancelled')
+        AND osi.order_item_id = ANY(${orderItemIds}::int[])
+      GROUP BY os.id, osi.order_item_id
+      ORDER BY os.id
+    `);
+    const coveredQtyByItemId = new Map<number, number>();
+    let representativeShipmentId: number | null = null;
+    for (const row of activeCoverage.rows ?? []) {
+      const shipmentId = Number((row as any).shipment_id);
+      const orderItemId = Number((row as any).order_item_id);
+      const qty = Number((row as any).qty ?? 0);
+      if (representativeShipmentId === null && Number.isInteger(shipmentId) && shipmentId > 0) {
+        representativeShipmentId = shipmentId;
+      }
+      if (Number.isInteger(orderItemId) && orderItemId > 0 && Number.isInteger(qty) && qty > 0) {
+        coveredQtyByItemId.set(
+          orderItemId,
+          (coveredQtyByItemId.get(orderItemId) ?? 0) + qty,
+        );
+      }
+    }
+
+    const fullyCovered = normalizedOrderItems.every((item) => {
+      const coveredQty = coveredQtyByItemId.get(item.id) ?? 0;
+      return coveredQty >= item.quantity;
+    });
+    if (fullyCovered && representativeShipmentId !== null) {
+      return { shipmentId: representativeShipmentId, created: false };
+    }
+  }
+
   const shipmentValues: InsertOutboundShipment = {
     orderId: wmsOrderId,
     channelId,
@@ -264,39 +342,8 @@ export async function createShipmentForOrder(
   // produce zero shippable items. The shipment row is still useful
   // (ops dashboards, SS parity checks) even when it carries no
   // inventory.
-  if (orderItems.length > 0) {
-    const seenOrderItemIds = new Set<number>();
-    for (const it of orderItems) {
-      if (!Number.isInteger(it.id) || it.id <= 0) {
-        throw new Error(
-          `createShipmentForOrder: orderItem.id must be a positive integer, got ${it.id}`,
-        );
-      }
-      if (seenOrderItemIds.has(it.id)) {
-        continue;
-      }
-      seenOrderItemIds.add(it.id);
-      if (!Number.isInteger(it.quantity) || it.quantity < 0) {
-        throw new Error(
-          `createShipmentForOrder: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
-        );
-      }
-      if (
-        it.productVariantId != null &&
-        (!Number.isInteger(it.productVariantId) || it.productVariantId <= 0)
-      ) {
-        throw new Error(
-          `createShipmentForOrder: orderItem.productVariantId must be a positive integer when provided, got ${it.productVariantId}`,
-        );
-      }
-      if (
-        it.fromLocationId != null &&
-        (!Number.isInteger(it.fromLocationId) || it.fromLocationId <= 0)
-      ) {
-        throw new Error(
-          `createShipmentForOrder: orderItem.fromLocationId must be a positive integer when provided, got ${it.fromLocationId}`,
-        );
-      }
+  if (normalizedOrderItems.length > 0) {
+    for (const it of normalizedOrderItems) {
       const defaults = await resolveShipmentItemDefaults(db, it.id);
       await insertShipmentItemIfMissing(db, {
         shipmentId,
