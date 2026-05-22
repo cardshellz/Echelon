@@ -32,6 +32,9 @@ const mocks = vi.hoisted(() => {
       createPO: vi.fn(),
       recalculateTotals: vi.fn(),
     },
+    stalePoEscalation: {
+      run: vi.fn(),
+    },
   };
 });
 
@@ -45,6 +48,10 @@ vi.mock("../../../modules/procurement/procurement.storage", () => ({
 
 vi.mock("../../../modules/procurement/purchasing.service", () => ({
   createPurchasingService: () => mocks.purchasing,
+}));
+
+vi.mock("../../../modules/procurement/auto-draft-po-escalation.service", () => ({
+  runStaleAutoDraftPoEscalationCheck: mocks.stalePoEscalation.run,
 }));
 
 vi.mock("../../../storage/base", () => {
@@ -144,6 +151,14 @@ describe("auto-draft job", () => {
     mocks.purchasing.createPO.mockResolvedValue({ id: 700 });
     mocks.storage.bulkCreatePurchaseOrderLines.mockResolvedValue([]);
     mocks.storage.getPurchaseOrderLines.mockResolvedValue([]);
+    mocks.stalePoEscalation.run.mockResolvedValue({
+      sent: false,
+      suppressed: false,
+      reason: "no_critical",
+      criticalCount: 0,
+      signature: null,
+      notificationTypeKey: "auto_draft_po_critical_stale",
+    });
   });
 
   it("creates PO lines only for recommendations that pass the quality gate", async () => {
@@ -198,6 +213,9 @@ describe("auto-draft job", () => {
         }),
       }),
     );
+    expect(mocks.stalePoEscalation.run).toHaveBeenCalledWith({
+      thresholds: undefined,
+    });
   });
 
   it("honors the stricter candidate-score approval policy before mutating draft POs", async () => {

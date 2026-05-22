@@ -2542,3 +2542,36 @@ Next step:
 
 - Continue Phase 10 with escalation notifications for critical stale
   auto-draft POs, using these configured thresholds as the policy source.
+
+### 2026-05-22 - Phase 10 Slice 7: Critical Stale Auto-Draft PO Escalations
+
+Scope:
+
+- Added a shared stale auto-draft PO aging row fetcher so the dashboard route
+  and scheduler escalation path scan the same open auto-draft PO population.
+- Added a critical stale auto-draft PO escalation service that builds a compact
+  operator notification from the existing stale diagnostics and configured
+  warning/critical thresholds.
+- Added duplicate suppression by critical PO/stage signature so unchanged
+  critical stale PO sets do not spam operators inside the cooldown window.
+- Wired the daily/manual auto-draft job to run the escalation check after a
+  successful recommendation run without failing PO creation if notification
+  delivery has an issue.
+- Seeded the `auto_draft_po_critical_stale` notification type with admin/lead
+  defaults and added the Procurement notification category label.
+- Kept this slice notification-only: recommendation math, auto-draft PO
+  creation, PO lifecycle commands, receiving, invoices, payments, and stale
+  threshold configuration behavior are unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/auto-draft-po-escalation.service.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/jobs/__tests__/unit/auto-draft.job.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-escalation.service.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- After merge, verify the notification type migration and one scheduler/manual
+  auto-draft run in production. Then decide whether Phase 10 is complete or
+  whether the dashboard should also show last escalation status/history.

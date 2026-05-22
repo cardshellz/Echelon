@@ -7,7 +7,7 @@ import { users, authRoles } from "./identity.schema";
 // NOTIFICATION SYSTEM
 // ============================================
 
-export const notificationCategoryEnum = ["replenishment", "receiving", "picking", "inventory"] as const;
+export const notificationCategoryEnum = ["replenishment", "receiving", "picking", "inventory", "procurement"] as const;
 export type NotificationCategory = typeof notificationCategoryEnum[number];
 
 // Notification types — static registry of events the system can fire
