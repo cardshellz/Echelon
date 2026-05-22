@@ -33,4 +33,18 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/planDiscountCents: normalizedLine\?\.planDiscountCents/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/couponDiscountCents: normalizedLine\?\.couponDiscountCents/);
   });
+
+  it("syncs WMS address from canonical Shopify shipping fields and handles existing shipments", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(/canonicalShipToFromShopifyUpdate\(shopifyOrder, existing\)/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/shipping_address = \$\{nextShipTo\.address1\}/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/if \(didWmsAddressChange && !isFinalOmsState\)/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/handleWmsAddressChange\(/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/handleAddressChangeOnShipment/);
+  });
+
+  it("does not let Shopify fulfilled webhooks mark WMS shipments shipped", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(/ShipStation shipment flow owns WMS shipment state/);
+    const fulfilledHandler = OMS_WEBHOOKS_SRC.match(/orders\/fulfilled[\s\S]*?eventType: "shipped"/)?.[0] ?? "";
+    expect(fulfilledHandler).not.toMatch(/UPDATE wms\.outbound_shipments SET[\s\S]*status = 'shipped'/);
+  });
 });

@@ -677,23 +677,42 @@ export class WmsSyncService {
       product_id: number | null;
       quantity: number;
     }>(sql`
+      WITH active_shipment_qty AS (
+        SELECT
+          osi.order_item_id,
+          COALESCE(SUM(osi.qty), 0)::int AS qty
+        FROM wms.outbound_shipment_items osi
+        JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+        WHERE os.order_id = ${wmsOrderId}
+          AND os.status NOT IN ('voided', 'cancelled')
+        GROUP BY osi.order_item_id
+      )
       SELECT
         oi.id,
         oi.oms_order_line_id,
         oi.product_id,
-        GREATEST(COALESCE(oi.quantity, 0) - COALESCE(oi.fulfilled_quantity, 0), 0)::int AS quantity
+        GREATEST(
+          COALESCE(oi.quantity, 0)
+          - GREATEST(
+              COALESCE(oi.fulfilled_quantity, 0),
+              COALESCE(asq.qty, 0)
+            ),
+          0
+        )::int AS quantity
       FROM wms.order_items oi
+      LEFT JOIN active_shipment_qty asq
+        ON asq.order_item_id = oi.id
       WHERE oi.order_id = ${wmsOrderId}
         AND COALESCE(oi.requires_shipping, 1) <> 0
-        AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
-        AND oi.status NOT IN ('cancelled', 'completed')
-        AND NOT EXISTS (
-          SELECT 1
-          FROM wms.outbound_shipment_items osi
-          JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
-          WHERE osi.order_item_id = oi.id
-            AND os.status NOT IN ('voided', 'cancelled')
-        )
+        AND oi.status NOT IN ('cancelled')
+        AND GREATEST(
+          COALESCE(oi.quantity, 0)
+          - GREATEST(
+              COALESCE(oi.fulfilled_quantity, 0),
+              COALESCE(asq.qty, 0)
+            ),
+          0
+        ) > 0
     `);
     const shippableShipmentItems = (orphanItemResult.rows ?? [])
       .map((row) => ({

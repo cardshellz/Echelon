@@ -35,8 +35,10 @@ describe("wms-sync existing order reconciliation", () => {
   });
 
   it("repairs existing pending WMS items that are not on an active shipment", () => {
+    expect(WMS_SYNC_SRC).toMatch(/WITH active_shipment_qty AS/);
     expect(WMS_SYNC_SRC).toMatch(/FROM wms\.order_items oi/);
     expect(WMS_SYNC_SRC).toMatch(/os\.status NOT IN \('voided', 'cancelled'\)/);
+    expect(WMS_SYNC_SRC).toMatch(/COALESCE\(asq\.qty, 0\)/);
     expect(WMS_SYNC_SRC).not.toMatch(/if \(missingLines\.length === 0\) return/);
   });
 
