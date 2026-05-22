@@ -383,6 +383,25 @@ type StaleAutoDraftPoDiagnostics = {
   }>;
 };
 
+type ProcurementHealthSummary = {
+  generatedAt: string;
+  status: "healthy" | "warning" | "critical";
+  critical: number;
+  warning: number;
+  total: number;
+  sources: Array<{
+    key: string;
+    label: string;
+    status: "healthy" | "warning" | "critical";
+    critical: number;
+    warning: number;
+    total: number;
+    href: string;
+    actionLabel: string;
+    detail: string;
+  }>;
+};
+
 function formatCents(cents: number): string {
   if (cents >= 100000) return `$${(cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -445,6 +464,12 @@ function stalePoSeverityClass(severity: string): string {
   if (severity === "critical") return "bg-red-50 text-red-700 border-red-200";
   if (severity === "warning") return "bg-amber-50 text-amber-700 border-amber-200";
   return "bg-zinc-50 text-zinc-700 border-zinc-200";
+}
+
+function procurementHealthClass(status: string): string {
+  if (status === "critical") return "border-red-300 bg-red-50/40";
+  if (status === "warning") return "border-amber-300 bg-amber-50/40";
+  return "border-emerald-300 bg-emerald-50/40";
 }
 
 function formatPoTrack(status?: string | null): string {
@@ -520,6 +545,16 @@ export default function PurchasingDashboard() {
 
   const { data: staleAutoDraftPos } = useQuery<StaleAutoDraftPoDiagnostics>({
     queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"],
+    refetchInterval: 5 * 60 * 1000,
+  });
+
+  const { data: procurementHealth } = useQuery<ProcurementHealthSummary>({
+    queryKey: ["/api/procurement/health"],
+    queryFn: async () => {
+      const res = await fetch("/api/procurement/health?limit=25", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch procurement health");
+      return res.json();
+    },
     refetchInterval: 5 * 60 * 1000,
   });
 
@@ -603,6 +638,7 @@ export default function PurchasingDashboard() {
       ]
     : [];
   const showStaleAutoDraftPos = Boolean(staleAutoDraftPos?.totalStale);
+  const showProcurementHealth = Boolean(procurementHealth && procurementHealth.status !== "healthy");
   const staleAutoDraftPoCounts = staleAutoDraftPos
     ? [
         { label: "Review", value: staleAutoDraftPos.counts.reviewPending + staleAutoDraftPos.counts.exceptionBlocked },
@@ -666,6 +702,70 @@ export default function PurchasingDashboard() {
               <Button variant="ghost" size="sm" onClick={() => navigate("/reorder-analysis")}>View Skipped</Button>
             </div>
           </div>
+        )}
+
+        {showProcurementHealth && procurementHealth && (
+          <Card className={procurementHealthClass(procurementHealth.status)}>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className={`mt-0.5 rounded-full p-1.5 ${procurementHealth.status === "critical" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+                    <AlertTriangle className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm font-semibold">Procurement Health Monitor</h2>
+                      <Badge variant={procurementHealth.status === "critical" ? "destructive" : "outline"} className="text-[10px] uppercase">
+                        {procurementHealth.status}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {procurementHealth.critical} critical / {procurementHealth.warning} warning across {procurementHealth.total} active signal{procurementHealth.total === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Existing purchasing guardrails rolled into one status so autopilot drift is visible before it affects inventory or financial reporting.
+                    </p>
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" className="self-start lg:self-center" onClick={() => navigate("/purchase-orders")}>
+                  Open Work Queues
+                  <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {procurementHealth.sources.map((source) => (
+                  <button
+                    key={source.key}
+                    type="button"
+                    className="rounded-md border bg-background/90 p-3 text-left hover:bg-background"
+                    onClick={() => navigate(source.href)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        {source.status === "healthy" ? (
+                          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                        ) : (
+                          <AlertTriangle className={`h-4 w-4 ${source.status === "critical" ? "text-red-600" : "text-amber-600"}`} />
+                        )}
+                        <span className="text-sm font-medium">{source.label}</span>
+                      </div>
+                      <Badge variant={source.status === "critical" ? "destructive" : "outline"} className="text-[10px] uppercase">
+                        {source.status}
+                      </Badge>
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">{source.detail}</div>
+                    <div className="mt-2 flex items-center justify-between text-[11px]">
+                      <span className="text-muted-foreground">
+                        {source.critical} critical / {source.warning} warning
+                      </span>
+                      <span className="text-primary font-medium">{source.actionLabel}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {showLandedCostHealth && landedCostHealth && (

@@ -14,6 +14,7 @@ import { registerPurchasingAdminRoutes } from "./purchasing-admin.routes";
 import { registerInboundShipmentRoutes } from "./inbound-shipment.routes";
 import { registerApLedgerRoutes } from "./ap-ledger.routes";
 import { registerProcurementReportRoutes } from "./procurement-report.routes";
+import { registerProcurementHealthRoutes } from "./procurement-health.routes";
 import {
   registerPurchasingRecommendationAdminRoutes,
   registerPurchasingRecommendationRoutes,
@@ -346,6 +347,7 @@ export function registerPurchasingRoutes(app: Express) {
   registerPurchasingAdminRoutes(app);
 
   registerProcurementReportRoutes(app);
+  registerProcurementHealthRoutes(app);
 
   registerInboundShipmentRoutes(app);
 
