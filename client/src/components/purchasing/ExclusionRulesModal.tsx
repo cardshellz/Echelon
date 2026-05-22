@@ -42,6 +42,24 @@ interface AutoDraftSettings {
   skipNoVendor: boolean;
   candidateScoreStrongThreshold: number;
   candidateScoreReviewThreshold: number;
+  stalePoThresholds: AutoDraftStalePoThresholds;
+}
+
+interface AutoDraftStalePoThresholds {
+  reviewPendingWarningDays: number;
+  reviewPendingCriticalDays: number;
+  supplierSendWarningDays: number;
+  supplierSendCriticalDays: number;
+  supplierFollowupWarningDays: number;
+  supplierFollowupCriticalDays: number;
+  receivingWarningDays: number;
+  receivingCriticalDays: number;
+  apCloseoutWarningDays: number;
+  apCloseoutCriticalDays: number;
+  exceptionBlockedWarningDays: number;
+  exceptionBlockedCriticalDays: number;
+  closeoutWarningDays: number;
+  closeoutCriticalDays: number;
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -52,6 +70,43 @@ const FIELD_LABELS: Record<string, string> = {
   sku_exact: "SKU (exact)",
   tag: "Tag",
 };
+
+const DEFAULT_STALE_PO_THRESHOLDS: AutoDraftStalePoThresholds = {
+  reviewPendingWarningDays: 2,
+  reviewPendingCriticalDays: 5,
+  supplierSendWarningDays: 2,
+  supplierSendCriticalDays: 5,
+  supplierFollowupWarningDays: 7,
+  supplierFollowupCriticalDays: 14,
+  receivingWarningDays: 3,
+  receivingCriticalDays: 10,
+  apCloseoutWarningDays: 7,
+  apCloseoutCriticalDays: 21,
+  exceptionBlockedWarningDays: 1,
+  exceptionBlockedCriticalDays: 3,
+  closeoutWarningDays: 7,
+  closeoutCriticalDays: 14,
+};
+
+const STALE_PO_THRESHOLD_ROWS: Array<{
+  label: string;
+  warningKey: keyof AutoDraftStalePoThresholds;
+  criticalKey: keyof AutoDraftStalePoThresholds;
+}> = [
+  { label: "Review", warningKey: "reviewPendingWarningDays", criticalKey: "reviewPendingCriticalDays" },
+  { label: "Send", warningKey: "supplierSendWarningDays", criticalKey: "supplierSendCriticalDays" },
+  { label: "Supplier", warningKey: "supplierFollowupWarningDays", criticalKey: "supplierFollowupCriticalDays" },
+  { label: "Receiving", warningKey: "receivingWarningDays", criticalKey: "receivingCriticalDays" },
+  { label: "AP", warningKey: "apCloseoutWarningDays", criticalKey: "apCloseoutCriticalDays" },
+  { label: "Exceptions", warningKey: "exceptionBlockedWarningDays", criticalKey: "exceptionBlockedCriticalDays" },
+  { label: "Closeout", warningKey: "closeoutWarningDays", criticalKey: "closeoutCriticalDays" },
+];
+
+function thresholdInputDefaults(): Record<keyof AutoDraftStalePoThresholds, string> {
+  return Object.fromEntries(
+    Object.entries(DEFAULT_STALE_PO_THRESHOLDS).map(([key, value]) => [key, String(value)]),
+  ) as Record<keyof AutoDraftStalePoThresholds, string>;
+}
 
 interface Props {
   open: boolean;
@@ -65,6 +120,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
   const [newValue, setNewValue] = useState("");
   const [candidateScoreStrongThreshold, setCandidateScoreStrongThreshold] = useState("80");
   const [candidateScoreReviewThreshold, setCandidateScoreReviewThreshold] = useState("60");
+  const [stalePoThresholdInputs, setStalePoThresholdInputs] = useState<Record<keyof AutoDraftStalePoThresholds, string>>(thresholdInputDefaults());
 
   const { data: rulesData, isLoading } = useQuery<RulesData>({
     queryKey: ["/api/purchasing/exclusion-rules"],
@@ -138,6 +194,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft-settings"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"] });
     },
     onError: (err: Error) => {
       toast({ title: "Failed to update settings", description: err.message, variant: "destructive" });
@@ -148,6 +205,10 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
     if (!settings) return;
     setCandidateScoreStrongThreshold(String(settings.candidateScoreStrongThreshold ?? 80));
     setCandidateScoreReviewThreshold(String(settings.candidateScoreReviewThreshold ?? 60));
+    const stalePoThresholds = { ...DEFAULT_STALE_PO_THRESHOLDS, ...(settings.stalePoThresholds ?? {}) };
+    setStalePoThresholdInputs(Object.fromEntries(
+      Object.entries(stalePoThresholds).map(([key, value]) => [key, String(value)]),
+    ) as Record<keyof AutoDraftStalePoThresholds, string>);
   }, [settings]);
 
   const handleAddRule = () => {
@@ -178,6 +239,29 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
       candidateScoreStrongThreshold: strongThreshold,
       candidateScoreReviewThreshold: reviewThreshold,
     });
+  };
+
+  const saveStalePoThresholds = () => {
+    const parsed = {} as AutoDraftStalePoThresholds;
+    for (const key of Object.keys(DEFAULT_STALE_PO_THRESHOLDS) as Array<keyof AutoDraftStalePoThresholds>) {
+      const value = Number(stalePoThresholdInputs[key]);
+      if (!Number.isInteger(value) || value < 0 || value > 365) {
+        toast({ title: "Invalid stale PO threshold", description: "Use whole days from 0 to 365.", variant: "destructive" });
+        return;
+      }
+      parsed[key] = value;
+    }
+    for (const row of STALE_PO_THRESHOLD_ROWS) {
+      if (parsed[row.warningKey] > parsed[row.criticalKey]) {
+        toast({
+          title: "Invalid stale PO thresholds",
+          description: `${row.label} warning days must be less than or equal to critical days.`,
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+    updateSettingsMutation.mutate({ stalePoThresholds: parsed });
   };
 
   return (
@@ -380,6 +464,61 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
                     disabled={updateSettingsMutation.isPending}
                   >
                     Save thresholds
+                  </Button>
+                </div>
+              </div>
+              <div className="rounded-md border bg-muted/40 p-3 space-y-3">
+                <div>
+                  <h4 className="text-sm font-medium">Stale PO aging thresholds</h4>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Controls when auto-draft POs appear in stale aging diagnostics. Values are days in the current PO stage.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-[1fr_74px_74px] gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    <span>Stage</span>
+                    <span>Warn</span>
+                    <span>Critical</span>
+                  </div>
+                  {STALE_PO_THRESHOLD_ROWS.map((row) => (
+                    <div key={row.label} className="grid grid-cols-[1fr_74px_74px] gap-2 items-center">
+                      <span className="text-xs font-medium">{row.label}</span>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={365}
+                        step={1}
+                        value={stalePoThresholdInputs[row.warningKey]}
+                        onChange={(event) => setStalePoThresholdInputs((current) => ({
+                          ...current,
+                          [row.warningKey]: event.target.value,
+                        }))}
+                        className="h-8 text-xs"
+                      />
+                      <Input
+                        type="number"
+                        min={0}
+                        max={365}
+                        step={1}
+                        value={stalePoThresholdInputs[row.criticalKey]}
+                        onChange={(event) => setStalePoThresholdInputs((current) => ({
+                          ...current,
+                          [row.criticalKey]: event.target.value,
+                        }))}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={saveStalePoThresholds}
+                    disabled={updateSettingsMutation.isPending}
+                  >
+                    Save aging thresholds
                   </Button>
                 </div>
               </div>

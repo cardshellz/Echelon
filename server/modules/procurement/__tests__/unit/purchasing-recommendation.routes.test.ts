@@ -775,6 +775,12 @@ describe("purchasing recommendation routes", () => {
   });
 
   it("returns stale auto-draft PO diagnostics from the shared action plan", async () => {
+    mocks.procurement.getAutoDraftSettings.mockResolvedValueOnce({
+      stalePoThresholds: {
+        reviewPendingWarningDays: 4,
+        reviewPendingCriticalDays: 9,
+      },
+    });
     mocks.db.execute.mockResolvedValueOnce({
       rows: [
         {
@@ -813,6 +819,10 @@ describe("purchasing recommendation routes", () => {
     expect(status).toBe(200);
     expect(mocks.db.execute).toHaveBeenCalledTimes(1);
     expect(body).toMatchObject({
+      thresholds: {
+        reviewPendingWarningDays: 4,
+        reviewPendingCriticalDays: 9,
+      },
       scannedAutoDraftPos: 1,
       totalStale: 1,
       counts: {
@@ -1153,6 +1163,43 @@ describe("purchasing recommendation routes", () => {
     );
   });
 
+  it("updates stale auto-draft PO aging thresholds", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      stalePoThresholds: {
+        reviewPendingWarningDays: 3,
+        reviewPendingCriticalDays: 6,
+        supplierSendWarningDays: 3,
+        supplierSendCriticalDays: 7,
+        supplierFollowupWarningDays: 8,
+        supplierFollowupCriticalDays: 15,
+        receivingWarningDays: 4,
+        receivingCriticalDays: 11,
+        apCloseoutWarningDays: 8,
+        apCloseoutCriticalDays: 22,
+        exceptionBlockedWarningDays: 2,
+        exceptionBlockedCriticalDays: 4,
+        closeoutWarningDays: 8,
+        closeoutCriticalDays: 16,
+      },
+    });
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(mocks.procurement.updateAutoDraftSettings).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        stalePoThresholds: expect.objectContaining({
+          reviewPendingWarningDays: 3,
+          reviewPendingCriticalDays: 6,
+          exceptionBlockedWarningDays: 2,
+          exceptionBlockedCriticalDays: 4,
+        }),
+      }),
+    );
+  });
+
   it("rejects invalid candidate score threshold settings", async () => {
     server = await startServer(buildApp());
 
@@ -1163,6 +1210,23 @@ describe("purchasing recommendation routes", () => {
 
     expect(status).toBe(400);
     expect(body).toEqual({ error: "candidateScoreReviewThreshold must be less than or equal to candidateScoreStrongThreshold" });
+    expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale PO aging thresholds where warning exceeds critical", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      stalePoThresholds: {
+        receivingWarningDays: 12,
+        receivingCriticalDays: 4,
+      },
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({
+      error: "stalePoThresholds.receivingWarningDays must be less than or equal to receivingCriticalDays",
+    });
     expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
   });
 
