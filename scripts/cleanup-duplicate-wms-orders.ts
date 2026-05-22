@@ -241,6 +241,10 @@ export function decideRow(row: DuplicateWmsOrder, canonical: DuplicateWmsOrder, 
     return { row, action: "keep", reason: "canonical WMS order", shipstationOrderIds: [] };
   }
 
+  if (row.warehouse_status === "cancelled" && row.active_shipment_count === 0) {
+    return { row, action: "already_retired", reason: "duplicate already cancelled", shipstationOrderIds: [] };
+  }
+
   if ((row.item_signature ?? "") !== (canonical.item_signature ?? "")) {
     return {
       row,
@@ -248,10 +252,6 @@ export function decideRow(row: DuplicateWmsOrder, canonical: DuplicateWmsOrder, 
       reason: "item coverage differs from canonical row",
       shipstationOrderIds: activeShipStationOrderIds(row),
     };
-  }
-
-  if (row.warehouse_status === "cancelled" && row.active_shipment_count === 0) {
-    return { row, action: "already_retired", reason: "duplicate already cancelled", shipstationOrderIds: [] };
   }
 
   if (hasShippedEvidence(row)) {
