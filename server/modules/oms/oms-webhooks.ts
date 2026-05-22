@@ -1406,7 +1406,7 @@ export function registerOmsWebhooks(
         })
         .where(eq(omsOrders.id, existing.id));
 
-      const wmsOrder = await db.execute<{
+      const wmsOrders = await db.execute<{
         id: number;
         shipping_name: string | null;
         shipping_company: string | null;
@@ -1430,13 +1430,10 @@ export function registerOmsWebhooks(
         FROM wms.orders
         WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
            OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-        LIMIT 1
       `);
-      const wmsOrderRow = wmsOrder.rows[0] ?? null;
-      const wmsOrderId = wmsOrderRow?.id ?? null;
-      const didWmsAddressChange = wmsOrderRow ? wmsAddressChanged(wmsOrderRow, nextShipTo) : false;
+      const wmsOrderRows = wmsOrders.rows;
 
-      if (wmsOrderId !== null) {
+      if (wmsOrderRows.length > 0) {
         await db.execute(sql`
           UPDATE wms.orders SET
             warehouse_status = CASE
@@ -1458,12 +1455,17 @@ export function registerOmsWebhooks(
             financial_status = ${shopifyOrder.financial_status || "paid"},
             customer_name = ${nextShipTo.name || existing.customerName || null},
             customer_email = ${shopifyOrder.email || existing.customerEmail || null}
-          WHERE id = ${wmsOrderId}
+          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
+             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
         `);
+      }
+
+      for (const wmsOrderRow of wmsOrderRows) {
+        const didWmsAddressChange = wmsAddressChanged(wmsOrderRow, nextShipTo);
 
         if (didWmsAddressChange && !isFinalOmsState) {
           await handleWmsAddressChange(
-            wmsOrderId,
+            wmsOrderRow.id,
             now,
             shopifyOrder.name || externalOrderId,
           );
@@ -1565,7 +1567,7 @@ export function registerOmsWebhooks(
         }
 
         // Update WMS order items if they exist
-        if (wmsOrderId !== null) {
+        if (wmsOrderRows.length > 0) {
           if (isFinalOmsState) {
             console.log(
               `${LOG_PREFIX} orders/updated skipped WMS reconcile for final order ${shopifyOrder.name || externalOrderId}`,
