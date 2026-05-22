@@ -49,7 +49,7 @@ function okOrder(overrides: Partial<WmsOrderRow> = {}): WmsOrderRow {
     id: 42,
     order_number: "1001",
     channel_id: 7,
-    oms_fulfillment_order_id: "42",
+    oms_fulfillment_order_id: null,
     sort_rank: "0000000100",
     external_order_id: "EXT-1001",
     customer_name: "Jane Customer",
@@ -473,7 +473,7 @@ describe("pushShipment :: happy path", () => {
       `wms_order_id:${orderRow.id}|shipment_id:${shipmentRow.id}`,
     );
     expect(payload.advancedOptions.customField3).toBe(
-      `oms_order_id:${orderRow.oms_fulfillment_order_id}`,
+      `oms_order_id:${orderRow.oms_fulfillment_order_id ?? ""}`,
     );
     expect(payload.shipTo.street1).toBe(orderRow.shipping_address);
     expect(payload.shipTo.street2).toBe("");
@@ -732,7 +732,65 @@ describe("pushShipment :: error cases", () => {
     });
   });
 
-  it("does NOT throw when shipment status is 'voided' (re-label path, §6 Commit 18)", async () => {
+  it("throws when the owning WMS order is already shipped", async () => {
+    const mock = makeDb([
+      { rows: [okShipment({ status: "queued" })] },
+      {
+        rows: [
+          okOrder({
+            warehouse_status: "shipped",
+            financial_status: "paid",
+          }),
+        ],
+      },
+    ]);
+    const svc = createShipStationService(mock.db);
+    let err: ShipStationPushError | undefined;
+    try {
+      await svc.pushShipment(okShipment().id);
+    } catch (e) {
+      err = e as ShipStationPushError;
+    }
+    expect(err).toBeInstanceOf(ShipStationPushError);
+    expect(err?.context.field).toBe("order.final_state");
+    expect(err?.context.value).toMatchObject({
+      warehouseStatus: "shipped",
+      financialStatus: "paid",
+    });
+  });
+
+  it("throws when linked OMS is already shipped and fulfilled even if WMS is stale-ready", async () => {
+    const mock = makeDb([
+      { rows: [okShipment({ status: "queued" })] },
+      {
+        rows: [
+          okOrder({
+            warehouse_status: "ready",
+            financial_status: "paid",
+            oms_fulfillment_order_id: "183763",
+          }),
+        ],
+      },
+      { rows: [{ status: "shipped", fulfillment_status: "fulfilled", financial_status: "paid" }] },
+    ]);
+    const svc = createShipStationService(mock.db);
+    let err: ShipStationPushError | undefined;
+    try {
+      await svc.pushShipment(okShipment().id);
+    } catch (e) {
+      err = e as ShipStationPushError;
+    }
+    expect(err).toBeInstanceOf(ShipStationPushError);
+    expect(err?.context.field).toBe("oms.final_state");
+    expect(err?.context.value).toMatchObject({
+      omsOrderId: "183763",
+      status: "shipped",
+      fulfillmentStatus: "fulfilled",
+      reason: "oms_fully_shipped",
+    });
+  });
+
+  it("allows a voided shipment to be pushed again for the re-label path", async () => {
     // Sibling to the two terminal-state rejection cases above: `voided`
     // is the ONE non-{planned,queued} status that pushShipment must
     // accept, because a voided label is re-pushable. Validate we get

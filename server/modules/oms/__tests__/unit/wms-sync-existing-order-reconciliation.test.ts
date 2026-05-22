@@ -42,6 +42,18 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).not.toMatch(/if \(missingLines\.length === 0\) return/);
   });
 
+  it("does not regenerate shipment work for an already shipped OMS order with no open shippable demand", () => {
+    expect(WMS_SYNC_SRC).toMatch(/hasOpenShippableOmsDemand/);
+    expect(WMS_SYNC_SRC).toMatch(/wmsOrderState\?\.warehouseStatus === "shipped"/);
+    expect(WMS_SYNC_SRC).toMatch(/!this\.hasOpenShippableOmsDemand\(omsLines\)/);
+    expect(WMS_SYNC_SRC).toMatch(/return \{ insertedItems: 0, updatedShipments: 0 \}/);
+  });
+
+  it("prefers non-cancelled duplicate WMS rows when choosing the OMS-linked row", () => {
+    expect(WMS_SYNC_SRC).toMatch(/CASE[\s\S]*WHEN \$\{wmsOrders\.warehouseStatus\} = 'cancelled' THEN 2/);
+    expect(WMS_SYNC_SRC).toMatch(/WHEN \$\{wmsOrders\.warehouseStatus\} = 'shipped' THEN 1/);
+  });
+
   it("reopens WMS work when reconciliation adds shippable demand", () => {
     expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders[\s\S]*THEN 'ready'/);
     expect(WMS_SYNC_SRC).toMatch(/ELSE w\.warehouse_status/);

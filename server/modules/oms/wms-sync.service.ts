@@ -132,7 +132,10 @@ export class WmsSyncService {
 
       // 1. Check if already synced (orders.source_table_id points to oms_orders.id)
       const existingWmsOrder = await db
-        .select({ id: wmsOrders.id })
+        .select({
+          id: wmsOrders.id,
+          warehouseStatus: wmsOrders.warehouseStatus,
+        })
         .from(wmsOrders)
         .where(
           and(
@@ -140,6 +143,14 @@ export class WmsSyncService {
             eq(wmsOrders.source, 'oms') // Distinguish from legacy shopify orders
           )
         )
+        .orderBy(sql`
+          CASE
+            WHEN ${wmsOrders.warehouseStatus} = 'cancelled' THEN 2
+            WHEN ${wmsOrders.warehouseStatus} = 'shipped' THEN 1
+            ELSE 0
+          END,
+          ${wmsOrders.id}
+        `)
         .limit(1);
 
       if (existingWmsOrder.length > 0) {
@@ -567,6 +578,17 @@ export class WmsSyncService {
     );
   }
 
+  private hasOpenShippableOmsDemand(lines: Array<typeof omsOrderLines.$inferSelect>): boolean {
+    return lines.some((line) => {
+      if (line.requiresShipping === false) return false;
+      if ((line.quantity ?? 0) <= 0) return false;
+      const lineFulfillmentStatus = String(line.fulfillmentStatus ?? "").toLowerCase();
+      if (lineFulfillmentStatus === "fulfilled") return false;
+      const fulfillableQuantity = line.fulfillableQuantity;
+      return fulfillableQuantity == null || fulfillableQuantity > 0;
+    });
+  }
+
   private async cancelExistingWmsOrderForFinalOmsOrder(omsOrderId: number): Promise<void> {
     await db.execute(sql`
       UPDATE wms.orders
@@ -596,6 +618,26 @@ export class WmsSyncService {
 
     const omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
     if (omsLines.length === 0) return { insertedItems: 0, updatedShipments: 0 };
+
+    const [wmsOrderState] = await db
+      .select({
+        warehouseStatus: wmsOrders.warehouseStatus,
+        channelId: wmsOrders.channelId,
+      })
+      .from(wmsOrders)
+      .where(eq(wmsOrders.id, wmsOrderId))
+      .limit(1);
+
+    if (wmsOrderState?.warehouseStatus === "cancelled") {
+      return { insertedItems: 0, updatedShipments: 0 };
+    }
+
+    if (
+      wmsOrderState?.warehouseStatus === "shipped" &&
+      !this.hasOpenShippableOmsDemand(omsLines)
+    ) {
+      return { insertedItems: 0, updatedShipments: 0 };
+    }
 
     const existingItems = await db
       .select({ omsOrderLineId: wmsOrderItems.omsOrderLineId })
@@ -803,15 +845,10 @@ export class WmsSyncService {
     }
 
     if (updatedShipments === 0) {
-      const [wmsOrder] = await db
-        .select({ channelId: wmsOrders.channelId })
-        .from(wmsOrders)
-        .where(eq(wmsOrders.id, wmsOrderId))
-        .limit(1);
       const created = await createShipmentForOrder(
         db,
         wmsOrderId,
-        wmsOrder?.channelId ?? null,
+        wmsOrderState?.channelId ?? null,
         shippableShipmentItems.map((item) => ({
           id: item.id,
           quantity: item.quantity ?? 0,
