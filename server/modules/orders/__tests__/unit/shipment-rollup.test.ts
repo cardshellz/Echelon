@@ -1445,6 +1445,76 @@ describe("recomputeOrderStatusFromShipments :: state matrix", () => {
     expect(mock.getCallCount()).toBe(2);
   });
 
+  it("open shipment with no shipped progress does not promote an unpicked order", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          {
+            id: 42,
+            warehouse_status: "ready",
+            completed_at: null,
+            shippable_unit_count: 14,
+            picked_unit_count: 0,
+          },
+        ],
+      },
+      { rows: [{ status: "queued" }] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result).toEqual({ warehouseStatus: "ready", changed: false });
+    expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("open shipment rolls invalid unpicked ready_to_ship status back to ready", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          {
+            id: 42,
+            warehouse_status: "ready_to_ship",
+            completed_at: null,
+            shippable_unit_count: 14,
+            picked_unit_count: 0,
+          },
+        ],
+      },
+      { rows: [{ status: "queued" }] },
+      { rows: [] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result).toEqual({ warehouseStatus: "ready", changed: true });
+    expect(mock.getCallCount()).toBe(3);
+  });
+
+  it("open shipment preserves ready_to_ship when all shippable units are picked", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          {
+            id: 42,
+            warehouse_status: "ready_to_ship",
+            completed_at: null,
+            shippable_unit_count: 14,
+            picked_unit_count: 14,
+          },
+        ],
+      },
+      { rows: [{ status: "queued" }] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result).toEqual({
+      warehouseStatus: "ready_to_ship",
+      changed: false,
+    });
+    expect(mock.getCallCount()).toBe(2);
+  });
+
   it("already matches derived state → changed=false, no UPDATE", async () => {
     const mock = makeDb([
       {

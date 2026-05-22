@@ -52,14 +52,32 @@ export interface MarkShipmentResult {
 }
 
 export interface RecomputeResult {
-  /** The warehouse_status as derived from the shipment set. Matches
-   *  `deriveWmsFromShipments`. Returned even when `changed=false` so
-   *  callers can log the observed state. */
+  /** The resulting warehouse_status after applying shipment roll-up
+   *  without clobbering valid in-warehouse pick progress. */
   warehouseStatus: WmsWarehouseStatus;
   /** True when the derived status differs from the current row and an
    *  UPDATE was issued. False when no row was found, when shipments
    *  are empty, or when the current status already matches. */
   changed: boolean;
+}
+
+function shouldPreserveWarehouseProgressDuringOpenShipmentRollup(orderRow: any): boolean {
+  const status = String(orderRow?.warehouse_status ?? "");
+  const shippableUnits = Number(orderRow?.shippable_unit_count ?? 0);
+  const pickedUnits = Number(orderRow?.picked_unit_count ?? 0);
+
+  if (status === "picking") return true;
+  if (
+    status === "picked" ||
+    status === "packing" ||
+    status === "packed" ||
+    status === "ready_to_ship" ||
+    status === "completed"
+  ) {
+    return shippableUnits > 0 && pickedUnits >= shippableUnits;
+  }
+
+  return false;
 }
 
 /**
@@ -686,9 +704,22 @@ export async function recomputeOrderStatusFromShipments(
   // trips is fine — the SHIP_NOTIFY loop is per-shipment and already
   // serial; optimizing to a single query would muddy the types.
   const orderResult: any = await db.execute(sql`
-    SELECT id, warehouse_status, completed_at
-    FROM wms.orders
-    WHERE id = ${wmsOrderId}
+    SELECT
+      o.id,
+      o.warehouse_status,
+      o.completed_at,
+      COALESCE(SUM(CASE
+        WHEN COALESCE(oi.requires_shipping, 1) <> 0 THEN COALESCE(oi.quantity, 0)
+        ELSE 0
+      END), 0)::int AS shippable_unit_count,
+      COALESCE(SUM(CASE
+        WHEN COALESCE(oi.requires_shipping, 1) <> 0 THEN COALESCE(oi.picked_quantity, 0)
+        ELSE 0
+      END), 0)::int AS picked_unit_count
+    FROM wms.orders o
+    LEFT JOIN wms.order_items oi ON oi.order_id = o.id
+    WHERE o.id = ${wmsOrderId}
+    GROUP BY o.id, o.warehouse_status, o.completed_at
     LIMIT 1
   `);
   const orderRow: any = orderResult?.rows?.[0];
@@ -718,6 +749,14 @@ export async function recomputeOrderStatusFromShipments(
   // deletions are extremely rare (admin-only) and always accompanied
   // by an explicit state write.
   if (statuses.length === 0 && derived === "ready") {
+    return { warehouseStatus: orderRow.warehouse_status, changed: false };
+  }
+
+  if (
+    statuses.length > 0 &&
+    derived === "ready" &&
+    shouldPreserveWarehouseProgressDuringOpenShipmentRollup(orderRow)
+  ) {
     return { warehouseStatus: orderRow.warehouse_status, changed: false };
   }
 

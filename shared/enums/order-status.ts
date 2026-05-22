@@ -162,7 +162,7 @@ export function deriveOmsFromWms(
 //   All shipments cancelled         → `cancelled`
 //   All shipments shipped           → `shipped`
 //   Some shipped + some open        → `partially_shipped`
-//   Otherwise (all open, none shipped) → `ready_to_ship`
+//   Otherwise (all open, none shipped) → `ready`
 //   No shipments at all             → `ready`
 //
 // A shipment in `voided` counts as "open" (the label is gone, the
@@ -186,6 +186,7 @@ export function deriveWmsFromShipments(
   if (anyShipped && !anyOpen) return "shipped";
 
   // No shipments have shipped yet, none on hold, not all cancelled.
-  // If mixed open + cancelled, treat as still open → ready_to_ship.
-  return "ready_to_ship";
+  // A queued/planned/labeled shipment means ShipStation work exists; it
+  // does not prove warehouse picking is complete.
+  return "ready";
 }
