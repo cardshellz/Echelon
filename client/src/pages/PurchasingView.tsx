@@ -292,6 +292,41 @@ interface RecommendationReviewQueueResponse {
   items: RecommendationReviewQueueItem[];
 }
 
+interface AcceptedRecommendationQueueItem {
+  recommendationId: string;
+  kind: Exclude<ReviewQueueKind, "all">;
+  decision: RecommendationDecision;
+  source: "current_recommendation" | "decision_snapshot";
+  current: boolean;
+  sku: string | null;
+  productName: string | null;
+  productId: number | null;
+  productVariantId: number | null;
+  preferredVendorId: number | null;
+  preferredVendorName: string | null;
+  suggestedOrderQty: number;
+  orderUomLabel: string;
+  candidateScore?: ReorderItem["recommendationCandidateScore"] | null;
+  statusReason: string;
+  action: {
+    action: string;
+    label: string;
+    href: string;
+  };
+}
+
+interface AcceptedRecommendationQueueResponse {
+  generatedAt: string;
+  lookbackDays: number;
+  summary: {
+    total: number;
+    current: number;
+    stale: number;
+    vendorCount: number;
+  };
+  items: AcceptedRecommendationQueueItem[];
+}
+
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: any; priority: number }> = {
   stockout: { label: "Stockout Imminent", bg: "bg-red-500/10", text: "text-red-500", icon: AlertTriangle, priority: 0 },
   order_now: { label: "Critical Restock", bg: "bg-orange-500/10", text: "text-orange-500", icon: AlertTriangle, priority: 1 },
@@ -424,6 +459,15 @@ export default function PurchasingView() {
     },
   });
 
+  const { data: acceptedRecommendationQueue } = useQuery<AcceptedRecommendationQueueResponse>({
+    queryKey: ["/api/purchasing/recommendation-accepted-queue"],
+    queryFn: async () => {
+      const res = await fetch("/api/purchasing/recommendation-accepted-queue?limit=25");
+      if (!res.ok) throw new Error("Failed to fetch accepted recommendation queue");
+      return res.json();
+    },
+  });
+
   const autoDraftMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch("/api/purchasing/auto-draft-run", {
@@ -476,6 +520,7 @@ export default function PurchasingView() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
       toast({
         title: "Recommendation Decision Recorded",
         description: `${variables.item.sku} marked ${formatRecommendationDecision(variables.decision).toLowerCase()}.`,
@@ -543,6 +588,7 @@ export default function PurchasingView() {
   const filteredReviewQueue = (recommendationReviewQueue?.items ?? [])
     .filter((item) => reviewQueueFilter === "all" || item.kind === reviewQueueFilter)
     .slice(0, 12);
+  const acceptedQueueItems = (acceptedRecommendationQueue?.items ?? []).slice(0, 8);
   const approvalPolicyImpact = analysis?.approvalPolicyImpact;
 
   const SortIcon = ({ field }: { field: string }) => {
@@ -643,16 +689,20 @@ export default function PurchasingView() {
     return "bg-zinc-50 text-zinc-600 border-zinc-200";
   };
 
-  const handleReviewQueueAction = (item: RecommendationReviewQueueItem) => {
-    if (item.action.href.startsWith("/reorder-analysis")) {
-      const params = new URLSearchParams(item.action.href.split("?")[1] ?? "");
+  const handleRecommendationHref = (href: string) => {
+    if (href.startsWith("/reorder-analysis")) {
+      const params = new URLSearchParams(href.split("?")[1] ?? "");
       const requestedBand = params.get("candidateBand");
       if (isCandidateBandFilter(requestedBand)) setCandidateBandFilter(requestedBand);
       const requestedQueue = params.get("reviewQueue");
       if (isReviewQueueKind(requestedQueue)) setReviewQueueFilter(requestedQueue);
       return;
     }
-    navigate(item.action.href);
+    navigate(href);
+  };
+
+  const handleReviewQueueAction = (item: RecommendationReviewQueueItem) => {
+    handleRecommendationHref(item.action.href);
   };
 
   return (
@@ -949,6 +999,73 @@ export default function PurchasingView() {
                   ))}
                 </div>
               )}
+            </CardContent>
+          </Card>
+        )}
+
+        {(acceptedRecommendationQueue?.summary.total ?? 0) > 0 && (
+          <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <CardTitle className="text-lg">Accepted PO Review Queue</CardTitle>
+                  <CardDescription>Recommendations accepted by operators and ready for explicit PO review before any purchase mutation.</CardDescription>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-right text-xs">
+                  <div className="rounded-md border bg-white px-2 py-1 dark:bg-zinc-900">
+                    <div className="font-semibold">{acceptedRecommendationQueue?.summary.current ?? 0}</div>
+                    <div className="text-zinc-500">Current</div>
+                  </div>
+                  <div className="rounded-md border bg-white px-2 py-1 dark:bg-zinc-900">
+                    <div className="font-semibold">{acceptedRecommendationQueue?.summary.stale ?? 0}</div>
+                    <div className="text-zinc-500">Stale</div>
+                  </div>
+                  <div className="rounded-md border bg-white px-2 py-1 dark:bg-zinc-900">
+                    <div className="font-semibold">{acceptedRecommendationQueue?.summary.vendorCount ?? 0}</div>
+                    <div className="text-zinc-500">Vendors</div>
+                  </div>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                {acceptedQueueItems.map((item) => (
+                  <div key={`${item.recommendationId}-${item.kind}-accepted`} className="rounded-md border bg-white dark:bg-zinc-900 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-xs font-semibold text-primary truncate">{item.sku}</span>
+                          <Badge variant="outline" className={item.current ? "text-[10px] bg-green-50 text-green-700 border-green-200" : "text-[10px] bg-amber-50 text-amber-700 border-amber-200"}>
+                            {item.current ? "Current" : "Snapshot"}
+                          </Badge>
+                          <Badge variant="outline" className={`text-[10px] ${recommendationDecisionClass(item.decision.decision)}`}>
+                            {formatRecommendationDecision(item.decision.decision)}
+                          </Badge>
+                          {item.candidateScore ? (
+                            <Badge variant="outline" className={`text-[10px] capitalize ${candidateBandClass(item.candidateScore.band)}`}>
+                              {item.candidateScore.score} - {formatCandidateBand(item.candidateScore.band)}
+                            </Badge>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 text-sm font-medium truncate">{item.productName}</div>
+                        <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.statusReason}</p>
+                        <div className="mt-2 text-[11px] text-zinc-500">
+                          {item.suggestedOrderQty} {item.orderUomLabel}
+                          {item.preferredVendorName ? ` - ${item.preferredVendorName}` : ""}
+                          {item.decision.decidedAt ? (
+                            <span className="ml-2">
+                              Accepted {new Date(item.decision.decidedAt).toLocaleDateString()}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <Button size="sm" variant="outline" className="h-7 text-[11px] flex-shrink-0" onClick={() => handleRecommendationHref(item.action.href)}>
+                        {item.action.label}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </CardContent>
           </Card>
         )}
