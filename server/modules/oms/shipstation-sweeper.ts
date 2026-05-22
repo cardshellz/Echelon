@@ -1,13 +1,38 @@
 import { db } from "../../../server/db";
 import { sql } from "drizzle-orm";
 
+async function cancelShipStationAwaitingOrder(
+  baseUrl: string,
+  encodedAuth: string,
+  order: any,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/orders/createorder`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Basic ${encodedAuth}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...order,
+      orderStatus: "cancelled",
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`ShipStation cancel failed (${res.status}): ${body}`);
+  }
+}
+
 /**
- * Sweeps the ShipStation awaiting_shipment queue and flags duplicate or
- * stale Echelon-owned orders for review.
+ * Sweeps the ShipStation awaiting_shipment queue and handles duplicate or
+ * stale Echelon-owned orders.
  *
- * This deliberately does not delete ShipStation orders. Manual splits and
- * operator-created recovery orders are too easy to misclassify from a broad
- * queue sweep; deletion belongs behind an explicit operator action.
+ * Final Echelon orders (shipped/cancelled) must not remain live in
+ * ShipStation. For those, the sweeper actively cancels the awaiting SS
+ * copy and mirrors the WMS shipment to cancelled when it is still pre-label.
+ * Non-final duplicate cleanup remains review-only because those can still be
+ * legitimate operator-created recovery orders.
  */
 export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   const baseUrl = "https://ssapi.shipstation.com";
@@ -18,6 +43,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   let page = 1;
   const pageSize = 100;
   let totalFlagged = 0;
+  let totalCancelled = 0;
   
   while (true) {
     const res = await fetch(`${baseUrl}/orders?orderStatus=awaiting_shipment&pageSize=${pageSize}&page=${page}`, {
@@ -72,12 +98,13 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
       }
 
       // 1. If the order is fully shipped/cancelled in Echelon, any
-      //    Echelon-owned awaiting_shipment copy is stale and needs review.
+      //    Echelon-owned awaiting_shipment copy is stale and must be
+      //    cancelled in ShipStation so it cannot ship later.
       // 2. If the order is not shipped and multiple Echelon-owned copies
       //    exist, flag the older OMS-level duplicates for review. Do not
       //    touch manual/user-created ShipStation orders.
       
-      let toReview = [];
+      let toReview: any[] = [];
       if (isShippedOrCancelled) {
         toReview = orders.filter(o => o.orderKey?.startsWith("echelon-oms-") || o.orderKey?.startsWith("echelon-wms-shp-"));
       } else if (orders.length > 1) {
@@ -102,16 +129,68 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
             : "duplicate_echelon_shipstation_order",
         };
 
-        console.warn(
-          `[ShipStation Sweeper] Flagging SS queue review for ${o.orderId} (${o.orderNumber}, key=${orderKey})`,
-        );
+        if (isShippedOrCancelled) {
+          try {
+            await cancelShipStationAwaitingOrder(baseUrl, encodedAuth, o);
+            totalCancelled++;
+
+            console.warn(
+              `[ShipStation Sweeper] Cancelled stale SS awaiting order ${o.orderId} (${o.orderNumber}, key=${orderKey})`,
+            );
+
+            if (wmsMatch) {
+              const shipmentId = Number(wmsMatch[1]);
+              await db.execute(sql`
+                UPDATE wms.outbound_shipments
+                SET status = CASE
+                      WHEN status IN ('planned', 'queued', 'on_hold') THEN 'cancelled'
+                      ELSE status
+                    END,
+                    cancelled_at = CASE
+                      WHEN status IN ('planned', 'queued', 'on_hold') THEN NOW()
+                      ELSE cancelled_at
+                    END,
+                    requires_review = CASE
+                      WHEN status IN ('planned', 'queued', 'on_hold') THEN false
+                      ELSE requires_review
+                    END,
+                    review_reason = CASE
+                      WHEN status IN ('planned', 'queued', 'on_hold') THEN NULL
+                      ELSE review_reason
+                    END,
+                    updated_at = NOW()
+                WHERE id = ${shipmentId}
+              `);
+              continue;
+            }
+
+            if (omsMatch) {
+              const omsOrderId = Number(omsMatch[1]);
+              await db.execute(sql`
+                INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+                VALUES (
+                  ${omsOrderId},
+                  'shipstation_stale_queue_order_cancelled',
+                  ${JSON.stringify(details)}::jsonb,
+                  NOW()
+                )
+              `);
+              continue;
+            }
+          } catch (err: any) {
+            console.error(
+              `[ShipStation Sweeper] Failed to cancel stale SS order ${o.orderId} (${o.orderNumber}, key=${orderKey}): ${err?.message ?? err}`,
+            );
+            details.reason = "stale_shipstation_cancel_failed";
+          }
+        }
 
         if (wmsMatch) {
           const shipmentId = Number(wmsMatch[1]);
           await db.execute(sql`
             UPDATE wms.outbound_shipments
             SET requires_review = true,
-                review_reason = 'shipstation_queue_review',
+                review_reason = ${isShippedOrCancelled ? "shipstation_cancel_failed" : "shipstation_queue_review"},
                 updated_at = NOW()
             WHERE id = ${shipmentId}
           `);
@@ -139,7 +218,9 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
     page++;
   }
 
-  if (totalFlagged > 0) {
-    console.log(`[ShipStation Sweeper] Done. Flagged ${totalFlagged} straggler/duplicate orders for review.`);
+  if (totalFlagged > 0 || totalCancelled > 0) {
+    console.log(
+      `[ShipStation Sweeper] Done. Cancelled ${totalCancelled} stale order(s); flagged ${totalFlagged} straggler/duplicate order(s) for review.`,
+    );
   }
 }

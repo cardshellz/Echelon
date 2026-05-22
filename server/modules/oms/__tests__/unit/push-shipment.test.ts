@@ -680,6 +680,58 @@ describe("pushShipment :: error cases", () => {
     );
   });
 
+  it("throws when shipment requires review even if it is otherwise pushable", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          okShipment({
+            status: "queued",
+            requires_review: true,
+            review_reason: "shipstation_queue_review",
+          }),
+        ],
+      },
+    ]);
+    const svc = createShipStationService(mock.db);
+    let err: ShipStationPushError | undefined;
+    try {
+      await svc.pushShipment(okShipment().id);
+    } catch (e) {
+      err = e as ShipStationPushError;
+    }
+    expect(err).toBeInstanceOf(ShipStationPushError);
+    expect(err?.context.field).toBe("shipment.requires_review");
+    expect(err?.context.value).toBe("shipstation_queue_review");
+  });
+
+  it("throws when the owning WMS order is already cancelled/refunded", async () => {
+    const mock = makeDb([
+      { rows: [okShipment({ status: "queued" })] },
+      {
+        rows: [
+          okOrder({
+            warehouse_status: "cancelled",
+            financial_status: "refunded",
+            cancelled_at: new Date("2026-05-22T12:00:00Z"),
+          }),
+        ],
+      },
+    ]);
+    const svc = createShipStationService(mock.db);
+    let err: ShipStationPushError | undefined;
+    try {
+      await svc.pushShipment(okShipment().id);
+    } catch (e) {
+      err = e as ShipStationPushError;
+    }
+    expect(err).toBeInstanceOf(ShipStationPushError);
+    expect(err?.context.field).toBe("order.final_state");
+    expect(err?.context.value).toMatchObject({
+      warehouseStatus: "cancelled",
+      financialStatus: "refunded",
+    });
+  });
+
   it("does NOT throw when shipment status is 'voided' (re-label path, §6 Commit 18)", async () => {
     // Sibling to the two terminal-state rejection cases above: `voided`
     // is the ONE non-{planned,queued} status that pushShipment must

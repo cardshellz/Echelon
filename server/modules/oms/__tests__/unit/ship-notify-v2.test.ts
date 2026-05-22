@@ -220,6 +220,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [] },
       // 5. SELECT oms_fulfillment_order_id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // finality guard
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
       // OMS line status derivation
       { rows: [] },
       // delayed tracking provider guard
@@ -255,6 +257,67 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     // Verify the audit event and Shopify fulfillment retry were inserted.
     const insertCalls = mock.calls.filter((c) => c.tag === "insert");
     expect(insertCalls.length).toBe(2);
+  });
+
+  it("does not re-fulfill OMS or push Shopify when SS ships after a final refunded order", async () => {
+    const shipmentPayload = makeShipmentPayload();
+    const mock = makeDb([
+      // shipstation_order_id lookup
+      { rows: [{ id: 501, order_id: 42, status: "queued" }] },
+      // markShipmentShipped load-current
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "queued",
+            tracking_number: null,
+            carrier: null,
+            tracking_url: null,
+          },
+        ],
+      },
+      // UPDATE outbound_shipments -> shipped
+      { rows: [] },
+      // recompute: SELECT order
+      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
+      // recompute: SELECT shipment statuses
+      { rows: [{ status: "shipped" }] },
+      // recompute: UPDATE wms.orders
+      { rows: [] },
+      // resolve OMS id
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // finality guard
+      { rows: [{ status: "shipped", financial_status: "refunded" }] },
+      // mark shipment review
+      { rows: [] },
+    ]);
+
+    (mock.db as any).__fulfillmentPush = {
+      pushShopifyFulfillment: vi.fn(),
+      pushTracking: vi.fn(),
+    };
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const svc = createShipStationService(mock.db);
+    const processed = await svc.processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+
+    const updateCalls = mock.calls.filter((c) => c.tag === "update");
+    expect(updateCalls.length).toBe(0);
+
+    const insertCalls = mock.calls.filter((c) => c.tag === "insert");
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]!.values.eventType).toBe("shipstation_shipped_after_final_order");
+
+    const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
+    expect(sqlText).toMatch(/review_reason/);
+    expect(sqlText).toMatch(/shipstation_shipped_after_refund/);
+    expect(sqlText).not.toMatch(/shipped_by_line/);
+    expect((mock.db as any).__fulfillmentPush.pushShopifyFulfillment).not.toHaveBeenCalled();
   });
 
   it("rejects non-ShipStation resource URLs before fetch", async () => {
@@ -367,6 +430,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [] },
       // resolve OMS id.
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // finality guard.
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
       // OMS line status derivation.
       { rows: [] },
       // delayed tracking provider guard.
@@ -507,6 +572,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [] },
       // resolve OMS id.
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // finality guard.
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
       // OMS line status derivation.
       { rows: [] },
       // applyShipmentQuantitiesToWmsOrderItems.
@@ -597,6 +664,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
       { rows: [] },
       { rows: [] },
       { rows: [{ provider: "shopify" }] },
@@ -841,11 +909,13 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       { rows: [] },
       // 7. SELECT oms_fulfillment_order_id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
-      // 8. OMS line status derivation
+      // 8. finality guard
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+      // 9. OMS line status derivation
       { rows: [] },
-      // 9. delayed tracking provider guard
+      // 10. delayed tracking provider guard
       { rows: [{ provider: "shopify" }] },
-      // 10. Shopify fulfillment provider guard
+      // 11. Shopify fulfillment provider guard
       { rows: [{ provider: "shopify" }] },
     ];
   }
@@ -1062,6 +1132,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ status: "shipped", financial_status: "paid" }] },
       { rows: [] },
       { rows: [{ provider: "shopify" }] },
       { rows: [{ provider: "shopify" }] },
@@ -1105,6 +1176,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ status: "shipped", financial_status: "paid" }] },
       { rows: [] },
       { rows: [{ provider: "ebay" }] },
       { rows: [] },
@@ -1159,6 +1231,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
       { rows: [] },
       { rows: [{ provider: "ebay" }] },
       { rows: [] },
@@ -1242,6 +1315,8 @@ describe("processShipNotify V2 :: error resilience", () => {
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "200" }] },
+      // finality guard
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
       // OMS line status derivation
       { rows: [] },
       // shouldEnqueueDelayedTrackingPush provider lookup
@@ -1293,6 +1368,8 @@ describe("processShipNotify V2 :: error resilience", () => {
       { rows: [{ status: "shipped" }] },
       { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "202" }] },
+      // finality guard
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
       // OMS line status derivation
       { rows: [] },
       // shouldEnqueueDelayedTrackingPush provider lookup
