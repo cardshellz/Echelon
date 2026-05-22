@@ -122,6 +122,23 @@ describe("cleanup-duplicate-wms-orders", () => {
     });
   });
 
+  it("treats cancelled inactive duplicates as already retired even when item coverage differs", () => {
+    const canonical = row({ wms_order_id: 1, item_signature: "A=1" });
+    const duplicate = row({
+      wms_order_id: 2,
+      warehouse_status: "cancelled",
+      item_signature: "B=1",
+      active_shipment_count: 0,
+      active_shipstation_count: 0,
+      shipments: [{ id: 889, status: "cancelled", shipstation_order_id: null, tracking_number: null }],
+    });
+
+    expect(decideRow(duplicate, canonical, parseFlags([]))).toMatchObject({
+      action: "already_retired",
+      reason: "duplicate already cancelled",
+    });
+  });
+
   it("builds one plan per duplicate OMS order", () => {
     const plans = buildPlans([
       row({ wms_order_id: 1, shipment_count: 0, active_shipment_count: 0, active_shipstation_count: 0, shipments: [] }),
