@@ -2607,3 +2607,32 @@ Next step:
 - Continue Phase 11 by adding more health sources into the same monitor, likely
   supplier setup gaps and in-flight PO supplier/receiving aging, before wiring
   broader stop conditions or notification policies.
+
+### 2026-05-22 - Phase 11 Slice 2: Supplier Setup Gaps In Health Monitor
+
+Scope:
+
+- Extracted purchasing recommendation context loading into a shared helper so
+  supplier setup diagnostics and the health monitor use the same defaults,
+  exclusion rules, and product metadata inputs.
+- Extracted the supplier setup gap builder into a shared service used by both
+  `/api/purchasing/supplier-setup-gaps` and `/api/procurement/health`.
+- Added supplier setup gaps as a first-class procurement health source with
+  blocked recommendations counted as critical and review recommendations
+  counted as warnings.
+- Kept this slice read-only: forecast math, recommendation ranking, auto-draft
+  PO behavior, PO lifecycle commands, receiving, landed-cost allocation, AP,
+  and notification policies are unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-escalation.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts`
+- Passed: `git diff --check` with CRLF normalization warnings only.
+
+Next step:
+
+- Continue Phase 11 by adding in-flight PO supplier/receiving aging into the
+  same health monitor, then decide whether any of the health sources should get
+  escalation notifications or hard stop conditions.

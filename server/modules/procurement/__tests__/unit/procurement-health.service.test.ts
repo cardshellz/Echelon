@@ -46,15 +46,29 @@ describe("buildProcurementHealthSummary", () => {
         critical: 0,
         warning: 2,
       },
+      supplierSetupGaps: {
+        totalGapItems: 2,
+        counts: {
+          missingVendor: 1,
+          missingSupplierCost: 0,
+          lastPurchaseCost: 0,
+          staleSupplierCost: 0,
+          unverifiedSupplierCost: 0,
+          defaultLeadTime: 1,
+          productLeadTimeFallback: 0,
+          blockedRecommendations: 1,
+          reviewRecommendations: 1,
+        },
+      },
       generatedAt: new Date("2026-05-10T12:00:00.000Z"),
     });
 
     expect(summary).toMatchObject({
       generatedAt: "2026-05-10T12:00:00.000Z",
       status: "critical",
-      critical: 1,
-      warning: 2,
-      total: 2,
+      critical: 2,
+      warning: 3,
+      total: 3,
       sources: [
         {
           key: "stale_auto_draft_pos",
@@ -71,6 +85,14 @@ describe("buildProcurementHealthSummary", () => {
           warning: 2,
           total: 2,
           href: "/shipments",
+        },
+        {
+          key: "supplier_setup_gaps",
+          status: "critical",
+          critical: 1,
+          warning: 1,
+          total: 2,
+          href: "/suppliers",
         },
       ],
     });

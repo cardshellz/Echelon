@@ -1,4 +1,5 @@
 import type { StaleAutoDraftPoDiagnostics } from "./auto-draft-po-aging.service";
+import type { SupplierSetupGaps } from "./supplier-setup-gaps.service";
 
 export type ProcurementHealthSeverity = "critical" | "warning" | "healthy";
 
@@ -29,6 +30,8 @@ type LandedCostHealthLike = {
   warning: number;
 };
 
+type SupplierSetupGapsLike = Pick<SupplierSetupGaps, "totalGapItems" | "counts">;
+
 function statusFromCounts(critical: number, warning: number): ProcurementHealthSeverity {
   if (critical > 0) return "critical";
   if (warning > 0) return "warning";
@@ -46,12 +49,15 @@ function countNonHealthy(sources: ProcurementHealthSource[]): number {
 export function buildProcurementHealthSummary(input: {
   staleAutoDraftPos: StaleAutoDraftPoDiagnostics;
   landedCostHealth: LandedCostHealthLike;
+  supplierSetupGaps?: SupplierSetupGapsLike;
   generatedAt?: Date;
 }): ProcurementHealthSummary {
   const staleCritical = input.staleAutoDraftPos.counts.critical;
   const staleWarning = input.staleAutoDraftPos.counts.warning;
   const landedCritical = input.landedCostHealth.critical;
   const landedWarning = input.landedCostHealth.warning;
+  const supplierCritical = input.supplierSetupGaps?.counts.blockedRecommendations ?? 0;
+  const supplierWarning = input.supplierSetupGaps?.counts.reviewRecommendations ?? 0;
 
   const sources: ProcurementHealthSource[] = [
     {
@@ -77,6 +83,20 @@ export function buildProcurementHealthSummary(input: {
       detail: "Inbound costing and allocation work that can block final inventory cost reporting.",
     },
   ];
+
+  if (input.supplierSetupGaps) {
+    sources.push({
+      key: "supplier_setup_gaps",
+      label: "Supplier setup gaps",
+      status: statusFromCounts(supplierCritical, supplierWarning),
+      critical: supplierCritical,
+      warning: supplierWarning,
+      total: input.supplierSetupGaps.totalGapItems,
+      href: "/suppliers",
+      actionLabel: "Open Suppliers",
+      detail: "Vendor, supplier cost, lead-time, MOQ, or UOM gaps blocking reliable purchasing recommendations.",
+    });
+  }
 
   const critical = sources.reduce((sum, source) => sum + source.critical, 0);
   const warning = sources.reduce((sum, source) => sum + source.warning, 0);
