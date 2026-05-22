@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   fetchAutoDraftPoAgingRows: vi.fn(),
   fetchInFlightPoAgingRows: vi.fn(),
   loadPurchasingRecommendationContext: vi.fn(),
+  sendProcurementHealthCriticalEscalation: vi.fn(),
   shipmentTracking: {
     getLandedCostHealth: vi.fn(),
   },
@@ -40,6 +41,9 @@ vi.mock("../../in-flight-po-aging.repository", () => ({
 vi.mock("../../purchasing-recommendation-context.service", () => ({
   loadPurchasingRecommendationContext: mocks.loadPurchasingRecommendationContext,
 }));
+vi.mock("../../procurement-health-escalation.service", () => ({
+  sendProcurementHealthCriticalEscalation: mocks.sendProcurementHealthCriticalEscalation,
+}));
 
 import { registerProcurementHealthRoutes } from "../../procurement-health.routes";
 
@@ -63,8 +67,12 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
   });
 }
 
-async function requestJson(baseUrl: string, path: string) {
-  const res = await fetch(`${baseUrl}${path}`);
+async function requestJson(baseUrl: string, method: string, path: string, body?: unknown) {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
@@ -92,6 +100,14 @@ describe("procurement health routes", () => {
       status: "healthy",
       critical: 0,
       warning: 0,
+    });
+    mocks.sendProcurementHealthCriticalEscalation.mockResolvedValue({
+      sent: true,
+      suppressed: false,
+      reason: "sent",
+      criticalCount: 1,
+      signature: "supplier_setup_gaps:1:0:1",
+      notificationTypeKey: "procurement_health_critical",
     });
   });
 
@@ -124,7 +140,7 @@ describe("procurement health routes", () => {
     ]);
     server = await startServer(buildApp());
 
-    const { status, body } = await requestJson(server.url, "/api/procurement/health?limit=10");
+    const { status, body } = await requestJson(server.url, "GET", "/api/procurement/health?limit=10");
 
     expect(status).toBe(200);
     expect(mocks.shipmentTracking.getLandedCostHealth).toHaveBeenCalledWith({ limit: 10 });
@@ -176,7 +192,7 @@ describe("procurement health routes", () => {
     ]);
     server = await startServer(buildApp());
 
-    const { status, body } = await requestJson(server.url, "/api/procurement/health?limit=10");
+    const { status, body } = await requestJson(server.url, "GET", "/api/procurement/health?limit=10");
 
     expect(status).toBe(200);
     expect(mocks.fetchInFlightPoAgingRows).toHaveBeenCalled();
@@ -190,5 +206,54 @@ describe("procurement health routes", () => {
         href: "/purchase-orders",
       }),
     ]));
+  });
+
+  it("can send a deduped critical health escalation from the shared health summary", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 101,
+        variant_id: 1001,
+        base_sku: "NO-VENDOR",
+        product_name: "No Vendor Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: null,
+        vendor_lead_time_days: null,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 2,
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/procurement/health/escalation?limit=10", {
+      force: true,
+      dedupeHours: 12,
+    });
+
+    expect(status).toBe(200);
+    expect(mocks.sendProcurementHealthCriticalEscalation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "critical",
+        critical: 1,
+      }),
+      { dedupeHours: 12, force: true },
+    );
+    expect(body).toMatchObject({
+      health: {
+        status: "critical",
+        critical: 1,
+      },
+      escalation: {
+        sent: true,
+        notificationTypeKey: "procurement_health_critical",
+      },
+    });
   });
 });

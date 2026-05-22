@@ -2667,3 +2667,34 @@ Next step:
   conditions for critical health sources, or move into the next procurement
   hardening phase if the read-only monitor now covers the active operational
   drift sources.
+
+### 2026-05-22 - Phase 11 Slice 4: Critical Procurement Health Escalation
+
+Scope:
+
+- Added a procurement health critical escalation service that turns the existing
+  aggregate health summary into a compact operator notification when any health
+  source is critical.
+- Dedupe is based on the critical-source signature, so repeated checks do not
+  spam operators unless the critical source mix or counts change, or a caller
+  explicitly forces a resend.
+- Added the `procurement_health_critical` notification type with admin and lead
+  defaults enabled and picker defaults disabled.
+- Added a guarded manual `POST /api/procurement/health/escalation` endpoint
+  that reuses the same summary builder as the dashboard and returns both the
+  health summary and send/suppression result.
+- Kept this slice notification-only: no hard stops, no recommendation math
+  changes, no auto-draft PO behavior changes, and no receiving, landed-cost, AP,
+  or supplier lifecycle mutations.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/procurement-health-escalation.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-escalation.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts server/modules/procurement/__tests__/unit/in-flight-po-aging.service.test.ts server/modules/procurement/__tests__/unit/procurement-health-escalation.service.test.ts`
+
+Next step:
+
+- Move out of Phase 11 only after deciding whether the health escalation should
+  be called from a scheduled job; otherwise start the next procurement phase
+  around forecast recommendation auditability and operator acceptance workflow.
