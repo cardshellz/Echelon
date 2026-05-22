@@ -15,11 +15,13 @@ import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import {
   outboundShipments,
   productLocations,
+  productVariants,
   warehouseLocations,
   wmsOrders,
   wmsOrderItems,
 } from "@shared/schema";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
+import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, type ShippingServiceLevel } from "../orders/sort-rank";
 import {
@@ -870,6 +872,311 @@ export class WmsSyncService {
     }
 
     return { insertedItems: insertedItems.length, updatedShipments };
+  }
+
+  /**
+   * Propagate order edits from OMS to WMS after an orders/updated webhook.
+   * Diffs OMS line items against WMS order items and applies changes
+   * based on the WMS item's pick status.
+   */
+  async propagateOmsEditsToWms(
+    omsOrderId: number,
+    shopifyLineItems?: any[],
+  ): Promise<{
+    updated: number;
+    added: number;
+    removed: number;
+    flaggedForReview: string[];
+  }> {
+    const LOG = "[WMS Edit Propagation]";
+    const result = { updated: 0, added: 0, removed: 0, flaggedForReview: [] as string[] };
+
+    // 1. Find WMS order
+    const wmsOrderResult = await db.execute<{
+      id: number;
+      warehouse_status: string;
+    }>(sql`
+      SELECT id, warehouse_status FROM wms.orders
+      WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrderId)})
+         OR (source = 'shopify' AND source_table_id = ${String(omsOrderId)})
+      LIMIT 1
+    `);
+    if (wmsOrderResult.rows.length === 0) return result;
+
+    const wmsOrderId = wmsOrderResult.rows[0].id;
+    const warehouseStatus = wmsOrderResult.rows[0].warehouse_status;
+
+    if (["shipped", "cancelled"].includes(warehouseStatus)) {
+      console.log(`${LOG} Skipping order ${wmsOrderId} — terminal state '${warehouseStatus}'`);
+      return result;
+    }
+
+    // 2. Current OMS lines (already updated by webhook handler)
+    const omsLines = await db
+      .select()
+      .from(omsOrderLines)
+      .where(eq(omsOrderLines.orderId, omsOrderId));
+
+    // 3. Current WMS items
+    const wmsItems = await db
+      .select()
+      .from(wmsOrderItems)
+      .where(eq(wmsOrderItems.orderId, wmsOrderId));
+
+    const wmsItemByOmsLineId = new Map(
+      wmsItems
+        .filter((item) => item.omsOrderLineId != null)
+        .map((item) => [item.omsOrderLineId!, item]),
+    );
+    const omsLineById = new Map(omsLines.map((line) => [line.id, line]));
+
+    // Shopify external line IDs still in the webhook payload
+    const shopifyLineIdSet = shopifyLineItems
+      ? new Set(shopifyLineItems.map((item: any) => String(item.id)))
+      : null;
+
+    const changes: string[] = [];
+
+    // 4. Process existing WMS items — detect qty changes and removals
+    for (const wmsItem of wmsItems) {
+      if (!wmsItem.omsOrderLineId) continue;
+      if (wmsItem.status === "cancelled") continue;
+
+      const omsLine = omsLineById.get(wmsItem.omsOrderLineId);
+
+      // Check if item was removed from Shopify order
+      const wasRemoved =
+        shopifyLineIdSet &&
+        omsLine?.externalLineItemId &&
+        !shopifyLineIdSet.has(omsLine.externalLineItemId);
+
+      if (wasRemoved) {
+        if (wmsItem.status === "pending") {
+          await db
+            .update(wmsOrderItems)
+            .set({ status: "cancelled" as any, quantity: 0 })
+            .where(eq(wmsOrderItems.id, wmsItem.id));
+          changes.push(`Cancelled pending item ${wmsItem.sku} (removed from order)`);
+          result.removed++;
+        } else if (wmsItem.status === "completed" || wmsItem.pickedQuantity > 0) {
+          result.flaggedForReview.push(
+            `Item ${wmsItem.sku} (id ${wmsItem.id}) removed from order but ${wmsItem.pickedQuantity} already picked — needs manual reversal`,
+          );
+        }
+        continue;
+      }
+
+      if (!omsLine) continue;
+
+      const omsQty = omsLine.quantity || 0;
+      const wmsQty = wmsItem.quantity;
+
+      if (omsQty === wmsQty) {
+        // Qty unchanged — check for SKU/name/variant updates
+        const updates: Record<string, any> = {};
+        if (omsLine.sku && omsLine.sku !== wmsItem.sku) updates.sku = omsLine.sku;
+        if (omsLine.title && omsLine.title !== wmsItem.name)
+          updates.name = omsLine.title;
+        if (
+          omsLine.productVariantId &&
+          omsLine.productVariantId !== wmsItem.productId
+        ) {
+          updates.productId = omsLine.productVariantId;
+          const bin = await resolvePrimaryBinLocation(db, omsLine.productVariantId);
+          if (bin) {
+            updates.location = bin.location;
+            updates.zone = bin.zone;
+          }
+        }
+
+        if (Object.keys(updates).length > 0) {
+          await db
+            .update(wmsOrderItems)
+            .set(updates)
+            .where(eq(wmsOrderItems.id, wmsItem.id));
+          changes.push(`Updated fields for ${wmsItem.sku}: ${Object.keys(updates).join(", ")}`);
+          result.updated++;
+        }
+        continue;
+      }
+
+      // Qty changed
+      if (wmsItem.status === "pending" || wmsItem.pickedQuantity === 0) {
+        // Not yet picked — safe to update
+        const updates: Record<string, any> = { quantity: omsQty };
+        if (omsLine.sku && omsLine.sku !== wmsItem.sku) updates.sku = omsLine.sku;
+        if (omsLine.title && omsLine.title !== wmsItem.name)
+          updates.name = omsLine.title;
+        if (
+          omsLine.productVariantId &&
+          omsLine.productVariantId !== wmsItem.productId
+        ) {
+          updates.productId = omsLine.productVariantId;
+          const bin = await resolvePrimaryBinLocation(db, omsLine.productVariantId);
+          if (bin) {
+            updates.location = bin.location;
+            updates.zone = bin.zone;
+          }
+        }
+
+        if (omsQty <= 0) {
+          updates.status = "cancelled";
+        }
+
+        await db
+          .update(wmsOrderItems)
+          .set(updates)
+          .where(eq(wmsOrderItems.id, wmsItem.id));
+        changes.push(
+          `${wmsItem.sku}: qty ${wmsQty} → ${omsQty}${omsQty <= 0 ? " (cancelled)" : ""}`,
+        );
+        result.updated++;
+      } else if (wmsItem.pickedQuantity > 0) {
+        if (omsQty < wmsItem.pickedQuantity) {
+          // Qty reduced below what was already picked
+          result.flaggedForReview.push(
+            `Item ${wmsItem.sku} (id ${wmsItem.id}): qty reduced ${wmsQty} → ${omsQty} but ${wmsItem.pickedQuantity} already picked`,
+          );
+        } else if (omsQty > wmsQty) {
+          // Qty increased — update qty, mark pending so picker picks the rest
+          await db
+            .update(wmsOrderItems)
+            .set({ quantity: omsQty, status: "pending" as any })
+            .where(eq(wmsOrderItems.id, wmsItem.id));
+          changes.push(
+            `${wmsItem.sku}: qty ${wmsQty} → ${omsQty} (${wmsItem.pickedQuantity} already picked, more picks needed)`,
+          );
+          result.updated++;
+        } else {
+          // Qty decreased but still >= picked — update qty
+          await db
+            .update(wmsOrderItems)
+            .set({ quantity: omsQty })
+            .where(eq(wmsOrderItems.id, wmsItem.id));
+          changes.push(`${wmsItem.sku}: qty ${wmsQty} → ${omsQty}`);
+          result.updated++;
+        }
+      }
+    }
+
+    // 5. Add new items (OMS lines not yet in WMS)
+    for (const omsLine of omsLines) {
+      if (wmsItemByOmsLineId.has(omsLine.id)) continue;
+      if (!omsLine.quantity || omsLine.quantity <= 0) continue;
+
+      // Skip items already removed from Shopify
+      if (
+        shopifyLineIdSet &&
+        omsLine.externalLineItemId &&
+        !shopifyLineIdSet.has(omsLine.externalLineItemId)
+      ) {
+        continue;
+      }
+
+      const variantId = omsLine.productVariantId || null;
+      let binLocation: WmsBinLocation | null = null;
+      if (variantId) {
+        try {
+          binLocation = await resolvePrimaryBinLocation(db, variantId);
+        } catch (e: any) {
+          console.warn(
+            `${LOG} Could not resolve bin for variant ${variantId}: ${e.message}`,
+          );
+        }
+      }
+
+      const itemRequiresShipping = omsLine.requiresShipping !== false;
+      await db.insert(wmsOrderItems).values({
+        orderId: wmsOrderId,
+        omsOrderLineId: omsLine.id,
+        sku: omsLine.sku || "UNKNOWN",
+        name: omsLine.title || "Unknown Item",
+        quantity: omsLine.quantity || 0,
+        pickedQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
+        fulfilledQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
+        status: itemRequiresShipping ? "pending" : "completed",
+        location: binLocation?.location || "UNASSIGNED",
+        zone: binLocation?.zone || "U",
+        productId: variantId,
+        requiresShipping: itemRequiresShipping ? 1 : 0,
+        unitPriceCents: (omsLine as any).paidPriceCents ?? 0,
+        paidPriceCents: (omsLine as any).paidPriceCents ?? 0,
+        totalPriceCents: (omsLine as any).totalPriceCents ?? 0,
+      } as any);
+
+      changes.push(`Added new item ${omsLine.sku} (qty ${omsLine.quantity})`);
+      result.added++;
+    }
+
+    // 6. Recalculate order-level counts
+    if (result.updated > 0 || result.added > 0 || result.removed > 0) {
+      const updatedItems = await db
+        .select()
+        .from(wmsOrderItems)
+        .where(eq(wmsOrderItems.orderId, wmsOrderId));
+      const activeItems = updatedItems.filter(
+        (item) => (item.status as string) !== "cancelled",
+      );
+      const newItemCount = activeItems.filter((i) => i.requiresShipping === 1).length;
+      const newUnitCount = activeItems
+        .filter((i) => i.requiresShipping === 1)
+        .reduce((sum, item) => sum + (item.quantity || 0), 0);
+      const newPickedCount = activeItems.reduce(
+        (sum, item) => sum + (item.pickedQuantity || 0),
+        0,
+      );
+
+      await db.execute(sql`
+        UPDATE wms.orders SET
+          item_count = ${newItemCount},
+          unit_count = ${newUnitCount},
+          picked_count = ${newPickedCount},
+          updated_at = NOW()
+        WHERE id = ${wmsOrderId}
+      `);
+
+      // Re-reserve inventory (release all then re-reserve for updated items)
+      try {
+        await this.services.reservation.releaseOrderReservation(
+          wmsOrderId,
+          "Order edited — re-reserving for updated items",
+        );
+        await this.services.reservation.reserveOrder(wmsOrderId);
+      } catch (e: any) {
+        console.warn(`${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}`);
+      }
+    }
+
+    // 7. Audit event
+    if (result.updated > 0 || result.added > 0 || result.removed > 0 || result.flaggedForReview.length > 0) {
+      await db.insert(omsOrderEvents).values({
+        orderId: omsOrderId,
+        eventType: "wms_edit_propagated",
+        details: {
+          wmsOrderId,
+          warehouseStatus,
+          changes,
+          flaggedForReview: result.flaggedForReview,
+          counts: { updated: result.updated, added: result.added, removed: result.removed },
+        },
+      });
+    }
+
+    if (result.flaggedForReview.length > 0) {
+      console.warn(`${LOG} Order ${wmsOrderId} has items requiring review:`, result.flaggedForReview);
+    }
+
+    if (warehouseStatus === "picking") {
+      console.warn(
+        `${LOG} Order ${wmsOrderId} modified while picker is active — picker may have stale data`,
+      );
+    }
+
+    console.log(
+      `${LOG} Order ${wmsOrderId}: ${result.updated} updated, ${result.added} added, ${result.removed} removed, ${result.flaggedForReview.length} flagged`,
+    );
+
+    return result;
   }
 
   /**
