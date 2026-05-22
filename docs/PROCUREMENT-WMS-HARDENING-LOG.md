@@ -2698,3 +2698,38 @@ Next step:
 - Move out of Phase 11 only after deciding whether the health escalation should
   be called from a scheduled job; otherwise start the next procurement phase
   around forecast recommendation auditability and operator acceptance workflow.
+
+### 2026-05-22 - Phase 11 Slice 5: Scheduler-Callable Procurement Health Escalation
+
+Scope:
+
+- Extracted procurement health summary loading out of the Express route into a
+  shared service, so the dashboard, manual escalation endpoint, and scheduled
+  checks all use the same health source math.
+- Added a scheduler-oriented procurement health escalation job that loads the
+  aggregate health summary and calls the existing deduped critical notification
+  sender.
+- Added `server/jobs/run-procurement-health-escalation.ts` and the
+  `npm run procurement:health-escalation` command for Heroku Scheduler or
+  manual ops execution.
+- Supported optional env controls for the runner:
+  `PROCUREMENT_HEALTH_ESCALATION_LIMIT`,
+  `PROCUREMENT_HEALTH_ESCALATION_DEDUPE_HOURS`, and
+  `PROCUREMENT_HEALTH_ESCALATION_FORCE`.
+- Kept this slice notification-only and schedule-ready: it does not add a new
+  in-process recurring scheduler, hard stops, recommendation math changes,
+  auto-draft behavior changes, or receiving, landed-cost, AP, or supplier
+  lifecycle mutations.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/procurement-health-escalation.job.test.ts server/modules/procurement/__tests__/unit/procurement-health-escalation.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/jobs/__tests__/unit/auto-draft.job.test.ts server/jobs/__tests__/unit/procurement-health-escalation.job.test.ts server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/purchase-order-lifecycle.service.test.ts server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts server/modules/procurement/__tests__/unit/receiving-mills.test.ts server/modules/procurement/__tests__/unit/po-close-3way-match.test.ts server/modules/procurement/__tests__/unit/inbound-shipment.routes.test.ts server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts server/modules/procurement/__tests__/unit/ap-ledger.routes.test.ts server/modules/procurement/__tests__/unit/ap-ledger-invoice-line-import.test.ts server/modules/procurement/__tests__/unit/ap-ledger-atomic-side-effects.test.ts server/modules/procurement/__tests__/unit/ap-ledger-record-payment.test.ts server/modules/procurement/__tests__/unit/ap-ledger-approve-invoice.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-aging.service.test.ts server/modules/procurement/__tests__/unit/auto-draft-po-escalation.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts server/modules/procurement/__tests__/unit/in-flight-po-aging.service.test.ts server/modules/procurement/__tests__/unit/procurement-health-escalation.service.test.ts`
+
+Next step:
+
+- Phase 11 can close after PR review. Start the next procurement hardening
+  phase around forecast recommendation auditability and operator acceptance
+  workflow, so recommendations become traceable decisions before more
+  automation is added.
