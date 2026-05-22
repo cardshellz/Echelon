@@ -136,6 +136,18 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
           AND wo.warehouse_status NOT IN ('cancelled')
           AND NOT EXISTS (
             SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
             FROM wms.outbound_shipment_items osi
             JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
             WHERE osi.order_item_id = oi.id
@@ -159,6 +171,18 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
           AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
           AND oi.status NOT IN ('cancelled', 'completed')
           AND wo.warehouse_status NOT IN ('cancelled')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM wms.outbound_shipment_items osi
@@ -287,6 +311,18 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
           )
           AND NOT EXISTS (
             SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
             FROM wms.outbound_shipments os
             WHERE os.order_id = wo.id
               AND os.status <> 'voided'
@@ -304,6 +340,18 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
             WHERE oi.order_id = wo.id
               AND COALESCE(oi.requires_shipping, 1) <> 0
               AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
           )
           AND NOT EXISTS (
             SELECT 1
@@ -333,6 +381,18 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
               AND COALESCE(oi.requires_shipping, 1) <> 0
               AND COALESCE(osi.qty, 0) > 0
           )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
+          )
       `,
       sql`
         SELECT os.id AS shipment_id, os.order_id, wo.order_number,
@@ -350,6 +410,18 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
             WHERE osi.shipment_id = os.id
               AND COALESCE(oi.requires_shipping, 1) <> 0
               AND COALESCE(osi.qty, 0) > 0
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                oo.status IN ('cancelled', 'shipped', 'refunded')
+                OR oo.financial_status = 'refunded'
+              )
           )
         ORDER BY os.created_at ASC
         LIMIT 10
