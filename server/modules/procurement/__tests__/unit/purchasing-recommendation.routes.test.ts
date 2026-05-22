@@ -774,6 +774,67 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
+  it("returns stale auto-draft PO diagnostics from the shared action plan", async () => {
+    mocks.db.execute.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 77,
+          poNumber: "PO-STALE",
+          vendorId: 9,
+          vendorName: "Vendor",
+          status: "draft",
+          physicalStatus: "draft",
+          financialStatus: "unbilled",
+          lineCount: 2,
+          totalCents: 12000,
+          source: "auto_draft",
+          autoDraftDate: "2020-01-01T00:00:00.000Z",
+          orderDate: null,
+          approvedAt: null,
+          sentToVendorAt: null,
+          expectedDeliveryDate: null,
+          confirmedDeliveryDate: null,
+          actualDeliveryDate: null,
+          firstShippedAt: null,
+          firstArrivedAt: null,
+          firstInvoicedAt: null,
+          firstPaidAt: null,
+          fullyPaidAt: null,
+          createdAt: "2020-01-01T00:00:00.000Z",
+          updatedAt: "2020-01-01T00:00:00.000Z",
+          openExceptionCount: 0,
+        },
+      ],
+    });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/auto-draft/stale-pos?limit=5");
+
+    expect(status).toBe(200);
+    expect(mocks.db.execute).toHaveBeenCalledTimes(1);
+    expect(body).toMatchObject({
+      scannedAutoDraftPos: 1,
+      totalStale: 1,
+      counts: {
+        critical: 1,
+        reviewPending: 1,
+      },
+      items: [
+        {
+          poId: 77,
+          poNumber: "PO-STALE",
+          vendorName: "Vendor",
+          stage: "review_pending",
+          severity: "critical",
+          action: {
+            action: "open_lines",
+            href: "/purchase-orders/77",
+          },
+        },
+      ],
+    });
+  });
+
   it("uses the shared recommendation engine for direct auto-draft items", async () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getReorderAnalysisData.mockResolvedValue([
