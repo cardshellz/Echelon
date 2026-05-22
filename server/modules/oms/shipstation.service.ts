@@ -148,6 +148,8 @@ export interface WmsShipmentRow {
   order_id: number;
   channel_id: number | null;
   status: string;
+  requires_review?: boolean | null;
+  review_reason?: string | null;
 }
 
 export interface WmsOrderRow {
@@ -156,6 +158,9 @@ export interface WmsOrderRow {
   channel_id: number | null;
   warehouse_id: number | null;
   oms_fulfillment_order_id: string | null;
+  warehouse_status?: string | null;
+  financial_status?: string | null;
+  cancelled_at?: Date | string | null;
   sort_rank: string | null;
   customer_name: string | null;
   customer_email: string | null;
@@ -187,6 +192,18 @@ export interface WmsShipmentItemRow {
   qty: number;
   unit_price_cents: number;
 }
+
+type ShipmentPushOmsBlocker = {
+  blocked: boolean;
+  reason:
+    | "oms_cancelled"
+    | "oms_refunded"
+    | "oms_fully_shipped"
+    | null;
+  status: string | null;
+  fulfillmentStatus: string | null;
+  financialStatus: string | null;
+};
 
 // ---------------------------------------------------------------------------
 // resolveShipStationIds — data-driven store/warehouse routing.
@@ -1513,6 +1530,146 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     return provider.length > 0 ? provider : null;
   }
 
+  async function getOmsFinalOrderBlockerForShipmentPush(
+    omsFulfillmentOrderId: string | null | undefined,
+  ): Promise<ShipmentPushOmsBlocker> {
+    if (!omsFulfillmentOrderId || !/^[1-9][0-9]*$/.test(omsFulfillmentOrderId)) {
+      return {
+        blocked: false,
+        reason: null,
+        status: null,
+        fulfillmentStatus: null,
+        financialStatus: null,
+      };
+    }
+
+    const result: any = await db.execute(sql`
+      SELECT status, fulfillment_status, financial_status
+      FROM oms.oms_orders
+      WHERE id = ${Number(omsFulfillmentOrderId)}
+      LIMIT 1
+    `);
+    const row = result?.rows?.[0] ?? {};
+    const status = String(row.status ?? "").toLowerCase();
+    const fulfillmentStatus = String(row.fulfillment_status ?? "").toLowerCase();
+    const financialStatus = String(row.financial_status ?? "").toLowerCase();
+
+    if (status === "cancelled") {
+      return {
+        blocked: true,
+        reason: "oms_cancelled",
+        status,
+        fulfillmentStatus: fulfillmentStatus || null,
+        financialStatus: financialStatus || null,
+      };
+    }
+
+    if (status === "refunded" || financialStatus === "refunded" || financialStatus === "voided") {
+      return {
+        blocked: true,
+        reason: "oms_refunded",
+        status: status || null,
+        fulfillmentStatus: fulfillmentStatus || null,
+        financialStatus: financialStatus || null,
+      };
+    }
+
+    if (status === "shipped" && fulfillmentStatus === "fulfilled") {
+      return {
+        blocked: true,
+        reason: "oms_fully_shipped",
+        status,
+        fulfillmentStatus,
+        financialStatus: financialStatus || null,
+      };
+    }
+
+    return {
+      blocked: false,
+      reason: null,
+      status: status || null,
+      fulfillmentStatus: fulfillmentStatus || null,
+      financialStatus: financialStatus || null,
+    };
+  }
+
+  async function getOmsFinalOrderBlockerForShipNotify(
+    omsOrderId: number,
+  ): Promise<{
+    blocked: boolean;
+    reason: "shipstation_shipped_after_cancel" | "shipstation_shipped_after_refund" | null;
+    status: string | null;
+    financialStatus: string | null;
+  }> {
+    const result: any = await db.execute(sql`
+      SELECT status, financial_status
+      FROM oms.oms_orders
+      WHERE id = ${omsOrderId}
+      LIMIT 1
+    `);
+    const row = result?.rows?.[0] ?? {};
+    const status = String(row.status ?? "").toLowerCase();
+    const financialStatus = String(row.financial_status ?? "").toLowerCase();
+
+    if (status === "cancelled" || status === "refunded") {
+      return {
+        blocked: true,
+        reason: "shipstation_shipped_after_cancel",
+        status,
+        financialStatus: financialStatus || null,
+      };
+    }
+
+    if (financialStatus === "refunded" || financialStatus === "voided") {
+      return {
+        blocked: true,
+        reason: "shipstation_shipped_after_refund",
+        status: status || null,
+        financialStatus,
+      };
+    }
+
+    return {
+      blocked: false,
+      reason: null,
+      status: status || null,
+      financialStatus: financialStatus || null,
+    };
+  }
+
+  async function markShipmentShippedAfterFinalOrderReview(
+    shipmentId: number,
+    omsOrderId: number,
+    event: ShipmentEvent & { kind: "shipped" },
+    finality: Awaited<ReturnType<typeof getOmsFinalOrderBlockerForShipNotify>>,
+  ): Promise<void> {
+    const reason = finality.reason ?? "shipstation_shipped_after_cancel";
+    await db.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = true,
+          review_reason = ${reason},
+          updated_at = NOW()
+      WHERE id = ${shipmentId}
+    `);
+
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "shipstation_shipped_after_final_order",
+      details: {
+        shipmentId,
+        trackingNumber: event.trackingNumber,
+        carrier: event.carrier,
+        omsStatus: finality.status,
+        financialStatus: finality.financialStatus,
+        reason,
+      },
+    });
+
+    console.error(
+      `[ShipStation Webhook V2] Shipment ${shipmentId} shipped after OMS order ${omsOrderId} was final (${finality.status}/${finality.financialStatus}); OMS/channel fulfillment update suppressed`,
+    );
+  }
+
   async function shouldEnqueueDelayedTrackingPush(omsOrderId: number): Promise<boolean> {
     const provider = await getOmsOrderProvider(omsOrderId);
     return provider !== null && provider !== "shopify";
@@ -1782,11 +1939,27 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       return { processed: true, fallback: false };
     }
 
-    await updateOmsDerivedFromEvent(omsOrderId, event, {
-      wmsOrderId,
-      warehouseStatus: rollup.warehouseStatus,
-    });
-    if (changed || rollup.changed) {
+    let suppressOmsAndChannelShipUpdate = false;
+    if (event.kind === "shipped") {
+      const finality = await getOmsFinalOrderBlockerForShipNotify(omsOrderId);
+      if (finality.blocked) {
+        suppressOmsAndChannelShipUpdate = true;
+        await markShipmentShippedAfterFinalOrderReview(
+          wmsShipmentRow.id,
+          omsOrderId,
+          event,
+          finality,
+        );
+      }
+    }
+
+    if (!suppressOmsAndChannelShipUpdate) {
+      await updateOmsDerivedFromEvent(omsOrderId, event, {
+        wmsOrderId,
+        warehouseStatus: rollup.warehouseStatus,
+      });
+    }
+    if (!suppressOmsAndChannelShipUpdate && (changed || rollup.changed)) {
       await recordShipmentEventV2(omsOrderId, event, shipment, {
         wmsFirst: true,
         wmsShipmentId: wmsShipmentRow.id,
@@ -1803,16 +1976,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       }
       await applyShipmentQuantitiesToWmsOrderItems(inventoryItemsToRecord);
 
-      await enqueueDelayedTrackingPushForShippedShipment(
-        omsOrderId,
-        wmsShipmentRow.id,
-      );
+      if (!suppressOmsAndChannelShipUpdate) {
+        await enqueueDelayedTrackingPushForShippedShipment(
+          omsOrderId,
+          wmsShipmentRow.id,
+        );
+      }
     }
 
     // Shopify fulfillment push runs after the shipment commit. Already-shipped
     // replays use the same path so a missed Shopify push can be repaired
     // without changing WMS shipment state again.
-    if (event.kind === "shipped") {
+    if (event.kind === "shipped" && !suppressOmsAndChannelShipUpdate) {
       await pushShopifyFulfillmentFromShipNotify(wmsShipmentRow.id, omsOrderId);
     }
 
@@ -2687,6 +2862,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       order_id: outboundShipments.orderId,
       channel_id: outboundShipments.channelId,
       status: outboundShipments.status,
+      requires_review: outboundShipments.requiresReview,
+      review_reason: outboundShipments.reviewReason,
     })
       .from(outboundShipments)
       .where(eq(outboundShipments.id, shipmentId))
@@ -2714,6 +2891,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         },
       );
     }
+    if (shipmentRow.requires_review === true) {
+      throw new ShipStationPushError(
+        `shipment requires review and cannot be pushed to ShipStation (${shipmentRow.review_reason ?? "review_required"})`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "shipment.requires_review",
+          value: shipmentRow.review_reason ?? true,
+        },
+      );
+    }
 
     // ─── 2. Load order (WMS only, with financial snapshot) ──────────
     const orderRows = await db.select({
@@ -2722,6 +2910,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       channel_id: wmsOrders.channelId,
       warehouse_id: wmsOrders.warehouseId,
       oms_fulfillment_order_id: wmsOrders.omsFulfillmentOrderId,
+      warehouse_status: wmsOrders.warehouseStatus,
+      financial_status: wmsOrders.financialStatus,
+      cancelled_at: wmsOrders.cancelledAt,
       sort_rank: wmsOrders.sortRank,
       external_order_id: wmsOrders.externalOrderId,
       customer_name: wmsOrders.customerName,
@@ -2755,6 +2946,28 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         value: shipmentRow.order_id,
       });
     }
+    const finalFinancialStatus = String(orderRow.financial_status ?? "").toLowerCase();
+    if (
+      orderRow.warehouse_status === "shipped" ||
+      orderRow.warehouse_status === "cancelled" ||
+      orderRow.cancelled_at != null ||
+      finalFinancialStatus === "refunded" ||
+      finalFinancialStatus === "voided"
+    ) {
+      throw new ShipStationPushError(
+        "shipment belongs to a cancelled/refunded order and cannot be pushed to ShipStation",
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "order.final_state",
+          value: {
+            warehouseStatus: orderRow.warehouse_status ?? null,
+            financialStatus: orderRow.financial_status ?? null,
+            cancelledAt: orderRow.cancelled_at ?? null,
+          },
+        },
+      );
+    }
 
     // ─── 3. Load items (WMS only, joined to order_items for pricing) ─
     // Keep this as a separate raw query instead of an inline drizzle select
@@ -2763,6 +2976,27 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // donation total. The validator needs this value to reconcile ShipStation
     // shipments that only push shippable lines while the WMS order total also
     // includes donations, memberships, or other non-shipping items.
+    const omsBlocker = await getOmsFinalOrderBlockerForShipmentPush(
+      orderRow.oms_fulfillment_order_id,
+    );
+    if (omsBlocker.blocked) {
+      throw new ShipStationPushError(
+        "shipment belongs to an OMS order that is already final and cannot be pushed to ShipStation",
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "oms.final_state",
+          value: {
+            omsOrderId: orderRow.oms_fulfillment_order_id ?? null,
+            status: omsBlocker.status,
+            fulfillmentStatus: omsBlocker.fulfillmentStatus,
+            financialStatus: omsBlocker.financialStatus,
+            reason: omsBlocker.reason,
+          },
+        },
+      );
+    }
+
     const nonShippingRows: any = await db.execute(sql`
       SELECT COALESCE(SUM(oi.total_price_cents), 0)::int AS non_shipping_total_cents
       FROM wms.order_items oi
