@@ -537,8 +537,8 @@ async function retireDuplicate(client: PoolClient, plan: GroupPlan, decision: Ro
       UPDATE wms.orders
       SET warehouse_status = 'cancelled',
           cancelled_at = COALESCE(cancelled_at, NOW()),
-          short_reason = $2,
-          notes = CONCAT_WS(E'\n', NULLIF(notes, ''), $3),
+          short_reason = $2::text,
+          notes = CONCAT_WS(E'\n', NULLIF(notes, ''), $3::text),
           updated_at = NOW()
       WHERE id = $1
     `, [
