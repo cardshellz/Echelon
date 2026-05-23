@@ -56,6 +56,7 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const demandAccelerationSignalCounts: Record<string, number> = {};
   const demandBaselineSignalCounts: Record<string, number> = {};
   const demandSeasonalitySignalCounts: Record<string, number> = {};
+  const demandMixSignalCounts: Record<string, number> = {};
   const forecastMethodCounts: Record<string, number> = {};
   const qualityControlCounts: Record<string, number> = {};
   const qualityControlAreaCounts: Record<string, number> = {};
@@ -66,6 +67,9 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const supplierCycleSignalCounts: Record<string, number> = {};
   const recommendationCandidateBandCounts: Record<string, number> = {};
   let totalPeriodUsagePieces = 0;
+  let totalPaidDemandPieces = 0;
+  let totalZeroRevenueDemandPieces = 0;
+  let totalCouponDiscountDemandPieces = 0;
   let avgDailyUsageTotal = 0;
   let latestDemandAt: string | Date | null = null;
   let autopilotBlockerItemCount = 0;
@@ -90,6 +94,7 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     increment(demandAccelerationSignalCounts, provenance.demandWindowDiagnostics.accelerationSignal);
     increment(demandBaselineSignalCounts, provenance.demandWindowDiagnostics.baselineSignal);
     increment(demandSeasonalitySignalCounts, provenance.demandWindowDiagnostics.seasonalSignal);
+    increment(demandMixSignalCounts, provenance.demandMixSignal);
     increment(supplierCycleSignalCounts, item.supplierCycleDiagnostics.signal);
     increment(recommendationCandidateBandCounts, item.recommendationCandidateScore.band);
     candidateScoreTotal += item.recommendationCandidateScore.score;
@@ -112,6 +117,9 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
       increment(autopilotBlockerSeverityCounts, blocker.severity);
     }
     totalPeriodUsagePieces += provenance.periodUsagePieces;
+    totalPaidDemandPieces += provenance.paidDemandPieces ?? 0;
+    totalZeroRevenueDemandPieces += provenance.zeroRevenueDemandPieces ?? 0;
+    totalCouponDiscountDemandPieces += provenance.couponDiscountDemandPieces ?? 0;
     avgDailyUsageTotal += provenance.avgDailyUsagePieces;
 
     if (provenance.latestDemandAt) {
@@ -136,6 +144,7 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     demandAccelerationSignalCounts,
     demandBaselineSignalCounts,
     demandSeasonalitySignalCounts,
+    demandMixSignalCounts,
     supplierCycleSignalCounts,
     supplierCycleOpenPoPastDueCount: openPoPastDueCount,
     avgSupplierCycleSupplyCoverageRatio:
@@ -152,6 +161,9 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     autopilotBlockerSeverityCounts,
     autopilotBlockerItemCount,
     totalPeriodUsagePieces,
+    totalPaidDemandPieces,
+    totalZeroRevenueDemandPieces,
+    totalCouponDiscountDemandPieces,
     avgDailyUsagePieces:
       recommendationCount > 0 ? Math.round((avgDailyUsageTotal / recommendationCount) * 100) / 100 : 0,
     latestDemandAt,

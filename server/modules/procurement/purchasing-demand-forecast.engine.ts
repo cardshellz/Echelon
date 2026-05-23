@@ -24,6 +24,11 @@ export type PurchasingDemandForecastSeasonalitySignal =
   | "above_seasonal"
   | "near_seasonal"
   | "below_seasonal";
+export type PurchasingDemandForecastDemandMixSignal =
+  | "not_available"
+  | "mostly_paid"
+  | "mixed_discounted_or_free"
+  | "mostly_zero_revenue";
 
 export interface PurchasingDemandForecastInput {
   lookbackDays: number | string | null | undefined;
@@ -32,6 +37,9 @@ export interface PurchasingDemandForecastInput {
   demandOrderCount?: number | string | null;
   demandActiveDays?: number | string | null;
   latestDemandAt?: string | Date | null;
+  paidDemandPieces?: number | string | null;
+  zeroRevenueDemandPieces?: number | string | null;
+  couponDiscountDemandPieces?: number | string | null;
 }
 
 export interface PurchasingDemandForecastBasis {
@@ -47,6 +55,12 @@ export interface PurchasingDemandForecastBasis {
   demandOrderCount: number | null;
   demandActiveDays: number | null;
   latestDemandAt: string | Date | null;
+  paidDemandPieces: number | null;
+  zeroRevenueDemandPieces: number | null;
+  couponDiscountDemandPieces: number | null;
+  zeroRevenueDemandShare: number | null;
+  couponDiscountDemandShare: number | null;
+  demandMixSignal: PurchasingDemandForecastDemandMixSignal;
 }
 
 export interface PurchasingDemandForecastWindowSnapshot extends PurchasingDemandForecastBasis {
@@ -83,6 +97,16 @@ function asNullableNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function asNullableNonNegativeNumber(value: unknown): number | null {
+  const parsed = asNullableNumber(value);
+  if (parsed === null) return null;
+  return Math.max(0, parsed);
+}
+
+function roundRatio(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 function classifyDemandQuality(input: {
   periodUsagePieces: number;
   lookbackDays: number;
@@ -114,6 +138,38 @@ function classifyDemandTrend(input: {
   return "stable";
 }
 
+function classifyDemandMix(input: {
+  periodUsagePieces: number;
+  zeroRevenueDemandPieces: number | null;
+  couponDiscountDemandPieces: number | null;
+}): {
+  zeroRevenueDemandShare: number | null;
+  couponDiscountDemandShare: number | null;
+  demandMixSignal: PurchasingDemandForecastDemandMixSignal;
+} {
+  const hasMixInput = input.zeroRevenueDemandPieces !== null || input.couponDiscountDemandPieces !== null;
+  if (!hasMixInput || input.periodUsagePieces <= 0) {
+    return {
+      zeroRevenueDemandShare: hasMixInput ? 0 : null,
+      couponDiscountDemandShare: hasMixInput ? 0 : null,
+      demandMixSignal: "not_available",
+    };
+  }
+
+  const zeroRevenueDemandPieces = input.zeroRevenueDemandPieces ?? 0;
+  const couponDiscountDemandPieces = input.couponDiscountDemandPieces ?? 0;
+  const zeroRevenueDemandShare = roundRatio(zeroRevenueDemandPieces / input.periodUsagePieces);
+  const couponDiscountDemandShare = roundRatio(couponDiscountDemandPieces / input.periodUsagePieces);
+
+  if (zeroRevenueDemandShare >= 0.5) {
+    return { zeroRevenueDemandShare, couponDiscountDemandShare, demandMixSignal: "mostly_zero_revenue" };
+  }
+  if (zeroRevenueDemandPieces > 0 || couponDiscountDemandShare >= 0.25) {
+    return { zeroRevenueDemandShare, couponDiscountDemandShare, demandMixSignal: "mixed_discounted_or_free" };
+  }
+  return { zeroRevenueDemandShare, couponDiscountDemandShare, demandMixSignal: "mostly_paid" };
+}
+
 export function buildPurchasingDemandForecastBasis(
   input: PurchasingDemandForecastInput,
 ): PurchasingDemandForecastBasis {
@@ -122,6 +178,9 @@ export function buildPurchasingDemandForecastBasis(
   const priorPeriodUsagePieces = asNullableNumber(input.priorPeriodUsagePieces);
   const demandOrderCount = asNullableNumber(input.demandOrderCount);
   const demandActiveDays = asNullableNumber(input.demandActiveDays);
+  const paidDemandPieces = asNullableNonNegativeNumber(input.paidDemandPieces);
+  const zeroRevenueDemandPieces = asNullableNonNegativeNumber(input.zeroRevenueDemandPieces);
+  const couponDiscountDemandPieces = asNullableNonNegativeNumber(input.couponDiscountDemandPieces);
   const avgDailyUsagePieces = lookbackDays > 0 ? periodUsagePieces / lookbackDays : 0;
   const demandQuality = classifyDemandQuality({
     periodUsagePieces,
@@ -132,6 +191,11 @@ export function buildPurchasingDemandForecastBasis(
   const demandTrend = classifyDemandTrend({
     periodUsagePieces,
     priorPeriodUsagePieces,
+  });
+  const demandMix = classifyDemandMix({
+    periodUsagePieces,
+    zeroRevenueDemandPieces,
+    couponDiscountDemandPieces,
   });
 
   return {
@@ -147,6 +211,10 @@ export function buildPurchasingDemandForecastBasis(
     demandOrderCount,
     demandActiveDays,
     latestDemandAt: input.latestDemandAt ?? null,
+    paidDemandPieces,
+    zeroRevenueDemandPieces,
+    couponDiscountDemandPieces,
+    ...demandMix,
   };
 }
 

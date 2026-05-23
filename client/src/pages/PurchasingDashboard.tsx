@@ -38,6 +38,7 @@ interface ForecastDiagnostics {
   demandAccelerationSignalCounts?: Record<string, number>;
   demandBaselineSignalCounts?: Record<string, number>;
   demandSeasonalitySignalCounts?: Record<string, number>;
+  demandMixSignalCounts?: Record<string, number>;
   supplierCycleSignalCounts?: Record<string, number>;
   supplierCycleOpenPoPastDueCount?: number;
   avgSupplierCycleSupplyCoverageRatio?: number | null;
@@ -52,6 +53,9 @@ interface ForecastDiagnostics {
   autopilotBlockerSeverityCounts?: Record<string, number>;
   autopilotBlockerItemCount?: number;
   totalPeriodUsagePieces: number;
+  totalPaidDemandPieces?: number;
+  totalZeroRevenueDemandPieces?: number;
+  totalCouponDiscountDemandPieces?: number;
   avgDailyUsagePieces: number;
   latestDemandAt: string | null;
 }
@@ -67,6 +71,12 @@ interface RecommendationForecastProvenance {
   demandOrderCount?: number | null;
   demandActiveDays?: number | null;
   latestDemandAt?: string | null;
+  paidDemandPieces?: number | null;
+  zeroRevenueDemandPieces?: number | null;
+  couponDiscountDemandPieces?: number | null;
+  zeroRevenueDemandShare?: number | null;
+  couponDiscountDemandShare?: number | null;
+  demandMixSignal?: string;
   demandWindowDiagnostics?: {
     shortWindow?: {
       lookbackDays?: number;
@@ -445,7 +455,9 @@ function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): st
   const topMethod = Object.entries(diagnostics.forecastMethodCounts ?? {}).sort((a, b) => b[1] - a[1])[0]?.[0];
   const blocker = topCountLabel(diagnostics.autopilotBlockerCounts);
   const blockerLabel = blocker === "None" ? "no blockers" : blocker;
-  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}`;
+  const demandMix = topCountLabel(diagnostics.demandMixSignalCounts);
+  const demandMixLabel = demandMix === "None" ? "mix n/a" : demandMix;
+  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${demandMixLabel} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}`;
 }
 
 function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
@@ -493,9 +505,12 @@ function formatRecommendationForecast(
   const baselineLabel = baseline ? ` - ${baseline.replace(/_/g, " ")}` : "";
   const seasonal = provenance.demandWindowDiagnostics?.seasonalSignal;
   const seasonalLabel = seasonal && seasonal !== "not_available" ? ` - ${seasonal.replace(/_/g, " ")}` : "";
+  const mixLabel = provenance.demandMixSignal && provenance.demandMixSignal !== "not_available"
+    ? ` - ${provenance.demandMixSignal.replace(/_/g, " ")}`
+    : "";
   const cycleLabel = supplierCycleDiagnostics ? ` - cycle ${supplierCycleDiagnostics.signal.replace(/_/g, " ")}` : "";
   const scoreLabel = candidateScore ? ` - score ${candidateScore.score} ${candidateScore.band.replace(/_/g, " ")}` : "";
-  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}${scoreLabel}`;
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}${mixLabel}${cycleLabel}${scoreLabel}`;
 }
 
 function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
@@ -1349,6 +1364,14 @@ export default function PurchasingDashboard() {
                       { label: "Needs review", value: data.lastAutoDraftRun.summaryJson?.recommendationSummary?.autoDraftReviewRequiredCount ?? 0 },
                       { label: "Forecast model", value: formatForecastDiagnostics(lastRunForecastDiagnostics) },
                       { label: "Demand trend", value: topCountLabel(lastRunForecastDiagnostics?.demandTrendCounts) },
+                      {
+                        label: "Demand mix",
+                        value: topCountLabel(lastRunForecastDiagnostics?.demandMixSignalCounts),
+                        warn: Boolean(
+                          lastRunForecastDiagnostics?.totalZeroRevenueDemandPieces ||
+                            lastRunForecastDiagnostics?.totalCouponDiscountDemandPieces,
+                        ),
+                      },
                       { label: "Short-window signal", value: topCountLabel(lastRunForecastDiagnostics?.demandAccelerationSignalCounts) },
                       { label: "Baseline signal", value: topCountLabel(lastRunForecastDiagnostics?.demandBaselineSignalCounts) },
                       { label: "Seasonality signal", value: topCountLabel(lastRunForecastDiagnostics?.demandSeasonalitySignalCounts) },

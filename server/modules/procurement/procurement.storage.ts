@@ -1296,6 +1296,9 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(vel.demand_order_count, 0)::int AS demand_order_count,
         COALESCE(vel.demand_active_days, 0)::int AS demand_active_days,
         vel.latest_demand_at,
+        COALESCE(vel.paid_demand_pieces, 0)::bigint AS paid_demand_pieces,
+        COALESCE(vel.zero_revenue_demand_pieces, 0)::bigint AS zero_revenue_demand_pieces,
+        COALESCE(vel.coupon_discount_demand_pieces, 0)::bigint AS coupon_discount_demand_pieces,
         ${shortWindowDays}::int AS short_window_days,
         COALESCE(vel.short_outbound_pieces, 0)::bigint AS short_outbound_pieces,
         COALESCE(vel.previous_short_outbound_pieces, 0)::bigint AS previous_short_outbound_pieces,
@@ -1370,6 +1373,40 @@ export const procurementMethods: IProcurementStorage = {
                   THEN o.order_placed_at
                   ELSE NULL
                 END) AS latest_demand_at,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
+                     AND GREATEST(
+                       COALESCE(oi.total_price_cents, 0),
+                       COALESCE(ool.total_price_cents, 0),
+                       COALESCE(oi.paid_price_cents, 0) * oi.quantity,
+                       COALESCE(ool.paid_price_cents, 0) * oi.quantity
+                     ) > 0
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS paid_demand_pieces,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
+                     AND GREATEST(
+                       COALESCE(oi.total_price_cents, 0),
+                       COALESCE(ool.total_price_cents, 0),
+                       COALESCE(oi.paid_price_cents, 0) * oi.quantity,
+                       COALESCE(ool.paid_price_cents, 0) * oi.quantity
+                     ) <= 0
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS zero_revenue_demand_pieces,
+                SUM(
+                  CASE
+                    WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
+                     AND COALESCE(ool.coupon_discount_cents, 0) > 0
+                    THEN oi.quantity * pv.units_per_variant
+                    ELSE 0
+                  END
+                ) AS coupon_discount_demand_pieces,
                 SUM(
                   CASE
                     WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${shortWindowDays})
@@ -1465,11 +1502,13 @@ export const procurementMethods: IProcurementStorage = {
                   ELSE NULL
                 END) AS seasonal_latest_demand_at
         FROM wms.order_items oi
+        LEFT JOIN oms.oms_order_lines ool ON ool.id = oi.oms_order_line_id
         JOIN wms.orders o ON o.id = oi.order_id
         JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'
           AND oi.status != 'cancelled'
+          AND COALESCE(oi.requires_shipping, 1) = 1
           AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${demandScanWindowDays})
         GROUP BY pv.product_id
       ) vel ON vel.product_id = p.id

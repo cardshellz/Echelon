@@ -93,6 +93,12 @@ interface ReorderItem {
     demandOrderCount?: number | null;
     demandActiveDays?: number | null;
     latestDemandAt?: string | null;
+    paidDemandPieces?: number | null;
+    zeroRevenueDemandPieces?: number | null;
+    couponDiscountDemandPieces?: number | null;
+    zeroRevenueDemandShare?: number | null;
+    couponDiscountDemandShare?: number | null;
+    demandMixSignal?: "not_available" | "mostly_paid" | "mixed_discounted_or_free" | "mostly_zero_revenue";
     leadTimeSource: "vendor_product" | "product" | "default";
     safetyStockSource: "product" | "default";
     orderUomSource: "variant" | "default_each";

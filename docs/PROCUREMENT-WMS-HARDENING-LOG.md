@@ -2826,3 +2826,34 @@ Next step:
   workflow by adding clearer operator history around accepted/handoff decisions
   or move into forecast-engine demand signal quality, depending on which gap is
   more urgent.
+
+### 2026-05-22 - Forecast Demand Composition Signals
+
+Scope:
+
+- Kept zero-dollar stock-consuming orders and lines in purchasing demand usage
+  so fully discounted orders and free gifts still inform replenishment and
+  purchasing volume.
+- Added paid, zero-revenue, and coupon-discount demand composition provenance
+  from the WMS/OMS demand query into the forecast basis, recommendation item,
+  run diagnostics, and dashboard summary.
+- Added review controls for high zero-revenue or discounted/free demand mixes,
+  lowering confidence to medium before autopilot can trust promotional demand.
+- Filtered forecast demand to shippable order items, so non-shipping lines do
+  not inflate physical purchasing demand.
+- Kept this slice to recommendation quality and visibility: no PO creation
+  behavior, approval policy, supplier setup, receiving, landed-cost, AP, or
+  forecast model authority changed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-demand-forecast.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- After PR review, continue hardening recommendation acceptance history and
+  forecast auditability before expanding any scheduled or automatic purchasing
+  mutations.
