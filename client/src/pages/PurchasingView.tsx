@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   Clock,
   DollarSign,
+  History,
   MoreHorizontal,
   PackageSearch,
   ShoppingCart,
@@ -334,6 +335,25 @@ interface AcceptedRecommendationQueueResponse {
   items: AcceptedRecommendationQueueItem[];
 }
 
+interface RecommendationDecisionHistoryResponse {
+  generatedAt: string;
+  limit: number;
+  summary: {
+    total: number;
+    active: number;
+    acceptedForPo: number;
+    poHandoffCreated: number;
+    deferred: number;
+    dismissed: number;
+    reviewed: number;
+    latestDecidedAt: string | null;
+    decisionCounts: Record<string, number>;
+    kindCounts: Record<string, number>;
+    statusCounts: Record<string, number>;
+  };
+  decisions: RecommendationDecision[];
+}
+
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: any; priority: number }> = {
   stockout: { label: "Stockout Imminent", bg: "bg-red-500/10", text: "text-red-500", icon: AlertTriangle, priority: 0 },
   order_now: { label: "Critical Restock", bg: "bg-orange-500/10", text: "text-orange-500", icon: AlertTriangle, priority: 1 },
@@ -481,6 +501,15 @@ export default function PurchasingView() {
     },
   });
 
+  const { data: recommendationDecisionHistory } = useQuery<RecommendationDecisionHistoryResponse>({
+    queryKey: ["/api/purchasing/recommendation-decisions"],
+    queryFn: async () => {
+      const res = await fetch("/api/purchasing/recommendation-decisions?limit=12");
+      if (!res.ok) throw new Error("Failed to fetch recommendation decision history");
+      return res.json();
+    },
+  });
+
   const autoDraftMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch("/api/purchasing/auto-draft-run", {
@@ -534,6 +563,7 @@ export default function PurchasingView() {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-decisions"] });
       toast({
         title: "Recommendation Decision Recorded",
         description: `${variables.item.sku} marked ${formatRecommendationDecision(variables.decision).toLowerCase()}.`,
@@ -576,6 +606,7 @@ export default function PurchasingView() {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-decisions"] });
       toast({
         title: "Draft PO Updated",
         description: `${item.sku} handed off to ${data.count ?? 0} draft PO${data.count === 1 ? "" : "s"}.`,
@@ -644,6 +675,7 @@ export default function PurchasingView() {
     .filter((item) => reviewQueueFilter === "all" || item.kind === reviewQueueFilter)
     .slice(0, 12);
   const acceptedQueueItems = (acceptedRecommendationQueue?.items ?? []).slice(0, 8);
+  const recentRecommendationDecisions = (recommendationDecisionHistory?.decisions ?? []).slice(0, 8);
   const approvalPolicyImpact = analysis?.approvalPolicyImpact;
 
   const SortIcon = ({ field }: { field: string }) => {
@@ -1129,6 +1161,77 @@ export default function PurchasingView() {
                             Draft PO
                           </Button>
                         ) : null}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {(recommendationDecisionHistory?.summary.total ?? 0) > 0 && (
+          <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
+            <CardHeader className="border-b dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 pb-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-lg">
+                    <History className="h-4 w-4" />
+                    Recommendation Decision History
+                  </CardTitle>
+                  <CardDescription>Recent operator decisions and PO handoffs for purchasing recommendations.</CardDescription>
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-right text-xs">
+                  <div className="rounded-md border bg-white px-2 py-1 dark:bg-zinc-900">
+                    <div className="font-semibold">{recommendationDecisionHistory?.summary.acceptedForPo ?? 0}</div>
+                    <div className="text-zinc-500">Accepted</div>
+                  </div>
+                  <div className="rounded-md border bg-white px-2 py-1 dark:bg-zinc-900">
+                    <div className="font-semibold">{recommendationDecisionHistory?.summary.poHandoffCreated ?? 0}</div>
+                    <div className="text-zinc-500">Handoff</div>
+                  </div>
+                  <div className="rounded-md border bg-white px-2 py-1 dark:bg-zinc-900">
+                    <div className="font-semibold">{recommendationDecisionHistory?.summary.deferred ?? 0}</div>
+                    <div className="text-zinc-500">Deferred</div>
+                  </div>
+                  <div className="rounded-md border bg-white px-2 py-1 dark:bg-zinc-900">
+                    <div className="font-semibold">{recommendationDecisionHistory?.summary.dismissed ?? 0}</div>
+                    <div className="text-zinc-500">Dismissed</div>
+                  </div>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                {recentRecommendationDecisions.map((decision) => (
+                  <div key={decision.id} className="rounded-md border bg-white dark:bg-zinc-900 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-xs font-semibold text-primary truncate">{decision.sku ?? decision.recommendationId}</span>
+                          <Badge variant="outline" className={`text-[10px] ${recommendationDecisionClass(decision.decision)}`}>
+                            {formatRecommendationDecision(decision.decision)}
+                          </Badge>
+                          <Badge variant="outline" className="text-[10px] bg-zinc-50 text-zinc-600 border-zinc-200">
+                            {formatReviewQueueKind(decision.kind)}
+                          </Badge>
+                          {decision.candidateScore != null ? (
+                            <Badge variant="outline" className={`text-[10px] capitalize ${candidateBandClass(decision.candidateBand)}`}>
+                              {decision.candidateScore} - {formatCandidateBand(decision.candidateBand)}
+                            </Badge>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 text-sm font-medium truncate">{decision.productName ?? "Recommendation snapshot"}</div>
+                        <div className="mt-2 text-[11px] text-zinc-500">
+                          {decision.decisionReason ? decision.decisionReason.replace(/_/g, " ") : "No decision reason"}
+                          {decision.decidedAt ? (
+                            <span className="ml-2">
+                              {new Date(decision.decidedAt).toLocaleString()}
+                            </span>
+                          ) : null}
+                          {decision.decidedBy ? <span className="ml-2">by {decision.decidedBy}</span> : null}
+                        </div>
+                        {decision.note ? <p className="mt-1 line-clamp-2 text-xs text-zinc-500">{decision.note}</p> : null}
                       </div>
                     </div>
                   </div>

@@ -2857,3 +2857,32 @@ Next step:
 - After PR review, continue hardening recommendation acceptance history and
   forecast auditability before expanding any scheduled or automatic purchasing
   mutations.
+
+### 2026-05-23 - Recommendation Decision History Visibility
+
+Scope:
+
+- Enriched the recommendation decision history endpoint with generated time,
+  active/inactive counts, decision counts, kind counts, status counts, and the
+  latest decision timestamp.
+- Added a Purchasing View decision-history panel so reviewed, accepted,
+  deferred, dismissed, and PO handoff decisions remain visible after items leave
+  the active review or accepted queues.
+- Refreshed decision history after recommendation decisions and accepted
+  recommendation PO handoffs so the UI does not require a manual reload to show
+  the audit trail.
+- Kept this slice audit/read-model only: no recommendation math, approval
+  policy, supplier data, PO creation rules, receiving, landed-cost, AP, or
+  forecast model authority changed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue forecast auditability by giving run history deeper drilldown/search,
+  or move into forecast input backfills once operator decision traceability is
+  sufficient.
