@@ -748,6 +748,87 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
+  it("returns recent recommendation decision history with operator summary counts", async () => {
+    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
+      {
+        id: 102,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        decision: "po_handoff_created",
+        status: "active",
+        decisionReason: "accepted_recommendation_po_handoff",
+        sku: "QUEUE-HELD",
+        productName: "Queue Held",
+        candidateScore: 88,
+        candidateBand: "review_candidate",
+        decidedBy: "admin-user",
+        decidedAt: "2026-05-23T10:00:00.000Z",
+      },
+      {
+        id: 101,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        decision: "accepted_for_po",
+        status: "active",
+        decisionReason: "held_by_approval_policy",
+        sku: "QUEUE-HELD",
+        productName: "Queue Held",
+        candidateScore: 88,
+        candidateBand: "review_candidate",
+        decidedBy: "admin-user",
+        decidedAt: "2026-05-23T09:00:00.000Z",
+      },
+      {
+        id: 100,
+        recommendationId: "303:3003:30",
+        kind: "quality_review_required",
+        decision: "deferred",
+        status: "inactive",
+        decisionReason: "medium_confidence_review",
+        sku: "PROMO-DEMAND",
+        productName: "Promo Demand",
+        decidedBy: "admin-user",
+        decidedAt: "2026-05-22T18:00:00.000Z",
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/recommendation-decisions?limit=10");
+
+    expect(status).toBe(200);
+    expect(mocks.procurement.getRecentRecommendationDecisions).toHaveBeenCalledWith(10);
+    expect(body.summary).toMatchObject({
+      total: 3,
+      active: 2,
+      acceptedForPo: 1,
+      poHandoffCreated: 1,
+      deferred: 1,
+      dismissed: 0,
+      reviewed: 0,
+      latestDecidedAt: "2026-05-23T10:00:00.000Z",
+      decisionCounts: {
+        accepted_for_po: 1,
+        po_handoff_created: 1,
+        deferred: 1,
+      },
+      kindCounts: {
+        held_by_policy: 2,
+        quality_review_required: 1,
+      },
+      statusCounts: {
+        active: 2,
+        inactive: 1,
+      },
+    });
+    expect(body.decisions[0]).toMatchObject({
+      id: 102,
+      recommendationId: "202:2002:30",
+      decision: "po_handoff_created",
+      sku: "QUEUE-HELD",
+      candidateScore: 88,
+    });
+  });
+
   it("returns accepted recommendations as a PO review staging queue", async () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({

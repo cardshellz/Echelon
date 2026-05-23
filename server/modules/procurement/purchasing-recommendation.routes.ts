@@ -561,6 +561,39 @@ function buildLatestDecisionMap(decisions: any[]) {
   return latest;
 }
 
+function buildRecommendationDecisionHistorySummary(decisions: Array<ReturnType<typeof normalizeRecommendationDecision>>) {
+  const decisionCounts: Record<string, number> = {};
+  const kindCounts: Record<string, number> = {};
+  const statusCounts: Record<string, number> = {};
+  let latestDecidedAt: string | Date | null = null;
+
+  for (const decision of decisions) {
+    if (!decision) continue;
+    decisionCounts[decision.decision] = (decisionCounts[decision.decision] ?? 0) + 1;
+    kindCounts[decision.kind] = (kindCounts[decision.kind] ?? 0) + 1;
+    statusCounts[decision.status] = (statusCounts[decision.status] ?? 0) + 1;
+    if (decision.decidedAt) {
+      const current = new Date(decision.decidedAt).getTime();
+      const latest = latestDecidedAt ? new Date(latestDecidedAt).getTime() : Number.NEGATIVE_INFINITY;
+      if (Number.isFinite(current) && current > latest) latestDecidedAt = decision.decidedAt;
+    }
+  }
+
+  return {
+    total: decisions.filter(Boolean).length,
+    active: decisions.filter((decision) => decision?.status === "active").length,
+    acceptedForPo: decisionCounts.accepted_for_po ?? 0,
+    poHandoffCreated: decisionCounts.po_handoff_created ?? 0,
+    deferred: decisionCounts.deferred ?? 0,
+    dismissed: decisionCounts.dismissed ?? 0,
+    reviewed: decisionCounts.reviewed ?? 0,
+    latestDecidedAt,
+    decisionCounts,
+    kindCounts,
+    statusCounts,
+  };
+}
+
 function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: ReturnType<typeof buildRecommendationReviewQueue>, limit: number) {
   const latestDecisions = Array.from(buildLatestDecisionMap(decisionRows).values())
     .filter((decision) => decision?.decision === "accepted_for_po");
@@ -809,9 +842,12 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     try {
       const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "25"), 10) || 25, 1), 100);
       const rows = await storage.getRecentRecommendationDecisions(limit);
+      const decisions = rows.map(normalizeRecommendationDecision);
       res.json({
+        generatedAt: new Date().toISOString(),
         limit,
-        decisions: rows.map(normalizeRecommendationDecision),
+        summary: buildRecommendationDecisionHistorySummary(decisions),
+        decisions,
       });
     } catch (error) {
       console.error("Error fetching recommendation decisions:", error);
