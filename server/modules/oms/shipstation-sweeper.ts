@@ -61,12 +61,16 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
     
     if (ssOrders.length === 0) break;
 
-    // Group by order number to detect duplicates
+    // Group by order number to detect duplicates. Normalize by stripping
+    // any channel prefix (e.g. "EB-") added by pushOrder/pushShipment so
+    // OMS-keyed and WMS-keyed copies of the same order group together.
     const byOrderNumber = new Map<string, any[]>();
     for (const o of ssOrders) {
-      let searchOrderNum = o.orderNumber;
-      if (searchOrderNum.startsWith("EB-")) {
-        searchOrderNum = searchOrderNum.replace("EB-", "");
+      const orderKey = String(o.orderKey || "");
+      let searchOrderNum = String(o.orderNumber || "");
+      if (orderKey.startsWith("echelon-oms-") || orderKey.startsWith("echelon-wms-shp-")) {
+        const prefixMatch = /^[A-Z]{2,4}-(.+)$/.exec(searchOrderNum);
+        if (prefixMatch) searchOrderNum = prefixMatch[1];
       }
       if (!byOrderNumber.has(searchOrderNum)) byOrderNumber.set(searchOrderNum, []);
       byOrderNumber.get(searchOrderNum)!.push(o);

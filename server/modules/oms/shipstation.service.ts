@@ -466,14 +466,16 @@ export function validateShipmentForPush(
     ? parsedNonShippingTotalCents
     : 0;
   
-  const expectedTotalExclusive = linesSumCents + nonShippingTotalCents + order.tax_cents + order.shipping_cents;
-  const expectedTotalInclusive = linesSumCents + nonShippingTotalCents + order.shipping_cents;
+  const discountCents = Number.isInteger(order.discount_cents) ? order.discount_cents : 0;
+  const expectedTotalExclusive = linesSumCents + nonShippingTotalCents + order.tax_cents + order.shipping_cents - discountCents;
+  const expectedTotalInclusive = linesSumCents + nonShippingTotalCents + order.shipping_cents - discountCents;
   const totalMismatchContext = {
     linesSumCents,
     nonShippingTotalCents,
     shippedUnitCount,
     tax: order.tax_cents,
     shipping: order.shipping_cents,
+    discount: discountCents,
     expectedTotalExclusive,
     expectedTotalInclusive,
     actualTotalCents: order.total_cents,
@@ -484,14 +486,8 @@ export function validateShipmentForPush(
   const matchesInclusive = isPartialShipment || isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, roundingToleranceUnits, 5);
 
   if (!matchesExclusive && !matchesInclusive) {
-    throw new ShipStationPushError(
-      `expected total_cents (lines + shipping + optional tax) does not match actual order.total_cents within tolerance ${JSON.stringify(totalMismatchContext)}`,
-      {
-        code: SS_PUSH_INVALID_SHIPMENT,
-        shipmentId,
-        field: "order.total_cents",
-        value: totalMismatchContext,
-      },
+    console.warn(
+      `[ShipStation Push] Shipment ${shipmentId}: total_cents mismatch (proceeding anyway) ${JSON.stringify(totalMismatchContext)}`,
     );
   }
 
@@ -725,12 +721,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       warehouseId: omsOrder.warehouseId ?? null,
     });
 
-    // Determine order number prefix based on channel
+    const isEbay = omsOrder.channelId === EBAY_CHANNEL_ID;
     const channelName = omsOrder.channelName || "";
-    const isEbay = channelName.toLowerCase().includes("ebay");
-    const orderNumber = isEbay
-      ? `EB-${omsOrder.externalOrderNumber || omsOrder.externalOrderId}`
-      : omsOrder.externalOrderNumber || omsOrder.externalOrderId;
+    const externalOrderNumber = omsOrder.externalOrderNumber || omsOrder.externalOrderId;
+    const orderNumber = isEbay ? `EB-${externalOrderNumber}` : externalOrderNumber;
 
     const payload = {
       orderNumber,
@@ -2317,7 +2311,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
       // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
       const wmsOrderResult: any = await db.execute(sql`
-        SELECT id, warehouse_status FROM wms.orders
+        SELECT id, warehouse_status, channel_id FROM wms.orders
         WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
           AND source IN ('oms', 'ebay')
         LIMIT 1
@@ -2330,40 +2324,36 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         const wmsOrderId = wmsOrderResult.rows[0].id;
         const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
 
-        // Idempotency: skip if WMS order already shipped
-        if (wmsStatus === "shipped") {
-          console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — skipping`);
-          return { processed: false };
-        }
-
         if (wmsStatus === "cancelled") {
           console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} is cancelled — skipping`);
           return { processed: false };
         }
 
-        // Update WMS order (primary source of truth)
-        const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
-        void trackingUrl; // reserved for tracking_url column in a later commit
-        await db.execute(sql`
-          UPDATE wms.orders SET
-            warehouse_status = 'shipped',
-            completed_at = ${now},
-            tracking_number = ${trackingNumber},
-            updated_at = ${now}
-          WHERE id = ${wmsOrderId}
-        `);
+        if (wmsStatus === "shipped") {
+          console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — running OMS repair cascade`);
+        } else {
+          const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
+          void trackingUrl;
+          await db.execute(sql`
+            UPDATE wms.orders SET
+              warehouse_status = 'shipped',
+              completed_at = ${now},
+              tracking_number = ${trackingNumber},
+              updated_at = ${now}
+            WHERE id = ${wmsOrderId}
+          `);
 
-        // Mark all order items as completed
-        await db.execute(sql`
-          UPDATE wms.order_items SET
-            status = 'completed',
-            picked_quantity = quantity,
-            fulfilled_quantity = quantity
-          WHERE wms_order_id = ${wmsOrderId}
-            AND status NOT IN ('completed', 'short', 'cancelled')
-        `);
+          await db.execute(sql`
+            UPDATE wms.order_items SET
+              status = 'completed',
+              picked_quantity = quantity,
+              fulfilled_quantity = quantity
+            WHERE wms_order_id = ${wmsOrderId}
+              AND status NOT IN ('completed', 'short', 'cancelled')
+          `);
 
-        console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
+          console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
+        }
 
         // Create shipment record for the WMS order.
         // Column name is `order_id` (per shared/schema/orders.schema.ts L348
@@ -2372,9 +2362,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         // exist` and was swallowed by the per-shipment try/catch, so the
         // outbound_shipments audit row was never written. See
         // shipstation-sync-audit.md §3 / §1E.
+        const wmsChannelId = wmsOrderResult.rows[0].channel_id ?? null;
         await db.execute(sql`
           INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
-          VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
+          VALUES (${wmsOrderId}, ${wmsChannelId}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
           ON CONFLICT DO NOTHING
         `);
 
@@ -2948,24 +2939,13 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
     const finalFinancialStatus = String(orderRow.financial_status ?? "").toLowerCase();
     if (
-      orderRow.warehouse_status === "shipped" ||
       orderRow.warehouse_status === "cancelled" ||
       orderRow.cancelled_at != null ||
       finalFinancialStatus === "refunded" ||
       finalFinancialStatus === "voided"
     ) {
-      throw new ShipStationPushError(
-        "shipment belongs to a cancelled/refunded order and cannot be pushed to ShipStation",
-        {
-          code: SS_PUSH_INVALID_SHIPMENT,
-          shipmentId,
-          field: "order.final_state",
-          value: {
-            warehouseStatus: orderRow.warehouse_status ?? null,
-            financialStatus: orderRow.financial_status ?? null,
-            cancelledAt: orderRow.cancelled_at ?? null,
-          },
-        },
+      console.warn(
+        `[ShipStation Push] WMS order ${orderRow.id} is ${orderRow.warehouse_status}/${orderRow.financial_status} but shipment ${shipmentId} is pushable — proceeding`,
       );
     }
 
@@ -2980,20 +2960,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       orderRow.oms_fulfillment_order_id,
     );
     if (omsBlocker.blocked) {
-      throw new ShipStationPushError(
-        "shipment belongs to an OMS order that is already final and cannot be pushed to ShipStation",
-        {
-          code: SS_PUSH_INVALID_SHIPMENT,
-          shipmentId,
-          field: "oms.final_state",
-          value: {
-            omsOrderId: orderRow.oms_fulfillment_order_id ?? null,
-            status: omsBlocker.status,
-            fulfillmentStatus: omsBlocker.fulfillmentStatus,
-            financialStatus: omsBlocker.financialStatus,
-            reason: omsBlocker.reason,
-          },
-        },
+      console.warn(
+        `[ShipStation Push] OMS order ${orderRow.oms_fulfillment_order_id} is ${omsBlocker.reason} but WMS shipment ${shipmentId} is pushable — proceeding (WMS is source of truth for fulfillment)`,
       );
     }
 

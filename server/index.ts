@@ -801,13 +801,13 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
         for (const order of stuckOrders.rows) {
           try {
-            // Check ShipStation for this order using the mapped ID, or fallback to order_number if manually created
             let ssOrder = null;
             if (order.shipstation_order_id) {
               ssOrder = await ss.getOrderById(Number(order.shipstation_order_id));
             } else {
-              const searchNumber = `EB-${order.external_order_number || order.external_order_id}`;
-              ssOrder = await ss.getOrderByNumber(searchNumber);
+              const baseNumber = String(order.external_order_number || order.external_order_id || "");
+              ssOrder = await ss.getOrderByNumber(`EB-${baseNumber}`)
+                || await ss.getOrderByNumber(baseNumber);
             }
             if (ssOrder && ssOrder.orderStatus === "shipped") {
               const shipment = ssOrder;
