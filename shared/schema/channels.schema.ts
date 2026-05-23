@@ -35,6 +35,12 @@ export const channels = channelsSchema.table("channels", {
   syncEnabled: boolean("sync_enabled").default(false),
   syncMode: varchar("sync_mode", { length: 10 }).default("dry_run"), // 'live' or 'dry_run'
   sweepIntervalMinutes: integer("sweep_interval_minutes").default(15),
+  // Per-channel fulfillment SLA in business days. NULL = use the global
+  // priority.sla_default_days fallback. Feeds sla_due_at (sla-monitor) which
+  // drives the SLA-urgency slot of the pick-queue sort_rank — tighter SLAs
+  // bubble up the queue. A platform-provided ship-by date (e.g. eBay's real
+  // shipByDate) still wins over this channel default when present.
+  slaDays: integer("sla_days"),
   shippingConfig: jsonb("shipping_config"), // Engine-specific routing: {"shipstation": {"storeId": 319989}}, {"easypost": {...}}, etc.
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
