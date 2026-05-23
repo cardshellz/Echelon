@@ -630,6 +630,15 @@ async function autoRemediateCriticalFlowIssues(
           : null;
       },
     },
+    {
+      code: "WMS_READY_WITHOUT_SHIPMENT",
+      inputFromSample: (sample) => {
+        const wmsOrderId = Number(sample.wms_order_id ?? sample.id);
+        return Number.isInteger(wmsOrderId) && wmsOrderId > 0
+          ? { code: "WMS_READY_WITHOUT_SHIPMENT", wmsOrderId }
+          : null;
+      },
+    },
   ];
 
   for (const mapping of mappings) {
