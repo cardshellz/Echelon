@@ -1208,13 +1208,26 @@ export class WmsSyncService {
     let memberPlanColor: string | null = null;
 
     try {
+      // A member is still entitled to their CURRENT plan's priority modifier
+      // until the billing cycle ends. A scheduled downgrade
+      // (pending_downgrade) or cancellation (pending_cancellation) does NOT
+      // revoke the plan immediately — it applies at cycle end. Matching only
+      // status='active' previously dropped these members to a 0 modifier
+      // (retail-tier pick priority) the moment they scheduled a change.
+      //
+      // This is the same entitled-status set used by the membership
+      // member_current_membership view and shellz-club's
+      // getActiveMemberSubscription(). ORDER BY created_at DESC mirrors the
+      // view's "most recent subscription wins" rule so a member with both an
+      // active and a pending row resolves deterministically to the latest.
       const result = await db.execute(sql`
         SELECT p.priority_modifier, p.name, p.primary_color
         FROM membership.plans p
         INNER JOIN membership.member_subscriptions ms ON p.id = ms.plan_id
         INNER JOIN membership.members m ON ms.member_id = m.id
         WHERE (m.email = ${omsOrder.customerEmail} OR m.shopify_customer_id = ${omsOrder.rawPayload ? (omsOrder.rawPayload as any).customer?.id : null})
-          AND ms.status = 'active'
+          AND ms.status IN ('active', 'pending_downgrade', 'pending_cancellation')
+        ORDER BY ms.created_at DESC
         LIMIT 1
       `);
 
