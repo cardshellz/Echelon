@@ -192,6 +192,65 @@ export class InventoryUseCases {
     return result;
   }
 
+  // ---------------------------------------------------------------------------
+  // UNPICK (reverse a pick — returns inventory from picked back to on-hand)
+  // ---------------------------------------------------------------------------
+
+  async unpickItem(params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    qty: number;
+    orderId: number;
+    orderItemId?: number;
+    userId?: string;
+    reason?: string;
+  }): Promise<boolean> {
+    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+
+    const result = await this.db.transaction(async (tx) => {
+      const level = await this.storage.lockInventoryLevel(
+        params.warehouseLocationId,
+        params.productVariantId,
+        tx
+      );
+
+      if (!level) return false;
+
+      const actualUnpick = Math.min(level.pickedQty, params.qty);
+      if (actualUnpick <= 0) return false;
+
+      await this.storage.adjustInventoryLevel(level.id, {
+        variantQty: actualUnpick,
+        pickedQty: -actualUnpick,
+      }, tx);
+
+      await this.storage.createInventoryTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: params.warehouseLocationId,
+        transactionType: "unpick",
+        variantQtyDelta: actualUnpick,
+        variantQtyBefore: level.variantQty,
+        variantQtyAfter: level.variantQty + actualUnpick,
+        sourceState: "picked",
+        targetState: "on_hand",
+        orderId: params.orderId,
+        orderItemId: params.orderItemId ?? null,
+        referenceType: "order",
+        referenceId: String(params.orderId),
+        userId: params.userId ?? null,
+        notes: params.reason || "Order edit: reversed pick",
+      }, tx);
+
+      return true;
+    });
+
+    if (result) {
+      this.triggerNotifyChange(params.productVariantId, "unpick");
+    }
+
+    return result;
+  }
+
   async getLevelsByVariant(productVariantId: number): Promise<InventoryLevel[]> {
     return this.storage.getInventoryLevelsByProductVariantId(productVariantId);
   }

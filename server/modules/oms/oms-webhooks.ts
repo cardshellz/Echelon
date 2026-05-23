@@ -1566,6 +1566,22 @@ export function registerOmsWebhooks(
           }
         }
 
+        // Zero-out OMS lines that were removed from the Shopify order
+        const shopifyLineIds = new Set(newLineItems.map((item: any) => String(item.id)));
+        for (const existingLine of existingLines) {
+          if (existingLine.externalLineItemId && !shopifyLineIds.has(existingLine.externalLineItemId)) {
+            if ((existingLine.quantity || 0) > 0) {
+              await db
+                .update(omsOrderLines)
+                .set({ quantity: 0 })
+                .where(eq(omsOrderLines.id, existingLine.id));
+              console.log(
+                `${LOG_PREFIX} Zeroed removed OMS line ${existingLine.externalLineItemId} (SKU: ${existingLine.sku}) for order ${shopifyOrder.name || externalOrderId}`,
+              );
+            }
+          }
+        }
+
         // Update WMS order items if they exist
         if (wmsOrderRows.length > 0) {
           if (isFinalOmsState) {
@@ -1578,6 +1594,29 @@ export function registerOmsWebhooks(
               existing.id,
               shopifyOrder.name || externalOrderId,
             );
+            // Propagate line item edits (qty changes, new items, removed items) to WMS
+            try {
+              const propagation = await wmsSyncService.propagateOmsEditsToWms(
+                existing.id,
+                newLineItems,
+              );
+              if (propagation.updated > 0 || propagation.added > 0 || propagation.removed > 0) {
+                console.log(
+                  `${LOG_PREFIX} Propagated edits to WMS order ${wmsOrderRows[0].id}: ` +
+                  `${propagation.updated} updated, ${propagation.added} added, ${propagation.removed} removed`,
+                );
+              }
+              if (propagation.flaggedForReview.length > 0) {
+                console.warn(
+                  `${LOG_PREFIX} Order ${shopifyOrder.name || externalOrderId} has items needing manual review:`,
+                  propagation.flaggedForReview,
+                );
+              }
+            } catch (propErr: any) {
+              console.error(
+                `${LOG_PREFIX} WMS edit propagation failed for order ${shopifyOrder.name || externalOrderId}: ${propErr.message}`,
+              );
+            }
           } else {
             await enqueueOmsWmsSyncRetry(
               db,
