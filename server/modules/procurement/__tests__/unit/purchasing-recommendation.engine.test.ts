@@ -586,6 +586,84 @@ describe("purchasing recommendation engine", () => {
     });
   });
 
+  it("keeps zero-revenue demand in usage while requiring review before auto-draft", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 65,
+          variant_id: 650,
+          base_sku: "PROMO-DEMAND",
+          product_name: "Promo Demand Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 60,
+          previous_outbound_pieces: 58,
+          paid_demand_pieces: 20,
+          zero_revenue_demand_pieces: 40,
+          coupon_discount_demand_pieces: 45,
+          demand_order_count: 15,
+          demand_active_days: 12,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 3,
+          safety_stock_days: 1,
+          order_uom_units: 10,
+          order_uom_level: 3,
+          vendor_product_id: 6500,
+          preferred_vendor_id: 10,
+          estimated_cost_cents: 250,
+          vendor_product_updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      status: "stockout",
+      suggestedOrderPieces: 10,
+      confidence: "medium",
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "medium_confidence_review",
+      },
+      demandBasis: {
+        periodUsagePieces: 60,
+        paidDemandPieces: 20,
+        zeroRevenueDemandPieces: 40,
+        couponDiscountDemandPieces: 45,
+        zeroRevenueDemandShare: 0.67,
+        couponDiscountDemandShare: 0.75,
+        demandMixSignal: "mostly_zero_revenue",
+      },
+      forecastProvenance: {
+        periodUsagePieces: 60,
+        paidDemandPieces: 20,
+        zeroRevenueDemandPieces: 40,
+        couponDiscountDemandPieces: 45,
+        demandMixSignal: "mostly_zero_revenue",
+      },
+      qualityControls: expect.arrayContaining([
+        expect.objectContaining({
+          area: "demand",
+          severity: "review",
+          code: "zero_revenue_demand_mix",
+        }),
+      ]),
+      recommendationCandidateScore: {
+        signals: expect.arrayContaining(["demand_mix:mostly_zero_revenue"]),
+        blockers: expect.arrayContaining(["zero_revenue_demand_mix"]),
+      },
+      confidenceFactors: expect.arrayContaining([
+        "Demand mix: 20 paid pieces, 40 zero-revenue pieces, and 45 coupon-discounted pieces.",
+      ]),
+    });
+    expect(result.summary).toMatchObject({
+      actionableCount: 1,
+      mediumConfidenceCount: 1,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 1,
+    });
+  });
+
   it("downgrades confidence and exposes stale last-purchase supplier cost fallback", () => {
     const result = generatePurchasingRecommendations({
       lookbackDays: 30,

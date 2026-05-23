@@ -2,6 +2,7 @@ import {
   buildPurchasingDemandForecastBasis,
   buildPurchasingDemandForecastWindowDiagnostics,
   type PurchasingDemandForecastMethod,
+  type PurchasingDemandForecastDemandMixSignal,
   type PurchasingDemandForecastQuality,
   type PurchasingDemandForecastTrend,
   type PurchasingDemandForecastWindowDiagnostics,
@@ -88,6 +89,9 @@ export interface PurchasingRecommendationRawRow {
   demand_order_count?: number | string | null;
   demand_active_days?: number | string | null;
   latest_demand_at?: string | Date | null;
+  paid_demand_pieces?: number | string | null;
+  zero_revenue_demand_pieces?: number | string | null;
+  coupon_discount_demand_pieces?: number | string | null;
   short_window_days?: number | string | null;
   short_outbound_pieces?: number | string | null;
   previous_short_outbound_pieces?: number | string | null;
@@ -249,6 +253,12 @@ export interface PurchasingRecommendationItem {
     demandOrderCount: number | null;
     demandActiveDays: number | null;
     latestDemandAt: string | Date | null;
+    paidDemandPieces: number | null;
+    zeroRevenueDemandPieces: number | null;
+    couponDiscountDemandPieces: number | null;
+    zeroRevenueDemandShare: number | null;
+    couponDiscountDemandShare: number | null;
+    demandMixSignal: PurchasingDemandForecastDemandMixSignal;
   };
   leadTimeBasis: {
     leadTimeDays: number;
@@ -270,6 +280,12 @@ export interface PurchasingRecommendationItem {
     demandOrderCount: number | null;
     demandActiveDays: number | null;
     latestDemandAt: string | Date | null;
+    paidDemandPieces: number | null;
+    zeroRevenueDemandPieces: number | null;
+    couponDiscountDemandPieces: number | null;
+    zeroRevenueDemandShare: number | null;
+    couponDiscountDemandShare: number | null;
+    demandMixSignal: PurchasingDemandForecastDemandMixSignal;
     leadTimeSource: PurchasingRecommendationLeadTimeSource;
     safetyStockSource: PurchasingRecommendationSafetyStockSource;
     orderUomSource: PurchasingRecommendationOrderUomSource;
@@ -508,6 +524,7 @@ function buildExplanation(input: {
 function buildConfidence(input: {
   demandQuality: PurchasingRecommendationDemandQuality;
   demandTrend: PurchasingRecommendationDemandTrend;
+  demandMixSignal: PurchasingDemandForecastDemandMixSignal;
   leadTimeSource: PurchasingRecommendationLeadTimeSource;
   costQuality: PurchasingRecommendationSupplierCostQuality;
   costSource: PurchasingRecommendationSupplierCostSource;
@@ -515,6 +532,7 @@ function buildConfidence(input: {
 }): PurchasingRecommendationConfidence {
   if (input.demandQuality === "no_recent_demand") return "low";
   if (input.demandQuality === "thin_history") return "medium";
+  if (input.demandMixSignal === "mostly_zero_revenue" || input.demandMixSignal === "mixed_discounted_or_free") return "medium";
   if (input.demandTrend === "new_demand" || input.demandTrend === "falling") return "medium";
   if (!input.hasVendor || input.leadTimeSource !== "vendor_product") return "medium";
   if (input.costQuality !== "current" || input.costSource === "last_purchase_cost") return "medium";
@@ -527,6 +545,12 @@ function buildQualityControls(input: {
   demandTrend: PurchasingRecommendationDemandTrend;
   demandOrderCount: number | null;
   demandActiveDays: number | null;
+  periodUsagePieces: number;
+  zeroRevenueDemandPieces: number | null;
+  couponDiscountDemandPieces: number | null;
+  zeroRevenueDemandShare: number | null;
+  couponDiscountDemandShare: number | null;
+  demandMixSignal: PurchasingDemandForecastDemandMixSignal;
   leadTimeSource: PurchasingRecommendationLeadTimeSource;
   costQuality: PurchasingRecommendationSupplierCostQuality;
   costSource: PurchasingRecommendationSupplierCostSource;
@@ -569,6 +593,24 @@ function buildQualityControls(input: {
       code: "falling_demand",
       label: "Falling demand",
       detail: "Current demand is lower than the prior lookback window, so the reorder quantity needs operator review.",
+    });
+  }
+
+  if (input.demandMixSignal === "mostly_zero_revenue") {
+    controls.push({
+      area: "demand",
+      severity: "review",
+      code: "zero_revenue_demand_mix",
+      label: "High zero-revenue demand",
+      detail: `${input.zeroRevenueDemandPieces ?? 0} of ${input.periodUsagePieces} forecast demand pieces came from zero-revenue lines. Count the units, but review before automated purchasing.`,
+    });
+  } else if (input.demandMixSignal === "mixed_discounted_or_free") {
+    controls.push({
+      area: "demand",
+      severity: "review",
+      code: "discounted_or_free_demand_mix",
+      label: "Discounted/free demand mix",
+      detail: `${input.zeroRevenueDemandPieces ?? 0} zero-revenue pieces and ${input.couponDiscountDemandPieces ?? 0} coupon-discounted pieces are included in demand. Review promotion-driven demand before automation.`,
     });
   }
 
@@ -644,6 +686,10 @@ function buildConfidenceFactors(input: {
   demandTrend: PurchasingRecommendationDemandTrend;
   demandOrderCount: number | null;
   demandActiveDays: number | null;
+  paidDemandPieces: number | null;
+  zeroRevenueDemandPieces: number | null;
+  couponDiscountDemandPieces: number | null;
+  demandMixSignal: PurchasingDemandForecastDemandMixSignal;
   leadTimeSource: PurchasingRecommendationLeadTimeSource;
   safetyStockSource: PurchasingRecommendationSafetyStockSource;
   costSource: PurchasingRecommendationSupplierCostSource;
@@ -675,6 +721,12 @@ function buildConfidenceFactors(input: {
     factors.push("Demand is falling versus the prior lookback window.");
   } else if (input.demandTrend === "stable") {
     factors.push("Demand is stable versus the prior lookback window.");
+  }
+
+  if (input.demandMixSignal !== "not_available") {
+    factors.push(
+      `Demand mix: ${input.paidDemandPieces ?? 0} paid pieces, ${input.zeroRevenueDemandPieces ?? 0} zero-revenue pieces, and ${input.couponDiscountDemandPieces ?? 0} coupon-discounted pieces.`,
+    );
   }
 
   if (input.leadTimeSource === "vendor_product") {
@@ -866,6 +918,7 @@ function buildRecommendationCandidateScore(input: {
   qualityControls: PurchasingRecommendationQualityControl[];
   demandQuality: PurchasingRecommendationDemandQuality;
   demandTrend: PurchasingRecommendationDemandTrend;
+  demandMixSignal: PurchasingDemandForecastDemandMixSignal;
   demandWindowDiagnostics: PurchasingDemandForecastWindowDiagnostics;
   supplierCycleDiagnostics: PurchasingRecommendationItem["supplierCycleDiagnostics"];
   strongThreshold: number;
@@ -948,6 +1001,7 @@ function buildRecommendationCandidateScore(input: {
     `status:${input.status}`,
     `demand:${input.demandQuality}`,
     `trend:${input.demandTrend}`,
+    `demand_mix:${input.demandMixSignal}`,
     `short:${demandWindow.accelerationSignal}`,
     `baseline:${demandWindow.baselineSignal}`,
     `seasonal:${demandWindow.seasonalSignal}`,
@@ -1171,6 +1225,9 @@ export function generatePurchasingRecommendations(
       demandOrderCount: row.demand_order_count,
       demandActiveDays: row.demand_active_days,
       latestDemandAt: row.latest_demand_at ?? null,
+      paidDemandPieces: row.paid_demand_pieces,
+      zeroRevenueDemandPieces: row.zero_revenue_demand_pieces,
+      couponDiscountDemandPieces: row.coupon_discount_demand_pieces,
     });
     const hasShortWindowInput =
       row.short_window_days !== undefined ||
@@ -1230,6 +1287,12 @@ export function generatePurchasingRecommendations(
     const demandOrderCount = demandForecast.demandOrderCount;
     const demandActiveDays = demandForecast.demandActiveDays;
     const latestDemandAt = demandForecast.latestDemandAt;
+    const paidDemandPieces = demandForecast.paidDemandPieces;
+    const zeroRevenueDemandPieces = demandForecast.zeroRevenueDemandPieces;
+    const couponDiscountDemandPieces = demandForecast.couponDiscountDemandPieces;
+    const zeroRevenueDemandShare = demandForecast.zeroRevenueDemandShare;
+    const couponDiscountDemandShare = demandForecast.couponDiscountDemandShare;
+    const demandMixSignal = demandForecast.demandMixSignal;
     const avgDailyUsage = demandForecast.avgDailyUsagePieces;
     const roundedAvgDailyUsage = Math.round(avgDailyUsage * 100) / 100;
     const onOrderPieces = asNumber(row.on_order_pieces);
@@ -1343,6 +1406,7 @@ export function generatePurchasingRecommendations(
     const confidence = buildConfidence({
       demandQuality,
       demandTrend,
+      demandMixSignal,
       leadTimeSource,
       costQuality: supplierCost.costQuality,
       costSource: supplierCost.costSource,
@@ -1354,6 +1418,12 @@ export function generatePurchasingRecommendations(
       demandTrend,
       demandOrderCount,
       demandActiveDays,
+      periodUsagePieces: periodUsage,
+      zeroRevenueDemandPieces,
+      couponDiscountDemandPieces,
+      zeroRevenueDemandShare,
+      couponDiscountDemandShare,
+      demandMixSignal,
       leadTimeSource,
       costQuality: supplierCost.costQuality,
       costSource: supplierCost.costSource,
@@ -1375,6 +1445,7 @@ export function generatePurchasingRecommendations(
       qualityControls,
       demandQuality,
       demandTrend,
+      demandMixSignal,
       demandWindowDiagnostics,
       supplierCycleDiagnostics,
       strongThreshold: candidateScoreThresholds.strongThreshold,
@@ -1442,6 +1513,12 @@ export function generatePurchasingRecommendations(
         demandOrderCount,
         demandActiveDays,
         latestDemandAt,
+        paidDemandPieces,
+        zeroRevenueDemandPieces,
+        couponDiscountDemandPieces,
+        zeroRevenueDemandShare,
+        couponDiscountDemandShare,
+        demandMixSignal,
       },
       leadTimeBasis: {
         leadTimeDays,
@@ -1463,6 +1540,12 @@ export function generatePurchasingRecommendations(
         demandOrderCount,
         demandActiveDays,
         latestDemandAt,
+        paidDemandPieces,
+        zeroRevenueDemandPieces,
+        couponDiscountDemandPieces,
+        zeroRevenueDemandShare,
+        couponDiscountDemandShare,
+        demandMixSignal,
         leadTimeSource,
         safetyStockSource,
         orderUomSource,
@@ -1474,6 +1557,10 @@ export function generatePurchasingRecommendations(
         demandTrend,
         demandOrderCount,
         demandActiveDays,
+        paidDemandPieces,
+        zeroRevenueDemandPieces,
+        couponDiscountDemandPieces,
+        demandMixSignal,
         leadTimeSource,
         safetyStockSource,
         costSource: supplierCost.costSource,

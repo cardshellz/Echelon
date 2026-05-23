@@ -108,6 +108,9 @@ describe("purchasing recommendation run detail", () => {
         demandSeasonalitySignalCounts: {
           not_available: 2,
         },
+        demandMixSignalCounts: {
+          not_available: 2,
+        },
         supplierCycleSignalCounts: {
           no_supplier_cycle_data: 2,
         },
@@ -149,6 +152,9 @@ describe("purchasing recommendation run detail", () => {
         },
         autopilotBlockerItemCount: 2,
         totalPeriodUsagePieces: 60,
+        totalPaidDemandPieces: 0,
+        totalZeroRevenueDemandPieces: 0,
+        totalCouponDiscountDemandPieces: 0,
         avgDailyUsagePieces: 1,
         latestDemandAt: null,
       },

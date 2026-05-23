@@ -13,6 +13,9 @@ describe("purchasing demand forecast engine", () => {
       demandOrderCount: 18,
       demandActiveDays: 12,
       latestDemandAt: "2026-05-18T12:00:00.000Z",
+      paidDemandPieces: 80,
+      zeroRevenueDemandPieces: 10,
+      couponDiscountDemandPieces: 15,
     });
 
     expect(basis).toEqual({
@@ -28,6 +31,12 @@ describe("purchasing demand forecast engine", () => {
       demandOrderCount: 18,
       demandActiveDays: 12,
       latestDemandAt: "2026-05-18T12:00:00.000Z",
+      paidDemandPieces: 80,
+      zeroRevenueDemandPieces: 10,
+      couponDiscountDemandPieces: 15,
+      zeroRevenueDemandShare: 0.11,
+      couponDiscountDemandShare: 0.17,
+      demandMixSignal: "mixed_discounted_or_free",
     });
   });
 
@@ -232,6 +241,30 @@ describe("purchasing demand forecast engine", () => {
       },
       seasonalRatio: 2,
       seasonalSignal: "above_seasonal",
+    });
+  });
+
+  it("keeps zero-revenue demand in usage while surfacing demand mix provenance", () => {
+    const basis = buildPurchasingDemandForecastBasis({
+      lookbackDays: 30,
+      periodUsagePieces: 100,
+      priorPeriodUsagePieces: 60,
+      demandOrderCount: 12,
+      demandActiveDays: 8,
+      paidDemandPieces: 40,
+      zeroRevenueDemandPieces: 60,
+      couponDiscountDemandPieces: 70,
+    });
+
+    expect(basis).toMatchObject({
+      periodUsagePieces: 100,
+      avgDailyUsagePieces: 100 / 30,
+      paidDemandPieces: 40,
+      zeroRevenueDemandPieces: 60,
+      couponDiscountDemandPieces: 70,
+      zeroRevenueDemandShare: 0.6,
+      couponDiscountDemandShare: 0.7,
+      demandMixSignal: "mostly_zero_revenue",
     });
   });
 });
