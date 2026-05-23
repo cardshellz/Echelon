@@ -82,8 +82,11 @@ class SLAMonitorService {
     // Priority order for the due date:
     //   1. Platform-provided ship-by deadline (eBay shipByDate, etc.) — hardest
     //      commitment, always wins when present.
-    //   2. Channel partner_profiles.sla_days — per-channel default.
-    //   3. DEFAULT_SLA_DAYS — global fallback (3 business days).
+    //   2. channels.sla_days — per-channel SLA for ANY channel (Shopify, eBay,
+    //      dropship, ...). Configurable on the /pick-priority page.
+    //   3. partner_profiles.sla_days — back-compat for partner (dropship/
+    //      wholesale) channels that set SLA there before channels.sla_days existed.
+    //   4. priority.sla_default_days (admin global) → DEFAULT_SLA_DAYS hardcode.
     let dueAt: Date | null = null;
     const channelShipBy = (order as any).channelShipByDate as Date | string | null;
     if (channelShipBy) {
@@ -91,18 +94,30 @@ class SLAMonitorService {
     }
 
     if (!dueAt) {
-      // Fallback SLA days = admin-configurable default (warehouse.echelon_settings
-      // key `priority.sla_default_days`), then channel partner_profile override.
+      // Start from the admin-configurable global default.
       let slaDays = await getSlaDefaultDays(this.db as any).catch(() => this.DEFAULT_SLA_DAYS);
+
       if (order.channelId) {
-        const [profile] = await this.db
-          .select()
-          .from(partnerProfiles)
-          .where(eq(partnerProfiles.channelId, order.channelId))
+        // (2) Per-channel SLA — canonical, applies to every channel type.
+        const [channel] = await this.db
+          .select({ slaDays: channels.slaDays })
+          .from(channels)
+          .where(eq(channels.id, order.channelId))
           .limit(1);
 
-        if (profile?.slaDays) {
-          slaDays = profile.slaDays;
+        if (channel?.slaDays != null) {
+          slaDays = channel.slaDays;
+        } else {
+          // (3) Back-compat: partner channels may still carry SLA on their profile.
+          const [profile] = await this.db
+            .select()
+            .from(partnerProfiles)
+            .where(eq(partnerProfiles.channelId, order.channelId))
+            .limit(1);
+
+          if (profile?.slaDays != null) {
+            slaDays = profile.slaDays;
+          }
         }
       }
       const placedAt = order.orderPlacedAt || order.createdAt;

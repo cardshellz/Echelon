@@ -38,12 +38,22 @@ interface PickPriorityPayload {
     primaryColor: string | null;
     isActive: boolean;
   }>;
+  channels: Array<{
+    id: number;
+    name: string;
+    provider: string;
+    status: string;
+    // null = inherit the global slaDefaultDays fallback
+    slaDays: number | null;
+  }>;
 }
 
 interface PickPriorityUpdate {
   shippingBase?: Partial<Record<ShippingLevel, number>>;
   slaDefaultDays?: number;
   planModifiers?: Record<string, number>;
+  // channelId -> SLA business days, or null to clear (inherit global default)
+  channelSlaDays?: Record<string, number | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +66,9 @@ const SLA_MIN = 0;
 const SLA_MAX = 30;
 const PLAN_MOD_MIN = 0;
 const PLAN_MOD_MAX = 500;
+// Per-channel SLA shares the same 0–30 business-day bound as the global default.
+const CHANNEL_SLA_MIN = 0;
+const CHANNEL_SLA_MAX = 30;
 
 function validateInt(n: unknown, min: number, max: number, label: string): number {
   if (typeof n !== "number" || !Number.isFinite(n)) {
@@ -113,6 +126,29 @@ async function readSettings(): Promise<{ shippingBase: Record<ShippingLevel, num
   return { shippingBase, slaDefaultDays };
 }
 
+async function readChannels(): Promise<PickPriorityPayload["channels"]> {
+  // Order: active channels first, then by name. sla_days NULL = inherit global.
+  const rows = await db.execute<{
+    id: number;
+    name: string | null;
+    provider: string | null;
+    status: string | null;
+    sla_days: number | null;
+  }>(sql`
+    SELECT id, name, provider, status, sla_days
+    FROM channels.channels
+    ORDER BY (status = 'active') DESC, name
+  `);
+
+  return rows.rows.map((r) => ({
+    id: Number(r.id),
+    name: r.name ?? "(unnamed channel)",
+    provider: r.provider ?? "manual",
+    status: r.status ?? "pending_setup",
+    slaDays: r.sla_days == null ? null : Number(r.sla_days),
+  }));
+}
+
 async function readPlans(): Promise<PickPriorityPayload["plans"]> {
   const rows = await db.execute<{
     id: string;
@@ -162,11 +198,12 @@ export function registerPickPriorityRoutes(app: Express): void {
     requirePermission("settings", "view"),
     async (_req: Request, res: Response) => {
       try {
-        const [{ shippingBase, slaDefaultDays }, plans] = await Promise.all([
+        const [{ shippingBase, slaDefaultDays }, plans, channels] = await Promise.all([
           readSettings(),
           readPlans(),
+          readChannels(),
         ]);
-        const payload: PickPriorityPayload = { shippingBase, slaDefaultDays, plans };
+        const payload: PickPriorityPayload = { shippingBase, slaDefaultDays, plans, channels };
         res.json(payload);
       } catch (err: any) {
         console.error("[PickPriority] GET failed:", err.message);
@@ -216,15 +253,40 @@ export function registerPickPriorityRoutes(app: Express): void {
           }
         }
 
+        if (body.channelSlaDays && typeof body.channelSlaDays === "object") {
+          for (const [channelIdRaw, raw] of Object.entries(body.channelSlaDays)) {
+            const channelId = Number(channelIdRaw);
+            if (!Number.isInteger(channelId) || channelId <= 0) {
+              throw new Error("channelSlaDays keys must be channel ids");
+            }
+            // null clears the per-channel SLA (channel reverts to global default).
+            if (raw === null) {
+              tasks.push(db.execute(sql`
+                UPDATE channels.channels
+                SET sla_days = NULL, updated_at = now()
+                WHERE id = ${channelId}
+              `));
+              continue;
+            }
+            const v = validateInt(raw, CHANNEL_SLA_MIN, CHANNEL_SLA_MAX, `channelSlaDays[${channelId}]`);
+            tasks.push(db.execute(sql`
+              UPDATE channels.channels
+              SET sla_days = ${v}, updated_at = now()
+              WHERE id = ${channelId}
+            `));
+          }
+        }
+
         await Promise.all(tasks);
         invalidatePickPrioritySettingsCache();
 
         // Return the fresh payload so the client stays in sync.
-        const [{ shippingBase, slaDefaultDays }, plans] = await Promise.all([
+        const [{ shippingBase, slaDefaultDays }, plans, channels] = await Promise.all([
           readSettings(),
           readPlans(),
+          readChannels(),
         ]);
-        res.json({ shippingBase, slaDefaultDays, plans });
+        res.json({ shippingBase, slaDefaultDays, plans, channels });
       } catch (err: any) {
         const status = /must be (a number|between)/.test(err.message) ? 400 : 500;
         console.error("[PickPriority] PATCH failed:", err.message);

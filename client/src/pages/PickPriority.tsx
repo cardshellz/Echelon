@@ -39,16 +39,26 @@ interface PlanRow {
   isActive: boolean;
 }
 
+interface ChannelRow {
+  id: number;
+  name: string;
+  provider: string;
+  status: string;
+  slaDays: number | null; // null = inherit global slaDefaultDays
+}
+
 interface PickPriorityPayload {
   shippingBase: Record<ShippingLevel, number>;
   slaDefaultDays: number;
   plans: PlanRow[];
+  channels: ChannelRow[];
 }
 
 interface PatchBody {
   shippingBase?: Partial<Record<ShippingLevel, number>>;
   slaDefaultDays?: number;
   planModifiers?: Record<string, number>;
+  channelSlaDays?: Record<string, number | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +173,11 @@ export default function PickPriority() {
     const orig = data.plans.find((d) => d.id === p.id);
     return orig && orig.priorityModifier !== p.priorityModifier;
   });
-  const hasChanges = dirtyShipping.length > 0 || dirtySla || dirtyPlans.length > 0;
+  const dirtyChannels = draft.channels.filter((c) => {
+    const orig = data.channels.find((d) => d.id === c.id);
+    return orig && orig.slaDays !== c.slaDays;
+  });
+  const hasChanges = dirtyShipping.length > 0 || dirtySla || dirtyPlans.length > 0 || dirtyChannels.length > 0;
 
   const handleSaveAll = () => {
     const body: PatchBody = {};
@@ -175,6 +189,10 @@ export default function PickPriority() {
     if (dirtyPlans.length > 0) {
       body.planModifiers = {};
       for (const p of dirtyPlans) body.planModifiers[p.id] = p.priorityModifier;
+    }
+    if (dirtyChannels.length > 0) {
+      body.channelSlaDays = {};
+      for (const c of dirtyChannels) body.channelSlaDays[String(c.id)] = c.slaDays;
     }
     mutate.mutate(body);
   };
@@ -361,10 +379,10 @@ export default function PickPriority() {
       {/* SLA Defaults */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">SLA defaults</CardTitle>
+          <CardTitle className="text-base">SLA default (global fallback)</CardTitle>
           <CardDescription>
-            Fallback SLA (business days) used when a channel has no partner profile and the order has no platform ship-by date.
-            Range 0\u201330 days.
+            Used when a channel has no SLA of its own and the order has no platform ship-by date.
+            Per-channel SLAs below override this. Range 0\u201330 days.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -382,6 +400,79 @@ export default function PickPriority() {
                 slaDefaultDays: clampInt(e.target.value, 0, 30, draft.slaDefaultDays),
               })}
             />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Per-Channel SLAs */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Channel SLAs</CardTitle>
+          <CardDescription>
+            Per-channel fulfillment SLA in business days. Tighter SLAs push orders up the pick queue.
+            Leave blank to inherit the global default ({draft.slaDefaultDays}d).
+            A platform-provided ship-by date (e.g. eBay's per-order deadline) still wins over this.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="rounded-md border overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Channel</TableHead>
+                  <TableHead className="w-32">Provider</TableHead>
+                  <TableHead className="w-28">Status</TableHead>
+                  <TableHead className="w-44">SLA days</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {draft.channels.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="text-center text-sm text-muted-foreground py-6">
+                      No channels found.
+                    </TableCell>
+                  </TableRow>
+                ) : draft.channels.map((channel) => (
+                  <TableRow key={channel.id}>
+                    <TableCell className="font-medium text-sm">{channel.name}</TableCell>
+                    <TableCell className="text-sm">
+                      <Badge variant="outline" className="capitalize">{channel.provider}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      {channel.status === "active" ? (
+                        <Badge className="bg-green-100 text-green-800">Active</Badge>
+                      ) : (
+                        <Badge className="bg-gray-100 text-gray-800 capitalize">{channel.status}</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={30}
+                        step={1}
+                        // Empty input = inherit global default (null).
+                        value={channel.slaDays ?? ""}
+                        placeholder={`${draft.slaDefaultDays} (default)`}
+                        onChange={(e) => {
+                          const raw = e.target.value.trim();
+                          const next: number | null = raw === ""
+                            ? null
+                            : clampInt(raw, 0, 30, channel.slaDays ?? draft.slaDefaultDays);
+                          setDraft({
+                            ...draft,
+                            channels: draft.channels.map((c) =>
+                              c.id === channel.id ? { ...c, slaDays: next } : c,
+                            ),
+                          });
+                        }}
+                        className="w-32"
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </div>
         </CardContent>
       </Card>
