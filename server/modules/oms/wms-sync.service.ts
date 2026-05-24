@@ -1091,6 +1091,32 @@ export class WmsSyncService {
       } catch (e: any) {
         console.warn(`${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}`);
       }
+
+      // Re-push active shipments to ShipStation so SS reflects updated items.
+      if (this.services.shipStation?.isConfigured()) {
+        try {
+          const activeShipments = await db.execute<{ id: number }>(sql`
+            SELECT id FROM wms.outbound_shipments
+            WHERE order_id = ${wmsOrderId}
+              AND status NOT IN ('shipped', 'cancelled', 'voided')
+            ORDER BY id
+          `);
+          for (const shipment of activeShipments.rows ?? []) {
+            try {
+              await this.services.shipStation.pushShipment(shipment.id);
+              console.log(`${LOG} Re-pushed shipment ${shipment.id} to ShipStation after item edit`);
+            } catch (pushErr: any) {
+              await enqueueShipStationShipmentPushRetry(
+                db,
+                shipment.id,
+                pushErr instanceof Error ? pushErr : new Error(pushErr?.message ?? String(pushErr)),
+              );
+            }
+          }
+        } catch (e: any) {
+          console.error(`${LOG} Failed to re-push shipments to ShipStation for order ${wmsOrderId}: ${e.message}`);
+        }
+      }
     }
 
     // 7. Audit event
