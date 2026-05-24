@@ -1,8 +1,8 @@
 /**
  * Unit tests for processShipNotify V2 path (§6 Commit 15).
  *
- * Scope: exercises `processShipNotify` with `SHIP_NOTIFY_V2=true` via a
- * hand-rolled db mock + fetch mock. No network, no real DB.
+ * Scope: exercises `processShipNotify` via a hand-rolled db mock +
+ * fetch mock. No network, no real DB.
  *
  * What this file covers:
  *   - Shipment found by `shipstation_order_id` → dispatches 'shipped'
@@ -11,7 +11,6 @@
  *     (verified by observing the legacy path's SQL pattern).
  *   - Void detected → dispatches 'voided' (no OMS status change).
  *   - Idempotency: already-shipped with same tracking → repair cascade.
- *   - Flag-off (default) → legacy path, V2 SQL never runs.
  *
  * What it does NOT cover (left to integration tests per the plan):
  *   - Real partial-shipment rollup with multiple outbound_shipments
@@ -150,18 +149,16 @@ function makeShipmentPayload(overrides: Partial<any> = {}) {
   };
 }
 
-// ─── V2 flag-on tests ────────────────────────────────────────────────
+// ─── V2 tests ───────────────────────────────────────────────────────
 
 describe("processShipNotify V2 :: shipment found by shipstation_order_id", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    process.env.SHIP_NOTIFY_V2 = "true";
   });
 
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
-    delete process.env.SHIP_NOTIFY_V2;
     vi.restoreAllMocks();
   });
 
@@ -739,140 +736,12 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
   });
 });
 
-// ─── Flag-off behavior ───────────────────────────────────────────────
-
-describe("processShipNotify :: SHIP_NOTIFY_V2 disabled → legacy path", () => {
-  beforeEach(() => {
-    process.env.SHIPSTATION_API_KEY = "test-key";
-    process.env.SHIPSTATION_API_SECRET = "test-secret";
-    // V2 is the opt-out default now; explicitly disable to exercise legacy.
-    process.env.SHIP_NOTIFY_V2 = "false";
-  });
-
-  afterEach(() => {
-    globalThis.fetch = ORIGINAL_FETCH;
-    delete process.env.SHIP_NOTIFY_V2;
-    vi.restoreAllMocks();
-  });
-
-  it("does NOT run the V2 shipstation_order_id lookup when flag is off", async () => {
-    const shipmentPayload = makeShipmentPayload({
-      orderKey: "echelon-oms-789", // forces the legacy OMS branch
-    });
-
-    const mock = makeDb([
-      // Legacy OMS branch: SELECT wms.orders by oms_fulfillment_order_id
-      { rows: [] }, // hasWmsOrder = false
-    ]);
-
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [shipmentPayload],
-    }) as any;
-
-    const svc = createShipStationService(mock.db);
-    await svc.processShipNotify("/foo");
-
-    const executeSqls = mock.calls
-      .filter((c) => c.tag === "execute")
-      .map((c) => c.sqlText);
-
-    // V2 lookup pattern must be absent.
-    const anyV2Lookup = executeSqls.some((s) =>
-      /shipstation_order_id/.test(s),
-    );
-    expect(anyV2Lookup).toBe(false);
-
-    // Legacy-path marker IS present.
-    const anyLegacyLookup = executeSqls.some((s) =>
-      /oms_fulfillment_order_id/.test(s),
-    );
-    expect(anyLegacyLookup).toBe(true);
-  });
-
-  it("flag explicitly set to 'false' runs the legacy path", async () => {
-    process.env.SHIP_NOTIFY_V2 = "false";
-
-    const shipmentPayload = makeShipmentPayload({
-      orderKey: "echelon-oms-789",
-    });
-    const mock = makeDb([{ rows: [] }]);
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [shipmentPayload],
-    }) as any;
-
-    const svc = createShipStationService(mock.db);
-    await svc.processShipNotify("/foo");
-
-    const executeSqls = mock.calls
-      .filter((c) => c.tag === "execute")
-      .map((c) => c.sqlText);
-    expect(executeSqls.some((s) => /shipstation_order_id/.test(s))).toBe(
-      false,
-    );
-  });
-
-  it("flag off + already-shipped shipment-id replay runs repair push", async () => {
-    process.env.SHIP_NOTIFY_V2 = "false";
-
-    const shipmentPayload = makeShipmentPayload({
-      orderKey: "echelon-wms-shp-501",
-    });
-    const mock = makeDb([
-      { rows: [{ id: 501, order_id: 900, status: "shipped" }] },
-      {
-        rows: [
-          {
-            id: 900,
-            warehouse_status: "completed",
-            oms_fulfillment_order_id: "789",
-          },
-        ],
-      },
-    ]);
-    const pushTrackingForShipment = vi.fn(async () => true);
-    mock.db.__fulfillmentPush = { pushTrackingForShipment };
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [shipmentPayload],
-    }) as any;
-
-    const processed = await createShipStationService(mock.db).processShipNotify("/foo");
-
-    expect(processed).toBe(1);
-    expect(pushTrackingForShipment).toHaveBeenCalledWith(501);
-  });
-
-  it("flag set to a random non-'false' value is treated as ON (opt-out default)", async () => {
-    process.env.SHIP_NOTIFY_V2 = "1"; // anything but the literal "false"
-
-    const shipmentPayload = makeShipmentPayload({
-      orderKey: "echelon-oms-789",
-    });
-    // V2 runs the shipstation_order_id lookup first, finds nothing, then
-    // falls back to the legacy orderKey path.
-    const mock = makeDb([{ rows: [] }]);
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [shipmentPayload],
-    }) as any;
-
-    const svc = createShipStationService(mock.db);
-    await svc.processShipNotify("/foo");
-
-    const executeSqls = mock.calls
-      .filter((c) => c.tag === "execute")
-      .map((c) => c.sqlText);
-    expect(executeSqls.some((s) => /shipstation_order_id/.test(s))).toBe(
-      true,
-    );
-  });
-});
-
 // ─── V2 Shopify fulfillment push wiring (C22d) ───────────────────────
 
 describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    process.env.SHIP_NOTIFY_V2 = "true";
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -880,7 +749,6 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
 
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
-    delete process.env.SHIP_NOTIFY_V2;
     delete process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED;
     vi.restoreAllMocks();
   });
@@ -1282,12 +1150,10 @@ describe("processShipNotify V2 :: error resilience", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    process.env.SHIP_NOTIFY_V2 = "true";
   });
 
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
-    delete process.env.SHIP_NOTIFY_V2;
     vi.restoreAllMocks();
   });
 

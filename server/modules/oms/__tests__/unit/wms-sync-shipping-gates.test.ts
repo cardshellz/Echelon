@@ -10,7 +10,7 @@ const WMS_SYNC_SRC = readFileSync(
 describe("wms-sync.service :: shippable item gates", () => {
   it("does not create or push ShipStation shipments for digital-only OMS orders", () => {
     expect(WMS_SYNC_SRC).toMatch(/const hasShippableItems = omsLines\.some\(line => line\.requiresShipping !== false\)/);
-    expect(WMS_SYNC_SRC).toMatch(/if \(WMS_SHIPMENT_AT_SYNC && hasShippableItems\)/);
+    expect(WMS_SYNC_SRC).toMatch(/if \(hasShippableItems\)/);
   });
 
   it("only includes shippable lines in outbound shipment item inputs", () => {

@@ -36,23 +36,6 @@ import {
 } from "../wms/create-shipment";
 import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
 
-// WMS-owned fulfillment is the baseline. These were transitional opt-in
-// flags during the OMS→WMS shipment-ownership cutover; they now default ON
-// (opt-out via env=false) so a missing env var can never silently revert to
-// the legacy pushOrder path — that reversion is what stranded orders with
-// no shipment rows.
-
-// Financial snapshot at OMS→WMS sync. Must stay on for the WMS-owned push
-// (pushShipment reads cents from wms.orders); off would send $0 to SS.
-const WMS_FINANCIAL_SNAPSHOT = process.env.WMS_FINANCIAL_SNAPSHOT !== "false";
-
-// Create wms.outbound_shipments + items at sync time. WMS owns shipments.
-const WMS_SHIPMENT_AT_SYNC = process.env.WMS_SHIPMENT_AT_SYNC !== "false";
-
-// Route the ShipStation push through pushShipment(shipmentId) (WMS-only +
-// validated). Requires WMS_SHIPMENT_AT_SYNC; both default on together.
-const PUSH_FROM_WMS = process.env.PUSH_FROM_WMS !== "false";
-
 type WmsBinLocation = { location: string; zone: string };
 
 async function resolvePrimaryBinLocation(
@@ -174,30 +157,10 @@ export class WmsSyncService {
         return null;
       }
 
-      // §6 Commit 7: optionally snapshot financials into the WMS row.
-      // Flag-gated so existing behavior is preserved until we flip it on.
-      let orderFinancialSnapshot:
-        | ReturnType<typeof buildWmsOrderFinancialSnapshot>
-        | undefined;
-      if (WMS_FINANCIAL_SNAPSHOT) {
-        validateOmsOrderFinancials(
-          {
-            id: omsOrder.id,
-            subtotalCents: omsOrder.subtotalCents ?? 0,
-            shippingCents: omsOrder.shippingCents ?? 0,
-            taxCents: omsOrder.taxCents ?? 0,
-            discountCents: omsOrder.discountCents ?? 0,
-            totalCents: omsOrder.totalCents ?? 0,
-            currency: omsOrder.currency ?? "USD",
-          },
-          omsLines.map((l) => ({
-            id: l.id,
-            quantity: l.quantity ?? 0,
-            paidPriceCents: (l as any).paidPriceCents ?? 0,
-            totalPriceCents: (l as any).totalPriceCents ?? 0,
-          })),
-        );
-        orderFinancialSnapshot = buildWmsOrderFinancialSnapshot({
+      // Snapshot financials into the WMS row so pushShipment reads cents
+      // from wms.orders (WMS-owned push).
+      validateOmsOrderFinancials(
+        {
           id: omsOrder.id,
           subtotalCents: omsOrder.subtotalCents ?? 0,
           shippingCents: omsOrder.shippingCents ?? 0,
@@ -205,8 +168,23 @@ export class WmsSyncService {
           discountCents: omsOrder.discountCents ?? 0,
           totalCents: omsOrder.totalCents ?? 0,
           currency: omsOrder.currency ?? "USD",
-        });
-      }
+        },
+        omsLines.map((l) => ({
+          id: l.id,
+          quantity: l.quantity ?? 0,
+          paidPriceCents: (l as any).paidPriceCents ?? 0,
+          totalPriceCents: (l as any).totalPriceCents ?? 0,
+        })),
+      );
+      const orderFinancialSnapshot = buildWmsOrderFinancialSnapshot({
+        id: omsOrder.id,
+        subtotalCents: omsOrder.subtotalCents ?? 0,
+        shippingCents: omsOrder.shippingCents ?? 0,
+        taxCents: omsOrder.taxCents ?? 0,
+        discountCents: omsOrder.discountCents ?? 0,
+        totalCents: omsOrder.totalCents ?? 0,
+        currency: omsOrder.currency ?? "USD",
+      });
 
       // 3. Check if order has any shippable items
       const hasShippableItems = omsLines.some(line => line.requiresShipping !== false);
@@ -254,7 +232,7 @@ export class WmsSyncService {
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
         orderPlacedAt: omsOrder.orderedAt,
-        ...(orderFinancialSnapshot ?? {}),
+        ...orderFinancialSnapshot,
       };
 
       // 4. Map line items
@@ -276,16 +254,13 @@ export class WmsSyncService {
         // Propagate requiresShipping from OMS (false = donation/membership/digital)
         const itemRequiresShipping = line.requiresShipping !== false;
 
-        // §6 Commit 7: optional per-line financial snapshot. When flag is
-        // off the spread is a no-op and schema defaults (0) take effect.
-        const itemSnapshot = WMS_FINANCIAL_SNAPSHOT
-          ? buildWmsItemFinancialSnapshot({
-              id: line.id,
-              quantity: line.quantity ?? 0,
-              paidPriceCents: (line as any).paidPriceCents ?? 0,
-              totalPriceCents: (line as any).totalPriceCents ?? 0,
-            })
-          : undefined;
+        // Per-line financial snapshot for WMS-owned push.
+        const itemSnapshot = buildWmsItemFinancialSnapshot({
+          id: line.id,
+          quantity: line.quantity ?? 0,
+          paidPriceCents: (line as any).paidPriceCents ?? 0,
+          totalPriceCents: (line as any).totalPriceCents ?? 0,
+        });
 
         wmsLineItems.push({
           orderId: 0, // Will be set by createOrderWithItems
@@ -300,7 +275,7 @@ export class WmsSyncService {
           zone: binLocation?.zone || "U",
           productId: variantId, // Temporary mapping to satisfy schema
           requiresShipping: itemRequiresShipping ? 1 : 0,
-          ...(itemSnapshot ?? {}),
+          ...itemSnapshot,
         });
       }
 
@@ -310,16 +285,11 @@ export class WmsSyncService {
 
       console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
 
-      // 5b. §6 Commit 8 — create a planned wms.outbound_shipments row
-      // with per-item rows. Flag-gated; failure is non-fatal so a
-      // broken shipment insert never blocks order sync (the hourly
-      // reconcile sweep in Group H will retry).
-      // Captured outside the try/catch so step 8 (push) can pass it to
-      // pushShipment when PUSH_FROM_WMS is on. Stays null if the flag is
-      // off or shipment creation failed — in either case step 8 falls
-      // back to the legacy pushOrder path.
+      // 5b. Create a planned wms.outbound_shipments row with per-item
+      // rows. Failure is non-fatal so a broken shipment insert never
+      // blocks order sync (the hourly reconcile sweep will retry).
       let shipmentIdForPush: number | null = null;
-      if (WMS_SHIPMENT_AT_SYNC && hasShippableItems) {
+      if (hasShippableItems) {
         // §6 Commit 14: routing by combined_role.
         //
         // `combined_group_id` + `combined_role` live on the WMS
@@ -391,7 +361,7 @@ export class WmsSyncService {
                   })),
                 );
               console.log(
-                `[WMS Sync] Linked combined-child order ${newWmsOrder.id} to parent ${parentWmsOrderId}'s shipment ${shipmentId} (created=${created}); PUSH_FROM_WMS skipped — parent owns the SS push`,
+                `[WMS Sync] Linked combined-child order ${newWmsOrder.id} to parent ${parentWmsOrderId}'s shipment ${shipmentId} (created=${created}); parent owns the SS push`,
               );
             }
           } catch (err: any) {
@@ -491,19 +461,14 @@ export class WmsSyncService {
         console.warn(`[WMS Sync] Warehouse routing skipped for order ${newWmsOrder.id}: ${err.message}`);
       }
 
-      // 8. Push to ShipStation (originates from WMS, not OMS)
-      // Plan §6 Commit 12: when PUSH_FROM_WMS is on AND a shipment row
-      // was created in step 5b, push via the new pushShipment(shipmentId)
-      // path which reads WMS only and validates. Otherwise fall back to
-      // the legacy pushOrder(omsOrder) path. Push failures never block
-      // the sync — Group H reconcile retries.
+      // 8. Push to ShipStation via WMS-owned pushShipment path.
+      // Push failures never block the sync — reconcile retries.
       if (this.services.shipStation?.isConfigured()) {
-        if (PUSH_FROM_WMS && shipmentIdForPush !== null) {
-          // New path (plan §6 C12): push via WMS-only pushShipment.
+        if (shipmentIdForPush !== null) {
           try {
             await this.services.shipStation.pushShipment(shipmentIdForPush);
             console.log(
-              `[WMS Sync] Pushed shipment ${shipmentIdForPush} to ShipStation via pushShipment (PUSH_FROM_WMS=true)`,
+              `[WMS Sync] Pushed shipment ${shipmentIdForPush} to ShipStation via pushShipment`,
             );
           } catch (err: any) {
             // Don't block the sync, but do persist a retry immediately.
@@ -526,27 +491,9 @@ export class WmsSyncService {
             }
           }
         } else {
-          // Legacy path: push via pushOrder reading OMS.
-          if (PUSH_FROM_WMS && shipmentIdForPush === null) {
-            console.log(
-              `[WMS Sync] PUSH_FROM_WMS enabled but no shipmentId available for OMS order ${omsOrderId} — using legacy path`,
-            );
-          }
-          try {
-            // Fetch full OMS order with lines for ShipStation payload
-            const omsService = this.services.omsService;
-            if (omsService) {
-              const fullOmsOrder = await omsService.getOrderById(omsOrderId);
-              if (fullOmsOrder) {
-                await this.services.shipStation.pushOrder(fullOmsOrder);
-                console.log(`[WMS Sync] Pushed OMS order ${omsOrderId} to ShipStation (legacy pushOrder)`);
-              } else {
-                console.warn(`[WMS Sync] Could not fetch OMS order ${omsOrderId} for ShipStation push`);
-              }
-            }
-          } catch (err: any) {
-            console.error(`[WMS Sync] ShipStation push failed for OMS order ${omsOrderId}: ${err.message}`);
-          }
+          console.error(
+            `[WMS Sync] No shipment available for OMS order ${omsOrderId} — expected a shipment row to exist for WMS push`,
+          );
         }
       }
 

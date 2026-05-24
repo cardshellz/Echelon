@@ -5,10 +5,7 @@
  * WITHOUT triggering the db module (which requires DATABASE_URL at
  * import time). Rule #5 / #8: validation logic is unit-testable.
  *
- * These are called by wms-sync.service.ts when the
- * WMS_FINANCIAL_SNAPSHOT feature flag is on.
- *
- * Plan reference: shipstation-flow-refactor-plan.md §6 Commit 7.
+ * Called unconditionally by wms-sync.service.ts during OMS→WMS sync.
  */
 
 import {

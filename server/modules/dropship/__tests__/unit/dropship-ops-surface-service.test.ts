@@ -38,9 +38,6 @@ const launchReadyEnv: NodeJS.ProcessEnv = {
   SHIPSTATION_API_KEY: "shipstation-key",
   SHIPSTATION_API_SECRET: "shipstation-secret",
   SHIPSTATION_WEBHOOK_SECRET: "shipstation-webhook-secret",
-  WMS_SHIPMENT_AT_SYNC: "true",
-  PUSH_FROM_WMS: "true",
-  SHIP_NOTIFY_V2: "true",
   STRIPE_SECRET_KEY: "stripe-secret-key",
   DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook-secret",
 };
@@ -249,9 +246,6 @@ describe("DropshipOpsSurfaceService", () => {
       SHIPSTATION_API_KEY: "shipstation-key",
       SHIPSTATION_API_SECRET: "shipstation-secret",
       SHIPSTATION_WEBHOOK_SECRET: "shipstation-webhook",
-      WMS_SHIPMENT_AT_SYNC: "true",
-      PUSH_FROM_WMS: "true",
-      SHIP_NOTIFY_V2: "true",
       STRIPE_SECRET_KEY: "stripe-secret",
       DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook",
       DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED: "true",
@@ -310,25 +304,12 @@ describe("DropshipOpsSurfaceService", () => {
     // with these flags unset reports ready.
     expect(checks.find((check) => check.key === "split_shipment_handoff")).toMatchObject({
       status: "ready",
-      requiredEnv: ["WMS_SHIPMENT_AT_SYNC!=false", "PUSH_FROM_WMS!=false", "SHIP_NOTIFY_V2!=false"],
+      requiredEnv: [],
     });
     expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
       status: "ready",
       requiredEnv: [],
-    });
-  });
-
-  it("blocks split-shipment handoff only when a WMS flag is explicitly disabled", () => {
-    const checks = buildDropshipSystemReadinessChecks({
-      WMS_SHIPMENT_AT_SYNC: "false",
-      PUSH_FROM_WMS: "false",
-    });
-
-    expect(checks.find((check) => check.key === "split_shipment_handoff")).toMatchObject({
-      status: "blocked",
-      message:
-        "Shipment-aware WMS and ShipStation sync is disabled by WMS_SHIPMENT_AT_SYNC=false, PUSH_FROM_WMS=false.",
     });
   });
 

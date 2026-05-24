@@ -88,10 +88,10 @@ export class ShipStationPushError extends Error {
 //   - Legacy (pushOrder):     "echelon-oms-<omsOrderId>"
 //   - New    (pushShipment):  "echelon-wms-shp-<shipmentId>"
 //
-// During the PUSH_FROM_WMS rollout, SHIP_NOTIFY webhooks can carry either
-// prefix: orders pushed before the flag flip come back with the legacy
-// key, orders pushed after come back with the shipment-native key.
-// processShipNotify dispatches on the parsed source.
+// SHIP_NOTIFY webhooks can carry either prefix: orders pushed before the
+// WMS cutover come back with the legacy key, orders pushed after come
+// back with the shipment-native key. processShipNotify dispatches on the
+// parsed source.
 //
 // Returns null for any key we do not own (e.g. Shopify-native SS
 // integration), including malformed or non-positive numeric suffixes.
@@ -895,10 +895,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   // Process SHIP_NOTIFY webhook
   // -------------------------------------------------------------------------
   //
-  // §6 Commit 15 — SHIP_NOTIFY_V2 feature flag.
-  //
-  // When `SHIP_NOTIFY_V2=true`, the per-shipment handler dispatches to
-  // the shipment-native V2 branch (`processShipNotifyV2`) which:
+  // The per-shipment handler dispatches to the shipment-native V2 branch
+  // (`processShipNotifyV2`) which:
   //   1. Looks up the WMS shipment by `shipstation_order_id` (primary)
   //      with a fallback to the legacy orderKey path for pre-cutover
   //      orders (pushed via pushOrder / echelon-oms-<id>).
@@ -910,15 +908,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   //   4. Derives the OMS state from the (post-rollup) WMS state and
   //      writes to `oms.oms_orders`.
   //
-  // When the flag is off (default), the legacy C13 path runs verbatim
-  // via `processShipNotifyLegacy`. No behavioral change on deploy.
-
-  function isShipNotifyV2Enabled(): boolean {
-    // WMS-owned shipment-native SHIP_NOTIFY is the baseline. Opt-out via
-    // SHIP_NOTIFY_V2=false; the legacy path still runs as fallback when V2
-    // can't resolve a WMS shipment (pre-cutover orderKeys).
-    return process.env.SHIP_NOTIFY_V2 !== "false";
-  }
+  // If V2 cannot resolve a WMS shipment (pre-cutover orderKeys), it
+  // signals fallback and the legacy C13 path runs instead.
 
   /**
    * Map a ShipStation shipment payload to a typed ShipmentEvent.
@@ -2320,9 +2311,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     } else {
           // =====================================================
           // LEGACY PATH: SHIP_NOTIFY carried echelon-oms-<omsId>.
-          // Unchanged from pre-C13 behavior. Will run through the
-          // deprecation window for orders pushed before the
-          // PUSH_FROM_WMS flag flip.
+          // Handles pre-cutover orders pushed via pushOrder before
+          // the WMS-native shipment path was active.
           // =====================================================
       omsOrderId = parsed.omsOrderId;
 
@@ -2546,22 +2536,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     return { processed: true };
   }
 
-  // ─── processShipNotify entry point (flag-gated) ────────────────
+  // ─── processShipNotify entry point ─────────────────────────────
 
   async function processShipmentNotification(
     shipment: ShipStationShipment,
   ): Promise<{ processed: boolean }> {
-    if (isShipNotifyV2Enabled()) {
-      const v2Result = await processShipNotifyV2(shipment);
-      if (v2Result.processed) {
-        return { processed: true };
-      }
-      if (!v2Result.fallback) {
-        return { processed: false };
-      }
-      return processShipNotifyLegacy(shipment);
+    const v2Result = await processShipNotifyV2(shipment);
+    if (v2Result.processed) {
+      return { processed: true };
     }
-
+    if (!v2Result.fallback) {
+      return { processed: false };
+    }
     return processShipNotifyLegacy(shipment);
   }
 
@@ -2845,9 +2831,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   // Fails loudly via ShipStationPushError on invalid data rather than
   // silently emitting $0 to ShipStation (the bug from audit B1 / #56430).
   //
-  // Not wired into any caller in this commit — Commit 12 flips the
-  // PUSH_FROM_WMS flag and routes wms-sync at this. Until then, pushOrder
-  // remains the live path.
+  // The live push path for WMS-native shipments, replacing the legacy
+  // pushOrder flow.
 
   async function pushShipment(
     shipmentId: number,

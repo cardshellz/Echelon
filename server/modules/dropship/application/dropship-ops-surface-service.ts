@@ -1240,32 +1240,13 @@ function buildShipStationWebhookSecurityCheck(env: NodeJS.ProcessEnv): DropshipS
   };
 }
 
-function buildSplitShipmentHandoffCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  // WMS-owned fulfillment is the code default now; these are opt-out flags.
-  // Only an explicit =false disables the path, which is what we warn on.
-  const requiredEnv = ["WMS_SHIPMENT_AT_SYNC!=false", "PUSH_FROM_WMS!=false", "SHIP_NOTIFY_V2!=false"];
-  const disabled = [
-    env.WMS_SHIPMENT_AT_SYNC === "false" ? "WMS_SHIPMENT_AT_SYNC=false" : null,
-    env.PUSH_FROM_WMS === "false" ? "PUSH_FROM_WMS=false" : null,
-    env.SHIP_NOTIFY_V2 === "false" ? "SHIP_NOTIFY_V2=false" : null,
-  ].filter((value): value is string => value !== null);
-
-  if (disabled.length > 0) {
-    return {
-      key: "split_shipment_handoff",
-      label: "Split-shipment handoff",
-      status: "blocked",
-      message: `Shipment-aware WMS and ShipStation sync is disabled by ${disabled.join(", ")}.`,
-      requiredEnv,
-    };
-  }
-
+function buildSplitShipmentHandoffCheck(_env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
   return {
     key: "split_shipment_handoff",
     label: "Split-shipment handoff",
     status: "ready",
     message: "WMS shipment creation, WMS-originated ShipStation push, and ShipStation V2 webhook rollups are enabled.",
-    requiredEnv,
+    requiredEnv: [],
   };
 }
 
