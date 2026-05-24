@@ -1,10 +1,12 @@
 # Dropship Dogfood Checklist
 
-Last updated: 2026-05-20
+Last updated: 2026-05-21
 
 Primary admin surface: Echelon internal admin at `/dropship`.
 
-Customer-facing portal: `/dropship-portal`.
+Production customer-facing portal: `https://www.cardshellz.io`.
+
+Customer-facing portal route: `/dropship-portal`.
 
 Use this document as the working checklist for the first internal dropship dogfood run. Check each row as it passes. If a row fails or needs follow-up, leave it unchecked and add an exception ID in the `Exception / correction needed` column and in the `Exception Log`.
 
@@ -16,6 +18,12 @@ Use this document as the working checklist for the first internal dropship dogfo
 | Tester |  |
 | Environment URL |  |
 | Echelon deploy/version/commit |  |
+| Acquisition path | New `.ops` / `.core` to `.ops` / `.club` to `.ops` |
+| Card Shellz customer email |  |
+| Starting membership plan | None / `.core` / `.club` |
+| Target membership plan | `.ops` |
+| Checkout session / payment ID |  |
+| Subscription ID |  |
 | Vendor name |  |
 | Vendor member ID |  |
 | Store connection ID |  |
@@ -53,14 +61,16 @@ Use this document as the working checklist for the first internal dropship dogfo
 | [ ] | STOP-02 | Token encryption and OAuth configuration are present. |  |  |
 | [ ] | STOP-03 | ShipStation credentials and webhook security are configured. |  |  |
 | [ ] | STOP-04 | Test vendor and store connection identity are known and correct. |  |  |
-| [ ] | STOP-05 | Test catalog exposure is narrow. Do not use broad catalog exposure for the first pass. |  |  |
-| [ ] | STOP-06 | No unclear wallet, inventory, fulfillment, or tracking state exists before retrying any action. |  |  |
-| [ ] | STOP-07 | Manual worker sweeps are only run for a specific stuck record with captured evidence. |  |  |
+| [ ] | STOP-05 | Customer acquisition path has proven an active `.ops` entitlement before store setup. | Member/subscription/plan evidence: |  |
+| [ ] | STOP-06 | Test catalog exposure is narrow. Do not use broad catalog exposure for the first pass. |  |  |
+| [ ] | STOP-07 | No unclear wallet, inventory, fulfillment, or tracking state exists before retrying any action. |  |  |
+| [ ] | STOP-08 | Manual worker sweeps are only run for a specific stuck record with captured evidence. |  |  |
 
 ## Master Checklist
 
 | Done | Phase | Required before moving on | Blocking exception |
 | --- | --- | --- | --- |
+| [ ] | -1. Membership acquisition | Direct `.ops` signup and `.club` to `.ops` upgrade paths are understood and at least one path is proven for the dogfood customer. |  |
 | [ ] | 0. Readiness | Internal source, system readiness, launch gate, and one ready vendor/store are clean. |  |
 | [ ] | 1. Vendor and store | Vendor identity, entitlement, OAuth, and order/listing config are correct. |  |
 | [ ] | 2. Catalog exposure | Exactly the intended SKU or variant is exposed. |  |
@@ -75,6 +85,86 @@ Use this document as the working checklist for the first internal dropship dogfo
 | [ ] | 11. Notifications | Required vendor/internal notification events are visible and retryable. |  |
 | [ ] | 12. Returns | Return policy, fault, inspection, and credit behavior are correct. Required only if in dogfood scope. |  |
 | [ ] | 13. Audit and exit | Evidence trail is complete and final readiness reflects the run. |  |
+
+## Phase -1: Membership Acquisition And Entitlement
+
+Goal: prove a customer can become `.ops` entitled before setting up the dropship vendor account, store connection, catalog selection, or wallet.
+
+Echelon dropship entitlement is consumed from the Card Shellz membership tables. The portal email must resolve to a Card Shellz member, the selected subscription must be active/current or active/past_due grace, and the selected plan must include dropship access. If any of those are unclear, stop before marketplace setup.
+
+Use this phase twice when possible:
+
+- First pass: walk through the expected steps without creating the customer yet. Fill `Expected evidence / ID` with where the proof should come from.
+- Second pass: execute with the real dogfood customer. Fill the actual evidence and leave failed rows unchecked.
+
+### Path A: New Or `.core` Customer Directly To `.ops`
+
+This path covers a brand-new customer and an existing `.core` customer who signs up directly for `.ops` without buying `.club` first.
+
+| Done | ID | Check | Expected evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | ACQ-DIRECT-01 | Choose the test email and confirm whether the starting state is new customer or existing `.core` customer. | Email / starting member ID: |  |
+| [ ] | ACQ-DIRECT-02 | Confirm the customer-facing purchase path lets the customer select `.ops` directly. | Page/URL/screenshot: |  |
+| [ ] | ACQ-DIRECT-03 | Confirm checkout labels the purchased plan as `.ops` and does not require `.club` first. | Checkout/session ID: |  |
+| [ ] | ACQ-DIRECT-04 | Complete the purchase or upgrade with the test payment method. | Payment/checkout ID: |  |
+| [ ] | ACQ-DIRECT-05 | Confirm the Card Shellz member email exactly matches the email used in the dropship portal. | Member email: |  |
+| [ ] | ACQ-DIRECT-06 | Confirm the customer has one intended member identity. Existing `.core` customers should not create a duplicate member. | Member ID: |  |
+| [ ] | ACQ-DIRECT-07 | Confirm the active subscription points to the `.ops` plan. | Subscription ID / plan ID: |  |
+| [ ] | ACQ-DIRECT-08 | Confirm the `.ops` plan is active and includes dropship access. | `includes_dropship=true`: |  |
+| [ ] | ACQ-DIRECT-09 | Open `https://www.cardshellz.io` and start portal setup with the same email. | Portal screenshot/status: |  |
+| [ ] | ACQ-DIRECT-10 | Complete portal bootstrap or login. | Auth identity / session result: |  |
+| [ ] | ACQ-DIRECT-11 | Confirm Echelon created or synced the dropship vendor profile from that member entitlement. | Vendor ID / entitlement status: |  |
+
+Path A pass criteria:
+
+- A new or `.core` customer can buy `.ops` directly.
+- The same Card Shellz member identity is used by the dropship portal.
+- The `.ops` plan is the entitlement source and includes dropship access.
+- Echelon provisions a dropship vendor profile after portal setup.
+
+### Path B: Existing `.club` Customer Upgrades To `.ops`
+
+This path covers an existing `.club` customer upgrading into the dropship benefit.
+
+| Done | ID | Check | Expected evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | ACQ-UPGRADE-01 | Choose an existing `.club` test customer and record the current member identity. | Email / member ID: |  |
+| [ ] | ACQ-UPGRADE-02 | Confirm the current subscription is `.club` before upgrade starts. | Current subscription / plan ID: |  |
+| [ ] | ACQ-UPGRADE-03 | Confirm the customer-facing upgrade path offers `.ops`. | Page/URL/screenshot: |  |
+| [ ] | ACQ-UPGRADE-04 | Confirm upgrade pricing, proration, or replacement behavior is clear before payment. | Checkout/session details: |  |
+| [ ] | ACQ-UPGRADE-05 | Complete the upgrade with the test payment method. | Payment/checkout ID: |  |
+| [ ] | ACQ-UPGRADE-06 | Confirm the upgrade preserves the same Card Shellz member identity. | Same member ID confirmed: |  |
+| [ ] | ACQ-UPGRADE-07 | Confirm the active/current subscription selected for entitlement is now `.ops`. | Subscription ID / plan ID: |  |
+| [ ] | ACQ-UPGRADE-08 | Confirm old `.club` state does not remain the selected entitlement source for dropship. | Old subscription status: |  |
+| [ ] | ACQ-UPGRADE-09 | Confirm the `.ops` plan is active and includes dropship access. | `includes_dropship=true`: |  |
+| [ ] | ACQ-UPGRADE-10 | Open `https://www.cardshellz.io` and start portal setup or login with the same email. | Portal screenshot/status: |  |
+| [ ] | ACQ-UPGRADE-11 | Complete portal bootstrap or login. | Auth identity / session result: |  |
+| [ ] | ACQ-UPGRADE-12 | Confirm Echelon created or synced the dropship vendor profile from that upgraded entitlement. | Vendor ID / entitlement status: |  |
+
+Path B pass criteria:
+
+- A `.club` customer can upgrade to `.ops`.
+- The same Card Shellz member identity is preserved.
+- The entitlement resolver selects the `.ops` subscription/plan after upgrade.
+- Echelon provisions or syncs the dropship vendor profile after portal setup.
+
+### Acquisition Failure Checks
+
+Run these negative checks once during dogfood setup. They prevent false positives before money and marketplace flows are involved.
+
+| Done | ID | Check | Expected evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | ACQ-FAIL-01 | Try portal setup with a non-member email and confirm access is denied. | Error/status: |  |
+| [ ] | ACQ-FAIL-02 | Try portal setup with a `.core` or `.club` member that has not upgraded to `.ops` and confirm access is denied. | Error/status: |  |
+| [ ] | ACQ-FAIL-03 | Confirm failed entitlement does not create an active dropship vendor. | Vendor lookup result: |  |
+| [ ] | ACQ-FAIL-04 | Confirm failed setup produces an operator-visible reason, not a generic crash. | Error code/message: |  |
+
+Phase pass criteria:
+
+- At least one real dogfood customer path has a proven `.ops` entitlement.
+- Direct `.ops` signup and `.club` to `.ops` upgrade have either passed or have explicit exceptions.
+- Failed entitlement cases are rejected cleanly.
+- Do not proceed to Phase 0 until the dogfood customer can log into the dropship portal and Echelon has a vendor profile for that member.
 
 ## Phase 0: Readiness
 
