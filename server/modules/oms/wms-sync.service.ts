@@ -36,23 +36,22 @@ import {
 } from "../wms/create-shipment";
 import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
 
-// Feature flag: gates §6 Commit 7 behavior (financial snapshot at
-// OMS→WMS sync). Default false; new wms.orders / wms.order_items cents
-// columns stay at schema defaults (0 / 'USD') until flipped on.
-const WMS_FINANCIAL_SNAPSHOT = process.env.WMS_FINANCIAL_SNAPSHOT === "true";
+// WMS-owned fulfillment is the baseline. These were transitional opt-in
+// flags during the OMS→WMS shipment-ownership cutover; they now default ON
+// (opt-out via env=false) so a missing env var can never silently revert to
+// the legacy pushOrder path — that reversion is what stranded orders with
+// no shipment rows.
 
-// Feature flag: gates §6 Commit 8 (creation of a wms.outbound_shipments
-// row + per-item wms.outbound_shipment_items rows at sync time). Default
-// false — when off, no shipment rows are written by the sync path and
-// downstream Group C/D/E handlers continue to use whatever legacy
-// creation path they relied on. Flip on once Group C is wired.
-const WMS_SHIPMENT_AT_SYNC = process.env.WMS_SHIPMENT_AT_SYNC === "true";
+// Financial snapshot at OMS→WMS sync. Must stay on for the WMS-owned push
+// (pushShipment reads cents from wms.orders); off would send $0 to SS.
+const WMS_FINANCIAL_SNAPSHOT = process.env.WMS_FINANCIAL_SNAPSHOT !== "false";
 
-// Feature flag: gates §6 Commit 12 (route WMS sync's ShipStation push
-// through pushShipment(shipmentId) which reads WMS only + validates).
-// Default false. Requires WMS_SHIPMENT_AT_SYNC=true to work, because
-// pushShipment needs a shipment row to exist.
-const PUSH_FROM_WMS = process.env.PUSH_FROM_WMS === "true";
+// Create wms.outbound_shipments + items at sync time. WMS owns shipments.
+const WMS_SHIPMENT_AT_SYNC = process.env.WMS_SHIPMENT_AT_SYNC !== "false";
+
+// Route the ShipStation push through pushShipment(shipmentId) (WMS-only +
+// validated). Requires WMS_SHIPMENT_AT_SYNC; both default on together.
+const PUSH_FROM_WMS = process.env.PUSH_FROM_WMS !== "false";
 
 type WmsBinLocation = { location: string; zone: string };
 

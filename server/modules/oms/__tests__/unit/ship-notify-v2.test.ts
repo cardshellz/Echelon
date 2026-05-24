@@ -549,6 +549,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
+      // self-heal: clear inventory_deduction_missing_item_data flag.
+      { rows: [] },
       // markShipmentShipped load-current.
       {
         rows: [
@@ -647,6 +649,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
+      // self-heal: clear inventory_deduction_missing_item_data flag.
+      { rows: [] },
       {
         rows: [
           {
@@ -741,11 +745,13 @@ describe("processShipNotify :: SHIP_NOTIFY_V2 disabled → legacy path", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    delete process.env.SHIP_NOTIFY_V2;
+    // V2 is the opt-out default now; explicitly disable to exercise legacy.
+    process.env.SHIP_NOTIFY_V2 = "false";
   });
 
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
+    delete process.env.SHIP_NOTIFY_V2;
     vi.restoreAllMocks();
   });
 
@@ -835,12 +841,14 @@ describe("processShipNotify :: SHIP_NOTIFY_V2 disabled → legacy path", () => {
     expect(pushTrackingForShipment).toHaveBeenCalledWith(501);
   });
 
-  it("flag set to a random non-'true' value is treated as OFF (safe default)", async () => {
-    process.env.SHIP_NOTIFY_V2 = "1"; // not the exact literal "true"
+  it("flag set to a random non-'false' value is treated as ON (opt-out default)", async () => {
+    process.env.SHIP_NOTIFY_V2 = "1"; // anything but the literal "false"
 
     const shipmentPayload = makeShipmentPayload({
       orderKey: "echelon-oms-789",
     });
+    // V2 runs the shipstation_order_id lookup first, finds nothing, then
+    // falls back to the legacy orderKey path.
     const mock = makeDb([{ rows: [] }]);
     globalThis.fetch = mockFetchOnceOk({
       shipments: [shipmentPayload],
@@ -853,7 +861,7 @@ describe("processShipNotify :: SHIP_NOTIFY_V2 disabled → legacy path", () => {
       .filter((c) => c.tag === "execute")
       .map((c) => c.sqlText);
     expect(executeSqls.some((s) => /shipstation_order_id/.test(s))).toBe(
-      false,
+      true,
     );
   });
 });

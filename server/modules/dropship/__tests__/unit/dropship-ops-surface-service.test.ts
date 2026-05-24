@@ -306,14 +306,29 @@ describe("DropshipOpsSurfaceService", () => {
       status: "blocked",
       requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
     });
+    // WMS-owned fulfillment is the code default now (opt-out), so an env
+    // with these flags unset reports ready.
     expect(checks.find((check) => check.key === "split_shipment_handoff")).toMatchObject({
-      status: "blocked",
-      requiredEnv: ["WMS_SHIPMENT_AT_SYNC=true", "PUSH_FROM_WMS=true", "SHIP_NOTIFY_V2=true"],
+      status: "ready",
+      requiredEnv: ["WMS_SHIPMENT_AT_SYNC!=false", "PUSH_FROM_WMS!=false", "SHIP_NOTIFY_V2!=false"],
     });
     expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
       status: "ready",
       requiredEnv: [],
+    });
+  });
+
+  it("blocks split-shipment handoff only when a WMS flag is explicitly disabled", () => {
+    const checks = buildDropshipSystemReadinessChecks({
+      WMS_SHIPMENT_AT_SYNC: "false",
+      PUSH_FROM_WMS: "false",
+    });
+
+    expect(checks.find((check) => check.key === "split_shipment_handoff")).toMatchObject({
+      status: "blocked",
+      message:
+        "Shipment-aware WMS and ShipStation sync is disabled by WMS_SHIPMENT_AT_SYNC=false, PUSH_FROM_WMS=false.",
     });
   });
 

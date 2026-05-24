@@ -914,7 +914,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   // via `processShipNotifyLegacy`. No behavioral change on deploy.
 
   function isShipNotifyV2Enabled(): boolean {
-    return process.env.SHIP_NOTIFY_V2 === "true";
+    // WMS-owned shipment-native SHIP_NOTIFY is the baseline. Opt-out via
+    // SHIP_NOTIFY_V2=false; the legacy path still runs as fallback when V2
+    // can't resolve a WMS shipment (pre-cutover orderKeys).
+    return process.env.SHIP_NOTIFY_V2 !== "false";
   }
 
   /**

@@ -1241,19 +1241,21 @@ function buildShipStationWebhookSecurityCheck(env: NodeJS.ProcessEnv): DropshipS
 }
 
 function buildSplitShipmentHandoffCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const requiredEnv = ["WMS_SHIPMENT_AT_SYNC=true", "PUSH_FROM_WMS=true", "SHIP_NOTIFY_V2=true"];
-  const missing = [
-    env.WMS_SHIPMENT_AT_SYNC === "true" ? null : "WMS_SHIPMENT_AT_SYNC=true",
-    env.PUSH_FROM_WMS === "true" ? null : "PUSH_FROM_WMS=true",
-    env.SHIP_NOTIFY_V2 === "true" ? null : "SHIP_NOTIFY_V2=true",
+  // WMS-owned fulfillment is the code default now; these are opt-out flags.
+  // Only an explicit =false disables the path, which is what we warn on.
+  const requiredEnv = ["WMS_SHIPMENT_AT_SYNC!=false", "PUSH_FROM_WMS!=false", "SHIP_NOTIFY_V2!=false"];
+  const disabled = [
+    env.WMS_SHIPMENT_AT_SYNC === "false" ? "WMS_SHIPMENT_AT_SYNC=false" : null,
+    env.PUSH_FROM_WMS === "false" ? "PUSH_FROM_WMS=false" : null,
+    env.SHIP_NOTIFY_V2 === "false" ? "SHIP_NOTIFY_V2=false" : null,
   ].filter((value): value is string => value !== null);
 
-  if (missing.length > 0) {
+  if (disabled.length > 0) {
     return {
       key: "split_shipment_handoff",
       label: "Split-shipment handoff",
       status: "blocked",
-      message: `Shipment-aware WMS and ShipStation sync is missing ${missing.join(", ")}.`,
+      message: `Shipment-aware WMS and ShipStation sync is disabled by ${disabled.join(", ")}.`,
       requiredEnv,
     };
   }

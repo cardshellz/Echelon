@@ -265,22 +265,23 @@ describe("validateShipmentForPush :: header-level violations", () => {
     expect(err?.context.value).toBe(-1);
   });
 
-  it("throws on line-sum mismatch beyond 1¢/line tolerance", () => {
-    // 1 line, tolerance window = 1¢. Sum off by 10¢ → reject.
-    let err: ShipStationPushError | undefined;
-    try {
+  it("warns but does not throw on total_cents mismatch (ShipStation accepts any totals)", () => {
+    // Mismatch of 11¢ beyond the tolerance window. Previously this hard-
+    // blocked the push; now it logs a warning and proceeds — blocking a
+    // shippable order over a totals rounding difference is worse than
+    // sending a slightly imprecise total to ShipStation.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() =>
       validateShipmentForPush(
         okShipment(),
-        okOrder({ total_cents: 5924 }), // 5000 + 413 + 500 + 11 = 5924
+        okOrder({ total_cents: 5924 }),
         [okItem({ unit_price_cents: 2500, qty: 2 })],
-      );
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.field).toBe("order.total_cents");
-    expect((err?.context.value as any).linesSumCents).toBe(5000);
-    expect((err?.context.value as any).actualTotalCents).toBe(5924);
+      ),
+    ).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("total_cents mismatch"),
+    );
+    warn.mockRestore();
   });
 
   it("throws when shipping_address is missing", () => {
@@ -704,9 +705,14 @@ describe("pushShipment :: error cases", () => {
     expect(err?.context.value).toBe("shipstation_queue_review");
   });
 
-  it("throws when the owning WMS order is already cancelled/refunded", async () => {
+  it("warns but pushes when the owning WMS order is already cancelled/refunded", async () => {
+    // WMS is the source of truth for physical fulfillment. If a shipment
+    // is in a pushable state, an OMS/WMS finality mismatch must not block
+    // the warehouse from getting a label — we warn and proceed.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const shipmentRow = okShipment({ status: "queued" });
     const mock = makeDb([
-      { rows: [okShipment({ status: "queued" })] },
+      { rows: [shipmentRow] },
       {
         rows: [
           okOrder({
@@ -716,25 +722,27 @@ describe("pushShipment :: error cases", () => {
           }),
         ],
       },
+      { rows: [{ non_shipping_total_cents: 0 }] },
+      { rows: [okItem()] },
+      { rows: [] }, // UPDATE
     ]);
+    globalThis.fetch = mockFetchOnceOk({
+      orderId: 42,
+      orderStatus: "awaiting_shipment",
+    }) as any;
     const svc = createShipStationService(mock.db);
-    let err: ShipStationPushError | undefined;
-    try {
-      await svc.pushShipment(okShipment().id);
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.field).toBe("order.final_state");
-    expect(err?.context.value).toMatchObject({
-      warehouseStatus: "cancelled",
-      financialStatus: "refunded",
+    await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
+      shipstationOrderId: 42,
     });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("is pushable"));
+    warn.mockRestore();
   });
 
-  it("throws when the owning WMS order is already shipped", async () => {
+  it("warns but pushes when the owning WMS order is already shipped (multi-shipment)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const shipmentRow = okShipment({ status: "queued" });
     const mock = makeDb([
-      { rows: [okShipment({ status: "queued" })] },
+      { rows: [shipmentRow] },
       {
         rows: [
           okOrder({
@@ -743,25 +751,26 @@ describe("pushShipment :: error cases", () => {
           }),
         ],
       },
+      { rows: [{ non_shipping_total_cents: 0 }] },
+      { rows: [okItem()] },
+      { rows: [] }, // UPDATE
     ]);
+    globalThis.fetch = mockFetchOnceOk({
+      orderId: 42,
+      orderStatus: "awaiting_shipment",
+    }) as any;
     const svc = createShipStationService(mock.db);
-    let err: ShipStationPushError | undefined;
-    try {
-      await svc.pushShipment(okShipment().id);
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.field).toBe("order.final_state");
-    expect(err?.context.value).toMatchObject({
-      warehouseStatus: "shipped",
-      financialStatus: "paid",
+    await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
+      shipstationOrderId: 42,
     });
+    warn.mockRestore();
   });
 
-  it("throws when linked OMS is already shipped and fulfilled even if WMS is stale-ready", async () => {
+  it("warns but pushes when linked OMS is already shipped and fulfilled even if WMS is stale-ready", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const shipmentRow = okShipment({ status: "queued" });
     const mock = makeDb([
-      { rows: [okShipment({ status: "queued" })] },
+      { rows: [shipmentRow] },
       {
         rows: [
           okOrder({
@@ -772,22 +781,22 @@ describe("pushShipment :: error cases", () => {
         ],
       },
       { rows: [{ status: "shipped", fulfillment_status: "fulfilled", financial_status: "paid" }] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
+      { rows: [okItem()] },
+      { rows: [] }, // UPDATE
     ]);
+    globalThis.fetch = mockFetchOnceOk({
+      orderId: 42,
+      orderStatus: "awaiting_shipment",
+    }) as any;
     const svc = createShipStationService(mock.db);
-    let err: ShipStationPushError | undefined;
-    try {
-      await svc.pushShipment(okShipment().id);
-    } catch (e) {
-      err = e as ShipStationPushError;
-    }
-    expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.field).toBe("oms.final_state");
-    expect(err?.context.value).toMatchObject({
-      omsOrderId: "183763",
-      status: "shipped",
-      fulfillmentStatus: "fulfilled",
-      reason: "oms_fully_shipped",
+    await expect(svc.pushShipment(shipmentRow.id)).resolves.toMatchObject({
+      shipstationOrderId: 42,
     });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("oms_fully_shipped"),
+    );
+    warn.mockRestore();
   });
 
   it("allows a voided shipment to be pushed again for the re-label path", async () => {
