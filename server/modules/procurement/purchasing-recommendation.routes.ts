@@ -108,6 +108,10 @@ function parseSummaryJson(value: unknown): any {
   return value;
 }
 
+function takeRunSamples<T>(items: T[], limit = 5): T[] {
+  return Array.isArray(items) ? items.slice(0, limit) : [];
+}
+
 function numberField(row: any, camel: string, snake: string): number {
   return Number(row?.[camel] ?? row?.[snake] ?? 0) || 0;
 }
@@ -269,6 +273,16 @@ function normalizeAutoDraftRun(row: any) {
     approvalPolicyDiagnostics,
     forecastDiagnostics: summaryJson?.forecastDiagnostics ?? null,
     poMutationCount: poMutations.length,
+    recommendationSamples: {
+      actionable: takeRunSamples(actionableRecommendations),
+      approvalPolicyBlocked: takeRunSamples(approvalPolicyBlockedRecommendations),
+      skipped: takeRunSamples(skippedRecommendations),
+    },
+    recommendationSampleCounts: {
+      actionable: actionableRecommendations.length,
+      approvalPolicyBlocked: approvalPolicyBlockedRecommendations.length,
+      skipped: skippedRecommendations.length,
+    },
     topActionableRecommendation: actionableRecommendations[0] ?? null,
     topApprovalPolicyBlockedRecommendation: approvalPolicyBlockedRecommendations[0] ?? null,
     topSkippedRecommendation: skippedRecommendations[0] ?? null,
