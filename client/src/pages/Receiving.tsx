@@ -81,6 +81,14 @@ interface Vendor {
   active: number;
 }
 
+function createReceivingIdempotencyKey(prefix: string): string {
+  return (
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? (crypto as any).randomUUID()
+      : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  ) as string;
+}
+
 interface ReceivingLine {
   id: number;
   receivingOrderId: number;
@@ -345,11 +353,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     mutationFn: async (data: typeof newReceipt) => {
       // If PO source type with a selected PO, use the create-receipt-from-PO endpoint
       if (data.sourceType === "po" && selectedPoId) {
-        const idempotencyKey = (
-          typeof crypto !== "undefined" && "randomUUID" in crypto
-            ? (crypto as any).randomUUID()
-            : `po-receipt-${selectedPoId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
-        ) as string;
+        const idempotencyKey = createReceivingIdempotencyKey(`po-receipt-${selectedPoId}`);
         const res = await fetch(`/api/purchase-orders/${selectedPoId}/create-receipt`, {
           method: "POST",
           headers: {
@@ -481,7 +485,12 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   const closeReceiptMutation = useMutation({
     mutationFn: async (id: number) => {
-      const res = await fetch(`/api/receiving/${id}/close`, { method: "POST" });
+      const res = await fetch(`/api/receiving/${id}/close`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": createReceivingIdempotencyKey(`receiving-close-${id}`),
+        },
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         if (body?.issues) {
