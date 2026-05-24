@@ -1,7 +1,16 @@
 import type { Express } from "express";
 import { db } from "../../db";
-import { and, asc, eq, sql } from "drizzle-orm";
-import { productAssets, productCategories, products } from "@shared/schema";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
+import {
+  channelConnections,
+  channelFeeds,
+  channelListings,
+  channels,
+  productAssets,
+  productCategories,
+  products,
+  productVariants,
+} from "@shared/schema";
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
 import { inventoryStorage } from "../inventory";
@@ -11,6 +20,235 @@ import { warehouseStorage } from "../warehouse";
 import { procurementStorage } from "../procurement";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
+
+const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
+
+function normalizeShopDomain(value: string): string {
+  const trimmed = value.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+  if (!trimmed) return trimmed;
+  return trimmed.includes(".") ? trimmed : `${trimmed}.myshopify.com`;
+}
+
+function normalizeShopifyNumericId(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/(\d+)$/);
+  return match ? match[1] : null;
+}
+
+export function extractShopifyVariantId(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const gidMatch = trimmed.match(/ProductVariant\/(\d+)/i);
+  if (gidMatch) return gidMatch[1];
+
+  const variantPathMatch = trimmed.match(/\/variants\/(\d+)/i);
+  if (variantPathMatch) return variantPathMatch[1];
+
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+function extractShopifyProductId(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const gidMatch = trimmed.match(/Product\/(\d+)/i);
+  if (gidMatch) return gidMatch[1];
+
+  const productPathMatch = trimmed.match(/\/products\/(\d+)/i);
+  if (productPathMatch) return productPathMatch[1];
+
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+async function getDefaultShopifyChannel(channelIdInput?: unknown) {
+  const requestedChannelId = channelIdInput === undefined || channelIdInput === null || channelIdInput === ""
+    ? null
+    : Number(channelIdInput);
+
+  if (requestedChannelId !== null && (!Number.isInteger(requestedChannelId) || requestedChannelId <= 0)) {
+    throw Object.assign(new Error("Invalid Shopify channel"), { statusCode: 400 });
+  }
+
+  const rows = await db
+    .select()
+    .from(channels)
+    .where(
+      requestedChannelId
+        ? and(eq(channels.id, requestedChannelId), eq(channels.provider, "shopify"))
+        : eq(channels.provider, "shopify"),
+    )
+    .orderBy(sql`CASE WHEN ${channels.isDefault} = 1 THEN 0 ELSE 1 END`, asc(channels.id))
+    .limit(1);
+
+  const channel = rows[0];
+  if (!channel) {
+    throw Object.assign(new Error("No Shopify channel is configured"), { statusCode: 400 });
+  }
+  return channel;
+}
+
+async function getShopifyCredentials(channelId: number) {
+  const [connection] = await db
+    .select()
+    .from(channelConnections)
+    .where(eq(channelConnections.channelId, channelId))
+    .limit(1);
+
+  const shopDomain = connection?.shopDomain || process.env.SHOPIFY_SHOP_DOMAIN;
+  const accessToken = connection?.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+  if (!shopDomain || !accessToken) {
+    throw Object.assign(new Error("Shopify credentials are not configured for this channel"), { statusCode: 400 });
+  }
+
+  return {
+    shopDomain: normalizeShopDomain(shopDomain),
+    accessToken,
+    apiVersion: connection?.apiVersion || DEFAULT_SHOPIFY_API_VERSION,
+  };
+}
+
+async function fetchShopifyJson(credentials: { shopDomain: string; accessToken: string; apiVersion: string }, path: string) {
+  const response = await fetch(`https://${credentials.shopDomain}/admin/api/${credentials.apiVersion}${path}`, {
+    headers: {
+      "X-Shopify-Access-Token": credentials.accessToken,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw Object.assign(new Error(`Shopify API error ${response.status}: ${body || response.statusText}`), {
+      statusCode: response.status === 404 ? 404 : 502,
+    });
+  }
+
+  return response.json();
+}
+
+type ShopifyProductSearchResult = {
+  id: string;
+  title: string | null;
+  handle: string | null;
+  status: string | null;
+  variants: any[];
+};
+
+function getShopifyNextPageInfo(linkHeader: string | null): string | null {
+  if (!linkHeader) return null;
+  const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
+  return nextMatch?.[1] || null;
+}
+
+async function fetchShopifyProductForSearch(
+  credentials: { shopDomain: string; accessToken: string; apiVersion: string },
+  productId: string,
+): Promise<ShopifyProductSearchResult | null> {
+  try {
+    const data = await fetchShopifyJson(credentials, `/products/${productId}.json`);
+    const product = data?.product;
+    if (!product?.id) return null;
+    return {
+      id: String(product.id),
+      title: product.title || null,
+      handle: product.handle || null,
+      status: product.status || null,
+      variants: Array.isArray(product.variants) ? product.variants : [],
+    };
+  } catch (error: any) {
+    if (error?.statusCode === 404) return null;
+    throw error;
+  }
+}
+
+async function fetchShopifyProductsForSearch(
+  credentials: { shopDomain: string; accessToken: string; apiVersion: string },
+  maxProducts: number,
+): Promise<ShopifyProductSearchResult[]> {
+  const productsForSearch: ShopifyProductSearchResult[] = [];
+  let pageInfo: string | null = null;
+
+  do {
+    const path: string = pageInfo
+      ? `/products.json?limit=250&page_info=${encodeURIComponent(pageInfo)}&fields=id,title,handle,status,variants`
+      : "/products.json?limit=250&fields=id,title,handle,status,variants";
+    const response = await fetch(`https://${credentials.shopDomain}/admin/api/${credentials.apiVersion}${path}`, {
+      headers: {
+        "X-Shopify-Access-Token": credentials.accessToken,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw Object.assign(new Error(`Shopify API error ${response.status}: ${body || response.statusText}`), {
+        statusCode: response.status === 404 ? 404 : 502,
+      });
+    }
+
+    const data = await response.json();
+    for (const product of data?.products || []) {
+      if (productsForSearch.length >= maxProducts) break;
+      productsForSearch.push({
+        id: String(product.id),
+        title: product.title || null,
+        handle: product.handle || null,
+        status: product.status || null,
+        variants: Array.isArray(product.variants) ? product.variants : [],
+      });
+    }
+
+    pageInfo = productsForSearch.length >= maxProducts ? null : getShopifyNextPageInfo(response.headers.get("Link"));
+  } while (pageInfo);
+
+  return productsForSearch;
+}
+
+async function resolveShopifyVariant(input: {
+  credentials: { shopDomain: string; accessToken: string; apiVersion: string };
+  productShopifyId: string | null;
+  sku: string | null;
+  shopifyVariantRef?: string | null;
+}) {
+  const explicitVariantId = input.shopifyVariantRef ? extractShopifyVariantId(input.shopifyVariantRef) : null;
+  if (input.shopifyVariantRef && !explicitVariantId) {
+    throw Object.assign(new Error("Enter a valid Shopify variant URL or numeric variant ID"), { statusCode: 400 });
+  }
+
+  if (explicitVariantId) {
+    const data = await fetchShopifyJson(input.credentials, `/variants/${explicitVariantId}.json`);
+    if (!data?.variant?.id) {
+      throw Object.assign(new Error("Shopify variant was not found"), { statusCode: 404 });
+    }
+    return data.variant;
+  }
+
+  if (!input.productShopifyId) {
+    throw Object.assign(new Error("Parent product is not tied to a Shopify product; paste a Shopify variant URL or ID"), { statusCode: 400 });
+  }
+  if (!input.sku) {
+    throw Object.assign(new Error("Echelon variant has no SKU; paste a Shopify variant URL or ID"), { statusCode: 400 });
+  }
+
+  const productData = await fetchShopifyJson(input.credentials, `/products/${input.productShopifyId}.json`);
+  const normalizedSku = input.sku.trim().toUpperCase();
+  const matches = (productData?.product?.variants || []).filter((variant: any) => {
+    return String(variant.sku || "").trim().toUpperCase() === normalizedSku;
+  });
+
+  if (matches.length === 0) {
+    throw Object.assign(new Error(`No Shopify variant with SKU ${input.sku} exists under Shopify product ${input.productShopifyId}`), { statusCode: 404 });
+  }
+  if (matches.length > 1) {
+    throw Object.assign(new Error(`Multiple Shopify variants with SKU ${input.sku} exist under Shopify product ${input.productShopifyId}`), { statusCode: 409 });
+  }
+
+  return matches[0];
+}
 
 function normalizeCategorySlug(value: string): string {
   return value
@@ -836,6 +1074,556 @@ export async function registerProductRoutes(app: Express) {
     } catch (error) {
       console.error("Error updating variant:", error);
       res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
+  app.get("/api/product-variants/:id/shopify-candidates", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid variant id" });
+      }
+
+      const [variant] = await db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, id))
+        .limit(1);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+
+      const [product] = await db
+        .select()
+        .from(products)
+        .where(eq(products.id, variant.productId))
+        .limit(1);
+      if (!product) {
+        return res.status(404).json({ error: "Parent product not found" });
+      }
+
+      const channel = await getDefaultShopifyChannel(req.query.channelId);
+      const credentials = await getShopifyCredentials(channel.id);
+      const query = typeof req.query.q === "string" && req.query.q.trim()
+        ? req.query.q.trim()
+        : String(variant.sku || "").trim();
+      const normalizedQuery = query.toUpperCase();
+      const explicitVariantId = query ? extractShopifyVariantId(query) : null;
+      const explicitProductId = typeof req.query.shopifyProductRef === "string"
+        ? extractShopifyProductId(req.query.shopifyProductRef)
+        : null;
+      const mappedProductId = normalizeShopifyNumericId(product.shopifyProductId);
+      const scope = req.query.scope === "all" ? "all" : "mapped";
+      const maxProductsRaw = Number(req.query.maxProducts || 250);
+      const maxProducts = Number.isInteger(maxProductsRaw)
+        ? Math.min(Math.max(maxProductsRaw, 1), 1000)
+        : 250;
+      const limitRaw = Number(req.query.limit || 25);
+      const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 50) : 25;
+
+      let productsToSearch: ShopifyProductSearchResult[] = [];
+      let searchedScope: "mapped" | "explicit-product" | "all" = "mapped";
+
+      if (explicitVariantId && !explicitProductId) {
+        const variantData = await fetchShopifyJson(credentials, `/variants/${explicitVariantId}.json`);
+        const variantProductId = normalizeShopifyNumericId(variantData?.variant?.product_id);
+        const shopifyProduct = variantProductId
+          ? await fetchShopifyProductForSearch(credentials, variantProductId)
+          : null;
+        productsToSearch = shopifyProduct ? [shopifyProduct] : [];
+        searchedScope = "explicit-product";
+      } else if (explicitProductId) {
+        const shopifyProduct = await fetchShopifyProductForSearch(credentials, explicitProductId);
+        productsToSearch = shopifyProduct ? [shopifyProduct] : [];
+        searchedScope = "explicit-product";
+      } else if (scope === "mapped" && mappedProductId) {
+        const shopifyProduct = await fetchShopifyProductForSearch(credentials, mappedProductId);
+        productsToSearch = shopifyProduct ? [shopifyProduct] : [];
+        searchedScope = "mapped";
+      } else {
+        productsToSearch = await fetchShopifyProductsForSearch(credentials, maxProducts);
+        searchedScope = "all";
+      }
+
+      const candidates: Array<{
+        variantId: string;
+        productId: string;
+        inventoryItemId: string | null;
+        sku: string | null;
+        variantTitle: string | null;
+        productTitle: string | null;
+        productHandle: string | null;
+        productStatus: string | null;
+        matchType: string;
+        productMatchesMappedProduct: boolean;
+        currentlyLinked: boolean;
+        conflicts: Array<{ type: string; id: number; productVariantId?: number | null; sku?: string | null }>;
+      }> = [];
+
+      for (const shopifyProduct of productsToSearch) {
+        for (const shopifyVariant of shopifyProduct.variants || []) {
+          const shopifyVariantId = normalizeShopifyNumericId(shopifyVariant.id);
+          if (!shopifyVariantId) continue;
+
+          const shopifySku = shopifyVariant.sku ? String(shopifyVariant.sku).trim() : "";
+          const haystack = [
+            shopifySku,
+            shopifyVariant.title,
+            shopifyProduct.title,
+            shopifyProduct.handle,
+          ].filter(Boolean).join(" ").toUpperCase();
+
+          let matchType: string | null = null;
+          if (explicitVariantId && shopifyVariantId === explicitVariantId) {
+            matchType = "variant_id";
+          } else if (normalizedQuery && shopifySku.toUpperCase() === normalizedQuery) {
+            matchType = "exact_sku";
+          } else if (normalizedQuery && shopifySku.toUpperCase().includes(normalizedQuery)) {
+            matchType = "sku_contains";
+          } else if (normalizedQuery && haystack.includes(normalizedQuery)) {
+            matchType = "title_contains";
+          } else if (!normalizedQuery) {
+            matchType = "product_variant";
+          }
+
+          if (!matchType) continue;
+
+          candidates.push({
+            variantId: shopifyVariantId,
+            productId: String(shopifyProduct.id),
+            inventoryItemId: normalizeShopifyNumericId(shopifyVariant.inventory_item_id),
+            sku: shopifySku || null,
+            variantTitle: shopifyVariant.title || null,
+            productTitle: shopifyProduct.title,
+            productHandle: shopifyProduct.handle,
+            productStatus: shopifyProduct.status,
+            matchType,
+            productMatchesMappedProduct: !mappedProductId || String(shopifyProduct.id) === mappedProductId,
+            currentlyLinked: normalizeShopifyNumericId(variant.shopifyVariantId) === shopifyVariantId,
+            conflicts: [],
+          });
+        }
+      }
+
+      candidates.sort((a, b) => {
+        const score = (candidate: typeof candidates[number]) => {
+          if (candidate.currentlyLinked) return 0;
+          if (candidate.productMatchesMappedProduct && candidate.matchType === "exact_sku") return 1;
+          if (candidate.matchType === "exact_sku") return 2;
+          if (candidate.productMatchesMappedProduct) return 3;
+          if (candidate.matchType === "variant_id") return 4;
+          if (candidate.matchType === "sku_contains") return 5;
+          return 6;
+        };
+        return score(a) - score(b) || a.productTitle?.localeCompare(b.productTitle || "") || 0;
+      });
+
+      const sliced = candidates.slice(0, limit);
+      const candidateVariantIds = Array.from(new Set(sliced.map((candidate) => candidate.variantId)));
+      const candidateInventoryItemIds = Array.from(new Set(sliced.map((candidate) => candidate.inventoryItemId).filter((value): value is string => Boolean(value))));
+
+      if (candidateVariantIds.length > 0) {
+        const catalogConflicts = await db
+          .select({
+            id: productVariants.id,
+            sku: productVariants.sku,
+            shopifyVariantId: productVariants.shopifyVariantId,
+            shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
+          })
+          .from(productVariants)
+          .where(and(
+            sql`${productVariants.id} <> ${id}`,
+            or(
+              inArray(productVariants.shopifyVariantId, candidateVariantIds),
+              candidateInventoryItemIds.length > 0
+                ? inArray(productVariants.shopifyInventoryItemId, candidateInventoryItemIds)
+                : sql`false`,
+            ),
+          ));
+
+        const feedConflicts = await db
+          .select({
+            id: channelFeeds.id,
+            productVariantId: channelFeeds.productVariantId,
+            channelVariantId: channelFeeds.channelVariantId,
+          })
+          .from(channelFeeds)
+          .where(and(
+            eq(channelFeeds.channelId, channel.id),
+            eq(channelFeeds.channelType, "shopify"),
+            inArray(channelFeeds.channelVariantId, candidateVariantIds),
+            sql`${channelFeeds.productVariantId} <> ${id}`,
+          ));
+
+        const listingConflicts = await db
+          .select({
+            id: channelListings.id,
+            productVariantId: channelListings.productVariantId,
+            externalVariantId: channelListings.externalVariantId,
+          })
+          .from(channelListings)
+          .where(and(
+            eq(channelListings.channelId, channel.id),
+            inArray(channelListings.externalVariantId, candidateVariantIds),
+            sql`${channelListings.productVariantId} <> ${id}`,
+          ));
+
+        for (const candidate of sliced) {
+          for (const conflict of catalogConflicts) {
+            if (
+              normalizeShopifyNumericId(conflict.shopifyVariantId) === candidate.variantId ||
+              (candidate.inventoryItemId && normalizeShopifyNumericId(conflict.shopifyInventoryItemId) === candidate.inventoryItemId)
+            ) {
+              candidate.conflicts.push({
+                type: "catalog_variant",
+                id: conflict.id,
+                productVariantId: conflict.id,
+                sku: conflict.sku,
+              });
+            }
+          }
+
+          for (const conflict of feedConflicts) {
+            if (normalizeShopifyNumericId(conflict.channelVariantId) === candidate.variantId) {
+              candidate.conflicts.push({
+                type: "channel_feed",
+                id: conflict.id,
+                productVariantId: conflict.productVariantId,
+              });
+            }
+          }
+
+          for (const conflict of listingConflicts) {
+            if (normalizeShopifyNumericId(conflict.externalVariantId) === candidate.variantId) {
+              candidate.conflicts.push({
+                type: "channel_listing",
+                id: conflict.id,
+                productVariantId: conflict.productVariantId,
+              });
+            }
+          }
+        }
+      }
+
+      res.json({
+        channel: {
+          id: channel.id,
+          name: channel.name,
+        },
+        echelon: {
+          variantId: variant.id,
+          sku: variant.sku,
+          productId: product.id,
+          productName: product.name,
+          mappedShopifyProductId: mappedProductId,
+        },
+        query,
+        scope: searchedScope,
+        searchedProducts: productsToSearch.length,
+        candidates: sliced,
+      });
+    } catch (error: any) {
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+      if (statusCode >= 500) {
+        console.error("Error searching Shopify variants:", error);
+      }
+      res.status(statusCode).json({ error: error?.message || "Failed to search Shopify variants" });
+    }
+  });
+
+  app.post("/api/product-variants/:id/shopify-link", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid variant id" });
+      }
+
+      const [variant] = await db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, id))
+        .limit(1);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+
+      const [product] = await db
+        .select()
+        .from(products)
+        .where(eq(products.id, variant.productId))
+        .limit(1);
+      if (!product) {
+        return res.status(404).json({ error: "Parent product not found" });
+      }
+
+      const channel = await getDefaultShopifyChannel(req.body?.channelId);
+      const credentials = await getShopifyCredentials(channel.id);
+      const shopifyVariant = await resolveShopifyVariant({
+        credentials,
+        productShopifyId: normalizeShopifyNumericId(product.shopifyProductId),
+        sku: variant.sku,
+        shopifyVariantRef: req.body?.shopifyVariantRef,
+      });
+
+      const shopifyVariantId = normalizeShopifyNumericId(shopifyVariant.id);
+      const shopifyProductId = normalizeShopifyNumericId(shopifyVariant.product_id);
+      const shopifyInventoryItemId = normalizeShopifyNumericId(shopifyVariant.inventory_item_id);
+      const shopifySku = shopifyVariant.sku ? String(shopifyVariant.sku).trim() : null;
+      const echelonSku = variant.sku ? String(variant.sku).trim() : null;
+
+      if (!shopifyVariantId || !shopifyProductId) {
+        return res.status(502).json({ error: "Shopify variant response did not include required ids" });
+      }
+
+      const existingProductShopifyId = normalizeShopifyNumericId(product.shopifyProductId);
+      const productRemapRequested = req.body?.allowProductRemap === true;
+      if (existingProductShopifyId && existingProductShopifyId !== shopifyProductId && !productRemapRequested) {
+        return res.status(409).json({
+          error: "Shopify variant belongs to a different Shopify product",
+          code: "SHOPIFY_PRODUCT_MISMATCH",
+          echelonProductId: product.id,
+          echelonProductName: product.name,
+          catalogShopifyProductId: existingProductShopifyId,
+          shopifyVariantProductId: shopifyProductId,
+        });
+      }
+
+      if (existingProductShopifyId && existingProductShopifyId !== shopifyProductId && productRemapRequested) {
+        const siblingConflicts = await db
+          .select({
+            variantId: productVariants.id,
+            sku: productVariants.sku,
+            feedProductId: channelFeeds.channelProductId,
+            listingProductId: channelListings.externalProductId,
+          })
+          .from(productVariants)
+          .leftJoin(channelFeeds, and(
+            eq(channelFeeds.productVariantId, productVariants.id),
+            eq(channelFeeds.channelId, channel.id),
+            eq(channelFeeds.channelType, "shopify"),
+            eq(channelFeeds.isActive, 1),
+          ))
+          .leftJoin(channelListings, and(
+            eq(channelListings.productVariantId, productVariants.id),
+            eq(channelListings.channelId, channel.id),
+          ))
+          .where(and(
+            eq(productVariants.productId, product.id),
+            sql`${productVariants.id} <> ${id}`,
+            sql`(
+              (${channelFeeds.channelProductId} IS NOT NULL AND ${channelFeeds.channelProductId} <> ${shopifyProductId})
+              OR (${channelListings.externalProductId} IS NOT NULL AND ${channelListings.externalProductId} <> ${shopifyProductId})
+            )`,
+          ))
+          .limit(10);
+
+        if (siblingConflicts.length > 0) {
+          return res.status(409).json({
+            error: "Cannot remap this product while sibling variants are mapped to a different Shopify product",
+            code: "SHOPIFY_PRODUCT_REMAP_CONFLICT",
+            catalogShopifyProductId: existingProductShopifyId,
+            shopifyVariantProductId: shopifyProductId,
+            siblingConflicts,
+          });
+        }
+      }
+
+      if (
+        echelonSku &&
+        shopifySku &&
+        echelonSku.toUpperCase() !== shopifySku.toUpperCase() &&
+        req.body?.allowSkuMismatch !== true
+      ) {
+        return res.status(409).json({
+          error: "Shopify SKU does not match this Echelon SKU",
+          code: "SHOPIFY_SKU_MISMATCH",
+          echelonSku,
+          shopifySku,
+        });
+      }
+
+      const duplicateVariant = await db
+        .select({
+          id: productVariants.id,
+          sku: productVariants.sku,
+          productId: productVariants.productId,
+        })
+        .from(productVariants)
+        .where(sql`
+          ${productVariants.id} <> ${id}
+          AND (
+            ${productVariants.shopifyVariantId} = ${shopifyVariantId}
+            ${shopifyInventoryItemId ? sql`OR ${productVariants.shopifyInventoryItemId} = ${shopifyInventoryItemId}` : sql``}
+          )
+        `)
+        .limit(1);
+      if (duplicateVariant[0]) {
+        return res.status(409).json({
+          error: "Shopify variant is already tied to another Echelon variant",
+          code: "SHOPIFY_VARIANT_ALREADY_MAPPED",
+          conflictVariant: duplicateVariant[0],
+        });
+      }
+
+      const duplicateFeed = await db
+        .select({
+          id: channelFeeds.id,
+          productVariantId: channelFeeds.productVariantId,
+          channelVariantId: channelFeeds.channelVariantId,
+        })
+        .from(channelFeeds)
+        .where(and(
+          eq(channelFeeds.channelId, channel.id),
+          eq(channelFeeds.channelType, "shopify"),
+          eq(channelFeeds.channelVariantId, shopifyVariantId),
+          sql`${channelFeeds.productVariantId} <> ${id}`,
+        ))
+        .limit(1);
+      if (duplicateFeed[0]) {
+        return res.status(409).json({
+          error: "Shopify feed mapping is already tied to another Echelon variant",
+          code: "SHOPIFY_FEED_ALREADY_MAPPED",
+          conflictFeed: duplicateFeed[0],
+        });
+      }
+
+      const duplicateListing = await db
+        .select({
+          id: channelListings.id,
+          productVariantId: channelListings.productVariantId,
+          externalVariantId: channelListings.externalVariantId,
+        })
+        .from(channelListings)
+        .where(and(
+          eq(channelListings.channelId, channel.id),
+          eq(channelListings.externalVariantId, shopifyVariantId),
+          sql`${channelListings.productVariantId} <> ${id}`,
+        ))
+        .limit(1);
+      if (duplicateListing[0]) {
+        return res.status(409).json({
+          error: "Shopify listing is already tied to another Echelon variant",
+          code: "SHOPIFY_LISTING_ALREADY_MAPPED",
+          conflictListing: duplicateListing[0],
+        });
+      }
+
+      const result = await db.transaction(async (tx) => {
+        if (!existingProductShopifyId || productRemapRequested) {
+          await tx
+            .update(products)
+            .set({ shopifyProductId, updatedAt: new Date() })
+            .where(eq(products.id, product.id));
+        }
+
+        const variantUpdates: Partial<typeof productVariants.$inferInsert> = {
+          shopifyVariantId,
+          shopifyInventoryItemId,
+          updatedAt: new Date(),
+        };
+        if (!variant.barcode && shopifyVariant.barcode) {
+          variantUpdates.barcode = String(shopifyVariant.barcode).trim();
+        }
+
+        const [updatedVariant] = await tx
+          .update(productVariants)
+          .set(variantUpdates)
+          .where(eq(productVariants.id, id))
+          .returning();
+
+        const updatedFeeds = await tx
+          .update(channelFeeds)
+          .set({
+            channelVariantId: shopifyVariantId,
+            channelProductId: shopifyProductId,
+            channelSku: shopifySku || echelonSku,
+            channelInventoryItemId: shopifyInventoryItemId,
+            isActive: 1,
+            updatedAt: new Date(),
+          })
+          .where(and(
+            eq(channelFeeds.channelId, channel.id),
+            eq(channelFeeds.productVariantId, id),
+            eq(channelFeeds.channelType, "shopify"),
+          ))
+          .returning({ id: channelFeeds.id });
+
+        let feedIds = updatedFeeds.map((row) => row.id);
+        if (feedIds.length === 0) {
+          const insertedFeeds = await tx
+            .insert(channelFeeds)
+            .values({
+              channelId: channel.id,
+              productVariantId: id,
+              channelType: "shopify",
+              channelVariantId: shopifyVariantId,
+              channelProductId: shopifyProductId,
+              channelSku: shopifySku || echelonSku,
+              channelInventoryItemId: shopifyInventoryItemId,
+              isActive: 1,
+            })
+            .returning({ id: channelFeeds.id });
+          feedIds = insertedFeeds.map((row) => row.id);
+        }
+
+        const updatedListings = await tx
+          .update(channelListings)
+          .set({
+            externalProductId: shopifyProductId,
+            externalVariantId: shopifyVariantId,
+            externalSku: shopifySku || echelonSku,
+            syncStatus: "synced",
+            syncError: null,
+            lastSyncedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(and(
+            eq(channelListings.channelId, channel.id),
+            eq(channelListings.productVariantId, id),
+          ))
+          .returning({ id: channelListings.id });
+
+        let listingIds = updatedListings.map((row) => row.id);
+        if (listingIds.length === 0) {
+          const insertedListings = await tx
+            .insert(channelListings)
+            .values({
+              channelId: channel.id,
+              productVariantId: id,
+              externalProductId: shopifyProductId,
+              externalVariantId: shopifyVariantId,
+              externalSku: shopifySku || echelonSku,
+              syncStatus: "synced",
+              lastSyncedAt: new Date(),
+            })
+            .returning({ id: channelListings.id });
+          listingIds = insertedListings.map((row) => row.id);
+        }
+
+        return { updatedVariant, feedIds, listingIds };
+      });
+
+      req.app.locals.services?.inventoryCore?.triggerNotifyChange?.(id, "shopify_variant_link");
+
+      res.json({
+        variant: result.updatedVariant,
+        shopify: {
+          channelId: channel.id,
+          channelName: channel.name,
+          productId: shopifyProductId,
+          variantId: shopifyVariantId,
+          inventoryItemId: shopifyInventoryItemId,
+          sku: shopifySku,
+        },
+        channelFeedIds: result.feedIds,
+        channelListingIds: result.listingIds,
+      });
+    } catch (error: any) {
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+      if (statusCode >= 500) {
+        console.error("Error linking Shopify variant:", error);
+      }
+      res.status(statusCode).json({ error: error?.message || "Failed to link Shopify variant" });
     }
   });
 

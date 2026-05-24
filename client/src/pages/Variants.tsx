@@ -23,7 +23,8 @@ import {
   Pencil,
   Trash2,
   ChevronsUpDown,
-  Check
+  Check,
+  Store,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -34,6 +35,7 @@ interface Product {
   name: string;
   category: string | null;
   brand: string | null;
+  shopifyProductId?: string | null;
   isActive: boolean;
   status: string | null;
   productLineIds?: number[];
@@ -49,8 +51,24 @@ interface ProductVariant {
   parentVariantId: number | null;
   barcode: string | null;
   shopifyVariantId: string | null;
+  shopifyInventoryItemId?: string | null;
   isActive: boolean;
   dropshipEligible?: boolean;
+}
+
+interface ShopifyCandidate {
+  variantId: string;
+  productId: string;
+  inventoryItemId: string | null;
+  sku: string | null;
+  variantTitle: string | null;
+  productTitle: string | null;
+  productHandle: string | null;
+  productStatus: string | null;
+  matchType: string;
+  productMatchesMappedProduct: boolean;
+  currentlyLinked: boolean;
+  conflicts: Array<{ type: string; id: number; productVariantId?: number | null; sku?: string | null }>;
 }
 
 export default function Variants() {
@@ -65,6 +83,16 @@ export default function Variants() {
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+  const [shopifyLinkDialogOpen, setShopifyLinkDialogOpen] = useState(false);
+  const [shopifyLinkVariant, setShopifyLinkVariant] = useState<ProductVariant | null>(null);
+  const [shopifyVariantRef, setShopifyVariantRef] = useState("");
+  const [shopifySearchQuery, setShopifySearchQuery] = useState("");
+  const [shopifySearchScope, setShopifySearchScope] = useState<"mapped" | "all">("mapped");
+  const [shopifyCandidates, setShopifyCandidates] = useState<ShopifyCandidate[]>([]);
+  const [selectedShopifyCandidate, setSelectedShopifyCandidate] = useState<ShopifyCandidate | null>(null);
+  const [allowShopifySkuMismatch, setAllowShopifySkuMismatch] = useState(false);
+  const [allowShopifyProductRemap, setAllowShopifyProductRemap] = useState(false);
+  const [shopifyLinkError, setShopifyLinkError] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [createProductDialogOpen, setCreateProductDialogOpen] = useState(false);
   const [linkProductOpen, setLinkProductOpen] = useState(false);
@@ -99,6 +127,7 @@ export default function Variants() {
       name: p.name, 
       category: p.category, 
       brand: p.brand, 
+      shopifyProductId: p.shopifyProductId,
       isActive: p.isActive,
       status: p.status,
       productLineIds: p.productLineIds,
@@ -173,6 +202,96 @@ export default function Variants() {
     },
     onError: () => {
       toast({ title: "Failed to update dropship eligibility", variant: "destructive" });
+    },
+  });
+
+  const shopifySearchMutation = useMutation({
+    mutationFn: async ({
+      variantId,
+      query,
+      scope,
+    }: {
+      variantId: number;
+      query: string;
+      scope: "mapped" | "all";
+    }) => {
+      const params = new URLSearchParams();
+      if (query.trim()) params.set("q", query.trim());
+      params.set("scope", scope);
+      params.set("limit", "25");
+      const res = await fetch(`/api/product-variants/${variantId}/shopify-candidates?${params.toString()}`, {
+        credentials: "include",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body?.error || "Failed to search Shopify variants");
+      }
+      return body as { candidates: ShopifyCandidate[]; searchedProducts: number; scope: string };
+    },
+    onSuccess: (data) => {
+      setShopifyCandidates(data.candidates || []);
+      setSelectedShopifyCandidate(null);
+      setShopifyLinkError(null);
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : "Failed to search Shopify variants";
+      setShopifyCandidates([]);
+      setSelectedShopifyCandidate(null);
+      setShopifyLinkError(message);
+      toast({ title: "Shopify search failed", description: message, variant: "destructive" });
+    },
+  });
+
+  const shopifyLinkMutation = useMutation({
+    mutationFn: async ({
+      variantId,
+      shopifyVariantRef,
+      allowSkuMismatch,
+      allowProductRemap,
+    }: {
+      variantId: number;
+      shopifyVariantRef?: string;
+      allowSkuMismatch: boolean;
+      allowProductRemap: boolean;
+    }) => {
+      const res = await fetch(`/api/product-variants/${variantId}/shopify-link`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          shopifyVariantRef: shopifyVariantRef?.trim() || undefined,
+          allowSkuMismatch,
+          allowProductRemap,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body?.error || "Failed to link Shopify variant");
+      }
+      return body;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      toast({
+        title: "Shopify variant linked",
+        description: data?.shopify?.variantId ? `Variant ${data.shopify.variantId}` : undefined,
+      });
+      setShopifyLinkDialogOpen(false);
+      setShopifyLinkVariant(null);
+      setShopifyVariantRef("");
+      setShopifySearchQuery("");
+      setShopifySearchScope("mapped");
+      setShopifyCandidates([]);
+      setSelectedShopifyCandidate(null);
+      setAllowShopifySkuMismatch(false);
+      setAllowShopifyProductRemap(false);
+      setShopifyLinkError(null);
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : "Failed to link Shopify variant";
+      setShopifyLinkError(message);
+      toast({ title: "Shopify link failed", description: message, variant: "destructive" });
     },
   });
 
@@ -394,6 +513,11 @@ export default function Variants() {
     return product?.sku || "-";
   };
 
+  const getProductShopifyId = (productId: number) => {
+    const product = products.find(p => p.id === productId);
+    return product?.shopifyProductId || null;
+  };
+
   const getHierarchyLabel = (level: number) => {
     switch (level) {
       case 1: return "Pack";
@@ -414,6 +538,22 @@ export default function Variants() {
     unlinked: allVariants.filter(v => !v.productId).length,
     needsConfig: allVariants.filter(v => !v.parentVariantId && v.hierarchyLevel > 1).length,
   };
+
+  const openShopifyLinkDialog = (variant: ProductVariant) => {
+    setShopifyLinkVariant(variant);
+    setShopifyVariantRef("");
+    setShopifySearchQuery(variant.sku || "");
+    setShopifySearchScope(getProductShopifyId(variant.productId) ? "mapped" : "all");
+    setShopifyCandidates([]);
+    setSelectedShopifyCandidate(null);
+    setAllowShopifySkuMismatch(false);
+    setAllowShopifyProductRemap(false);
+    setShopifyLinkError(null);
+    setShopifyLinkDialogOpen(true);
+  };
+
+  const selectedShopifyProductMismatch = !!selectedShopifyCandidate && !selectedShopifyCandidate.productMatchesMappedProduct;
+  const selectedShopifyHasConflicts = !!selectedShopifyCandidate && selectedShopifyCandidate.conflicts.length > 0;
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
@@ -583,20 +723,32 @@ export default function Variants() {
                   ) : (
                     <Badge variant="secondary" className="text-xs mb-2">Unlinked</Badge>
                   )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full min-h-[44px]"
-                    onClick={() => {
-                      setSelectedVariant(variant);
-                      setSelectedProductId(variant.productId?.toString() || "");
-                      setLinkDialogOpen(true);
-                    }}
-                    data-testid={`btn-link-variant-mobile-${variant.id}`}
-                  >
-                    <LinkIcon className="h-4 w-4 mr-1" />
-                    {variant.productId ? "Change Link" : "Link to Product"}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="min-h-[44px] flex-1"
+                      onClick={() => {
+                        setSelectedVariant(variant);
+                        setSelectedProductId(variant.productId?.toString() || "");
+                        setLinkDialogOpen(true);
+                      }}
+                      data-testid={`btn-link-variant-mobile-${variant.id}`}
+                    >
+                      <LinkIcon className="h-4 w-4 mr-1" />
+                      Product
+                    </Button>
+                    <Button
+                      variant={variant.shopifyVariantId ? "secondary" : "outline"}
+                      size="sm"
+                      className="min-h-[44px] flex-1"
+                      onClick={() => openShopifyLinkDialog(variant)}
+                      data-testid={`btn-shopify-link-mobile-${variant.id}`}
+                    >
+                      <Store className="h-4 w-4 mr-1" />
+                      Shopify
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             ))}
@@ -623,9 +775,10 @@ export default function Variants() {
                   <TableHead>Type</TableHead>
                   <TableHead>Breaks Into</TableHead>
                   <TableHead>Linked Product</TableHead>
+                  <TableHead>Shopify</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Dropship</TableHead>
-                  <TableHead className="w-24">Actions</TableHead>
+                  <TableHead className="w-40">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -675,6 +828,18 @@ export default function Variants() {
                       )}
                     </TableCell>
                     <TableCell>
+                      {variant.shopifyVariantId ? (
+                        <div className="space-y-1">
+                          <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300">
+                            Linked
+                          </Badge>
+                          <p className="text-xs text-muted-foreground font-mono">{variant.shopifyVariantId}</p>
+                        </div>
+                      ) : (
+                        <Badge variant="secondary">Unmapped</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell>
                       <Badge variant={variant.isActive ? "default" : "secondary"}>
                         {variant.isActive ? "Active" : "Inactive"}
                       </Badge>
@@ -688,20 +853,32 @@ export default function Variants() {
                       />
                     </TableCell>
                     <TableCell>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="min-h-[44px]"
-                        onClick={() => {
-                          setSelectedVariant(variant);
-                          setSelectedProductId(variant.productId?.toString() || "");
-                          setLinkDialogOpen(true);
-                        }}
-                        data-testid={`btn-link-variant-${variant.id}`}
-                      >
-                        <LinkIcon className="h-4 w-4 mr-1" />
-                        {variant.productId ? "Change" : "Link"}
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="min-h-[44px] min-w-[44px]"
+                          onClick={() => {
+                            setSelectedVariant(variant);
+                            setSelectedProductId(variant.productId?.toString() || "");
+                            setLinkDialogOpen(true);
+                          }}
+                          title={variant.productId ? "Change product link" : "Link to product"}
+                          data-testid={`btn-link-variant-${variant.id}`}
+                        >
+                          <LinkIcon className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant={variant.shopifyVariantId ? "secondary" : "outline"}
+                          size="icon"
+                          className="min-h-[44px] min-w-[44px]"
+                          onClick={() => openShopifyLinkDialog(variant)}
+                          title={variant.shopifyVariantId ? "Change Shopify variant link" : "Link Shopify variant"}
+                          data-testid={`btn-shopify-link-${variant.id}`}
+                        >
+                          <Store className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                   );
@@ -814,6 +991,239 @@ export default function Variants() {
               className="min-h-[44px]"
             >
               {linkMutation.isPending ? "Linking..." : "Link Variant"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={shopifyLinkDialogOpen}
+        onOpenChange={(open) => {
+          setShopifyLinkDialogOpen(open);
+          if (!open) {
+            setShopifyLinkVariant(null);
+            setShopifyVariantRef("");
+            setShopifySearchQuery("");
+            setShopifySearchScope("mapped");
+            setShopifyCandidates([]);
+            setSelectedShopifyCandidate(null);
+            setAllowShopifySkuMismatch(false);
+            setAllowShopifyProductRemap(false);
+            setShopifyLinkError(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle>Link Shopify Variant</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="rounded-md border p-3 bg-muted/20 space-y-1">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-mono truncate">{shopifyLinkVariant?.sku || "-"}</p>
+                  <p className="text-sm text-muted-foreground truncate">{shopifyLinkVariant?.name}</p>
+                </div>
+                {shopifyLinkVariant?.shopifyVariantId ? (
+                  <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300">Linked</Badge>
+                ) : (
+                  <Badge variant="secondary">Unmapped</Badge>
+                )}
+              </div>
+              {shopifyLinkVariant?.productId && (
+                <div className="text-xs text-muted-foreground">
+                  Product: {getProductName(shopifyLinkVariant.productId)}
+                  {getProductShopifyId(shopifyLinkVariant.productId)
+                    ? ` - Shopify ${getProductShopifyId(shopifyLinkVariant.productId)}`
+                    : ""}
+                </div>
+              )}
+              {shopifyLinkVariant?.shopifyVariantId && (
+                <div className="text-xs text-muted-foreground font-mono">
+                  Current: {shopifyLinkVariant.shopifyVariantId}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="shopify-search-query" className="text-sm">Search Shopify</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="shopify-search-query"
+                  value={shopifySearchQuery}
+                  onChange={(e) => {
+                    setShopifySearchQuery(e.target.value);
+                    setSelectedShopifyCandidate(null);
+                    setShopifyLinkError(null);
+                  }}
+                  placeholder="SKU, variant ID, or title"
+                  className="h-11 font-mono text-sm"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-[44px]"
+                  onClick={() => {
+                    if (!shopifyLinkVariant) return;
+                    shopifySearchMutation.mutate({
+                      variantId: shopifyLinkVariant.id,
+                      query: shopifySearchQuery,
+                      scope: shopifySearchScope,
+                    });
+                  }}
+                  disabled={!shopifyLinkVariant || shopifySearchMutation.isPending}
+                >
+                  {shopifySearchMutation.isPending ? "Searching..." : "Search"}
+                </Button>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={shopifySearchScope === "all"}
+                onCheckedChange={(checked) => {
+                  setShopifySearchScope(checked === true ? "all" : "mapped");
+                  setShopifyCandidates([]);
+                  setSelectedShopifyCandidate(null);
+                }}
+              />
+              <span>Search all Shopify products</span>
+            </label>
+
+            {shopifyCandidates.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-sm">Candidates</Label>
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {shopifyCandidates.map((candidate) => {
+                    const selected = selectedShopifyCandidate?.variantId === candidate.variantId;
+                    const blocked = candidate.conflicts.length > 0;
+                    return (
+                      <button
+                        key={`${candidate.productId}-${candidate.variantId}`}
+                        type="button"
+                        className={`w-full rounded-md border p-3 text-left transition-colors ${
+                          selected ? "border-blue-500 bg-blue-50" : "hover:bg-muted/40"
+                        } ${blocked ? "border-red-200 bg-red-50/60" : ""}`}
+                        onClick={() => {
+                          setSelectedShopifyCandidate(candidate);
+                          setShopifyVariantRef(candidate.variantId);
+                          setAllowShopifySkuMismatch(false);
+                          setAllowShopifyProductRemap(false);
+                          setShopifyLinkError(null);
+                        }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-mono text-sm truncate">{candidate.sku || "-"}</p>
+                            <p className="text-sm truncate">{candidate.variantTitle || "Default Title"}</p>
+                            <p className="text-xs text-muted-foreground truncate">
+                              {candidate.productTitle || "Untitled product"} · {candidate.productId}
+                            </p>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            {candidate.currentlyLinked ? (
+                              <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300">Current</Badge>
+                            ) : blocked ? (
+                              <Badge variant="outline" className="bg-red-50 text-red-700 border-red-300">Mapped</Badge>
+                            ) : candidate.productMatchesMappedProduct ? (
+                              <Badge variant="outline">Same product</Badge>
+                            ) : (
+                              <Badge variant="secondary">Different product</Badge>
+                            )}
+                            <span className="text-xs text-muted-foreground">{candidate.matchType}</span>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                          <span>Variant {candidate.variantId}</span>
+                          {candidate.inventoryItemId && <span>Inventory {candidate.inventoryItemId}</span>}
+                          {candidate.productStatus && <span>{candidate.productStatus}</span>}
+                        </div>
+                        {blocked && (
+                          <p className="mt-2 text-xs text-red-700">
+                            Already mapped to {candidate.conflicts.map((c) => c.sku || `variant ${c.productVariantId || c.id}`).join(", ")}
+                          </p>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="shopify-variant-ref" className="text-sm">Shopify Variant URL or ID</Label>
+              <Input
+                id="shopify-variant-ref"
+                value={shopifyVariantRef}
+                onChange={(e) => {
+                  setShopifyVariantRef(e.target.value);
+                  setSelectedShopifyCandidate(null);
+                  setShopifyLinkError(null);
+                }}
+                placeholder="Paste URL/ID or select a candidate"
+                className="h-11 font-mono text-sm"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+              />
+            </div>
+
+            {selectedShopifyProductMismatch && (
+              <label className="flex items-start gap-2 text-sm rounded-md border border-amber-200 bg-amber-50 p-3 text-amber-900">
+                <Checkbox
+                  checked={allowShopifyProductRemap}
+                  onCheckedChange={(checked) => setAllowShopifyProductRemap(checked === true)}
+                />
+                <span>Update this Echelon product to the selected Shopify product</span>
+              </label>
+            )}
+
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={allowShopifySkuMismatch}
+                onCheckedChange={(checked) => setAllowShopifySkuMismatch(checked === true)}
+              />
+              <span>Allow SKU mismatch</span>
+            </label>
+
+            {shopifyLinkError && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {shopifyLinkError}
+              </div>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setShopifyLinkDialogOpen(false)}
+              className="min-h-[44px]"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!shopifyLinkVariant) return;
+                shopifyLinkMutation.mutate({
+                  variantId: shopifyLinkVariant.id,
+                  shopifyVariantRef,
+                  allowSkuMismatch: allowShopifySkuMismatch,
+                  allowProductRemap: allowShopifyProductRemap,
+                });
+              }}
+              disabled={
+                !shopifyLinkVariant ||
+                shopifyLinkMutation.isPending ||
+                selectedShopifyHasConflicts ||
+                (selectedShopifyProductMismatch && !allowShopifyProductRemap)
+              }
+              className="min-h-[44px]"
+            >
+              {shopifyLinkMutation.isPending ? "Linking..." : "Link Shopify"}
             </Button>
           </DialogFooter>
         </DialogContent>
