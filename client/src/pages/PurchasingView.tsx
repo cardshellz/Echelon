@@ -107,6 +107,20 @@ interface ReorderItem {
       constrainedAvailablePieces: number;
       daysOfSupply: number;
     };
+    forecastTrust?: {
+      signal:
+        | "trusted"
+        | "no_recent_demand"
+        | "stale_recent_demand"
+        | "thin_sample"
+        | "missing_latest_demand_timestamp"
+        | "missing_prior_baseline";
+      severity: "ok" | "watch" | "review";
+      detail: string;
+      latestDemandAgeDays?: number | null;
+      staleDemandThresholdDays?: number;
+      inputGaps?: string[];
+    };
     leadTimeSource: "vendor_product" | "product" | "default";
     safetyStockSource: "product" | "default";
     orderUomSource: "variant" | "default_each";
@@ -756,6 +770,10 @@ export default function PurchasingView() {
       provenance.demandSuppressionRisk && provenance.demandSuppressionRisk.signal !== "none"
         ? ` - suppression ${provenance.demandSuppressionRisk.signal.replace(/_/g, " ")}`
         : "";
+    const trustLabel =
+      provenance.forecastTrust && provenance.forecastTrust.signal !== "trusted"
+        ? ` - trust ${provenance.forecastTrust.signal.replace(/_/g, " ")}`
+        : "";
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -764,7 +782,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}${scoreLabel}${suppressionLabel} - ${leadLabel} - ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}${scoreLabel}${suppressionLabel}${trustLabel} - ${leadLabel} - ${costLabel}`;
   };
 
   const getAutopilotBlockers = (item: ReorderItem) => {

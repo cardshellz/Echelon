@@ -53,6 +53,22 @@ export type PurchasingRecommendationDemandSuppressionSignal =
   | "stockout_velocity_suppression"
   | "low_supply_velocity_suppression";
 export type PurchasingRecommendationDemandSuppressionSeverity = "none" | "watch" | "review";
+export type PurchasingRecommendationForecastTrustSignal =
+  | "trusted"
+  | "no_recent_demand"
+  | "stale_recent_demand"
+  | "thin_sample"
+  | "missing_latest_demand_timestamp"
+  | "missing_prior_baseline";
+export type PurchasingRecommendationForecastTrustSeverity = "ok" | "watch" | "review";
+export type PurchasingRecommendationForecastInputGap =
+  | "missing_latest_demand_at"
+  | "missing_demand_order_count"
+  | "missing_demand_active_days"
+  | "missing_prior_period"
+  | "missing_short_window"
+  | "missing_long_window"
+  | "missing_seasonal_window";
 export type PurchasingRecommendationReviewAction =
   | "create_po"
   | "assign_vendor"
@@ -89,6 +105,23 @@ export interface PurchasingRecommendationDemandSuppressionRisk {
   daysOfSupply: number;
   demandTrend: PurchasingRecommendationDemandTrend;
   demandQuality: PurchasingRecommendationDemandQuality;
+}
+
+export interface PurchasingRecommendationForecastTrustDiagnostics {
+  signal: PurchasingRecommendationForecastTrustSignal;
+  severity: PurchasingRecommendationForecastTrustSeverity;
+  detail: string;
+  latestDemandAgeDays: number | null;
+  staleDemandThresholdDays: number;
+  demandOrderCount: number | null;
+  demandActiveDays: number | null;
+  demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
+  hasPriorBaseline: boolean;
+  hasShortWindow: boolean;
+  hasLongWindow: boolean;
+  hasSeasonalWindow: boolean;
+  inputGaps: PurchasingRecommendationForecastInputGap[];
 }
 
 export interface PurchasingRecommendationRawRow {
@@ -181,6 +214,7 @@ export interface AutoDraftRecommendationSettings {
 export interface GeneratePurchasingRecommendationsOptions {
   rows: PurchasingRecommendationRawRow[];
   lookbackDays: number;
+  asOf?: Date | string;
   productMetaById?: Map<number, PurchasingRecommendationProductMeta> | Record<string, PurchasingRecommendationProductMeta>;
   exclusionRules?: PurchasingRecommendationExclusionRule[];
   defaults?: Partial<PurchasingRecommendationDefaults>;
@@ -275,6 +309,7 @@ export interface PurchasingRecommendationItem {
     couponDiscountDemandShare: number | null;
     demandMixSignal: PurchasingDemandForecastDemandMixSignal;
     demandSuppressionRisk: PurchasingRecommendationDemandSuppressionRisk;
+    forecastTrust: PurchasingRecommendationForecastTrustDiagnostics;
   };
   leadTimeBasis: {
     leadTimeDays: number;
@@ -307,6 +342,7 @@ export interface PurchasingRecommendationItem {
     orderUomSource: PurchasingRecommendationOrderUomSource;
     demandWindowDiagnostics: PurchasingDemandForecastWindowDiagnostics;
     demandSuppressionRisk: PurchasingRecommendationDemandSuppressionRisk;
+    forecastTrust: PurchasingRecommendationForecastTrustDiagnostics;
   };
   confidence: PurchasingRecommendationConfidence;
   confidenceFactors: string[];
@@ -368,6 +404,7 @@ const DEFAULTS: PurchasingRecommendationDefaults = {
 
 const DEFAULT_CANDIDATE_SCORE_STRONG_THRESHOLD = 80;
 const DEFAULT_CANDIDATE_SCORE_REVIEW_THRESHOLD = 60;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 function asNumber(value: unknown, fallback = 0): number {
   if (value === null || value === undefined || value === "") return fallback;
@@ -387,6 +424,22 @@ function asPositiveNumberOrNull(value: unknown): number | null {
 
 function roundRatio(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function normalizeAsOf(value: Date | string | undefined): Date {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
+function getLatestDemandAgeDays(asOf: Date, latestDemandAt: string | Date | null): number | null {
+  if (!latestDemandAt) return null;
+  const latest = new Date(latestDemandAt).getTime();
+  if (!Number.isFinite(latest)) return null;
+  return Math.max(0, Math.floor((asOf.getTime() - latest) / MS_PER_DAY));
 }
 
 function clampScore(value: number): number {
@@ -750,6 +803,76 @@ function buildDemandSuppressionRisk(input: {
     daysOfSupply: input.daysOfSupply,
     demandTrend: input.demandTrend,
     demandQuality: input.demandQuality,
+  };
+}
+
+function buildForecastTrustDiagnostics(input: {
+  asOf: Date;
+  lookbackDays: number;
+  priorPeriodUsagePieces: number | null;
+  demandOrderCount: number | null;
+  demandActiveDays: number | null;
+  latestDemandAt: string | Date | null;
+  demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
+  hasShortWindowInput: boolean;
+  hasLongWindowInput: boolean;
+  hasSeasonalWindowInput: boolean;
+}): PurchasingRecommendationForecastTrustDiagnostics {
+  const latestDemandAgeDays = getLatestDemandAgeDays(input.asOf, input.latestDemandAt);
+  const staleDemandThresholdDays = Math.max(input.lookbackDays, 14);
+  const hasPriorBaseline = input.priorPeriodUsagePieces !== null;
+  const inputGaps: PurchasingRecommendationForecastInputGap[] = [];
+
+  if (!input.latestDemandAt) inputGaps.push("missing_latest_demand_at");
+  if (input.demandOrderCount === null) inputGaps.push("missing_demand_order_count");
+  if (input.demandActiveDays === null) inputGaps.push("missing_demand_active_days");
+  if (!hasPriorBaseline) inputGaps.push("missing_prior_period");
+  if (!input.hasShortWindowInput) inputGaps.push("missing_short_window");
+  if (!input.hasLongWindowInput) inputGaps.push("missing_long_window");
+  if (!input.hasSeasonalWindowInput) inputGaps.push("missing_seasonal_window");
+
+  let signal: PurchasingRecommendationForecastTrustSignal = "trusted";
+  let severity: PurchasingRecommendationForecastTrustSeverity = "ok";
+  let detail = "Forecast inputs have recent demand, a usable sample, and a prior-period baseline.";
+
+  if (input.demandQuality === "no_recent_demand") {
+    signal = "no_recent_demand";
+    severity = "review";
+    detail = "Forecast has no outbound usage in the current lookback window; review before using it as an autopilot purchasing ceiling.";
+  } else if (latestDemandAgeDays !== null && latestDemandAgeDays > staleDemandThresholdDays) {
+    signal = "stale_recent_demand";
+    severity = "review";
+    detail = `Most recent demand is ${latestDemandAgeDays} days old, older than the ${staleDemandThresholdDays}-day trust threshold.`;
+  } else if (input.demandQuality === "thin_history") {
+    signal = "thin_sample";
+    severity = "watch";
+    detail = "Forecast is based on a thin demand sample; keep it visible for review before expanding autopilot scope.";
+  } else if (!input.latestDemandAt) {
+    signal = "missing_latest_demand_timestamp";
+    severity = "watch";
+    detail = "Forecast has outbound usage but no latest-demand timestamp, so freshness cannot be proven.";
+  } else if (!hasPriorBaseline) {
+    signal = "missing_prior_baseline";
+    severity = "watch";
+    detail = "Forecast has no prior-period baseline, so trend confidence is limited.";
+  }
+
+  return {
+    signal,
+    severity,
+    detail,
+    latestDemandAgeDays,
+    staleDemandThresholdDays,
+    demandOrderCount: input.demandOrderCount,
+    demandActiveDays: input.demandActiveDays,
+    demandQuality: input.demandQuality,
+    demandTrend: input.demandTrend,
+    hasPriorBaseline,
+    hasShortWindow: input.hasShortWindowInput,
+    hasLongWindow: input.hasLongWindowInput,
+    hasSeasonalWindow: input.hasSeasonalWindowInput,
+    inputGaps,
   };
 }
 
@@ -1279,6 +1402,7 @@ export function generatePurchasingRecommendations(
   const settings = options.autoDraftSettings ?? {};
   const candidateScoreThresholds = normalizeCandidateScoreThresholds(settings);
   const lookbackDays = asPositiveInt(options.lookbackDays, 30);
+  const asOf = normalizeAsOf(options.asOf);
   const items: PurchasingRecommendationItem[] = [];
   const skippedItems: PurchasingRecommendationItem[] = [];
 
@@ -1444,6 +1568,19 @@ export function generatePurchasingRecommendations(
       demandQuality,
       demandTrend,
     });
+    const forecastTrust = buildForecastTrustDiagnostics({
+      asOf,
+      lookbackDays,
+      priorPeriodUsagePieces: priorPeriodUsage,
+      demandOrderCount,
+      demandActiveDays,
+      latestDemandAt,
+      demandQuality,
+      demandTrend,
+      hasShortWindowInput,
+      hasLongWindowInput,
+      hasSeasonalWindowInput,
+    });
 
     let skippedReason: PurchasingRecommendationSkipReason | null = null;
     if (isExcluded(row, meta, rules)) {
@@ -1601,6 +1738,7 @@ export function generatePurchasingRecommendations(
         couponDiscountDemandShare,
         demandMixSignal,
         demandSuppressionRisk,
+        forecastTrust,
       },
       leadTimeBasis: {
         leadTimeDays,
@@ -1633,6 +1771,7 @@ export function generatePurchasingRecommendations(
         orderUomSource,
         demandWindowDiagnostics,
         demandSuppressionRisk,
+        forecastTrust,
       },
       confidence,
       confidenceFactors: buildConfidenceFactors({

@@ -2942,3 +2942,33 @@ Next step:
 - Continue forecast auditability by exposing input freshness/backfill gaps, then
   move toward explicit recommendation confidence policy only after operators can
   see the forecast's weak spots.
+
+### 2026-05-24 - Forecast Trust Diagnostics
+
+Scope:
+
+- Added read-only forecast trust diagnostics to recommendation demand basis and
+  forecast provenance so stale demand, no recent demand, thin samples, missing
+  latest-demand timestamps, and missing prior baselines are explicit.
+- Added input gap tracking for missing latest demand, demand sample metadata,
+  prior-period baseline, short-window, long-window, and seasonal-window inputs.
+- Aggregated forecast trust signals, severity counts, and input gap counts into
+  recommendation run diagnostics.
+- Surfaced forecast trust in Purchasing View forecast text and Purchasing
+  Dashboard run summaries/search without changing recommendation quantities,
+  candidate scores, approval policy, PO creation, supplier data, receiving,
+  landed-cost, AP, or forecast model authority.
+- Added focused coverage for stale forecast trust signals and run-level input
+  gap diagnostics.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- After PR review, use these trust diagnostics to decide which forecast inputs
+  need backfill jobs or stricter autopilot eligibility rules before widening
+  automated purchasing.
