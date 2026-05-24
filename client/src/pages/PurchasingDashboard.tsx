@@ -42,6 +42,11 @@ interface ForecastDiagnostics {
   demandMixSignalCounts?: Record<string, number>;
   demandSuppressionSignalCounts?: Record<string, number>;
   demandSuppressionReviewCount?: number;
+  forecastTrustSignalCounts?: Record<string, number>;
+  forecastTrustSeverityCounts?: Record<string, number>;
+  forecastTrustWatchCount?: number;
+  forecastTrustReviewCount?: number;
+  forecastInputGapCounts?: Record<string, number>;
   supplierCycleSignalCounts?: Record<string, number>;
   supplierCycleOpenPoPastDueCount?: number;
   avgSupplierCycleSupplyCoverageRatio?: number | null;
@@ -84,6 +89,14 @@ interface RecommendationForecastProvenance {
     signal: string;
     severity: string;
     detail: string;
+  };
+  forecastTrust?: {
+    signal: string;
+    severity: string;
+    detail: string;
+    latestDemandAgeDays?: number | null;
+    staleDemandThresholdDays?: number;
+    inputGaps?: string[];
   };
   demandWindowDiagnostics?: {
     shortWindow?: {
@@ -445,7 +458,15 @@ function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): st
   const demandMixLabel = demandMix === "None" ? "mix n/a" : demandMix;
   const suppressionCount = diagnostics.demandSuppressionReviewCount ?? 0;
   const suppressionLabel = suppressionCount > 0 ? ` - ${suppressionCount} suppression review` : "";
-  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${demandMixLabel} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}${suppressionLabel}`;
+  const trustReviewCount = diagnostics.forecastTrustReviewCount ?? 0;
+  const trustWatchCount = diagnostics.forecastTrustWatchCount ?? 0;
+  const trustLabel =
+    trustReviewCount > 0
+      ? ` - ${trustReviewCount} trust review`
+      : trustWatchCount > 0
+        ? ` - ${trustWatchCount} trust watch`
+        : "";
+  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${demandMixLabel} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}${suppressionLabel}${trustLabel}`;
 }
 
 function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
@@ -498,7 +519,11 @@ function formatRecommendationForecast(
     : "";
   const cycleLabel = supplierCycleDiagnostics ? ` - cycle ${supplierCycleDiagnostics.signal.replace(/_/g, " ")}` : "";
   const scoreLabel = candidateScore ? ` - score ${candidateScore.score} ${candidateScore.band.replace(/_/g, " ")}` : "";
-  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}${mixLabel}${cycleLabel}${scoreLabel}`;
+  const trustLabel =
+    provenance.forecastTrust && provenance.forecastTrust.signal !== "trusted"
+      ? ` - trust ${provenance.forecastTrust.signal.replace(/_/g, " ")}`
+      : "";
+  return `${formatForecastMethod(provenance.forecastMethod)} - ${sample} - ${trend}${accelerationLabel}${baselineLabel}${seasonalLabel}${mixLabel}${cycleLabel}${scoreLabel}${trustLabel}`;
 }
 
 function formatQualityControlSummary(controls?: RecommendationQualityControl[] | null): string | null {
@@ -517,6 +542,9 @@ function runRecommendationSampleText(item?: AutoDraftRunRecommendationSample | n
     item.skippedReason,
     item.forecastProvenance?.demandSuppressionRisk?.signal,
     item.forecastProvenance?.demandSuppressionRisk?.detail,
+    item.forecastProvenance?.forecastTrust?.signal,
+    item.forecastProvenance?.forecastTrust?.detail,
+    item.forecastProvenance?.forecastTrust?.inputGaps?.join(" "),
     item.recommendationCandidateScore?.band,
     item.recommendationCandidateScore?.signals?.join(" "),
     item.recommendationCandidateScore?.blockers?.join(" "),
@@ -1405,6 +1433,19 @@ export default function PurchasingDashboard() {
                       { label: "Short-window signal", value: topCountLabel(lastRunForecastDiagnostics?.demandAccelerationSignalCounts) },
                       { label: "Baseline signal", value: topCountLabel(lastRunForecastDiagnostics?.demandBaselineSignalCounts) },
                       { label: "Seasonality signal", value: topCountLabel(lastRunForecastDiagnostics?.demandSeasonalitySignalCounts) },
+                      {
+                        label: "Forecast trust",
+                        value: topCountLabel(lastRunForecastDiagnostics?.forecastTrustSignalCounts),
+                        warn: Boolean(
+                          lastRunForecastDiagnostics?.forecastTrustReviewCount ||
+                            lastRunForecastDiagnostics?.forecastTrustWatchCount,
+                        ),
+                      },
+                      {
+                        label: "Forecast input gaps",
+                        value: topCountLabel(lastRunForecastDiagnostics?.forecastInputGapCounts),
+                        warn: Boolean(Object.keys(lastRunForecastDiagnostics?.forecastInputGapCounts ?? {}).length),
+                      },
                       { label: "Supplier cycle", value: topCountLabel(lastRunForecastDiagnostics?.supplierCycleSignalCounts), warn: Boolean(lastRunForecastDiagnostics?.supplierCycleOpenPoPastDueCount) },
                       { label: "Candidate score", value: lastRunForecastDiagnostics?.avgRecommendationCandidateScore ?? "n/a" },
                       { label: "Candidate band", value: topCountLabel(lastRunForecastDiagnostics?.recommendationCandidateBandCounts) },

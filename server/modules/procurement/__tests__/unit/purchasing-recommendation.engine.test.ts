@@ -638,6 +638,61 @@ describe("purchasing recommendation engine", () => {
     );
   });
 
+  it("exposes read-only forecast trust diagnostics for stale and incomplete forecast inputs", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      asOf: "2026-05-24T00:00:00.000Z",
+      rows: [
+        {
+          product_id: 62,
+          variant_id: 621,
+          base_sku: "STALE-FORECAST",
+          product_name: "Stale Forecast Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 30,
+          previous_outbound_pieces: 30,
+          demand_order_count: 8,
+          demand_active_days: 6,
+          latest_demand_at: "2026-04-01T00:00:00.000Z",
+          on_order_pieces: 0,
+          vendor_lead_time_days: 3,
+          safety_stock_days: 1,
+          order_uom_units: 10,
+          preferred_vendor_id: 10,
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      demandBasis: {
+        demandQuality: "normal",
+        forecastTrust: {
+          signal: "stale_recent_demand",
+          severity: "review",
+          latestDemandAgeDays: 53,
+          staleDemandThresholdDays: 30,
+          hasPriorBaseline: true,
+          hasShortWindow: false,
+          hasLongWindow: false,
+          hasSeasonalWindow: false,
+          inputGaps: expect.arrayContaining([
+            "missing_short_window",
+            "missing_long_window",
+            "missing_seasonal_window",
+          ]),
+        },
+      },
+      forecastProvenance: {
+        forecastTrust: {
+          signal: "stale_recent_demand",
+          severity: "review",
+          detail: expect.stringContaining("Most recent demand is 53 days old"),
+        },
+      },
+    });
+  });
+
   it("keeps zero-revenue demand in usage while requiring review before auto-draft", () => {
     const result = generatePurchasingRecommendations({
       lookbackDays: 30,

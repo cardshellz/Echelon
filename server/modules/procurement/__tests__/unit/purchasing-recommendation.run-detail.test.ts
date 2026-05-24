@@ -115,6 +115,23 @@ describe("purchasing recommendation run detail", () => {
           none: 2,
         },
         demandSuppressionReviewCount: 0,
+        forecastTrustSignalCounts: {
+          missing_latest_demand_timestamp: 2,
+        },
+        forecastTrustSeverityCounts: {
+          watch: 2,
+        },
+        forecastTrustWatchCount: 2,
+        forecastTrustReviewCount: 0,
+        forecastInputGapCounts: {
+          missing_latest_demand_at: 2,
+          missing_demand_order_count: 2,
+          missing_demand_active_days: 2,
+          missing_prior_period: 2,
+          missing_short_window: 2,
+          missing_long_window: 2,
+          missing_seasonal_window: 2,
+        },
         supplierCycleSignalCounts: {
           no_supplier_cycle_data: 2,
         },

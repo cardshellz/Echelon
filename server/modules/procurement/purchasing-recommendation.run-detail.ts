@@ -58,6 +58,9 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const demandSeasonalitySignalCounts: Record<string, number> = {};
   const demandMixSignalCounts: Record<string, number> = {};
   const demandSuppressionSignalCounts: Record<string, number> = {};
+  const forecastTrustSignalCounts: Record<string, number> = {};
+  const forecastTrustSeverityCounts: Record<string, number> = {};
+  const forecastInputGapCounts: Record<string, number> = {};
   const forecastMethodCounts: Record<string, number> = {};
   const qualityControlCounts: Record<string, number> = {};
   const qualityControlAreaCounts: Record<string, number> = {};
@@ -80,6 +83,8 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   let candidateScoreTotal = 0;
   let strongCandidateCount = 0;
   let demandSuppressionReviewCount = 0;
+  let forecastTrustWatchCount = 0;
+  let forecastTrustReviewCount = 0;
 
   for (const item of result.items) {
     const provenance = item.forecastProvenance;
@@ -99,6 +104,13 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     increment(demandMixSignalCounts, provenance.demandMixSignal);
     increment(demandSuppressionSignalCounts, provenance.demandSuppressionRisk?.signal);
     if (provenance.demandSuppressionRisk?.severity === "review") demandSuppressionReviewCount += 1;
+    increment(forecastTrustSignalCounts, provenance.forecastTrust?.signal);
+    increment(forecastTrustSeverityCounts, provenance.forecastTrust?.severity);
+    if (provenance.forecastTrust?.severity === "watch") forecastTrustWatchCount += 1;
+    if (provenance.forecastTrust?.severity === "review") forecastTrustReviewCount += 1;
+    for (const gap of provenance.forecastTrust?.inputGaps ?? []) {
+      increment(forecastInputGapCounts, gap);
+    }
     increment(supplierCycleSignalCounts, item.supplierCycleDiagnostics.signal);
     increment(recommendationCandidateBandCounts, item.recommendationCandidateScore.band);
     candidateScoreTotal += item.recommendationCandidateScore.score;
@@ -151,6 +163,11 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     demandMixSignalCounts,
     demandSuppressionSignalCounts,
     demandSuppressionReviewCount,
+    forecastTrustSignalCounts,
+    forecastTrustSeverityCounts,
+    forecastTrustWatchCount,
+    forecastTrustReviewCount,
+    forecastInputGapCounts,
     supplierCycleSignalCounts,
     supplierCycleOpenPoPastDueCount: openPoPastDueCount,
     avgSupplierCycleSupplyCoverageRatio:
