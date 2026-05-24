@@ -1263,6 +1263,32 @@ describe("purchasing recommendation routes", () => {
             autopilotBlockerItemCount: 2,
           },
           poMutationCount: 0,
+          recommendationSamples: {
+            actionable: [
+              {
+                sku: "ORDER-ME",
+                productName: "Order Me",
+                suggestedOrderQty: 2,
+              },
+            ],
+            skipped: [
+              {
+                sku: "NO-VENDOR",
+                skippedReason: "no_vendor",
+              },
+            ],
+            approvalPolicyBlocked: [
+              {
+                sku: "REVIEW-CANDIDATE",
+                suggestedOrderQty: 1,
+              },
+            ],
+          },
+          recommendationSampleCounts: {
+            actionable: 1,
+            skipped: 1,
+            approvalPolicyBlocked: 1,
+          },
           topActionableRecommendation: {
             sku: "ORDER-ME",
             suggestedOrderQty: 2,

@@ -2886,3 +2886,30 @@ Next step:
 - Continue forecast auditability by giving run history deeper drilldown/search,
   or move into forecast input backfills once operator decision traceability is
   sufficient.
+
+### 2026-05-23 - Recommendation Run History Drilldown
+
+Scope:
+
+- Normalized bounded recommendation samples for each auto-draft run across
+  actionable, approval-policy-held, and skipped recommendations.
+- Added Purchasing Dashboard recent-run search over run id, status, mode,
+  approval policy, forecast diagnostics, sample SKUs, product names, vendor
+  names, quality controls, and autopilot blockers.
+- Expanded recent-run cards beyond the single top recommendation so operators
+  can see additional held, orderable, and skipped samples before opening deeper
+  analysis screens.
+- Kept this slice audit/read-model only: no recommendation math, approval
+  policy, supplier data, PO creation rules, receiving, landed-cost, AP, or
+  forecast model authority changed.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Continue forecast auditability into forecast input backfills and stockout or
+  demand-suppression visibility once run-level drilldown is verified.

@@ -20,6 +20,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
@@ -139,6 +140,21 @@ interface RecommendationCandidateScore {
 
 type AutoDraftApprovalPolicy = "high_confidence_only" | "high_confidence_and_strong_candidate";
 
+interface AutoDraftRunRecommendationSample {
+  sku: string;
+  productName: string;
+  suggestedOrderQty?: number;
+  orderUomLabel?: string;
+  preferredVendorName?: string | null;
+  skippedReason?: string | null;
+  explanation: string;
+  forecastProvenance?: RecommendationForecastProvenance;
+  supplierCycleDiagnostics?: RecommendationSupplierCycleDiagnostics;
+  recommendationCandidateScore?: RecommendationCandidateScore;
+  qualityControls?: RecommendationQualityControl[];
+  autopilotBlockers?: RecommendationQualityControl[];
+}
+
 interface ApprovalPolicyDiagnostics {
   policy: AutoDraftApprovalPolicy;
   mode: "draft_po" | "review_only";
@@ -188,36 +204,9 @@ interface DashboardData {
       approvalPolicyDiagnostics?: ApprovalPolicyDiagnostics | null;
       forecastDiagnostics?: ForecastDiagnostics | null;
       skippedReasonCounts?: Record<string, number>;
-      actionableRecommendations?: Array<{
-        sku: string;
-        productName: string;
-        suggestedOrderQty: number;
-        orderUomLabel: string;
-        preferredVendorName: string | null;
-        explanation: string;
-        forecastProvenance?: RecommendationForecastProvenance;
-        supplierCycleDiagnostics?: RecommendationSupplierCycleDiagnostics;
-        recommendationCandidateScore?: RecommendationCandidateScore;
-        qualityControls?: RecommendationQualityControl[];
-        autopilotBlockers?: RecommendationQualityControl[];
-      }>;
-      skippedRecommendations?: Array<{
-        sku: string;
-        productName: string;
-        skippedReason: string | null;
-        explanation: string;
-      }>;
-      approvalPolicyBlockedRecommendations?: Array<{
-        sku: string;
-        productName: string;
-        suggestedOrderQty: number;
-        orderUomLabel: string;
-        preferredVendorName: string | null;
-        explanation: string;
-        recommendationCandidateScore?: RecommendationCandidateScore;
-        qualityControls?: RecommendationQualityControl[];
-        autopilotBlockers?: RecommendationQualityControl[];
-      }>;
+      actionableRecommendations?: AutoDraftRunRecommendationSample[];
+      skippedRecommendations?: AutoDraftRunRecommendationSample[];
+      approvalPolicyBlockedRecommendations?: AutoDraftRunRecommendationSample[];
     } | null;
   } | null;
 }
@@ -245,29 +234,19 @@ interface AutoDraftRunHistoryItem {
   skippedOnOrder: number;
   skippedExcluded: number;
   errorMessage: string | null;
-  topActionableRecommendation: {
-    sku: string;
-    productName: string;
-    suggestedOrderQty: number;
-    orderUomLabel: string;
-    preferredVendorName: string | null;
-    explanation: string;
-    forecastProvenance?: RecommendationForecastProvenance;
-    recommendationCandidateScore?: RecommendationCandidateScore;
-    qualityControls?: RecommendationQualityControl[];
-    autopilotBlockers?: RecommendationQualityControl[];
-  } | null;
-  topApprovalPolicyBlockedRecommendation: {
-    sku: string;
-    productName: string;
-    suggestedOrderQty: number;
-    orderUomLabel: string;
-    preferredVendorName: string | null;
-    explanation: string;
-    recommendationCandidateScore?: RecommendationCandidateScore;
-    qualityControls?: RecommendationQualityControl[];
-    autopilotBlockers?: RecommendationQualityControl[];
-  } | null;
+  recommendationSamples?: {
+    actionable?: AutoDraftRunRecommendationSample[];
+    approvalPolicyBlocked?: AutoDraftRunRecommendationSample[];
+    skipped?: AutoDraftRunRecommendationSample[];
+  };
+  recommendationSampleCounts?: {
+    actionable: number;
+    approvalPolicyBlocked: number;
+    skipped: number;
+  };
+  topActionableRecommendation: AutoDraftRunRecommendationSample | null;
+  topApprovalPolicyBlockedRecommendation: AutoDraftRunRecommendationSample | null;
+  topSkippedRecommendation: AutoDraftRunRecommendationSample | null;
   recommendedActions: Array<{
     action: string;
     label: string;
@@ -520,6 +499,41 @@ function formatQualityControlSummary(controls?: RecommendationQualityControl[] |
   return `${controls.some((control) => control.severity === "block") ? "Blocked" : "Review"}: ${labels}${remainder}`;
 }
 
+function runRecommendationSampleText(item?: AutoDraftRunRecommendationSample | null): string {
+  if (!item) return "";
+  return [
+    item.sku,
+    item.productName,
+    item.preferredVendorName,
+    item.skippedReason,
+    item.recommendationCandidateScore?.band,
+    item.recommendationCandidateScore?.signals?.join(" "),
+    item.recommendationCandidateScore?.blockers?.join(" "),
+    item.qualityControls?.map((control) => `${control.code} ${control.label}`).join(" "),
+    item.autopilotBlockers?.map((control) => `${control.code} ${control.label}`).join(" "),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function autoDraftRunSearchText(run: AutoDraftRunHistoryItem): string {
+  const samples = [
+    ...(run.recommendationSamples?.actionable ?? []),
+    ...(run.recommendationSamples?.approvalPolicyBlocked ?? []),
+    ...(run.recommendationSamples?.skipped ?? []),
+    run.topActionableRecommendation,
+    run.topApprovalPolicyBlockedRecommendation,
+    run.topSkippedRecommendation,
+  ];
+  return [
+    String(run.id),
+    run.status,
+    run.mode,
+    run.approvalPolicy,
+    run.errorMessage,
+    formatForecastDiagnostics(run.forecastDiagnostics),
+    ...samples.map(runRecommendationSampleText),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
   sent: { label: "Sent", className: "bg-blue-50 text-blue-700 border-blue-200" },
   acknowledged: { label: "Acknowledged", className: "bg-purple-50 text-purple-700 border-purple-200" },
@@ -532,6 +546,7 @@ export default function PurchasingDashboard() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [exclusionModalOpen, setExclusionModalOpen] = useState(false);
+  const [runHistorySearch, setRunHistorySearch] = useState("");
 
   const { data, isLoading } = useQuery<DashboardData>({
     queryKey: ["/api/purchasing/dashboard"],
@@ -663,6 +678,10 @@ export default function PurchasingDashboard() {
       ]
     : [];
   const recentAutoDraftRuns = autoDraftRunHistory?.runs ?? [];
+  const normalizedRunHistorySearch = runHistorySearch.trim().toLowerCase();
+  const visibleAutoDraftRuns = normalizedRunHistorySearch
+    ? recentAutoDraftRuns.filter((run) => autoDraftRunSearchText(run).includes(normalizedRunHistorySearch))
+    : recentAutoDraftRuns;
   const lastRunForecastDiagnostics = data.lastAutoDraftRun?.summaryJson?.forecastDiagnostics ?? null;
   const lastRunApprovalDiagnostics = data.lastAutoDraftRun?.summaryJson?.approvalPolicyDiagnostics ?? null;
 
@@ -1442,11 +1461,22 @@ export default function PurchasingDashboard() {
                   ) : null}
                   {recentAutoDraftRuns.length > 0 ? (
                     <div className="mt-3 pt-3 border-t">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
-                        Recent Runs
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          Recent Runs
+                        </div>
+                        <div className="relative w-40">
+                          <Filter className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            value={runHistorySearch}
+                            onChange={(event) => setRunHistorySearch(event.target.value)}
+                            placeholder="Search SKU"
+                            className="h-7 pl-7 text-[11px]"
+                          />
+                        </div>
                       </div>
                       <div className="space-y-2">
-                        {recentAutoDraftRuns.slice(0, 5).map((run) => (
+                        {visibleAutoDraftRuns.slice(0, 5).map((run) => (
                           <div key={run.id} className="rounded border bg-muted/20 p-2 text-xs">
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-2 min-w-0">
@@ -1477,6 +1507,12 @@ export default function PurchasingDashboard() {
                                 <span> - score {run.topApprovalPolicyBlockedRecommendation.recommendationCandidateScore?.score ?? "n/a"}</span>
                               </div>
                             ) : null}
+                            {run.recommendationSamples?.approvalPolicyBlocked?.slice(1, 3).map((item) => (
+                              <div key={`held-${run.id}-${item.sku}`} className="mt-1 truncate text-[11px] text-amber-700">
+                                Held: <span className="font-mono font-semibold">{item.sku}</span>
+                                <span> - score {item.recommendationCandidateScore?.score ?? "n/a"}</span>
+                              </div>
+                            ))}
                             {run.topActionableRecommendation ? (
                               <div className="mt-1 truncate text-[11px]">
                                 <span className="font-mono font-semibold text-primary">{run.topActionableRecommendation.sku}</span>
@@ -1486,6 +1522,18 @@ export default function PurchasingDashboard() {
                                 ) : null}
                               </div>
                             ) : null}
+                            {run.recommendationSamples?.actionable?.slice(1, 3).map((item) => (
+                              <div key={`actionable-${run.id}-${item.sku}`} className="mt-1 truncate text-[11px]">
+                                Order: <span className="font-mono font-semibold text-primary">{item.sku}</span>
+                                <span className="text-muted-foreground"> - {item.suggestedOrderQty ?? "n/a"} {item.orderUomLabel ?? ""}</span>
+                              </div>
+                            ))}
+                            {run.recommendationSamples?.skipped?.slice(0, 2).map((item) => (
+                              <div key={`skipped-${run.id}-${item.sku}`} className="mt-1 truncate text-[11px] text-muted-foreground">
+                                Skipped: <span className="font-mono font-semibold">{item.sku}</span>
+                                {item.skippedReason ? <span> - {item.skippedReason.replace(/_/g, " ")}</span> : null}
+                              </div>
+                            ))}
                             {run.recommendedActions?.length ? (
                               <div className="mt-2 flex flex-wrap gap-1.5">
                                 {run.recommendedActions.slice(0, 3).map((action) => (
@@ -1508,6 +1556,11 @@ export default function PurchasingDashboard() {
                             ) : null}
                           </div>
                         ))}
+                        {visibleAutoDraftRuns.length === 0 ? (
+                          <div className="rounded border border-dashed bg-muted/10 p-3 text-[11px] text-muted-foreground">
+                            No recent runs match this search.
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   ) : null}
