@@ -100,6 +100,13 @@ interface ReorderItem {
     zeroRevenueDemandShare?: number | null;
     couponDiscountDemandShare?: number | null;
     demandMixSignal?: "not_available" | "mostly_paid" | "mixed_discounted_or_free" | "mostly_zero_revenue";
+    demandSuppressionRisk?: {
+      signal: "none" | "stockout_velocity_suppression" | "low_supply_velocity_suppression";
+      severity: "none" | "watch" | "review";
+      detail: string;
+      constrainedAvailablePieces: number;
+      daysOfSupply: number;
+    };
     leadTimeSource: "vendor_product" | "product" | "default";
     safetyStockSource: "product" | "default";
     orderUomSource: "variant" | "default_each";
@@ -745,6 +752,10 @@ export default function PurchasingView() {
     const scoreLabel = item.recommendationCandidateScore
       ? ` - score ${item.recommendationCandidateScore.score} ${item.recommendationCandidateScore.band.replace(/_/g, " ")}`
       : "";
+    const suppressionLabel =
+      provenance.demandSuppressionRisk && provenance.demandSuppressionRisk.signal !== "none"
+        ? ` - suppression ${provenance.demandSuppressionRisk.signal.replace(/_/g, " ")}`
+        : "";
     const costLabel =
       item.supplierBasis?.costQuality === "current"
         ? "cost current"
@@ -753,7 +764,7 @@ export default function PurchasingView() {
           : item.supplierBasis?.costQuality === "unverified"
             ? "cost unverified"
             : "cost missing";
-    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}${scoreLabel} - ${leadLabel} - ${costLabel}`;
+    return `${methodLabel} - ${demandLabel} - ${sampleLabel} - ${usageLabel}${shortWindowLabel}${trendLabel ? ` - ${trendLabel}` : ""}${accelerationLabel}${baselineLabel}${seasonalLabel}${cycleLabel}${scoreLabel}${suppressionLabel} - ${leadLabel} - ${costLabel}`;
   };
 
   const getAutopilotBlockers = (item: ReorderItem) => {

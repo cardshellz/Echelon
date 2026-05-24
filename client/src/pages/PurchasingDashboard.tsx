@@ -40,6 +40,8 @@ interface ForecastDiagnostics {
   demandBaselineSignalCounts?: Record<string, number>;
   demandSeasonalitySignalCounts?: Record<string, number>;
   demandMixSignalCounts?: Record<string, number>;
+  demandSuppressionSignalCounts?: Record<string, number>;
+  demandSuppressionReviewCount?: number;
   supplierCycleSignalCounts?: Record<string, number>;
   supplierCycleOpenPoPastDueCount?: number;
   avgSupplierCycleSupplyCoverageRatio?: number | null;
@@ -78,6 +80,11 @@ interface RecommendationForecastProvenance {
   zeroRevenueDemandShare?: number | null;
   couponDiscountDemandShare?: number | null;
   demandMixSignal?: string;
+  demandSuppressionRisk?: {
+    signal: string;
+    severity: string;
+    detail: string;
+  };
   demandWindowDiagnostics?: {
     shortWindow?: {
       lookbackDays?: number;
@@ -436,7 +443,9 @@ function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): st
   const blockerLabel = blocker === "None" ? "no blockers" : blocker;
   const demandMix = topCountLabel(diagnostics.demandMixSignalCounts);
   const demandMixLabel = demandMix === "None" ? "mix n/a" : demandMix;
-  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${demandMixLabel} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}`;
+  const suppressionCount = diagnostics.demandSuppressionReviewCount ?? 0;
+  const suppressionLabel = suppressionCount > 0 ? ` - ${suppressionCount} suppression review` : "";
+  return `${formatForecastMethod(topMethod)} - ${topCountLabel(diagnostics.demandQualityCounts)} - ${demandMixLabel} - ${diagnostics.totalPeriodUsagePieces.toLocaleString()} pcs - ${blockerLabel}${suppressionLabel}`;
 }
 
 function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
@@ -506,6 +515,8 @@ function runRecommendationSampleText(item?: AutoDraftRunRecommendationSample | n
     item.productName,
     item.preferredVendorName,
     item.skippedReason,
+    item.forecastProvenance?.demandSuppressionRisk?.signal,
+    item.forecastProvenance?.demandSuppressionRisk?.detail,
     item.recommendationCandidateScore?.band,
     item.recommendationCandidateScore?.signals?.join(" "),
     item.recommendationCandidateScore?.blockers?.join(" "),

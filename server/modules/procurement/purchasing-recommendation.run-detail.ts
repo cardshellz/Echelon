@@ -57,6 +57,7 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   const demandBaselineSignalCounts: Record<string, number> = {};
   const demandSeasonalitySignalCounts: Record<string, number> = {};
   const demandMixSignalCounts: Record<string, number> = {};
+  const demandSuppressionSignalCounts: Record<string, number> = {};
   const forecastMethodCounts: Record<string, number> = {};
   const qualityControlCounts: Record<string, number> = {};
   const qualityControlAreaCounts: Record<string, number> = {};
@@ -78,6 +79,7 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
   let supplyCoverageRatioCount = 0;
   let candidateScoreTotal = 0;
   let strongCandidateCount = 0;
+  let demandSuppressionReviewCount = 0;
 
   for (const item of result.items) {
     const provenance = item.forecastProvenance;
@@ -95,6 +97,8 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     increment(demandBaselineSignalCounts, provenance.demandWindowDiagnostics.baselineSignal);
     increment(demandSeasonalitySignalCounts, provenance.demandWindowDiagnostics.seasonalSignal);
     increment(demandMixSignalCounts, provenance.demandMixSignal);
+    increment(demandSuppressionSignalCounts, provenance.demandSuppressionRisk?.signal);
+    if (provenance.demandSuppressionRisk?.severity === "review") demandSuppressionReviewCount += 1;
     increment(supplierCycleSignalCounts, item.supplierCycleDiagnostics.signal);
     increment(recommendationCandidateBandCounts, item.recommendationCandidateScore.band);
     candidateScoreTotal += item.recommendationCandidateScore.score;
@@ -145,6 +149,8 @@ function buildForecastDiagnostics(result: PurchasingRecommendationResult) {
     demandBaselineSignalCounts,
     demandSeasonalitySignalCounts,
     demandMixSignalCounts,
+    demandSuppressionSignalCounts,
+    demandSuppressionReviewCount,
     supplierCycleSignalCounts,
     supplierCycleOpenPoPastDueCount: openPoPastDueCount,
     avgSupplierCycleSupplyCoverageRatio:

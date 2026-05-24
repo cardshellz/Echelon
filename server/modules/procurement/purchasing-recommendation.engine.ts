@@ -48,6 +48,11 @@ export type PurchasingRecommendationCandidateBand =
   | "review_candidate"
   | "watch"
   | "blocked";
+export type PurchasingRecommendationDemandSuppressionSignal =
+  | "none"
+  | "stockout_velocity_suppression"
+  | "low_supply_velocity_suppression";
+export type PurchasingRecommendationDemandSuppressionSeverity = "none" | "watch" | "review";
 export type PurchasingRecommendationReviewAction =
   | "create_po"
   | "assign_vendor"
@@ -74,6 +79,16 @@ export interface PurchasingRecommendationQualityControl {
   code: string;
   label: string;
   detail: string;
+}
+
+export interface PurchasingRecommendationDemandSuppressionRisk {
+  signal: PurchasingRecommendationDemandSuppressionSignal;
+  severity: PurchasingRecommendationDemandSuppressionSeverity;
+  detail: string;
+  constrainedAvailablePieces: number;
+  daysOfSupply: number;
+  demandTrend: PurchasingRecommendationDemandTrend;
+  demandQuality: PurchasingRecommendationDemandQuality;
 }
 
 export interface PurchasingRecommendationRawRow {
@@ -259,6 +274,7 @@ export interface PurchasingRecommendationItem {
     zeroRevenueDemandShare: number | null;
     couponDiscountDemandShare: number | null;
     demandMixSignal: PurchasingDemandForecastDemandMixSignal;
+    demandSuppressionRisk: PurchasingRecommendationDemandSuppressionRisk;
   };
   leadTimeBasis: {
     leadTimeDays: number;
@@ -290,6 +306,7 @@ export interface PurchasingRecommendationItem {
     safetyStockSource: PurchasingRecommendationSafetyStockSource;
     orderUomSource: PurchasingRecommendationOrderUomSource;
     demandWindowDiagnostics: PurchasingDemandForecastWindowDiagnostics;
+    demandSuppressionRisk: PurchasingRecommendationDemandSuppressionRisk;
   };
   confidence: PurchasingRecommendationConfidence;
   confidenceFactors: string[];
@@ -679,6 +696,61 @@ function buildQualityControls(input: {
   }
 
   return controls;
+}
+
+function buildDemandSuppressionRisk(input: {
+  available: number;
+  daysOfSupply: number;
+  leadTimeDays: number;
+  safetyStockDays: number;
+  periodUsagePieces: number;
+  demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
+}): PurchasingRecommendationDemandSuppressionRisk {
+  const constrainedWindowDays = input.leadTimeDays + input.safetyStockDays;
+  const constrainedAvailablePieces = Math.max(0, input.available);
+  const isStockout = input.available <= 0;
+  const isLowSupply = !isStockout && input.daysOfSupply <= constrainedWindowDays;
+  const suppressedSignal =
+    input.demandTrend === "falling" ||
+    input.demandQuality === "no_recent_demand" ||
+    (input.periodUsagePieces > 0 && input.demandQuality === "thin_history");
+
+  if (isStockout && suppressedSignal) {
+    return {
+      signal: "stockout_velocity_suppression",
+      severity: "review",
+      detail:
+        "Observed order velocity may understate demand because this SKU is stocked out while recent demand is falling, missing, or sparse.",
+      constrainedAvailablePieces,
+      daysOfSupply: input.daysOfSupply,
+      demandTrend: input.demandTrend,
+      demandQuality: input.demandQuality,
+    };
+  }
+
+  if (isLowSupply && suppressedSignal) {
+    return {
+      signal: "low_supply_velocity_suppression",
+      severity: "watch",
+      detail:
+        "Observed order velocity may be constrained by low available supply; review before treating the demand forecast as a hard ceiling.",
+      constrainedAvailablePieces,
+      daysOfSupply: input.daysOfSupply,
+      demandTrend: input.demandTrend,
+      demandQuality: input.demandQuality,
+    };
+  }
+
+  return {
+    signal: "none",
+    severity: "none",
+    detail: "No demand suppression signal detected from current supply, demand quality, and demand trend.",
+    constrainedAvailablePieces,
+    daysOfSupply: input.daysOfSupply,
+    demandTrend: input.demandTrend,
+    demandQuality: input.demandQuality,
+  };
 }
 
 function buildConfidenceFactors(input: {
@@ -1363,6 +1435,15 @@ export function generatePurchasingRecommendations(
     const hasVendor = Boolean(preferredVendorId);
     const demandQuality = demandForecast.demandQuality;
     const demandTrend = demandForecast.demandTrend;
+    const demandSuppressionRisk = buildDemandSuppressionRisk({
+      available,
+      daysOfSupply,
+      leadTimeDays,
+      safetyStockDays,
+      periodUsagePieces: periodUsage,
+      demandQuality,
+      demandTrend,
+    });
 
     let skippedReason: PurchasingRecommendationSkipReason | null = null;
     if (isExcluded(row, meta, rules)) {
@@ -1519,6 +1600,7 @@ export function generatePurchasingRecommendations(
         zeroRevenueDemandShare,
         couponDiscountDemandShare,
         demandMixSignal,
+        demandSuppressionRisk,
       },
       leadTimeBasis: {
         leadTimeDays,
@@ -1550,6 +1632,7 @@ export function generatePurchasingRecommendations(
         safetyStockSource,
         orderUomSource,
         demandWindowDiagnostics,
+        demandSuppressionRisk,
       },
       confidence,
       confidenceFactors: buildConfidenceFactors({

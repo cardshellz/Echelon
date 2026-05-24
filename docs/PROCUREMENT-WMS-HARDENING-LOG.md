@@ -2913,3 +2913,32 @@ Next step:
 
 - Continue forecast auditability into forecast input backfills and stockout or
   demand-suppression visibility once run-level drilldown is verified.
+
+### 2026-05-24 - Forecast Demand Suppression Visibility
+
+Scope:
+
+- Added a read-only demand suppression risk signal to recommendation demand
+  basis and forecast provenance when stockouts or low available supply may make
+  recent order velocity understate true demand.
+- Aggregated suppression signal counts and review counts into recommendation
+  run forecast diagnostics so operators can see when run output may be supply
+  constrained.
+- Surfaced the suppression signal in Purchasing View forecast text and
+  Purchasing Dashboard run summaries/search without changing recommendation
+  quantities, candidate scores, approval policy, PO creation, supplier data,
+  receiving, landed-cost, AP, or forecast model authority.
+- Added focused coverage for stockout velocity-suppression detection and run
+  diagnostics.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts`
+- Pending: `git diff --check`
+
+Next step:
+
+- Continue forecast auditability by exposing input freshness/backfill gaps, then
+  move toward explicit recommendation confidence policy only after operators can
+  see the forecast's weak spots.
