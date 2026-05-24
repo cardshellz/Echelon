@@ -225,6 +225,7 @@ describe("purchasing recommendation engine", () => {
           previous_outbound_pieces: 50,
           demand_order_count: 12,
           demand_active_days: 10,
+          latest_demand_at: "2026-05-18T12:00:00.000Z",
           short_window_days: 7,
           short_outbound_pieces: 21,
           previous_short_outbound_pieces: 7,
@@ -276,6 +277,7 @@ describe("purchasing recommendation engine", () => {
           previous_outbound_pieces: 50,
           demand_order_count: 12,
           demand_active_days: 10,
+          latest_demand_at: "2026-05-18T12:00:00.000Z",
           short_window_days: 7,
           short_outbound_pieces: 21,
           previous_short_outbound_pieces: 7,
@@ -691,6 +693,76 @@ describe("purchasing recommendation engine", () => {
         },
       },
     });
+  });
+
+  it("holds otherwise high-confidence recommendations when forecast trust has review severity", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      asOf: "2026-05-24T00:00:00.000Z",
+      rows: [
+        {
+          product_id: 63,
+          variant_id: 631,
+          base_sku: "STALE-HIGH-CONF",
+          product_name: "Stale High Confidence Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 60,
+          previous_outbound_pieces: 60,
+          demand_order_count: 12,
+          demand_active_days: 10,
+          latest_demand_at: "2026-04-01T00:00:00.000Z",
+          short_window_days: 7,
+          short_outbound_pieces: 14,
+          previous_short_outbound_pieces: 14,
+          short_demand_order_count: 5,
+          short_demand_active_days: 4,
+          long_window_days: 90,
+          long_outbound_pieces: 180,
+          previous_long_outbound_pieces: 180,
+          long_demand_order_count: 24,
+          long_demand_active_days: 20,
+          seasonal_window_days: 30,
+          seasonal_outbound_pieces: 60,
+          previous_seasonal_outbound_pieces: 60,
+          seasonal_demand_order_count: 12,
+          seasonal_demand_active_days: 10,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 3,
+          safety_stock_days: 1,
+          order_uom_units: 10,
+          vendor_product_id: 6310,
+          preferred_vendor_id: 10,
+          estimated_cost_cents: 250,
+          vendor_product_updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      confidence: "high",
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "forecast_trust_review",
+        label: "Forecast trust review",
+        detail: expect.stringContaining("stale recent demand"),
+      },
+      forecastProvenance: {
+        forecastTrust: {
+          signal: "stale_recent_demand",
+          severity: "review",
+        },
+      },
+      recommendationCandidateScore: {
+        signals: expect.arrayContaining(["quality_gate:forecast_trust_review"]),
+      },
+    });
+    expect(result.summary).toMatchObject({
+      highConfidenceCount: 1,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 1,
+    });
+    expect(passesAutoDraftApprovalPolicy(result.items[0], { approvalPolicy: "high_confidence_only" })).toBe(false);
   });
 
   it("keeps zero-revenue demand in usage while requiring review before auto-draft", () => {

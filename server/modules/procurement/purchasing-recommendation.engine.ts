@@ -81,7 +81,8 @@ export type PurchasingRecommendationQualityGateReason =
   | "high_confidence"
   | "medium_confidence_review"
   | "low_confidence_review"
-  | "not_actionable";
+  | "not_actionable"
+  | "forecast_trust_review";
 export type PurchasingRecommendationQualityControlArea =
   | "demand"
   | "lead_time"
@@ -1337,6 +1338,7 @@ function buildQualityGate(input: {
   confidence: PurchasingRecommendationConfidence;
   skippedReason: PurchasingRecommendationSkipReason | null;
   autopilotBlockers: PurchasingRecommendationQualityControl[];
+  forecastTrust: PurchasingRecommendationForecastTrustDiagnostics;
 }): PurchasingRecommendationItem["qualityGate"] {
   const primaryBlocker = input.autopilotBlockers[0];
   if (!input.actionable) {
@@ -1351,6 +1353,15 @@ function buildQualityGate(input: {
       reason: "not_actionable",
       label: "Not auto-draftable",
       detail,
+    };
+  }
+
+  if (input.confidence === "high" && input.forecastTrust.severity === "review") {
+    return {
+      autoDraftEligible: false,
+      reason: "forecast_trust_review",
+      label: "Forecast trust review",
+      detail: `Forecast trust ${input.forecastTrust.signal.replace(/_/g, " ")}: ${input.forecastTrust.detail}`,
     };
   }
 
@@ -1653,6 +1664,7 @@ export function generatePurchasingRecommendations(
       confidence,
       skippedReason,
       autopilotBlockers,
+      forecastTrust,
     });
     const recommendationCandidateScore = buildRecommendationCandidateScore({
       status,

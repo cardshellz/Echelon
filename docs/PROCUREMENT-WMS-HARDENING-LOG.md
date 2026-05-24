@@ -2972,3 +2972,34 @@ Next step:
 - After PR review, use these trust diagnostics to decide which forecast inputs
   need backfill jobs or stricter autopilot eligibility rules before widening
   automated purchasing.
+
+### 2026-05-24 - Forecast Trust Auto-Draft Gate
+
+Scope:
+
+- Reused forecast trust diagnostics as an auto-draft guardrail for otherwise
+  high-confidence purchasing recommendations.
+- Held auto-draft eligibility when forecast trust has `review` severity, while
+  leaving watch-level trust gaps visible as diagnostics and preserving existing
+  medium/low confidence review reasons for recommendations that are already
+  held by other controls.
+- Added a dedicated `forecast_trust_review` quality-gate reason so run detail,
+  approval policy diagnostics, recommendation scoring, and operator review
+  queues can distinguish forecast-trust holds from ordinary confidence holds.
+- Kept recommendation quantities, demand math, candidate score thresholds,
+  supplier data, PO creation commands, receiving, landed-cost, and AP behavior
+  unchanged.
+- Added focused coverage proving a high-confidence recommendation with stale
+  demand freshness is visible but not auto-draft eligible.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.run-detail.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/jobs/__tests__/unit/auto-draft.job.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- After this gate is verified in PR, continue into forecast input backfill jobs
+  or health-source integration so operators can see whether trust issues are
+  caused by missing source data versus genuine demand gaps.

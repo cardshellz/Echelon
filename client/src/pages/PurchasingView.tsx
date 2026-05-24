@@ -195,7 +195,12 @@ interface ReorderItem {
   };
   qualityGate?: {
     autoDraftEligible: boolean;
-    reason: "high_confidence" | "medium_confidence_review" | "low_confidence_review" | "not_actionable";
+    reason:
+      | "high_confidence"
+      | "medium_confidence_review"
+      | "low_confidence_review"
+      | "not_actionable"
+      | "forecast_trust_review";
     label: string;
     detail: string;
   };

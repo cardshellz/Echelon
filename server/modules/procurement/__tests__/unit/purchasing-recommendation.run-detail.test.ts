@@ -259,6 +259,7 @@ describe("purchasing recommendation run detail", () => {
           previous_outbound_pieces: 90,
           demand_order_count: 15,
           demand_active_days: 15,
+          latest_demand_at: "2026-05-18T12:00:00.000Z",
           lead_time_days: 3,
           vendor_lead_time_days: 3,
           safety_stock_days: 1,
