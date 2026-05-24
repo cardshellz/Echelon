@@ -16,6 +16,7 @@ import { createHmac } from "crypto";
 import type { Request, Response, Express } from "express";
 import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
+import { applyChannelFulfillment } from "./channel-fulfillment.service";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections, webhookRetryQueue } from "@shared/schema";
 import { db } from "../../db";
@@ -1852,57 +1853,68 @@ export function registerOmsWebhooks(
       const carrier = latestFulfillment?.tracking_company || null;
       const now = new Date();
 
-      // Update OMS order
-      await db
-        .update(omsOrders)
-        .set({
-          status: "shipped",
-          fulfillmentStatus: "fulfilled",
-          trackingNumber,
-          trackingCarrier: carrier,
-          shippedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(omsOrders.id, existing.id));
-
-      // Update all OMS line items to fulfilled
-      await db
-        .update(omsOrderLines)
-        .set({ fulfillmentStatus: "fulfilled" })
-        .where(eq(omsOrderLines.orderId, existing.id));
-
-      // Update WMS order tracking
+      // Find WMS order
       const wmsOrder = await db.execute<{ id: number }>(sql`
         SELECT id FROM wms.orders
         WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
            OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
         LIMIT 1
       `);
-      if (wmsOrder.rows.length > 0) {
-        const shipmentCount = await db.execute<{ count: string }>(sql`
-          SELECT COUNT(*)::text AS count
-          FROM wms.outbound_shipments
-          WHERE order_id = ${wmsOrder.rows[0].id}
-        `);
-        const hasShipmentRows = Number(shipmentCount.rows?.[0]?.count ?? 0) > 0;
-        if (!hasShipmentRows) {
+
+      if (wmsOrder.rows.length > 0 && trackingNumber) {
+        // Flow through WMS shipment cascade — same path as SHIP_NOTIFY V2.
+        // This handles labels bought in Shopify instead of ShipStation.
+        await applyChannelFulfillment(db, wmsOrder.rows[0].id, {
+          trackingNumber,
+          carrier: carrier || "other",
+          shipDate: now,
+          source: "shopify_fulfilled_webhook",
+          sourceFulfillmentId: latestFulfillment?.id ? String(latestFulfillment.id) : null,
+        });
+      } else {
+        // No WMS order or no tracking — update OMS directly
+        await db
+          .update(omsOrders)
+          .set({
+            status: "shipped",
+            fulfillmentStatus: "fulfilled",
+            trackingNumber,
+            trackingCarrier: carrier,
+            shippedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(omsOrders.id, existing.id));
+
+        await db
+          .update(omsOrderLines)
+          .set({ fulfillmentStatus: "fulfilled" })
+          .where(eq(omsOrderLines.orderId, existing.id));
+
+        if (wmsOrder.rows.length > 0) {
           await db.execute(sql`
             UPDATE wms.orders SET
               warehouse_status = CASE
                 WHEN warehouse_status NOT IN ('shipped', 'cancelled') THEN 'shipped'
                 ELSE warehouse_status
-              END
+              END,
+              updated_at = NOW()
             WHERE id = ${wmsOrder.rows[0].id}
           `);
-        } else {
-          console.log(
-            `${LOG_PREFIX} orders/fulfilled left WMS shipments unchanged for ${shopifyOrder.name || externalOrderId}; ShipStation shipment flow owns WMS shipment state`,
-          );
         }
+
+        await db.insert(omsOrderEvents).values({
+          orderId: existing.id,
+          eventType: "shipped",
+          details: {
+            source: "shopify_fulfilled_webhook",
+            trackingNumber,
+            carrier,
+            fulfillmentId: latestFulfillment?.id,
+          },
+        });
       }
 
-      // Mirror to ShipStation: mark the Echelon-pushed order shipped so it
-      // leaves Awaiting Shipment. Non-blocking — local state is authoritative.
+      // Mirror to ShipStation so the order leaves Awaiting Shipment.
       if (shipStationService?.isConfigured() && existing.shipstationOrderId) {
         try {
           await shipStationService.markAsShipped(existing.shipstationOrderId, {
@@ -1915,18 +1927,6 @@ export function registerOmsWebhooks(
           console.error(`${LOG_PREFIX} ShipStation markAsShipped failed for ${shopifyOrder.name}: ${err.message}`);
         }
       }
-
-      // Log event
-      await db.insert(omsOrderEvents).values({
-        orderId: existing.id,
-        eventType: "shipped",
-        details: {
-          source: "shopify_webhook",
-          trackingNumber,
-          carrier,
-          fulfillmentId: latestFulfillment?.id,
-        },
-      });
 
       console.log(`${LOG_PREFIX} ✅ Fulfilled order ${shopifyOrder.name} (tracking: ${trackingNumber || "none"})`);
       pushToMissionControl(existing.id, "order.fulfilled");

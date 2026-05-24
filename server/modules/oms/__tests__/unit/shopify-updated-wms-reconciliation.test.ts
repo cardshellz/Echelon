@@ -53,9 +53,8 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(addressSyncBlock).not.toMatch(/LIMIT 1/);
   });
 
-  it("does not let Shopify fulfilled webhooks mark WMS shipments shipped", () => {
-    expect(OMS_WEBHOOKS_SRC).toMatch(/ShipStation shipment flow owns WMS shipment state/);
-    const fulfilledHandler = OMS_WEBHOOKS_SRC.match(/orders\/fulfilled[\s\S]*?eventType: "shipped"/)?.[0] ?? "";
-    expect(fulfilledHandler).not.toMatch(/UPDATE wms\.outbound_shipments SET[\s\S]*status = 'shipped'/);
+  it("routes Shopify fulfilled webhooks through WMS shipment cascade", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(/applyChannelFulfillment/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/shopify_fulfilled_webhook/);
   });
 });
