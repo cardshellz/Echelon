@@ -111,6 +111,10 @@ describe("purchasing recommendation run detail", () => {
         demandMixSignalCounts: {
           not_available: 2,
         },
+        demandSuppressionSignalCounts: {
+          none: 2,
+        },
+        demandSuppressionReviewCount: 0,
         supplierCycleSignalCounts: {
           no_supplier_cycle_data: 2,
         },

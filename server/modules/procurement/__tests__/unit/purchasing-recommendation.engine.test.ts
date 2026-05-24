@@ -586,6 +586,58 @@ describe("purchasing recommendation engine", () => {
     });
   });
 
+  it("flags possible velocity suppression when demand falls during a stockout", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [
+        {
+          product_id: 61,
+          variant_id: 611,
+          base_sku: "STOCKOUT-SUPPRESSED",
+          product_name: "Stockout Suppressed Demand",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 18,
+          previous_outbound_pieces: 60,
+          demand_order_count: 8,
+          demand_active_days: 6,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 3,
+          safety_stock_days: 1,
+          order_uom_units: 10,
+          preferred_vendor_id: 10,
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      status: "stockout",
+      demandBasis: {
+        demandTrend: "falling",
+        demandSuppressionRisk: {
+          signal: "stockout_velocity_suppression",
+          severity: "review",
+          constrainedAvailablePieces: 0,
+        },
+      },
+      forecastProvenance: {
+        demandTrend: "falling",
+        demandSuppressionRisk: {
+          signal: "stockout_velocity_suppression",
+          severity: "review",
+          constrainedAvailablePieces: 0,
+        },
+      },
+    });
+    expect(result.items[0].qualityControls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "falling_demand",
+        }),
+      ]),
+    );
+  });
+
   it("keeps zero-revenue demand in usage while requiring review before auto-draft", () => {
     const result = generatePurchasingRecommendations({
       lookbackDays: 30,
