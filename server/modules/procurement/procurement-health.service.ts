@@ -1,4 +1,5 @@
 import type { StaleAutoDraftPoDiagnostics } from "./auto-draft-po-aging.service";
+import type { ForecastTrustHealth } from "./forecast-trust-health.service";
 import type { InFlightPoAgingDiagnostics } from "./in-flight-po-aging.service";
 import type { SupplierSetupGaps } from "./supplier-setup-gaps.service";
 
@@ -33,6 +34,7 @@ type LandedCostHealthLike = {
 
 type SupplierSetupGapsLike = Pick<SupplierSetupGaps, "totalGapItems" | "counts">;
 type InFlightPoAgingLike = Pick<InFlightPoAgingDiagnostics, "totalAging" | "counts">;
+type ForecastTrustHealthLike = Pick<ForecastTrustHealth, "totalTrustItems" | "counts">;
 
 function statusFromCounts(critical: number, warning: number): ProcurementHealthSeverity {
   if (critical > 0) return "critical";
@@ -53,6 +55,7 @@ export function buildProcurementHealthSummary(input: {
   landedCostHealth: LandedCostHealthLike;
   supplierSetupGaps?: SupplierSetupGapsLike;
   inFlightPoAging?: InFlightPoAgingLike;
+  forecastTrustHealth?: ForecastTrustHealthLike;
   generatedAt?: Date;
 }): ProcurementHealthSummary {
   const staleCritical = input.staleAutoDraftPos.counts.critical;
@@ -63,6 +66,8 @@ export function buildProcurementHealthSummary(input: {
   const supplierWarning = input.supplierSetupGaps?.counts.reviewRecommendations ?? 0;
   const inFlightCritical = input.inFlightPoAging?.counts.critical ?? 0;
   const inFlightWarning = input.inFlightPoAging?.counts.warning ?? 0;
+  const forecastTrustCritical = 0;
+  const forecastTrustWarning = input.forecastTrustHealth?.counts.reviewRecommendations ?? 0;
 
   const sources: ProcurementHealthSource[] = [
     {
@@ -114,6 +119,20 @@ export function buildProcurementHealthSummary(input: {
       href: "/purchase-orders",
       actionLabel: "Open POs",
       detail: "Non-auto-draft POs stale in supplier follow-up or receiving.",
+    });
+  }
+
+  if (input.forecastTrustHealth) {
+    sources.push({
+      key: "forecast_trust_health",
+      label: "Forecast trust health",
+      status: statusFromCounts(forecastTrustCritical, forecastTrustWarning),
+      critical: forecastTrustCritical,
+      warning: forecastTrustWarning,
+      total: input.forecastTrustHealth.totalTrustItems,
+      href: "/reorder-analysis",
+      actionLabel: "Review Forecasts",
+      detail: "Forecast freshness and input gaps that can hold or weaken automated purchasing recommendations.",
     });
   }
 

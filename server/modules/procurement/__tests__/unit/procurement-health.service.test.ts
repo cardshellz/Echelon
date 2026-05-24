@@ -118,4 +118,57 @@ describe("buildProcurementHealthSummary", () => {
       ],
     });
   });
+
+  it("adds forecast trust health as a warning source without escalating to critical", () => {
+    const summary = buildProcurementHealthSummary({
+      staleAutoDraftPos: buildStaleAutoDraftPoDiagnostics([], {
+        now: new Date("2026-05-10T00:00:00.000Z"),
+      }),
+      landedCostHealth: {
+        status: "healthy",
+        critical: 0,
+        warning: 0,
+      },
+      forecastTrustHealth: {
+        totalTrustItems: 2,
+        counts: {
+          trusted: 10,
+          watchRecommendations: 1,
+          reviewRecommendations: 1,
+          forecastTrustHeldAutoDraft: 1,
+          inputGapItems: 2,
+          noRecentDemand: 0,
+          staleRecentDemand: 1,
+          thinSample: 0,
+          missingLatestDemandTimestamp: 1,
+          missingPriorBaseline: 0,
+          missingLatestDemandAt: 1,
+          missingDemandOrderCount: 0,
+          missingDemandActiveDays: 0,
+          missingPriorPeriod: 0,
+          missingShortWindow: 1,
+          missingLongWindow: 1,
+          missingSeasonalWindow: 1,
+        },
+      },
+      generatedAt: new Date("2026-05-10T12:00:00.000Z"),
+    });
+
+    expect(summary).toMatchObject({
+      status: "warning",
+      critical: 0,
+      warning: 1,
+      total: 1,
+    });
+    expect(summary.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "forecast_trust_health",
+        status: "warning",
+        critical: 0,
+        warning: 1,
+        total: 2,
+        href: "/reorder-analysis",
+      }),
+    ]));
+  });
 });

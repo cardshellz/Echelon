@@ -3003,3 +3003,29 @@ Next step:
 - After this gate is verified in PR, continue into forecast input backfill jobs
   or health-source integration so operators can see whether trust issues are
   caused by missing source data versus genuine demand gaps.
+
+### 2026-05-24 - Forecast Trust Health Source
+
+Scope:
+
+- Added a forecast trust health source to the existing procurement health
+  summary instead of creating a separate monitor surface.
+- Reused purchasing recommendation output to count trust review signals,
+  watch signals, input gaps, and auto-draft holds caused by
+  `forecast_trust_review`.
+- Kept forecast trust as a warning-level health source so stale or incomplete
+  forecast inputs are operator-visible without paging as critical incidents.
+- Wired `/api/procurement/health` to include the source alongside stale
+  auto-draft POs, landed cost, supplier setup gaps, and in-flight PO aging.
+- Added focused coverage for the forecast trust health builder, summary
+  aggregation, and route-level exposure.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/forecast-trust-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts`
+
+Next step:
+
+- Continue toward forecast input backfill or operator runbook actions for the
+  trust gaps that now show in procurement health.
