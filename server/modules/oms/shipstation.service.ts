@@ -1456,6 +1456,20 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       // Return empty array to skip inventory deduction, but allow the rest of the process to continue.
       return [];
     }
+
+    // Data is complete. If this shipment was previously flagged for the
+    // transient missing-data condition, clear it now — the SHIP_NOTIFY V2
+    // repair cascade re-runs this path for already-shipped shipments, so a
+    // replay after the catalog/bin data lands self-heals the review flag.
+    await db.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = false,
+          review_reason = NULL,
+          updated_at = NOW()
+      WHERE id = ${shipmentId}
+        AND requires_review = true
+        AND review_reason = 'inventory_deduction_missing_item_data'
+    `);
     return rows;
   }
 
