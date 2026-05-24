@@ -6,6 +6,7 @@ import { fetchAutoDraftPoAgingRows } from "./auto-draft-po-aging.repository";
 import { buildInFlightPoAgingDiagnostics } from "./in-flight-po-aging.service";
 import { fetchInFlightPoAgingRows } from "./in-flight-po-aging.repository";
 import { buildProcurementHealthSummary, type ProcurementHealthSummary } from "./procurement-health.service";
+import { buildForecastTrustHealth } from "./forecast-trust-health.service";
 import {
   generatePurchasingRecommendations,
   type AutoDraftRecommendationSettings,
@@ -62,6 +63,7 @@ export async function loadProcurementHealthSummary(options: {
     ...recommendationContext,
   });
   const supplierSetupGaps = buildSupplierSetupGaps(recommendationResult);
+  const forecastTrustHealth = buildForecastTrustHealth(recommendationResult);
 
   const staleAutoDraftPos = buildStaleAutoDraftPoDiagnostics(autoDraftRows, {
     limit,
@@ -77,5 +79,6 @@ export async function loadProcurementHealthSummary(options: {
     landedCostHealth,
     supplierSetupGaps,
     inFlightPoAging,
+    forecastTrustHealth,
   });
 }
