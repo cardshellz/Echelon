@@ -1,6 +1,6 @@
 # Dropship Dogfood Checklist
 
-Last updated: 2026-05-21
+Last updated: 2026-05-24
 
 Primary admin surface: Echelon internal admin at `/dropship`.
 
@@ -57,7 +57,7 @@ Use this document as the working checklist for the first internal dropship dogfo
 
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
-| [ ] | STOP-01 | Dogfood launch gate is not blocked before marketplace testing starts. |  |  |
+| [ ] | STOP-01 | Admin dogfood launch gate is not blocked before marketplace listing or order testing starts. |  |  |
 | [ ] | STOP-02 | Token encryption and OAuth configuration are present. |  |  |
 | [ ] | STOP-03 | ShipStation credentials and webhook security are configured. |  |  |
 | [ ] | STOP-04 | Test vendor and store connection identity are known and correct. |  |  |
@@ -70,25 +70,26 @@ Use this document as the working checklist for the first internal dropship dogfo
 
 | Done | Phase | Required before moving on | Blocking exception |
 | --- | --- | --- | --- |
-| [ ] | -1. Membership acquisition | Direct `.ops` signup and `.club` to `.ops` upgrade paths are understood and at least one path is proven for the dogfood customer. |  |
-| [ ] | 0. Readiness | Internal source, system readiness, launch gate, and one ready vendor/store are clean. |  |
-| [ ] | 1. Vendor and store | Vendor identity, entitlement, OAuth, and order/listing config are correct. |  |
-| [ ] | 2. Catalog exposure | Exactly the intended SKU or variant is exposed. |  |
-| [ ] | 3. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. |  |
-| [ ] | 4. Listing push | One marketplace listing is created and mapped back to Echelon identity. |  |
-| [ ] | 5. Order intake | One external marketplace order ingests once with correct vendor/store/line identity. |  |
-| [ ] | 6. Wallet and acceptance | Funding/hold/debit behavior is traceable and order acceptance is idempotent. |  |
-| [ ] | 7. OMS and WMS | Accepted order creates correct OMS and WMS records. |  |
-| [ ] | 8. ShipStation | Shipment ingests back into WMS/OMS and inventory is recorded. |  |
-| [ ] | 9. Tracking push | Marketplace customer-facing tracking is correct. |  |
-| [ ] | 10. Split shipment | Multiple shipments preserve correct item-level tracking. Required only if in dogfood scope. |  |
-| [ ] | 11. Notifications | Required vendor/internal notification events are visible and retryable. |  |
-| [ ] | 12. Returns | Return policy, fault, inspection, and credit behavior are correct. Required only if in dogfood scope. |  |
-| [ ] | 13. Audit and exit | Evidence trail is complete and final readiness reflects the run. |  |
+| [ ] | 0. Membership acquisition | Direct `.ops` signup and `.club` to `.ops` upgrade paths are understood and at least one path is proven for the dogfood customer. |  |
+| [ ] | 1. Portal bootstrap | The `.ops` customer can access the dropship portal and Echelon provisions the vendor profile. |  |
+| [ ] | 2. Store connection | Vendor OAuth, store identity, and order/listing config are correct. |  |
+| [ ] | 3. Admin readiness gate | Internal source, system readiness, launch gate, and one ready vendor/store are clean. |  |
+| [ ] | 4. Catalog exposure | Exactly the intended SKU or variant is exposed. |  |
+| [ ] | 5. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. |  |
+| [ ] | 6. Listing push | One marketplace listing is created and mapped back to Echelon identity. |  |
+| [ ] | 7. Order intake | One external marketplace order ingests once with correct vendor/store/line identity. |  |
+| [ ] | 8. Wallet and acceptance | Funding/hold/debit behavior is traceable and order acceptance is idempotent. |  |
+| [ ] | 9. OMS and WMS | Accepted order creates correct OMS and WMS records. |  |
+| [ ] | 10. ShipStation | Shipment ingests back into WMS/OMS and inventory is recorded. |  |
+| [ ] | 11. Tracking push | Marketplace customer-facing tracking is correct. |  |
+| [ ] | 12. Split shipment | Multiple shipments preserve correct item-level tracking. Required only if in dogfood scope. |  |
+| [ ] | 13. Notifications | Required vendor/internal notification events are visible and retryable. |  |
+| [ ] | 14. Returns | Return policy, fault, inspection, and credit behavior are correct. Required only if in dogfood scope. |  |
+| [ ] | 15. Audit and exit | Evidence trail is complete and final readiness reflects the run. |  |
 
-## Phase -1: Membership Acquisition And Entitlement
+## Phase 0: Membership Acquisition And Entitlement
 
-Goal: prove a customer can become `.ops` entitled before setting up the dropship vendor account, store connection, catalog selection, or wallet.
+Goal: prove a customer can become `.ops` entitled before dropship portal bootstrap, store connection, catalog selection, or wallet.
 
 Echelon dropship entitlement is consumed from the Card Shellz membership tables. The portal email must resolve to a Card Shellz member, the selected subscription must be active/current or active/past_due grace, and the selected plan must include dropship access. If any of those are unclear, stop before marketplace setup.
 
@@ -111,16 +112,12 @@ This path covers a brand-new customer and an existing `.core` customer who signs
 | [ ] | ACQ-DIRECT-06 | Confirm the customer has one intended member identity. Existing `.core` customers should not create a duplicate member. | Member ID: |  |
 | [ ] | ACQ-DIRECT-07 | Confirm the active subscription points to the `.ops` plan. | Subscription ID / plan ID: |  |
 | [ ] | ACQ-DIRECT-08 | Confirm the `.ops` plan is active and includes dropship access. | `includes_dropship=true`: |  |
-| [ ] | ACQ-DIRECT-09 | Open `https://www.cardshellz.io` and start portal setup with the same email. | Portal screenshot/status: |  |
-| [ ] | ACQ-DIRECT-10 | Complete portal bootstrap or login. | Auth identity / session result: |  |
-| [ ] | ACQ-DIRECT-11 | Confirm Echelon created or synced the dropship vendor profile from that member entitlement. | Vendor ID / entitlement status: |  |
 
 Path A pass criteria:
 
 - A new or `.core` customer can buy `.ops` directly.
-- The same Card Shellz member identity is used by the dropship portal.
+- The same Card Shellz member identity will be used by the dropship portal.
 - The `.ops` plan is the entitlement source and includes dropship access.
-- Echelon provisions a dropship vendor profile after portal setup.
 
 ### Path B: Existing `.club` Customer Upgrades To `.ops`
 
@@ -137,38 +134,76 @@ This path covers an existing `.club` customer upgrading into the dropship benefi
 | [ ] | ACQ-UPGRADE-07 | Confirm the active/current subscription selected for entitlement is now `.ops`. | Subscription ID / plan ID: |  |
 | [ ] | ACQ-UPGRADE-08 | Confirm old `.club` state does not remain the selected entitlement source for dropship. | Old subscription status: |  |
 | [ ] | ACQ-UPGRADE-09 | Confirm the `.ops` plan is active and includes dropship access. | `includes_dropship=true`: |  |
-| [ ] | ACQ-UPGRADE-10 | Open `https://www.cardshellz.io` and start portal setup or login with the same email. | Portal screenshot/status: |  |
-| [ ] | ACQ-UPGRADE-11 | Complete portal bootstrap or login. | Auth identity / session result: |  |
-| [ ] | ACQ-UPGRADE-12 | Confirm Echelon created or synced the dropship vendor profile from that upgraded entitlement. | Vendor ID / entitlement status: |  |
 
 Path B pass criteria:
 
 - A `.club` customer can upgrade to `.ops`.
 - The same Card Shellz member identity is preserved.
 - The entitlement resolver selects the `.ops` subscription/plan after upgrade.
-- Echelon provisions or syncs the dropship vendor profile after portal setup.
-
-### Acquisition Failure Checks
-
-Run these negative checks once during dogfood setup. They prevent false positives before money and marketplace flows are involved.
-
-| Done | ID | Check | Expected evidence / ID | Exception / correction needed |
-| --- | --- | --- | --- | --- |
-| [ ] | ACQ-FAIL-01 | Try portal setup with a non-member email and confirm access is denied. | Error/status: |  |
-| [ ] | ACQ-FAIL-02 | Try portal setup with a `.core` or `.club` member that has not upgraded to `.ops` and confirm access is denied. | Error/status: |  |
-| [ ] | ACQ-FAIL-03 | Confirm failed entitlement does not create an active dropship vendor. | Vendor lookup result: |  |
-| [ ] | ACQ-FAIL-04 | Confirm failed setup produces an operator-visible reason, not a generic crash. | Error code/message: |  |
 
 Phase pass criteria:
 
 - At least one real dogfood customer path has a proven `.ops` entitlement.
 - Direct `.ops` signup and `.club` to `.ops` upgrade have either passed or have explicit exceptions.
+- Do not proceed to Phase 1 until the customer email has a known Card Shellz member, active/current `.ops` subscription, and dropship-enabled plan.
+
+## Phase 1: Portal Bootstrap And Vendor Provisioning
+
+Goal: prove the `.ops` customer can access the dropship portal and Echelon creates or syncs the vendor profile before store setup.
+
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | PORTAL-01 | Open `https://www.cardshellz.io`. | Screenshot / URL: |  |
+| [ ] | PORTAL-02 | Start setup or login with the same Card Shellz customer email from Phase 0. | Email: |  |
+| [ ] | PORTAL-03 | Complete portal bootstrap or login. | Auth identity / session result: |  |
+| [ ] | PORTAL-04 | Confirm the portal identity maps to the expected Card Shellz member. | Member ID: |  |
+| [ ] | PORTAL-05 | Confirm Echelon created or synced the dropship vendor profile from that entitlement. | Vendor ID / entitlement status: |  |
+| [ ] | PORTAL-06 | Confirm the vendor profile is not lapsed, suspended, or blocked. | Vendor status: |  |
+| [ ] | PORTAL-07 | Confirm onboarding shows store connection as the next required step. | Onboarding status: |  |
+
+### Portal Entitlement Failure Checks
+
+Run these negative checks once during dogfood setup. They prevent false positives before money and marketplace flows are involved.
+
+| Done | ID | Check | Expected evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | PORTAL-FAIL-01 | Try portal setup with a non-member email and confirm access is denied. | Error/status: |  |
+| [ ] | PORTAL-FAIL-02 | Try portal setup with a `.core` or `.club` member that has not upgraded to `.ops` and confirm access is denied. | Error/status: |  |
+| [ ] | PORTAL-FAIL-03 | Confirm failed entitlement does not create an active dropship vendor. | Vendor lookup result: |  |
+| [ ] | PORTAL-FAIL-04 | Confirm failed setup produces an operator-visible reason, not a generic crash. | Error code/message: |  |
+
+Phase pass criteria:
+
+- Portal access works for the `.ops` customer.
+- Echelon provisions or syncs the dropship vendor profile.
 - Failed entitlement cases are rejected cleanly.
-- Do not proceed to Phase 0 until the dogfood customer can log into the dropship portal and Echelon has a vendor profile for that member.
+- Do not proceed to Phase 2 until the vendor profile exists.
 
-## Phase 0: Readiness
+## Phase 2: Store Connection
 
-Goal: prove the internal admin control surface is ready before touching marketplace flows.
+Goal: prove the selected vendor and marketplace store are the intended dogfood target.
+
+| Done | ID | Check | Evidence / ID | Exception / correction needed |
+| --- | --- | --- | --- | --- |
+| [ ] | STORE-01 | Open `Store connections` in the dropship portal. |  |  |
+| [ ] | STORE-02 | Confirm selected store connection belongs to the intended vendor. | Vendor ID / store connection ID: |  |
+| [ ] | STORE-03 | Connect the intended marketplace store. | eBay / Shopify: |  |
+| [ ] | STORE-04 | Confirm external store identity matches the vendor account. | External store/account ID: |  |
+| [ ] | STORE-05 | Confirm OAuth status is healthy. | OAuth status: |  |
+| [ ] | STORE-06 | Confirm store status is connected. | Store status: |  |
+| [ ] | STORE-07 | Confirm setup status is ready. | Setup status: |  |
+| [ ] | STORE-08 | Confirm order processing config is present. | Config ID/status: |  |
+| [ ] | STORE-09 | Confirm listing config is present if listing push is in scope. | Config ID/status: |  |
+
+Phase pass criteria:
+
+- Store connection is active and tied to the correct vendor.
+- OAuth is valid.
+- Listing and order processing configuration match the intended platform.
+
+## Phase 3: Admin Readiness Gate
+
+Goal: prove the internal admin control surface recognizes the vendor/store row before touching marketplace flows.
 
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
@@ -187,29 +222,7 @@ Phase pass criteria:
 - No launch-blocking readiness checks remain.
 - One vendor/store row is ready for controlled testing.
 
-## Phase 1: Vendor And Store Connection
-
-Goal: prove the selected vendor and marketplace store are the intended dogfood target.
-
-| Done | ID | Check | Evidence / ID | Exception / correction needed |
-| --- | --- | --- | --- | --- |
-| [ ] | STORE-01 | Confirm vendor has Shellz Club identity. | Member ID: |  |
-| [ ] | STORE-02 | Confirm vendor has required `.ops` entitlement. | Entitlement evidence: |  |
-| [ ] | STORE-03 | Open `Store connections`. |  |  |
-| [ ] | STORE-04 | Confirm selected store connection belongs to the intended vendor. | Store connection ID: |  |
-| [ ] | STORE-05 | Confirm marketplace platform is correct. | eBay / Shopify: |  |
-| [ ] | STORE-06 | Confirm external store identity matches the vendor account. | External store/account ID: |  |
-| [ ] | STORE-07 | Confirm OAuth status is healthy. | OAuth status: |  |
-| [ ] | STORE-08 | Confirm order processing config is present. | Config ID/status: |  |
-| [ ] | STORE-09 | Confirm listing config is present if listing push is in scope. | Config ID/status: |  |
-
-Phase pass criteria:
-
-- Store connection is active and tied to the correct vendor.
-- OAuth is valid.
-- Listing and order processing configuration match the intended platform.
-
-## Phase 2: Catalog Exposure
+## Phase 4: Catalog Exposure
 
 Goal: expose exactly the intended catalog item to the vendor.
 
@@ -230,7 +243,7 @@ Phase pass criteria:
 - Unrelated catalog remains blocked.
 - Echelon remains the source of truth for product, SKU, variant, and inventory identity.
 
-## Phase 3: Shipping Configuration
+## Phase 5: Shipping Configuration
 
 Goal: prove the test SKU can calculate shipping and use the intended policy stack.
 
@@ -251,7 +264,7 @@ Phase pass criteria:
 - Markup, insurance, and return policies are explicit.
 - No hardcoded shipping behavior is needed for this test.
 
-## Phase 4: Listing Push
+## Phase 6: Listing Push
 
 Goal: create one marketplace listing and prove it maps back to Echelon identity.
 
@@ -271,7 +284,7 @@ Phase pass criteria:
 - Marketplace listing identity is stored.
 - Listing maps to the correct Echelon SKU/product variant.
 
-## Phase 5: Order Intake
+## Phase 7: Order Intake
 
 Goal: ingest one marketplace order into dropship order intake exactly once.
 
@@ -294,7 +307,7 @@ Phase pass criteria:
 - Vendor, store connection, platform, order ID, SKU, quantity, and variant identity are correct.
 - Duplicate intake is prevented.
 
-## Phase 6: Wallet And Acceptance
+## Phase 8: Wallet And Acceptance
 
 Goal: prove order funding and acceptance are traceable and idempotent.
 
@@ -314,7 +327,7 @@ Phase pass criteria:
 - Wallet effects are traceable.
 - Acceptance cannot duplicate financial effects.
 
-## Phase 7: OMS And WMS Handoff
+## Phase 9: OMS And WMS Handoff
 
 Goal: prove accepted dropship orders create correct internal order records.
 
@@ -335,7 +348,7 @@ Phase pass criteria:
 - Line items match.
 - Dropship source tagging is internal to Echelon and separate from vendor store connection identity.
 
-## Phase 8: ShipStation Fulfillment
+## Phase 10: ShipStation Fulfillment
 
 Goal: prove fulfillment flows through WMS and ShipStation and returns cleanly.
 
@@ -357,7 +370,7 @@ Phase pass criteria:
 - WMS and OMS status update correctly.
 - Inventory shipment recording is not skipped.
 
-## Phase 9: Tracking Push
+## Phase 11: Tracking Push
 
 Goal: prove customer-visible tracking is pushed back to the marketplace.
 
@@ -378,7 +391,7 @@ Phase pass criteria:
 - Push completion matches the actual marketplace customer view.
 - Failures are visible and retryable.
 
-## Phase 10: Split Shipment Test
+## Phase 12: Split Shipment Test
 
 Run this only after the single-shipment path passes. Required if split shipments are in dogfood launch scope.
 
@@ -402,7 +415,7 @@ Phase pass criteria:
 - Partial shipment does not close the full order early.
 - Marketplace tracking is item-specific.
 
-## Phase 11: Notifications
+## Phase 13: Notifications
 
 Goal: prove required vendor and internal notifications are visible and retryable.
 
@@ -422,7 +435,7 @@ Phase pass criteria:
 - Failures are visible and retryable.
 - Notification identity is correct.
 
-## Phase 12: Returns
+## Phase 14: Returns
 
 Run this after order, fulfillment, and tracking pass. Required if returns are in dogfood launch scope.
 
@@ -446,7 +459,7 @@ Phase pass criteria:
 - Fault classification is explicit.
 - Credit/release behavior follows the configured policy.
 
-## Phase 13: Audit And Exit
+## Phase 15: Audit And Exit
 
 Goal: prove the dogfood run has a usable evidence trail and no unresolved launch blockers.
 
