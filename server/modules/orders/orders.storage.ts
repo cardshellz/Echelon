@@ -296,7 +296,7 @@ export const orderMethods: IOrderStorage = {
         (o.source = 'oms'     AND o.oms_fulfillment_order_id = oms.id::text)
         OR (o.source = 'shopify' AND o.source_table_id = oms.id::text)
       )
-      WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
+      WHERE o.warehouse_status NOT IN ('shipped', 'cancelled')
         AND (
           oms.status IS NULL
           OR oms.status NOT IN ('cancelled', 'refunded', 'shipped')
@@ -314,8 +314,8 @@ export const orderMethods: IOrderStorage = {
         )
         AND (oms.financial_status IS NULL OR oms.financial_status NOT IN ('refunded', 'voided'))
         AND (
-          -- Ready/in_progress orders: show in pick queue
-          o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped')
+          -- Ready/in_progress/ready_to_ship orders: show in pick queue
+          o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
           -- Completed orders: show for 24 hours in done queue
           OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours')
         )
@@ -528,7 +528,7 @@ export const orderMethods: IOrderStorage = {
       // Self-heal: if shipments exist and are all shipped/cancelled/returned/lost
       // but warehouse_status is still a pick-queue state, the rollup was
       // missed (webhook failure, race, etc.). Re-run it now.
-      if (["ready", "in_progress", "partially_shipped"].includes(order.warehouseStatus)) {
+      if (["ready", "in_progress", "partially_shipped", "ready_to_ship"].includes(order.warehouseStatus)) {
         try {
           const shipResult: any = await db.execute(
             sql`SELECT status FROM wms.outbound_shipments WHERE order_id = ${order.id}`
