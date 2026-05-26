@@ -601,6 +601,7 @@ describe("purchasing recommendation routes", () => {
       qualityGateReason: "forecast_trust_review",
       action: {
         code: "verify_recent_demand",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
       },
     });
     expect(body.samples[1]).toMatchObject({
@@ -610,6 +611,7 @@ describe("purchasing recommendation routes", () => {
       inputGaps: ["missing_latest_demand_at"],
       action: {
         code: "repair_order_velocity_source",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
       },
     });
   });
@@ -763,6 +765,150 @@ describe("purchasing recommendation routes", () => {
         code: "medium_confidence_review",
       },
     });
+  });
+
+  it("filters recommendation review queue items by forecast action bucket", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_only",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 80,
+      candidateScoreReviewThreshold: 60,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 211,
+        variant_id: 2110,
+        base_sku: "STALE-TRUST",
+        product_name: "Stale Trust Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: "2026-04-01T00:00:00.000Z",
+        short_window_days: 7,
+        short_outbound_pieces: 14,
+        previous_short_outbound_pieces: 14,
+        short_demand_order_count: 5,
+        short_demand_active_days: 4,
+        long_window_days: 90,
+        long_outbound_pieces: 180,
+        previous_long_outbound_pieces: 180,
+        long_demand_order_count: 24,
+        long_demand_active_days: 20,
+        seasonal_window_days: 30,
+        seasonal_outbound_pieces: 60,
+        previous_seasonal_outbound_pieces: 60,
+        seasonal_demand_order_count: 12,
+        seasonal_demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        vendor_product_id: 21100,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor A",
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        estimated_cost_cents: 125,
+        vendor_product_updated_at: new Date().toISOString(),
+      },
+      {
+        product_id: 212,
+        variant_id: 2120,
+        base_sku: "MISSING-LATEST",
+        product_name: "Missing Latest Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 12,
+        previous_outbound_pieces: 12,
+        demand_order_count: 1,
+        demand_active_days: 1,
+        latest_demand_at: null,
+        short_window_days: 7,
+        short_outbound_pieces: 2,
+        previous_short_outbound_pieces: 2,
+        short_demand_order_count: 1,
+        short_demand_active_days: 1,
+        long_window_days: 90,
+        long_outbound_pieces: 30,
+        previous_long_outbound_pieces: 30,
+        long_demand_order_count: 3,
+        long_demand_active_days: 3,
+        seasonal_window_days: 30,
+        seasonal_outbound_pieces: 12,
+        previous_seasonal_outbound_pieces: 12,
+        seasonal_demand_order_count: 1,
+        seasonal_demand_active_days: 1,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        vendor_product_id: 21200,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor A",
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        estimated_cost_cents: 125,
+        vendor_product_updated_at: new Date().toISOString(),
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const recentDemandQueue = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/recommendation-review-queue?kind=quality_review_required&forecastAction=verify_recent_demand&limit=10",
+    );
+
+    expect(recentDemandQueue.status).toBe(200);
+    expect(recentDemandQueue.body.filters).toMatchObject({
+      kind: "quality_review_required",
+      forecastAction: "verify_recent_demand",
+    });
+    expect(recentDemandQueue.body.forecastActionCounts).toMatchObject({
+      verify_recent_demand: 1,
+      repair_order_velocity_source: 1,
+    });
+    expect(recentDemandQueue.body.filteredCount).toBe(1);
+    expect(recentDemandQueue.body.items[0]).toMatchObject({
+      sku: "STALE-TRUST",
+      reason: {
+        code: "forecast_trust_review",
+      },
+      forecastAction: {
+        code: "verify_recent_demand",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
+      },
+    });
+
+    const sourceRepairQueue = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/recommendation-review-queue?kind=quality_review_required&forecastAction=repair_order_velocity_source&limit=10",
+    );
+
+    expect(sourceRepairQueue.status).toBe(200);
+    expect(sourceRepairQueue.body.filteredCount).toBe(1);
+    expect(sourceRepairQueue.body.items[0]).toMatchObject({
+      sku: "MISSING-LATEST",
+      forecastAction: {
+        code: "repair_order_velocity_source",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
+      },
+    });
+
+    const invalidActionQueue = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/recommendation-review-queue?forecastAction=bad_bucket",
+    );
+
+    expect(invalidActionQueue.status).toBe(400);
+    expect(invalidActionQueue.body.error).toContain("forecastAction must be one of");
   });
 
   it("attaches latest operator decisions to recommendation review queue items", async () => {
