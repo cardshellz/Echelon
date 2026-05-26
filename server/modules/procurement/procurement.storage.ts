@@ -1296,6 +1296,7 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(vel.demand_order_count, 0)::int AS demand_order_count,
         COALESCE(vel.demand_active_days, 0)::int AS demand_active_days,
         vel.latest_demand_at,
+        vel.latest_known_demand_at,
         COALESCE(vel.paid_demand_pieces, 0)::bigint AS paid_demand_pieces,
         COALESCE(vel.zero_revenue_demand_pieces, 0)::bigint AS zero_revenue_demand_pieces,
         COALESCE(vel.coupon_discount_demand_pieces, 0)::bigint AS coupon_discount_demand_pieces,
@@ -1373,6 +1374,7 @@ export const procurementMethods: IProcurementStorage = {
                   THEN o.order_placed_at
                   ELSE NULL
                 END) AS latest_demand_at,
+                MAX(o.order_placed_at) AS latest_known_demand_at,
                 SUM(
                   CASE
                     WHEN o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${normalizedLookbackDays})
