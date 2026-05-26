@@ -595,6 +595,26 @@ describe("purchasing recommendation routes", () => {
         code: "held_by_approval_policy",
       },
     });
+
+    const qualityReasonQueue = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/recommendation-review-queue?kind=quality_review_required&reason=medium_confidence_review&limit=10",
+    );
+
+    expect(qualityReasonQueue.status).toBe(200);
+    expect(qualityReasonQueue.body.filters).toMatchObject({
+      kind: "quality_review_required",
+      reason: "medium_confidence_review",
+    });
+    expect(qualityReasonQueue.body.filteredCount).toBe(1);
+    expect(qualityReasonQueue.body.items[0]).toMatchObject({
+      kind: "quality_review_required",
+      sku: "QUEUE-MISSING-COST",
+      reason: {
+        code: "medium_confidence_review",
+      },
+    });
   });
 
   it("attaches latest operator decisions to recommendation review queue items", async () => {

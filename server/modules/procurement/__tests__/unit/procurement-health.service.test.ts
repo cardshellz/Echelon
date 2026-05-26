@@ -167,7 +167,7 @@ describe("buildProcurementHealthSummary", () => {
         critical: 0,
         warning: 1,
         total: 2,
-        href: "/reorder-analysis",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
       }),
     ]));
   });

@@ -813,10 +813,14 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const { configuredLookback, settings, queue } = await loadRecommendationReviewQueueData();
       const kind = typeof req.query.kind === "string" ? req.query.kind : "all";
       const severity = typeof req.query.severity === "string" ? req.query.severity : "all";
+      const reason = typeof req.query.reason === "string" && req.query.reason.trim()
+        ? req.query.reason.trim()
+        : "all";
       const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 100);
       const filteredItems = queue.items
         .filter((item) => kind === "all" || item.kind === kind)
         .filter((item) => severity === "all" || item.severity === severity)
+        .filter((item) => reason === "all" || item.reason.code === reason)
         .slice(0, limit);
       const latestDecisionRows = await storage.getLatestRecommendationDecisions(
         filteredItems.map((item) => item.recommendationId),
@@ -840,7 +844,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         lookbackDays: configuredLookback,
         autoDraftMode: settings.autoDraftMode ?? "draft_po",
         approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
-        filters: { kind, severity, limit },
+        filters: { kind, severity, reason, limit },
         ...queue,
         filteredCount: filteredItems.length,
         decisionCounts,
