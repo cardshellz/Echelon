@@ -3165,3 +3165,28 @@ Next step:
 - Run the dry-run audit against live data after deploy. Only build a mutation
   backfill if `decision.requiresBackfillInvestigation` remains true and the
   source repair class is understood.
+
+### 2026-05-26 - Forecast Trust Health Action Routing
+
+Scope:
+
+- Reused forecast gap action buckets inside forecast trust health so the
+  procurement health summary can point operators to the highest-priority
+  forecast action instead of a generic review link.
+- Updated the forecast trust health source to use the top action label, href,
+  and count in its action label and detail.
+- Kept recommendation math, trust scoring, auto-draft eligibility, PO creation,
+  supplier data, receiving, landed-cost, AP, WMS behavior, forecast source
+  queries, and the dry-run audit command unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/forecast-trust-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- After health action routing is verified, run the live dry-run audit and decide
+  whether the next implementation should be a real backfill mutation or a
+  forecast review workflow improvement.

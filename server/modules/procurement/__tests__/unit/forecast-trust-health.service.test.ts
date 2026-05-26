@@ -79,6 +79,24 @@ describe("buildForecastTrustHealth", () => {
         missingLatestDemandTimestamp: 1,
         missingLatestDemandAt: 1,
       },
+      actionCounts: {
+        verify_recent_demand: 1,
+        repair_order_velocity_source: 1,
+      },
+      actions: expect.arrayContaining([
+        expect.objectContaining({
+          code: "verify_recent_demand",
+          label: "Verify recent demand",
+          severity: "warning",
+          count: 1,
+        }),
+        expect.objectContaining({
+          code: "repair_order_velocity_source",
+          label: "Repair velocity source",
+          severity: "warning",
+          count: 1,
+        }),
+      ]),
     });
   });
 });
