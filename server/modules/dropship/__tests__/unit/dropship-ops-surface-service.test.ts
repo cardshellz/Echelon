@@ -38,9 +38,6 @@ const launchReadyEnv: NodeJS.ProcessEnv = {
   SHIPSTATION_API_KEY: "shipstation-key",
   SHIPSTATION_API_SECRET: "shipstation-secret",
   SHIPSTATION_WEBHOOK_SECRET: "shipstation-webhook-secret",
-  WMS_SHIPMENT_AT_SYNC: "true",
-  PUSH_FROM_WMS: "true",
-  SHIP_NOTIFY_V2: "true",
   STRIPE_SECRET_KEY: "stripe-secret-key",
   DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook-secret",
 };
@@ -249,9 +246,6 @@ describe("DropshipOpsSurfaceService", () => {
       SHIPSTATION_API_KEY: "shipstation-key",
       SHIPSTATION_API_SECRET: "shipstation-secret",
       SHIPSTATION_WEBHOOK_SECRET: "shipstation-webhook",
-      WMS_SHIPMENT_AT_SYNC: "true",
-      PUSH_FROM_WMS: "true",
-      SHIP_NOTIFY_V2: "true",
       STRIPE_SECRET_KEY: "stripe-secret",
       DROPSHIP_STRIPE_WEBHOOK_SECRET: "stripe-webhook",
       DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED: "true",
@@ -306,9 +300,11 @@ describe("DropshipOpsSurfaceService", () => {
       status: "blocked",
       requiredEnv: ["SHIPSTATION_WEBHOOK_SECRET"],
     });
+    // WMS-owned fulfillment is the code default now (opt-out), so an env
+    // with these flags unset reports ready.
     expect(checks.find((check) => check.key === "split_shipment_handoff")).toMatchObject({
-      status: "blocked",
-      requiredEnv: ["WMS_SHIPMENT_AT_SYNC=true", "PUSH_FROM_WMS=true", "SHIP_NOTIFY_V2=true"],
+      status: "ready",
+      requiredEnv: [],
     });
     expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({

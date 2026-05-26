@@ -141,6 +141,55 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
     }
   }
 
+  /**
+   * Pull tracking info from Shopify fulfillments for the inbound sweep.
+   * Returns the most recent fulfillment's tracking data.
+   */
+  async getTrackingInfo(order: OmsOrder): Promise<{ trackingNumber: string; carrier: string } | null> {
+    try {
+      const shopifyOrderGid = resolveShopifyOrderGid(order);
+      if (!shopifyOrderGid) return null;
+
+      const response = await this.shopifyClient.request<{
+        order?: {
+          fulfillments?: Array<{
+            trackingInfo?: Array<{ number?: string; company?: string }>;
+          }>;
+        } | null;
+      }>(
+        `
+          query trackingForOrder($id: ID!) {
+            order(id: $id) {
+              fulfillments(first: 10) {
+                trackingInfo {
+                  number
+                  company
+                }
+              }
+            }
+          }
+        `,
+        { id: shopifyOrderGid },
+      );
+
+      const fulfillments = response.order?.fulfillments ?? [];
+      for (let i = fulfillments.length - 1; i >= 0; i--) {
+        const tracking = fulfillments[i].trackingInfo;
+        if (tracking && tracking.length > 0 && tracking[0].number) {
+          return {
+            trackingNumber: tracking[0].number,
+            carrier: tracking[0].company || "other",
+          };
+        }
+      }
+
+      return null;
+    } catch (err: any) {
+      console.error(`[ShopifyFulfillmentReconciler] Error fetching tracking for order ${order.id}: ${err.message}`);
+      return null;
+    }
+  }
+
   private async findShippedWmsShipmentIds(orderId: number): Promise<number[]> {
     const result: any = await this.db.execute(sql`
       SELECT os.id AS shipment_id

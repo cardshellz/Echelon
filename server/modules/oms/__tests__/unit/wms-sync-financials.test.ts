@@ -342,13 +342,7 @@ describe("buildWmsItemFinancialSnapshot", () => {
 
 // ─── Structural guarantees (flag-off parity) ─────────────────────────
 
-describe("WMS_FINANCIAL_SNAPSHOT flag-off behavior (structural)", () => {
-  // Flag-off is structurally enforced in the service by NOT calling the
-  // helpers and NOT including the fields in the INSERT literal. The
-  // helpers themselves have no flag awareness — their job is to run
-  // when called. This test documents the contract: if someone wires
-  // the helpers into a new caller without flag-gating, validation will
-  // fire. That's intentional and safe.
+describe("financial helpers validate regardless of caller context (safe by default)", () => {
   it("helpers throw on invalid input regardless of any flag (safe by default)", () => {
     expect(() =>
       validateOmsOrderFinancials(

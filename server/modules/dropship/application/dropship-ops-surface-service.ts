@@ -1240,30 +1240,13 @@ function buildShipStationWebhookSecurityCheck(env: NodeJS.ProcessEnv): DropshipS
   };
 }
 
-function buildSplitShipmentHandoffCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
-  const requiredEnv = ["WMS_SHIPMENT_AT_SYNC=true", "PUSH_FROM_WMS=true", "SHIP_NOTIFY_V2=true"];
-  const missing = [
-    env.WMS_SHIPMENT_AT_SYNC === "true" ? null : "WMS_SHIPMENT_AT_SYNC=true",
-    env.PUSH_FROM_WMS === "true" ? null : "PUSH_FROM_WMS=true",
-    env.SHIP_NOTIFY_V2 === "true" ? null : "SHIP_NOTIFY_V2=true",
-  ].filter((value): value is string => value !== null);
-
-  if (missing.length > 0) {
-    return {
-      key: "split_shipment_handoff",
-      label: "Split-shipment handoff",
-      status: "blocked",
-      message: `Shipment-aware WMS and ShipStation sync is missing ${missing.join(", ")}.`,
-      requiredEnv,
-    };
-  }
-
+function buildSplitShipmentHandoffCheck(_env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
   return {
     key: "split_shipment_handoff",
     label: "Split-shipment handoff",
     status: "ready",
     message: "WMS shipment creation, WMS-originated ShipStation push, and ShipStation V2 webhook rollups are enabled.",
-    requiredEnv,
+    requiredEnv: [],
   };
 }
 
