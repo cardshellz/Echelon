@@ -2370,11 +2370,27 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         // outbound_shipments audit row was never written. See
         // shipstation-sync-audit.md §3 / §1E.
         const wmsChannelId = wmsOrderResult.rows[0].channel_id ?? null;
-        await db.execute(sql`
+        const insertedShipment: any = await db.execute(sql`
           INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
           VALUES (${wmsOrderId}, ${wmsChannelId}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
           ON CONFLICT DO NOTHING
+          RETURNING id
         `);
+        if (insertedShipment?.rows?.[0]?.id) {
+          trackingPushShipmentId = Number(insertedShipment.rows[0].id);
+        } else {
+          // ON CONFLICT — find the existing shipment for Shopify push
+          const existingShipment: any = await db.execute(sql`
+            SELECT id FROM wms.outbound_shipments
+            WHERE order_id = ${wmsOrderId}
+              AND status = 'shipped'
+              AND tracking_number = ${trackingNumber}
+            LIMIT 1
+          `);
+          if (existingShipment?.rows?.[0]?.id) {
+            trackingPushShipmentId = Number(existingShipment.rows[0].id);
+          }
+        }
 
         wmsFirst = true;
       } else {
@@ -2499,6 +2515,11 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     console.log(
       `[ShipStation Webhook] Order ${omsOrderId} shipped: ${carrier} ${trackingNumber}`,
     );
+
+    // Push Shopify fulfillment (legacy path lacked this — only pushed eBay tracking)
+    if (trackingPushShipmentId !== null) {
+      await pushShopifyFulfillmentFromShipNotify(trackingPushShipmentId, omsOrderId);
+    }
 
     // Push tracking to the originating channel (eBay, etc.)
     try {
