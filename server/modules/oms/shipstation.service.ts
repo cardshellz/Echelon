@@ -150,6 +150,8 @@ export interface WmsShipmentRow {
   status: string;
   requires_review?: boolean | null;
   review_reason?: string | null;
+  shipstation_order_id?: number | null;
+  shipstation_order_key?: string | null;
 }
 
 export interface WmsOrderRow {
@@ -308,19 +310,6 @@ export async function resolveShipStationIds(
   return { storeId, warehouseId };
 }
 
-// Shipment statuses that are eligible to be pushed to ShipStation. Any
-// other state (shipped, cancelled, returned, lost, labeled, on_hold)
-// means we MUST NOT push — either it's terminal or ShipStation already
-// has it. Mirrors the shipment state machine in plan §2.4.
-//
-// `voided` is pushable (§6 Commit 18 — re-label flow): when an operator
-// voids a label on ShipStation (§6 Commit 17) and then re-pushes, SS
-// upserts on the same orderKey and our WMS state transitions back to
-// `queued`. The UPDATE below also clears `voided_at` + `voided_reason`
-// on the transition so stale void metadata doesn't linger on a freshly
-// re-queued shipment; NULLing already-NULL columns is a no-op for the
-// planned/queued paths, so one UPDATE covers every re-push-eligible
-// state.
 const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued", "voided"]);
 
 // ---------------------------------------------------------------------------
@@ -2878,6 +2867,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       status: outboundShipments.status,
       requires_review: outboundShipments.requiresReview,
       review_reason: outboundShipments.reviewReason,
+      shipstation_order_id: outboundShipments.shipstationOrderId,
+      shipstation_order_key: outboundShipments.shipstationOrderKey,
     })
       .from(outboundShipments)
       .where(eq(outboundShipments.id, shipmentId))
@@ -2893,8 +2884,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       });
     }
     if (!PUSHABLE_SHIPMENT_STATUSES.has(shipmentRow.status)) {
-      // Already labeled / shipped / voided / cancelled — re-pushing
-      // would either collide with SS or clobber a legitimate final state.
       throw new ShipStationPushError(
         `shipment status '${shipmentRow.status}' is not pushable`,
         {
@@ -2905,6 +2894,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         },
       );
     }
+
+    // Idempotency: if this shipment already has a ShipStation order ID,
+    // pass it in the payload so SS updates the existing order instead of
+    // creating a duplicate.
+    const existingSsOrderId = shipmentRow.shipstation_order_id;
+    const isUpdate =
+      existingSsOrderId != null &&
+      Number.isInteger(existingSsOrderId) &&
+      existingSsOrderId > 0;
     if (shipmentRow.requires_review === true) {
       throw new ShipStationPushError(
         `shipment requires review and cannot be pushed to ShipStation (${shipmentRow.review_reason ?? "review_required"})`,
@@ -3061,7 +3059,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       warehouseId: orderRow.warehouse_id,
     });
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       orderNumber,
       orderKey,
       orderDate: orderDateIso,
@@ -3088,10 +3086,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         sku: item.sku || "",
         name: item.name || "",
         quantity: item.qty,
-        // Validation above guarantees unit_price_cents is a positive
-        // integer, so this division cannot produce NaN or Infinity.
-        // Using /100 directly (no toFixed) because ShipStation accepts
-        // the number as-is; SS does the string formatting server-side.
         unitPrice: item.unit_price_cents / 100,
         options: [] as unknown[],
       })),
@@ -3103,20 +3097,44 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         warehouseId: routing.warehouseId,
         storeId: routing.storeId,
         source: "echelon-wms",
-        // customField1 — sort_rank for packer pick-order sort. Padded
-        // string so ShipStation's text sort matches our numeric sort.
         customField1: orderRow.sort_rank || "",
-        // customField2 — dual reference to wms order + shipment for
-        // webhook back-resolution and audit.
         customField2: `wms_order_id:${orderRow.id}|shipment_id:${shipmentId}`,
-        // customField3 — legacy OMS pointer so operators can cross-
-        // reference against pre-refactor tooling during the deprecation
-        // window. May be empty for orders that never had an OMS row.
         customField3: `oms_order_id:${orderRow.oms_fulfillment_order_id ?? ""}`,
       },
     };
 
-    // ─── 6. Push to ShipStation. No swallowing — reconcile retries. ─
+    // ─── 6. Push to ShipStation ─────────────────────────────────────
+    // Idempotency: if this shipment already has a SS order ID (from the
+    // initial load or from a concurrent push that landed between our
+    // SELECT and now), include it so SS updates instead of creating a
+    // duplicate.
+    let ssOrderIdForPayload: number | null = isUpdate
+      ? (shipmentRow.shipstation_order_id ?? null)
+      : null;
+
+    if (!ssOrderIdForPayload) {
+      // Re-check for concurrent push that may have set the SS order ID
+      // after our initial SELECT. This closes the race window where two
+      // concurrent pushShipment calls both read shipstation_order_id=NULL,
+      // then both try to create on SS.
+      const freshCheck: any = await db.execute(sql`
+        SELECT shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE id = ${shipmentId}
+      `);
+      const freshSsId = Number(freshCheck?.rows?.[0]?.shipstation_order_id ?? 0);
+      if (Number.isInteger(freshSsId) && freshSsId > 0) {
+        ssOrderIdForPayload = freshSsId;
+      }
+    }
+
+    if (ssOrderIdForPayload) {
+      payload.orderId = ssOrderIdForPayload;
+      console.log(
+        `[ShipStation] Updating existing SS order ${ssOrderIdForPayload} for WMS shipment ${shipmentId} (key: ${orderKey})`,
+      );
+    }
+
     const result = await apiRequest<ShipStationCreateOrderResponse>(
       "POST",
       "/orders/createorder",
@@ -3124,9 +3142,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     // ─── 7. Mark shipment queued + persist SS pointers ──────────────
-    // Also clears voided_at/voided_reason for the re-label flow (§6
-    // Commit 18). NULL on already-null columns is a no-op, so this
-    // single UPDATE works for planned/queued/voided inputs alike.
     const now = new Date();
     await db.execute(sql`
       UPDATE wms.outbound_shipments
@@ -3142,7 +3157,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
 
     console.log(
-      `[ShipStation] Pushed WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})`,
+      `[ShipStation] ${isUpdate ? "Updated" : "Pushed"} WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})`,
     );
 
     return { shipstationOrderId: result.orderId, orderKey };
