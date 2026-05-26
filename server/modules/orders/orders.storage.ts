@@ -317,7 +317,7 @@ export const orderMethods: IOrderStorage = {
           -- Ready/in_progress/ready_to_ship orders: show in pick queue
           o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
           -- Completed orders: show for 24 hours in done queue
-          OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours')
+          OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours' AND COALESCE(o.item_count, 0) > 0)
         )
       ORDER BY
         -- sort_rank is the single source of truth (flattened composite of

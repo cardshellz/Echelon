@@ -883,7 +883,7 @@ export class WmsSyncService {
     const wmsOrderId = wmsOrderResult.rows[0].id;
     const warehouseStatus = wmsOrderResult.rows[0].warehouse_status;
 
-    if (["shipped", "cancelled"].includes(warehouseStatus)) {
+    if (["shipped", "cancelled", "completed"].includes(warehouseStatus)) {
       console.log(`${LOG} Skipping order ${wmsOrderId} — terminal state '${warehouseStatus}'`);
       return result;
     }
