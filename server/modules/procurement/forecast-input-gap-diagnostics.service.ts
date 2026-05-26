@@ -64,7 +64,7 @@ function increment(counts: Record<string, number>, key: string | null | undefine
   counts[key] = (counts[key] ?? 0) + 1;
 }
 
-function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInputGapAction {
+export function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInputGapAction {
   const gaps = item.forecastProvenance.forecastTrust.inputGaps;
   const signal = item.forecastProvenance.forecastTrust.signal;
 
@@ -77,7 +77,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
       code: "repair_order_velocity_source",
       label: "Repair velocity source",
       detail: "Recent order velocity is missing demand timestamps or sample metadata.",
-      href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+      href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
       severity: "warning",
     };
   }
@@ -92,7 +92,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
       code: "rebuild_forecast_windows",
       label: "Rebuild forecast windows",
       detail: "One or more comparison windows are missing from the recommendation input.",
-      href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+      href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=rebuild_forecast_windows",
       severity: "warning",
     };
   }
@@ -102,7 +102,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
       code: "verify_recent_demand",
       label: "Verify recent demand",
       detail: "Demand is absent or stale enough to hold automated purchasing.",
-      href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+      href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
       severity: "warning",
     };
   }
@@ -111,7 +111,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
     code: "monitor_thin_sample",
     label: "Monitor thin sample",
     detail: "Forecast trust is weak, but the recommendation is not held by a source-data gap.",
-    href: "/reorder-analysis",
+    href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=monitor_thin_sample",
     severity: "info",
   };
 }

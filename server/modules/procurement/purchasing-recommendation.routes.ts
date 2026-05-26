@@ -24,7 +24,12 @@ import {
   type AutoDraftPoAgingThresholds,
 } from "./auto-draft-po-aging.service";
 import { fetchAutoDraftPoAgingRows } from "./auto-draft-po-aging.repository";
-import { buildForecastInputGapDiagnostics } from "./forecast-input-gap-diagnostics.service";
+import {
+  buildForecastInputGapDiagnostics,
+  forecastInputGapAction,
+  type ForecastInputGapAction,
+  type ForecastInputGapActionCode,
+} from "./forecast-input-gap-diagnostics.service";
 import { loadPurchasingRecommendationContext } from "./purchasing-recommendation-context.service";
 import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
 const storage = { ...procurementStorage, ...inventoryStorage };
@@ -324,6 +329,13 @@ type RecommendationReviewQueueKind = "skipped" | "held_by_policy" | "quality_rev
 type RecommendationReviewQueueSeverity = "critical" | "warning" | "info";
 type RecommendationDecision = "reviewed" | "accepted_for_po" | "deferred" | "dismissed" | "po_handoff_created";
 
+const forecastInputGapActionCodes: ForecastInputGapActionCode[] = [
+  "repair_order_velocity_source",
+  "rebuild_forecast_windows",
+  "verify_recent_demand",
+  "monitor_thin_sample",
+];
+
 const recommendationDecisionValues: RecommendationDecision[] = [
   "reviewed",
   "accepted_for_po",
@@ -346,6 +358,12 @@ const reviewQueueSeverityPriority: Record<RecommendationReviewQueueSeverity, num
 function parseReviewQueueKind(value: unknown): RecommendationReviewQueueKind | null {
   return value === "skipped" || value === "held_by_policy" || value === "quality_review_required"
     ? value
+    : null;
+}
+
+function parseForecastInputGapActionCode(value: unknown): ForecastInputGapActionCode | null {
+  return forecastInputGapActionCodes.includes(value as ForecastInputGapActionCode)
+    ? value as ForecastInputGapActionCode
     : null;
 }
 
@@ -446,6 +464,18 @@ function reviewQueueReason(item: PurchasingRecommendationItem, kind: Recommendat
   };
 }
 
+function reviewQueueForecastAction(
+  item: PurchasingRecommendationItem,
+  kind: RecommendationReviewQueueKind,
+): ForecastInputGapAction | null {
+  if (kind !== "quality_review_required") return null;
+  const trust = item.forecastProvenance.forecastTrust;
+  if (trust.severity === "ok" && trust.inputGaps.length === 0 && item.qualityGate.reason !== "forecast_trust_review") {
+    return null;
+  }
+  return forecastInputGapAction(item);
+}
+
 function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurchasingRecommendations>, settings: AutoDraftRecommendationSettings) {
   const entries: Array<{
     recommendationId: string;
@@ -453,6 +483,7 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     severity: RecommendationReviewQueueSeverity;
     reason: { code: string; label: string; detail: string };
     action: { action: string; label: string; href: string };
+    forecastAction: ForecastInputGapAction | null;
     productId: number;
     productVariantId: number | null;
     sku: string;
@@ -477,6 +508,7 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
       severity,
       reason: reviewQueueReason(item, kind),
       action: reviewQueueAction(item, kind),
+      forecastAction: reviewQueueForecastAction(item, kind),
       productId: item.productId,
       productVariantId: item.productVariantId ?? null,
       sku: item.sku,
@@ -522,10 +554,14 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
 
   const reasonCounts: Record<string, number> = {};
   const actionCounts: Record<string, number> = {};
+  const forecastActionCounts: Record<string, number> = {};
   const candidateBandCounts: Record<string, number> = {};
   for (const entry of entries) {
     reasonCounts[entry.reason.code] = (reasonCounts[entry.reason.code] ?? 0) + 1;
     actionCounts[entry.action.action] = (actionCounts[entry.action.action] ?? 0) + 1;
+    if (entry.forecastAction) {
+      forecastActionCounts[entry.forecastAction.code] = (forecastActionCounts[entry.forecastAction.code] ?? 0) + 1;
+    }
     const band = entry.candidateScore?.band ?? "unscored";
     candidateBandCounts[band] = (candidateBandCounts[band] ?? 0) + 1;
   }
@@ -534,6 +570,7 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     summary,
     reasonCounts,
     actionCounts,
+    forecastActionCounts,
     candidateBandCounts,
     items: entries.sort((a, b) => {
       const severityDelta = reviewQueueSeverityPriority[a.severity] - reviewQueueSeverityPriority[b.severity];
@@ -845,11 +882,20 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const reason = typeof req.query.reason === "string" && req.query.reason.trim()
         ? req.query.reason.trim()
         : "all";
+      const forecastAction = typeof req.query.forecastAction === "string" && req.query.forecastAction.trim()
+        ? req.query.forecastAction.trim()
+        : "all";
+      if (forecastAction !== "all" && !parseForecastInputGapActionCode(forecastAction)) {
+        return res.status(400).json({
+          error: `forecastAction must be one of: all, ${forecastInputGapActionCodes.join(", ")}`,
+        });
+      }
       const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 100);
       const filteredItems = queue.items
         .filter((item) => kind === "all" || item.kind === kind)
         .filter((item) => severity === "all" || item.severity === severity)
         .filter((item) => reason === "all" || item.reason.code === reason)
+        .filter((item) => forecastAction === "all" || item.forecastAction?.code === forecastAction)
         .slice(0, limit);
       const latestDecisionRows = await storage.getLatestRecommendationDecisions(
         filteredItems.map((item) => item.recommendationId),
@@ -873,7 +919,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         lookbackDays: configuredLookback,
         autoDraftMode: settings.autoDraftMode ?? "draft_po",
         approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
-        filters: { kind, severity, reason, limit },
+        filters: { kind, severity, reason, forecastAction, limit },
         ...queue,
         filteredCount: filteredItems.length,
         decisionCounts,

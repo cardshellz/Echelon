@@ -283,6 +283,13 @@ interface RecommendationReviewQueueItem {
     label: string;
     href: string;
   };
+  forecastAction?: {
+    code: string;
+    label: string;
+    detail: string;
+    href: string;
+    severity: "warning" | "info";
+  } | null;
   productId: number;
   productVariantId: number | null;
   sku: string;
@@ -314,6 +321,7 @@ interface RecommendationReviewQueueResponse {
   };
   reasonCounts: Record<string, number>;
   actionCounts: Record<string, number>;
+  forecastActionCounts: Record<string, number>;
   candidateBandCounts: Record<string, number>;
   decisionCounts?: {
     reviewed: number;
@@ -447,6 +455,14 @@ function formatReviewQueueReason(reason: string): string {
   return reason.replace(/_/g, " ");
 }
 
+function formatForecastAction(action: string): string {
+  if (action === "repair_order_velocity_source") return "Repair velocity source";
+  if (action === "rebuild_forecast_windows") return "Rebuild forecast windows";
+  if (action === "verify_recent_demand") return "Verify recent demand";
+  if (action === "monitor_thin_sample") return "Monitor thin sample";
+  return action.replace(/_/g, " ");
+}
+
 function formatRecommendationDecision(decision?: RecommendationDecisionValue | null): string {
   if (decision === "accepted_for_po") return "Accepted";
   if (decision === "po_handoff_created") return "PO handoff";
@@ -500,6 +516,10 @@ export default function PurchasingView() {
     const params = new URLSearchParams(location.split("?")[1] ?? "");
     return params.get("reason")?.trim() || "all";
   });
+  const [reviewQueueForecastActionFilter, setReviewQueueForecastActionFilter] = useState<string>(() => {
+    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    return params.get("forecastAction")?.trim() || "all";
+  });
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -523,11 +543,17 @@ export default function PurchasingView() {
   });
 
   const { data: recommendationReviewQueue } = useQuery<RecommendationReviewQueueResponse>({
-    queryKey: ["/api/purchasing/recommendation-review-queue", reviewQueueFilter, reviewQueueReasonFilter],
+    queryKey: [
+      "/api/purchasing/recommendation-review-queue",
+      reviewQueueFilter,
+      reviewQueueReasonFilter,
+      reviewQueueForecastActionFilter,
+    ],
     queryFn: async () => {
       const params = new URLSearchParams({ limit: "100" });
       if (reviewQueueFilter !== "all") params.set("kind", reviewQueueFilter);
       if (reviewQueueReasonFilter !== "all") params.set("reason", reviewQueueReasonFilter);
+      if (reviewQueueForecastActionFilter !== "all") params.set("forecastAction", reviewQueueForecastActionFilter);
       const res = await fetch(`/api/purchasing/recommendation-review-queue?${params.toString()}`);
       if (!res.ok) throw new Error("Failed to fetch recommendation review queue");
       return res.json();
@@ -716,6 +742,7 @@ export default function PurchasingView() {
   const filteredReviewQueue = (recommendationReviewQueue?.items ?? [])
     .filter((item) => reviewQueueFilter === "all" || item.kind === reviewQueueFilter)
     .filter((item) => reviewQueueReasonFilter === "all" || item.reason.code === reviewQueueReasonFilter)
+    .filter((item) => reviewQueueForecastActionFilter === "all" || item.forecastAction?.code === reviewQueueForecastActionFilter)
     .slice(0, 12);
   const acceptedQueueItems = (acceptedRecommendationQueue?.items ?? []).slice(0, 8);
   const recentRecommendationDecisions = (recommendationDecisionHistory?.decisions ?? []).slice(0, 8);
@@ -835,6 +862,7 @@ export default function PurchasingView() {
       const requestedQueue = params.get("reviewQueue");
       if (isReviewQueueKind(requestedQueue)) setReviewQueueFilter(requestedQueue);
       setReviewQueueReasonFilter(params.get("reason")?.trim() || "all");
+      setReviewQueueForecastActionFilter(params.get("forecastAction")?.trim() || "all");
       return;
     }
     navigate(href);
@@ -1053,6 +1081,7 @@ export default function PurchasingView() {
                       onClick={() => {
                         setReviewQueueFilter(option.value);
                         setReviewQueueReasonFilter("all");
+                        setReviewQueueForecastActionFilter("all");
                       }}
                     >
                       {option.label}
@@ -1069,6 +1098,17 @@ export default function PurchasingView() {
                       onClick={() => setReviewQueueReasonFilter("all")}
                     >
                       {formatReviewQueueReason(reviewQueueReasonFilter)}
+                      <span className="rounded bg-white/60 px-1">Clear</span>
+                    </Button>
+                  )}
+                  {reviewQueueForecastActionFilter !== "all" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-[11px] gap-1 border-blue-200 bg-blue-50 text-blue-700"
+                      onClick={() => setReviewQueueForecastActionFilter("all")}
+                    >
+                      {formatForecastAction(reviewQueueForecastActionFilter)}
                       <span className="rounded bg-white/60 px-1">Clear</span>
                     </Button>
                   )}
@@ -1097,6 +1137,11 @@ export default function PurchasingView() {
                             {item.candidateScore ? (
                               <Badge variant="outline" className={`text-[10px] capitalize ${candidateBandClass(item.candidateScore.band)}`}>
                                 {item.candidateScore.score} - {formatCandidateBand(item.candidateScore.band)}
+                              </Badge>
+                            ) : null}
+                            {item.forecastAction ? (
+                              <Badge variant="outline" className="text-[10px] bg-blue-50 text-blue-700 border-blue-200">
+                                {item.forecastAction.label}
                               </Badge>
                             ) : null}
                             {item.latestDecision ? (

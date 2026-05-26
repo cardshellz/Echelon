@@ -3190,3 +3190,29 @@ Next step:
 - After health action routing is verified, run the live dry-run audit and decide
   whether the next implementation should be a real backfill mutation or a
   forecast review workflow improvement.
+
+### 2026-05-26 - Forecast Action Review Queue Filters
+
+Scope:
+
+- Reused the forecast input gap action classifier inside the recommendation
+  review queue so forecast-source, window, recent-demand, and thin-sample work
+  can be filtered as separate operator buckets.
+- Added `forecastAction` deep-link support to forecast action hrefs and the
+  Purchasing Dashboard review queue filter state.
+- Added forecast action metadata and counts to review queue responses without
+  changing recommendation math, trust scoring, auto-draft eligibility, PO
+  creation, supplier data, receiving, landed-cost, AP, WMS behavior, or
+  forecast source queries.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/forecast-trust-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts`
+
+Next step:
+
+- Use the live forecast health action links to confirm operators land on the
+  exact review bucket before deciding whether any remaining source-repair class
+  needs a mutation backfill.
