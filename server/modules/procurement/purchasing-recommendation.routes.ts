@@ -24,6 +24,7 @@ import {
   type AutoDraftPoAgingThresholds,
 } from "./auto-draft-po-aging.service";
 import { fetchAutoDraftPoAgingRows } from "./auto-draft-po-aging.repository";
+import { buildForecastInputGapDiagnostics } from "./forecast-input-gap-diagnostics.service";
 import { loadPurchasingRecommendationContext } from "./purchasing-recommendation-context.service";
 import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
 const storage = { ...procurementStorage, ...inventoryStorage };
@@ -805,6 +806,34 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching supplier setup gaps:", error);
       res.status(500).json({ error: "Failed to fetch supplier setup gaps" });
+    }
+  });
+
+  app.get("/api/purchasing/forecast-input-gaps", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const configuredLookback = await storage.getVelocityLookbackDays();
+      const rawRows = await storage.getReorderAnalysisData(configuredLookback);
+      const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
+      const context = await loadPurchasingRecommendationContext();
+      const recommendationResult = generatePurchasingRecommendations({
+        rows: rawRows as PurchasingRecommendationRawRow[],
+        lookbackDays: configuredLookback,
+        autoDraftSettings: settings,
+        requireVendor: Boolean(settings.skipNoVendor),
+        ...context,
+      });
+      const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "10"), 10) || 10, 1), 50);
+
+      res.json({
+        generatedAt: new Date().toISOString(),
+        lookbackDays: configuredLookback,
+        autoDraftMode: settings.autoDraftMode ?? "draft_po",
+        approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
+        ...buildForecastInputGapDiagnostics(recommendationResult, { limit }),
+      });
+    } catch (error) {
+      console.error("Error fetching forecast input gaps:", error);
+      res.status(500).json({ error: "Failed to fetch forecast input gaps" });
     }
   });
 

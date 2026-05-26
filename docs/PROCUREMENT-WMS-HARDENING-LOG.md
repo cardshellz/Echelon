@@ -3056,3 +3056,31 @@ Next step:
 
 - If this action path holds up, continue into source-data backfill for forecast
   inputs that are repeatedly missing or stale.
+
+### 2026-05-26 - Forecast Input Gap Diagnostics
+
+Scope:
+
+- Added a live `/api/purchasing/forecast-input-gaps` endpoint that reuses the
+  existing purchasing recommendation engine and summarizes forecast trust input
+  gaps without creating a second forecast authority.
+- Classified affected recommendations into review, watch, trusted, input-gap,
+  and auto-draft-held counts, with sample SKUs and suggested repair actions for
+  missing velocity source fields, missing forecast windows, stale demand, and
+  thin samples.
+- Added a Purchasing Dashboard alert card that surfaces current forecast input
+  gaps, top missing fields, and sample SKUs with a deep link into the existing
+  forecast-trust review queue.
+- Kept demand math, auto-draft eligibility rules, supplier data, PO creation,
+  receiving, landed-cost, AP, and WMS behavior unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- Use the live diagnostics to scope the first real source-data repair/backfill
+  job by gap type, starting with the highest-volume forecast input gap.
