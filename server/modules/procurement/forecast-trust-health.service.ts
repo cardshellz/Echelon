@@ -1,4 +1,8 @@
 import type { PurchasingRecommendationResult } from "./purchasing-recommendation.engine";
+import {
+  buildForecastInputGapDiagnostics,
+  type ForecastInputGapActionSummary,
+} from "./forecast-input-gap-diagnostics.service";
 
 export type ForecastTrustHealthCounts = {
   trusted: number;
@@ -24,6 +28,8 @@ export type ForecastTrustHealth = {
   totalRecommendations: number;
   totalTrustItems: number;
   counts: ForecastTrustHealthCounts;
+  actionCounts: Record<string, number>;
+  actions: ForecastInputGapActionSummary[];
 };
 
 function emptyCounts(): ForecastTrustHealthCounts {
@@ -50,6 +56,7 @@ function emptyCounts(): ForecastTrustHealthCounts {
 
 export function buildForecastTrustHealth(result: PurchasingRecommendationResult): ForecastTrustHealth {
   const counts = emptyCounts();
+  const inputGapDiagnostics = buildForecastInputGapDiagnostics(result, { limit: 1 });
   let totalTrustItems = 0;
 
   for (const item of result.items) {
@@ -119,5 +126,7 @@ export function buildForecastTrustHealth(result: PurchasingRecommendationResult)
     totalRecommendations: result.items.length,
     totalTrustItems,
     counts,
+    actionCounts: inputGapDiagnostics.actionCounts,
+    actions: inputGapDiagnostics.actions,
   };
 }

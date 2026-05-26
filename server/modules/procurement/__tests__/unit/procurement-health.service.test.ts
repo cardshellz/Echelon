@@ -150,6 +150,16 @@ describe("buildProcurementHealthSummary", () => {
           missingLongWindow: 1,
           missingSeasonalWindow: 1,
         },
+        actions: [
+          {
+            code: "repair_order_velocity_source",
+            label: "Repair velocity source",
+            detail: "Recent order velocity is missing demand timestamps or sample metadata.",
+            href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+            severity: "warning",
+            count: 1,
+          },
+        ],
       },
       generatedAt: new Date("2026-05-10T12:00:00.000Z"),
     });
@@ -168,6 +178,8 @@ describe("buildProcurementHealthSummary", () => {
         warning: 1,
         total: 2,
         href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+        actionLabel: "Repair velocity source",
+        detail: "1 forecast recommendation need repair velocity source.",
       }),
     ]));
   });

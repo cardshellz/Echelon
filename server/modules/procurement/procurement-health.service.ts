@@ -34,7 +34,7 @@ type LandedCostHealthLike = {
 
 type SupplierSetupGapsLike = Pick<SupplierSetupGaps, "totalGapItems" | "counts">;
 type InFlightPoAgingLike = Pick<InFlightPoAgingDiagnostics, "totalAging" | "counts">;
-type ForecastTrustHealthLike = Pick<ForecastTrustHealth, "totalTrustItems" | "counts">;
+type ForecastTrustHealthLike = Pick<ForecastTrustHealth, "totalTrustItems" | "counts" | "actions">;
 
 function statusFromCounts(critical: number, warning: number): ProcurementHealthSeverity {
   if (critical > 0) return "critical";
@@ -123,6 +123,7 @@ export function buildProcurementHealthSummary(input: {
   }
 
   if (input.forecastTrustHealth) {
+    const topForecastAction = input.forecastTrustHealth.actions[0];
     sources.push({
       key: "forecast_trust_health",
       label: "Forecast trust health",
@@ -130,9 +131,11 @@ export function buildProcurementHealthSummary(input: {
       critical: forecastTrustCritical,
       warning: forecastTrustWarning,
       total: input.forecastTrustHealth.totalTrustItems,
-      href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
-      actionLabel: "Review Forecasts",
-      detail: "Forecast freshness and input gaps that can hold or weaken automated purchasing recommendations.",
+      href: topForecastAction?.href ?? "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+      actionLabel: topForecastAction?.label ?? "Review Forecasts",
+      detail: topForecastAction
+        ? `${topForecastAction.count} forecast recommendation${topForecastAction.count === 1 ? "" : "s"} need ${topForecastAction.label.toLowerCase()}.`
+        : "Forecast freshness and input gaps that can hold or weaken automated purchasing recommendations.",
     });
   }
 
