@@ -3112,3 +3112,30 @@ Next step:
 - After this source repair is verified, re-run live forecast input diagnostics
   and only add a true backfill job if missing source timestamps remain after the
   query now exposes scan-horizon demand freshness.
+
+### 2026-05-26 - Forecast Gap Action Buckets
+
+Scope:
+
+- Added ordered action summaries to forecast input gap diagnostics so operators
+  can work source repairs, forecast window rebuilds, recent-demand review, and
+  thin-sample monitoring as explicit queues.
+- Added severity and count metadata to each action while preserving the
+  existing sample-level action details and review-queue links.
+- Updated the Purchasing Dashboard forecast input gap card to show action
+  queues first, with the top missing field retained as supporting detail.
+- Kept recommendation math, trust scoring, auto-draft eligibility, PO creation,
+  supplier data, receiving, landed-cost, AP, WMS behavior, and forecast source
+  queries unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/forecast-trust-health.service.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- After action buckets are verified, use the live diagnostics output to decide
+  whether remaining forecast issues require a dry-run backfill job or are
+  genuine demand-review work.

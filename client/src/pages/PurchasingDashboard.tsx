@@ -365,6 +365,14 @@ type ForecastInputGapDiagnostics = {
   trustSignalCounts: Record<string, number>;
   trustSeverityCounts: Record<string, number>;
   actionCounts: Record<string, number>;
+  actions: Array<{
+    code: string;
+    label: string;
+    detail: string;
+    href: string;
+    severity: "warning" | "info";
+    count: number;
+  }>;
   samples: Array<{
     recommendationId: string;
     sku: string;
@@ -386,6 +394,7 @@ type ForecastInputGapDiagnostics = {
       label: string;
       detail: string;
       href: string;
+      severity?: "warning" | "info";
     };
   }>;
 };
@@ -536,6 +545,11 @@ function procurementHealthClass(status: string): string {
   if (status === "critical") return "border-red-300 bg-red-50/40";
   if (status === "warning") return "border-amber-300 bg-amber-50/40";
   return "border-emerald-300 bg-emerald-50/40";
+}
+
+function forecastActionClass(severity: string): string {
+  if (severity === "warning") return "border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100";
+  return "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50";
 }
 
 function formatPoTrack(status?: string | null): string {
@@ -935,17 +949,26 @@ export default function PurchasingDashboard() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="rounded-md border bg-background/90 p-3">
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Top Gaps</div>
-                  <div className="space-y-1.5">
-                    {forecastGapCounts.length ? (
-                      forecastGapCounts.map((row) => (
-                        <div key={row.label} className="flex items-center justify-between gap-3 text-xs">
-                          <span className="capitalize text-muted-foreground">{row.label}</span>
-                          <span className="font-semibold text-amber-700">{row.value}</span>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Action Queues</div>
+                  <div className="space-y-2">
+                    {(forecastInputGaps.actions ?? []).slice(0, 4).map((action) => (
+                      <button
+                        key={action.code}
+                        type="button"
+                        onClick={() => navigate(action.href)}
+                        className={`w-full rounded-md border p-2 text-left text-xs transition-colors ${forecastActionClass(action.severity)}`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="font-semibold">{action.label}</span>
+                          <span className="font-mono text-[11px]">{action.count}</span>
                         </div>
-                      ))
-                    ) : (
-                      <div className="text-xs text-muted-foreground">No missing input fields detected.</div>
+                        <div className="mt-1 line-clamp-2 text-[11px] opacity-80">{action.detail}</div>
+                      </button>
+                    ))}
+                    {forecastGapCounts.length > 0 && (
+                      <div className="border-t pt-2 text-[11px] text-muted-foreground">
+                        Top missing field: {forecastGapCounts[0].label} ({forecastGapCounts[0].value})
+                      </div>
                     )}
                   </div>
                 </div>

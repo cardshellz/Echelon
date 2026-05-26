@@ -10,11 +10,18 @@ export type ForecastInputGapActionCode =
   | "verify_recent_demand"
   | "monitor_thin_sample";
 
+export type ForecastInputGapActionSeverity = "warning" | "info";
+
 export type ForecastInputGapAction = {
   code: ForecastInputGapActionCode;
   label: string;
   detail: string;
   href: string;
+  severity: ForecastInputGapActionSeverity;
+};
+
+export type ForecastInputGapActionSummary = ForecastInputGapAction & {
+  count: number;
 };
 
 export type ForecastInputGapDiagnosticsSample = {
@@ -48,6 +55,7 @@ export type ForecastInputGapDiagnostics = {
   trustSignalCounts: Record<string, number>;
   trustSeverityCounts: Record<string, number>;
   actionCounts: Record<string, number>;
+  actions: ForecastInputGapActionSummary[];
   samples: ForecastInputGapDiagnosticsSample[];
 };
 
@@ -70,6 +78,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
       label: "Repair velocity source",
       detail: "Recent order velocity is missing demand timestamps or sample metadata.",
       href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+      severity: "warning",
     };
   }
 
@@ -84,6 +93,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
       label: "Rebuild forecast windows",
       detail: "One or more comparison windows are missing from the recommendation input.",
       href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+      severity: "warning",
     };
   }
 
@@ -93,6 +103,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
       label: "Verify recent demand",
       detail: "Demand is absent or stale enough to hold automated purchasing.",
       href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
+      severity: "warning",
     };
   }
 
@@ -101,6 +112,7 @@ function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInp
     label: "Monitor thin sample",
     detail: "Forecast trust is weak, but the recommendation is not held by a source-data gap.",
     href: "/reorder-analysis",
+    severity: "info",
   };
 }
 
@@ -135,6 +147,7 @@ export function buildForecastInputGapDiagnostics(
   const trustSignalCounts: Record<string, number> = {};
   const trustSeverityCounts: Record<string, number> = {};
   const actionCounts: Record<string, number> = {};
+  const actionByCode = new Map<ForecastInputGapActionCode, ForecastInputGapAction>();
   const issueItems: PurchasingRecommendationItem[] = [];
   let reviewItems = 0;
   let watchItems = 0;
@@ -159,9 +172,27 @@ export function buildForecastInputGapDiagnostics(
 
     if (trust.severity !== "ok" || trust.inputGaps.length > 0) {
       issueItems.push(item);
-      increment(actionCounts, forecastInputGapAction(item).code);
+      const action = forecastInputGapAction(item);
+      actionByCode.set(action.code, action);
+      increment(actionCounts, action.code);
     }
   }
+
+  const severityPriority: Record<ForecastInputGapActionSeverity, number> = {
+    warning: 0,
+    info: 1,
+  };
+  const actions = Object.entries(actionCounts)
+    .map(([code, count]) => {
+      const action = actionByCode.get(code as ForecastInputGapActionCode);
+      return action ? { ...action, count } : null;
+    })
+    .filter((action): action is ForecastInputGapActionSummary => Boolean(action))
+    .sort((a, b) => {
+      const severityDelta = severityPriority[a.severity] - severityPriority[b.severity];
+      if (severityDelta !== 0) return severityDelta;
+      return b.count - a.count;
+    });
 
   const samples = issueItems
     .sort((a, b) => {
@@ -193,6 +224,7 @@ export function buildForecastInputGapDiagnostics(
     trustSignalCounts,
     trustSeverityCounts,
     actionCounts,
+    actions,
     samples,
   };
 }
