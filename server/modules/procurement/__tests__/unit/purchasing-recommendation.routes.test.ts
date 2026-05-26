@@ -576,6 +576,22 @@ describe("purchasing recommendation routes", () => {
         repair_order_velocity_source: 1,
       },
     });
+    expect(body.actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "verify_recent_demand",
+          label: "Verify recent demand",
+          severity: "warning",
+          count: 1,
+        }),
+        expect.objectContaining({
+          code: "repair_order_velocity_source",
+          label: "Repair velocity source",
+          severity: "warning",
+          count: 1,
+        }),
+      ]),
+    );
     expect(body.generatedAt).toEqual(expect.any(String));
     expect(body.samples).toHaveLength(2);
     expect(body.samples[0]).toMatchObject({
