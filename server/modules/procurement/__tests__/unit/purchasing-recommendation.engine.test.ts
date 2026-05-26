@@ -695,6 +695,73 @@ describe("purchasing recommendation engine", () => {
     });
   });
 
+  it("uses latest known demand for trust freshness without hiding no-recent-demand forecasts", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      asOf: "2026-05-24T00:00:00.000Z",
+      rows: [
+        {
+          product_id: 64,
+          variant_id: 641,
+          base_sku: "NO-RECENT-KNOWN-DEMAND",
+          product_name: "No Recent Known Demand Product",
+          total_pieces: 0,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 0,
+          previous_outbound_pieces: 12,
+          demand_order_count: 0,
+          demand_active_days: 0,
+          latest_demand_at: null,
+          latest_known_demand_at: "2026-04-15T00:00:00.000Z",
+          short_window_days: 7,
+          short_outbound_pieces: 0,
+          previous_short_outbound_pieces: 0,
+          short_demand_order_count: 0,
+          short_demand_active_days: 0,
+          long_window_days: 90,
+          long_outbound_pieces: 12,
+          previous_long_outbound_pieces: 24,
+          long_demand_order_count: 2,
+          long_demand_active_days: 2,
+          seasonal_window_days: 30,
+          seasonal_outbound_pieces: 4,
+          previous_seasonal_outbound_pieces: 4,
+          seasonal_demand_order_count: 1,
+          seasonal_demand_active_days: 1,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 3,
+          safety_stock_days: 1,
+          order_uom_units: 10,
+          vendor_product_id: 6410,
+          preferred_vendor_id: 10,
+          estimated_cost_cents: 250,
+          vendor_product_updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      skippedReason: "zero_suggested_quantity",
+      demandBasis: {
+        demandQuality: "no_recent_demand",
+        latestDemandAt: null,
+        forecastTrust: {
+          signal: "no_recent_demand",
+          severity: "review",
+          latestDemandAgeDays: 39,
+          inputGaps: [],
+        },
+      },
+      forecastProvenance: {
+        forecastTrust: {
+          signal: "no_recent_demand",
+          latestDemandAgeDays: 39,
+        },
+      },
+    });
+    expect(result.items[0].demandBasis.forecastTrust.inputGaps).not.toContain("missing_latest_demand_at");
+  });
+
   it("holds otherwise high-confidence recommendations when forecast trust has review severity", () => {
     const result = generatePurchasingRecommendations({
       lookbackDays: 30,

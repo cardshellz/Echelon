@@ -3084,3 +3084,31 @@ Next step:
 
 - Use the live diagnostics to scope the first real source-data repair/backfill
   job by gap type, starting with the highest-volume forecast input gap.
+
+### 2026-05-26 - Forecast Latest Known Demand Source Repair
+
+Scope:
+
+- Split current-window latest demand from scan-horizon latest known demand in
+  the reorder analysis source query.
+- Kept current-window demand quantities, demand quality, recommendation math,
+  candidate scoring, supplier data, PO creation, receiving, landed-cost, AP,
+  and WMS behavior unchanged.
+- Used latest known demand only for forecast trust freshness, so products with
+  historical demand but no current-window usage are reported as no-recent or
+  stale demand instead of missing source timestamps.
+- Added focused coverage proving no-recent-demand recommendations keep their
+  review hold while no longer raising `missing_latest_demand_at` when a wider
+  source timestamp exists.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.engine.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts server/modules/procurement/__tests__/unit/forecast-trust-health.service.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- After this source repair is verified, re-run live forecast input diagnostics
+  and only add a true backfill job if missing source timestamps remain after the
+  query now exposes scan-horizon demand freshness.

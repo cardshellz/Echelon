@@ -138,6 +138,7 @@ export interface PurchasingRecommendationRawRow {
   demand_order_count?: number | string | null;
   demand_active_days?: number | string | null;
   latest_demand_at?: string | Date | null;
+  latest_known_demand_at?: string | Date | null;
   paid_demand_pieces?: number | string | null;
   zero_revenue_demand_pieces?: number | string | null;
   coupon_discount_demand_pieces?: number | string | null;
@@ -1494,6 +1495,7 @@ export function generatePurchasingRecommendations(
     const demandOrderCount = demandForecast.demandOrderCount;
     const demandActiveDays = demandForecast.demandActiveDays;
     const latestDemandAt = demandForecast.latestDemandAt;
+    const latestKnownDemandAt = row.latest_known_demand_at ?? latestDemandAt;
     const paidDemandPieces = demandForecast.paidDemandPieces;
     const zeroRevenueDemandPieces = demandForecast.zeroRevenueDemandPieces;
     const couponDiscountDemandPieces = demandForecast.couponDiscountDemandPieces;
@@ -1585,7 +1587,7 @@ export function generatePurchasingRecommendations(
       priorPeriodUsagePieces: priorPeriodUsage,
       demandOrderCount,
       demandActiveDays,
-      latestDemandAt,
+      latestDemandAt: latestKnownDemandAt,
       demandQuality,
       demandTrend,
       hasShortWindowInput,
