@@ -503,7 +503,7 @@ export const orderMethods: IOrderStorage = {
       if (order.warehouseStatus === "in_progress") {
         const items = itemsByOrderId.get(order.id) || [];
         const shippableItems = items.filter(i => i.requiresShipping === 1);
-        const allShippableDone = shippableItems.length > 0 && 
+        const allShippableDone = shippableItems.length > 0 &&
           shippableItems.every(i => i.status === "completed" || i.status === "short");
         if (allShippableDone) {
           const hasShort = shippableItems.some(i => i.status === "short");
@@ -522,6 +522,37 @@ export const orderMethods: IOrderStorage = {
           } catch (err) {
             console.error(`[PickQueue] Failed to auto-fix order ${order.orderNumber}:`, err);
           }
+        }
+      }
+
+      // Self-heal: if shipments exist and are all shipped/cancelled/returned/lost
+      // but warehouse_status is still a pick-queue state, the rollup was
+      // missed (webhook failure, race, etc.). Re-run it now.
+      if (["ready", "in_progress", "partially_shipped"].includes(order.warehouseStatus)) {
+        try {
+          const shipResult: any = await db.execute(
+            sql`SELECT status FROM wms.outbound_shipments WHERE order_id = ${order.id}`
+          );
+          const shipmentStatuses: string[] = (shipResult?.rows ?? []).map((r: any) => r.status);
+          if (shipmentStatuses.length > 0) {
+            const hasOpen = shipmentStatuses.some(
+              (s: string) => s === "planned" || s === "queued" || s === "labeled" || s === "on_hold" || s === "voided"
+            );
+            const hasShipped = shipmentStatuses.some(
+              (s: string) => s === "shipped" || s === "returned" || s === "lost"
+            );
+            if (hasShipped && !hasOpen) {
+              const rollup = await recomputeOrderStatusFromShipments(db, order.id);
+              if (rollup.changed) {
+                order.warehouseStatus = rollup.warehouseStatus;
+                console.log(
+                  `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): warehouse_status → ${rollup.warehouseStatus}`,
+                );
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`[PickQueue] Shipment rollup self-heal failed for order ${order.orderNumber}:`, err);
         }
       }
     }

@@ -1509,6 +1509,29 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  async function applyShipmentQuantitiesToWmsOrderItemsFallback(
+    shipmentId: number,
+  ): Promise<void> {
+    await db.execute(sql`
+      UPDATE wms.order_items oi
+      SET fulfilled_quantity = LEAST(oi.quantity, COALESCE(oi.fulfilled_quantity, 0) + osi.qty),
+          picked_quantity = LEAST(oi.quantity, GREATEST(COALESCE(oi.picked_quantity, 0), COALESCE(oi.fulfilled_quantity, 0) + osi.qty)),
+          status = CASE
+            WHEN LEAST(oi.quantity, COALESCE(oi.fulfilled_quantity, 0) + osi.qty) >= oi.quantity THEN 'completed'
+            ELSE oi.status
+          END,
+          picked_at = CASE
+            WHEN LEAST(oi.quantity, COALESCE(oi.fulfilled_quantity, 0) + osi.qty) >= oi.quantity
+                 AND oi.picked_at IS NULL THEN NOW()
+            ELSE oi.picked_at
+          END
+      FROM wms.outbound_shipment_items osi
+      WHERE osi.shipment_id = ${shipmentId}
+        AND osi.order_item_id = oi.id
+        AND osi.qty > 0
+    `);
+  }
+
   async function getOmsOrderProvider(omsOrderId: number): Promise<string | null> {
     const result: any = await db.execute(sql`
       SELECT c.provider
@@ -1965,7 +1988,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           inventoryItemsToRecord,
         );
       }
-      await applyShipmentQuantitiesToWmsOrderItems(inventoryItemsToRecord);
+
+      // Update fulfilled_quantity on WMS order items. When inventoryCore
+      // is wired but the validated items list is empty (missing variant/
+      // location data), fall back to a direct UPDATE so fulfilled_quantity
+      // is always updated when a shipment ships — otherwise the order
+      // stays stuck in the pick queue because items look unfulfilled.
+      if (inventoryItemsToRecord.length > 0) {
+        await applyShipmentQuantitiesToWmsOrderItems(inventoryItemsToRecord);
+      } else if (inventoryCore) {
+        await applyShipmentQuantitiesToWmsOrderItemsFallback(wmsShipmentRow.id);
+      }
 
       if (!suppressOmsAndChannelShipUpdate) {
         await enqueueDelayedTrackingPushForShippedShipment(
