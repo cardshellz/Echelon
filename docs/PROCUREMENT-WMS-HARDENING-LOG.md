@@ -3139,3 +3139,29 @@ Next step:
 - After action buckets are verified, use the live diagnostics output to decide
   whether remaining forecast issues require a dry-run backfill job or are
   genuine demand-review work.
+
+### 2026-05-26 - Forecast Gap Dry-Run Audit Script
+
+Scope:
+
+- Added a read-only `scripts/audit-forecast-input-gaps.ts` CLI that reuses the
+  purchasing recommendation engine and forecast gap diagnostics.
+- Added `npm run procurement:forecast-input-gaps` as the operator command for
+  JSON output in local or Heroku runs.
+- The script reports action buckets, samples, and a decision summary separating
+  source-repair candidates from ordinary demand-review work before any backfill
+  mutation is considered.
+- Kept recommendation math, trust scoring, auto-draft eligibility, PO creation,
+  supplier data, receiving, landed-cost, AP, WMS behavior, and forecast source
+  queries unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `git diff --check`
+
+Next step:
+
+- Run the dry-run audit against live data after deploy. Only build a mutation
+  backfill if `decision.requiresBackfillInvestigation` remains true and the
+  source repair class is understood.
