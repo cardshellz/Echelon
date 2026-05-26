@@ -466,6 +466,138 @@ describe("purchasing recommendation routes", () => {
     expect(body.items.map((item: any) => item.sku)).toContain("STALE-COST");
   });
 
+  it("returns live forecast input gap diagnostics with actionable samples", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_only",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+      candidateScoreStrongThreshold: 80,
+      candidateScoreReviewThreshold: 60,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        product_id: 211,
+        variant_id: 2110,
+        base_sku: "STALE-TRUST",
+        product_name: "Stale Trust Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: "2026-04-01T00:00:00.000Z",
+        short_window_days: 7,
+        short_outbound_pieces: 14,
+        previous_short_outbound_pieces: 14,
+        short_demand_order_count: 5,
+        short_demand_active_days: 4,
+        long_window_days: 90,
+        long_outbound_pieces: 180,
+        previous_long_outbound_pieces: 180,
+        long_demand_order_count: 24,
+        long_demand_active_days: 20,
+        seasonal_window_days: 30,
+        seasonal_outbound_pieces: 60,
+        previous_seasonal_outbound_pieces: 60,
+        seasonal_demand_order_count: 12,
+        seasonal_demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        vendor_product_id: 21100,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor A",
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        estimated_cost_cents: 125,
+        vendor_product_updated_at: new Date().toISOString(),
+      },
+      {
+        product_id: 212,
+        variant_id: 2120,
+        base_sku: "MISSING-LATEST",
+        product_name: "Missing Latest Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: null,
+        short_window_days: 7,
+        short_outbound_pieces: 14,
+        previous_short_outbound_pieces: 14,
+        short_demand_order_count: 5,
+        short_demand_active_days: 4,
+        long_window_days: 90,
+        long_outbound_pieces: 180,
+        previous_long_outbound_pieces: 180,
+        long_demand_order_count: 24,
+        long_demand_active_days: 20,
+        seasonal_window_days: 30,
+        seasonal_outbound_pieces: 60,
+        previous_seasonal_outbound_pieces: 60,
+        seasonal_demand_order_count: 12,
+        seasonal_demand_active_days: 10,
+        on_order_pieces: 0,
+        open_po_count: 0,
+        vendor_product_id: 21200,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor A",
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        estimated_cost_cents: 125,
+        vendor_product_updated_at: new Date().toISOString(),
+      },
+    ]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/forecast-input-gaps?limit=5");
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      lookbackDays: 30,
+      totalRecommendations: 2,
+      totalIssueItems: 2,
+      inputGapItems: 1,
+      reviewItems: 1,
+      watchItems: 1,
+      forecastTrustHeldAutoDraft: 1,
+      gapCounts: {
+        missing_latest_demand_at: 1,
+      },
+      actionCounts: {
+        verify_recent_demand: 1,
+        repair_order_velocity_source: 1,
+      },
+    });
+    expect(body.generatedAt).toEqual(expect.any(String));
+    expect(body.samples).toHaveLength(2);
+    expect(body.samples[0]).toMatchObject({
+      sku: "STALE-TRUST",
+      forecastTrustSignal: "stale_recent_demand",
+      forecastTrustSeverity: "review",
+      qualityGateReason: "forecast_trust_review",
+      action: {
+        code: "verify_recent_demand",
+      },
+    });
+    expect(body.samples[1]).toMatchObject({
+      sku: "MISSING-LATEST",
+      forecastTrustSignal: "missing_latest_demand_timestamp",
+      forecastTrustSeverity: "watch",
+      inputGaps: ["missing_latest_demand_at"],
+      action: {
+        code: "repair_order_velocity_source",
+      },
+    });
+  });
+
   it("returns a filtered recommendation review queue for skipped, held, and quality-review items", async () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({

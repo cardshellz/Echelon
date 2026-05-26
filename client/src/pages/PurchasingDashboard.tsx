@@ -349,6 +349,47 @@ type SupplierSetupGaps = {
   }>;
 };
 
+type ForecastInputGapDiagnostics = {
+  generatedAt: string;
+  lookbackDays: number;
+  autoDraftMode: "draft_po" | "review_only";
+  approvalPolicy: AutoDraftApprovalPolicy;
+  totalRecommendations: number;
+  totalIssueItems: number;
+  inputGapItems: number;
+  reviewItems: number;
+  watchItems: number;
+  trustedItems: number;
+  forecastTrustHeldAutoDraft: number;
+  gapCounts: Record<string, number>;
+  trustSignalCounts: Record<string, number>;
+  trustSeverityCounts: Record<string, number>;
+  actionCounts: Record<string, number>;
+  samples: Array<{
+    recommendationId: string;
+    sku: string;
+    productName: string;
+    productId: number;
+    productVariantId: number | null;
+    status: string;
+    confidence: string;
+    candidateBand: string;
+    candidateScore: number;
+    qualityGateReason: string;
+    forecastTrustSignal: string;
+    forecastTrustSeverity: string;
+    forecastTrustDetail: string;
+    latestDemandAgeDays: number | null;
+    inputGaps: string[];
+    action: {
+      code: string;
+      label: string;
+      detail: string;
+      href: string;
+    };
+  }>;
+};
+
 type StaleAutoDraftPoDiagnostics = {
   generatedAt: string;
   scannedAutoDraftPos: number;
@@ -447,6 +488,10 @@ function topCountLabel(counts?: Record<string, number> | null): string {
   const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
   if (!top) return "None";
   return `${top[0].replace(/_/g, " ")} (${top[1]})`;
+}
+
+function formatGapCode(code: string): string {
+  return code.replace(/_/g, " ");
 }
 
 function formatForecastDiagnostics(diagnostics?: ForecastDiagnostics | null): string {
@@ -612,6 +657,11 @@ export default function PurchasingDashboard() {
     refetchInterval: 5 * 60 * 1000,
   });
 
+  const { data: forecastInputGaps } = useQuery<ForecastInputGapDiagnostics>({
+    queryKey: ["/api/purchasing/forecast-input-gaps?limit=5"],
+    refetchInterval: 5 * 60 * 1000,
+  });
+
   const { data: staleAutoDraftPos } = useQuery<StaleAutoDraftPoDiagnostics>({
     queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"],
     refetchInterval: 5 * 60 * 1000,
@@ -647,6 +697,7 @@ export default function PurchasingDashboard() {
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/runs?limit=5"] });
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/purchasing/forecast-input-gaps?limit=5"] });
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"] });
       }, 15000);
     },
@@ -705,6 +756,13 @@ export default function PurchasingDashboard() {
         { label: "Verify cost", value: supplierSetupGaps.counts.lastPurchaseCost + supplierSetupGaps.counts.staleSupplierCost + supplierSetupGaps.counts.unverifiedSupplierCost },
         { label: "Lead time", value: supplierSetupGaps.counts.defaultLeadTime + supplierSetupGaps.counts.productLeadTimeFallback },
       ]
+    : [];
+  const showForecastInputGaps = Boolean(forecastInputGaps?.totalIssueItems);
+  const forecastGapCounts = forecastInputGaps
+    ? Object.entries(forecastInputGaps.gapCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([label, value]) => ({ label: formatGapCode(label), value }))
     : [];
   const showStaleAutoDraftPos = Boolean(staleAutoDraftPos?.totalStale);
   const showProcurementHealth = Boolean(procurementHealth && procurementHealth.status !== "healthy");
@@ -836,6 +894,78 @@ export default function PurchasingDashboard() {
                     </div>
                   </button>
                 ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {showForecastInputGaps && forecastInputGaps && (
+          <Card className="border-amber-300 bg-amber-50/40">
+            <CardContent className="p-4 space-y-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 rounded-full bg-amber-100 p-1.5 text-amber-700">
+                    <AlertTriangle className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm font-semibold">Forecast Input Gaps</h2>
+                      <Badge variant="outline" className="text-[10px] uppercase">
+                        {forecastInputGaps.reviewItems} review / {forecastInputGaps.watchItems} watch
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {forecastInputGaps.totalIssueItems} affected of {forecastInputGaps.totalRecommendations} recommendations
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Live source-data gaps behind forecast trust so backfill work can target the real missing inputs.
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="self-start lg:self-center"
+                  onClick={() => navigate("/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review")}
+                >
+                  Review Forecasts
+                  <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="rounded-md border bg-background/90 p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Top Gaps</div>
+                  <div className="space-y-1.5">
+                    {forecastGapCounts.length ? (
+                      forecastGapCounts.map((row) => (
+                        <div key={row.label} className="flex items-center justify-between gap-3 text-xs">
+                          <span className="capitalize text-muted-foreground">{row.label}</span>
+                          <span className="font-semibold text-amber-700">{row.value}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-xs text-muted-foreground">No missing input fields detected.</div>
+                    )}
+                  </div>
+                </div>
+                <div className="rounded-md border bg-background/90 p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Top Samples</div>
+                  <div className="space-y-2">
+                    {forecastInputGaps.samples.slice(0, 3).map((sample) => (
+                      <div key={sample.recommendationId} className="rounded border bg-muted/30 p-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate font-mono font-semibold">{sample.sku}</span>
+                          <Badge variant="outline" className="text-[10px] capitalize">
+                            {sample.forecastTrustSeverity}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">{sample.action.detail}</p>
+                        <p className="mt-1 truncate text-[11px] text-amber-700">{sample.action.label}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </CardContent>
           </Card>
