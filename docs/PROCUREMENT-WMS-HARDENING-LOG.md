@@ -3029,3 +3029,30 @@ Next step:
 
 - Continue toward forecast input backfill or operator runbook actions for the
   trust gaps that now show in procurement health.
+
+### 2026-05-24 - Forecast Trust Health Actions
+
+Scope:
+
+- Pointed the forecast trust health source directly at the existing
+  recommendation review queue with `reviewQueue=quality_review_required` and
+  `reason=forecast_trust_review`.
+- Added server-side recommendation review queue filtering by reason code so
+  health, notifications, and future operator surfaces can deep-link to a
+  specific hold class without creating a parallel queue.
+- Updated Purchasing View to honor `reason` query parameters, fetch the matching
+  review queue slice, and show a clearable active reason filter.
+- Preserved existing queue filters, recommendation decisions, accepted queue,
+  PO handoff, recommendation math, supplier data, receiving, landed-cost, and
+  AP behavior.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/procurement-health.service.test.ts server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+- Passed: `git diff --check`
+
+Next step:
+
+- If this action path holds up, continue into source-data backfill for forecast
+  inputs that are repeatedly missing or stale.

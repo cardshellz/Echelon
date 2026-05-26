@@ -438,6 +438,15 @@ function formatReviewQueueKind(kind: string): string {
   return "Skipped";
 }
 
+function formatReviewQueueReason(reason: string): string {
+  if (reason === "forecast_trust_review") return "Forecast trust review";
+  if (reason === "medium_confidence_review") return "Medium confidence review";
+  if (reason === "low_confidence_review") return "Low confidence review";
+  if (reason === "held_by_approval_policy") return "Held by approval policy";
+  if (reason === "no_vendor") return "No vendor";
+  return reason.replace(/_/g, " ");
+}
+
 function formatRecommendationDecision(decision?: RecommendationDecisionValue | null): string {
   if (decision === "accepted_for_po") return "Accepted";
   if (decision === "po_handoff_created") return "PO handoff";
@@ -487,6 +496,10 @@ export default function PurchasingView() {
     const requested = params.get("reviewQueue");
     return isReviewQueueKind(requested) ? requested : "all";
   });
+  const [reviewQueueReasonFilter, setReviewQueueReasonFilter] = useState<string>(() => {
+    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    return params.get("reason")?.trim() || "all";
+  });
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -510,9 +523,12 @@ export default function PurchasingView() {
   });
 
   const { data: recommendationReviewQueue } = useQuery<RecommendationReviewQueueResponse>({
-    queryKey: ["/api/purchasing/recommendation-review-queue"],
+    queryKey: ["/api/purchasing/recommendation-review-queue", reviewQueueFilter, reviewQueueReasonFilter],
     queryFn: async () => {
-      const res = await fetch("/api/purchasing/recommendation-review-queue?limit=100");
+      const params = new URLSearchParams({ limit: "100" });
+      if (reviewQueueFilter !== "all") params.set("kind", reviewQueueFilter);
+      if (reviewQueueReasonFilter !== "all") params.set("reason", reviewQueueReasonFilter);
+      const res = await fetch(`/api/purchasing/recommendation-review-queue?${params.toString()}`);
       if (!res.ok) throw new Error("Failed to fetch recommendation review queue");
       return res.json();
     },
@@ -699,6 +715,7 @@ export default function PurchasingView() {
     });
   const filteredReviewQueue = (recommendationReviewQueue?.items ?? [])
     .filter((item) => reviewQueueFilter === "all" || item.kind === reviewQueueFilter)
+    .filter((item) => reviewQueueReasonFilter === "all" || item.reason.code === reviewQueueReasonFilter)
     .slice(0, 12);
   const acceptedQueueItems = (acceptedRecommendationQueue?.items ?? []).slice(0, 8);
   const recentRecommendationDecisions = (recommendationDecisionHistory?.decisions ?? []).slice(0, 8);
@@ -817,6 +834,7 @@ export default function PurchasingView() {
       if (isCandidateBandFilter(requestedBand)) setCandidateBandFilter(requestedBand);
       const requestedQueue = params.get("reviewQueue");
       if (isReviewQueueKind(requestedQueue)) setReviewQueueFilter(requestedQueue);
+      setReviewQueueReasonFilter(params.get("reason")?.trim() || "all");
       return;
     }
     navigate(href);
@@ -1032,7 +1050,10 @@ export default function PurchasingView() {
                       size="sm"
                       variant={reviewQueueFilter === option.value ? "default" : "outline"}
                       className="h-7 text-[11px] gap-1"
-                      onClick={() => setReviewQueueFilter(option.value)}
+                      onClick={() => {
+                        setReviewQueueFilter(option.value);
+                        setReviewQueueReasonFilter("all");
+                      }}
                     >
                       {option.label}
                       <span className="rounded bg-white/20 px-1">
@@ -1040,6 +1061,17 @@ export default function PurchasingView() {
                       </span>
                     </Button>
                   ))}
+                  {reviewQueueReasonFilter !== "all" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-[11px] gap-1 border-amber-200 bg-amber-50 text-amber-700"
+                      onClick={() => setReviewQueueReasonFilter("all")}
+                    >
+                      {formatReviewQueueReason(reviewQueueReasonFilter)}
+                      <span className="rounded bg-white/60 px-1">Clear</span>
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardHeader>

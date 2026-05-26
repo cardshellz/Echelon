@@ -130,7 +130,7 @@ export function buildProcurementHealthSummary(input: {
       critical: forecastTrustCritical,
       warning: forecastTrustWarning,
       total: input.forecastTrustHealth.totalTrustItems,
-      href: "/reorder-analysis",
+      href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review",
       actionLabel: "Review Forecasts",
       detail: "Forecast freshness and input gaps that can hold or weaken automated purchasing recommendations.",
     });
