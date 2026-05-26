@@ -233,4 +233,95 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
       `[ShipStation Sweeper] Done. Cancelled ${totalCancelled} stale order(s); flagged ${totalFlagged} straggler/duplicate order(s) for review.`,
     );
   }
+
+  // Second pass: fix Echelon-owned orders stuck in awaiting_payment.
+  // ShipStation splits don't copy paymentDate to the child order, leaving
+  // them unshippable. Push an update to set orderStatus + paymentDate.
+  await fixAwaitingPaymentOrders(baseUrl, encodedAuth);
+}
+
+async function fixAwaitingPaymentOrders(
+  baseUrl: string,
+  encodedAuth: string,
+): Promise<void> {
+  console.log("[ShipStation Sweeper] Checking for Echelon orders stuck in awaiting_payment...");
+
+  let page = 1;
+  const pageSize = 100;
+  let fixed = 0;
+
+  while (true) {
+    let res: Response;
+    try {
+      res = await fetch(
+        `${baseUrl}/orders?orderStatus=awaiting_payment&pageSize=${pageSize}&page=${page}`,
+        {
+          method: "GET",
+          headers: { Authorization: `Basic ${encodedAuth}` },
+        },
+      );
+    } catch (err: any) {
+      console.warn(`[ShipStation Sweeper] Failed to fetch awaiting_payment page ${page}: ${err.message}`);
+      break;
+    }
+
+    if (!res.ok) {
+      console.warn("[ShipStation Sweeper] Failed to fetch awaiting_payment queue", await res.text());
+      break;
+    }
+
+    const data = await res.json();
+    const ssOrders: any[] = data.orders || [];
+    if (ssOrders.length === 0) break;
+
+    for (const o of ssOrders) {
+      const orderKey = String(o.orderKey || "");
+      if (
+        !orderKey.startsWith("echelon-oms-") &&
+        !orderKey.startsWith("echelon-wms-shp-")
+      ) {
+        continue;
+      }
+
+      try {
+        const updateRes = await fetch(`${baseUrl}/orders/createorder`, {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${encodedAuth}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            orderId: o.orderId,
+            orderKey: o.orderKey,
+            orderNumber: o.orderNumber,
+            orderStatus: "awaiting_shipment",
+            paymentDate: o.orderDate || new Date().toISOString(),
+          }),
+        });
+
+        if (updateRes.ok) {
+          fixed++;
+          console.log(
+            `[ShipStation Sweeper] Fixed awaiting_payment → awaiting_shipment for SS order ${o.orderId} (${o.orderNumber}, key=${orderKey})`,
+          );
+        } else {
+          const body = await updateRes.text();
+          console.warn(
+            `[ShipStation Sweeper] Failed to fix awaiting_payment for SS order ${o.orderId}: ${updateRes.status} ${body}`,
+          );
+        }
+      } catch (err: any) {
+        console.error(
+          `[ShipStation Sweeper] Error fixing awaiting_payment for SS order ${o.orderId}: ${err.message}`,
+        );
+      }
+    }
+
+    if (data.page >= data.pages) break;
+    page++;
+  }
+
+  if (fixed > 0) {
+    console.log(`[ShipStation Sweeper] Fixed ${fixed} awaiting_payment order(s).`);
+  }
 }

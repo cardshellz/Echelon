@@ -836,15 +836,20 @@ describe("handleAddressChangeOnShipment", () => {
     expect(mock.getCallCount()).toBe(1);
   });
 
-  it("returns { mode: 'can_repush' } when shipment is 'queued' (no DB write)", async () => {
+  it("returns { mode: 'requires_review' } when shipment is 'queued' (already in SS)", async () => {
     const mock = makeDb([
       { rows: [shipmentRow({ status: "queued" })] },
+      { rows: [] },
     ]);
     const result = await handleAddressChangeOnShipment(mock.db, 501, {
       now: NOW,
     });
-    expect(result).toEqual({ mode: "can_repush", shipmentId: 501 });
-    expect(mock.getCallCount()).toBe(1);
+    expect(result).toEqual({ mode: "requires_review", shipmentId: 501 });
+    expect(mock.getCallCount()).toBe(2);
+    const updateSql = mock.calls[1].sqlText;
+    expect(updateSql).toMatch(/requires_review = true/);
+    expect(updateSql).toMatch(/review_reason = /);
+    expect(updateSql).toMatch(/address_changed_after_push/);
   });
 
   it("sets review flags and returns 'requires_review' when shipment is 'labeled'", async () => {
