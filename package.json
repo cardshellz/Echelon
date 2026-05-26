@@ -11,6 +11,7 @@
     "check": "tsc",
     "monitor:pick-replen-health": "tsx scripts/monitor-pick-replen-health.ts --notify --recoverInlineReplen --queueMissingReplen --json",
     "procurement:health-escalation": "tsx server/jobs/run-procurement-health-escalation.ts",
+    "procurement:forecast-input-gaps": "tsx scripts/audit-forecast-input-gaps.ts --json",
     "qa:daily-replen-counts": "tsx scripts/create-daily-replen-qa-counts.ts --json",
     "recover:allocation-exceptions": "tsx scripts/recover-allocation-exceptions.ts --json",
     "recover:replen-health": "tsx scripts/recover-replen-health.ts --json",
