@@ -1092,13 +1092,16 @@ export class WmsSyncService {
         console.warn(`${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}`);
       }
 
-      // Re-push active shipments to ShipStation so SS reflects updated items.
+      // Re-push planned shipments to ShipStation so SS reflects updated items.
+      // Only push 'planned' — 'queued'/'labeled' shipments are already in SS
+      // and re-pushing would overwrite the SS order (undoing any SS-side
+      // splits the operator made).
       if (this.services.shipStation?.isConfigured()) {
         try {
           const activeShipments = await db.execute<{ id: number }>(sql`
             SELECT id FROM wms.outbound_shipments
             WHERE order_id = ${wmsOrderId}
-              AND status NOT IN ('shipped', 'cancelled', 'voided')
+              AND status = 'planned'
             ORDER BY id
           `);
           for (const shipment of activeShipments.rows ?? []) {

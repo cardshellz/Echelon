@@ -428,8 +428,20 @@ export async function handleAddressChangeOnShipment(
 
   switch (current.status) {
     case "planned":
-    case "queued":
       return { mode: "can_repush", shipmentId };
+
+    case "queued": {
+      // Already pushed to ShipStation — re-pushing would overwrite the SS
+      // order and undo any operator-made splits.
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments SET
+          requires_review = true,
+          review_reason = 'address_changed_after_push',
+          updated_at = ${now}
+        WHERE id = ${shipmentId}
+      `);
+      return { mode: "requires_review", shipmentId };
+    }
 
     case "labeled":
     case "shipped": {
@@ -848,4 +860,60 @@ export async function dispatchShipmentEvent(
       return _never;
     }
   }
+}
+
+// ─── cancelStaleShipmentsIfFullyCovered ─────────────────────────────
+
+/**
+ * After a shipment ships, if the order is "partially_shipped" because
+ * of stale planned/queued shipments whose items are already fully
+ * covered by shipped shipments, cancel those stale shipments.
+ *
+ * Returns true when at least one shipment was cancelled (caller should
+ * re-run `recomputeOrderStatusFromShipments` to derive the new status).
+ */
+export async function cancelStaleShipmentsIfFullyCovered(
+  db: any,
+  wmsOrderId: number,
+): Promise<boolean> {
+  assertPositiveInt(wmsOrderId, "wmsOrderId");
+
+  const coverageResult: any = await db.execute(sql`
+    SELECT oi.id, oi.quantity,
+           COALESCE(SUM(osi.qty) FILTER (
+             WHERE os.status IN ('shipped', 'returned', 'lost')
+           ), 0) AS shipped_qty
+    FROM wms.order_items oi
+    LEFT JOIN wms.outbound_shipment_items osi ON osi.order_item_id = oi.id
+    LEFT JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+    WHERE oi.order_id = ${wmsOrderId}
+    GROUP BY oi.id, oi.quantity
+  `);
+
+  const rows: Array<{ quantity: number; shipped_qty: number }> =
+    coverageResult?.rows ?? [];
+  if (rows.length === 0) return false;
+
+  const allCovered = rows.every(
+    (r) => Number(r.shipped_qty) >= Number(r.quantity),
+  );
+  if (!allCovered) return false;
+
+  const cancelResult: any = await db.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET status = 'cancelled',
+        cancelled_at = NOW(),
+        updated_at = NOW()
+    WHERE order_id = ${wmsOrderId}
+      AND status IN ('planned', 'queued')
+    RETURNING id
+  `);
+
+  const cancelledCount = cancelResult?.rows?.length ?? 0;
+  if (cancelledCount > 0) {
+    console.log(
+      `[ShipmentRollup] Cancelled ${cancelledCount} stale shipment(s) for fully-covered order ${wmsOrderId}`,
+    );
+  }
+  return cancelledCount > 0;
 }

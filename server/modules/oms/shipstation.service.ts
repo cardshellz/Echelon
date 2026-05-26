@@ -16,6 +16,7 @@ import type { OmsOrderWithLines } from "./oms.service";
 import { buildTrackingUrl } from "./tracking-url.util";
 import { isLineSumWithinTolerance } from "@shared/validation/currency";
 import {
+  cancelStaleShipmentsIfFullyCovered,
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
   type ShipmentEvent,
@@ -1939,7 +1940,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // status is now derived from the full shipment set. Shipped replays
     // also run this cascade because the original attempt may have died
     // after WMS shipment state changed but before OMS/Shopify were updated.
-    const rollup = await recomputeOrderStatusFromShipments(db, wmsOrderId);
+    let rollup = await recomputeOrderStatusFromShipments(db, wmsOrderId);
+
+    if (event.kind === "shipped" && rollup.warehouseStatus === "partially_shipped") {
+      const cleaned = await cancelStaleShipmentsIfFullyCovered(db, wmsOrderId);
+      if (cleaned) {
+        rollup = await recomputeOrderStatusFromShipments(db, wmsOrderId);
+      }
+    }
+
     console.log(
       `[ShipStation Webhook V2] WMS order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus} (changed=${rollup.changed})`,
     );

@@ -569,6 +569,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [{ status: "shipped" }, { status: "queued" }] },
       // recompute UPDATE wms.orders to partially_shipped.
       { rows: [] },
+      // cancelStaleShipmentsIfFullyCovered: coverage check (not all covered).
+      { rows: [{ id: 1, quantity: 2, shipped_qty: 1 }] },
       // resolve OMS id.
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard.

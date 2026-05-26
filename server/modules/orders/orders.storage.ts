@@ -13,7 +13,7 @@ import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { computeSortRank } from "./sort-rank";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
-import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
+import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -548,6 +548,17 @@ export const orderMethods: IOrderStorage = {
                 console.log(
                   `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): warehouse_status → ${rollup.warehouseStatus}`,
                 );
+              }
+            } else if (hasShipped && hasOpen) {
+              const cleaned = await cancelStaleShipmentsIfFullyCovered(db, order.id);
+              if (cleaned) {
+                const rollup = await recomputeOrderStatusFromShipments(db, order.id);
+                if (rollup.changed) {
+                  order.warehouseStatus = rollup.warehouseStatus;
+                  console.log(
+                    `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): cancelled stale shipments → ${rollup.warehouseStatus}`,
+                  );
+                }
               }
             }
           }
