@@ -315,7 +315,16 @@ export const orderMethods: IOrderStorage = {
         AND (oms.financial_status IS NULL OR oms.financial_status NOT IN ('refunded', 'voided'))
         AND (
           -- Ready/in_progress/ready_to_ship orders: show in pick queue
-          o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+          -- Exclude orders with zero shippable items (nothing to pick).
+          (
+            o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND EXISTS (
+              SELECT 1 FROM wms.order_items oi
+              WHERE oi.order_id = o.id
+                AND COALESCE(oi.requires_shipping, 1) <> 0
+                AND oi.status NOT IN ('cancelled', 'completed', 'short')
+            )
+          )
           -- Completed orders: show for 24 hours in done queue
           OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours' AND COALESCE(o.item_count, 0) > 0)
         )
@@ -521,6 +530,28 @@ export const orderMethods: IOrderStorage = {
             order.completedAt = new Date();
           } catch (err) {
             console.error(`[PickQueue] Failed to auto-fix order ${order.orderNumber}:`, err);
+          }
+        }
+      }
+
+      // Self-heal: auto-complete orders with zero shippable items remaining
+      if (["ready", "in_progress"].includes(order.warehouseStatus)) {
+        const items = itemsByOrderId.get(order.id) || [];
+        const pendingShippable = items.filter(
+          i => i.requiresShipping === 1 && !["cancelled", "completed", "short"].includes(i.status),
+        );
+        if (pendingShippable.length === 0) {
+          try {
+            await db.execute(
+              sql`UPDATE wms.orders SET warehouse_status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = ${order.id}`,
+            );
+            order.warehouseStatus = "completed";
+            order.completedAt = new Date();
+            console.log(
+              `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): zero shippable items → completed`,
+            );
+          } catch (err) {
+            console.error(`[PickQueue] Failed to auto-complete zero-item order ${order.orderNumber}:`, err);
           }
         }
       }
