@@ -181,17 +181,15 @@ describe("deriveWmsFromShipments — roll-up matrix", () => {
     expect(deriveWmsFromShipments(["shipped", "cancelled"])).toBe("shipped");
   });
 
-  it("all open (none shipped) → ready_to_ship", () => {
-    expect(deriveWmsFromShipments(["planned"])).toBe("ready_to_ship");
-    expect(deriveWmsFromShipments(["planned", "queued"])).toBe("ready_to_ship");
-    expect(deriveWmsFromShipments(["queued", "labeled"])).toBe("ready_to_ship");
-    expect(deriveWmsFromShipments(["voided"])).toBe("ready_to_ship");
+  it("all open (none shipped) → ready", () => {
+    expect(deriveWmsFromShipments(["planned"])).toBe("ready");
+    expect(deriveWmsFromShipments(["planned", "queued"])).toBe("ready");
+    expect(deriveWmsFromShipments(["queued", "labeled"])).toBe("ready");
+    expect(deriveWmsFromShipments(["voided"])).toBe("ready");
   });
 
-  it("mixed open + cancelled (no shipped) → ready_to_ship", () => {
-    expect(deriveWmsFromShipments(["planned", "cancelled"])).toBe(
-      "ready_to_ship",
-    );
+  it("mixed open + cancelled (no shipped) → ready", () => {
+    expect(deriveWmsFromShipments(["planned", "cancelled"])).toBe("ready");
   });
 
   it("returned counts as shipped for roll-up", () => {
