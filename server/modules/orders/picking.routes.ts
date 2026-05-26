@@ -336,6 +336,7 @@ export function registerPickingRoutes(app: Express) {
           `);
           const ssId = ssRow.rows[0]?.shipstation_order_id;
           if (ssId) await shipStation.putOrderOnHold(Number(ssId));
+          await shipStation.updateSortRank(id);
         } catch (err: any) {
           console.warn(`[Hold] ShipStation mirror failed for order ${id}:`, err.message);
         }
@@ -392,6 +393,7 @@ export function registerPickingRoutes(app: Express) {
           `);
           const ssId = ssRow.rows[0]?.shipstation_order_id;
           if (ssId) await shipStation.releaseOrderFromHold(Number(ssId));
+          await shipStation.updateSortRank(id);
         } catch (err: any) {
           console.warn(`[ReleaseHold] ShipStation mirror failed for order ${id}:`, err.message);
         }
@@ -441,6 +443,16 @@ export function registerPickingRoutes(app: Express) {
       }
 
       const label = priority === "reset" ? "reset to SLA priority" : (priority >= 9999 ? "bumped to top" : priority < 0 ? "held" : `set to ${priority}`);
+
+      // Push updated sort_rank to ShipStation (non-blocking).
+      (async () => {
+        try {
+          const { shipStation } = req.app.locals.services || {};
+          if (shipStation?.isConfigured()) await shipStation.updateSortRank(id);
+        } catch (err: any) {
+          console.warn(`[Priority] ShipStation sort_rank update failed for order ${id}:`, err.message);
+        }
+      })();
 
       // Log the priority change (non-blocking)
       storage.createPickingLog({

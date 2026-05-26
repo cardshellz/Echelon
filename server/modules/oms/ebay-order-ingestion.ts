@@ -78,10 +78,8 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
   const address = shipTo?.contactAddress;
   const pricingSummary = ebayOrder.pricingSummary;
 
-  // eBay's per-order ship-by deadline — the platform's hard commitment for
-  // this order. Feeds the SLA slot of sort_rank so urgent ship-by orders
-  // outrank generic 3-day-default orders.
-  const channelShipByRaw = (shippingStep as any)?.shipByDate;
+  const fulfillmentInstruction = ebayOrder.fulfillmentStartInstructions?.[0];
+  const channelShipByRaw = fulfillmentInstruction?.shipByDate;
   const channelShipByDate = channelShipByRaw ? new Date(channelShipByRaw) : null;
 
   const lineItems: LineItemData[] = (ebayOrder.lineItems || []).map((item) => {

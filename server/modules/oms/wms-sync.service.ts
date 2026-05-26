@@ -23,7 +23,7 @@ import {
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
-import { computeSortRank, getShippingBase, type ShippingServiceLevel } from "../orders/sort-rank";
+import { computeSortRank, getShippingBase, getSlaDefaultDays, type ShippingServiceLevel } from "../orders/sort-rank";
 import {
   validateOmsOrderFinancials,
   buildWmsOrderFinancialSnapshot,
@@ -37,6 +37,17 @@ import {
 import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
 
 type WmsBinLocation = { location: string; zone: string };
+
+function addBusinessDays(date: Date, days: number): Date {
+  const result = new Date(date);
+  let added = 0;
+  while (added < days) {
+    result.setDate(result.getDate() + 1);
+    if (result.getDay() !== 0 && result.getDay() !== 6) added++;
+  }
+  result.setHours(17, 0, 0, 0);
+  return result;
+}
 
 async function resolvePrimaryBinLocation(
   database: typeof db,
@@ -194,15 +205,33 @@ export class WmsSyncService {
         ? this.determineWarehouseStatus(omsOrder)
         : "completed"; // Pure digital/donation/membership → skip pick queue
       const { priority, memberPlanName, memberPlanColor } = await this.determinePriority(omsOrder);
-      // Prefer platform ship-by-date over any channel-default SLA for the
-      // sort_rank SLA slot. sla-monitor will also set sla_due_at later,
-      // but we compute sort_rank now so new orders are ranked correctly
-      // the moment they land in WMS.
+      // Compute SLA due date at sync time so sort_rank includes urgency
+      // from the start. Priority: platform ship-by-date → channel partner
+      // profile sla_days → global sla_default_days.
       const channelShipBy = (omsOrder as any).channelShipByDate as Date | string | null | undefined;
+      let slaDueAt: Date | string | null = channelShipBy ?? (omsOrder as any).slaDueAt ?? null;
+      if (!slaDueAt) {
+        let slaDays = await getSlaDefaultDays(db).catch(() => 3);
+        if (omsOrder.channelId) {
+          try {
+            const profileResult: any = await db.execute(sql`
+              SELECT sla_days FROM channels.partner_profiles
+              WHERE channel_id = ${omsOrder.channelId}
+              LIMIT 1
+            `);
+            const profileSlaDays = Number(profileResult?.rows?.[0]?.sla_days);
+            if (Number.isFinite(profileSlaDays) && profileSlaDays > 0) {
+              slaDays = profileSlaDays;
+            }
+          } catch {}
+        }
+        const placedAt = omsOrder.orderedAt ? new Date(omsOrder.orderedAt) : new Date();
+        slaDueAt = addBusinessDays(placedAt, slaDays);
+      }
       const sortRank = computeSortRank({
         priority,
         onHold: false,
-        slaDueAt: channelShipBy ?? (omsOrder as any).slaDueAt ?? null,
+        slaDueAt,
         orderPlacedAt: omsOrder.orderedAt,
       });
 
@@ -227,6 +256,8 @@ export class WmsSyncService {
         memberPlanName,
         memberPlanColor,
         channelShipByDate: channelShipBy ? new Date(channelShipBy as any) : null,
+        slaDueAt: slaDueAt instanceof Date ? slaDueAt : slaDueAt ? new Date(slaDueAt) : null,
+        slaStatus: "on_time",
         sortRank,
         warehouseStatus,
         itemCount: omsLines.length,
@@ -852,7 +883,7 @@ export class WmsSyncService {
     const wmsOrderId = wmsOrderResult.rows[0].id;
     const warehouseStatus = wmsOrderResult.rows[0].warehouse_status;
 
-    if (["shipped", "cancelled"].includes(warehouseStatus)) {
+    if (["shipped", "cancelled", "completed"].includes(warehouseStatus)) {
       console.log(`${LOG} Skipping order ${wmsOrderId} — terminal state '${warehouseStatus}'`);
       return result;
     }

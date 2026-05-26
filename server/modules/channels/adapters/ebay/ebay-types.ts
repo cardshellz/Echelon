@@ -220,6 +220,7 @@ export interface EbayOrder {
 
 export interface EbayFulfillmentInstruction {
   fulfillmentInstructionsType: string;
+  shipByDate?: string;
   shippingStep: {
     shippingCarrierCode?: string;
     shippingServiceCode: string;

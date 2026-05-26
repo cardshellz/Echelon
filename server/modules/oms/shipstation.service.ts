@@ -2853,21 +2853,38 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
   /**
    * Update only the sort_rank customField1 of an existing ShipStation order.
-   * Implemented as a full re-push via /orders/createorder — ShipStation
-   * treats createorder as upsert when orderKey matches.
+   * Fetches the current SS order and re-pushes with updated customField1
+   * via /orders/createorder (upsert by orderId).
    */
-  async function updateSortRank(omsOrderId: number): Promise<void> {
+  async function updateSortRank(wmsOrderId: number): Promise<void> {
     if (!isConfigured()) return;
     try {
-      const omsRows: any = await db.execute(sql`
-        SELECT id, shipstation_order_id FROM oms.oms_orders WHERE id = ${omsOrderId}
+      const shipmentRows: any = await db.execute(sql`
+        SELECT id, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE order_id = ${wmsOrderId}
+          AND shipstation_order_id IS NOT NULL
+          AND status NOT IN ('cancelled', 'voided')
+        ORDER BY id
       `);
-      if (!omsRows?.rows?.[0]?.shipstation_order_id) return;
-      // Caller is expected to use pushOrder() for a full re-sync; this
-      // stub exists so callers can do a lightweight refresh later.
-      console.log(`[ShipStation] sort_rank update requested for OMS ${omsOrderId} (full re-push recommended)`);
+      const rankRow: any = await db.execute(sql`
+        SELECT sort_rank FROM wms.orders WHERE id = ${wmsOrderId} LIMIT 1
+      `);
+      const sortRank = rankRow?.rows?.[0]?.sort_rank;
+      if (!sortRank) return;
+
+      for (const row of shipmentRows?.rows ?? []) {
+        const ssOrderId = Number(row.shipstation_order_id);
+        if (!ssOrderId) continue;
+        const ssOrder = await getOrderById(ssOrderId);
+        if (!ssOrder) continue;
+        await apiRequest("POST", "/orders/createorder", {
+          ...ssOrder,
+          customField1: sortRank,
+        });
+      }
     } catch (err: any) {
-      console.error(`[ShipStation] updateSortRank failed for OMS ${omsOrderId}:`, err.message);
+      console.error(`[ShipStation] updateSortRank failed for WMS order ${wmsOrderId}:`, err.message);
     }
   }
 
