@@ -74,12 +74,16 @@ describe("sweepShipStationQueue", () => {
       .mockResolvedValueOnce({
         ok: true,
         text: async () => "",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ page: 1, pages: 1, orders: [] }),
       });
     globalThis.fetch = fetchMock as any;
 
     await sweepShipStationQueue("api-key", "api-secret");
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(String(fetchMock.mock.calls[1]![0])).toContain("/orders/createorder");
     const cancelBody = JSON.parse((fetchMock.mock.calls[1]![1] as any).body);
     expect(cancelBody).toMatchObject({
@@ -119,12 +123,16 @@ describe("sweepShipStationQueue", () => {
         ok: false,
         status: 500,
         text: async () => "boom",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ page: 1, pages: 1, orders: [] }),
       });
     globalThis.fetch = fetchMock as any;
 
     await sweepShipStationQueue("api-key", "api-secret");
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(mockDb.execute).toHaveBeenCalledTimes(2);
     const updateSql = sqlText(mockDb.execute.mock.calls[1]![0]);
     expect(updateSql).toMatch(/requires_review = true/);
