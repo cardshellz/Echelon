@@ -198,6 +198,10 @@ export async function enqueueShipStationRetry(
 export interface RetryShipStationService {
   processShipNotify(resourceUrl: string): Promise<number>;
   pushShipment?(shipmentId: number): Promise<unknown>;
+  syncWmsOrderShipStationHoldState?(
+    wmsOrderId: number,
+    mode: "hold" | "release",
+  ): Promise<{ touched: number }>;
 }
 
 /**
@@ -461,6 +465,55 @@ export async function enqueueShipStationShipmentPushRetry(
     provider: "internal",
     topic: "shipstation_shipment_push",
     payload: { shipmentId },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
+export async function enqueueShipStationHoldSyncRetry(
+  dbArg: any,
+  wmsOrderId: number,
+  requestedMode: "hold" | "release",
+  cause?: unknown,
+): Promise<void> {
+  if (
+    typeof wmsOrderId !== "number" ||
+    !Number.isInteger(wmsOrderId) ||
+    wmsOrderId <= 0
+  ) {
+    throw new Error(
+      `enqueueShipStationHoldSyncRetry: wmsOrderId must be a positive integer (got ${wmsOrderId})`,
+    );
+  }
+  if (requestedMode !== "hold" && requestedMode !== "release") {
+    throw new Error(
+      `enqueueShipStationHoldSyncRetry: requestedMode must be hold or release (got ${requestedMode})`,
+    );
+  }
+
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "shipstation_hold_sync",
+    scope: sql`payload->>'wmsOrderId' = ${String(wmsOrderId)}`,
+  })) {
+    return;
+  }
+
+  await insertWebhookRetryQueueRow(dbArg, {
+    provider: "internal",
+    topic: "shipstation_hold_sync",
+    payload: { wmsOrderId, requestedMode },
     attempts: 0,
     status: "pending",
     lastError: message || null,
@@ -892,6 +945,97 @@ export async function dispatchShipStationShipmentPushRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+export async function dispatchShipStationHoldSyncRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as {
+    wmsOrderId?: number;
+    requestedMode?: "hold" | "release";
+  } | null;
+  const wmsOrderId = payload?.wmsOrderId;
+
+  if (
+    typeof wmsOrderId !== "number" ||
+    !Number.isInteger(wmsOrderId) ||
+    wmsOrderId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item,
+      "malformed payload: wmsOrderId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_hold_sync payload)`,
+    );
+    return "malformed";
+  }
+
+  const shipStationService = resolveShipStationService(dbArg);
+  if (
+    !shipStationService ||
+    typeof shipStationService.syncWmsOrderShipStationHoldState !== "function"
+  ) {
+    await keepPending(
+      dbArg,
+      item.id,
+      "ShipStation hold sync service not available on db.__shipStationService",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) deferred - ShipStation hold sync service unavailable`,
+    );
+    return "pending";
+  }
+
+  const orderResult = await dbArg.execute(sql`
+    SELECT id, order_number, on_hold
+    FROM wms.orders
+    WHERE id = ${wmsOrderId}
+    LIMIT 1
+  `);
+  const orderRow = Array.isArray(orderResult?.rows) ? orderResult.rows[0] : null;
+  if (!orderRow) {
+    await markRowDead(
+      dbArg,
+      item,
+      `WMS order ${wmsOrderId} not found for ShipStation hold sync`,
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found`,
+    );
+    return "dead";
+  }
+
+  const mode: "hold" | "release" = Number(orderRow.on_hold) === 1 ? "hold" : "release";
+
+  try {
+    const result =
+      await shipStationService.syncWmsOrderShipStationHoldState(wmsOrderId, mode);
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}, touched=${result?.touched ?? 0}) succeeded`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "shipstation_hold_sync", orderId: wmsOrderId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -1441,6 +1585,20 @@ async function processPendingWebhooks() {
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} shipstation_shipment_push dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === "shipstation_hold_sync"
+    ) {
+      try {
+        await dispatchShipStationHoldSyncRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} shipstation_hold_sync dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
