@@ -57,11 +57,13 @@ vi.mock("../../../wms/create-shipment", () => ({
 
 import {
   enqueueShipStationRetry,
+  enqueueShipStationHoldSyncRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueOmsWmsSyncRetry,
   enqueueWmsShipmentCreateRetry,
   requeueDeadWebhookRetry,
   dispatchShipStationRetry,
+  dispatchShipStationHoldSyncRetry,
   dispatchShipStationShipmentPushRetry,
   dispatchOmsWmsSyncRetry,
   dispatchWmsShipmentCreateRetry,
@@ -97,6 +99,10 @@ function makeDb(opts: {
   shipStationService?: {
     processShipNotify: (url: string) => Promise<number>;
     pushShipment?: (shipmentId: number) => Promise<unknown>;
+    syncWmsOrderShipStationHoldState?: (
+      wmsOrderId: number,
+      mode: "hold" | "release",
+    ) => Promise<{ touched: number }>;
   } | null;
   fulfillmentPush?:
     | {
@@ -541,6 +547,44 @@ describe("enqueueShipStationShipmentPushRetry", () => {
   });
 });
 
+describe("enqueueShipStationHoldSyncRetry", () => {
+  it("inserts an immediately due internal ShipStation hold sync row", async () => {
+    const { db, inserts } = makeDb();
+
+    await enqueueShipStationHoldSyncRetry(db, 202589, "hold", "manual repair");
+
+    expect(inserts).toHaveLength(1);
+    const row = inserts[0]!.values;
+    expect(row.provider).toBe("internal");
+    expect(row.topic).toBe("shipstation_hold_sync");
+    expect(row.payload).toEqual({ wmsOrderId: 202589, requestedMode: "hold" });
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBe("manual repair");
+    expect(row.nextRetryAt).toBeInstanceOf(Date);
+  });
+
+  it("does not enqueue duplicate pending hold sync rows for the same WMS order", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 42 }] }],
+    });
+
+    await enqueueShipStationHoldSyncRetry(db, 202589, "release", "operator retry");
+
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("rejects invalid WMS order ids", async () => {
+    const { db, inserts } = makeDb();
+
+    await expect(enqueueShipStationHoldSyncRetry(db, 0, "hold", "bad")).rejects.toThrow(
+      /positive integer/,
+    );
+
+    expect(inserts).toHaveLength(0);
+  });
+});
+
 describe("requeueDeadWebhookRetry", () => {
   it("resets a dead retry row to pending", async () => {
     const { db } = makeDb();
@@ -611,6 +655,79 @@ describe("dispatchShipStationRetry :: happy path", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0]!.set.status).toBe("success");
     expect(updates[0]!.set.updatedAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("dispatchShipStationHoldSyncRetry", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("uses current WMS on_hold state instead of stale requested mode", async () => {
+    const syncHold = vi.fn(async () => ({ touched: 1 }));
+    const { db, updates } = makeDb({
+      shipStationService: {
+        processShipNotify: async () => 1,
+        syncWmsOrderShipStationHoldState: syncHold,
+      },
+      executeRows: [{ rows: [{ id: 202589, order_number: "#57981", on_hold: 1 }] }],
+    });
+
+    const outcome = await dispatchShipStationHoldSyncRetry(db, {
+      id: 701,
+      provider: "internal",
+      topic: "shipstation_hold_sync",
+      payload: { wmsOrderId: 202589, requestedMode: "release" },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(syncHold).toHaveBeenCalledWith(202589, "hold");
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("releases ShipStation when current WMS on_hold state is cleared", async () => {
+    const syncHold = vi.fn(async () => ({ touched: 1 }));
+    const { db } = makeDb({
+      shipStationService: {
+        processShipNotify: async () => 1,
+        syncWmsOrderShipStationHoldState: syncHold,
+      },
+      executeRows: [{ rows: [{ id: 202589, order_number: "#57981", on_hold: 0 }] }],
+    });
+
+    const outcome = await dispatchShipStationHoldSyncRetry(db, {
+      id: 702,
+      provider: "internal",
+      topic: "shipstation_hold_sync",
+      payload: { wmsOrderId: 202589, requestedMode: "hold" },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(syncHold).toHaveBeenCalledWith(202589, "release");
+  });
+
+  it("keeps the row pending when the ShipStation service is not wired", async () => {
+    const { db, updates } = makeDb({
+      shipStationService: { processShipNotify: async () => 1 },
+    });
+
+    const outcome = await dispatchShipStationHoldSyncRetry(db, {
+      id: 703,
+      provider: "internal",
+      topic: "shipstation_hold_sync",
+      payload: { wmsOrderId: 202589, requestedMode: "hold" },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.lastError).toMatch(/hold sync service not available/);
   });
 });
 

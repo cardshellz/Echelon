@@ -8,9 +8,11 @@ const PICKING_ROUTES_SRC = readFileSync(
 );
 
 describe("picking routes ShipStation hold sync", () => {
-  it("mirrors hold/release through WMS shipment-level ShipStation pointers", () => {
-    expect(PICKING_ROUTES_SRC).toMatch(/syncWmsOrderShipStationHoldState\(id, "hold"\)/);
-    expect(PICKING_ROUTES_SRC).toMatch(/syncWmsOrderShipStationHoldState\(id, "release"\)/);
+  it("queues durable hold/release sync and mirrors through WMS shipment-level ShipStation pointers", () => {
+    expect(PICKING_ROUTES_SRC).toMatch(/enqueueShipStationHoldSyncRetry\(db, orderId, mode, context\)/);
+    expect(PICKING_ROUTES_SRC).toMatch(/queueShipStationHoldSync\(id, "hold", "Hold"\)/);
+    expect(PICKING_ROUTES_SRC).toMatch(/queueShipStationHoldSync\(id, "release", "ReleaseHold"\)/);
+    expect(PICKING_ROUTES_SRC).toMatch(/syncWmsOrderShipStationHoldState\(orderId, mode\)/);
     expect(PICKING_ROUTES_SRC).not.toMatch(/oms\.shipstation_order_id/);
   });
 });

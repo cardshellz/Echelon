@@ -6,6 +6,8 @@ const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";
+import { db } from "../../db";
+import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.worker";
 import Papa from "papaparse";
 
 export function registerPickingRoutes(app: Express) {
@@ -14,6 +16,30 @@ export function registerPickingRoutes(app: Express) {
     error: "Picker replen confirmation has been removed",
     message: "Replenishment is system-owned. Use replenishment/admin workflows for task execution or cancellation; picker input is limited to pick exceptions and QA review signals.",
   });
+  const queueShipStationHoldSync = async (
+    orderId: number,
+    mode: "hold" | "release",
+    context: string,
+  ) => {
+    await enqueueShipStationHoldSyncRetry(db, orderId, mode, context);
+
+    const { shipStation } = app.locals.services || {};
+    if (
+      !shipStation?.isConfigured?.() ||
+      typeof shipStation.syncWmsOrderShipStationHoldState !== "function"
+    ) {
+      return;
+    }
+
+    void shipStation
+      .syncWmsOrderShipStationHoldState(orderId, mode)
+      .catch((err: any) => {
+        console.warn(
+          `[${context}] immediate ShipStation ${mode} sync failed for order ${orderId}; retry queued:`,
+          err?.message ?? err,
+        );
+      });
+  };
 
   // ===== PICKING QUEUE API =====
   
@@ -319,21 +345,8 @@ export function registerPickingRoutes(app: Express) {
         return res.status(404).json({ error: "Order not found" });
       }
 
-      // Mirror hold state to ShipStation so packer's grid doesn't show it.
-      // Non-blocking — local state is authoritative, SS sync is best effort.
-      (async () => {
-        try {
-          const { shipStation } = req.app.locals.services || {};
-          if (!shipStation?.isConfigured()) return;
-          if (typeof shipStation.syncWmsOrderShipStationHoldState === "function") {
-            await shipStation.syncWmsOrderShipStationHoldState(id, "hold");
-          } else {
-            await shipStation.updateSortRank(id);
-          }
-        } catch (err: any) {
-          console.warn(`[Hold] ShipStation mirror failed for order ${id}:`, err.message);
-        }
-      })();
+      // Local WMS state is authoritative; ShipStation sync is retried durably.
+      await queueShipStationHoldSync(id, "hold", "Hold");
       
       // Log the hold action (non-blocking)
       storage.createPickingLog({
@@ -372,20 +385,8 @@ export function registerPickingRoutes(app: Express) {
         return res.status(404).json({ error: "Order not found" });
       }
 
-      // Mirror release to ShipStation.
-      (async () => {
-        try {
-          const { shipStation } = req.app.locals.services || {};
-          if (!shipStation?.isConfigured()) return;
-          if (typeof shipStation.syncWmsOrderShipStationHoldState === "function") {
-            await shipStation.syncWmsOrderShipStationHoldState(id, "release");
-          } else {
-            await shipStation.updateSortRank(id);
-          }
-        } catch (err: any) {
-          console.warn(`[ReleaseHold] ShipStation mirror failed for order ${id}:`, err.message);
-        }
-      })();
+      // Local WMS state is authoritative; ShipStation sync is retried durably.
+      await queueShipStationHoldSync(id, "release", "ReleaseHold");
       
       // Log the unhold action (non-blocking)
       storage.createPickingLog({
