@@ -235,6 +235,7 @@ export interface IProcurementStorage {
   updateAutoDraftRun(id: number, updates: any): Promise<void>;
   getRecentRecommendationDecisions(limit?: number): Promise<any[]>;
   getLatestRecommendationDecisions(recommendationIds: string[], kinds?: string[]): Promise<any[]>;
+  getLatestRecommendationDecisionsByDecision(decision: string, limit?: number): Promise<any[]>;
   createRecommendationDecision(data: any): Promise<any>;
   getDashboardData(lookbackDays: number): Promise<any>;
   getAutoDraftSettings(warehouseId?: number): Promise<any>;
@@ -1887,6 +1888,48 @@ export const procurementMethods: IProcurementStorage = {
       .from(purchasingRecommendationDecisions)
       .where(and(...conditions))
       .orderBy(desc(purchasingRecommendationDecisions.decidedAt));
+  },
+
+  async getLatestRecommendationDecisionsByDecision(decision: string, limit: number = 25): Promise<any[]> {
+    const safeDecision = String(decision ?? "").trim();
+    if (!safeDecision) return [];
+    const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+
+    const result = await db.execute(sql`
+      WITH latest_decisions AS (
+        SELECT DISTINCT ON (recommendation_id, kind)
+          id,
+          recommendation_id AS "recommendationId",
+          kind,
+          decision,
+          status,
+          decision_reason AS "decisionReason",
+          note,
+          source,
+          auto_draft_run_id AS "autoDraftRunId",
+          product_id AS "productId",
+          product_variant_id AS "productVariantId",
+          vendor_id AS "vendorId",
+          sku,
+          product_name AS "productName",
+          candidate_score AS "candidateScore",
+          candidate_band AS "candidateBand",
+          recommendation_snapshot AS "recommendationSnapshot",
+          decided_by AS "decidedBy",
+          decided_at AS "decidedAt",
+          created_at AS "createdAt"
+        FROM procurement.purchasing_recommendation_decisions
+        WHERE status = 'active'
+        ORDER BY recommendation_id, kind, decided_at DESC, id DESC
+      )
+      SELECT *
+      FROM latest_decisions
+      WHERE decision = ${safeDecision}
+      ORDER BY "decidedAt" DESC, id DESC
+      LIMIT ${safeLimit}
+    `);
+
+    return result.rows ?? [];
   },
 
   async createRecommendationDecision(data: any): Promise<any> {
