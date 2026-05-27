@@ -10,6 +10,7 @@ import type { OmsService } from "../modules/oms/oms.service";
 import type { FulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import type { ShipStationService } from "../modules/oms/shipstation.service";
 import { db } from "../db";
+import { sql } from "drizzle-orm";
 import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
 import { remediateOmsFlowIssue } from "../modules/oms/oms-flow-reconciliation.service";
 import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service";
@@ -227,7 +228,7 @@ export function registerOmsRoutes(app: Express) {
   });
 
   // -----------------------------------------------------------------------
-  // POST /api/oms/orders/:id/push-to-shipstation — manual ShipStation push
+  // POST /api/oms/orders/:id/push-to-shipstation — manual WMS shipment push
   // -----------------------------------------------------------------------
   app.post("/api/oms/orders/:id/push-to-shipstation", requireAuth, async (req: Request, res: Response) => {
     try {
@@ -243,12 +244,40 @@ export function registerOmsRoutes(app: Express) {
         return res.status(404).json({ error: "Order not found" });
       }
 
-      const result = await ss.pushOrder(order);
+      const shipmentRows = await db.execute<{
+        shipment_id: number;
+        wms_order_id: number;
+        shipment_status: string;
+      }>(sql`
+        SELECT os.id AS shipment_id,
+               w.id AS wms_order_id,
+               os.status AS shipment_status
+        FROM wms.orders w
+        JOIN wms.outbound_shipments os ON os.order_id = w.id
+        WHERE w.source = 'oms'
+          AND w.oms_fulfillment_order_id = ${String(id)}
+          AND os.status IN ('planned', 'queued', 'voided')
+        ORDER BY os.id
+      `);
+
+      if (shipmentRows.rows.length === 0) {
+        return res.status(409).json({
+          error: "No pushable WMS shipment found for OMS order",
+          omsOrderId: id,
+        });
+      }
+
+      const pushed = [];
+      for (const row of shipmentRows.rows) {
+        pushed.push({
+          shipmentId: row.shipment_id,
+          result: await ss.pushShipment(row.shipment_id),
+        });
+      }
       const updated = await getOms(req).getOrderById(id);
 
       res.json({
-        shipstationOrderId: result.shipstationOrderId,
-        orderKey: result.orderKey,
+        pushed,
         order: updated,
       });
     } catch (err: any) {

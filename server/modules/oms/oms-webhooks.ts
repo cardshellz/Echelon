@@ -86,8 +86,7 @@ interface WmsServices {
 
 interface ShipStationService {
   isConfigured: () => boolean;
-  pushOrder: (order: any) => Promise<any>;
-  pushShipment?: (shipmentId: number) => Promise<any>;
+  pushShipment: (shipmentId: number) => Promise<any>;
   markAsShipped: (shipstationOrderId: number, opts?: {
     shipDate?: Date | string;
     trackingNumber?: string | null;

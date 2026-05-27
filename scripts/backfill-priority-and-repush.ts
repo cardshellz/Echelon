@@ -1,5 +1,5 @@
 /**
- * Backfill member plan info + sort_rank + re-push to ShipStation
+ * Backfill member plan info + sort_rank + refresh ShipStation custom fields
  * for all active (non-shipped, non-cancelled) orders.
  *
  * Run with:
@@ -13,7 +13,6 @@ import { db } from "../server/db";
 import { sql } from "drizzle-orm";
 import { computeSortRank } from "../server/modules/orders/sort-rank";
 import { createShipStationService } from "../server/modules/oms/shipstation.service";
-import { createOmsService } from "../server/modules/oms/oms.service";
 
 async function main() {
   console.log("[Backfill] Starting priority + ShipStation refresh...");
@@ -147,46 +146,40 @@ async function main() {
   }
   console.log(`[Backfill] Updated sort_rank on ${rankUpdated} orders`);
 
-  // 5. Re-push all active orders to ShipStation so customField1 gets sort_rank
-  //    and customField2 gets the combined oms_order_id|channel format.
-  console.log("[Backfill] Step 5: re-pushing active orders to ShipStation...");
+  // 5. Refresh active WMS ShipStation orders so customField1 gets sort_rank.
+  console.log("[Backfill] Step 5: refreshing active WMS ShipStation sort ranks...");
   const shipStation = createShipStationService(db);
   if (!shipStation.isConfigured()) {
-    console.warn("[Backfill] ShipStation not configured, skipping re-push");
+    console.warn("[Backfill] ShipStation not configured, skipping refresh");
     return;
   }
 
-  const omsService = createOmsService(db);
   const idRows: any = await db.execute(sql`
-    SELECT oms.id
-    FROM oms.oms_orders oms
-    WHERE oms.status NOT IN ('shipped', 'cancelled')
-      AND oms.shipstation_order_id IS NOT NULL
-    ORDER BY oms.id ASC
+    SELECT DISTINCT w.id
+    FROM wms.orders w
+    JOIN wms.outbound_shipments os ON os.order_id = w.id
+    WHERE w.warehouse_status NOT IN ('shipped', 'cancelled')
+      AND os.shipstation_order_id IS NOT NULL
+      AND os.status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
+    ORDER BY w.id ASC
   `);
-  console.log(`[Backfill] Re-pushing ${idRows.rows?.length ?? 0} orders to ShipStation...`);
+  console.log(`[Backfill] Refreshing ${idRows.rows?.length ?? 0} WMS order sort ranks in ShipStation...`);
 
   let success = 0;
   let failed = 0;
   for (const idRow of idRows.rows ?? []) {
     try {
-      // Load via OMS service — gives us camelCase object + mapped lines
-      const fullOrder = await omsService.getOrderById(idRow.id);
-      if (!fullOrder) {
-        failed++;
-        continue;
-      }
-      await shipStation.pushOrder(fullOrder);
+      await shipStation.updateSortRank(Number(idRow.id));
       success++;
-      if (success % 25 === 0) console.log(`[Backfill]   ...${success} pushed`);
-      // Rate limit \u2014 ShipStation allows ~40 req/min
+      if (success % 25 === 0) console.log(`[Backfill]   ...${success} refreshed`);
+      // Rate limit: ShipStation allows roughly 40 req/min.
       await new Promise((r) => setTimeout(r, 2000));
     } catch (err: any) {
-      console.warn(`[Backfill] Failed to push OMS order ${idRow.id}: ${err.message}`);
+      console.warn(`[Backfill] Failed to refresh WMS order ${idRow.id}: ${err.message}`);
       failed++;
     }
   }
-  console.log(`[Backfill] Done: ${success} pushed, ${failed} failed`);
+  console.log(`[Backfill] Done: ${success} refreshed, ${failed} failed`);
   process.exit(0);
 }
 
