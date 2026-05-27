@@ -1,11 +1,9 @@
 import { eq, and, sql, isNull, inArray } from "drizzle-orm";
 import {
   orders,
-  channels,
-  partnerProfiles,
   warehouses,
 } from "@shared/schema";
-import { getSlaDefaultDays } from "./sort-rank";
+import { resolveSlaDueAt } from "./sort-rank";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -55,16 +53,14 @@ export interface SLASummary {
  *   - overdue:  past SLA due date, not yet shipped
  *   - met:      shipped before SLA due date
  *
- * `slaDueAt` is computed as: orderPlacedAt + partnerProfile.slaDays (business days)
- * If no partner profile exists, uses a default of 3 business days.
+ * `slaDueAt` is computed from platform ship-by date, channel SLA,
+ * partner-profile SLA, then the global default.
  */
 class SLAMonitorService {
-  private readonly DEFAULT_SLA_DAYS = 3;
-
   constructor(private readonly db: DrizzleDb) {}
 
   /**
-   * Set SLA due date on an order based on its channel's partner profile.
+   * Set SLA due date on an order based on the shared SLA resolution rules.
    * Called when an order is routed to a warehouse.
    */
   async setSLAForOrder(orderId: number): Promise<void> {
@@ -87,42 +83,15 @@ class SLAMonitorService {
     //   3. partner_profiles.sla_days — back-compat for partner (dropship/
     //      wholesale) channels that set SLA there before channels.sla_days existed.
     //   4. priority.sla_default_days (admin global) → DEFAULT_SLA_DAYS hardcode.
-    let dueAt: Date | null = null;
-    const channelShipBy = (order as any).channelShipByDate as Date | string | null;
-    if (channelShipBy) {
-      dueAt = channelShipBy instanceof Date ? channelShipBy : new Date(channelShipBy);
-    }
+    const dueAt = await resolveSlaDueAt({
+      channelId: order.channelId,
+      channelShipByDate: (order as any).channelShipByDate as Date | string | null,
+      explicitSlaDueAt: null,
+      orderPlacedAt: order.orderPlacedAt,
+      createdAt: order.createdAt,
+    }, this.db as any);
 
-    if (!dueAt) {
-      // Start from the admin-configurable global default.
-      let slaDays = await getSlaDefaultDays(this.db as any).catch(() => this.DEFAULT_SLA_DAYS);
-
-      if (order.channelId) {
-        // (2) Per-channel SLA — canonical, applies to every channel type.
-        const [channel] = await this.db
-          .select({ slaDays: channels.slaDays })
-          .from(channels)
-          .where(eq(channels.id, order.channelId))
-          .limit(1);
-
-        if (channel?.slaDays != null) {
-          slaDays = channel.slaDays;
-        } else {
-          // (3) Back-compat: partner channels may still carry SLA on their profile.
-          const [profile] = await this.db
-            .select()
-            .from(partnerProfiles)
-            .where(eq(partnerProfiles.channelId, order.channelId))
-            .limit(1);
-
-          if (profile?.slaDays != null) {
-            slaDays = profile.slaDays;
-          }
-        }
-      }
-      const placedAt = order.orderPlacedAt || order.createdAt;
-      dueAt = this.addBusinessDays(new Date(placedAt), slaDays);
-    }
+    if (!dueAt) return;
 
     await this.db
       .update(orders)
@@ -269,23 +238,6 @@ class SLAMonitorService {
     };
   }
 
-  /**
-   * Add business days (Mon-Fri) to a date.
-   */
-  private addBusinessDays(date: Date, days: number): Date {
-    const result = new Date(date);
-    let added = 0;
-    while (added < days) {
-      result.setDate(result.getDate() + 1);
-      const dow = result.getDay();
-      if (dow !== 0 && dow !== 6) {
-        added++;
-      }
-    }
-    // Set to end of business day (5 PM)
-    result.setHours(17, 0, 0, 0);
-    return result;
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -113,6 +113,92 @@ interface SettingsRow { key: string; value: string | null }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type PickPrioritySettingsDb = { execute: (query: any) => Promise<{ rows: any[] }> };
 
+function coerceValidDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function coerceSlaDays(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
+/**
+ * Add business days (Mon-Fri) and normalize to 5 PM.
+ */
+export function addBusinessDays(date: Date, days: number): Date {
+  const result = new Date(date);
+  let added = 0;
+  while (added < days) {
+    result.setDate(result.getDate() + 1);
+    if (result.getDay() !== 0 && result.getDay() !== 6) added++;
+  }
+  result.setHours(17, 0, 0, 0);
+  return result;
+}
+
+export interface ResolveSlaDueAtInput {
+  channelId?: number | null;
+  channelShipByDate?: Date | string | null;
+  explicitSlaDueAt?: Date | string | null;
+  orderPlacedAt?: Date | string | null;
+  createdAt?: Date | string | null;
+}
+
+/**
+ * Resolve the SLA due date used by WMS ranking.
+ *
+ * Order:
+ * 1. Platform ship-by date, when supplied by the channel.
+ * 2. Explicit SLA due date already carried by the caller.
+ * 3. channels.channels.sla_days, for any channel type.
+ * 4. channels.partner_profiles.sla_days, for legacy partner channels.
+ * 5. warehouse.echelon_settings priority.sla_default_days.
+ */
+export async function resolveSlaDueAt(
+  input: ResolveSlaDueAtInput,
+  dbHandle: PickPrioritySettingsDb,
+): Promise<Date | null> {
+  const channelShipBy = coerceValidDate(input.channelShipByDate);
+  if (channelShipBy) return channelShipBy;
+
+  const explicit = coerceValidDate(input.explicitSlaDueAt);
+  if (explicit) return explicit;
+
+  const baseDate = coerceValidDate(input.orderPlacedAt) ?? coerceValidDate(input.createdAt);
+  if (!baseDate) return null;
+
+  let slaDays = coerceSlaDays(await getSlaDefaultDays(dbHandle).catch(() => DEFAULT_SLA_DAYS)) ?? DEFAULT_SLA_DAYS;
+  const channelId = Number(input.channelId);
+  if (Number.isInteger(channelId) && channelId > 0) {
+    try {
+      const { sql } = await import("drizzle-orm");
+      const result = await dbHandle.execute(sql`
+        SELECT
+          c.sla_days AS channel_sla_days,
+          pp.sla_days AS partner_sla_days
+        FROM channels.channels c
+        LEFT JOIN channels.partner_profiles pp ON pp.channel_id = c.id
+        WHERE c.id = ${channelId}
+        LIMIT 1
+      `);
+      const row = result.rows?.[0];
+      const channelSlaDays = coerceSlaDays(row?.channel_sla_days);
+      const partnerSlaDays = coerceSlaDays(row?.partner_sla_days);
+      slaDays = channelSlaDays ?? partnerSlaDays ?? slaDays;
+    } catch (err) {
+      // Keep the global fallback if channel lookup fails.
+      // eslint-disable-next-line no-console
+      console.warn("[sort-rank] Failed to resolve channel SLA days, using default:", (err as Error).message);
+    }
+  }
+
+  return addBusinessDays(baseDate, slaDays);
+}
+
 async function loadSettings(dbHandle: PickPrioritySettingsDb): Promise<PickPrioritySettingsCache> {
   const now = Date.now();
   if (settingsCache && settingsCache.expiresAt > now) {

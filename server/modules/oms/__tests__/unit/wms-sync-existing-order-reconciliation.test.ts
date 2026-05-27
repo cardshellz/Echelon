@@ -81,4 +81,9 @@ describe("wms-sync existing order reconciliation", () => {
     const orderItemsPriceUpdate = WMS_SYNC_SRC.match(/UPDATE wms\.order_items oi[\s\S]*?AND ol\.order_id = \$\{omsOrderId\}/)?.[0] ?? "";
     expect(orderItemsPriceUpdate).not.toContain("updated_at");
   });
+
+  it("uses the shared SLA resolver when building the WMS sort rank", () => {
+    expect(WMS_SYNC_SRC).toMatch(/resolveSlaDueAt/);
+    expect(WMS_SYNC_SRC).not.toMatch(/SELECT sla_days FROM channels\.partner_profiles/);
+  });
 });
