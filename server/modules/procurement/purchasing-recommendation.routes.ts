@@ -951,10 +951,9 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
   app.get("/api/purchasing/recommendation-accepted-queue", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "25"), 10) || 25, 1), 100);
-      const decisionScanLimit = Math.max(limit * 5, 100);
       const [{ configuredLookback, settings, queue }, decisionRows] = await Promise.all([
         loadRecommendationReviewQueueData(),
-        storage.getRecentRecommendationDecisions(decisionScanLimit),
+        storage.getLatestRecommendationDecisionsByDecision("accepted_for_po", limit),
       ]);
       const acceptedQueue = buildAcceptedRecommendationReviewQueue(decisionRows, queue, limit);
 
@@ -964,6 +963,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         autoDraftMode: settings.autoDraftMode ?? "draft_po",
         approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
         limit,
+        loadedDecisionCount: decisionRows.length,
         scannedDecisionCount: decisionRows.length,
         ...acceptedQueue,
       });
@@ -989,10 +989,12 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           return res.status(500).json({ error: "Purchasing service is not available" });
         }
 
-        const decisionScanLimit = Math.max(parsed.selections.length * 10, 100);
         const [{ configuredLookback, settings, queue }, decisionRows] = await Promise.all([
           loadRecommendationReviewQueueData(),
-          storage.getRecentRecommendationDecisions(decisionScanLimit),
+          storage.getLatestRecommendationDecisions(
+            parsed.selections.map((selection) => selection.recommendationId),
+            parsed.selections.map((selection) => selection.kind),
+          ),
         ]);
         const acceptedQueue = buildAcceptedRecommendationReviewQueue(decisionRows, queue, 100);
         const acceptedByKey = new Map(

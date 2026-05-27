@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
     updateAutoDraftRun: vi.fn(),
     getRecentRecommendationDecisions: vi.fn(),
     getLatestRecommendationDecisions: vi.fn(),
+    getLatestRecommendationDecisionsByDecision: vi.fn(),
     createRecommendationDecision: vi.fn(),
     getAutoDraftSettings: vi.fn(),
     updateAutoDraftSettings: vi.fn(),
@@ -127,6 +128,7 @@ describe("purchasing recommendation routes", () => {
     mocks.procurement.getRecentAutoDraftRuns.mockResolvedValue([]);
     mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([]);
     mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([]);
+    mocks.procurement.getLatestRecommendationDecisionsByDecision.mockResolvedValue([]);
     mocks.procurement.createRecommendationDecision.mockImplementation(async (data) => ({
       id: 5001,
       ...data,
@@ -1180,7 +1182,7 @@ describe("purchasing recommendation routes", () => {
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
-    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
+    mocks.procurement.getLatestRecommendationDecisionsByDecision.mockResolvedValue([
       {
         id: 91,
         recommendationId: "202:2002:30",
@@ -1221,24 +1223,17 @@ describe("purchasing recommendation routes", () => {
           },
         },
       },
-      {
-        id: 89,
-        recommendationId: "202:2002:30",
-        kind: "held_by_policy",
-        decision: "reviewed",
-        status: "active",
-        decidedAt: "2026-05-21T11:00:00.000Z",
-      },
     ]);
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/recommendation-accepted-queue?limit=10");
 
     expect(status).toBe(200);
-    expect(mocks.procurement.getRecentRecommendationDecisions).toHaveBeenCalledWith(100);
+    expect(mocks.procurement.getLatestRecommendationDecisionsByDecision).toHaveBeenCalledWith("accepted_for_po", 10);
     expect(body).toMatchObject({
       lookbackDays: 30,
       approvalPolicy: "high_confidence_and_strong_candidate",
+      loadedDecisionCount: 2,
       summary: {
         total: 2,
         current: 1,
@@ -1304,7 +1299,7 @@ describe("purchasing recommendation routes", () => {
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
-    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
+    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([
       {
         id: 91,
         recommendationId: "202:2002:30",
@@ -1340,6 +1335,10 @@ describe("purchasing recommendation routes", () => {
     );
 
     expect(status).toBe(201);
+    expect(mocks.procurement.getLatestRecommendationDecisions).toHaveBeenCalledWith(
+      ["202:2002:30"],
+      ["held_by_policy"],
+    );
     expect(mocks.purchasingService.createPOFromReorder).toHaveBeenCalledWith(
       [
         {
@@ -1394,7 +1393,7 @@ describe("purchasing recommendation routes", () => {
       candidateScoreReviewThreshold: 80,
     });
     mocks.procurement.getReorderAnalysisData.mockResolvedValue([]);
-    mocks.procurement.getRecentRecommendationDecisions.mockResolvedValue([
+    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([
       {
         id: 90,
         recommendationId: "999:product:30",
@@ -1427,6 +1426,10 @@ describe("purchasing recommendation routes", () => {
     );
 
     expect(status).toBe(409);
+    expect(mocks.procurement.getLatestRecommendationDecisions).toHaveBeenCalledWith(
+      ["999:product:30"],
+      ["quality_review_required"],
+    );
     expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
     expect(mocks.procurement.createRecommendationDecision).not.toHaveBeenCalled();
     expect(body).toMatchObject({

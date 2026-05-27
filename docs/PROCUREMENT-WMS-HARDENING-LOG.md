@@ -3216,3 +3216,32 @@ Next step:
 - Use the live forecast health action links to confirm operators land on the
   exact review bucket before deciding whether any remaining source-repair class
   needs a mutation backfill.
+
+### 2026-05-26 - Latest Accepted Recommendation Decision Query
+
+Scope:
+
+- Replaced the accepted recommendation PO review queue's generic recent-history
+  decision scan with a purpose-built latest-decision query for
+  `accepted_for_po` recommendations.
+- Updated manual accepted-recommendation PO handoff to load the latest decisions
+  for the selected recommendation keys instead of scanning an arbitrary recent
+  decision window.
+- Preserved the existing accepted queue and handoff behavior: only current
+  accepted recommendations can create draft PO handoffs, stale snapshots remain
+  conflict/skipped items, and successful handoffs still write
+  `po_handoff_created` decisions.
+- Kept recommendation math, forecast trust scoring, approval policy, PO
+  creation internals, supplier data, receiving, landed-cost, AP, and WMS
+  behavior unchanged.
+
+Verification:
+
+- Passed: `npx tsc --noEmit --pretty false`
+- Passed: `$env:DATABASE_URL='postgres://test:test@localhost:5432/test'; npx vitest run server/modules/procurement/__tests__/unit/purchasing-recommendation.routes.test.ts`
+
+Next step:
+
+- Verify the accepted queue and PO handoff route tests, then continue with
+  forecast input live audit/backfill only if the latest production diagnostics
+  still show source repair gaps.
