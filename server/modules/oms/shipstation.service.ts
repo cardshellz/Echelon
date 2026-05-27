@@ -1,18 +1,17 @@
 /**
  * ShipStation Integration Service
  *
- * Pushes OMS orders to ShipStation for fulfillment and receives
+ * Pushes WMS shipments to ShipStation for fulfillment and receives
  * SHIP_NOTIFY webhooks for automatic tracking updates.
  *
  * Key design points:
- * - Idempotent pushes via `orderKey` (echelon-oms-{oms_order_id})
+ * - Idempotent pushes via `orderKey` (echelon-wms-shp-{shipment_id})
  * - ShipStation API requires HTTP/1.1 (node fetch defaults to this)
  * - Carrier code mapping for eBay fulfillment push
  */
 
 import { eq, and, sql } from "drizzle-orm";
 import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels, outboundShipments, wmsOrders, outboundShipmentItems, wmsOrderItems } from "@shared/schema";
-import type { OmsOrderWithLines } from "./oms.service";
 import { buildTrackingUrl } from "./tracking-url.util";
 import { isLineSumWithinTolerance } from "@shared/validation/currency";
 import {
@@ -679,127 +678,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       return res.json() as Promise<T>;
     }
     throw new Error("ShipStation API request failed after max retries.");
-  }
-
-  // -------------------------------------------------------------------------
-  // Push an OMS order to ShipStation
-  // -------------------------------------------------------------------------
-
-  async function pushOrder(
-    omsOrder: OmsOrderWithLines,
-  ): Promise<{ shipstationOrderId: number; orderKey: string }> {
-    const orderKey = `echelon-oms-${omsOrder.id}`;
-
-    // Fetch sort_rank from the WMS row so packer can sort ShipStation grid
-    // in the same order as the Echelon pick queue. Falls back to empty
-    // string if the WMS row hasn't been created yet (unlikely).
-    let sortRank = "";
-    try {
-      const wmsRow: any = await db.execute(sql`
-        SELECT sort_rank FROM wms.orders
-        WHERE source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrder.id)}
-        LIMIT 1
-      `);
-      sortRank = wmsRow?.rows?.[0]?.sort_rank || "";
-    } catch (err) {
-      console.warn(`[ShipStation] sort_rank lookup failed for order ${omsOrder.id}:`, err);
-    }
-
-    // Resolve ShipStation store/warehouse routing (data-driven, falls back to env/hardcoded)
-    const routing = await resolveShipStationIds(db, {
-      channelId: omsOrder.channelId ?? null,
-      warehouseId: omsOrder.warehouseId ?? null,
-    });
-
-    const isEbay = omsOrder.channelId === EBAY_CHANNEL_ID;
-    const channelName = omsOrder.channelName || "";
-    const externalOrderNumber = omsOrder.externalOrderNumber || omsOrder.externalOrderId;
-    const orderNumber = isEbay ? `EB-${externalOrderNumber}` : externalOrderNumber;
-
-    const payload = {
-      orderNumber,
-      orderKey,
-      orderDate: omsOrder.orderedAt
-        ? new Date(omsOrder.orderedAt).toISOString()
-        : new Date().toISOString(),
-      paymentDate: omsOrder.orderedAt
-        ? new Date(omsOrder.orderedAt).toISOString()
-        : new Date().toISOString(),
-      orderStatus: "awaiting_shipment",
-      customerUsername: omsOrder.customerName || "",
-      customerEmail: omsOrder.customerEmail || "",
-      billTo: {
-        name: omsOrder.customerName || "",
-      },
-      shipTo: {
-        name: omsOrder.shipToName || omsOrder.customerName || "",
-        company: (omsOrder as any).shipToCompany || "",
-        street1: omsOrder.shipToAddress1 || "",
-        street2: omsOrder.shipToAddress2 || "",
-        city: omsOrder.shipToCity || "",
-        state: omsOrder.shipToState || "",
-        postalCode: omsOrder.shipToZip || "",
-        country: omsOrder.shipToCountry || "US",
-        phone: omsOrder.customerPhone || "",
-      },
-      items: (omsOrder.lines || []).map((line) => ({
-        lineItemKey: `oms-line-${line.id}`,
-        sku: line.sku || "",
-        name: line.title || "",
-        quantity: line.quantity,
-        unitPrice: ((line as any).priceCents || 0) / 100,
-        options: [],
-      })),
-      amountPaid: (omsOrder.totalCents || 0) / 100,
-      taxAmount: (omsOrder.taxCents || 0) / 100,
-      shippingAmount: (omsOrder.shippingCents || 0) / 100,
-      internalNotes: `Source: ${channelName || "unknown"} via Echelon OMS`,
-      advancedOptions: {
-        warehouseId: routing.warehouseId,
-        storeId: routing.storeId,
-        source: channelName || "echelon",
-        // customField1 carries the Echelon pick queue sort rank. Packer
-        // sorts ShipStation grid by Custom Field 1 DESC — yields the
-        // same order the picker picks in. 22-char padded string so
-        // ShipStation's text sort matches our numeric sort.
-        customField1: sortRank,
-        customField2: `oms_order_id:${omsOrder.id}|channel:${channelName || "unknown"}`,
-        customField3: `external_id:${omsOrder.externalOrderId}`,
-      },
-    };
-
-    const result = await apiRequest<ShipStationCreateOrderResponse>(
-      "POST",
-      "/orders/createorder",
-      payload,
-    );
-
-    // Update oms_orders with ShipStation mapping
-    await db
-      .update(omsOrders)
-      .set({
-        shipstationOrderId: result.orderId,
-        shipstationOrderKey: orderKey,
-        updatedAt: new Date(),
-      })
-      .where(eq(omsOrders.id, omsOrder.id));
-
-    // Record event
-    await db.insert(omsOrderEvents).values({
-      orderId: omsOrder.id,
-      eventType: "pushed_to_shipstation",
-      details: {
-        shipstationOrderId: result.orderId,
-        orderKey,
-        orderNumber: result.orderNumber,
-      },
-    });
-
-    console.log(
-      `[ShipStation] Pushed OMS order ${omsOrder.id} → SS order ${result.orderId} (key: ${orderKey})`,
-    );
-
-    return { shipstationOrderId: result.orderId, orderKey };
   }
 
   // -------------------------------------------------------------------------
@@ -3291,7 +3169,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   return {
-    pushOrder,
     pushShipment,
     getShipments,
     getOrderById,
