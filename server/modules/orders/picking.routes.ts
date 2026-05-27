@@ -2,8 +2,6 @@ import type { Express } from "express";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
-import { db } from "../../db";
-import { sql } from "drizzle-orm";
 const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
@@ -327,16 +325,11 @@ export function registerPickingRoutes(app: Express) {
         try {
           const { shipStation } = req.app.locals.services || {};
           if (!shipStation?.isConfigured()) return;
-          const ssRow = await db.execute<{ shipstation_order_id: number | null }>(sql`
-            SELECT oms.shipstation_order_id
-            FROM oms.oms_orders oms
-            JOIN wms.orders w ON w.source = 'oms' AND w.oms_fulfillment_order_id = oms.id::text
-            WHERE w.id = ${id}
-            LIMIT 1
-          `);
-          const ssId = ssRow.rows[0]?.shipstation_order_id;
-          if (ssId) await shipStation.putOrderOnHold(Number(ssId));
-          await shipStation.updateSortRank(id);
+          if (typeof shipStation.syncWmsOrderShipStationHoldState === "function") {
+            await shipStation.syncWmsOrderShipStationHoldState(id, "hold");
+          } else {
+            await shipStation.updateSortRank(id);
+          }
         } catch (err: any) {
           console.warn(`[Hold] ShipStation mirror failed for order ${id}:`, err.message);
         }
@@ -384,16 +377,11 @@ export function registerPickingRoutes(app: Express) {
         try {
           const { shipStation } = req.app.locals.services || {};
           if (!shipStation?.isConfigured()) return;
-          const ssRow = await db.execute<{ shipstation_order_id: number | null }>(sql`
-            SELECT oms.shipstation_order_id
-            FROM oms.oms_orders oms
-            JOIN wms.orders w ON w.source = 'oms' AND w.oms_fulfillment_order_id = oms.id::text
-            WHERE w.id = ${id}
-            LIMIT 1
-          `);
-          const ssId = ssRow.rows[0]?.shipstation_order_id;
-          if (ssId) await shipStation.releaseOrderFromHold(Number(ssId));
-          await shipStation.updateSortRank(id);
+          if (typeof shipStation.syncWmsOrderShipStationHoldState === "function") {
+            await shipStation.syncWmsOrderShipStationHoldState(id, "release");
+          } else {
+            await shipStation.updateSortRank(id);
+          }
         } catch (err: any) {
           console.warn(`[ReleaseHold] ShipStation mirror failed for order ${id}:`, err.message);
         }

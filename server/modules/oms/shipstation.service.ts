@@ -2851,41 +2851,109 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  type WmsShipmentShipStationRow = {
+    id: number;
+    shipstation_order_id: number | null;
+  };
+
+  async function getActiveWmsShipmentShipStationRows(
+    wmsOrderId: number,
+  ): Promise<WmsShipmentShipStationRow[]> {
+    const shipmentRows: any = await db.execute(sql`
+      SELECT id, shipstation_order_id
+      FROM wms.outbound_shipments
+      WHERE order_id = ${wmsOrderId}
+        AND shipstation_order_id IS NOT NULL
+        AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
+      ORDER BY id
+    `);
+
+    return (shipmentRows?.rows ?? []).map((row: any) => ({
+      id: Number(row.id),
+      shipstation_order_id:
+        row.shipstation_order_id === null || row.shipstation_order_id === undefined
+          ? null
+          : Number(row.shipstation_order_id),
+    }));
+  }
+
+  async function getWmsOrderSortRank(wmsOrderId: number): Promise<string | null> {
+    const rankRow: any = await db.execute(sql`
+      SELECT sort_rank FROM wms.orders WHERE id = ${wmsOrderId} LIMIT 1
+    `);
+    return rankRow?.rows?.[0]?.sort_rank || null;
+  }
+
+  async function updateShipStationCustomField1(
+    shipstationOrderId: number,
+    sortRank: string,
+  ): Promise<void> {
+    const ssOrder = await getOrderById(shipstationOrderId);
+    if (!ssOrder) return;
+
+    await apiRequest("POST", "/orders/createorder", {
+      ...ssOrder,
+      customField1: sortRank,
+      advancedOptions: {
+        ...(ssOrder.advancedOptions || {}),
+        customField1: sortRank,
+      },
+    });
+  }
+
+  async function updateSortRankForShipmentRows(
+    wmsOrderId: number,
+    shipmentRows: WmsShipmentShipStationRow[],
+  ): Promise<void> {
+    const sortRank = await getWmsOrderSortRank(wmsOrderId);
+    if (!sortRank) return;
+
+    for (const row of shipmentRows) {
+      const ssOrderId = Number(row.shipstation_order_id);
+      if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) continue;
+      await updateShipStationCustomField1(ssOrderId, sortRank);
+    }
+  }
+
   /**
-   * Update only the sort_rank customField1 of an existing ShipStation order.
-   * Fetches the current SS order and re-pushes with updated customField1
-   * via /orders/createorder (upsert by orderId).
+   * Update only the sort_rank customField1 of active WMS ShipStation orders.
+   * ShipStation pointers live on wms.outbound_shipments; do not read the
+   * legacy OMS header-level ShipStation id here.
    */
   async function updateSortRank(wmsOrderId: number): Promise<void> {
     if (!isConfigured()) return;
     try {
-      const shipmentRows: any = await db.execute(sql`
-        SELECT id, shipstation_order_id
-        FROM wms.outbound_shipments
-        WHERE order_id = ${wmsOrderId}
-          AND shipstation_order_id IS NOT NULL
-          AND status NOT IN ('cancelled', 'voided')
-        ORDER BY id
-      `);
-      const rankRow: any = await db.execute(sql`
-        SELECT sort_rank FROM wms.orders WHERE id = ${wmsOrderId} LIMIT 1
-      `);
-      const sortRank = rankRow?.rows?.[0]?.sort_rank;
-      if (!sortRank) return;
-
-      for (const row of shipmentRows?.rows ?? []) {
-        const ssOrderId = Number(row.shipstation_order_id);
-        if (!ssOrderId) continue;
-        const ssOrder = await getOrderById(ssOrderId);
-        if (!ssOrder) continue;
-        await apiRequest("POST", "/orders/createorder", {
-          ...ssOrder,
-          customField1: sortRank,
-        });
-      }
+      const shipmentRows = await getActiveWmsShipmentShipStationRows(wmsOrderId);
+      await updateSortRankForShipmentRows(wmsOrderId, shipmentRows);
     } catch (err: any) {
       console.error(`[ShipStation] updateSortRank failed for WMS order ${wmsOrderId}:`, err.message);
     }
+  }
+
+  async function syncWmsOrderShipStationHoldState(
+    wmsOrderId: number,
+    mode: "hold" | "release",
+  ): Promise<{ touched: number }> {
+    if (!isConfigured()) return { touched: 0 };
+
+    const shipmentRows = await getActiveWmsShipmentShipStationRows(wmsOrderId);
+    let touched = 0;
+
+    for (const row of shipmentRows) {
+      const ssOrderId = Number(row.shipstation_order_id);
+      if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) continue;
+
+      if (mode === "hold") {
+        await putOrderOnHold(ssOrderId);
+      } else {
+        await releaseOrderFromHold(ssOrderId);
+      }
+      touched += 1;
+    }
+
+    await updateSortRankForShipmentRows(wmsOrderId, shipmentRows);
+
+    return { touched };
   }
 
   // -------------------------------------------------------------------------
@@ -3238,6 +3306,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     markAsShipped,
     cancelOrder,
     updateSortRank,
+    syncWmsOrderShipStationHoldState,
   };
 }
 

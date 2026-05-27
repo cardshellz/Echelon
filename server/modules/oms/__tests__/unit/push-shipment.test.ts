@@ -407,6 +407,23 @@ function mockFetchOnce500() {
   }));
 }
 
+function mockFetchQueue(responses: any[]) {
+  const remaining = [...responses];
+  return vi.fn(async (_url: string, _init: any) => {
+    if (remaining.length === 0) {
+      throw new Error("Unexpected fetch call");
+    }
+    const json = remaining.shift();
+    return {
+      ok: true,
+      status: 200,
+      json: async () => json,
+      text: async () => JSON.stringify(json),
+      headers: new Map<string, string>() as any,
+    };
+  });
+}
+
 const ORIGINAL_FETCH = globalThis.fetch;
 
 describe("pushShipment :: happy path", () => {
@@ -699,6 +716,95 @@ describe("pushShipment :: happy path", () => {
     const [, init] = (globalThis.fetch as any).mock.calls[0];
     const payload = JSON.parse(init.body);
     expect(payload.orderNumber).toBe("EB-EBAY-123");
+  });
+});
+
+describe("ShipStation WMS hold/sort sync", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  it("holds active WMS shipment ShipStation orders and refreshes customField1", async () => {
+    const sortRank = "0-0-0150-000000-8220412154";
+    const mock = makeDb([
+      {
+        rows: [
+          { id: 1719, shipstation_order_id: 741033983 },
+          { id: 1720, shipstation_order_id: 741033984 },
+        ],
+      },
+      { rows: [{ sort_rank: sortRank }] },
+    ]);
+    const fetchMock = mockFetchQueue([
+      {},
+      {},
+      { orderId: 741033983, orderKey: "echelon-wms-shp-1719", advancedOptions: { customField2: "keep" } },
+      { orderId: 741033983 },
+      { orderId: 741033984, orderKey: "echelon-wms-shp-1720", advancedOptions: { customField2: "keep" } },
+      { orderId: 741033984 },
+    ]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    await expect(
+      svc.syncWmsOrderShipStationHoldState(202542, "hold"),
+    ).resolves.toEqual({ touched: 2 });
+
+    expect(mock.getCallCount()).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+
+    const holdBodies = fetchMock.mock.calls
+      .filter(([url]) => String(url).includes("/orders/holduntil"))
+      .map(([, init]) => JSON.parse((init as any).body));
+    expect(holdBodies).toEqual([
+      { orderId: 741033983, holdUntilDate: "2099-12-31" },
+      { orderId: 741033984, holdUntilDate: "2099-12-31" },
+    ]);
+
+    const upsertBodies = fetchMock.mock.calls
+      .filter(([url]) => String(url).includes("/orders/createorder"))
+      .map(([, init]) => JSON.parse((init as any).body));
+    expect(upsertBodies).toHaveLength(2);
+    expect(upsertBodies[0].orderId).toBe(741033983);
+    expect(upsertBodies[0].customField1).toBe(sortRank);
+    expect(upsertBodies[0].advancedOptions).toMatchObject({
+      customField1: sortRank,
+      customField2: "keep",
+    });
+    expect(upsertBodies[1].orderId).toBe(741033984);
+    expect(upsertBodies[1].advancedOptions.customField1).toBe(sortRank);
+  });
+
+  it("releases active WMS shipment ShipStation orders instead of reading OMS header ids", async () => {
+    const mock = makeDb([
+      { rows: [{ id: 1719, shipstation_order_id: 741033983 }] },
+      { rows: [{ sort_rank: "1-0-0150-000000-8220412154" }] },
+    ]);
+    const fetchMock = mockFetchQueue([
+      {},
+      { orderId: 741033983, orderKey: "echelon-wms-shp-1719" },
+      { orderId: 741033983 },
+    ]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db);
+    await expect(
+      svc.syncWmsOrderShipStationHoldState(202542, "release"),
+    ).resolves.toEqual({ touched: 1 });
+
+    const releaseCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/orders/restorefromhold"),
+    );
+    expect(releaseCall).toBeTruthy();
+    expect(JSON.parse((releaseCall![1] as any).body)).toEqual({
+      orderId: 741033983,
+    });
   });
 });
 
