@@ -286,22 +286,67 @@ export const orderMethods: IOrderStorage = {
   async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
     
     const orderList = await db.execute(sql`
-      SELECT o.*
+      SELECT
+        o.id,
+        o.channel_id,
+        o.source,
+        o.external_order_id,
+        o.source_table_id,
+        o.order_number,
+        o.customer_name,
+        o.customer_email,
+        o.shipping_address,
+        o.shipping_city,
+        o.shipping_state,
+        o.shipping_postal_code,
+        o.shipping_country,
+        o.priority,
+        o.shipping_service_level,
+        o.member_plan_name,
+        o.member_plan_color,
+        o.channel_ship_by_date,
+        o.sort_rank,
+        o.warehouse_status,
+        o.on_hold,
+        o.held_at,
+        o.held_by,
+        o.assigned_picker_id,
+        o.claimed_at,
+        o.completed_at,
+        o.exception_at,
+        o.exception_type,
+        o.exception_notes,
+        o.resolved_at,
+        o.resolved_by,
+        o.resolution_notes,
+        o.item_count,
+        o.unit_count,
+        o.total_amount,
+        o.currency,
+        o.shopify_created_at,
+        o.order_placed_at,
+        o.created_at,
+        o.updated_at,
+        o.metadata,
+        o.legacy_order_id,
+        o.combined_group_id,
+        o.combined_role
       FROM wms.orders o
-      LEFT JOIN warehouse.echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
       -- BELT & SUSPENDERS: Reject any order whose OMS parent is
       -- cancelled/refunded/shipped even if WMS status didn't get updated.
       -- Protects against webhook delivery failures.
-      LEFT JOIN oms.oms_orders oms ON (
-        (o.source = 'oms'     AND o.oms_fulfillment_order_id = oms.id::text)
-        OR (o.source = 'shopify' AND o.source_table_id = oms.id::text)
-      )
+      LEFT JOIN oms.oms_orders oms_direct
+        ON o.source = 'oms'
+       AND o.oms_fulfillment_order_id = oms_direct.id::text
+      LEFT JOIN oms.oms_orders oms_source
+        ON o.source = 'shopify'
+       AND o.source_table_id = oms_source.id::text
       WHERE o.warehouse_status NOT IN ('shipped', 'cancelled')
         AND (
-          oms.status IS NULL
-          OR oms.status NOT IN ('cancelled', 'refunded', 'shipped')
+          COALESCE(oms_direct.status, oms_source.status) IS NULL
+          OR COALESCE(oms_direct.status, oms_source.status) NOT IN ('cancelled', 'refunded', 'shipped')
           OR (
-            oms.status = 'shipped'
+            COALESCE(oms_direct.status, oms_source.status) = 'shipped'
             AND EXISTS (
               SELECT 1
               FROM wms.order_items open_items
@@ -312,7 +357,10 @@ export const orderMethods: IOrderStorage = {
             )
           )
         )
-        AND (oms.financial_status IS NULL OR oms.financial_status NOT IN ('refunded', 'voided'))
+        AND (
+          COALESCE(oms_direct.financial_status, oms_source.financial_status) IS NULL
+          OR COALESCE(oms_direct.financial_status, oms_source.financial_status) NOT IN ('refunded', 'voided')
+        )
         AND (
           -- Ready/in_progress/ready_to_ship orders: show in pick queue
           o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
@@ -382,9 +430,40 @@ export const orderMethods: IOrderStorage = {
     const orderIds = orderRows.map((o: any) => o.id);
     const idList = sql.join(orderIds.map((id: number) => sql`${id}`), sql`, `);
     const allItemsResult = await db.execute(sql`
-      SELECT * FROM wms.order_items 
+      SELECT
+        id,
+        order_id,
+        oms_order_line_id,
+        product_id,
+        sku,
+        name,
+        barcode,
+        quantity,
+        picked_quantity,
+        fulfilled_quantity,
+        requires_shipping,
+        status,
+        location,
+        zone,
+        short_reason,
+        picked_at,
+        image_url
+      FROM wms.order_items
+      WHERE order_id IN (${idList})
+      ORDER BY order_id, id
+    `);
+
+    const shipmentStatusResult = await db.execute<{ order_id: number; status: string }>(sql`
+      SELECT order_id, status
+      FROM wms.outbound_shipments
       WHERE order_id IN (${idList})
     `);
+    const shipmentStatusesByOrderId = new Map<number, string[]>();
+    for (const shipment of shipmentStatusResult.rows) {
+      const existing = shipmentStatusesByOrderId.get(shipment.order_id) || [];
+      existing.push(shipment.status);
+      shipmentStatusesByOrderId.set(shipment.order_id, existing);
+    }
     
     // Map wms.order_items columns to expected structure
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
@@ -530,10 +609,7 @@ export const orderMethods: IOrderStorage = {
       // missed (webhook failure, race, etc.). Re-run it now.
       if (["ready", "in_progress", "partially_shipped", "ready_to_ship"].includes(order.warehouseStatus)) {
         try {
-          const shipResult: any = await db.execute(
-            sql`SELECT status FROM wms.outbound_shipments WHERE order_id = ${order.id}`
-          );
-          const shipmentStatuses: string[] = (shipResult?.rows ?? []).map((r: any) => r.status);
+          const shipmentStatuses = shipmentStatusesByOrderId.get(order.id) || [];
           if (shipmentStatuses.length > 0) {
             const hasOpen = shipmentStatuses.some(
               (s: string) => s === "planned" || s === "queued" || s === "labeled" || s === "on_hold" || s === "voided"

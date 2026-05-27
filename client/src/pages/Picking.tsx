@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { 
@@ -732,7 +732,7 @@ export default function Picking() {
   }, [refetch, soundTheme]);
   
   // Transform API orders to SingleOrder format for UI
-  const formatOrderDate = (dateInput: string | Date | undefined | null): string => {
+  const formatOrderDate = useCallback((dateInput: string | Date | undefined | null): string => {
     if (!dateInput) return "";
     let date: Date;
     if (typeof dateInput === "string") {
@@ -743,17 +743,17 @@ export default function Picking() {
       date = dateInput;
     }
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  };
+  }, []);
   
   // First, map all API orders to SingleOrder format
-  const allOrdersMapped: SingleOrder[] = apiOrders.map((order): SingleOrder => ({
+  const allOrdersMapped = useMemo<SingleOrder[]>(() => apiOrders.map((order): SingleOrder => ({
     id: String(order.id),
     orderNumber: order.orderNumber,
     customer: order.customerName,
     priority: order.priority,
     age: getOrderAge(order.orderPlacedAt || order.shopifyCreatedAt || order.createdAt),
     orderDate: formatOrderDate(order.orderPlacedAt || order.shopifyCreatedAt || order.createdAt),
-    status: order.warehouseStatus === "in_progress" ? "in_progress" : 
+    status: order.warehouseStatus === "in_progress" ? "in_progress" :
             (order.warehouseStatus === "completed" || order.warehouseStatus === "ready_to_ship" || order.warehouseStatus === "shipped") ? "completed" : "ready",
     assignee: order.assignedPickerId,
     onHold: order.onHold === 1,
@@ -787,12 +787,20 @@ export default function Picking() {
         };
       })
       .filter((item) => item.qty > 0 || item.status === "short"),
-  }));
+  })), [apiOrders, formatOrderDate]);
 
   // Group combined orders into single entries
-  const ordersFromApi: SingleOrder[] = (() => {
+  const ordersFromApi = useMemo<SingleOrder[]>(() => {
     const result: SingleOrder[] = [];
     const processedGroupIds = new Set<number>();
+    const ordersByCombinedGroupId = new Map<number, SingleOrder[]>();
+
+    for (const order of allOrdersMapped) {
+      if (!order.combinedGroupId) continue;
+      const existing = ordersByCombinedGroupId.get(order.combinedGroupId) || [];
+      existing.push(order);
+      ordersByCombinedGroupId.set(order.combinedGroupId, existing);
+    }
     
     for (const order of allOrdersMapped) {
       // Skip child orders - they'll be merged into the parent
@@ -806,7 +814,7 @@ export default function Picking() {
         processedGroupIds.add(order.combinedGroupId);
         
         // Find all orders in this combined group
-        const groupOrders = allOrdersMapped.filter(o => o.combinedGroupId === order.combinedGroupId);
+        const groupOrders = ordersByCombinedGroupId.get(order.combinedGroupId) || [order];
         
         // Combine all items from all orders, preserving which order each item belongs to
         const allItems: PickItem[] = [];
@@ -841,7 +849,7 @@ export default function Picking() {
     }
     
     return result;
-  })();
+  }, [allOrdersMapped]);
   
   // Core state - Batch mode
   const [queue, setQueue] = useState<PickBatch[]>([]);
@@ -850,24 +858,30 @@ export default function Picking() {
   
   // Merge API data with local state - local state takes precedence for in-progress orders
   // For completed orders, use API data which has picker metadata
-  const singleQueue = pickingMode === "single" && ordersFromApi.length > 0
-    ? (() => {
-        // Start with API orders, preferring local state for in-progress orders only
-        const merged = ordersFromApi.map(apiOrder => {
-          const localOrder = localSingleQueue.find(lo => lo.id === apiOrder.id);
-          // For completed orders, prefer API data which has picker metadata
-          if (apiOrder.status === "completed") {
-            return apiOrder;
-          }
-          return localOrder || apiOrder;
-        });
-        // Add completed orders from local state that aren't in API anymore (recently completed)
-        const completedLocalOrders = localSingleQueue.filter(
-          lo => lo.status === "completed" && !ordersFromApi.some(ao => ao.id === lo.id)
-        );
-        return [...merged, ...completedLocalOrders];
-      })()
-    : localSingleQueue;
+  const singleQueue = useMemo<SingleOrder[]>(() => {
+    if (pickingMode !== "single" || ordersFromApi.length === 0) {
+      return localSingleQueue;
+    }
+
+    const localOrdersById = new Map(localSingleQueue.map(order => [order.id, order]));
+    const apiOrderIds = new Set(ordersFromApi.map(order => order.id));
+
+    // Start with API orders, preferring local state for in-progress orders only.
+    const merged = ordersFromApi.map(apiOrder => {
+      const localOrder = localOrdersById.get(apiOrder.id);
+      // For completed orders, prefer API data which has picker metadata.
+      if (apiOrder.status === "completed") {
+        return apiOrder;
+      }
+      return localOrder || apiOrder;
+    });
+
+    // Add completed orders from local state that aren't in API anymore (recently completed).
+    const completedLocalOrders = localSingleQueue.filter(
+      lo => lo.status === "completed" && !apiOrderIds.has(lo.id)
+    );
+    return [...merged, ...completedLocalOrders];
+  }, [pickingMode, ordersFromApi, localSingleQueue]);
 
   // Sync completed orders from API into local state to persist across refetches
   // Uses a ref to track last-synced IDs and avoid unnecessary state updates (prevents infinite re-render loop)
@@ -884,9 +898,10 @@ export default function Picking() {
         setLocalSingleQueue(prev => {
           // Get current completed orders from local state
           const localCompleted = prev.filter(o => o.status === "completed");
+          const completedApiIds = new Set(completedFromApi.map(o => o.id));
           // Merge: API completed orders + local completed orders not in API
           const localOnlyCompleted = localCompleted.filter(
-            lc => !completedFromApi.some(ac => ac.id === lc.id)
+            lc => !completedApiIds.has(lc.id)
           );
           // Combine unique completed orders from both sources
           const allCompleted = [...completedFromApi, ...localOnlyCompleted];
