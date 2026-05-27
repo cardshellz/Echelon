@@ -2915,6 +2915,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  async function updateSortRankForShipmentRowsBestEffort(
+    wmsOrderId: number,
+    shipmentRows: WmsShipmentShipStationRow[],
+    context: string,
+  ): Promise<void> {
+    try {
+      await updateSortRankForShipmentRows(wmsOrderId, shipmentRows);
+    } catch (err: any) {
+      console.error(
+        `[ShipStation] ${context} sort-rank refresh failed for WMS order ${wmsOrderId}:`,
+        err.message,
+      );
+    }
+  }
+
   /**
    * Update only the sort_rank customField1 of active WMS ShipStation orders.
    * ShipStation pointers live on wms.outbound_shipments; do not read the
@@ -2939,6 +2954,14 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     const shipmentRows = await getActiveWmsShipmentShipStationRows(wmsOrderId);
     let touched = 0;
 
+    if (mode === "release") {
+      await updateSortRankForShipmentRowsBestEffort(
+        wmsOrderId,
+        shipmentRows,
+        "pre-release",
+      );
+    }
+
     for (const row of shipmentRows) {
       const ssOrderId = Number(row.shipstation_order_id);
       if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) continue;
@@ -2951,7 +2974,13 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       touched += 1;
     }
 
-    await updateSortRankForShipmentRows(wmsOrderId, shipmentRows);
+    if (mode === "hold") {
+      await updateSortRankForShipmentRowsBestEffort(
+        wmsOrderId,
+        shipmentRows,
+        "post-hold",
+      );
+    }
 
     return { touched };
   }
