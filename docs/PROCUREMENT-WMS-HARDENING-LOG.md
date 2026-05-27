@@ -27,16 +27,18 @@ live operational observations.
 
 Started: 2026-05-16
 
-Current phase: Phase 8 - Purchasing Recommendation Engine Foundation
+Current phase: Wrap-up / operational validation
 
 Current objective:
 
-- Unify reorder analysis, purchasing KPIs, and auto-draft eligibility behind one
-  explainable recommendation engine.
-- Keep PO creation downstream of recommendation generation so autopilot can run
-  in review-only or draft-producing modes.
-- Make every recommendation and skip decision visible enough for the later
-  demand forecast engine to plug into this boundary.
+- Treat the current procurement, receiving, AP, recommendation, forecast-health,
+  and WMS hardening pass as implementation-complete unless live validation finds
+  a verified defect.
+- Use production read-only audits and scheduled health outputs to confirm the
+  system is stable enough to operate.
+- Stop adding feature slices during wrap-up. Any new PR should be tied to a
+  failing live check, a concrete operator blocker, or scheduler/runbook
+  enablement.
 
 ## Baseline Decisions
 
@@ -3245,3 +3247,96 @@ Next step:
 - Verify the accepted queue and PO handoff route tests, then continue with
   forecast input live audit/backfill only if the latest production diagnostics
   still show source repair gaps.
+
+### 2026-05-27 - Hardening Wrap-Up Status
+
+Scope:
+
+- Closed the procurement hardening implementation loop and moved the program
+  into live validation.
+- Updated the program status so future work starts from operational evidence
+  instead of continuing the phase list by inertia.
+- Established the exit criteria for calling this pass done and the only reasons
+  to open additional hardening PRs.
+
+Implemented in this pass:
+
+- Procurement backend routes were split behind stable URLs while preserving the
+  admin UI contract.
+- PO create, send, mark, lifecycle, and receiving flows gained focused route
+  coverage and safer state transitions.
+- Receiving close and inventory posting were hardened against silent drift and
+  unsafe retry behavior.
+- Inbound shipment, landed cost, AP ledger, procurement report, and
+  notification routes gained focused coverage around their critical behavior.
+- Purchasing recommendations were consolidated behind one explainable engine
+  with review-only and policy-gated mutation boundaries.
+- Recommendation decisions gained audit history, latest accepted decision lookup,
+  accepted recommendation review queues, and manual PO handoff safeguards.
+- Forecast input diagnostics now expose demand composition, action buckets,
+  source-repair signals, review-queue filters, dry-run audit output, and health
+  escalation routing.
+- Procurement health escalation is scheduler-callable through
+  `npm run procurement:health-escalation`.
+- Forecast input gap review is read-only and scheduler/operator callable through
+  `npm run procurement:forecast-input-gaps`.
+- WMS/replenishment hardening now has read-only health defaults, system-owned
+  replenishment execution, missing-replen queueing, and daily replen QA count
+  support.
+
+What is not a blocker for closure:
+
+- A more advanced statistical demand forecast model can be a future product
+  phase. The current purchasing system now has the recommendation boundary,
+  source diagnostics, trust signals, and audit history needed for that engine to
+  plug in later.
+- More UI drilldowns are useful but should not block operational closure unless
+  a live operator cannot complete the review or handoff workflow.
+- A mutation backfill should not be built unless the live forecast input audit
+  still reports a source-repair class after the latest source query repair.
+
+Live validation checklist:
+
+- Typecheck the deployed branch locally before release:
+  `npx tsc --noEmit --pretty false`
+- Confirm procurement health escalation returns JSON and does not create noisy
+  duplicate escalations:
+  `npm run procurement:health-escalation`
+- Audit forecast input gaps against live data:
+  `npm run procurement:forecast-input-gaps -- --limit=50`
+- Confirm WMS/replenishment health is clean for the main warehouse:
+  `npx tsx scripts/monitor-pick-replen-health.ts --json --warehouseId=1 --sampleLimit=50`
+- Confirm the accepted recommendation review queue can hand off current accepted
+  recommendations to draft POs and stale snapshots are rejected.
+- Confirm forecast health links land operators on the correct action bucket in
+  the Purchasing Dashboard.
+- Confirm the daily replen QA count is visible in cycle counts and no picker
+  replen confirmation endpoint is required.
+
+Operational exit criteria:
+
+- Procurement health has no critical items, or each critical item is a known
+  accepted operational exception with an owner.
+- WMS/replenishment health has no critical items for warehouse 1.
+- Forecast input diagnostics either report no source-repair requirement or the
+  remaining source-repair class is understood and intentionally scheduled as a
+  separate repair.
+- Accepted recommendation handoff is idempotent: current accepted decisions can
+  create draft PO handoffs, stale selected snapshots are skipped or conflicted,
+  and the decision audit records the result.
+- Auto-draft behavior remains review-only or policy-gated until live forecast
+  trust and supplier constraints are proven stable.
+- Scheduler commands are configured only after the read-only runs are clean.
+
+Allowed follow-up PRs after wrap-up:
+
+- Fix a live validation failure.
+- Add scheduler configuration or runbook glue for an already validated command.
+- Repair a specific forecast source class found by the read-only audit.
+- Address a concrete operator blocker in the review, handoff, receiving, AP, or
+  WMS health workflow.
+
+Next step:
+
+- Run the live validation checklist. If it passes, stop the hardening slice loop
+  and move procurement/forecast work into normal product-roadmap planning.
