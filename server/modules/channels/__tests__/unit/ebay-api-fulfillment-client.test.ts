@@ -85,3 +85,36 @@ describe("EbayApiClient.createShippingFulfillment", () => {
     ).rejects.toThrow("returned success but fulfillment was not readable");
   });
 });
+
+describe("EbayApiClient listing lifecycle", () => {
+  it("withdraws a single offer with the Inventory API withdraw endpoint", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await makeClient().withdrawOffer("offer-123");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://api.ebay.com/sell/inventory/v1/offer/offer-123/withdraw",
+    );
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("POST");
+  });
+
+  it("withdraws a multi-variation listing by inventory item group", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await makeClient().withdrawOfferByInventoryItemGroup("SHLZ-SEMI-OVR-DH");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://api.ebay.com/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
+    );
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      inventoryItemGroupKey: "SHLZ-SEMI-OVR-DH",
+      marketplaceId: "EBAY_US",
+    });
+  });
+});

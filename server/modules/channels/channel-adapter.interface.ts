@@ -85,6 +85,7 @@ export interface InventoryPushResult {
 /** Per-variant pricing to push */
 export interface PricingPushItem {
   variantId: number;
+  sku?: string | null;
   externalVariantId: string | null;
   priceCents: number;
   compareAtPriceCents: number | null;

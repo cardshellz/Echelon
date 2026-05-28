@@ -8,7 +8,9 @@ import {
   ebayCategoryMappings,
   ebayTypeAspectDefaults,
   ebayProductAspectOverrides,
-  channelPricingRules
+  channelPricingRules,
+  channelProductOverrides,
+  channelVariantOverrides,
 } from "@shared/schema";
 import { eq, and, sql, inArray, asc } from "drizzle-orm";
 
@@ -38,8 +40,8 @@ export async function upsertChannelListing(
     externalUrl: data.externalUrl || null,
     syncStatus: data.syncStatus || "pending",
     syncError: data.syncError || null,
-    lastSyncedPrice: data.lastSyncedPrice || null,
-    lastSyncedQty: data.lastSyncedQty || null,
+    lastSyncedPrice: data.lastSyncedPrice ?? null,
+    lastSyncedQty: data.lastSyncedQty ?? null,
     lastSyncedAt: new Date(),
     createdAt: new Date(),
     updatedAt: new Date()
@@ -52,8 +54,8 @@ export async function upsertChannelListing(
       externalUrl: sql`COALESCE(EXCLUDED.external_url, channel_listings.external_url)`,
       syncStatus: data.syncStatus || "pending",
       syncError: data.syncError || null,
-      lastSyncedPrice: data.lastSyncedPrice || null,
-      lastSyncedQty: data.lastSyncedQty || null,
+      lastSyncedPrice: data.lastSyncedPrice ?? null,
+      lastSyncedQty: data.lastSyncedQty ?? null,
       lastSyncedAt: new Date(),
       updatedAt: new Date()
     }
@@ -302,7 +304,11 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     // Build the filter clause for active listings
     const conditions = [
       eq(channelListings.channelId, EBAY_CHANNEL_ID),
-      eq(channelListings.syncStatus, 'synced')
+      eq(channelListings.syncStatus, 'synced'),
+      sql`COALESCE(${products.ebayListingExcluded}, false) = false`,
+      sql`COALESCE(${productVariants.ebayListingExcluded}, false) = false`,
+      sql`COALESCE(${channelProductOverrides.isListed}, 1) <> 0`,
+      sql`COALESCE(${channelVariantOverrides.isListed}, 1) <> 0`,
     ];
 
     if (filter?.productIds && filter.productIds.length > 0) {
@@ -347,6 +353,20 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     .from(channelListings)
     .innerJoin(productVariants, eq(productVariants.id, channelListings.productVariantId))
     .innerJoin(products, eq(products.id, productVariants.productId))
+    .leftJoin(
+      channelProductOverrides,
+      and(
+        eq(channelProductOverrides.channelId, channelListings.channelId),
+        eq(channelProductOverrides.productId, products.id),
+      ),
+    )
+    .leftJoin(
+      channelVariantOverrides,
+      and(
+        eq(channelVariantOverrides.channelId, channelListings.channelId),
+        eq(channelVariantOverrides.productVariantId, productVariants.id),
+      ),
+    )
     .where(and(...conditions))
     .orderBy(asc(products.id), asc(productVariants.position), asc(productVariants.id));
 

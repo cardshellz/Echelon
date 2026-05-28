@@ -17,6 +17,11 @@ import {
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
+import {
+  markEbayProductListingsPendingForRelist,
+  setEbayProductListingIntent,
+  withdrawEbayProductListings,
+} from "./ebay-listing-state";
 
 export const router = express.Router();
 
@@ -29,12 +34,36 @@ export const router = express.Router();
         return;
       }
       const { excluded } = req.body as { excluded: boolean };
-      
-      await db.update(products)
-        .set({ ebayListingExcluded: excluded })
-        .where(eq(products.id, productId));
-        
-      res.json({ success: true, productId, excluded });
+      if (typeof excluded !== "boolean") {
+        res.status(400).json({ error: "excluded (boolean) is required" });
+        return;
+      }
+
+      await setEbayProductListingIntent(productId, !excluded);
+
+      if (!excluded) {
+        await markEbayProductListingsPendingForRelist(productId);
+        res.json({
+          success: true,
+          productId,
+          excluded,
+          remoteAction: "pending_relist",
+        });
+        return;
+      }
+
+      try {
+        const remote = await withdrawEbayProductListings(productId);
+        res.json({ success: true, productId, excluded, remote });
+      } catch (remoteErr: any) {
+        res.status(502).json({
+          success: false,
+          productId,
+          excluded,
+          error: remoteErr.message,
+          message: "Local eBay listing intent was saved, but remote eBay withdrawal failed.",
+        });
+      }
     } catch (err: any) {
       console.error("[eBay Product Exclusion] Error:", err.message);
       res.status(500).json({ error: err.message });

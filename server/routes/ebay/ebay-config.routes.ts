@@ -15,6 +15,11 @@ import {
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
+import {
+  markEbayVariantListingPendingForRelist,
+  setEbayVariantListingIntent,
+  zeroEbayVariantListing,
+} from "./ebay-listing-state";
 
 export const router = express.Router();
 
@@ -388,15 +393,30 @@ ${categoriesXml}
         res.status(400).json({ error: "excluded (boolean) is required" });
         return;
       }
-      const client = await pool.connect();
+      await setEbayVariantListingIntent(variantId, !excluded);
+
+      if (!excluded) {
+        await markEbayVariantListingPendingForRelist(variantId);
+        res.json({
+          success: true,
+          variantId,
+          excluded,
+          remoteAction: "pending_relist",
+        });
+        return;
+      }
+
       try {
-        await client.query(
-          "UPDATE catalog.product_variants SET ebay_listing_excluded = $1 WHERE id = $2",
-          [excluded, variantId]
-        );
-        res.json({ success: true, variantId, excluded });
-      } finally {
-        client.release();
+        const remote = await zeroEbayVariantListing(variantId);
+        res.json({ success: true, variantId, excluded, remote });
+      } catch (remoteErr: any) {
+        res.status(502).json({
+          success: false,
+          variantId,
+          excluded,
+          error: remoteErr.message,
+          message: "Local eBay variant listing intent was saved, but remote eBay quantity update failed.",
+        });
       }
     } catch (err: any) {
       console.error("[eBay Variant Exclusion] Error:", err.message);

@@ -150,20 +150,34 @@ export interface EbaySpecification {
 // ---------------------------------------------------------------------------
 
 export interface EbayBulkPriceQuantityRequest {
-  requests: EbayPriceQuantityItem[];
+  requests: EbayPriceQuantityRequest[];
 }
 
-export interface EbayPriceQuantityItem {
+export interface EbayPriceQuantityOffer {
   offerId: string;
-  availableQuantity: number;
-  price: EbayAmount;
+  availableQuantity?: number;
+  price?: EbayAmount;
+}
+
+export interface EbayPriceQuantityRequest {
+  sku: string;
+  shipToLocationAvailability?: {
+    quantity: number;
+  };
+  offers: EbayPriceQuantityOffer[];
 }
 
 export interface EbayBulkPriceQuantityResponse {
   responses: Array<{
     statusCode: number;
-    offerId: string;
-    sku: string;
+    sku?: string;
+    offerId?: string;
+    offers?: Array<{
+      offerId: string;
+      statusCode: number;
+      errors?: EbayError[];
+      warnings?: EbayError[];
+    }>;
     errors?: EbayError[];
     warnings?: EbayError[];
   }>;

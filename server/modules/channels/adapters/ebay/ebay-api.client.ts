@@ -154,6 +154,46 @@ export class EbayApiClient {
   }
 
   /**
+   * Withdraw a published offer from eBay.
+   * POST /sell/inventory/v1/offer/{offerId}/withdraw
+   */
+  async withdrawOffer(offerId: string): Promise<void> {
+    await this.request({
+      method: "POST",
+      path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`,
+      expectNoContent: true,
+    });
+  }
+
+  /**
+   * Withdraw a published multi-variation listing from eBay.
+   * POST /sell/inventory/v1/offer/withdraw_by_inventory_item_group
+   */
+  async withdrawOfferByInventoryItemGroup(
+    inventoryItemGroupKey: string,
+    marketplaceId: string = "EBAY_US",
+  ): Promise<void> {
+    await this.request({
+      method: "POST",
+      path: "/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
+      body: { inventoryItemGroupKey, marketplaceId },
+      expectNoContent: true,
+    });
+  }
+
+  /**
+   * Delete an unpublished offer. Published offers must be withdrawn first.
+   * DELETE /sell/inventory/v1/offer/{offerId}
+   */
+  async deleteOffer(offerId: string): Promise<void> {
+    await this.request({
+      method: "DELETE",
+      path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`,
+      expectNoContent: true,
+    });
+  }
+
+  /**
    * Get offers for a SKU.
    * GET /sell/inventory/v1/offer?sku={sku}&marketplace_id=EBAY_US
    */
