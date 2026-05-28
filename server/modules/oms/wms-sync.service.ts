@@ -476,9 +476,9 @@ export class WmsSyncService {
       // 6. Reserve inventory
       if (warehouseStatus === "ready") {
         try {
-          const reserveResult = await this.services.reservation.reserveForOrder(newWmsOrder.id);
-          if (!reserveResult.success) {
-            console.warn(`[WMS Sync] Inventory reservation failed for order ${newWmsOrder.id}: ${reserveResult.issues?.join(", ")}`);
+          const reserveResult = await this.services.reservation.reserveOrder(newWmsOrder.id);
+          if (reserveResult.failed.length > 0) {
+            console.warn(`[WMS Sync] Inventory reservation partial failure for order ${newWmsOrder.id}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
           }
         } catch (err: any) {
           console.error(`[WMS Sync] Inventory reservation error for order ${newWmsOrder.id}: ${err.message}`);

@@ -1073,7 +1073,7 @@ export const orderMethods: IOrderStorage = {
     };
     
     if (resolution !== "hold") {
-      updates.status = newStatus;
+      updates.warehouseStatus = newStatus;
     }
     
     const result = await db
