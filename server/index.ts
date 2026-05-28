@@ -28,7 +28,11 @@ import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
-import { resolveShipStationShipmentTimestamp } from "./modules/oms/shipstation-date.util";
+import {
+  deriveShipStationShipmentReconcileEvent,
+  filterShipmentsForShipStationOrder,
+  selectActionableShipStationShipments,
+} from "./modules/oms/shipstation-reconcile-state";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
 import { pool as dbPool } from "./db";
@@ -949,67 +953,58 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               continue;
             }
 
+            const ssShipments = await ss.getShipments(ssOrderId, {
+              orderNumber: row.order_number,
+            });
+            const currentOrderShipments = filterShipmentsForShipStationOrder(
+              ssShipments,
+              ssOrderId,
+            );
+
             let event: { kind: string; [key: string]: any } | null = null;
 
-            // 2. Detect voided labels first (voidDate beats orderStatus)
-            if (row.wms_shipment_status !== "voided") {
-              const ssShipments = await ss.getShipments(ssOrderId, {
-                orderNumber: row.order_number,
-              });
-              const hasVoidedLabel = ssShipments.some(
-                (s: any) => s.voidDate != null,
-              );
-              if (hasVoidedLabel) {
-                event = { kind: "voided", reason: "ss_label_void" };
+            if (
+              ssShipments.length > 0 &&
+              typeof ss.processShipmentNotification === "function"
+            ) {
+              let processedFromService = 0;
+              const actionableShipments =
+                selectActionableShipStationShipments(ssShipments);
+              for (const ssShipment of actionableShipments) {
+                const result = await ss.processShipmentNotification(ssShipment);
+                if (result?.processed) {
+                  processedFromService++;
+                  if (ssShipment.voidDate != null) {
+                    markedVoided++;
+                  } else {
+                    markedShipped++;
+                  }
+                }
+              }
+              if (processedFromService > 0) {
+                await db.execute(sql`
+                  UPDATE wms.outbound_shipments
+                  SET last_reconciled_at = NOW()
+                  WHERE id = ${shipmentId}
+                `);
+                continue;
               }
             }
 
-            // 3. Detect shipped / cancelled from order status
+            event = deriveShipStationShipmentReconcileEvent({
+              ssOrderStatus: ssOrder.orderStatus,
+              currentWmsShipmentStatus: row.wms_shipment_status,
+              currentTrackingNumber: row.tracking_number,
+              currentCarrier: row.carrier,
+              shipments: currentOrderShipments,
+            });
+
+            // 3. Push WMS shipped status outward when SS has drifted.
+            // Cancellation is intentionally not mirrored from WMS to SS here:
+            // cancelled/voided SS records must be learned from SS webhooks or
+            // explicit customer-cancel flows, not broad scheduled inference.
             if (!event) {
               if (
-                ssOrder.orderStatus === "shipped" &&
-                row.wms_shipment_status !== "shipped"
-              ) {
-                const ssShipments = await ss.getShipments(ssOrderId, {
-                  orderNumber: row.order_number,
-                });
-                if (
-                  ssShipments.length > 0 &&
-                  typeof ss.processShipmentNotification === "function"
-                ) {
-                  let processedFromService = 0;
-                  for (const ssShipment of ssShipments) {
-                    const result = await ss.processShipmentNotification(ssShipment);
-                    if (result?.processed) {
-                      processedFromService++;
-                    }
-                  }
-                  if (processedFromService > 0) {
-                    markedShipped += processedFromService;
-                    await db.execute(sql`
-                      UPDATE wms.outbound_shipments
-                      SET last_reconciled_at = NOW()
-                      WHERE id = ${shipmentId}
-                    `);
-                    continue;
-                  }
-                }
-                const latest = ssShipments[ssShipments.length - 1];
-                event = {
-                  kind: "shipped",
-                  trackingNumber: latest?.trackingNumber || row.tracking_number || "",
-                  carrier: latest?.carrierCode || row.carrier || "other",
-                  shipDate: resolveShipStationShipmentTimestamp(
-                    latest?.shipDate,
-                    new Date(),
-                  ),
-                };
-              } else if (
-                ssOrder.orderStatus === "cancelled" &&
-                row.wms_shipment_status !== "cancelled"
-              ) {
-                event = { kind: "cancelled", reason: "ss_cancelled" };
-              } else if (
                 ssOrder.orderStatus !== "shipped" &&
                 row.wms_shipment_status === "shipped"
               ) {
@@ -1022,21 +1017,6 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 });
                 console.log(`[ShipStation Reconcile V2] Outbound sync: marked SS order ${ssOrderId} shipped`);
                 markedShipped++;
-
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
-                continue;
-              } else if (
-                ssOrder.orderStatus !== "cancelled" &&
-                row.wms_shipment_status === "cancelled"
-              ) {
-                // Outbound Sync: Push cancelled status to ShipStation if it drifted
-                await ss.cancelOrder(ssOrderId);
-                console.log(`[ShipStation Reconcile V2] Outbound sync: cancelled SS order ${ssOrderId}`);
-                markedCancelled++;
 
                 await db.execute(sql`
                   UPDATE wms.outbound_shipments
@@ -1247,7 +1227,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         if (!rows.rows?.length) return;
 
         let markedShipped = 0;
-        let cancelled = 0;
+        let skippedCancelled = 0;
         for (const row of rows.rows) {
           try {
             if (row.warehouse_status === 'shipped') {
@@ -1259,8 +1239,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               });
               markedShipped++;
             } else {
-              await ss.cancelOrder(Number(row.shipstation_order_id));
-              cancelled++;
+              console.warn(
+                `[ShipStation Reconcile V1] WMS order ${row.wms_id} is cancelled; skipping automatic ShipStation cancellation for order ${row.shipstation_order_id}`,
+              );
+              skippedCancelled++;
             }
             await db.execute(sql`
               UPDATE oms.oms_orders SET shipstation_reconciled_at = NOW() WHERE id = ${row.oms_id}
@@ -1270,8 +1252,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             console.warn(`[ShipStation Reconcile V1] Failed for OMS ${row.oms_id}:`, err?.message);
           }
         }
-        if (markedShipped || cancelled) {
-          console.warn(`[ShipStation Reconcile V1] Swept ${rows.rows.length} divergent order(s): ${markedShipped} marked shipped, ${cancelled} cancelled`);
+        if (markedShipped || skippedCancelled) {
+          console.warn(`[ShipStation Reconcile V1] Swept ${rows.rows.length} divergent order(s): ${markedShipped} marked shipped, ${skippedCancelled} skipped cancelled`);
         }
       } catch (err: any) {
         console.warn("[ShipStation Reconcile V1] Sweep error:", err?.message);
@@ -1283,9 +1265,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       if (process.env.RECONCILE_V2 === "true") {
         await runShipStationReconcileV2();
         
-        // Also run the aggressive sweeper to catch stray SS-generated duplicates
-        // Note: The sweeper has been updated to strictly ONLY delete echelon-oms-* orders
-        // so it will never interfere with ShipStation automation rules or manual splits.
+        // Also run the ShipStation queue sweeper. It is review-only against
+        // ShipStation so manual replacement labels, reships, and splits remain
+        // authoritative external state for reconciliation.
         const apiKey = process.env.SHIPSTATION_API_KEY;
         const apiSecret = process.env.SHIPSTATION_API_SECRET;
         if (apiKey && apiSecret) {

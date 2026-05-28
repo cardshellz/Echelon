@@ -30,6 +30,13 @@ function sqlText(query: any): string {
     .join("");
 }
 
+function expectNoShipStationMutation(fetchMock: ReturnType<typeof vi.fn>) {
+  for (const [url, init] of fetchMock.mock.calls) {
+    expect(String(url)).not.toContain("/orders/createorder");
+    expect((init as RequestInit | undefined)?.method).not.toBe("POST");
+  }
+}
+
 describe("sweepShipStationQueue", () => {
   beforeEach(() => {
     mockDb.execute.mockReset();
@@ -40,9 +47,11 @@ describe("sweepShipStationQueue", () => {
     delete (globalThis as any).fetch;
   });
 
-  it("actively cancels stale ShipStation awaiting orders for final Echelon shipments", async () => {
+  it("flags stale awaiting ShipStation orders for final WMS shipments without cancelling ShipStation", async () => {
     mockDb.execute
-      .mockResolvedValueOnce({ rows: [{ warehouse_status: "shipped" }] })
+      .mockResolvedValueOnce({
+        rows: [{ shipment_status: "shipped", warehouse_status: "shipped" }],
+      })
       .mockResolvedValueOnce({ rows: [] });
 
     const fetchMock = vi
@@ -58,22 +67,9 @@ describe("sweepShipStationQueue", () => {
               orderNumber: "57771",
               orderKey: "echelon-wms-shp-1578",
               orderStatus: "awaiting_shipment",
-              shipTo: {
-                name: "Customer",
-                street1: "1 Main St",
-                city: "Test",
-                state: "TX",
-                postalCode: "75001",
-                country: "US",
-              },
-              items: [],
             },
           ],
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () => "",
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -83,23 +79,60 @@ describe("sweepShipStationQueue", () => {
 
     await sweepShipStationQueue("api-key", "api-secret");
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(String(fetchMock.mock.calls[1]![0])).toContain("/orders/createorder");
-    const cancelBody = JSON.parse((fetchMock.mock.calls[1]![1] as any).body);
-    expect(cancelBody).toMatchObject({
-      orderId: 740117299,
-      orderStatus: "cancelled",
-      orderKey: "echelon-wms-shp-1578",
-    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expectNoShipStationMutation(fetchMock);
 
     expect(mockDb.execute).toHaveBeenCalledTimes(2);
     expect(sqlText(mockDb.execute.mock.calls[1]![0])).toMatch(/UPDATE wms\.outbound_shipments/);
-    expect(sqlText(mockDb.execute.mock.calls[1]![0])).toMatch(/status IN \('planned', 'queued', 'on_hold'\)/);
+    expect(sqlText(mockDb.execute.mock.calls[1]![0])).toMatch(/requires_review = true/);
+    expect(sqlText(mockDb.execute.mock.calls[1]![0])).not.toMatch(/SET status =/);
+    expect(sqlText(mockDb.execute.mock.calls[1]![0])).not.toMatch(/cancelled_at/);
   });
 
-  it("falls back to review when ShipStation cancellation fails", async () => {
+  it("flags awaiting_payment Echelon WMS orders without rewriting ShipStation order status", async () => {
+    mockDb.execute.mockResolvedValue({ rows: [] });
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ page: 1, pages: 1, orders: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          page: 1,
+          pages: 1,
+          orders: [
+            {
+              orderId: 740117301,
+              orderNumber: "57772",
+              orderKey: "echelon-wms-shp-1580",
+              orderStatus: "awaiting_payment",
+            },
+          ],
+        }),
+      });
+    globalThis.fetch = fetchMock as any;
+
+    await sweepShipStationQueue("api-key", "api-secret");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expectNoShipStationMutation(fetchMock);
+
+    expect(mockDb.execute).toHaveBeenCalledTimes(1);
+    const updateSql = sqlText(mockDb.execute.mock.calls[0]![0]);
+    expect(updateSql).toMatch(/UPDATE wms\.outbound_shipments/);
+    expect(updateSql).toMatch(/requires_review = true/);
+    expect(updateSql).toMatch(/review_reason =/);
+  });
+
+  it("flags duplicate OMS-level ShipStation queue copies through an idempotent review event", async () => {
     mockDb.execute
-      .mockResolvedValueOnce({ rows: [{ warehouse_status: "cancelled" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{ shipment_status: "queued", warehouse_status: "processing" }],
+      })
       .mockResolvedValueOnce({ rows: [] });
 
     const fetchMock = vi
@@ -116,13 +149,14 @@ describe("sweepShipStationQueue", () => {
               orderKey: "echelon-wms-shp-1578",
               orderStatus: "awaiting_shipment",
             },
+            {
+              orderId: 740117298,
+              orderNumber: "57771",
+              orderKey: "echelon-oms-191861",
+              orderStatus: "awaiting_shipment",
+            },
           ],
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 500,
-        text: async () => "boom",
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -132,10 +166,13 @@ describe("sweepShipStationQueue", () => {
 
     await sweepShipStationQueue("api-key", "api-secret");
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(mockDb.execute).toHaveBeenCalledTimes(2);
-    const updateSql = sqlText(mockDb.execute.mock.calls[1]![0]);
-    expect(updateSql).toMatch(/requires_review = true/);
-    expect(updateSql).toMatch(/review_reason =/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expectNoShipStationMutation(fetchMock);
+
+    expect(mockDb.execute).toHaveBeenCalledTimes(3);
+    const eventSql = sqlText(mockDb.execute.mock.calls[0]![0]);
+    expect(eventSql).toMatch(/INSERT INTO oms\.oms_order_events/);
+    expect(eventSql).toMatch(/shipstation_queue_review_required/);
+    expect(eventSql).toMatch(/WHERE NOT EXISTS/);
   });
 });

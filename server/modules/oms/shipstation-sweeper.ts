@@ -1,254 +1,282 @@
 import { db } from "../../../server/db";
 import { sql } from "drizzle-orm";
 
-async function cancelShipStationAwaitingOrder(
-  baseUrl: string,
-  encodedAuth: string,
-  order: any,
-): Promise<void> {
-  const res = await fetch(`${baseUrl}/orders/createorder`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Basic ${encodedAuth}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      ...order,
-      orderStatus: "cancelled",
-    }),
-  });
+interface ShipStationQueueOrder {
+  orderId?: number | null;
+  orderNumber?: string | null;
+  orderKey?: string | null;
+  orderStatus?: string | null;
+}
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`ShipStation cancel failed (${res.status}): ${body}`);
+interface QueueReviewDetails {
+  shipStationOrderId: number | null;
+  shipStationOrderNumber: string | null;
+  orderKey: string;
+  queueStatus: string;
+  reason: string;
+}
+
+function parseWmsShipmentId(orderKey: string): number | null {
+  const match = /^echelon-wms-shp-([1-9][0-9]*)$/.exec(orderKey);
+  return match ? Number(match[1]) : null;
+}
+
+function parseOmsOrderId(orderKey: string): number | null {
+  const match = /^echelon-oms-([1-9][0-9]*)$/.exec(orderKey);
+  return match ? Number(match[1]) : null;
+}
+
+function getNormalizedOrderNumber(order: ShipStationQueueOrder): string {
+  const orderKey = String(order.orderKey || "");
+  let orderNumber = String(order.orderNumber || "");
+  if (
+    orderKey.startsWith("echelon-oms-") ||
+    orderKey.startsWith("echelon-wms-shp-")
+  ) {
+    const prefixMatch = /^[A-Z]{2,4}-(.+)$/.exec(orderNumber);
+    if (prefixMatch) {
+      orderNumber = prefixMatch[1];
+    }
   }
+  return orderNumber;
+}
+
+function buildQueueReviewDetails(
+  order: ShipStationQueueOrder,
+  reason: string,
+): QueueReviewDetails {
+  return {
+    shipStationOrderId:
+      typeof order.orderId === "number" ? order.orderId : null,
+    shipStationOrderNumber:
+      typeof order.orderNumber === "string" ? order.orderNumber : null,
+    orderKey: String(order.orderKey || ""),
+    queueStatus: String(order.orderStatus || "unknown"),
+    reason,
+  };
+}
+
+async function flagOmsOrderForShipStationReview(
+  orderId: number,
+  details: QueueReviewDetails,
+): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+    SELECT
+      ${orderId},
+      'shipstation_queue_review_required',
+      ${JSON.stringify(details)}::jsonb,
+      NOW()
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM oms.oms_order_events e
+      WHERE e.order_id = ${orderId}
+        AND e.event_type = 'shipstation_queue_review_required'
+        AND COALESCE(e.details->>'shipStationOrderId', '') = ${String(details.shipStationOrderId ?? "")}
+        AND COALESCE(e.details->>'orderKey', '') = ${details.orderKey}
+        AND COALESCE(e.details->>'reason', '') = ${details.reason}
+    )
+  `);
+}
+
+async function flagWmsShipmentForShipStationReview(
+  shipmentId: number,
+  reason: string,
+): Promise<void> {
+  await db.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET requires_review = true,
+        review_reason = ${reason},
+        updated_at = NOW()
+    WHERE id = ${shipmentId}
+  `);
+}
+
+async function getWmsShipmentFinality(
+  shipmentId: number,
+): Promise<{ isFinal: boolean; shipmentStatus: string | null; warehouseStatus: string | null }> {
+  const shipmentQuery = await db.execute(sql`
+    SELECT os.status AS shipment_status,
+           wo.warehouse_status
+    FROM wms.outbound_shipments os
+    JOIN wms.orders wo ON wo.id = os.order_id
+    WHERE os.id = ${shipmentId}
+    LIMIT 1
+  `);
+  const row = shipmentQuery.rows[0] as any;
+  if (!row) {
+    return { isFinal: false, shipmentStatus: null, warehouseStatus: null };
+  }
+
+  const shipmentStatus = String(row.shipment_status || "");
+  const warehouseStatus = String(row.warehouse_status || "");
+  return {
+    isFinal:
+      shipmentStatus === "shipped" ||
+      shipmentStatus === "cancelled" ||
+      shipmentStatus === "voided" ||
+      warehouseStatus === "shipped" ||
+      warehouseStatus === "cancelled",
+    shipmentStatus,
+    warehouseStatus,
+  };
+}
+
+async function isOmsOrderFinal(orderId: number): Promise<boolean> {
+  const omsQuery = await db.execute(sql`
+    SELECT status, fulfillment_status
+    FROM oms.oms_orders
+    WHERE id = ${orderId}
+    LIMIT 1
+  `);
+  const row = omsQuery.rows[0] as any;
+  if (!row) {
+    return false;
+  }
+  return (
+    row.fulfillment_status === "fulfilled" ||
+    row.status === "cancelled" ||
+    row.status === "shipped"
+  );
 }
 
 /**
- * Sweeps the ShipStation awaiting_shipment queue and handles duplicate or
- * stale Echelon-owned orders.
+ * Sweeps ShipStation queues and flags Echelon-owned stragglers for review.
  *
- * Final Echelon orders (shipped/cancelled) must not remain live in
- * ShipStation. For those, the sweeper actively cancels the awaiting SS
- * copy and mirrors the WMS shipment to cancelled when it is still pre-label.
- * Non-final duplicate cleanup remains review-only because those can still be
- * legitimate operator-created recovery orders.
+ * This job is intentionally read-only against ShipStation. Operator-created
+ * replacement labels, reships, and split orders are real external state; a
+ * scheduled WMS sweep must not cancel or rewrite them through /orders/createorder.
  */
 export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   const baseUrl = "https://ssapi.shipstation.com";
   const encodedAuth = Buffer.from(`${apiKey}:${apiSecret}`).toString("base64");
 
   console.log("[ShipStation Sweeper] Fetching all awaiting_shipment orders...");
-  
+
   let page = 1;
   const pageSize = 100;
   let totalFlagged = 0;
-  let totalCancelled = 0;
-  
+
   while (true) {
-    const res = await fetch(`${baseUrl}/orders?orderStatus=awaiting_shipment&pageSize=${pageSize}&page=${page}`, {
-      method: "GET",
-      headers: { "Authorization": `Basic ${encodedAuth}` }
-    });
-    
+    const res = await fetch(
+      `${baseUrl}/orders?orderStatus=awaiting_shipment&pageSize=${pageSize}&page=${page}`,
+      {
+        method: "GET",
+        headers: { Authorization: `Basic ${encodedAuth}` },
+      },
+    );
+
     if (!res.ok) {
       console.warn("[ShipStation Sweeper] Failed to fetch SS queue", await res.text());
       break;
     }
 
     const data = await res.json();
-    const ssOrders = data.orders || [];
-    
+    const ssOrders: ShipStationQueueOrder[] = data.orders || [];
+
     if (ssOrders.length === 0) break;
 
-    // Group by order number to detect duplicates. Normalize by stripping
-    // any channel prefix (e.g. "EB-") added by pushOrder/pushShipment so
-    // OMS-keyed and WMS-keyed copies of the same order group together.
-    const byOrderNumber = new Map<string, any[]>();
-    for (const o of ssOrders) {
-      const orderKey = String(o.orderKey || "");
-      let searchOrderNum = String(o.orderNumber || "");
-      if (orderKey.startsWith("echelon-oms-") || orderKey.startsWith("echelon-wms-shp-")) {
-        const prefixMatch = /^[A-Z]{2,4}-(.+)$/.exec(searchOrderNum);
-        if (prefixMatch) searchOrderNum = prefixMatch[1];
-      }
-      if (!byOrderNumber.has(searchOrderNum)) byOrderNumber.set(searchOrderNum, []);
-      byOrderNumber.get(searchOrderNum)!.push(o);
+    const byOrderNumber = new Map<string, ShipStationQueueOrder[]>();
+    for (const order of ssOrders) {
+      const orderNumber = getNormalizedOrderNumber(order);
+      const bucket = byOrderNumber.get(orderNumber) ?? [];
+      bucket.push(order);
+      byOrderNumber.set(orderNumber, bucket);
     }
 
-    for (const [orderNumber, orders] of byOrderNumber.entries()) {
-      // Duplicate detection: if multiple echelon-owned copies exist for the
-      // same order number and the order is NOT final, flag old OMS-level
-      // duplicates for review.
+    for (const orders of byOrderNumber.values()) {
       if (orders.length > 1) {
-        const wmsOrder = orders.find((o: any) => o.orderKey?.startsWith("echelon-wms-shp-"));
+        const wmsOrder = orders.find((order) =>
+          String(order.orderKey || "").startsWith("echelon-wms-shp-"),
+        );
         if (wmsOrder) {
-          const dupes = orders.filter((o: any) => o.orderKey?.startsWith("echelon-oms-"));
-          for (const o of dupes) {
-            const orderKey = String(o.orderKey || "");
-            const omsMatch = /^echelon-oms-([1-9][0-9]*)$/.exec(orderKey);
-            if (omsMatch) {
-              const omsOrderId = Number(omsMatch[1]);
-              await db.execute(sql`
-                INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                VALUES (
-                  ${omsOrderId},
-                  'shipstation_queue_review_required',
-                  ${JSON.stringify({
-                    shipStationOrderId: o.orderId ?? null,
-                    shipStationOrderNumber: o.orderNumber ?? null,
-                    orderKey,
-                    queueStatus: o.orderStatus ?? "awaiting_shipment",
-                    reason: "duplicate_echelon_shipstation_order",
-                  })}::jsonb,
-                  NOW()
-                )
-              `);
-              totalFlagged++;
+          const duplicateOmsOrders = orders.filter((order) =>
+            String(order.orderKey || "").startsWith("echelon-oms-"),
+          );
+          for (const order of duplicateOmsOrders) {
+            const orderKey = String(order.orderKey || "");
+            const omsOrderId = parseOmsOrderId(orderKey);
+            if (!omsOrderId) {
+              continue;
             }
+            await flagOmsOrderForShipStationReview(
+              omsOrderId,
+              buildQueueReviewDetails(order, "duplicate_echelon_shipstation_order"),
+            );
+            totalFlagged++;
           }
         }
       }
 
-      // Per-order finality check: only cancel a ShipStation order when the
-      // SPECIFIC linked shipment or OMS order is final — never based on a
-      // loose order_number match that can hit the wrong WMS row.
-      for (const o of orders) {
-        const orderKey = String(o.orderKey || "");
-        if (!orderKey.startsWith("echelon-oms-") && !orderKey.startsWith("echelon-wms-shp-")) {
+      for (const order of orders) {
+        const orderKey = String(order.orderKey || "");
+        const wmsShipmentId = parseWmsShipmentId(orderKey);
+        const omsOrderId = parseOmsOrderId(orderKey);
+        if (!wmsShipmentId && !omsOrderId) {
           continue;
         }
 
-        const wmsMatch = /^echelon-wms-shp-([1-9][0-9]*)$/.exec(orderKey);
-        const omsMatch = /^echelon-oms-([1-9][0-9]*)$/.exec(orderKey);
-
-        let isFinal = false;
-
-        if (wmsMatch) {
-          const shipmentId = Number(wmsMatch[1]);
-          const shipmentQuery = await db.execute(sql`
-            SELECT os.status AS shipment_status,
-                   wo.warehouse_status
-            FROM wms.outbound_shipments os
-            JOIN wms.orders wo ON wo.id = os.order_id
-            WHERE os.id = ${shipmentId}
-            LIMIT 1
-          `);
-          const row = shipmentQuery.rows[0] as any;
-          if (row) {
-            isFinal = row.warehouse_status === 'shipped' || row.warehouse_status === 'cancelled';
+        if (wmsShipmentId) {
+          const finality = await getWmsShipmentFinality(wmsShipmentId);
+          if (!finality.isFinal) {
+            continue;
           }
-        } else if (omsMatch) {
-          const omsOrderId = Number(omsMatch[1]);
-          const omsQuery = await db.execute(sql`
-            SELECT status, fulfillment_status FROM oms.oms_orders
-            WHERE id = ${omsOrderId}
-            LIMIT 1
-          `);
-          const row = omsQuery.rows[0] as any;
-          if (row && (row.fulfillment_status === 'fulfilled' || row.status === 'cancelled' || row.status === 'shipped')) {
-            isFinal = true;
-          }
+          await flagWmsShipmentForShipStationReview(
+            wmsShipmentId,
+            "shipstation_queue_review_required",
+          );
+          totalFlagged++;
+          console.warn(
+            `[ShipStation Sweeper] Flagged stale SS awaiting order ${order.orderId} ` +
+              `(${order.orderNumber}, key=${orderKey}) for WMS review; ` +
+              `shipmentStatus=${finality.shipmentStatus}, warehouseStatus=${finality.warehouseStatus}`,
+          );
+          continue;
         }
 
-        if (!isFinal) continue;
-
-        const details = {
-          shipStationOrderId: o.orderId ?? null,
-          shipStationOrderNumber: o.orderNumber ?? null,
-          orderKey,
-          queueStatus: o.orderStatus ?? "awaiting_shipment",
-          reason: "echelon_shipped_or_cancelled_but_shipstation_awaiting",
-        };
-
-        try {
-          await cancelShipStationAwaitingOrder(baseUrl, encodedAuth, o);
-          totalCancelled++;
-
-          console.warn(
-            `[ShipStation Sweeper] Cancelled stale SS awaiting order ${o.orderId} (${o.orderNumber}, key=${orderKey})`,
+        if (omsOrderId && (await isOmsOrderFinal(omsOrderId))) {
+          await flagOmsOrderForShipStationReview(
+            omsOrderId,
+            buildQueueReviewDetails(
+              order,
+              "echelon_final_but_shipstation_awaiting",
+            ),
           );
-
-          if (wmsMatch) {
-            const shipmentId = Number(wmsMatch[1]);
-            await db.execute(sql`
-              UPDATE wms.outbound_shipments
-              SET status = CASE
-                    WHEN status IN ('planned', 'queued', 'on_hold') THEN 'cancelled'
-                    ELSE status
-                  END,
-                  cancelled_at = CASE
-                    WHEN status IN ('planned', 'queued', 'on_hold') THEN NOW()
-                    ELSE cancelled_at
-                  END,
-                  requires_review = CASE
-                    WHEN status IN ('planned', 'queued', 'on_hold') THEN false
-                    ELSE requires_review
-                  END,
-                  review_reason = CASE
-                    WHEN status IN ('planned', 'queued', 'on_hold') THEN NULL
-                    ELSE review_reason
-                  END,
-                  updated_at = NOW()
-              WHERE id = ${shipmentId}
-            `);
-          } else if (omsMatch) {
-            const omsOrderId = Number(omsMatch[1]);
-            await db.execute(sql`
-              INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-              VALUES (
-                ${omsOrderId},
-                'shipstation_stale_queue_order_cancelled',
-                ${JSON.stringify(details)}::jsonb,
-                NOW()
-              )
-            `);
-          }
-        } catch (err: any) {
-          console.error(
-            `[ShipStation Sweeper] Failed to cancel stale SS order ${o.orderId} (${o.orderNumber}, key=${orderKey}): ${err?.message ?? err}`,
-          );
-
-          if (wmsMatch) {
-            const shipmentId = Number(wmsMatch[1]);
-            await db.execute(sql`
-              UPDATE wms.outbound_shipments
-              SET requires_review = true,
-                  review_reason = 'shipstation_cancel_failed',
-                  updated_at = NOW()
-              WHERE id = ${shipmentId}
-            `);
-          }
           totalFlagged++;
+          console.warn(
+            `[ShipStation Sweeper] Flagged stale SS awaiting order ${order.orderId} ` +
+              `(${order.orderNumber}, key=${orderKey}) for OMS review`,
+          );
         }
       }
     }
-    
+
     if (data.page >= data.pages) break;
     page++;
   }
 
-  if (totalFlagged > 0 || totalCancelled > 0) {
+  const awaitingPaymentFlagged = await flagAwaitingPaymentOrdersForReview(
+    baseUrl,
+    encodedAuth,
+  );
+  totalFlagged += awaitingPaymentFlagged;
+
+  if (totalFlagged > 0) {
     console.log(
-      `[ShipStation Sweeper] Done. Cancelled ${totalCancelled} stale order(s); flagged ${totalFlagged} straggler/duplicate order(s) for review.`,
+      `[ShipStation Sweeper] Done. Flagged ${totalFlagged} ShipStation queue issue(s) for review.`,
     );
   }
-
-  // Second pass: fix Echelon-owned orders stuck in awaiting_payment.
-  // ShipStation splits don't copy paymentDate to the child order, leaving
-  // them unshippable. Push an update to set orderStatus + paymentDate.
-  await fixAwaitingPaymentOrders(baseUrl, encodedAuth);
 }
 
-async function fixAwaitingPaymentOrders(
+async function flagAwaitingPaymentOrdersForReview(
   baseUrl: string,
   encodedAuth: string,
-): Promise<void> {
+): Promise<number> {
   console.log("[ShipStation Sweeper] Checking for Echelon orders stuck in awaiting_payment...");
 
   let page = 1;
   const pageSize = 100;
-  let fixed = 0;
+  let flagged = 0;
 
   while (true) {
     let res: Response;
@@ -271,48 +299,39 @@ async function fixAwaitingPaymentOrders(
     }
 
     const data = await res.json();
-    const ssOrders: any[] = data.orders || [];
+    const ssOrders: ShipStationQueueOrder[] = data.orders || [];
     if (ssOrders.length === 0) break;
 
-    for (const o of ssOrders) {
-      const orderKey = String(o.orderKey || "");
-      if (
-        !orderKey.startsWith("echelon-oms-") &&
-        !orderKey.startsWith("echelon-wms-shp-")
-      ) {
+    for (const order of ssOrders) {
+      const orderKey = String(order.orderKey || "");
+      const wmsShipmentId = parseWmsShipmentId(orderKey);
+      const omsOrderId = parseOmsOrderId(orderKey);
+
+      if (wmsShipmentId) {
+        await flagWmsShipmentForShipStationReview(
+          wmsShipmentId,
+          "shipstation_awaiting_payment_review",
+        );
+        flagged++;
+        console.warn(
+          `[ShipStation Sweeper] Flagged awaiting_payment SS order ${order.orderId} ` +
+            `(${order.orderNumber}, key=${orderKey}) for WMS review`,
+        );
         continue;
       }
 
-      try {
-        const updateRes = await fetch(`${baseUrl}/orders/createorder`, {
-          method: "POST",
-          headers: {
-            Authorization: `Basic ${encodedAuth}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            orderId: o.orderId,
-            orderKey: o.orderKey,
-            orderNumber: o.orderNumber,
-            orderStatus: "awaiting_shipment",
-            paymentDate: o.orderDate || new Date().toISOString(),
-          }),
-        });
-
-        if (updateRes.ok) {
-          fixed++;
-          console.log(
-            `[ShipStation Sweeper] Fixed awaiting_payment → awaiting_shipment for SS order ${o.orderId} (${o.orderNumber}, key=${orderKey})`,
-          );
-        } else {
-          const body = await updateRes.text();
-          console.warn(
-            `[ShipStation Sweeper] Failed to fix awaiting_payment for SS order ${o.orderId}: ${updateRes.status} ${body}`,
-          );
-        }
-      } catch (err: any) {
-        console.error(
-          `[ShipStation Sweeper] Error fixing awaiting_payment for SS order ${o.orderId}: ${err.message}`,
+      if (omsOrderId) {
+        await flagOmsOrderForShipStationReview(
+          omsOrderId,
+          buildQueueReviewDetails(
+            order,
+            "echelon_shipstation_awaiting_payment",
+          ),
+        );
+        flagged++;
+        console.warn(
+          `[ShipStation Sweeper] Flagged awaiting_payment SS order ${order.orderId} ` +
+            `(${order.orderNumber}, key=${orderKey}) for OMS review`,
         );
       }
     }
@@ -321,7 +340,5 @@ async function fixAwaitingPaymentOrders(
     page++;
   }
 
-  if (fixed > 0) {
-    console.log(`[ShipStation Sweeper] Fixed ${fixed} awaiting_payment order(s).`);
-  }
+  return flagged;
 }
