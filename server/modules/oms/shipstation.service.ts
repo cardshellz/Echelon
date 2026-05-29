@@ -2348,10 +2348,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       omsOrderId = parsed.omsOrderId;
 
       // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
+      // Match BOTH WMS-order creation paths, exactly as every other WMS lookup
+      // in this codebase does (see oms-webhooks.ts and orders.storage pick
+      // queue): wms-sync creates rows with source='oms'/'ebay' linked via
+      // oms_fulfillment_order_id; the legacy Shopify direct-write/manual path
+      // uses source='shopify' linked via source_table_id. Matching only the
+      // first set silently dropped shipped Shopify-sourced orders onto the
+      // OMS-only branch below, which never updates wms.orders.warehouse_status
+      // — leaving the order stuck in the pick queue forever.
       const wmsOrderResult: any = await db.execute(sql`
         SELECT id, warehouse_status, channel_id FROM wms.orders
-        WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
-          AND source IN ('oms', 'ebay')
+        WHERE (source IN ('oms', 'ebay') AND oms_fulfillment_order_id = ${String(omsOrderId)})
+           OR (source = 'shopify'        AND source_table_id        = ${String(omsOrderId)})
         LIMIT 1
       `);
 
