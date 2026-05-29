@@ -15,6 +15,7 @@ import {
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
+import { isProductEffectivelyListed, isVariantEffectivelyListed } from "./ebay-listing-state";
 
 export const router = express.Router();
 
@@ -46,6 +47,7 @@ export const router = express.Router();
             cl.sync_error AS listing_sync_error,
             cl.external_product_id,
             p.ebay_listing_excluded,
+            cpo.is_listed AS product_override_is_listed,
             COALESCE(ecm.listing_enabled, true) AS type_listing_enabled,
             p.ebay_fulfillment_policy_override AS product_fulfillment_override,
             p.ebay_return_policy_override AS product_return_override,
@@ -53,6 +55,7 @@ export const router = express.Router();
           FROM products p
           LEFT JOIN product_types pt ON pt.slug = p.product_type
           LEFT JOIN ebay_category_mappings ecm ON ecm.product_type_slug = p.product_type AND ecm.channel_id = $1
+          LEFT JOIN channels.channel_product_overrides cpo ON cpo.product_id = p.id AND cpo.channel_id = $1
           LEFT JOIN LATERAL (
             SELECT cl2.id, cl2.sync_status, cl2.sync_error, cl2.external_product_id
             FROM channels.channel_listings cl2
@@ -77,13 +80,15 @@ export const router = express.Router();
               pv.name,
               pv.price_cents,
               pv.ebay_listing_excluded,
+              cvo.is_listed AS variant_override_is_listed,
               pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
               pv.ebay_return_policy_override AS variant_return_override,
               pv.ebay_payment_policy_override AS variant_payment_override
             FROM product_variants pv
+            LEFT JOIN channels.channel_variant_overrides cvo ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2
             WHERE pv.product_id = ANY($1) AND pv.sku IS NOT NULL AND pv.is_active = true
             ORDER BY pv.product_id, pv.position ASC, pv.id ASC
-          `, [productIds]);
+          `, [productIds, EBAY_CHANNEL_ID]);
 
           // Fetch fungible ATP for all products in the feed
           const atpByVariantId: Map<number, number> = new Map();
@@ -103,7 +108,10 @@ export const router = express.Router();
               sku: v.sku,
               name: v.name,
               priceCents: v.price_cents,
-              ebayListingExcluded: v.ebay_listing_excluded === true,
+              ebayListingExcluded: v.ebay_listing_excluded === true || v.variant_override_is_listed === 0,
+              explicitlyExcluded: v.ebay_listing_excluded === true || v.variant_override_is_listed === 0,
+              excludedByProduct: false,
+              effectivelyListed: true,
               inventoryQuantity: Math.max(0, atpByVariantId.get(v.id) ?? 0),
               fulfillmentPolicyOverride: v.variant_fulfillment_override || null,
               returnPolicyOverride: v.variant_return_override || null,
@@ -186,7 +194,16 @@ export const router = express.Router();
           const listingSyncStatus = row.listing_status;
           const listingSyncError = row.listing_sync_error || null;
 
-          const isExcluded = row.ebay_listing_excluded === true;
+          const productExcludedByIntent = !isProductEffectivelyListed({
+            productExcluded: row.ebay_listing_excluded === true,
+            productOverrideIsListed: row.product_override_is_listed,
+          });
+          const productEffectivelyListed = isProductEffectivelyListed({
+            productExcluded: row.ebay_listing_excluded === true,
+            productOverrideIsListed: row.product_override_is_listed,
+            typeListingEnabled: row.type_listing_enabled,
+          });
+          const isExcluded = productExcludedByIntent;
           const isTypeDisabled = row.type_listing_enabled === false;
 
           // Check for missing required aspects
@@ -226,8 +243,20 @@ export const router = express.Router();
           if (!hasVariants) missingItems.push("variants");
           if (!hasImages) missingItems.push("images");
 
-          const variants = variantsByProduct.get(row.id) || [];
-          const includedVariantCount = variants.filter((v: any) => !v.ebayListingExcluded).length;
+          const variants = (variantsByProduct.get(row.id) || []).map((v: any) => {
+            const effectivelyListed = isVariantEffectivelyListed({
+              productExcluded: row.ebay_listing_excluded === true,
+              productOverrideIsListed: row.product_override_is_listed,
+              typeListingEnabled: row.type_listing_enabled,
+              variantExcluded: v.explicitlyExcluded,
+            });
+            return {
+              ...v,
+              excludedByProduct: !productEffectivelyListed,
+              effectivelyListed,
+            };
+          });
+          const includedVariantCount = variants.filter((v: any) => v.effectivelyListed).length;
 
           return {
             id: row.id,
@@ -313,27 +342,43 @@ export const router = express.Router();
         for (const productId of productIds) {
           // 1. Fetch product (include policy overrides + SKU)
           const prodResult = await client.query(
-            `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id,
-                    ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-             FROM catalog.products WHERE id = $1 AND is_active = true`,
-            [productId],
+            `SELECT p.id, p.name, p.sku, p.description, p.brand, p.product_type, p.ebay_browse_category_id,
+                    p.ebay_fulfillment_policy_override, p.ebay_return_policy_override, p.ebay_payment_policy_override,
+                    p.ebay_listing_excluded,
+                    cpo.is_listed AS product_override_is_listed
+             FROM catalog.products p
+             LEFT JOIN channels.channel_product_overrides cpo
+               ON cpo.product_id = p.id AND cpo.channel_id = $2::integer
+             WHERE p.id = $1::integer AND p.is_active = true`,
+            [productId, EBAY_CHANNEL_ID],
           );
           if (prodResult.rows.length === 0) {
             results.push({ productId, productName: "", variantCount: 0, success: false, error: "Product not found or inactive" });
             continue;
           }
           const product = prodResult.rows[0];
+          if (!isProductEffectivelyListed({
+            productExcluded: product.ebay_listing_excluded === true,
+            productOverrideIsListed: product.product_override_is_listed,
+          })) {
+            results.push({ productId, productName: product.name, variantCount: 0, success: false, error: "Product excluded" });
+            continue;
+          }
 
           // 2. Fetch variants (skip excluded), include policy overrides
           const varResult = await client.query(
-            `SELECT id, sku, name, option1_name, option1_value, option2_name, option2_value,
-                    price_cents, compare_at_price_cents, weight_grams, barcode,
-                    units_per_variant, hierarchy_level,
-                    ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-             FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true
-               AND COALESCE(ebay_listing_excluded, false) = false
-             ORDER BY position ASC, id ASC`,
-            [productId],
+            `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
+                    pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
+                    pv.units_per_variant, pv.hierarchy_level,
+                    pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
+             FROM product_variants pv
+             LEFT JOIN channels.channel_variant_overrides cvo
+               ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2::integer
+             WHERE pv.product_id = $1::integer AND pv.sku IS NOT NULL AND pv.is_active = true
+               AND COALESCE(pv.ebay_listing_excluded, false) = false
+               AND COALESCE(cvo.is_listed, 1) <> 0
+             ORDER BY pv.position ASC, pv.id ASC`,
+            [productId, EBAY_CHANNEL_ID],
           );
           if (varResult.rows.length === 0) {
             results.push({ productId, productName: product.name, variantCount: 0, success: false, error: "No eligible variants" });
@@ -871,11 +916,15 @@ export const router = express.Router();
 
           // 1. Fetch product
           const prodResult = await client.query(
-            `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id,
-                    ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override,
-                    ebay_listing_excluded
-             FROM catalog.products WHERE id = $1 AND is_active = true`,
-            [productId],
+            `SELECT p.id, p.name, p.sku, p.description, p.brand, p.product_type, p.ebay_browse_category_id,
+                    p.ebay_fulfillment_policy_override, p.ebay_return_policy_override, p.ebay_payment_policy_override,
+                    p.ebay_listing_excluded,
+                    cpo.is_listed AS product_override_is_listed
+             FROM catalog.products p
+             LEFT JOIN channels.channel_product_overrides cpo
+               ON cpo.product_id = p.id AND cpo.channel_id = $2::integer
+             WHERE p.id = $1::integer AND p.is_active = true`,
+            [productId, EBAY_CHANNEL_ID],
           );
           if (prodResult.rows.length === 0) {
             failed++;
@@ -886,7 +935,10 @@ export const router = express.Router();
           const product = prodResult.rows[0];
 
           // Check if excluded or type disabled
-          if (product.ebay_listing_excluded) {
+          if (!isProductEffectivelyListed({
+            productExcluded: product.ebay_listing_excluded === true,
+            productOverrideIsListed: product.product_override_is_listed,
+          })) {
             skipped++;
             sendEvent({ type: "progress", product: product.name, productId, status: "skipped", error: "Product excluded", current, total });
             continue;
@@ -894,14 +946,18 @@ export const router = express.Router();
 
           // 2. Fetch variants
           const varResult = await client.query(
-            `SELECT id, sku, name, option1_name, option1_value, option2_name, option2_value,
-                    price_cents, compare_at_price_cents, weight_grams, barcode,
-                    units_per_variant, hierarchy_level,
-                    ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-             FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true
-               AND COALESCE(ebay_listing_excluded, false) = false
-             ORDER BY position ASC, id ASC`,
-            [productId],
+            `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
+                    pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
+                    pv.units_per_variant, pv.hierarchy_level,
+                    pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
+             FROM product_variants pv
+             LEFT JOIN channels.channel_variant_overrides cvo
+               ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2::integer
+             WHERE pv.product_id = $1::integer AND pv.sku IS NOT NULL AND pv.is_active = true
+               AND COALESCE(pv.ebay_listing_excluded, false) = false
+               AND COALESCE(cvo.is_listed, 1) <> 0
+             ORDER BY pv.position ASC, pv.id ASC`,
+            [productId, EBAY_CHANNEL_ID],
           );
           if (varResult.rows.length === 0) {
             failed++;

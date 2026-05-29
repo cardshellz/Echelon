@@ -702,9 +702,18 @@ class EchelonSyncOrchestrator {
         currency: channelPricing.currency,
         variantSku: productVariants.sku,
         shopifyVariantId: productVariants.shopifyVariantId,
+        listingExternalVariantId: channelListings.externalVariantId,
+        listingExternalSku: channelListings.externalSku,
       })
       .from(channelPricing)
       .innerJoin(productVariants, eq(channelPricing.productVariantId, productVariants.id))
+      .leftJoin(
+        channelListings,
+        and(
+          eq(channelListings.channelId, channelId),
+          eq(channelListings.productVariantId, productVariants.id),
+        ),
+      )
       .where(eq(channelPricing.channelId, channelId));
 
     if (productIds && productIds.length > 0) {
@@ -727,14 +736,17 @@ class EchelonSyncOrchestrator {
     const pushItems: PricingPushItem[] = [];
 
     for (const pr of pricingRows) {
-      if (!pr.shopifyVariantId) {
+      const externalVariantId = pr.listingExternalVariantId ?? pr.shopifyVariantId;
+      const externalSku = pr.listingExternalSku ?? pr.variantSku;
+
+      if (!externalVariantId) {
         result.details.push({
           variantId: pr.productVariantId!,
           sku: pr.variantSku,
           priceCents: pr.price,
           compareAtPriceCents: pr.compareAtPrice,
           status: "skipped",
-          error: "No shopifyVariantId",
+          error: `No external variant id for channel ${channel.name}`,
         });
         result.variantsSkipped++;
         continue;
@@ -775,7 +787,8 @@ class EchelonSyncOrchestrator {
 
       pushItems.push({
         variantId: pr.productVariantId!,
-        externalVariantId: pr.shopifyVariantId,
+        sku: externalSku,
+        externalVariantId,
         priceCents: pr.price,
         compareAtPriceCents: pr.compareAtPrice,
         currency: pr.currency,

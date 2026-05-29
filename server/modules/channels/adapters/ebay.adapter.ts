@@ -265,22 +265,27 @@ export class EbayAdapter implements IChannelAdapter {
         try {
           const bulkRequest = {
             requests: itemsWithOffers.map((item) => ({
-              offerId: item.externalVariantId!,
-              availableQuantity: item.allocatedQty,
-              price: {
-                value: "0", // Will be ignored if not changing price
-                currency: "USD",
-              },
+              sku: item.sku || String(item.variantId),
+              shipToLocationAvailability: { quantity: item.allocatedQty },
+              offers: [
+                {
+                  offerId: item.externalVariantId!,
+                  availableQuantity: item.allocatedQty,
+                },
+              ],
             })),
           };
 
           const response = await client.bulkUpdatePriceQuantity(bulkRequest);
 
           for (const item of itemsWithOffers) {
-            const resp = response?.responses?.find(
-              (r) => r.offerId === item.externalVariantId,
+            const resp = response?.responses?.find((r) =>
+              r.offerId === item.externalVariantId ||
+              r.offers?.some((offer) => offer.offerId === item.externalVariantId),
             );
-            if (resp && resp.statusCode >= 200 && resp.statusCode < 300) {
+            const offerResp = resp?.offers?.find((offer) => offer.offerId === item.externalVariantId);
+            const statusCode = offerResp?.statusCode ?? resp?.statusCode;
+            if (statusCode && statusCode >= 200 && statusCode < 300) {
               results.push({
                 variantId: item.variantId,
                 pushedQty: item.allocatedQty,
@@ -291,7 +296,7 @@ export class EbayAdapter implements IChannelAdapter {
                 variantId: item.variantId,
                 pushedQty: 0,
                 status: "error",
-                error: resp?.errors?.[0]?.message || `Status ${resp?.statusCode}`,
+                error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
               });
             }
           }
@@ -402,28 +407,35 @@ export class EbayAdapter implements IChannelAdapter {
         try {
           const bulkRequest = {
             requests: validItems.map((item) => ({
-              offerId: item.externalVariantId!,
-              availableQuantity: -1, // -1 = don't change quantity
-              price: {
-                value: (item.priceCents / 100).toFixed(2),
-                currency: item.currency || "USD",
-              },
+              sku: item.sku || String(item.variantId),
+              offers: [
+                {
+                  offerId: item.externalVariantId!,
+                  price: {
+                    value: (item.priceCents / 100).toFixed(2),
+                    currency: item.currency || "USD",
+                  },
+                },
+              ],
             })),
           };
 
           const response = await client.bulkUpdatePriceQuantity(bulkRequest);
 
           for (const item of validItems) {
-            const resp = response?.responses?.find(
-              (r) => r.offerId === item.externalVariantId,
+            const resp = response?.responses?.find((r) =>
+              r.offerId === item.externalVariantId ||
+              r.offers?.some((offer) => offer.offerId === item.externalVariantId),
             );
-            if (resp && resp.statusCode >= 200 && resp.statusCode < 300) {
+            const offerResp = resp?.offers?.find((offer) => offer.offerId === item.externalVariantId);
+            const statusCode = offerResp?.statusCode ?? resp?.statusCode;
+            if (statusCode && statusCode >= 200 && statusCode < 300) {
               results.push({ variantId: item.variantId, status: "success" });
             } else {
               results.push({
                 variantId: item.variantId,
                 status: "error",
-                error: resp?.errors?.[0]?.message || `Status ${resp?.statusCode}`,
+                error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
               });
             }
           }

@@ -25,6 +25,7 @@ import {
   channelWarehouseAssignments,
   channelAllocationRules,
   channelProductLines,
+  channelProductOverrides,
   channelVariantOverrides,
   productVariants,
   productLineProducts,
@@ -310,7 +311,28 @@ class AllocationEngine {
       }
     }
 
-    // 6.5 Load channel variant overrides (is_listed = false blocks allocation)
+    // 6.5 Load channel product + variant overrides (is_listed = false blocks allocation)
+    const productOverrides = await this.db
+      .select({
+        channelId: channelProductOverrides.channelId,
+        productId: channelProductOverrides.productId,
+        isListed: channelProductOverrides.isListed,
+      })
+      .from(channelProductOverrides)
+      .where(
+        and(
+          inArray(channelProductOverrides.channelId, channelIds),
+          eq(channelProductOverrides.productId, productId),
+        ),
+      );
+
+    const listedOverridesByChannelProduct = new Map<string, boolean>();
+    for (const row of productOverrides) {
+      if (row.channelId && row.productId) {
+        listedOverridesByChannelProduct.set(`${row.channelId}:${row.productId}`, row.isListed !== 0);
+      }
+    }
+
     const variantOverrides = await this.db
       .select({
         channelId: channelVariantOverrides.channelId,
@@ -323,7 +345,7 @@ class AllocationEngine {
     const listedOverridesByChannelVariant = new Map<string, boolean>();
     for (const row of variantOverrides) {
       if (row.channelId && row.productVariantId) {
-        listedOverridesByChannelVariant.set(`${row.channelId}:${row.productVariantId}`, row.isListed ?? true);
+        listedOverridesByChannelVariant.set(`${row.channelId}:${row.productVariantId}`, row.isListed !== 0);
       }
     }
 
@@ -335,6 +357,31 @@ class AllocationEngine {
           channelId: channel.id,
           reason: "Product line not assigned to this channel",
         });
+        continue;
+      }
+
+      const productIsListed = listedOverridesByChannelProduct.get(`${channel.id}:${productId}`);
+      if (productIsListed === false) {
+        result.blocked.push({
+          channelId: channel.id,
+          reason: "Product is explicitly unlisted for this channel (via overrides)",
+        });
+        for (const variant of globalVariantAtp) {
+          result.allocations.push({
+            channelId: channel.id,
+            channelName: channel.name,
+            channelProvider: channel.provider,
+            channelPriority: channel.priority,
+            productVariantId: variant.productVariantId,
+            sku: variant.sku,
+            unitsPerVariant: variant.unitsPerVariant,
+            allocatedUnits: 0,
+            allocatedBase: 0,
+            method: "zero",
+            reason: "Product is explicitly unlisted for this channel (via overrides)",
+            warehouseBreakdown: [],
+          });
+        }
         continue;
       }
 

@@ -26,6 +26,7 @@ function createMockDb() {
     chain.returning = vi.fn(() => chain);
     chain.groupBy = vi.fn(() => chain);
     chain.innerJoin = vi.fn(() => chain);
+    chain.leftJoin = vi.fn(() => chain);
     chain.orderBy = vi.fn(() => chain);
     return chain;
   }

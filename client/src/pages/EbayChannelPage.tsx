@@ -152,6 +152,9 @@ interface FeedVariant {
   name: string;
   priceCents: number | null;
   ebayListingExcluded: boolean;
+  explicitlyExcluded: boolean;
+  excludedByProduct: boolean;
+  effectivelyListed: boolean;
   inventoryQuantity: number;
   fulfillmentPolicyOverride: string | null;
   returnPolicyOverride: string | null;
@@ -2015,21 +2018,22 @@ export default function EbayChannelPage() {
                         {isExpanded && hasVariants && item.variants.map((variant) => (
                           <React.Fragment key={`v-${variant.id}`}>
                           <TableRow
-                            className={`bg-muted/20 sm:table-row flex flex-col p-3 sm:p-0 gap-1 sm:gap-0 ${variant.ebayListingExcluded ? "opacity-50" : ""}`}
+                            className={`bg-muted/20 sm:table-row flex flex-col p-3 sm:p-0 gap-1 sm:gap-0 ${!variant.effectivelyListed ? "opacity-50" : ""}`}
                           >
                             <TableCell className="sm:table-cell flex items-center sm:w-[40px] py-0 sm:py-1.5 pl-8 sm:pl-10">
                               <Switch
-                                checked={!variant.ebayListingExcluded}
+                                checked={variant.effectivelyListed}
+                                disabled={variant.excludedByProduct}
                                 onCheckedChange={(checked) =>
                                   toggleVariantExclusionMutation.mutate({ variantId: variant.id, excluded: !checked })
                                 }
                                 className="scale-[0.65]"
-                                title={variant.ebayListingExcluded ? "Include variant" : "Exclude variant"}
+                                title={variant.excludedByProduct ? "Excluded by product" : variant.explicitlyExcluded ? "Include variant" : "Exclude variant"}
                               />
                             </TableCell>
                             <TableCell className="sm:table-cell block py-0 sm:py-1.5" colSpan={2}>
                               <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
-                                <span className={`text-xs font-medium ${variant.ebayListingExcluded ? "line-through text-muted-foreground" : ""}`}>
+                                <span className={`text-xs font-medium ${!variant.effectivelyListed ? "line-through text-muted-foreground" : ""}`}>
                                   {variant.name}
                                 </span>
                                 <code className="text-[11px] bg-muted px-1 py-0.5 rounded text-muted-foreground">

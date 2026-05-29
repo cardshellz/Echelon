@@ -69,6 +69,7 @@ import { identityStorage } from "../modules/identity";
 import { createAllocationEngine } from "../modules/channels/allocation-engine.service";
 import { createSourceLockService } from "../modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
+import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
 import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
 import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-orchestrator.service";
 import { productVariants as pvTable } from "@shared/schema";
@@ -160,8 +161,10 @@ export function createServices(db: any) {
   const allocationEngine = createAllocationEngine(db, atp);
   const sourceLockService = createSourceLockService(db);
   const shopifyAdapter = createShopifyAdapter(db);
+  const ebayAdapter = createEbayAdapter(db);
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
+  adapterRegistry.register(ebayAdapter);
   const echelonOrchestrator = createEchelonSyncOrchestrator(
     db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush, atp,
   );

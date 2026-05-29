@@ -37,6 +37,8 @@ function thenableChain(data: any[]) {
  * 4. Warehouse assignments
  * 5. Fulfillment warehouses (ONLY if some channels have no assignments)
  * 6. Allocation rules
+ * 7. Channel product overrides
+ * 8. Channel variant overrides
  */
 function createMockDb(config: {
   activeChannels?: any[];
@@ -45,6 +47,8 @@ function createMockDb(config: {
   warehouseAssignments?: any[];
   fulfillmentWarehouses?: any[];
   allocationRules?: any[];
+  productOverrides?: any[];
+  variantOverrides?: any[];
 } = {}) {
   let selectCallCount = 0;
 
@@ -74,6 +78,8 @@ function createMockDb(config: {
   }
 
   selectSequence.push(config.allocationRules ?? []); // 6: allocation rules
+  selectSequence.push(config.productOverrides ?? []); // 7: channel product overrides
+  selectSequence.push(config.variantOverrides ?? []); // 8: channel variant overrides
 
   return {
     select: vi.fn(() => {
@@ -794,6 +800,80 @@ describe("Allocation Engine (Parallel Model)", () => {
 
       const ca = syncTargets.find(t => t.channelId === 37);
       expect(ca?.variantAllocations[0].allocatedUnits).toBe(450); // 90% of 500
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Channel listing overrides
+  // -----------------------------------------------------------------------
+
+  describe("channel listing overrides", () => {
+    it("zeros every variant when the product is explicitly unlisted for a channel", async () => {
+      const variants = [
+        { productVariantId: 10, sku: "SHLZ-SEMI-OVR-DH-B200", name: "Box", unitsPerVariant: 200, atpUnits: 3, atpBase: 600 },
+        { productVariantId: 11, sku: "SHLZ-SEMI-OVR-DH-C2000", name: "Case", unitsPerVariant: 200, atpUnits: 3, atpBase: 600 },
+      ];
+      const channels = [
+        { id: 67, name: "Ebay", provider: "ebay", status: "active", priority: 0 },
+      ];
+      const warehouseAssignments = [
+        { channelId: 67, warehouseId: 1, enabled: true },
+      ];
+      const productOverrides = [
+        { channelId: 67, productId: 74, isListed: 0 },
+      ];
+
+      const db = createMockDb({
+        activeChannels: channels,
+        warehouseAssignments,
+        productOverrides,
+      });
+      const atp = createMockAtpService({ variants, warehouseAtp: { 1: 600 } });
+      const engine = createAllocationEngine(db, atp);
+
+      const result = await engine.allocateProduct(74);
+
+      expect(result.blocked).toEqual([
+        {
+          channelId: 67,
+          reason: "Product is explicitly unlisted for this channel (via overrides)",
+        },
+      ]);
+      expect(result.allocations).toHaveLength(2);
+      expect(result.allocations.every((allocation) => allocation.allocatedUnits === 0)).toBe(true);
+      expect(result.allocations.every((allocation) => allocation.allocatedBase === 0)).toBe(true);
+    });
+
+    it("zeros only the variant that is explicitly unlisted for a channel", async () => {
+      const variants = [
+        { productVariantId: 10, sku: "SHLZ-SEMI-OVR-DH-B200", name: "Box", unitsPerVariant: 200, atpUnits: 3, atpBase: 600 },
+        { productVariantId: 11, sku: "SHLZ-SEMI-OVR-DH-C2000", name: "Case", unitsPerVariant: 200, atpUnits: 3, atpBase: 600 },
+      ];
+      const channels = [
+        { id: 67, name: "Ebay", provider: "ebay", status: "active", priority: 0 },
+      ];
+      const warehouseAssignments = [
+        { channelId: 67, warehouseId: 1, enabled: true },
+      ];
+      const variantOverrides = [
+        { channelId: 67, productVariantId: 10, isListed: 0 },
+      ];
+
+      const db = createMockDb({
+        activeChannels: channels,
+        warehouseAssignments,
+        variantOverrides,
+      });
+      const atp = createMockAtpService({ variants, warehouseAtp: { 1: 600 } });
+      const engine = createAllocationEngine(db, atp);
+
+      const result = await engine.allocateProduct(74);
+
+      const box = result.allocations.find((allocation) => allocation.productVariantId === 10);
+      const kase = result.allocations.find((allocation) => allocation.productVariantId === 11);
+      expect(box?.allocatedUnits).toBe(0);
+      expect(box?.reason).toBe("Variant is explicitly unlisted for this channel (via overrides)");
+      expect(kase?.allocatedBase).toBe(600);
     });
   });
 

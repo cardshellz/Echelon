@@ -417,6 +417,85 @@ describe("eBay Listing Builder", () => {
       expect(group!.payload.description).toContain("Happiness Guarantee");
     });
   });
+
+  describe("pushInventory", () => {
+    it("uses eBay bulk price/quantity request shape for offer quantity updates", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
+        responses: [
+          {
+            sku: "CS-TL35-P25",
+            offers: [{ offerId: "offer-101", statusCode: 200 }],
+          },
+        ],
+      });
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue({ bulkUpdatePriceQuantity });
+      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
+
+      const result = await adapter.pushInventory(2, [
+        {
+          variantId: 101,
+          sku: "CS-TL35-P25",
+          externalVariantId: "offer-101",
+          externalInventoryItemId: null,
+          allocatedQty: 0,
+        },
+      ]);
+
+      expect(result).toEqual([{ variantId: 101, pushedQty: 0, status: "success" }]);
+      expect(bulkUpdatePriceQuantity).toHaveBeenCalledWith({
+        requests: [
+          {
+            sku: "CS-TL35-P25",
+            shipToLocationAvailability: { quantity: 0 },
+            offers: [{ offerId: "offer-101", availableQuantity: 0 }],
+          },
+        ],
+      });
+    });
+  });
+
+  describe("pushPricing", () => {
+    it("uses eBay bulk price/quantity request shape without changing quantity", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
+        responses: [
+          {
+            sku: "CS-TL35-P25",
+            offers: [{ offerId: "offer-101", statusCode: 200 }],
+          },
+        ],
+      });
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue({ bulkUpdatePriceQuantity });
+      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
+
+      const result = await adapter.pushPricing(2, [
+        {
+          variantId: 101,
+          sku: "CS-TL35-P25",
+          externalVariantId: "offer-101",
+          priceCents: 1299,
+          compareAtPriceCents: null,
+          currency: "USD",
+        },
+      ]);
+
+      expect(result).toEqual([{ variantId: 101, status: "success" }]);
+      expect(bulkUpdatePriceQuantity).toHaveBeenCalledWith({
+        requests: [
+          {
+            sku: "CS-TL35-P25",
+            offers: [
+              {
+                offerId: "offer-101",
+                price: { value: "12.99", currency: "USD" },
+              },
+            ],
+          },
+        ],
+      });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
