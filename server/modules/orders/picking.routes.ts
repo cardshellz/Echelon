@@ -134,10 +134,20 @@ export function registerPickingRoutes(app: Express) {
       const { pickerId } = req.body;
       if (!pickerId) return res.status(400).json({ error: "pickerId is required" });
       const result = await picking.claimOrder(id, pickerId, req.headers["x-device-type"] as string, req.sessionID);
-      
+
       res.json({ ...result.order, items: result.items });
     } catch (error: any) {
       console.error("Error claiming order:", error);
+      // Surface structured claim failures (on hold / actively picked by another
+      // picker / not claimable) with their real status code + reason so the UI
+      // can show the truth instead of a blanket "claimed by another picker".
+      if (error?.isOperational && typeof error.statusCode === "number") {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          reason: error.context?.reason,
+          context: error.context,
+        });
+      }
       res.status(500).json({ error: "Failed to claim order" });
     }
   });

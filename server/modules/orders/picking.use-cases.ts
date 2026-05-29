@@ -1,5 +1,5 @@
 import { eq, and, sql } from "drizzle-orm";
-import { IntegrityError, ValidationError } from "../../../shared/errors";
+import { IntegrityError, NotFoundError, ValidationError } from "../../../shared/errors";
 import { AuditLogger } from "../../infrastructure/auditLogger";
 import {
   inventoryLevels,
@@ -1820,7 +1820,38 @@ export class PickingUseCases {
     const orderBefore = await this.storage.getOrderById(orderId);
 
     const order = await this.storage.claimOrder(orderId, pickerId);
-    if (!order) throw new IntegrityError("Order is no longer available");
+    if (!order) {
+      // Claim was rejected by the guarded UPDATE. Classify WHY so the UI can
+      // tell the picker the truth instead of always blaming "another picker".
+      const current = orderBefore ?? (await this.storage.getOrderById(orderId));
+      if (!current) {
+        throw new NotFoundError(`Order ${orderId} not found`, { reason: "not_found", orderId });
+      }
+      if (current.onHold === 1) {
+        throw new IntegrityError("Order is on hold and cannot be picked", {
+          reason: "on_hold",
+          orderId,
+        });
+      }
+      if (
+        current.warehouseStatus === "in_progress" &&
+        current.assignedPickerId &&
+        current.assignedPickerId !== pickerId
+      ) {
+        const holder = await this.storage.getUser(current.assignedPickerId);
+        const holderName = holder?.displayName || holder?.username || "another picker";
+        throw new IntegrityError(`Order is currently being picked by ${holderName}`, {
+          reason: "in_progress_other",
+          orderId,
+          assignedPickerId: current.assignedPickerId,
+          pickerName: holderName,
+        });
+      }
+      throw new IntegrityError(
+        `Order is not available to pick (status: ${current.warehouseStatus})`,
+        { reason: "not_claimable", orderId, warehouseStatus: current.warehouseStatus },
+      );
+    }
 
     // Audit log (fire-and-forget)
     const picker = await this.storage.getUser(pickerId);

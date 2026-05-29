@@ -10,7 +10,7 @@ import {
   outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
-import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
+import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { computeSortRank } from "./sort-rank";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
@@ -654,18 +654,24 @@ export const orderMethods: IOrderStorage = {
   },
 
   async claimOrder(orderId: number, pickerId: string): Promise<Order | null> {
+    // Idempotent re-claim: the picker already holds this order AND it is still
+    // actively being picked. We intentionally require `in_progress` here — a
+    // stale `assigned_picker_id` left over on a ready/ready_to_ship order from a
+    // previous pass is attribution, not an active claim, and must fall through
+    // to the guarded UPDATE below so it can be re-claimed cleanly.
     const existingOrder = await db.select().from(orders).where(
       and(
         eq(orders.id, orderId),
-        eq(orders.assignedPickerId, pickerId)
+        eq(orders.assignedPickerId, pickerId),
+        eq(orders.warehouseStatus, "in_progress"),
       )
     );
-    
+
     if (existingOrder.length > 0) {
-      console.log(`[CLAIM] Picker ${pickerId} already owns order ${orderId}, returning existing`);
+      console.log(`[CLAIM] Picker ${pickerId} already owns in-progress order ${orderId}, returning existing`);
       return existingOrder[0];
     }
-    
+
     const currentOrder = await db.select().from(orders).where(eq(orders.id, orderId));
     if (currentOrder.length > 0) {
       console.log(`[CLAIM] Order ${orderId} current state:`, {
@@ -674,7 +680,16 @@ export const orderMethods: IOrderStorage = {
         onHold: currentOrder[0].onHold
       });
     }
-    
+
+    // The picker assignment is ONLY a lock while the order is actively being
+    // picked (`warehouse_status = 'in_progress'`). In every other claimable
+    // state (`ready` / `partially_shipped` / `ready_to_ship`) a non-null
+    // `assigned_picker_id` is a leftover attribution record from a prior pass —
+    // it is NOT an active hold and must not block a new claim. The ONLY thing
+    // that blocks a claim is an order currently in_progress under a DIFFERENT
+    // picker. This makes the claim correct regardless of how a stale picker id
+    // got left behind (completion, shipment rollup, order edit, reconcile),
+    // so we don't have to chase every status writer to null the field.
     const result = await db
       .update(orders)
       .set({
@@ -685,26 +700,29 @@ export const orderMethods: IOrderStorage = {
       .where(
         and(
           eq(orders.id, orderId),
+          eq(orders.onHold, 0),
+          inArray(orders.warehouseStatus, [
+            "ready",
+            "partially_shipped",
+            "ready_to_ship",
+            "in_progress",
+          ]),
+          // NOT (in_progress AND held by someone else)
           or(
-            eq(orders.warehouseStatus, "ready"),
-            eq(orders.warehouseStatus, "partially_shipped"),
-            and(
-              eq(orders.warehouseStatus, "in_progress"),
-              isNull(orders.assignedPickerId)
-            )
+            ne(orders.warehouseStatus, "in_progress"),
+            isNull(orders.assignedPickerId),
+            eq(orders.assignedPickerId, pickerId),
           ),
-          isNull(orders.assignedPickerId),
-          eq(orders.onHold, 0)
         )
       )
       .returning();
-    
+
     if (result.length === 0) {
       console.log(`[CLAIM] Order ${orderId} claim failed - not available for picker ${pickerId}`);
     } else {
       console.log(`[CLAIM] Order ${orderId} claimed successfully by picker ${pickerId}`);
     }
-    
+
     return result[0] || null;
   },
 

@@ -873,7 +873,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               OR  (w.source = 'shopify' AND w.source_table_id = oms.id::text)
                 )
             AND oms.status IN ('cancelled', 'shipped', 'refunded')
-            AND w.warehouse_status IN ('ready', 'in_progress')
+            -- Include post-pick states (ready_to_ship/completed): a fully picked
+            -- order whose OMS parent is already shipped/cancelled but whose WMS
+            -- row never advanced will otherwise stay stuck in the pick/done
+            -- queue forever. Only the cancelled/shipped CASE branches mutate
+            -- warehouse_status, so this is a safe forward-only correction.
+            AND w.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'completed')
           RETURNING w.id, w.order_number, oms.status AS oms_status
         `);
         if (result.rows.length > 0) {
