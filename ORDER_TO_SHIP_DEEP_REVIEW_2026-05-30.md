@@ -411,12 +411,25 @@ contract (CLAUDE.md §6 errors, §10 audit):
 Foundation (logger + correlation context + error taxonomy) lands in **Phase 0/1** so every core
 built afterward uses it; the dashboard/alerting consolidation lands in **Phase 5**.
 
-Each phase ships with tests (unit + integration where DB-touching) per CLAUDE.md §11.
+Each phase ships with tests (unit + integration where DB-touching) per CLAUDE.md §11. **Every
+fixed P0/P1 ships a bug-reproduction regression test** — written failing first (reproduces the
+bug), made green by the fix, and kept in the suite forever so the bug is unrepeatable. The CI gate
+(Phase 0, item 0) runs the whole suite on every PR and blocks merge on red — this is the ratchet
+that stops the months-long regress cycle.
 
 ---
 
-### Phase 0 — Stop the live bleeding (hours; tactical, low blast radius)
+### Phase 0 — Foundations + stop the live bleeding (low blast radius)
 Interim hotfixes that hold until C3/C4 land; do not build new divergent logic here.
+0. **CI + test gate (prerequisite — do this FIRST, before touching pipeline code).** Add a
+   GitHub Actions workflow (`.github/workflows/ci.yml`) that on every PR runs: `npm install` →
+   `npm run check` (tsc) → `npm test` (the 1,723 unit tests) → spin up a Postgres service container
+   → `npm run test:integration` (the DB/seam tests we couldn't run this pass) → later, the
+   concurrency/race tests (duplicate-shipment TOCTOU). Turn on branch protection: "require status
+   checks to pass" so a red suite **blocks merge**. This is the ratchet — without it, the rebuild
+   regresses. First action it forces: fix or consciously quarantine the 3 red
+   `link-child-to-parent` tests. (Distinct from regression testing: the gate is the *enforcement*;
+   the bug-reproduction regression tests added per fix are the *content* — see the tests note above.)
 1. **D-FORCECXL + D-SPAM:** in reconcile #4 (`index.ts:888-916`), read `cancelOrder`'s
    `{alreadyInState}`; when SS reports shipped, route through the shipped rollup and stamp the
    shipment terminal; add a terminal guard to the cascade SELECT. Make `cancelled` non-re-derivable
