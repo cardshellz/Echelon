@@ -18,6 +18,10 @@ const SERVER_INDEX_SRC = readFileSync(
   resolve(__dirname, "../../../..", "index.ts"),
   "utf8",
 );
+const PICK_PRIORITY_ROUTES_SRC = readFileSync(
+  resolve(__dirname, "../../../..", "routes/pick-priority.routes.ts"),
+  "utf8",
+);
 
 describe("ShipStation WMS hold/release sync", () => {
   it("makes restorefromhold the final ShipStation write for release", () => {
@@ -54,10 +58,17 @@ describe("ShipStation WMS hold/release sync", () => {
 
   it("queues ShipStation sync after startup sort-rank recompute changes active WMS rows", () => {
     expect(ORDER_STORAGE_SRC).toMatch(/export async function recomputeAllActiveSortRanksDetailed/);
-    expect(ORDER_STORAGE_SRC).toMatch(/if \(row\.sortRank === rank\) continue/);
+    expect(ORDER_STORAGE_SRC).toMatch(/if \(row\.sortRank === rank && sameDateTime/);
     expect(SERVER_INDEX_SRC).toMatch(/recomputeAllActiveSortRanksDetailed/);
     expect(SERVER_INDEX_SRC).toMatch(
       /enqueueShipStationSortRankSyncRetry\(\s*db,\s*orderId,\s*"startup sort_rank recompute"/,
     );
+  });
+
+  it("queues ShipStation sync after pick-priority settings change active sort ranks", () => {
+    expect(PICK_PRIORITY_ROUTES_SRC).toMatch(/recomputeAllActiveSortRanksDetailed/);
+    expect(PICK_PRIORITY_ROUTES_SRC).toMatch(/enqueueShipStationSortRankSyncRetry/);
+    expect(PICK_PRIORITY_ROUTES_SRC).toMatch(/pick-priority settings changed/);
+    expect(PICK_PRIORITY_ROUTES_SRC).toMatch(/sortRankSync/);
   });
 });

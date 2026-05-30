@@ -68,6 +68,7 @@ interface PatchBody {
 const BUMP_THRESHOLD = 9999;
 const SLA_WIDTH = 6;
 const SLA_MAX = 999999;
+const SLA_EPOCH_MS = Date.UTC(2024, 0, 1);
 const AGE_WIDTH = 10;
 const AGE_MAX = 9999999999;
 
@@ -82,7 +83,6 @@ function computeSortRankPreview(params: {
   slaDueAt: Date | null;
   orderPlacedAt: Date;
 }): string {
-  const now = new Date();
   const priority = Math.max(0, Math.min(BUMP_THRESHOLD, Math.floor(params.priority)));
   const isHeld = params.onHold;
   const isBumped = priority >= BUMP_THRESHOLD;
@@ -93,8 +93,8 @@ function computeSortRankPreview(params: {
 
   let slaComponent = 0;
   if (params.slaDueAt) {
-    const minutesUntilSla = Math.round((params.slaDueAt.getTime() - now.getTime()) / 60000);
-    slaComponent = Math.max(0, SLA_MAX - Math.max(0, minutesUntilSla));
+    const daysSinceEpoch = Math.floor((params.slaDueAt.getTime() - SLA_EPOCH_MS) / 86400000);
+    slaComponent = Math.max(0, SLA_MAX - Math.max(0, daysSinceEpoch));
   }
   const S = pad(Math.min(SLA_MAX, slaComponent), SLA_WIDTH);
 

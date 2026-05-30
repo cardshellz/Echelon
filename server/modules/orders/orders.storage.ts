@@ -11,7 +11,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../db";
 import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
-import { computeSortRank } from "./sort-rank";
+import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
 
@@ -114,26 +114,49 @@ async function findExistingOrderForCreate(tx: any, order: InsertOrder): Promise<
  * change to priority or onHold so the flattened ShipStation sort key
  * stays in step with Echelon's pick queue.
  */
+function dateTime(value: Date | string | null | undefined): number | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
+function sameDateTime(
+  left: Date | string | null | undefined,
+  right: Date | string | null | undefined,
+): boolean {
+  return dateTime(left) === dateTime(right);
+}
+
 async function recomputeSortRank(orderId: number): Promise<string | null> {
   const rows = await db
     .select({
       priority: orders.priority,
       onHold: orders.onHold,
       slaDueAt: orders.slaDueAt,
+      channelId: orders.channelId,
+      channelShipByDate: orders.channelShipByDate,
       orderPlacedAt: orders.orderPlacedAt,
+      createdAt: orders.createdAt,
     })
     .from(orders)
     .where(eq(orders.id, orderId))
     .limit(1);
   if (rows.length === 0) return null;
   const row = rows[0];
+  const slaDueAt = await resolveSlaDueAt({
+    channelId: row.channelId,
+    channelShipByDate: row.channelShipByDate as any,
+    explicitSlaDueAt: null,
+    orderPlacedAt: row.orderPlacedAt as any,
+    createdAt: row.createdAt as any,
+  }, db as any);
   const rank = computeSortRank({
     priority: row.priority,
     onHold: row.onHold,
-    slaDueAt: row.slaDueAt as any,
+    slaDueAt,
     orderPlacedAt: row.orderPlacedAt as any,
   });
-  await db.update(orders).set({ sortRank: rank }).where(eq(orders.id, orderId));
+  await db.update(orders).set({ sortRank: rank, slaDueAt }).where(eq(orders.id, orderId));
   return rank;
 }
 
@@ -149,7 +172,10 @@ export async function recomputeAllActiveSortRanksDetailed(): Promise<SortRankRec
       priority: orders.priority,
       onHold: orders.onHold,
       slaDueAt: orders.slaDueAt,
+      channelId: orders.channelId,
+      channelShipByDate: orders.channelShipByDate,
       orderPlacedAt: orders.orderPlacedAt,
+      createdAt: orders.createdAt,
       sortRank: orders.sortRank,
     })
     .from(orders)
@@ -163,15 +189,22 @@ export async function recomputeAllActiveSortRanksDetailed(): Promise<SortRankRec
     );
   const orderIds: number[] = [];
   for (const row of activeOrders) {
+    const slaDueAt = await resolveSlaDueAt({
+      channelId: row.channelId,
+      channelShipByDate: row.channelShipByDate as any,
+      explicitSlaDueAt: null,
+      orderPlacedAt: row.orderPlacedAt as any,
+      createdAt: row.createdAt as any,
+    }, db as any);
     const rank = computeSortRank({
       priority: row.priority,
       onHold: row.onHold,
-      slaDueAt: row.slaDueAt as any,
+      slaDueAt,
       orderPlacedAt: row.orderPlacedAt as any,
     });
-    if (row.sortRank === rank) continue;
-    await db.update(orders).set({ sortRank: rank }).where(eq(orders.id, row.id));
-    orderIds.push(row.id);
+    if (row.sortRank === rank && sameDateTime(row.slaDueAt as any, slaDueAt)) continue;
+    await db.update(orders).set({ sortRank: rank, slaDueAt }).where(eq(orders.id, row.id));
+    if (row.sortRank !== rank) orderIds.push(row.id);
   }
   return { updated: orderIds.length, orderIds };
 }
@@ -424,7 +457,7 @@ export const orderMethods: IOrderStorage = {
         -- sort_rank is the single source of truth (flattened composite of
         -- hold/bump/priority/SLA/age). Built by computeSortRank() and
         -- pushed to ShipStation customField1 so pick queue == ship queue.
-        o.sort_rank ASC NULLS LAST,
+        o.sort_rank DESC NULLS LAST,
         -- Fallback only if sort_rank somehow unset (shouldn't happen):
         COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);

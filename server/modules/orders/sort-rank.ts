@@ -5,22 +5,21 @@
  * the same order Echelon's picker sees.
  *
  * Format: H-B-PPPP-SSSSSS-AAAAAAAAAA  (22 chars total)
- *   H          1 char   "0" if NOT on hold, "1" if held
- *   B          1 char   "0" if priority >= 9999 (bumped), "1" otherwise
- *   PPPP       4 chars  9999 - priority, zero-padded (lower = higher pri)
- *   SSSSSS     6 chars  SLA deadline: days_since_epoch(sla_due_at)
- *                       lower = earlier deadline = more urgent
- *   AAAAAAAAAA 10 chars age: unix_seconds(placed_at)
- *                       lower = older order = ships first (FIFO)
+ *   H          1 char   "1" if NOT on hold, "0" if held
+ *   B          1 char   "1" if priority >= 9999 (bumped), "0" otherwise
+ *   PPPP       4 chars  priority 0000-9999, zero-padded
+ *   SSSSSS     6 chars  SLA deadline: 999999 - days_since_epoch(sla_due_at)
+ *                       higher = earlier deadline = more urgent
+ *   AAAAAAAAAA 10 chars age: 9999999999 - unix_seconds(placed_at)
+ *                       higher = older order = ships first (FIFO)
  *
- * Sort ASC on this string = correct priority ordering. ShipStation sorts
- * customField1 ASC by default; pick queue ORDER BY sort_rank ASC matches.
+ * Sort DESC on this string = correct priority ordering.
  */
 
-const HOLD_BIT_NOT_HELD = "0";
-const HOLD_BIT_HELD = "1";
-const BUMP_BIT_BUMPED = "0";
-const BUMP_BIT_NORMAL = "1";
+const HOLD_BIT_NOT_HELD = "1";
+const HOLD_BIT_HELD = "0";
+const BUMP_BIT_BUMPED = "1";
+const BUMP_BIT_NORMAL = "0";
 const BUMP_THRESHOLD = 9999;
 
 const PRIORITY_MAX = 9999;
@@ -54,28 +53,29 @@ export function computeSortRank(input: SortRankInput): string {
 
   const H = isHeld ? HOLD_BIT_HELD : HOLD_BIT_NOT_HELD;
   const B = isBumped ? BUMP_BIT_BUMPED : BUMP_BIT_NORMAL;
-  const P = pad(PRIORITY_MAX - priority, 4);
+  const P = pad(priority, 4);
 
-  // SLA component: earlier deadline = fewer days from epoch = lower value
-  // = sorts first in ASC. Orders sharing the same deadline get identical S
+  // SLA component: earlier deadline = fewer days from epoch = higher
+  // inverted value = sorts first in DESC. Orders sharing the same deadline get identical S
   // values; the age component (A) breaks ties by FIFO.
-  let slaComponent = SLA_MAX;
+  let slaComponent = 0;
   if (input.slaDueAt) {
     const slaDate = input.slaDueAt instanceof Date ? input.slaDueAt : new Date(input.slaDueAt);
     if (!isNaN(slaDate.getTime())) {
       const daysSinceEpoch = Math.floor((slaDate.getTime() - SLA_EPOCH_MS) / 86400000);
-      slaComponent = Math.max(0, daysSinceEpoch);
+      slaComponent = Math.max(0, SLA_MAX - Math.max(0, daysSinceEpoch));
     }
   }
   const S = pad(Math.min(SLA_MAX, slaComponent), SLA_WIDTH);
 
-  // Age component: older = lower unix timestamp = lower value = sorts first
-  // in ASC (FIFO). Orders with no placed date get AGE_MAX (sort last).
-  let ageComponent = AGE_MAX;
+  // Age component: older = lower unix timestamp = higher inverted value =
+  // sorts first in DESC (FIFO). Orders with no placed date get 0 (sort last).
+  let ageComponent = 0;
   if (input.orderPlacedAt) {
     const placed = input.orderPlacedAt instanceof Date ? input.orderPlacedAt : new Date(input.orderPlacedAt);
     if (!isNaN(placed.getTime())) {
-      ageComponent = Math.floor(placed.getTime() / 1000);
+      const unixSeconds = Math.floor(placed.getTime() / 1000);
+      ageComponent = Math.max(0, AGE_MAX - unixSeconds);
     }
   }
   const A = pad(Math.min(AGE_MAX, ageComponent), AGE_WIDTH);

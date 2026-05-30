@@ -2,16 +2,16 @@ import { describe, expect, it } from "vitest";
 import { computeSortRank } from "../../sort-rank";
 
 /**
- * Sort rank is ASC-sorted: lower value = higher priority.
- * ShipStation customField1 and pick queue both sort ASC.
+ * Sort rank is DESC-sorted: higher value = higher priority.
+ * ShipStation customField1 and pick queue must both sort DESC.
  */
-describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
+describe("computeSortRank — DESC ordering (higher = higher priority)", () => {
   const SAME_DAY_MORNING = new Date("2025-05-30T10:00:00Z");
   const SAME_DAY_AFTERNOON = new Date("2025-05-30T14:00:00Z");
   const SAME_DAY_EVENING = new Date("2025-05-30T17:00:00Z");
   const SLA_DEADLINE = new Date("2025-06-04T17:00:00Z");
 
-  it("older order ranks above newer order — lower sort_rank (same priority, same SLA)", () => {
+  it("older order ranks above newer order — higher sort_rank (same priority, same SLA)", () => {
     const early = computeSortRank({
       priority: 100,
       onHold: false,
@@ -24,10 +24,10 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
       slaDueAt: SLA_DEADLINE,
       orderPlacedAt: SAME_DAY_AFTERNOON,
     });
-    expect(early < late).toBe(true);
+    expect(early > late).toBe(true);
   });
 
-  it("three same-day orders sort oldest-first (FIFO) in ASC", () => {
+  it("three same-day orders sort oldest-first (FIFO) in DESC", () => {
     const ranks = [SAME_DAY_MORNING, SAME_DAY_AFTERNOON, SAME_DAY_EVENING].map(
       (placed) =>
         computeSortRank({
@@ -37,7 +37,7 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
           orderPlacedAt: placed,
         }),
     );
-    const sorted = [...ranks].sort();
+    const sorted = [...ranks].sort().reverse();
     expect(ranks).toEqual(sorted);
   });
 
@@ -57,7 +57,7 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
     expect(earlyParts[3]).toBe(lateParts[3]);
   });
 
-  it("earlier SLA deadline produces lower S component (more urgent, sorts first)", () => {
+  it("earlier SLA deadline produces higher S component (more urgent, sorts first)", () => {
     const urgentSla = new Date("2025-06-02T17:00:00Z");
     const relaxedSla = new Date("2025-06-05T17:00:00Z");
     const urgent = computeSortRank({
@@ -72,10 +72,10 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
       slaDueAt: relaxedSla,
       orderPlacedAt: SAME_DAY_MORNING,
     }).split("-")[3];
-    expect(Number(urgent) < Number(relaxed)).toBe(true);
+    expect(Number(urgent) > Number(relaxed)).toBe(true);
   });
 
-  it("expedited order sorts before standard — lower sort_rank even when placed later", () => {
+  it("expedited order sorts before standard — higher sort_rank even when placed later", () => {
     const standard = computeSortRank({
       priority: 100,
       onHold: false,
@@ -88,10 +88,10 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
       slaDueAt: SLA_DEADLINE,
       orderPlacedAt: SAME_DAY_AFTERNOON,
     });
-    expect(expedited < standard).toBe(true);
+    expect(expedited > standard).toBe(true);
   });
 
-  it("null orderPlacedAt sorts last (AGE_MAX)", () => {
+  it("null orderPlacedAt sorts last (zero age component)", () => {
     const noPlacement = computeSortRank({
       priority: 100,
       onHold: false,
@@ -104,10 +104,10 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
       slaDueAt: SLA_DEADLINE,
       orderPlacedAt: SAME_DAY_MORNING,
     });
-    expect(noPlacement > withPlacement).toBe(true);
+    expect(noPlacement < withPlacement).toBe(true);
   });
 
-  it("null slaDueAt sorts last (SLA_MAX)", () => {
+  it("null slaDueAt sorts last (zero SLA component)", () => {
     const withSla = computeSortRank({
       priority: 100,
       onHold: false,
@@ -120,7 +120,7 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
       slaDueAt: null,
       orderPlacedAt: SAME_DAY_MORNING,
     });
-    expect(withSla < noSla).toBe(true);
+    expect(withSla > noSla).toBe(true);
   });
 
   it("on-hold orders sort after non-held orders", () => {
@@ -136,10 +136,10 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
       slaDueAt: SLA_DEADLINE,
       orderPlacedAt: SAME_DAY_MORNING,
     });
-    expect(held > notHeld).toBe(true);
+    expect(held < notHeld).toBe(true);
   });
 
-  it("bumped order (priority 9999) sorts first in ASC", () => {
+  it("bumped order (priority 9999) sorts first in DESC", () => {
     const bumped = computeSortRank({
       priority: 9999,
       onHold: false,
@@ -152,6 +152,6 @@ describe("computeSortRank — ASC ordering (lower = higher priority)", () => {
       slaDueAt: SLA_DEADLINE,
       orderPlacedAt: SAME_DAY_MORNING,
     });
-    expect(bumped < standard).toBe(true);
+    expect(bumped > standard).toBe(true);
   });
 });
