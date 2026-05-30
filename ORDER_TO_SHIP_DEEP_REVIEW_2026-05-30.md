@@ -244,6 +244,17 @@ instead of forcing cancelled; (b) make `cancelled` terminal/non-re-derivable in 
 | D-QGUARD | `recordShipment` dedup needs both `shipmentId`+`orderItemId`; no DB unique to enforce | `inventory.use-cases.ts:279` |
 | D-NOENGINE | No `ShippingEngine` interface; ShipStation hardcoded throughout (S5-S3) | `shipstation.service.ts:628-3225` |
 
+### Cross-cutting — observability & error handling (P1 unless noted)
+
+| ID | Defect | Evidence |
+|----|--------|----------|
+| D-NOCORRELATION | **No correlation/request id threaded anywhere** — cannot trace one order across OMS→WMS→engine from logs | grep: 0 `correlationId/requestId/traceId` in `server/` |
+| D-LOGSTRUCT (P2) | **1,632 raw `console.*`** vs 86 structured `logger.*` — logs are free-text, not queryable | grep counts across `server/` |
+| D-SWALLOW | **11 empty `catch {}`** + **87 fire-and-forget `.catch()`**; financial state swallowed with a log (CLAUDE.md §6) | e.g. `picking.use-cases.ts:1114-1127`, `orders.storage.ts:531-533` |
+| D-RETRYTERM | No transient/permanent error classification → terminal conditions retried forever (the cancel-spam is this) | `shipstation.service.ts:2840`; reconcile #4 |
+| D-NOALERT | No alerting/dead-letter on push-fail, no-match ship-notify, dropped webhook, or reconciler-correction rate | (absent) — see D-PUSHFLAG, D-NOMATCH, D-200LOSS |
+| D-LOGLEVEL (P2) | Expected conditions logged at WARN and repeated (log spam), drowning real errors | `index.ts` cancel-spam; "already shipped" WARN loop |
+
 ### Already fixed since 2026-05-28 audit (verified this pass)
 - **S3-W1** reservation no-op → now calls `reserveOrder(wmsOrderId)` correctly; regression test
   exists (`wms-sync-reservation-method.test.ts`).
@@ -367,6 +378,39 @@ triple on `outbound_shipments`. Keep `shipstation_order_id` as a back-compat sha
 during migration (it has ~191 references). The ShipStation adapter maps the triple to its
 `orderId`/`orderKey`; the canonical `ShipmentEvent` carries the triple, not SS fields.
 
+**Cross-cutting — observability & error contract (every core implements it).** Today: **0
+correlation ids, 1,632 raw `console.*`, 11 empty catches, 87 fire-and-forget, no alerting** — so a
+stuck order is hard to trace and terminal errors retry forever. Every core ships against this
+contract (CLAUDE.md §6 errors, §10 audit):
+
+- **E1 — Structured errors + classification.** Every error is `{ code, message, context }` with a
+  namespaced code (`INGEST_*`, `RESERVE_*`, `SHIPMENT_*`, `SHIP_NOTIFY_*`, `CANCEL_*`, `ENGINE_*`)
+  and a **class**: `transient` (retry w/ backoff), `permanent` (stamp `requires_review` +
+  dead-letter, **stop retrying**), `fatal` (abort + alert). Branching on class is what kills the
+  cancel-spam — "already shipped" is `permanent`, not a forever-retry. (D-RETRYTERM)
+- **E2 — No silent failures.** No empty `catch`; no swallow of financial state. Fire-and-forget
+  only for true side-channels (audit best-effort), commented and still logged. Never ACK 200 on a
+  webhook whose work failed and should retry — persist to inbox first. (D-SWALLOW, D-200LOSS)
+- **E3 — Correlation threaded end-to-end.** A context `{ oms_order_id, wms_order_id, shipment_id,
+  channel_event_id, engine_ref }` on every log line and every emitted event, intake→write-back. One
+  grep on an order id returns its whole life story. (D-NOCORRELATION — the #1 traceability gap.)
+- **E4 — One structured JSON logger** replacing the 1,632 `console.*`. Each line:
+  `{ ts, level, core, action, outcome, <correlation>, before, after, error_code }`. Levels:
+  ERROR = needs a human, WARN = anomaly auto-recovered, INFO = state transition, DEBUG = detail.
+  Expected conditions are DEBUG + a terminal action, not repeated WARNs. (D-LOGSTRUCT, D-LOGLEVEL)
+- **E5 — Append-only audit = the financial record.** Every transition (C4), inventory move (C6),
+  and shipment event (C5) writes an immutable who/what/when/before→after row. Universal, not partial.
+- **E6 — Surfacing & alerting.** Permanent failures stamp `requires_review` + code (D-PUSHFLAG);
+  dead-letter queue for un-processable events (D-NOMATCH, dropped webhooks); metrics/alerts on
+  push-fail, no-match ship-notify, **reconciler-correction rate** (a reconciler firing a lot =
+  upstream bug → reconcilers become a monitoring signal), duplicate-shipment detections,
+  negative-inventory guard trips, and **outbox queue depth/age**. (D-NOALERT)
+- **E7 — Idempotency/retry observability.** Log dedup/replay hits (not silent skips); the C7 outbox
+  and retry worker expose depth, attempts, age, last_error — a stuck order is visible, not silent.
+
+Foundation (logger + correlation context + error taxonomy) lands in **Phase 0/1** so every core
+built afterward uses it; the dashboard/alerting consolidation lands in **Phase 5**.
+
 Each phase ships with tests (unit + integration where DB-touching) per CLAUDE.md §11.
 
 ---
@@ -378,6 +422,11 @@ Interim hotfixes that hold until C3/C4 land; do not build new divergent logic he
    shipment terminal; add a terminal guard to the cascade SELECT. Make `cancelled` non-re-derivable
    in `deriveWmsFromShipments`.
 2. **D-PENDING:** fix/remove `FulfillmentService.createShipment`'s invalid `"pending"` write.
+2b. **Observability foundation (E1/E3/E4 scaffolding, no behavior change):** add one structured
+    JSON logger, a correlation-context helper `{ oms_order_id, wms_order_id, shipment_id,
+    channel_event_id, engine_ref }`, and the namespaced error-code + class (`transient` /
+    `permanent` / `fatal`) types. Cheap infra that every later core/phase builds on; also lets
+    Phase 0's spam fix log the terminal condition once instead of looping WARNs (D-LOGLEVEL).
 
 ### Phase 1 — C9 ShippingEngine port + C4 Order-status core + C3 Shipment core (kills duplicates, spam, zombies; decouples the engine)
 3. **C9 (D-NOENGINE) — do this FIRST so C3/C5/C8 build against the port, not `ss.*`:** define the
@@ -445,6 +494,11 @@ Interim hotfixes that hold until C3/C4 land; do not build new divergent logic he
     lock, and writes a `last_reconciled_at`. Startup "one-time" repairs become locked, idempotent
     jobs. With C4's terminal states and C3's uniqueness, the reconcilers can no longer fight or
     re-create.
+13a. **Observability consolidation (E6/E7, D-NOALERT):** dead-letter queue for un-processable
+     events; `requires_review` surfaced on an ops dashboard with the structured code; metrics +
+     alerts on push-fail, no-match ship-notify, reconciler-correction rate, duplicate-shipment
+     detections, negative-inventory guard trips, and outbox depth/age. Reconcilers become a
+     monitoring signal, not a silent patch.
 
 ### Phase 6 — Determinism, boundaries, observability (P2)
 14. Inject one clock through SLA/sort_rank/completed_at (**D-CLOCK**); integer money parser at all

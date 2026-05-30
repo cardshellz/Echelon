@@ -94,7 +94,13 @@ public interface and never reaches into another system's tables directly.
 - No empty `catch {}` that swallows financial state. Fire-and-forget is only acceptable
   for true side-channels (e.g., audit-log best-effort) and must be a deliberate,
   commented decision.
-- Use structured errors: `{ code, message, context }`.
+- Use structured errors: `{ code, message, context }` with a namespaced code.
+- **Classify every error** as `transient` (retry with backoff), `permanent` (stamp
+  `requires_review` + dead-letter; **stop retrying**), or `fatal` (abort + alert). Handlers
+  branch on the class. **Never retry a `permanent` error** — that is how you get infinite-retry
+  log spam against an already-terminal external state.
+- Never ACK a webhook 200 when its work failed and should be retried — persist to the inbox
+  first, then 2xx; otherwise return 5xx so the sender retries.
 
 ---
 
@@ -130,6 +136,16 @@ Re-check order state before mutating inventory (e.g., reject picks on cancelled/
 Every critical action logs who / what / when / before→after state, structured (JSON-able),
 to an append-only trail (`inventory_transactions`, `picking_logs`, `oms_order_events`).
 Logs that establish financial history are immutable.
+
+- **One structured logger** (JSON), not raw `console.*`. Each line carries `level, action,
+  outcome, before, after, error_code`. Level discipline: ERROR = needs a human, WARN = anomaly
+  auto-recovered, INFO = state transition, DEBUG = detail. Expected/terminal conditions are DEBUG,
+  not repeated WARNs.
+- **Thread a correlation context** — `{ oms_order_id, wms_order_id, shipment_id, channel_event_id,
+  engine_ref }` — on every log line and every emitted event, from intake to write-back. A single
+  query on one order id must return its entire life story across OMS → WMS → shipping engine.
+- Surface permanent failures as `requires_review` (with the structured code) and dead-letter
+  un-processable events; alert on push failures, no-match events, and reconciler-correction rate.
 
 ---
 
