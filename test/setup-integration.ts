@@ -34,11 +34,14 @@ let db: ReturnType<typeof drizzle> | null = null;
 
 export function getTestPool(): pg.Pool {
   if (!pool) {
+    const needsSsl = TEST_DB_URL != null
+      && !TEST_DB_URL.includes("localhost")
+      && !TEST_DB_URL.includes("127.0.0.1");
     pool = new pg.Pool({
       connectionString: TEST_DB_URL,
       max: 5,
       idleTimeoutMillis: 30000,
-      ssl: { rejectUnauthorized: false },
+      ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
     });
   }
   return pool;
