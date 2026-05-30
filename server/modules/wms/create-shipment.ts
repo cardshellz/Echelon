@@ -247,6 +247,25 @@ export async function createShipmentForOrder(
     normalizedOrderItems.push(it);
   }
 
+  // Advisory lock keyed on order_id prevents two concurrent callers
+  // from both passing the probe and both inserting. The lock is
+  // session-level and released at the end of this function.
+  // Key space: 918406 (C3 shipment core) + order_id.
+  await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
+
+  try {
+    return await createShipmentForOrderLocked(db, wmsOrderId, channelId, normalizedOrderItems);
+  } finally {
+    await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
+  }
+}
+
+async function createShipmentForOrderLocked(
+  db: DbLike,
+  wmsOrderId: number,
+  channelId: number | null,
+  normalizedOrderItems: CreateShipmentInput[],
+): Promise<CreateShipmentResult> {
   const existing = await db.execute(sql`
     SELECT id
       FROM wms.outbound_shipments

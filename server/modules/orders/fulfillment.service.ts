@@ -537,11 +537,10 @@ class FulfillmentService {
 
       if (wmsOrder?.rows?.length > 0) {
         const wmsOrderId = wmsOrder.rows[0].id;
-        const now = new Date();
+        const { markOrderShipped } = await import("./order-status-core");
+        await markOrderShipped(this.db, wmsOrderId, "shopify_fulfillment_webhook");
         await this.db.execute(sql`
           UPDATE wms.orders SET
-            warehouse_status = 'shipped',
-            completed_at = ${now},
             tracking_number = ${params.trackingNumber || null}
           WHERE id = ${wmsOrderId}
         `);

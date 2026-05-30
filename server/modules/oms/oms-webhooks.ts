@@ -1435,16 +1435,9 @@ export function registerOmsWebhooks(
       const wmsOrderRows = wmsOrders.rows;
 
       if (wmsOrderRows.length > 0) {
+        // Update address/financial fields (non-status)
         await db.execute(sql`
           UPDATE wms.orders SET
-            warehouse_status = CASE
-              WHEN ${isFinalOmsState} THEN 'cancelled'
-              ELSE warehouse_status
-            END,
-            cancelled_at = CASE
-              WHEN ${isFinalOmsState} THEN COALESCE(cancelled_at, ${now})
-              ELSE cancelled_at
-            END,
             shipping_name = ${nextShipTo.name},
             shipping_company = ${nextShipTo.company},
             shipping_address = ${nextShipTo.address1},
@@ -1459,6 +1452,14 @@ export function registerOmsWebhooks(
           WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
              OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
         `);
+
+        // Status transition through C4 (guarded)
+        if (isFinalOmsState) {
+          const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+          for (const wmsRow of wmsOrderRows) {
+            await cancelWmsOrder(db, wmsRow.id, "shopify_order_update_final");
+          }
+        }
       }
 
       for (const wmsOrderRow of wmsOrderRows) {
@@ -1776,13 +1777,8 @@ export function registerOmsWebhooks(
             // No shipments — order cancelled before any shipment was created.
             // Direct-write the WMS order to cancelled. Only skip if already
             // shipped (fulfillment is a fact) or already cancelled (idempotent).
-            await db.execute(sql`
-              UPDATE wms.orders SET
-                warehouse_status = 'cancelled',
-                cancelled_at = ${now}
-              WHERE id = ${wmsOrderId}
-                AND warehouse_status NOT IN ('shipped', 'cancelled')
-            `);
+            const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+            await cancelWmsOrder(db, wmsOrderId, "shopify_cancel_webhook");
           }
         }
       }
@@ -1892,15 +1888,8 @@ export function registerOmsWebhooks(
           .where(eq(omsOrderLines.orderId, existing.id));
 
         if (wmsOrder.rows.length > 0) {
-          await db.execute(sql`
-            UPDATE wms.orders SET
-              warehouse_status = CASE
-                WHEN warehouse_status NOT IN ('shipped', 'cancelled') THEN 'shipped'
-                ELSE warehouse_status
-              END,
-              updated_at = NOW()
-            WHERE id = ${wmsOrder.rows[0].id}
-          `);
+          const { markOrderShipped } = await import("../orders/order-status-core");
+          await markOrderShipped(db, wmsOrder.rows[0].id, "shopify_fulfilled_webhook");
         }
 
         await db.insert(omsOrderEvents).values({

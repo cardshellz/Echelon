@@ -2312,12 +2312,11 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         orderRow.warehouse_status !== "shipped" &&
         orderRow.warehouse_status !== "cancelled"
       ) {
+        const { markOrderShipped } = await import("../orders/order-status-core");
+        await markOrderShipped(db, wmsOrderId, "ship_notify_v2_wms");
         await db.execute(sql`
           UPDATE wms.orders SET
-            warehouse_status = 'shipped',
-            completed_at = ${now},
-            tracking_number = ${trackingNumber},
-            updated_at = ${now}
+            tracking_number = ${trackingNumber}
           WHERE id = ${wmsOrderId}
         `);
 
@@ -2378,14 +2377,11 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         if (wmsStatus === "shipped") {
           console.log(`[ShipStation Webhook] WMS order ${wmsOrderId} already shipped — running OMS repair cascade`);
         } else {
-          const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
-          void trackingUrl;
+          const { markOrderShipped } = await import("../orders/order-status-core");
+          await markOrderShipped(db, wmsOrderId, "ship_notify_legacy_oms");
           await db.execute(sql`
             UPDATE wms.orders SET
-              warehouse_status = 'shipped',
-              completed_at = ${now},
-              tracking_number = ${trackingNumber},
-              updated_at = ${now}
+              tracking_number = ${trackingNumber}
             WHERE id = ${wmsOrderId}
           `);
 

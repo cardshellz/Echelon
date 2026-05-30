@@ -38,15 +38,32 @@ interface RecordedInsert {
   returning?: boolean;
 }
 
+function isAdvisoryLockQuery(query: any): boolean {
+  try {
+    const str = JSON.stringify(query);
+    return str.includes("pg_advisory_lock") || str.includes("pg_advisory_unlock");
+  } catch {
+    return String(query).includes("advisory");
+  }
+}
+
 function makeMockDb(existingPlannedId: number | null, newShipmentId = 12345) {
   const inserts: RecordedInsert[] = [];
 
-  const execute = vi.fn(async (_query: any) => {
+  const execute = vi.fn(async (query: any) => {
+    if (isAdvisoryLockQuery(query)) {
+      return { rows: [{}] };
+    }
+
     if (existingPlannedId === null) {
       return { rows: [] };
     }
     return { rows: [{ id: existingPlannedId }] };
   });
+
+  function getNonLockExecuteCalls(): number {
+    return execute.mock.calls.filter((args: any[]) => !isAdvisoryLockQuery(args[0])).length;
+  }
 
   // Drizzle-like chain: insert(table).values(rows).returning({...})?
   function insert(table: any) {
@@ -77,7 +94,7 @@ function makeMockDb(existingPlannedId: number | null, newShipmentId = 12345) {
   return {
     db: { execute, insert: vi.fn(insert) },
     getInserts: () => inserts,
-    getExecuteCalls: () => execute.mock.calls.length,
+    getExecuteCalls: () => getNonLockExecuteCalls(),
   };
 }
 
@@ -169,15 +186,24 @@ describe("createShipmentForOrder :: idempotency", () => {
 
   it("returns an existing active shipment when all requested items are already covered", async () => {
     const inserts: RecordedInsert[] = [];
-    const execute = vi
-      .fn()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
+    let realQueryCount = 0;
+    const execute = vi.fn().mockImplementation((query: any) => {
+      if (isAdvisoryLockQuery(query)) {
+        return Promise.resolve({ rows: [{}] });
+      }
+      realQueryCount++;
+      // First real query: probe for existing shipment → none found
+      // Second real query: active coverage → all items covered
+      if (realQueryCount <= 1) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({
         rows: [
           { shipment_id: 777, order_item_id: 101, qty: 2 },
           { shipment_id: 777, order_item_id: 102, qty: 1 },
         ],
       });
+    });
     const insert = vi.fn((table: any) => {
       const record: RecordedInsert = { table };
       inserts.push(record);
