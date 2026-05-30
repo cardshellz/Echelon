@@ -22,7 +22,12 @@ import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dr
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
-import { startWebhookRetryWorker, enqueueShipStationRetry, enqueueDelayedTrackingPush } from "./modules/oms/webhook-retry.worker";
+import {
+  startWebhookRetryWorker,
+  enqueueShipStationRetry,
+  enqueueDelayedTrackingPush,
+  enqueueShipStationSortRankSyncRetry,
+} from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
@@ -1066,9 +1071,19 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // relative-to-sync-time SLA to absolute-deadline encoding).
   setTimeout(async () => {
     try {
-      const { recomputeAllActiveSortRanks } = await import("./modules/orders/orders.storage");
-      const count = await recomputeAllActiveSortRanks();
-      if (count > 0) console.log(`[Sort-Rank] Recomputed sort_rank for ${count} active order(s)`);
+      const { recomputeAllActiveSortRanksDetailed } = await import("./modules/orders/orders.storage");
+      const { updated, orderIds } = await recomputeAllActiveSortRanksDetailed();
+      if (updated > 0) {
+        console.log(`[Sort-Rank] Recomputed sort_rank for ${updated} active order(s)`);
+        for (const orderId of orderIds) {
+          await enqueueShipStationSortRankSyncRetry(
+            db,
+            orderId,
+            "startup sort_rank recompute",
+          );
+        }
+        console.log(`[Sort-Rank] Queued ShipStation customField1 sync for ${orderIds.length} active order(s)`);
+      }
     } catch (err: any) {
       console.warn("[Sort-Rank] Recompute error:", err?.message);
     }

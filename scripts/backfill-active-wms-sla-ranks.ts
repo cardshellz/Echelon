@@ -203,11 +203,15 @@ export async function run(flags: Flags): Promise<void> {
   let pushed = 0;
   if (flags.mode === "execute") {
     const shipStation = flags.pushShipStation ? createShipStationService(db) : null;
-    for (const plan of plans) {
-      await applyUpdate(plan);
-      updated++;
+    const planByOrderId = new Map(plans.map((plan) => [plan.row.id, plan]));
+    for (const row of rows) {
+      const plan = planByOrderId.get(row.id);
+      if (plan) {
+        await applyUpdate(plan);
+        updated++;
+      }
       if (shipStation?.isConfigured()) {
-        await shipStation.updateSortRank(plan.row.id);
+        await shipStation.updateSortRank(row.id);
         pushed++;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }

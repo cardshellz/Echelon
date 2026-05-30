@@ -202,6 +202,7 @@ export interface RetryShipStationService {
     wmsOrderId: number,
     mode: "hold" | "release",
   ): Promise<{ touched: number }>;
+  updateSortRank?(wmsOrderId: number): Promise<{ touched: number }>;
 }
 
 /**
@@ -514,6 +515,49 @@ export async function enqueueShipStationHoldSyncRetry(
     provider: "internal",
     topic: "shipstation_hold_sync",
     payload: { wmsOrderId, requestedMode },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
+export async function enqueueShipStationSortRankSyncRetry(
+  dbArg: any,
+  wmsOrderId: number,
+  cause?: unknown,
+): Promise<void> {
+  if (
+    typeof wmsOrderId !== "number" ||
+    !Number.isInteger(wmsOrderId) ||
+    wmsOrderId <= 0
+  ) {
+    throw new Error(
+      `enqueueShipStationSortRankSyncRetry: wmsOrderId must be a positive integer (got ${wmsOrderId})`,
+    );
+  }
+
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "shipstation_sort_rank_sync",
+    scope: sql`payload->>'wmsOrderId' = ${String(wmsOrderId)}`,
+  })) {
+    return;
+  }
+
+  await insertWebhookRetryQueueRow(dbArg, {
+    provider: "internal",
+    topic: "shipstation_sort_rank_sync",
+    payload: { wmsOrderId },
     attempts: 0,
     status: "pending",
     lastError: message || null,
@@ -1036,6 +1080,110 @@ export async function dispatchShipStationHoldSyncRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+export async function dispatchShipStationSortRankSyncRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as { wmsOrderId?: number } | null;
+  const wmsOrderId = payload?.wmsOrderId;
+
+  if (
+    typeof wmsOrderId !== "number" ||
+    !Number.isInteger(wmsOrderId) ||
+    wmsOrderId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item,
+      "malformed payload: wmsOrderId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_sort_rank_sync payload)`,
+    );
+    return "malformed";
+  }
+
+  const shipStationService = resolveShipStationService(dbArg);
+  if (
+    !shipStationService ||
+    typeof shipStationService.updateSortRank !== "function"
+  ) {
+    await keepPending(
+      dbArg,
+      item.id,
+      "ShipStation sort-rank sync service not available on db.__shipStationService",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) deferred - ShipStation sort-rank sync service unavailable`,
+    );
+    return "pending";
+  }
+
+  const orderResult = await dbArg.execute(sql`
+    SELECT id, order_number, sort_rank
+    FROM wms.orders
+    WHERE id = ${wmsOrderId}
+    LIMIT 1
+  `);
+  const orderRow = Array.isArray(orderResult?.rows) ? orderResult.rows[0] : null;
+  if (!orderRow) {
+    await markRowDead(
+      dbArg,
+      item,
+      `WMS order ${wmsOrderId} not found for ShipStation sort-rank sync`,
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found`,
+    );
+    return "dead";
+  }
+
+  if (!orderRow.sort_rank) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      `WMS order ${wmsOrderId} has no sort_rank to sync`,
+      { topic: "shipstation_sort_rank_sync", orderId: wmsOrderId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts - missing sort_rank`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) missing sort_rank. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+
+  try {
+    const result = await shipStationService.updateSortRank(wmsOrderId);
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}, touched=${result?.touched ?? 0}) succeeded`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "shipstation_sort_rank_sync", orderId: wmsOrderId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -1599,6 +1747,20 @@ async function processPendingWebhooks() {
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} shipstation_hold_sync dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === "shipstation_sort_rank_sync"
+    ) {
+      try {
+        await dispatchShipStationSortRankSyncRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} shipstation_sort_rank_sync dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
