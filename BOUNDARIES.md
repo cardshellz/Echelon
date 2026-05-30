@@ -15,6 +15,45 @@ Each function:
 
 ---
 
+## Two kinds of boundary — pick the right pattern
+
+The principle "depend on an interface, never on internals; one owner per concern" is universal.
+The **mechanism** depends on what sits on the other side. Do not make everything a swappable port.
+
+### External integration → PORT + ADAPTER
+The other side is a **third party we don't control and might replace** (shipping engine,
+sales channels — Shopify/eBay, payment, marketplace APIs). It is *untrusted* and
+*interchangeable*. Give it:
+- a **canonical vocabulary** owned by us (e.g. a `ShipmentEvent`, a canonical order shape),
+- an **adapter** per provider that translates the vendor's model to ours (anti-corruption),
+- **no vendor-specific identifiers or field names leaking past the adapter** into our core
+  tables or logic (e.g. no `shipstation_order_id` in domain SQL — use a generic
+  `(engine, engine_ref)` and let the adapter map it).
+
+Multiple adapters may coexist. ShipStation is one adapter behind a `ShippingEngine` port;
+each sales channel is an adapter behind the OMS ingest core.
+
+### Internal domain → PUBLISHED MODULE INTERFACE (one owner, no swap)
+OMS, WMS, Catalog, Procurement are domains **we build and own**. We will never "plug in a
+different WMS." They get:
+- **one stable public interface** (the calling surface other systems use),
+- **one owner per table** — no other system writes it; no raw cross-schema SQL; no cross-boundary
+  inner joins,
+- **NO swappable-adapter machinery.** That is speculative generality (YAGNI) and adds indirection
+  on the money/inventory path for a swap that will never happen.
+
+`reserveForOrder()` is the canonical example: WMS's single published entry point, called by OMS,
+never reimplemented or bypassed with raw `inventory_levels` writes.
+
+> A clean internal interface still leaves the door open to later split a domain into its own
+> deployable service cheaply — that is the interface's value, achieved **without** building
+> port/adapter indirection now.
+
+**Rule of thumb:** if you could plausibly buy/replace it from a vendor → port + adapter.
+If we build and own it → published interface, one owner, no swap.
+
+---
+
 ## Systems
 
 ### OMS (Order Management System)
@@ -162,8 +201,11 @@ Safety net: scheduled sweep every 15 min catches anything missed
 3. **Before checking stock at a location, ask: does this need a `product_locations` join?** Probably not — `inventory_levels` tells you where stock IS.
 4. **Never use `allowNegative: true`** — if the math goes negative, something is wrong. Flag it, don't force it.
 5. **Every reservation goes through `reserveForOrder()`** — no raw SQL, no reimplementation.
-6. **If you're not sure, ask.** Don't build a workaround.
+6. **Pick the right boundary pattern** (see "Two kinds of boundary"): external/replaceable →
+   port + adapter with a canonical vocabulary; internal/owned → published interface, one owner,
+   no swappable-adapter machinery. No vendor-specific identifiers leak past an adapter.
+7. **If you're not sure, ask.** Don't build a workaround.
 
 ---
 
-*Last updated: 2026-03-20*
+*Last updated: 2026-05-30*

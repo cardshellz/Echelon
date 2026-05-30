@@ -273,6 +273,33 @@ adapter** behind it. No core, reconciler, or route calls `ss.*` or persists an e
 identifier directly — so a future in-house engine or an alternate provider drops in as a second
 adapter with zero pipeline changes. This makes the engine swappable the same way channels are.
 
+#### Which pattern for which boundary (consistency rule)
+
+"Consistent architecture" does **not** mean "make everything a swappable port." It means apply
+the *right* pattern to the *kind* of boundary. There are exactly two:
+
+- **External integration → PORT + ADAPTER.** The thing behind it is a third party you don't
+  control and might replace (shipping engine, sales channels Shopify/eBay, payment, marketplace
+  APIs). It is *untrusted* and *interchangeable*, so it gets a canonical vocabulary + an
+  anti-corruption layer that translates the vendor's model to ours. Multiple adapters may exist.
+  Examples here: **C9 ShippingEngine** (ShipStation = adapter #1), the channel adapters over C1.
+
+- **Internal domain → PUBLISHED MODULE INTERFACE (one owner, no swap).** OMS, WMS, Catalog,
+  Procurement are domains *we* build and own; we will never "plug in a different WMS." They get a
+  single stable public interface, one owner per table, and **no raw cross-boundary table access** —
+  exactly what `BOUNDARIES.md` already mandates. They do **not** get swappable-adapter machinery;
+  that would be speculative generality (YAGNI) and adds indirection on the money/inventory path for
+  a swap that will never happen. The cores **are** these interfaces: **C2** is WMS's reservation
+  entry point OMS calls; **C1** is OMS's boundary the channels call; **C3/C4/C6** are WMS-owned and
+  never written directly by OMS.
+
+**The principle is identical** (depend on an interface, never on internals; one owner per concern).
+Only the *mechanism* differs: external = port/adapter with translation; internal = enforced module
+interface. The OMS/WMS work is therefore **enforcement** (route every cross-boundary call through a
+core; kill the raw cross-schema SQL — defect `D-BOUNDARY`), not port-ification. Clean interfaces
+also leave the door open to later split a domain (e.g. WMS) into its own service cheaply — the
+interface value without the speculative adapter cost.
+
 The nine cores below subsume the entire defect register. The plan is sequenced so each core
 lands before the callers that depend on it, so nothing regresses.
 
