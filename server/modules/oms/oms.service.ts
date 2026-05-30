@@ -100,6 +100,23 @@ export interface OmsOrderFlowHistoryEntry {
   createdAt: Date | string | null;
 }
 
+function coerceValidDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function sameDateTime(
+  left: Date | string | null | undefined,
+  right: Date | string | null | undefined,
+): boolean {
+  const leftDate = coerceValidDate(left);
+  const rightDate = coerceValidDate(right);
+  if (!leftDate && !rightDate) return true;
+  if (!leftDate || !rightDate) return false;
+  return leftDate.getTime() === rightDate.getTime();
+}
+
 // ---------------------------------------------------------------------------
 // Service Factory
 // ---------------------------------------------------------------------------
@@ -182,11 +199,39 @@ export function createOmsService(db: any, reservationService?: any) {
         throw new Error(`[OMS] Unresolved race condition hit avoiding duplicate for ${externalOrderId}. Order not found after conflict.`);
       }
 
+      let existingOrder = existing[0];
+      const incomingChannelShipByDate = coerceValidDate(data.channelShipByDate);
+      if (
+        incomingChannelShipByDate &&
+        !sameDateTime(existingOrder.channelShipByDate as Date | string | null, incomingChannelShipByDate)
+      ) {
+        const [updatedExistingOrder] = await db
+          .update(omsOrders)
+          .set({
+            channelShipByDate: incomingChannelShipByDate,
+            updatedAt: new Date(),
+          })
+          .where(eq(omsOrders.id, existingOrder.id))
+          .returning();
+
+        existingOrder = updatedExistingOrder ?? existingOrder;
+
+        await db.insert(omsOrderEvents).values({
+          orderId: existingOrder.id,
+          eventType: "channel_ship_by_date_updated",
+          details: {
+            source: "duplicate_ingest",
+            previous: coerceValidDate(existing[0].channelShipByDate as Date | string | null)?.toISOString() ?? null,
+            next: incomingChannelShipByDate.toISOString(),
+          },
+        });
+      }
+
       // Check if line items exist for this order
       const existingLines = await db
         .select()
         .from(omsOrderLines)
-        .where(eq(omsOrderLines.orderId, existing[0].id))
+        .where(eq(omsOrderLines.orderId, existingOrder.id))
         .limit(1);
 
       // If no line items, create them (handles partial ingestion recovery)
@@ -208,7 +253,7 @@ export function createOmsService(db: any, reservationService?: any) {
           }
 
           await db.insert(omsOrderLines).values({
-            orderId: existing[0].id,
+            orderId: existingOrder.id,
             productVariantId,
             externalLineItemId: item.externalLineItemId,
             externalProductId: item.externalProductId || null,
@@ -232,10 +277,10 @@ export function createOmsService(db: any, reservationService?: any) {
             orderNumber: data.externalOrderNumber || null,
           } satisfies InsertOmsOrderLine).onConflictDoNothing();
         }
-        console.log(`[OMS] Backfilled ${data.lineItems.length} missing line items for order ${existing[0].id}`);
+        console.log(`[OMS] Backfilled ${data.lineItems.length} missing line items for order ${existingOrder.id}`);
       }
 
-      return existing[0];
+      return existingOrder;
     }
 
     // Insert line items with SKU → product_variant lookup

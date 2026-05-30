@@ -97,4 +97,12 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/resolveSlaDueAt/);
     expect(WMS_SYNC_SRC).not.toMatch(/SELECT sla_days FROM channels\.partner_profiles/);
   });
+
+  it("refreshes existing WMS SLA rank fields from the OMS source order", () => {
+    expect(WMS_SYNC_SRC).toMatch(/refreshExistingWmsOrderHeaderFromOms\(omsOrder, wmsOrderId\)/);
+    expect(WMS_SYNC_SRC).toMatch(/channelShipByDate: nextChannelShipByDate/);
+    expect(WMS_SYNC_SRC).toMatch(/slaDueAt: nextSlaDueAt/);
+    expect(WMS_SYNC_SRC).toMatch(/sortRank: nextSortRank/);
+    expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationSortRankSyncRetry/);
+  });
 });
