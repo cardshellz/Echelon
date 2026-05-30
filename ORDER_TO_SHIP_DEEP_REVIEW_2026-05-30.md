@@ -263,23 +263,41 @@ wallet debit), but it must not reimplement what the core owns. "No divergent exp
 channel" = the order/reservation/shipment/transition/cancel logic is byte-identical regardless
 of source; only payload-mapping and auth differ.
 
-The eight cores below subsume the entire defect register. The plan is sequenced so each core
+**The same applies to the shipping engine — it is a PORT, not a hardcoded dependency.** Today
+ShipStation is wired in directly: ~16 `ss.*` methods are called from all over, the SS-specific
+external id `shipstation_order_id` appears in **~133 raw-SQL + 58 code references across 12
+files**, the `orderKey` scheme is `echelon-wms-shp-${id}`, and carrier/status maps and the base
+URL are hardcoded (`shipstation.service.ts:28,629`). The pipeline must instead speak a **canonical
+shipment vocabulary** through a `ShippingEngine` interface; **ShipStation becomes the first
+adapter** behind it. No core, reconciler, or route calls `ss.*` or persists an engine-specific
+identifier directly — so a future in-house engine or an alternate provider drops in as a second
+adapter with zero pipeline changes. This makes the engine swappable the same way channels are.
+
+The nine cores below subsume the entire defect register. The plan is sequenced so each core
 lands before the callers that depend on it, so nothing regresses.
 
 | Core | Owns | Replaces (divergent today) | Callers become adapters |
 |------|------|----------------------------|--------------------------|
 | **C1 Ingest core** | atomic order+lines+events, one dedup key, validation, fires `order.ingested` | `ingestOrder` (non-tx) **and** dropship's bespoke order INSERTs | shopify-webhook, shopify-bridge, eBay poll/webhook, dropship |
 | **C2 Reservation core** (tx-aware) | ATP-gated `reserveForOrder`, accepts a tx handle | dropship's raw `inventory_levels` reservation | C1, edit-propagation, dropship (in its own tx) |
-| **C3 Shipment core** | one `createOrUpdateShipmentForOrder`, per-order uniqueness, one status filter, per-order SS idempotency | 8 INSERT paths | sync, reconcilers, Shopify external-fulfillment, SS split round-trip |
+| **C3 Shipment core** | one `createOrUpdateShipmentForOrder`, per-order uniqueness, one status filter, per-order idempotency; pushes via **C9** | 8 INSERT paths | sync, reconcilers, external-fulfillment, engine split round-trip |
 | **C4 Order-status core** | one guarded `transitionOrderStatus(from[],to)`, terminal states enforced, no read-path writes | 12+ scattered writers + reconciler status writes | pick, sync, rollup, all reconcilers, resolveException |
-| **C5 Shipment-event applier** | one transactional inbound cascade (shipment→rollup→OMS→inventory→outbox), idempotent | V2 + legacy + per-channel SHIP_NOTIFY branches | SHIP_NOTIFY webhook, reconcilers, lost-notify replay |
+| **C5 Shipment-event applier** | one transactional inbound cascade (shipment→rollup→OMS→inventory→outbox), idempotent; consumes **canonical** events from C9 | V2 + legacy + per-channel SHIP_NOTIFY branches | engine webhook (via C9), reconcilers, lost-notify replay |
 | **C6 Inventory movement** | `inventoryCore` for reserve/pick/ship/unpick — the only writer of `inventory_levels` | dropship direct write; missing unpick on cancel | C2, picking, C5, cancel/refund cascade |
 | **C7 Write-back core** | uniform idempotency-key + durable outbox for channel fulfillment/tracking | Shopify/eBay (no key) vs dropship (key) | shopify, eBay, dropship adapters |
-| **C8 Cancel/refund core** | one transactional cascade (inventory reverse, shipment cascade, SS cancel, events), idempotency key at the top | Shopify cancel, eBay cancel, dropship (missing) | shopify, eBay, dropship adapters |
+| **C8 Cancel/refund core** | one transactional cascade (inventory reverse, shipment cascade, engine cancel via **C9**, events), idempotency key at the top | Shopify cancel, eBay cancel, dropship (missing) | shopify, eBay, dropship adapters |
+| **C9 ShippingEngine port** | canonical engine contract: `upsertShipment / cancel / hold / releaseHold / markShipped / updatePriority / getState` + inbound `normalizeWebhook → ShipmentEvent`; canonical status & carrier vocab; engine-agnostic external ref | direct `ss.*` (~16 methods), `shipstation_order_id` (~191 refs), `echelon-*` orderKey, hardcoded carrier/status/base-URL | **ShipStation = adapter #1**; C3/C5/C7/C8 + reconcilers all speak C9 |
 
-**Cross-cutting — Reconciler discipline:** the ~19 background jobs must call C3/C4/C5/C6 (never
-raw SQL reimplementations), run under advisory locks, and be consolidated under one orchestrator.
-This dissolves the conflict matrix (§4) and the cancel-spam oscillation by construction.
+**Cross-cutting — Reconciler discipline:** the ~19 background jobs must call C3/C4/C5/C6/**C9**
+(never raw SQL or `ss.*` reimplementations), run under advisory locks, and be consolidated under
+one orchestrator. This dissolves the conflict matrix (§4) and the cancel-spam oscillation by
+construction.
+
+**Engine-agnostic identity (schema):** replace the SS-specific `shipstation_order_id` and
+`echelon-*` orderKey with a generic `(shipping_engine, engine_order_ref, engine_shipment_ref)`
+triple on `outbound_shipments`. Keep `shipstation_order_id` as a back-compat shadow column/view
+during migration (it has ~191 references). The ShipStation adapter maps the triple to its
+`orderId`/`orderKey`; the canonical `ShipmentEvent` carries the triple, not SS fields.
 
 Each phase ships with tests (unit + integration where DB-touching) per CLAUDE.md §11.
 
@@ -293,67 +311,78 @@ Interim hotfixes that hold until C3/C4 land; do not build new divergent logic he
    in `deriveWmsFromShipments`.
 2. **D-PENDING:** fix/remove `FulfillmentService.createShipment`'s invalid `"pending"` write.
 
-### Phase 1 — C4 Order-status core + C3 Shipment core (kills duplicates, spam, zombies structurally)
-3. **C4 (D-NOSM, D-ZOMBIE, D-GETWRITE, D-SYNCSTATUS, D-PINGPONG, D-FORCECXL, D-SPAM):** build
+### Phase 1 — C9 ShippingEngine port + C4 Order-status core + C3 Shipment core (kills duplicates, spam, zombies; decouples the engine)
+3. **C9 (D-NOENGINE) — do this FIRST so C3/C5/C8 build against the port, not `ss.*`:** define the
+   `ShippingEngine` interface (`upsertShipment / cancel / hold / releaseHold / markShipped /
+   updatePriority / getState`, inbound `normalizeWebhook → ShipmentEvent`, canonical status &
+   carrier vocab). Wrap the **existing** `shipstation.service.ts` as `ShipStationEngineAdapter`
+   (adapter #1) — no behavior change yet, just the seam. Add the engine-agnostic
+   `(shipping_engine, engine_order_ref, engine_shipment_ref)` columns with `shipstation_order_id`
+   as a back-compat shadow. Every later core calls `engine.*`, never `ss.*`.
+4. **C4 (D-NOSM, D-ZOMBIE, D-GETWRITE, D-SYNCSTATUS, D-PINGPONG, D-FORCECXL, D-SPAM):** build
    `transitionOrderStatus(orderId, from[], to)` as one guarded UPDATE with a terminal-state matrix
    (`cancelled`/`shipped` terminal, non-re-derivable). Route **all** 12+ writers *and every
    reconciler* through it; move pick-queue self-heal out of the GET into a job; fix the
    `orders.status` column bug. The oscillation loop and the ping-pong die here.
-4. **C3 (D-DUP, D-SHOPFUL, D-PENDING, D-VOIDSTRAND, D-STALECLEAN, D-RECREATE):** one
+5. **C3 (D-DUP, D-SHOPFUL, D-PENDING, D-VOIDSTRAND, D-STALECLEAN, D-RECREATE):** one
    `createOrUpdateShipmentForOrder`; partial unique index `outbound_shipments(order_id) WHERE
    status NOT IN (terminal)`; order-keyed `pg_advisory_xact_lock` around probe+insert; one status
-   filter (voided handled explicitly); **per-order** (not per-shipment) SS idempotency or a
-   documented split model. Converge all 8 INSERT paths (incl. Shopify external-fulfillment Path B
-   → transition, not insert) onto it. Run stale-cleanup via C4 in reconcilers too.
-5. Re-triage the 3 `link-child-to-parent` test failures against the consolidated C3 creator.
+   filter (voided handled explicitly); **per-order** (not per-engine-shipment) idempotency keyed on
+   the C9 external ref, or a documented split model. Converge all 8 INSERT paths (incl. external-
+   fulfillment Path B → transition, not insert) onto it; pushes go through C9. Run stale-cleanup
+   via C4 in reconcilers too.
+6. Re-triage the 3 `link-child-to-parent` test failures against the consolidated C3 creator.
 
 ### Phase 2 — C2 Reservation core (tx-aware) + C1 Ingest core (one path for all channels)
-6. **C2 (D-DROPCONFLICT/S2-E1, D-RESVSKU, D-RESERVEGATE, D-SHORTFALL, D-EDITATOMIC):** make
+7. **C2 (D-DROPCONFLICT/S2-E1, D-RESVSKU, D-RESERVEGATE, D-SHORTFALL, D-EDITATOMIC):** make
    `reserveForOrder` accept an external transaction/connection handle and reserve by
    `productId/variantId` (not SKU). On shortfall, set a queryable backorder/hold sub-state instead
    of silent `ready`. This is the prerequisite for C1 + dropship convergence.
-7. **C1 (D-NOTX-INGEST, D-CHANNELDIV, D-200LOSS, D-EBAYAUTH, D-FLOAT, partially D-DROPCONFLICT):**
+8. **C1 (D-NOTX-INGEST, D-CHANNELDIV, D-200LOSS, D-EBAYAUTH, D-FLOAT, partially D-DROPCONFLICT):**
    one transactional `ingestOrder` core (order+lines+events atomic, one dedup-key strategy,
    validation against one canonical schema, calls C2, emits `order.ingested`). Reduce **every**
    channel — Shopify webhook, Shopify bridge, eBay poll/webhook, **and dropship** — to a thin
    adapter (payload map + auth + dedup key) over this core. Dropship's wallet/economics compose
    *around* C1 inside the same tx; it stops re-INSERTing orders and stops reserving directly.
-7a. **D-NOTX-SYNC (the OMS→WMS seam):** with C2 tx-aware and C3 in place, the sync orchestration
+8a. **D-NOTX-SYNC (the OMS→WMS seam):** with C2 tx-aware and C3 in place, the sync orchestration
     composes order+items (C4-backed) + reservation (C2) + shipment (C3) in **one transaction**;
-    the SS push moves to the C7 outbox. No more `ready` orders with no shipment/reservation.
+    the engine push moves to the C7 outbox. No more `ready` orders with no shipment/reservation.
 
 ### Phase 3 — C5 Shipment-event applier + C6 Inventory truth on unhappy paths
-8. **C5 (D-NOTX-NOTIFY, D-DUPEVENT, D-NOMATCH, D-FULLQTY, D-LOSTNOTIFY):** one transactional
-   inbound applier for V2/legacy/all channels; WMS-side writes in one tx, external pushes via the
-   C7 outbox; unique constraint on ship events; alert on no-match; reconciler that **replays the
-   same applier** for shipped-but-unrecorded shipments (idempotent guard already exists).
-9. **C6 (D-RESTOCK, D-LEDGER, D-SHORTRES, D-SHORTREPLEN, D-PICKGUARD):** all `inventory_levels`
-   movement through `inventoryCore` only; `pickItem` re-checks order state under lock and rolls
-   back item completion on deduct failure; release reservation on short with a durable blocker.
-   **D-QGUARD:** add a DB unique constraint on `inventory_transactions(transaction_type,
-   reference_id, order_item_id)` for ship rows so the idempotency guard cannot be bypassed.
-   (Cancel/refund `unpick` lands with C8.)
+9. **C5 (D-NOTX-NOTIFY, D-DUPEVENT, D-NOMATCH, D-FULLQTY, D-LOSTNOTIFY):** one transactional
+   inbound applier fed by C9's `normalizeWebhook → ShipmentEvent` (engine-agnostic; replaces the
+   V2/legacy/per-channel branches); WMS-side writes in one tx, external pushes via the C7 outbox;
+   unique constraint on ship events; alert on no-match; reconciler that **replays the same applier**
+   for shipped-but-unrecorded shipments (idempotent guard already exists).
+10. **C6 (D-RESTOCK, D-LEDGER, D-SHORTRES, D-SHORTREPLEN, D-PICKGUARD):** all `inventory_levels`
+    movement through `inventoryCore` only; `pickItem` re-checks order state under lock and rolls
+    back item completion on deduct failure; release reservation on short with a durable blocker.
+    **D-QGUARD:** add a DB unique constraint on `inventory_transactions(transaction_type,
+    reference_id, order_item_id)` for ship rows so the idempotency guard cannot be bypassed.
+    (Cancel/refund `unpick` lands with C8.)
 
 ### Phase 4 — C8 Cancel/refund core + C7 Write-back core (channel parity)
-10. **C8 (D-CXLPARTIAL, D-REFUNDORDER, D-EBAYCXL, D-RESTOCK):** one transactional cancel/refund
+11. **C8 (D-CXLPARTIAL, D-REFUNDORDER, D-EBAYCXL, D-RESTOCK):** one transactional cancel/refund
     cascade — idempotency key at the *top*, inventory reverse via C6 (`unpick` picked units,
-    release reservation), shipment cascade via C3, SS cancel, events. Shopify/eBay/dropship become
-    adapters; the durable partial-cancel window closes (guard on a cascade-complete signal, not
-    `oms_orders.status`).
-11. **C7 (D-DUPFUL, D-DUPEVENT, D-FANOUT):** one write-back core with a uniform idempotency-key +
+    release reservation), shipment cascade via C3, **engine cancel via C9**, events.
+    Shopify/eBay/dropship become adapters; the durable partial-cancel window closes (guard on a
+    cascade-complete signal, not `oms_orders.status`).
+12. **C7 (D-DUPFUL, D-DUPEVENT, D-FANOUT):** one write-back core with a uniform idempotency-key +
     durable outbox contract (dropship is the model); Shopify/eBay adapters send keys; per-child
     atomicity for combined-order fan-out.
 
 ### Phase 5 — Reconciler consolidation onto the cores
-12. **Conflict matrix (D-BOOTREPAIR, D-PINGPONG, D-SPAM residue):** consolidate the ~19 jobs under
-    one orchestrator; each calls C3/C4/C5/C6 (no raw SQL), runs under an advisory lock, and writes
-    a `last_reconciled_at`. Startup "one-time" repairs become locked, idempotent jobs. With C4's
-    terminal states and C3's uniqueness, the reconcilers can no longer fight or re-create.
+13. **Conflict matrix (D-BOOTREPAIR, D-PINGPONG, D-SPAM residue):** consolidate the ~19 jobs under
+    one orchestrator; each calls C3/C4/C5/C6/C9 (no raw SQL, no `ss.*`), runs under an advisory
+    lock, and writes a `last_reconciled_at`. Startup "one-time" repairs become locked, idempotent
+    jobs. With C4's terminal states and C3's uniqueness, the reconcilers can no longer fight or
+    re-create.
 
 ### Phase 6 — Determinism, boundaries, observability (P2)
-13. Inject one clock through SLA/sort_rank/completed_at (**D-CLOCK**); integer money parser at all
+14. Inject one clock through SLA/sort_rank/completed_at (**D-CLOCK**); integer money parser at all
     adapters (D-FLOAT); enum/CHECK constraints (D-ENUMDRIFT); remove cross-boundary raw joins
-    (D-BOUNDARY); `ShippingEngine` port (D-NOENGINE); alerts on push-fail/dropped-webhook
+    (D-BOUNDARY); finalize the C9 engine-agnostic identity migration (drop the
+    `shipstation_order_id` shadow once all adapters use the triple); alerts on push-fail/dropped-webhook
     (D-PUSHFLAG).
 
 ---
