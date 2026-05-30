@@ -139,7 +139,7 @@ describe("createShipmentForOrder :: idempotency", () => {
     expect(CREATE_SHIPMENT_SRC).not.toContain("ANY(${orderItemIds}::int[])");
   });
 
-  it("returns existing id and performs NO insert when a planned shipment exists", async () => {
+  it("returns existing id and performs NO insert when an active shipment exists", async () => {
     const mock = makeMockDb(555, /* newShipmentId irrelevant */ 99999);
     const result = await createShipmentForOrder(mock.db as any, 42, 7, [
       { id: 101, quantity: 2 },
@@ -152,6 +152,11 @@ describe("createShipmentForOrder :: idempotency", () => {
     // Only the probe ran; no inserts.
     expect(mock.getExecuteCalls()).toBe(1);
     expect(mock.getInserts().length).toBe(0);
+  });
+
+  it("dedup probe checks all active statuses, not just planned", () => {
+    expect(CREATE_SHIPMENT_SRC).toContain("NOT IN ('voided', 'cancelled')");
+    expect(CREATE_SHIPMENT_SRC).not.toContain("AND status  = ${PLANNED_STATUS}");
   });
 
   it("throws if the existing row's id is not a positive integer (defensive)", async () => {

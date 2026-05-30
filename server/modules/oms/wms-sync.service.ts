@@ -10,7 +10,7 @@
  */
 
 import { db } from "../../db";
-import { sql, eq, and } from "drizzle-orm";
+import { sql, eq, and, notInArray } from "drizzle-orm";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import {
   outboundShipments,
@@ -606,13 +606,59 @@ export class WmsSyncService {
     }
 
     const existingItems = await db
-      .select({ omsOrderLineId: wmsOrderItems.omsOrderLineId })
+      .select({
+        id: wmsOrderItems.id,
+        omsOrderLineId: wmsOrderItems.omsOrderLineId,
+        sku: wmsOrderItems.sku,
+        quantity: wmsOrderItems.quantity,
+        pickedQuantity: wmsOrderItems.pickedQuantity,
+        status: wmsOrderItems.status,
+      })
       .from(wmsOrderItems)
       .where(eq(wmsOrderItems.orderId, wmsOrderId));
     const existingOmsLineIds = new Set(
       existingItems.map((item) => item.omsOrderLineId).filter((id): id is number => id != null),
     );
     const missingLines = omsLines.filter((line) => !existingOmsLineIds.has(line.id));
+
+    // Sync cancellations and quantity changes from OMS → WMS.
+    // If an OMS line was removed (quantity zeroed) or edited, update the
+    // WMS item to match — but only if it hasn't been picked yet.
+    const omsLineById = new Map(omsLines.map((line) => [line.id, line]));
+    for (const wmsItem of existingItems) {
+      if (!wmsItem.omsOrderLineId) continue;
+      if (wmsItem.status === "cancelled") continue;
+
+      const omsLine = omsLineById.get(wmsItem.omsOrderLineId);
+      const omsQty = omsLine?.quantity ?? 0;
+      const wmsQty = wmsItem.quantity ?? 0;
+
+      if (omsQty === wmsQty) continue;
+
+      if (wmsItem.status === "pending" || (wmsItem.pickedQuantity ?? 0) === 0) {
+        const updates: Record<string, any> = { quantity: omsQty };
+        if (omsQty <= 0) updates.status = "cancelled";
+        await db
+          .update(wmsOrderItems)
+          .set(updates)
+          .where(eq(wmsOrderItems.id, wmsItem.id));
+        console.log(
+          `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} → ${omsQty}${omsQty <= 0 ? " (cancelled)" : ""}`,
+        );
+      } else if ((wmsItem.pickedQuantity ?? 0) > 0 && omsQty < (wmsItem.pickedQuantity ?? 0)) {
+        console.warn(
+          `[WMS Sync] Item ${wmsItem.sku} (id ${wmsItem.id}): OMS qty reduced to ${omsQty} but ${wmsItem.pickedQuantity} already picked — needs manual review`,
+        );
+      } else if (omsQty !== wmsQty) {
+        await db
+          .update(wmsOrderItems)
+          .set({ quantity: omsQty })
+          .where(eq(wmsOrderItems.id, wmsItem.id));
+        console.log(
+          `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} → ${omsQty}`,
+        );
+      }
+    }
 
     const insertedItems: {
       id: number;
@@ -781,51 +827,20 @@ export class WmsSyncService {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
 
-    const plannedShipments = await db
-      .select({ id: outboundShipments.id })
+    // Shipment reconciliation: three cases based on what already exists.
+    const activeShipments = await db
+      .select({ id: outboundShipments.id, status: outboundShipments.status })
       .from(outboundShipments)
-      .where(and(eq(outboundShipments.orderId, wmsOrderId), eq(outboundShipments.status, "planned")));
-    let updatedShipments = 0;
-    for (const shipment of plannedShipments) {
-      for (const item of shippableShipmentItems) {
-        const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
-        if (!line || line.requiresShipping === false) continue;
-        const inserted: any = await db.execute(sql`
-          INSERT INTO wms.outbound_shipment_items (
-            shipment_id,
-            order_item_id,
-            product_variant_id,
-            qty
-          )
-          SELECT
-            ${shipment.id},
-            ${item.id},
-            ${item.productId},
-            ${item.quantity ?? 0}
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM wms.outbound_shipment_items
-            WHERE shipment_id = ${shipment.id}
-              AND order_item_id = ${item.id}
-          )
-          RETURNING id
-        `);
-        updatedShipments += inserted?.rows?.length ?? 0;
-      }
-      try {
-        await enqueueShipStationShipmentPushRetry(
-          db,
-          shipment.id,
-          new Error("WMS line reconciliation added missing shipment item"),
-        );
-      } catch (err: any) {
-        console.error(
-          `[WMS Sync] failed to enqueue ShipStation retry for reconciled shipment ${shipment.id}: ${err?.message ?? String(err)}`,
-        );
-      }
-    }
+      .where(and(
+        eq(outboundShipments.orderId, wmsOrderId),
+        notInArray(outboundShipments.status, ["voided", "cancelled"]),
+      ));
 
-    if (updatedShipments === 0) {
+    let updatedShipments = 0;
+
+    if (activeShipments.length === 0) {
+      // Case A: No shipment exists at all — initial sync must have crashed
+      // before creating one. Create a new shipment and push it.
       const created = await createShipmentForOrder(
         db,
         wmsOrderId,
@@ -841,12 +856,56 @@ export class WmsSyncService {
         await enqueueShipStationShipmentPushRetry(
           db,
           created.shipmentId,
-          new Error("WMS line reconciliation created shipment for added order item"),
+          new Error("WMS line reconciliation created shipment (no prior shipment existed)"),
         );
       } catch (err: any) {
         console.error(
-          `[WMS Sync] failed to enqueue ShipStation retry for reconciled shipment ${created.shipmentId}: ${err?.message ?? String(err)}`,
+          `[WMS Sync] failed to enqueue ShipStation retry for new shipment ${created.shipmentId}: ${err?.message ?? String(err)}`,
         );
+      }
+    } else {
+      // Case B/C: Shipment(s) already exist. Add any missing items to
+      // planned shipments (Case B) and re-push. If the shipment is already
+      // queued/labeled/shipped (Case C), it's already in ShipStation — no
+      // duplicate creation needed.
+      const plannedShipments = activeShipments.filter((s) => s.status === "planned");
+      for (const shipment of plannedShipments) {
+        for (const item of shippableShipmentItems) {
+          const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
+          if (!line || line.requiresShipping === false) continue;
+          const inserted: any = await db.execute(sql`
+            INSERT INTO wms.outbound_shipment_items (
+              shipment_id,
+              order_item_id,
+              product_variant_id,
+              qty
+            )
+            SELECT
+              ${shipment.id},
+              ${item.id},
+              ${item.productId},
+              ${item.quantity ?? 0}
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM wms.outbound_shipment_items
+              WHERE shipment_id = ${shipment.id}
+                AND order_item_id = ${item.id}
+            )
+            RETURNING id
+          `);
+          updatedShipments += inserted?.rows?.length ?? 0;
+        }
+        try {
+          await enqueueShipStationShipmentPushRetry(
+            db,
+            shipment.id,
+            new Error("WMS line reconciliation added missing shipment item"),
+          );
+        } catch (err: any) {
+          console.error(
+            `[WMS Sync] failed to enqueue ShipStation retry for reconciled shipment ${shipment.id}: ${err?.message ?? String(err)}`,
+          );
+        }
       }
     }
 

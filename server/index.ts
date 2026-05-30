@@ -1005,6 +1005,63 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     }
   }, 12_000);
 
+  // One-time duplicate shipment cleanup: for each order with multiple
+  // active shipments, keep the one furthest along and cancel the rest.
+  // Also cancels the duplicate in ShipStation if it has a SS order ID.
+  setTimeout(async () => {
+    try {
+      const dupes = await db.execute(sql`
+        WITH ranked AS (
+          SELECT
+            os.id,
+            os.order_id,
+            os.status,
+            os.shipstation_order_id,
+            ROW_NUMBER() OVER (
+              PARTITION BY os.order_id
+              ORDER BY CASE os.status
+                WHEN 'shipped'  THEN 0
+                WHEN 'labeled'  THEN 1
+                WHEN 'queued'   THEN 2
+                WHEN 'on_hold'  THEN 3
+                WHEN 'planned'  THEN 4
+                ELSE 5
+              END,
+              os.created_at ASC
+            ) AS rn
+          FROM wms.outbound_shipments os
+          WHERE os.status NOT IN ('voided', 'cancelled')
+        )
+        SELECT id, order_id, status, shipstation_order_id
+        FROM ranked
+        WHERE rn > 1
+      `);
+      if (dupes.rows.length > 0) {
+        const ss = (services as any).shipStation;
+        for (const row of dupes.rows as any[]) {
+          await db.execute(sql`
+            UPDATE wms.outbound_shipments
+            SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
+            WHERE id = ${row.id}
+          `);
+          if (row.shipstation_order_id && ss?.isConfigured()) {
+            try {
+              await ss.cancelOrder(row.shipstation_order_id);
+            } catch (ssErr: any) {
+              console.warn(`[Data Repair] Could not cancel SS order ${row.shipstation_order_id}: ${ssErr?.message}`);
+            }
+          }
+        }
+        console.warn(
+          `[Data Repair] Cancelled ${dupes.rows.length} duplicate shipment(s):`,
+          (dupes.rows as any[]).map((r: any) => `shipment ${r.id} (order ${r.order_id}, status=${r.status})`).join(', '),
+        );
+      }
+    } catch (err: any) {
+      console.warn("[Data Repair] Duplicate shipment cleanup error:", err?.message);
+    }
+  }, 15_000);
+
   // One-time sort_rank recompute for active orders (formula changed from
   // relative-to-sync-time SLA to absolute-deadline encoding).
   setTimeout(async () => {
