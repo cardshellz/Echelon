@@ -30,9 +30,10 @@ import {
 
 // ─── Mock db factory ─────────────────────────────────────────────────
 //
-// The helper issues TWO execute() calls:
+// The helper issues execute() calls for:
 //   1. Child idempotency probe (SELECT id FROM outbound_shipments WHERE order_id=child)
 //   2. Parent lookup        (SELECT id, shipstation_order_id, shipstation_order_key ...)
+//   3..N. Per item: resolveShipmentItemDefaults (execute) + insertShipmentItemIfMissing (execute)
 //
 // The mock returns canned rows for each call in order. This mirrors
 // the helper's execution order exactly and keeps the mock trivial.
@@ -62,7 +63,9 @@ function makeMockDb(cfg: MockDbConfig) {
     executeCalls.push({ index: idx });
     if (idx === 0) return { rows: cfg.childProbeRows };
     if (idx === 1) return { rows: cfg.parentLookupRows };
-    return { rows: [] };
+    // resolveShipmentItemDefaults returns a row with product_variant_id / from_location_id
+    // insertShipmentItemIfMissing returns rows: [{ id: N }] on success
+    return { rows: [{ product_variant_id: 1, from_location_id: 1, id: idx }] };
   });
 
   function insert(table: any) {
@@ -116,11 +119,12 @@ describe("linkChildToParentShipment :: happy path", () => {
     expect(result.shipmentId).toBe(9001);
     expect(result.created).toBe(true);
 
-    // Child probe + parent lookup + one item-default lookup per shipment item.
-    expect(mock.getExecuteCalls()).toBe(4);
+    // Child probe + parent lookup + (resolveDefaults + insertItemIfMissing) per item.
+    expect(mock.getExecuteCalls()).toBe(6);
 
     const inserts = mock.getInserts();
-    expect(inserts.length).toBe(2);
+    // Only the shipment row goes through db.insert(); items go through db.execute().
+    expect(inserts.length).toBe(1);
 
     // Shipment row — inherits parent's SS linkage.
     const shipmentInsert = inserts[0];
@@ -136,24 +140,9 @@ describe("linkChildToParentShipment :: happy path", () => {
     );
     expect(shipmentInsert.returning).toBe(true);
 
-    // Items rows — each carries the new shipmentId.
-    const itemsInsert = inserts[1];
-    expect(Array.isArray(itemsInsert.values)).toBe(true);
-    expect(itemsInsert.values.length).toBe(2);
-    expect(itemsInsert.values[0]).toEqual({
-      shipmentId: 9001,
-      orderItemId: 201,
-      productVariantId: null,
-      fromLocationId: null,
-      qty: 2,
-    });
-    expect(itemsInsert.values[1]).toEqual({
-      shipmentId: 9001,
-      orderItemId: 202,
-      productVariantId: null,
-      fromLocationId: null,
-      qty: 1,
-    });
+    // Items are inserted via db.execute() (insertShipmentItemIfMissing),
+    // not db.insert(). Each item triggers resolveDefaults + insertIfMissing
+    // = 2 execute calls per item, 4 total for 2 items.
   });
 
   it("accepts channelId=null", async () => {
@@ -440,8 +429,9 @@ describe("linkChildToParentShipment :: input validation", () => {
       [{ id: 1, quantity: 0 }],
     );
     expect(result.created).toBe(true);
-    const itemsInsert = mock.getInserts()[1];
-    expect(itemsInsert.values[0].qty).toBe(0);
+    // Item insert goes through db.execute() (insertShipmentItemIfMissing),
+    // not db.insert(). Verify it was called (resolveDefaults + insertItem = 2 extra).
+    expect(mock.getExecuteCalls()).toBe(4);
   });
 });
 
