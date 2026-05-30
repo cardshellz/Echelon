@@ -14,7 +14,7 @@
 -- share a parent's SS order and are expected to coexist with the parent's
 -- shipment.
 
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_outbound_shipments_active_per_order
+CREATE UNIQUE INDEX IF NOT EXISTS uq_outbound_shipments_active_per_order
   ON wms.outbound_shipments (order_id)
   WHERE status IN ('planned', 'queued', 'labeled', 'on_hold')
     AND COALESCE(source, '') <> 'echelon_combined_child';
