@@ -50,6 +50,7 @@ import {
   getSchedulerDisableReason,
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
+import { reportError, runWithContext } from "./platform/observability";
 
 declare module "express-session" {
   interface SessionData {
@@ -78,6 +79,14 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
+
+// Per-request correlation context via AsyncLocalStorage.
+// Reads x-request-id from upstream (load balancer) or generates one.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const correlationId = (req.headers["x-request-id"] as string) ?? require("node:crypto").randomUUID();
+  res.setHeader("x-correlation-id", correlationId);
+  runWithContext({ correlationId }, () => next());
+});
 
 // Trust proxy for Heroku (needed for secure cookies behind load balancer)
 if (process.env.NODE_ENV === "production") {
@@ -690,7 +699,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     const message = err.message || "Internal Server Error";
 
     res.status(status).json({ message });
-    console.error("[Global Error Handler] Unhandled exception:", err);
+    reportError(err, { action: "global_error_handler", context: { status } });
   });
 
   // importantly only setup vite in development and after
@@ -718,6 +727,14 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   } catch (err) {
     console.error("[Startup Fix] Failed to clear negative inventory balances or dangling items", err);
   }
+
+  // Crash handlers — surface unhandled errors instead of silent death.
+  process.on("unhandledRejection", (reason) => {
+    reportError(reason, { action: "unhandled_rejection" });
+  });
+  process.on("uncaughtException", (err) => {
+    reportError(err, { action: "uncaught_exception" });
+  });
 
   httpServer.listen(
     {
