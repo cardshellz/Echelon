@@ -14,7 +14,8 @@ describe("wms-sync existing order reconciliation", () => {
   });
 
   it("adds reconciled shippable lines to planned outbound shipments and requeues ShipStation", () => {
-    expect(WMS_SYNC_SRC).toMatch(/eq\(outboundShipments\.status, "planned"\)/);
+    expect(WMS_SYNC_SRC).toMatch(/plannedShipments = activeShipments\.filter/);
+    expect(WMS_SYNC_SRC).toMatch(/s\.status === "planned"/);
     expect(WMS_SYNC_SRC).toMatch(/INSERT INTO wms\.outbound_shipment_items/);
     expect(WMS_SYNC_SRC).toMatch(/WHERE NOT EXISTS \(/);
     expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationShipmentPushRetry/);
@@ -26,12 +27,12 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/skipped WMS sync/);
   });
 
-  it("creates a new shipment when missing shippable lines have no planned shipment", () => {
+  it("creates a new shipment only when no active shipment exists (Case A)", () => {
     expect(WMS_SYNC_SRC).toMatch(/const orphanItemResult = await db\.execute/);
     expect(WMS_SYNC_SRC).toMatch(/const shippableShipmentItems = \(orphanItemResult\.rows/);
-    expect(WMS_SYNC_SRC).toMatch(/if \(updatedShipments === 0\)/);
+    expect(WMS_SYNC_SRC).toMatch(/if \(activeShipments\.length === 0\)/);
     expect(WMS_SYNC_SRC).toMatch(/createShipmentForOrder\(/);
-    expect(WMS_SYNC_SRC).toMatch(/WMS line reconciliation created shipment for added order item/);
+    expect(WMS_SYNC_SRC).not.toMatch(/if \(updatedShipments === 0\)[\s\S]*createShipmentForOrder/);
   });
 
   it("repairs existing pending WMS items that are not on an active shipment", () => {
@@ -56,7 +57,17 @@ describe("wms-sync existing order reconciliation", () => {
 
   it("reopens WMS work when reconciliation adds shippable demand", () => {
     expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders[\s\S]*THEN 'ready'/);
-    expect(WMS_SYNC_SRC).toMatch(/ELSE w\.warehouse_status/);
+  });
+
+  it("transitions to completed/cancelled when no pending items remain", () => {
+    expect(WMS_SYNC_SRC).toMatch(/ELSE 'completed'/);
+    expect(WMS_SYNC_SRC).toMatch(/THEN 'cancelled'/);
+  });
+
+  it("syncs item cancellations and quantity changes from OMS to WMS", () => {
+    expect(WMS_SYNC_SRC).toContain("Reconciled item");
+    expect(WMS_SYNC_SRC).toContain('updates.status = "cancelled"');
+    expect(WMS_SYNC_SRC).toContain("omsQty <= 0");
   });
 
   it("recomputes WMS aggregate counts after reconciliation changes order items", () => {
