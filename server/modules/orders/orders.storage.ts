@@ -137,6 +137,38 @@ async function recomputeSortRank(orderId: number): Promise<string | null> {
   return rank;
 }
 
+export async function recomputeAllActiveSortRanks(): Promise<number> {
+  const activeOrders = await db
+    .select({
+      id: orders.id,
+      priority: orders.priority,
+      onHold: orders.onHold,
+      slaDueAt: orders.slaDueAt,
+      orderPlacedAt: orders.orderPlacedAt,
+    })
+    .from(orders)
+    .where(
+      inArray(orders.warehouseStatus, [
+        "ready",
+        "in_progress",
+        "partially_shipped",
+        "ready_to_ship",
+      ]),
+    );
+  let updated = 0;
+  for (const row of activeOrders) {
+    const rank = computeSortRank({
+      priority: row.priority,
+      onHold: row.onHold,
+      slaDueAt: row.slaDueAt as any,
+      orderPlacedAt: row.orderPlacedAt as any,
+    });
+    await db.update(orders).set({ sortRank: rank }).where(eq(orders.id, row.id));
+    updated++;
+  }
+  return updated;
+}
+
 export interface IOrderStorage {
   getOrderByExternalId(externalOrderId: string): Promise<Order | undefined>;
   getOrderById(id: number): Promise<Order | undefined>;

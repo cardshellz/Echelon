@@ -8,8 +8,8 @@
  *   H          1 char   "1" if NOT on hold, "0" if held
  *   B          1 char   "1" if priority >= 9999 (bumped), "0" otherwise
  *   PPPP       4 chars  priority 0000-9999, zero-padded
- *   SSSSSS     6 chars  SLA urgency: 999999 - minutes_until_sla (capped >=0)
- *                       higher = closer to SLA breach
+ *   SSSSSS     6 chars  SLA deadline: 999999 - days_since_epoch(sla_due_at)
+ *                       higher = earlier deadline = more urgent
  *   AAAAAAAAAA 10 chars age component: 9999999999 - unix_seconds(placed_at)
  *                       higher = older order
  *
@@ -28,6 +28,9 @@ const BUMP_THRESHOLD = 9999;
 
 const SLA_WIDTH = 6;
 const SLA_MAX = 999999;
+// Fixed reference epoch for absolute SLA encoding. Days from this date
+// fit comfortably in 6 digits for decades.
+const SLA_EPOCH_MS = Date.UTC(2024, 0, 1);
 
 const AGE_WIDTH = 10;
 const AGE_MAX = 9999999999;
@@ -46,7 +49,6 @@ export interface SortRankInput {
 }
 
 export function computeSortRank(input: SortRankInput): string {
-  const now = input.now ?? new Date();
   const priority = Math.max(0, Math.min(BUMP_THRESHOLD, Math.floor(input.priority ?? 0)));
   const isHeld = input.onHold === true || input.onHold === 1;
   const isBumped = priority >= BUMP_THRESHOLD;
@@ -55,13 +57,16 @@ export function computeSortRank(input: SortRankInput): string {
   const B = isBumped ? BUMP_BIT_BUMPED : BUMP_BIT_NORMAL;
   const P = pad(priority, 4);
 
-  // SLA component: smaller minutes_until_sla = more urgent = larger S component
+  // SLA component: earlier deadline = more urgent = larger S component.
+  // Encodes the deadline as absolute days-since-epoch so orders sharing the
+  // same SLA deadline get identical S values regardless of sync time. Within
+  // the same deadline, the age component (A) breaks ties by FIFO.
   let slaComponent = 0;
   if (input.slaDueAt) {
     const slaDate = input.slaDueAt instanceof Date ? input.slaDueAt : new Date(input.slaDueAt);
     if (!isNaN(slaDate.getTime())) {
-      const minutesUntilSla = Math.round((slaDate.getTime() - now.getTime()) / 60000);
-      slaComponent = Math.max(0, SLA_MAX - Math.max(0, minutesUntilSla));
+      const daysSinceEpoch = Math.floor((slaDate.getTime() - SLA_EPOCH_MS) / 86400000);
+      slaComponent = Math.max(0, SLA_MAX - Math.max(0, daysSinceEpoch));
     }
   }
   const S = pad(Math.min(SLA_MAX, slaComponent), SLA_WIDTH);

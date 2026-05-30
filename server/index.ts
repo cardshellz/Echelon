@@ -895,6 +895,18 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     logSchedulerDisabled("scheduler", "OMS WMS reconciliation", "OMS_WMS_RECONCILE_DISABLED");
   }
 
+  // One-time sort_rank recompute for active orders (formula changed from
+  // relative-to-sync-time SLA to absolute-deadline encoding).
+  setTimeout(async () => {
+    try {
+      const { recomputeAllActiveSortRanks } = await import("./modules/orders/orders.storage");
+      const count = await recomputeAllActiveSortRanks();
+      if (count > 0) console.log(`[Sort-Rank] Recomputed sort_rank for ${count} active order(s)`);
+    } catch (err: any) {
+      console.warn("[Sort-Rank] Recompute error:", err?.message);
+    }
+  }, 20_000);
+
   // WMS<->ShipStation reconciliation.
   //
   // V2 (RECONCILE_V2=true): reads from wms.outbound_shipments (source of
