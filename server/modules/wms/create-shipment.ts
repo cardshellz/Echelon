@@ -13,9 +13,9 @@
  *   always have a target row to update.
  *
  * Idempotency (coding-standards rule #6):
- *   The helper checks for an existing `planned` shipment on the same
- *   `order_id`. If one exists, it returns that id with created=false
- *   and performs no writes. Safe to retry.
+ *   The helper checks for any existing active (non-voided/cancelled)
+ *   shipment on the same `order_id`. If one exists, it returns that id
+ *   with created=false and performs no writes. Safe to retry.
  *
  * Determinism (rule #2):
  *   The helper takes `db` via argument — no hidden clocks, no global
@@ -251,7 +251,12 @@ export async function createShipmentForOrder(
     SELECT id
       FROM wms.outbound_shipments
      WHERE order_id = ${wmsOrderId}
-       AND status  = ${PLANNED_STATUS}
+       AND status NOT IN ('voided', 'cancelled')
+     ORDER BY CASE status
+       WHEN 'planned' THEN 0
+       WHEN 'queued'  THEN 1
+       ELSE 2
+     END
      LIMIT 1
   `);
 
