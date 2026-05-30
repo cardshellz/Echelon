@@ -96,7 +96,18 @@ async function claimOrder(orderId: number, pickerId: string): Promise<OrderWithI
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pickerId }),
   });
-  if (!res.ok) throw new Error("Failed to claim order");
+  if (!res.ok) {
+    // Prefer the server's structured reason so the picker sees the truth
+    // (on hold / actively picked by X / not claimable) rather than a guess.
+    let message = "Failed to claim order";
+    try {
+      const body = await res.json();
+      if (body?.error) message = body.error;
+    } catch {
+      // Non-JSON error body — fall back to the generic message.
+    }
+    throw new Error(message);
+  }
   return res.json();
 }
 
@@ -1579,7 +1590,11 @@ export default function Picking() {
           triggerHaptic("medium");
         } catch (error: any) {
           console.error("Failed to claim combined order:", error);
-          setClaimError("One or more orders in this group were claimed by another picker.");
+          setClaimError(
+            error?.message
+              ? `Could not claim group: ${error.message}`
+              : "One or more orders in this group could not be claimed.",
+          );
           refetch();
           triggerHaptic("heavy");
           playSound("error");
@@ -1608,7 +1623,11 @@ export default function Picking() {
         triggerHaptic("medium");
       } catch (error: any) {
         console.error("Failed to claim order:", error);
-        setClaimError("This order was just claimed by another picker. The queue has been refreshed.");
+        setClaimError(
+          error?.message
+            ? `${error.message}. The queue has been refreshed.`
+            : "This order could not be claimed. The queue has been refreshed.",
+        );
         refetch();
         triggerHaptic("heavy");
         playSound("error");

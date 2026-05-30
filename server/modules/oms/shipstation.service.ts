@@ -2329,7 +2329,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
             status = 'completed',
             picked_quantity = quantity,
             fulfilled_quantity = quantity
-          WHERE wms_order_id = ${wmsOrderId}
+          WHERE order_id = ${wmsOrderId}
             AND status NOT IN ('completed', 'short', 'cancelled')
         `);
       }
@@ -2348,10 +2348,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       omsOrderId = parsed.omsOrderId;
 
       // ---- WMS-FIRST: Update WMS as the source of truth for fulfillment ----
+      // Match BOTH WMS-order creation paths, exactly as every other WMS lookup
+      // in this codebase does (see oms-webhooks.ts and orders.storage pick
+      // queue): wms-sync creates rows with source='oms'/'ebay' linked via
+      // oms_fulfillment_order_id; the legacy Shopify direct-write/manual path
+      // uses source='shopify' linked via source_table_id. Matching only the
+      // first set silently dropped shipped Shopify-sourced orders onto the
+      // OMS-only branch below, which never updates wms.orders.warehouse_status
+      // — leaving the order stuck in the pick queue forever.
       const wmsOrderResult: any = await db.execute(sql`
         SELECT id, warehouse_status, channel_id FROM wms.orders
-        WHERE oms_fulfillment_order_id = ${String(omsOrderId)}
-          AND source IN ('oms', 'ebay')
+        WHERE (source IN ('oms', 'ebay') AND oms_fulfillment_order_id = ${String(omsOrderId)})
+           OR (source = 'shopify'        AND source_table_id        = ${String(omsOrderId)})
         LIMIT 1
       `);
 
@@ -2386,7 +2394,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
               status = 'completed',
               picked_quantity = quantity,
               fulfilled_quantity = quantity
-            WHERE wms_order_id = ${wmsOrderId}
+            WHERE order_id = ${wmsOrderId}
               AND status NOT IN ('completed', 'short', 'cancelled')
           `);
 
@@ -3121,24 +3129,29 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       finalFinancialStatus === "refunded" ||
       finalFinancialStatus === "voided"
     ) {
-      console.warn(
-        `[ShipStation Push] WMS order ${orderRow.id} is ${orderRow.warehouse_status}/${orderRow.financial_status} but shipment ${shipmentId} is pushable — proceeding`,
+      throw new ShipStationPushError(
+        `WMS order ${orderRow.id} is ${orderRow.warehouse_status}/${orderRow.financial_status} — refusing to push cancelled/refunded order to ShipStation`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "order.warehouse_status",
+          value: orderRow.warehouse_status,
+        },
       );
     }
 
-    // ─── 3. Load items (WMS only, joined to order_items for pricing) ─
-    // Keep this as a separate raw query instead of an inline drizzle select
-    // expression. Production diagnostics on #57215 showed the inline aggregate
-    // arriving as 0 even while direct SQL returned the correct non-shipping
-    // donation total. The validator needs this value to reconcile ShipStation
-    // shipments that only push shippable lines while the WMS order total also
-    // includes donations, memberships, or other non-shipping items.
     const omsBlocker = await getOmsFinalOrderBlockerForShipmentPush(
       orderRow.oms_fulfillment_order_id,
     );
     if (omsBlocker.blocked) {
-      console.warn(
-        `[ShipStation Push] OMS order ${orderRow.oms_fulfillment_order_id} is ${omsBlocker.reason} but WMS shipment ${shipmentId} is pushable — proceeding (WMS is source of truth for fulfillment)`,
+      throw new ShipStationPushError(
+        `OMS order ${orderRow.oms_fulfillment_order_id} is ${omsBlocker.reason} — refusing to push cancelled/refunded order to ShipStation`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "oms.status",
+          value: omsBlocker.reason,
+        },
       );
     }
 

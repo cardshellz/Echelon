@@ -877,12 +877,52 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               OR  (w.source = 'shopify' AND w.source_table_id = oms.id::text)
                 )
             AND oms.status IN ('cancelled', 'shipped', 'refunded')
-            AND w.warehouse_status IN ('ready', 'in_progress')
+            -- Include post-pick states (ready_to_ship/completed): a fully picked
+            -- order whose OMS parent is already shipped/cancelled but whose WMS
+            -- row never advanced will otherwise stay stuck in the pick/done
+            -- queue forever. Only the cancelled/shipped CASE branches mutate
+            -- warehouse_status, so this is a safe forward-only correction.
+            AND w.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'completed')
           RETURNING w.id, w.order_number, oms.status AS oms_status
         `);
         if (result.rows.length > 0) {
           console.warn(`[OMS<->WMS Reconcile] Corrected ${result.rows.length} divergent order(s):`,
             result.rows.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", "));
+
+          // For orders just marked cancelled, also cancel any active SS
+          // shipments. Without this, the order is gone from the pick queue
+          // but still active in ShipStation.
+          const cancelledIds = (result.rows as any[])
+            .filter((r: any) => r.oms_status === "cancelled")
+            .map((r: any) => r.id);
+          if (cancelledIds.length > 0) {
+            try {
+              const ssRows: any = await db.execute(sql`
+                SELECT os.id AS shipment_id, os.shipstation_order_id
+                FROM wms.outbound_shipments os
+                WHERE os.order_id = ANY(${cancelledIds})
+                  AND os.shipstation_order_id IS NOT NULL
+                  AND os.status NOT IN ('cancelled', 'voided', 'returned', 'lost')
+              `);
+              const ss = (services as any).shipStation;
+              if (ss?.isConfigured() && ssRows.rows.length > 0) {
+                for (const row of ssRows.rows) {
+                  try {
+                    await ss.cancelOrder(row.shipstation_order_id);
+                    await db.execute(sql`
+                      UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
+                      WHERE id = ${row.shipment_id}
+                    `);
+                    console.log(`[OMS<->WMS Reconcile] Cancelled SS order ${row.shipstation_order_id} for shipment ${row.shipment_id}`);
+                  } catch (ssErr: any) {
+                    console.warn(`[OMS<->WMS Reconcile] Failed to cancel SS order ${row.shipstation_order_id}: ${ssErr?.message}`);
+                  }
+                }
+              }
+            } catch (err: any) {
+              console.warn("[OMS<->WMS Reconcile] SS cascade error:", err?.message);
+            }
+          }
         }
       } catch (err: any) {
         console.warn("[OMS<->WMS Reconcile] Sweep error:", err?.message);
@@ -893,6 +933,89 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   } else {
     logSchedulerDisabled("scheduler", "OMS WMS reconciliation", "OMS_WMS_RECONCILE_DISABLED");
   }
+
+  // One-time data repair: shipped orders whose items were never completed
+  // (caused by wms_order_id column-name bug in SHIP_NOTIFY legacy paths).
+  // Also cancels orphaned planned/queued shipments for shipped orders so
+  // they don't get re-pushed to ShipStation.
+  setTimeout(async () => {
+    try {
+      const itemFix = await db.execute(sql`
+        UPDATE wms.order_items oi SET
+          status = 'completed',
+          fulfilled_quantity = oi.quantity,
+          picked_quantity = GREATEST(oi.picked_quantity, oi.quantity)
+        FROM wms.orders o
+        WHERE o.id = oi.order_id
+          AND o.warehouse_status IN ('shipped', 'cancelled')
+          AND oi.status NOT IN ('completed', 'short', 'cancelled')
+        RETURNING oi.id
+      `);
+      if (itemFix.rows.length > 0) {
+        console.warn(`[Data Repair] Completed ${itemFix.rows.length} orphaned item(s) on shipped/cancelled orders`);
+      }
+      const shipmentFix = await db.execute(sql`
+        UPDATE wms.outbound_shipments os SET
+          status = 'cancelled',
+          cancelled_at = COALESCE(os.cancelled_at, NOW()),
+          updated_at = NOW()
+        FROM wms.orders o
+        WHERE o.id = os.order_id
+          AND o.warehouse_status IN ('shipped', 'cancelled')
+          AND os.status IN ('planned', 'queued')
+        RETURNING os.id, os.order_id
+      `);
+      if (shipmentFix.rows.length > 0) {
+        console.warn(`[Data Repair] Cancelled ${shipmentFix.rows.length} orphaned planned/queued shipment(s) on shipped/cancelled orders`);
+      }
+      // Zombie orders: active warehouse_status but no pending shippable items.
+      // These get stuck in the pick queue forever because nothing triggers
+      // their status transition.
+      const zombieFix = await db.execute(sql`
+        UPDATE wms.orders o
+        SET warehouse_status = CASE
+              WHEN NOT EXISTS (
+                SELECT 1 FROM wms.order_items ai WHERE ai.order_id = o.id
+              ) THEN 'cancelled'
+              WHEN EXISTS (
+                SELECT 1 FROM wms.order_items ai
+                WHERE ai.order_id = o.id
+                  AND ai.status NOT IN ('cancelled')
+              ) THEN 'completed'
+              ELSE 'cancelled'
+            END,
+            completed_at = COALESCE(o.completed_at, NOW()),
+            updated_at = NOW()
+        WHERE o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+          AND NOT EXISTS (
+            SELECT 1 FROM wms.order_items oi
+            WHERE oi.order_id = o.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(oi.quantity, 0) > 0
+              AND oi.status NOT IN ('cancelled', 'completed', 'short')
+          )
+        RETURNING o.id, o.order_number, o.warehouse_status
+      `);
+      if (zombieFix.rows.length > 0) {
+        console.warn(`[Data Repair] Transitioned ${zombieFix.rows.length} zombie order(s) with no pending items:`,
+          (zombieFix.rows as any[]).map((r: any) => `${r.order_number}→${r.warehouse_status}`).join(', '));
+      }
+    } catch (err: any) {
+      console.warn("[Data Repair] Shipped-order cleanup error:", err?.message);
+    }
+  }, 12_000);
+
+  // One-time sort_rank recompute for active orders (formula changed from
+  // relative-to-sync-time SLA to absolute-deadline encoding).
+  setTimeout(async () => {
+    try {
+      const { recomputeAllActiveSortRanks } = await import("./modules/orders/orders.storage");
+      const count = await recomputeAllActiveSortRanks();
+      if (count > 0) console.log(`[Sort-Rank] Recomputed sort_rank for ${count} active order(s)`);
+    } catch (err: any) {
+      console.warn("[Sort-Rank] Recompute error:", err?.message);
+    }
+  }, 20_000);
 
   // WMS<->ShipStation reconciliation.
   //

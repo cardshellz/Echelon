@@ -10,7 +10,7 @@ import {
   outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
-import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
+import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { computeSortRank } from "./sort-rank";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
@@ -135,6 +135,38 @@ async function recomputeSortRank(orderId: number): Promise<string | null> {
   });
   await db.update(orders).set({ sortRank: rank }).where(eq(orders.id, orderId));
   return rank;
+}
+
+export async function recomputeAllActiveSortRanks(): Promise<number> {
+  const activeOrders = await db
+    .select({
+      id: orders.id,
+      priority: orders.priority,
+      onHold: orders.onHold,
+      slaDueAt: orders.slaDueAt,
+      orderPlacedAt: orders.orderPlacedAt,
+    })
+    .from(orders)
+    .where(
+      inArray(orders.warehouseStatus, [
+        "ready",
+        "in_progress",
+        "partially_shipped",
+        "ready_to_ship",
+      ]),
+    );
+  let updated = 0;
+  for (const row of activeOrders) {
+    const rank = computeSortRank({
+      priority: row.priority,
+      onHold: row.onHold,
+      slaDueAt: row.slaDueAt as any,
+      orderPlacedAt: row.orderPlacedAt as any,
+    });
+    await db.update(orders).set({ sortRank: rank }).where(eq(orders.id, row.id));
+    updated++;
+  }
+  return updated;
 }
 
 export interface IOrderStorage {
@@ -362,7 +394,17 @@ export const orderMethods: IOrderStorage = {
         )
         AND (
           -- Ready/in_progress/ready_to_ship orders: show in pick queue
-          o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+          -- Exclude orders with zero shippable items (nothing to pick).
+          (
+            o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND EXISTS (
+              SELECT 1 FROM wms.order_items oi
+              WHERE oi.order_id = o.id
+                AND COALESCE(oi.requires_shipping, 1) <> 0
+                AND COALESCE(oi.quantity, 0) > 0
+                AND oi.status NOT IN ('cancelled', 'completed', 'short')
+            )
+          )
           -- Completed orders: show for 24 hours in done queue
           OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours' AND COALESCE(o.item_count, 0) > 0)
         )
@@ -370,7 +412,7 @@ export const orderMethods: IOrderStorage = {
         -- sort_rank is the single source of truth (flattened composite of
         -- hold/bump/priority/SLA/age). Built by computeSortRank() and
         -- pushed to ShipStation customField1 so pick queue == ship queue.
-        o.sort_rank DESC NULLS LAST,
+        o.sort_rank ASC NULLS LAST,
         -- Fallback only if sort_rank somehow unset (shouldn't happen):
         COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
@@ -602,6 +644,28 @@ export const orderMethods: IOrderStorage = {
         }
       }
 
+      // Self-heal: auto-complete orders with zero shippable items remaining
+      if (["ready", "in_progress"].includes(order.warehouseStatus)) {
+        const items = itemsByOrderId.get(order.id) || [];
+        const pendingShippable = items.filter(
+          i => i.requiresShipping === 1 && !["cancelled", "completed", "short"].includes(i.status),
+        );
+        if (pendingShippable.length === 0) {
+          try {
+            await db.execute(
+              sql`UPDATE wms.orders SET warehouse_status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = ${order.id}`,
+            );
+            order.warehouseStatus = "completed";
+            order.completedAt = new Date();
+            console.log(
+              `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): zero shippable items → completed`,
+            );
+          } catch (err) {
+            console.error(`[PickQueue] Failed to auto-complete zero-item order ${order.orderNumber}:`, err);
+          }
+        }
+      }
+
       // Self-heal: if shipments exist and are all shipped/cancelled/returned/lost
       // but warehouse_status is still a pick-queue state, the rollup was
       // missed (webhook failure, race, etc.). Re-run it now.
@@ -697,18 +761,24 @@ export const orderMethods: IOrderStorage = {
   },
 
   async claimOrder(orderId: number, pickerId: string): Promise<Order | null> {
+    // Idempotent re-claim: the picker already holds this order AND it is still
+    // actively being picked. We intentionally require `in_progress` here — a
+    // stale `assigned_picker_id` left over on a ready/ready_to_ship order from a
+    // previous pass is attribution, not an active claim, and must fall through
+    // to the guarded UPDATE below so it can be re-claimed cleanly.
     const existingOrder = await db.select().from(orders).where(
       and(
         eq(orders.id, orderId),
-        eq(orders.assignedPickerId, pickerId)
+        eq(orders.assignedPickerId, pickerId),
+        eq(orders.warehouseStatus, "in_progress"),
       )
     );
-    
+
     if (existingOrder.length > 0) {
-      console.log(`[CLAIM] Picker ${pickerId} already owns order ${orderId}, returning existing`);
+      console.log(`[CLAIM] Picker ${pickerId} already owns in-progress order ${orderId}, returning existing`);
       return existingOrder[0];
     }
-    
+
     const currentOrder = await db.select().from(orders).where(eq(orders.id, orderId));
     if (currentOrder.length > 0) {
       console.log(`[CLAIM] Order ${orderId} current state:`, {
@@ -717,7 +787,16 @@ export const orderMethods: IOrderStorage = {
         onHold: currentOrder[0].onHold
       });
     }
-    
+
+    // The picker assignment is ONLY a lock while the order is actively being
+    // picked (`warehouse_status = 'in_progress'`). In every other claimable
+    // state (`ready` / `partially_shipped` / `ready_to_ship`) a non-null
+    // `assigned_picker_id` is a leftover attribution record from a prior pass —
+    // it is NOT an active hold and must not block a new claim. The ONLY thing
+    // that blocks a claim is an order currently in_progress under a DIFFERENT
+    // picker. This makes the claim correct regardless of how a stale picker id
+    // got left behind (completion, shipment rollup, order edit, reconcile),
+    // so we don't have to chase every status writer to null the field.
     const result = await db
       .update(orders)
       .set({
@@ -728,26 +807,29 @@ export const orderMethods: IOrderStorage = {
       .where(
         and(
           eq(orders.id, orderId),
+          eq(orders.onHold, 0),
+          inArray(orders.warehouseStatus, [
+            "ready",
+            "partially_shipped",
+            "ready_to_ship",
+            "in_progress",
+          ]),
+          // NOT (in_progress AND held by someone else)
           or(
-            eq(orders.warehouseStatus, "ready"),
-            eq(orders.warehouseStatus, "partially_shipped"),
-            and(
-              eq(orders.warehouseStatus, "in_progress"),
-              isNull(orders.assignedPickerId)
-            )
+            ne(orders.warehouseStatus, "in_progress"),
+            isNull(orders.assignedPickerId),
+            eq(orders.assignedPickerId, pickerId),
           ),
-          isNull(orders.assignedPickerId),
-          eq(orders.onHold, 0)
         )
       )
       .returning();
-    
+
     if (result.length === 0) {
       console.log(`[CLAIM] Order ${orderId} claim failed - not available for picker ${pickerId}`);
     } else {
       console.log(`[CLAIM] Order ${orderId} claimed successfully by picker ${pickerId}`);
     }
-    
+
     return result[0] || null;
   },
 
@@ -973,12 +1055,16 @@ export const orderMethods: IOrderStorage = {
     const itemCount = items.length;
     const unitCount = items.reduce((sum, item) => sum + item.quantity, 0);
 
-    const allShippableDone = shippableItems.length > 0 &&
+    const allShippableDone = shippableItems.length === 0 ||
       shippableItems.every(item => item.status === "completed" || item.status === "short");
     const hasShortItems = shippableItems.some(item => item.status === "short");
+    const allItemsCancelled = items.length > 0 && items.every(item => item.status === "cancelled");
 
     const updates: any = { pickedCount, itemCount, unitCount };
-    if (allShippableDone) {
+    if (allItemsCancelled) {
+      updates.warehouseStatus = "cancelled" as OrderStatus;
+      updates.completedAt = new Date();
+    } else if (allShippableDone) {
       if (hasShortItems) {
         updates.warehouseStatus = "exception" as OrderStatus;
         updates.exceptionAt = new Date();
@@ -1116,7 +1202,7 @@ export const orderMethods: IOrderStorage = {
     };
     
     if (resolution !== "hold") {
-      updates.status = newStatus;
+      updates.warehouseStatus = newStatus;
     }
     
     const result = await db

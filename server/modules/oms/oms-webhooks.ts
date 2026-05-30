@@ -1774,13 +1774,14 @@ export function registerOmsWebhooks(
             );
           } else {
             // No shipments — order cancelled before any shipment was created.
-            // Direct-write the WMS order to cancelled per fallback per Plan §6 C28.
+            // Direct-write the WMS order to cancelled. Only skip if already
+            // shipped (fulfillment is a fact) or already cancelled (idempotent).
             await db.execute(sql`
               UPDATE wms.orders SET
                 warehouse_status = 'cancelled',
                 cancelled_at = ${now}
               WHERE id = ${wmsOrderId}
-                AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
+                AND warehouse_status NOT IN ('shipped', 'cancelled')
             `);
           }
         }

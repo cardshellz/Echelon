@@ -453,9 +453,9 @@ export class WmsSyncService {
       // 6. Reserve inventory
       if (warehouseStatus === "ready") {
         try {
-          const reserveResult = await this.services.reservation.reserveForOrder(newWmsOrder.id);
-          if (!reserveResult.success) {
-            console.warn(`[WMS Sync] Inventory reservation failed for order ${newWmsOrder.id}: ${reserveResult.issues?.join(", ")}`);
+          const reserveResult = await this.services.reservation.reserveOrder(newWmsOrder.id);
+          if (reserveResult.failed.length > 0) {
+            console.warn(`[WMS Sync] Inventory reservation partial failure for order ${newWmsOrder.id}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
           }
         } catch (err: any) {
           console.error(`[WMS Sync] Inventory reservation error for order ${newWmsOrder.id}: ${err.message}`);
@@ -471,8 +471,16 @@ export class WmsSyncService {
 
       // 8. Push to ShipStation via WMS-owned pushShipment path.
       // Push failures never block the sync — reconcile retries.
+      // Recheck OMS status: a cancellation webhook may have arrived
+      // between step 5 (WMS order creation) and now.
       if (this.services.shipStation?.isConfigured()) {
         if (shipmentIdForPush !== null) {
+          const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
+          if (recheckOms && this.isFinalOrCancelledOmsOrder(recheckOms)) {
+            console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping SS push, cancelling WMS`);
+            await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
+            return newWmsOrder.id;
+          }
           try {
             await this.services.shipStation.pushShipment(shipmentIdForPush);
             console.log(
@@ -551,8 +559,10 @@ export class WmsSyncService {
          SET warehouse_status = 'cancelled',
              cancelled_at = COALESCE(cancelled_at, NOW()),
              updated_at = NOW()
-       WHERE source = 'oms'
-         AND oms_fulfillment_order_id = ${String(omsOrderId)}
+       WHERE (
+               (source IN ('oms', 'ebay') AND oms_fulfillment_order_id = ${String(omsOrderId)})
+            OR (source = 'shopify'        AND source_table_id        = ${String(omsOrderId)})
+             )
          AND warehouse_status NOT IN ('cancelled', 'shipped')
     `);
   }
@@ -724,16 +734,21 @@ export class WmsSyncService {
     await db.execute(sql`
       UPDATE wms.orders w
          SET warehouse_status = CASE
-               WHEN w.warehouse_status IN ('cancelled') THEN w.warehouse_status
+               WHEN w.warehouse_status IN ('cancelled', 'shipped') THEN w.warehouse_status
                WHEN EXISTS (
                  SELECT 1
                  FROM wms.order_items pending_items
                  WHERE pending_items.order_id = w.id
                    AND COALESCE(pending_items.requires_shipping, 1) <> 0
+                   AND COALESCE(pending_items.quantity, 0) > 0
                    AND COALESCE(pending_items.quantity, 0) > COALESCE(pending_items.fulfilled_quantity, 0)
                    AND pending_items.status NOT IN ('cancelled', 'completed')
                ) THEN 'ready'
-               ELSE w.warehouse_status
+               WHEN (
+                 SELECT COUNT(*) FROM wms.order_items all_items
+                 WHERE all_items.order_id = w.id
+               ) = 0 THEN 'cancelled'
+               ELSE 'completed'
              END,
              item_count = agg.item_count,
              unit_count = agg.unit_count,
@@ -753,6 +768,16 @@ export class WmsSyncService {
     `);
 
     if (shippableShipmentItems.length === 0) {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+
+    // Re-check: never create or push shipments for terminal orders.
+    const [freshWmsState] = await db
+      .select({ warehouseStatus: wmsOrders.warehouseStatus })
+      .from(wmsOrders)
+      .where(eq(wmsOrders.id, wmsOrderId))
+      .limit(1);
+    if (freshWmsState?.warehouseStatus === "shipped" || freshWmsState?.warehouseStatus === "cancelled") {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
 
