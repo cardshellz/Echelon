@@ -5,7 +5,7 @@ import * as schema from "@shared/schema";
 
 const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
 
-if (!connectionString) {
+if (!connectionString && !process.env.VITEST) {
   throw new Error(
     "Database connection string must be set. Provide EXTERNAL_DATABASE_URL or DATABASE_URL.",
   );
@@ -15,13 +15,18 @@ if (!connectionString) {
 // Heroku and most cloud databases require SSL connections
 const useSSL = process.env.EXTERNAL_DATABASE_URL || (process.env.DATABASE_URL && process.env.DATABASE_URL.includes("amazonaws.com"));
 
-export const pool = new Pool({
-  connectionString,
+// In test environments without a DB connection, create a stub pool so
+// modules that import db.ts don't crash at load time. Actual DB calls
+// will fail at runtime (tests should mock them).
+const poolConfig = {
+  connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
-  max: 3, // Limit connections per dyno (Heroku Hobby = 20 total across all dynos)
+  max: connectionString ? 3 : 0,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-});
+};
+
+export const pool = new Pool(poolConfig);
 
 pool.on("error", (error) => {
   console.error("[DatabasePool] Unexpected idle client error:", error);

@@ -754,6 +754,18 @@ export async function recomputeOrderStatusFromShipments(
     return { warehouseStatus: derived, changed: false };
   }
 
+  // Guard: `cancelled` is terminal for roll-up purposes. Once an order
+  // is cancelled (by the OMS↔WMS reconciler or a cancel cascade), the
+  // shipment-based derivation must NOT flip it back to `ready_to_ship`
+  // or any other non-terminal state. Without this guard, the reconciler
+  // sets cancelled → `deriveWmsFromShipments` re-derives ready_to_ship
+  // → reconciler re-fires ss.cancelOrder → "already shipped" spam loop.
+  // The only forward transition from cancelled is `shipped` (physical
+  // shipment already left the building — truth wins, needs human review).
+  if (orderRow.warehouse_status === "cancelled" && derived !== "shipped") {
+    return { warehouseStatus: "cancelled", changed: false };
+  }
+
   // Empty-shipments roll-up: `deriveWmsFromShipments([])` returns
   // `"ready"`. We do NOT clobber an order already in a post-ready state
   // (picking/packed/etc.) just because its shipments were deleted; a

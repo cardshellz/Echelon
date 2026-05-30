@@ -135,29 +135,49 @@ describe("recordPayment — 409 on duplicate payment number", () => {
   it("throws ApLedgerError with 409 on unique violation", async () => {
     vi.resetModules();
 
-    // Mock db to throw 23505 on insert
-    const insertChain = {
-      values: vi.fn().mockReturnThis(),
-      returning: vi.fn().mockRejectedValue({ code: "23505", constraint: "ap_payments_payment_number_active_uidx" }),
-    };
-
-    vi.mock("../../../../db", () => ({
-      db: {
-        insert: vi.fn().mockReturnValue(insertChain),
-        select: vi.fn().mockReturnValue({
-          from: vi.fn().mockReturnThis(),
-          where: vi.fn().mockResolvedValue([{ paymentNumber: "PAY-20260503-001" }]),
-          orderBy: vi.fn().mockReturnThis(),
-          limit: vi.fn().mockReturnThis(),
-          innerJoin: vi.fn().mockReturnThis(),
-        }),
-        update: vi.fn().mockReturnValue({
-          set: vi.fn().mockReturnValue({
-            where: vi.fn().mockResolvedValue([]),
+    // vi.mock factories are hoisted — all referenced values must be inline.
+    vi.mock("../../../../db", () => {
+      const makeSelectChain = () => {
+        const chain: any = {};
+        chain.from = vi.fn().mockReturnValue(chain);
+        chain.where = vi.fn().mockReturnValue(chain);
+        chain.orderBy = vi.fn().mockReturnValue(chain);
+        chain.limit = vi.fn().mockResolvedValue([{ paymentNumber: "PAY-20260503-001" }]);
+        chain.innerJoin = vi.fn().mockReturnValue(chain);
+        chain.then = (resolve: any) => Promise.resolve([{ paymentNumber: "PAY-20260503-001" }]).then(resolve);
+        return chain;
+      };
+      const insertChain = {
+        values: vi.fn().mockReturnThis(),
+        returning: vi.fn().mockRejectedValue({ code: "23505", constraint: "ap_payments_payment_number_active_uidx" }),
+      };
+      return {
+        db: {
+          insert: vi.fn().mockReturnValue(insertChain),
+          select: vi.fn().mockImplementation(() => makeSelectChain()),
+          update: vi.fn().mockReturnValue({
+            set: vi.fn().mockReturnValue({
+              where: vi.fn().mockResolvedValue([]),
+            }),
           }),
-        }),
-      },
-    }));
+          transaction: vi.fn().mockImplementation(async (fn: any) => {
+            const txInsertChain = {
+              values: vi.fn().mockReturnThis(),
+              returning: vi.fn().mockRejectedValue({ code: "23505", constraint: "ap_payments_payment_number_active_uidx" }),
+            };
+            return fn({
+              insert: vi.fn().mockReturnValue(txInsertChain),
+              select: vi.fn().mockImplementation(() => makeSelectChain()),
+              update: vi.fn().mockReturnValue({
+                set: vi.fn().mockReturnValue({
+                  where: vi.fn().mockResolvedValue([]),
+                }),
+              }),
+            });
+          }),
+        },
+      };
+    });
 
     vi.mock("@shared/schema", () => ({
       apPayments: { id: "id", paymentNumber: "paymentNumber" },

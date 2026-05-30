@@ -1604,6 +1604,60 @@ describe("recomputeOrderStatusFromShipments :: state matrix", () => {
     });
     expect(mock.getCallCount()).toBe(0);
   });
+
+  // Regression: cancelled↔ready_to_ship oscillation (cancel-spam fix).
+  // When warehouse_status is already 'cancelled', the rollup must NOT
+  // flip it back to ready_to_ship even if shipments are still open.
+  it("cancelled order with open shipments → stays cancelled (no oscillation)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          { id: 42, warehouse_status: "cancelled", completed_at: null },
+        ],
+      },
+      { rows: [{ status: "planned" }] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result.warehouseStatus).toBe("cancelled");
+    expect(result.changed).toBe(false);
+    expect(mock.getCallCount()).toBe(2); // SELECTs only, no UPDATE
+  });
+
+  it("cancelled order with all-cancelled shipments → stays cancelled", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          { id: 42, warehouse_status: "cancelled", completed_at: null },
+        ],
+      },
+      { rows: [{ status: "cancelled" }, { status: "cancelled" }] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result.warehouseStatus).toBe("cancelled");
+    expect(result.changed).toBe(false);
+  });
+
+  // Edge: if shipments actually shipped after OMS cancelled, truth wins.
+  it("cancelled order with shipped shipment → transitions to shipped (truth wins)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          { id: 42, warehouse_status: "cancelled", completed_at: null },
+        ],
+      },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] }, // UPDATE
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result.warehouseStatus).toBe("shipped");
+    expect(result.changed).toBe(true);
+  });
 });
 
 // ─── dispatchShipmentEvent ──────────────────────────────────────────
