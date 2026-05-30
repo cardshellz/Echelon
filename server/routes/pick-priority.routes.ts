@@ -20,6 +20,8 @@ import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { requireAuth, requirePermission } from "./middleware";
 import { invalidatePickPrioritySettingsCache } from "../modules/orders/sort-rank";
+import { recomputeAllActiveSortRanksDetailed } from "../modules/orders/orders.storage";
+import { enqueueShipStationSortRankSyncRetry } from "../modules/oms/webhook-retry.worker";
 
 // ---------------------------------------------------------------------------
 // Shape
@@ -186,6 +188,29 @@ async function upsertSetting(key: string, value: number, type: string = "number"
   `);
 }
 
+async function recomputeAndQueueActiveSortRankSync(
+  context: string,
+): Promise<{ recomputed: number; queued: number; failed: number }> {
+  const { updated, orderIds } = await recomputeAllActiveSortRanksDetailed();
+  let queued = 0;
+  let failed = 0;
+
+  for (const orderId of orderIds) {
+    try {
+      await enqueueShipStationSortRankSyncRetry(db, orderId, context);
+      queued++;
+    } catch (err: any) {
+      failed++;
+      console.error(
+        `[PickPriority] Failed to queue ShipStation sort_rank sync for WMS order ${orderId}:`,
+        err?.message ?? err,
+      );
+    }
+  }
+
+  return { recomputed: updated, queued, failed };
+}
+
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
@@ -224,6 +249,7 @@ export function registerPickPriorityRoutes(app: Express): void {
         const body = (req.body ?? {}) as PickPriorityUpdate;
 
         const tasks: Promise<unknown>[] = [];
+        let affectsSortRank = false;
 
         if (body.shippingBase) {
           for (const level of ["standard", "expedited", "overnight"] as const) {
@@ -231,12 +257,14 @@ export function registerPickPriorityRoutes(app: Express): void {
             if (raw == null) continue;
             const v = validateInt(raw, SHIPPING_MIN, SHIPPING_MAX, `shippingBase.${level}`);
             tasks.push(upsertSetting(`priority.shipping_base.${level}`, v));
+            affectsSortRank = true;
           }
         }
 
         if (body.slaDefaultDays != null) {
           const v = validateInt(body.slaDefaultDays, SLA_MIN, SLA_MAX, "slaDefaultDays");
           tasks.push(upsertSetting("priority.sla_default_days", v));
+          affectsSortRank = true;
         }
 
         if (body.planModifiers && typeof body.planModifiers === "object") {
@@ -250,6 +278,7 @@ export function registerPickPriorityRoutes(app: Express): void {
               SET priority_modifier = ${v}
               WHERE id = ${planId}
             `));
+            affectsSortRank = true;
           }
         }
 
@@ -266,6 +295,7 @@ export function registerPickPriorityRoutes(app: Express): void {
                 SET sla_days = NULL, updated_at = now()
                 WHERE id = ${channelId}
               `));
+              affectsSortRank = true;
               continue;
             }
             const v = validateInt(raw, CHANNEL_SLA_MIN, CHANNEL_SLA_MAX, `channelSlaDays[${channelId}]`);
@@ -274,11 +304,15 @@ export function registerPickPriorityRoutes(app: Express): void {
               SET sla_days = ${v}, updated_at = now()
               WHERE id = ${channelId}
             `));
+            affectsSortRank = true;
           }
         }
 
         await Promise.all(tasks);
         invalidatePickPrioritySettingsCache();
+        const sortRankSync = affectsSortRank
+          ? await recomputeAndQueueActiveSortRankSync("pick-priority settings changed")
+          : { recomputed: 0, queued: 0, failed: 0 };
 
         // Return the fresh payload so the client stays in sync.
         const [{ shippingBase, slaDefaultDays }, plans, channels] = await Promise.all([
@@ -286,7 +320,7 @@ export function registerPickPriorityRoutes(app: Express): void {
           readPlans(),
           readChannels(),
         ]);
-        res.json({ shippingBase, slaDefaultDays, plans, channels });
+        res.json({ shippingBase, slaDefaultDays, plans, channels, sortRankSync });
       } catch (err: any) {
         const status = /must be (a number|between)/.test(err.message) ? 400 : 500;
         console.error("[PickPriority] PATCH failed:", err.message);
