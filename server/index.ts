@@ -907,18 +907,31 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 FROM wms.outbound_shipments os
                 WHERE os.order_id = ANY(${cancelledIds})
                   AND os.shipstation_order_id IS NOT NULL
-                  AND os.status NOT IN ('cancelled', 'voided', 'returned', 'lost')
+                  AND os.status NOT IN ('cancelled', 'shipped', 'voided', 'returned', 'lost')
               `);
               const ss = (services as any).shipStation;
               if (ss?.isConfigured() && ssRows.rows.length > 0) {
                 for (const row of ssRows.rows) {
                   try {
-                    await ss.cancelOrder(row.shipstation_order_id);
-                    await db.execute(sql`
-                      UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-                      WHERE id = ${row.shipment_id}
-                    `);
-                    console.log(`[OMS<->WMS Reconcile] Cancelled SS order ${row.shipstation_order_id} for shipment ${row.shipment_id}`);
+                    const cancelResult = await ss.cancelOrder(row.shipstation_order_id);
+                    if (cancelResult?.alreadyInState) {
+                      // SS order is already shipped or cancelled — record
+                      // truth instead of forcing our DB to 'cancelled'.
+                      // This stops the cancel↔ready_to_ship spam loop.
+                      await db.execute(sql`
+                        UPDATE wms.outbound_shipments
+                        SET status = 'shipped', updated_at = NOW()
+                        WHERE id = ${row.shipment_id}
+                          AND status NOT IN ('shipped', 'returned', 'lost')
+                      `);
+                      console.log(`[OMS<->WMS Reconcile] SS order ${row.shipstation_order_id} already terminal — recorded shipped for shipment ${row.shipment_id}`);
+                    } else {
+                      await db.execute(sql`
+                        UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
+                        WHERE id = ${row.shipment_id}
+                      `);
+                      console.log(`[OMS<->WMS Reconcile] Cancelled SS order ${row.shipstation_order_id} for shipment ${row.shipment_id}`);
+                    }
                   } catch (ssErr: any) {
                     console.warn(`[OMS<->WMS Reconcile] Failed to cancel SS order ${row.shipstation_order_id}: ${ssErr?.message}`);
                   }
@@ -1219,6 +1232,32 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                   WHERE id = ${shipmentId}
                 `);
                 continue;
+              } else if (
+                ssOrder.orderStatus !== "cancelled" &&
+                row.wms_shipment_status === "cancelled"
+              ) {
+                // Outbound Sync: Push cancelled status to ShipStation if it drifted
+                const cancelResult = await ss.cancelOrder(ssOrderId);
+                if (cancelResult?.alreadyInState) {
+                  // SS order already shipped — update our DB to match truth
+                  await db.execute(sql`
+                    UPDATE wms.outbound_shipments
+                    SET status = 'shipped', last_reconciled_at = NOW(), updated_at = NOW()
+                    WHERE id = ${shipmentId}
+                      AND status NOT IN ('shipped', 'returned', 'lost')
+                  `);
+                  console.log(`[ShipStation Reconcile V2] Outbound sync: SS order ${ssOrderId} already terminal — recorded shipped`);
+                  markedShipped++;
+                } else {
+                  console.log(`[ShipStation Reconcile V2] Outbound sync: cancelled SS order ${ssOrderId}`);
+                  markedCancelled++;
+                  await db.execute(sql`
+                    UPDATE wms.outbound_shipments
+                    SET last_reconciled_at = NOW()
+                    WHERE id = ${shipmentId}
+                  `);
+                }
+                continue;
               }
             }
 
@@ -1434,10 +1473,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               });
               markedShipped++;
             } else {
-              console.warn(
-                `[ShipStation Reconcile V1] WMS order ${row.wms_id} is cancelled; skipping automatic ShipStation cancellation for order ${row.shipstation_order_id}`,
-              );
-              skippedCancelled++;
+              const cancelResult = await ss.cancelOrder(Number(row.shipstation_order_id));
+              if (cancelResult?.alreadyInState) {
+                markedShipped++;
+              } else {
+                skippedCancelled++;
+              }
             }
             await db.execute(sql`
               UPDATE oms.oms_orders SET shipstation_reconciled_at = NOW() WHERE id = ${row.oms_id}
