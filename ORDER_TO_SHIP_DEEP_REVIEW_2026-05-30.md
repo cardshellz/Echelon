@@ -540,6 +540,49 @@ Interim hotfixes that hold until C3/C4 land; do not build new divergent logic he
 
 ---
 
+## 6b. Enterprise-readiness — beyond pipeline correctness
+
+The cores (§6) make the pipeline correct. These are the surrounding enterprise concerns. The
+**cross-cutting** ones fold into the phases above; the **adjacent initiatives** are named, scoped,
+and sequenced *after* the pipeline is solid (each is its own project).
+
+### Cross-cutting (fold into the phased work)
+- **ER1 — CI + test gate.** Phase 0 item 0 (added). The ratchet; everything else depends on it.
+- **ER2 — Financial invariant assertions.** A job that asserts the must-holds and alerts on
+  violation: `reserved ≤ on_hand`, ledger sums reconcile, no negative ATP, `Σ(shipment item qty) ≤
+  order qty`, no orphaned `picked_qty`. Lands with the reconciler consolidation (**Phase 5**); ties
+  to E6. This is the financial-audit backbone.
+- **ER3 — External-call resilience.** Timeouts, circuit breakers, retry budgets, rate-limit
+  handling for ShipStation/Shopify/eBay (only ~7 refs today). Natural home: the **C9** engine
+  adapter (**Phase 1**) and the channel adapters (**Phase 2/5**).
+- **ER4 — Deploy & migration safety.** Migrations as a discrete, forward-only, advisory-locked
+  deploy step (not racing app boot via `runStartupMigrations`); add app **`/healthz` + `/readyz`**
+  (none today); make startup repairs locked + idempotent. **Phase 0/1.**
+- **ER5 — Queue/worker discipline.** Depth limits, dead-letter, poison-message handling, and
+  visibility for inbox/outbox/retry-queue. Extends **E6/E7**, lands with **C5/C7**.
+- **ER10 — Security audit.** RBAC coverage on privileged actions (`forceReleaseOrder`,
+  `transitionStuckOrder`, `resolveException`); eBay webhook signing (**D-EBAYAUTH**, with **C1**);
+  secrets + PII handling review. **Phase 6** (D-EBAYAUTH earlier with C1).
+- **ER11 — Config/feature-flag discipline.** One config module; remove ad-hoc env checks
+  (`RECONCILE_V2`, `schedulersDisabled`); dev/prod parity (dev DB is empty per CLAUDE.md). **Phase 6.**
+
+### Adjacent initiatives (named; scoped after the pipeline is solid)
+- **AI1 — Returns/RMA lifecycle.** `returns.service.ts` exists but physical restock is broken
+  (**D-RESTOCK**); needs disposition, refund linkage, received→restock flow.
+- **AI2 — Backorder/allocation management.** **D-SHORTFALL** is the seed; needs real backorder
+  state, allocation prioritization, ATP/ATF discipline.
+- **AI3 — Inventory accuracy & valuation.** Cycle counts exist; missing systematic physical-vs-
+  system reconciliation, adjustment approval/audit, and COGS/valuation correctness (review
+  `COGS-ENGINE-SPEC.md`).
+- **AI4 — Performance & SLOs.** Pick-queue GET took **3.2s** in prod logs and is also the
+  GET-that-writes (**D-GETWRITE**); needs query perf, defined SLOs, and load tests.
+
+### Verified OK (not gaps)
+Multi-warehouse is threaded (526 `warehouse_id` refs); an RBAC mechanism exists
+(`requirePermission`); returns are partial, not greenfield.
+
+---
+
 ## 7. Open questions — verify against prod before acting
 
 1. `RECONCILE_V2` value in prod (decides #8 vs #9 active).
