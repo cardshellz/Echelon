@@ -424,7 +424,7 @@ export const orderMethods: IOrderStorage = {
         -- sort_rank is the single source of truth (flattened composite of
         -- hold/bump/priority/SLA/age). Built by computeSortRank() and
         -- pushed to ShipStation customField1 so pick queue == ship queue.
-        o.sort_rank ASC NULLS LAST,
+        o.sort_rank DESC NULLS LAST,
         -- Fallback only if sort_rank somehow unset (shouldn't happen):
         COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);

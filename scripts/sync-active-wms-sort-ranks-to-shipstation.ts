@@ -98,7 +98,7 @@ async function loadActiveRows(flags: Flags): Promise<ActiveSortRankRow[]> {
       ${orderNumberSql}
       ${wmsOrderIdSql}
     GROUP BY o.id, o.order_number, o.sort_rank
-    ORDER BY o.sort_rank ASC NULLS LAST, o.id ASC
+    ORDER BY o.sort_rank DESC NULLS LAST, o.id ASC
     ${limitSql}
   `);
 
