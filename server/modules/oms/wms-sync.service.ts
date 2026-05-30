@@ -34,7 +34,10 @@ import {
   linkChildToParentShipment,
   ChildWithoutParentShipmentError,
 } from "../wms/create-shipment";
-import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
+import {
+  enqueueShipStationShipmentPushRetry,
+  enqueueShipStationSortRankSyncRetry,
+} from "./webhook-retry.worker";
 
 type WmsBinLocation = { location: string; zone: string };
 
@@ -75,6 +78,26 @@ interface WmsSyncServices {
   fulfillmentRouter: any;
   shipStation?: any;
   omsService?: any;
+}
+
+const ACTIVE_SORT_RANK_SYNC_STATUSES = new Set([
+  "ready",
+  "in_progress",
+  "partially_shipped",
+  "ready_to_ship",
+]);
+
+function dateTimeKey(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function slaStatusFor(dueAt: Date | null, now = new Date()): string | null {
+  if (!dueAt) return null;
+  if (dueAt.getTime() < now.getTime()) return "overdue";
+  if (dueAt.getTime() - now.getTime() <= 24 * 60 * 60 * 1000) return "at_risk";
+  return "on_time";
 }
 
 export class WmsSyncService {
@@ -139,9 +162,11 @@ export class WmsSyncService {
 
       if (existingWmsOrder.length > 0) {
         const wmsOrderId = existingWmsOrder[0].id;
+        const headerRefresh = await this.refreshExistingWmsOrderHeaderFromOms(omsOrder, wmsOrderId);
         const reconciled = await this.reconcileExistingWmsOrderLines(omsOrderId, wmsOrderId);
         console.log(
-          `[WMS Sync] Order ${omsOrderId} already synced to WMS (id ${wmsOrderId}); reconciled ${reconciled.insertedItems} missing item(s)`,
+          `[WMS Sync] Order ${omsOrderId} already synced to WMS (id ${wmsOrderId}); ` +
+            `headerRefreshed=${headerRefresh.updated}; reconciled ${reconciled.insertedItems} missing item(s)`,
         );
         return wmsOrderId;
       }
@@ -565,6 +590,77 @@ export class WmsSyncService {
              )
          AND warehouse_status NOT IN ('cancelled', 'shipped')
     `);
+  }
+
+  private async refreshExistingWmsOrderHeaderFromOms(
+    omsOrder: typeof omsOrders.$inferSelect,
+    wmsOrderId: number,
+  ): Promise<{ updated: boolean; sortRankChanged: boolean }> {
+    const [wmsOrder] = await db
+      .select({
+        id: wmsOrders.id,
+        warehouseStatus: wmsOrders.warehouseStatus,
+        priority: wmsOrders.priority,
+        onHold: wmsOrders.onHold,
+        channelShipByDate: wmsOrders.channelShipByDate,
+        slaDueAt: wmsOrders.slaDueAt,
+        sortRank: wmsOrders.sortRank,
+        orderPlacedAt: wmsOrders.orderPlacedAt,
+        createdAt: wmsOrders.createdAt,
+      })
+      .from(wmsOrders)
+      .where(eq(wmsOrders.id, wmsOrderId))
+      .limit(1);
+
+    if (!wmsOrder || wmsOrder.warehouseStatus === "cancelled") {
+      return { updated: false, sortRankChanged: false };
+    }
+
+    const channelShipByDate = (omsOrder as any).channelShipByDate as Date | string | null | undefined;
+    const nextSlaDueAt = await resolveSlaDueAt({
+      channelId: omsOrder.channelId,
+      channelShipByDate,
+      explicitSlaDueAt: null,
+      orderPlacedAt: wmsOrder.orderPlacedAt ?? omsOrder.orderedAt,
+      createdAt: wmsOrder.createdAt,
+    }, db);
+    const nextSortRank = computeSortRank({
+      priority: wmsOrder.priority,
+      onHold: wmsOrder.onHold,
+      slaDueAt: nextSlaDueAt,
+      orderPlacedAt: wmsOrder.orderPlacedAt ?? omsOrder.orderedAt ?? wmsOrder.createdAt,
+    });
+    const nextChannelShipByDate = channelShipByDate ? new Date(channelShipByDate as any) : null;
+    const sortRankChanged = wmsOrder.sortRank !== nextSortRank;
+    const changed =
+      dateTimeKey(wmsOrder.channelShipByDate) !== dateTimeKey(nextChannelShipByDate) ||
+      dateTimeKey(wmsOrder.slaDueAt) !== dateTimeKey(nextSlaDueAt) ||
+      sortRankChanged;
+
+    if (!changed) {
+      return { updated: false, sortRankChanged: false };
+    }
+
+    await db
+      .update(wmsOrders)
+      .set({
+        channelShipByDate: nextChannelShipByDate,
+        slaDueAt: nextSlaDueAt,
+        slaStatus: slaStatusFor(nextSlaDueAt),
+        sortRank: nextSortRank,
+        updatedAt: new Date(),
+      })
+      .where(eq(wmsOrders.id, wmsOrderId));
+
+    if (sortRankChanged && ACTIVE_SORT_RANK_SYNC_STATUSES.has(String(wmsOrder.warehouseStatus))) {
+      await enqueueShipStationSortRankSyncRetry(
+        db,
+        wmsOrderId,
+        "OMS/WMS sync refreshed SLA sort_rank from source order",
+      );
+    }
+
+    return { updated: true, sortRankChanged };
   }
 
   private async reconcileExistingWmsOrderLines(

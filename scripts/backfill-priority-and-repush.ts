@@ -14,6 +14,7 @@ import { sql } from "drizzle-orm";
 import { computeSortRank } from "../server/modules/orders/sort-rank";
 import { createShipStationService } from "../server/modules/oms/shipstation.service";
 import { createOmsService } from "../server/modules/oms/oms.service";
+import { extractEbayShipByDate } from "../server/modules/oms/ebay-shipby";
 
 async function main() {
   console.log("[Backfill] Starting priority + ShipStation refresh...");
@@ -75,14 +76,15 @@ async function main() {
   console.log(`[Backfill] Recomputed priority on ${priorityResult?.rows?.length ?? 0} orders`);
 
   // 4a. Backfill channel_ship_by_date on eBay orders from raw_payload.
-  //     eBay order payload carries fulfillmentStartInstructions[0].shippingStep.shipByDate.
+  //     eBay order payloads may carry shipByDate at the fulfillment instruction
+  //     or line-item fulfillment instruction level depending on API shape.
   //     Without this, historical eBay orders have no platform deadline and fall back
   //     to the generic channel-default SLA.
   console.log("[Backfill] Step 4a: extracting eBay shipByDate from raw_payload...");
   const ebayCandidates: any = await db.execute(sql`
     SELECT oms.id, oms.raw_payload
     FROM oms.oms_orders oms
-    INNER JOIN channels c ON c.id = oms.channel_id
+    INNER JOIN channels.channels c ON c.id = oms.channel_id
     WHERE oms.channel_ship_by_date IS NULL
       AND oms.raw_payload IS NOT NULL
       AND oms.status NOT IN ('cancelled')
@@ -92,10 +94,8 @@ async function main() {
   for (const row of ebayCandidates.rows ?? []) {
     try {
       const raw = typeof row.raw_payload === "string" ? JSON.parse(row.raw_payload) : row.raw_payload;
-      const shipByRaw = raw?.fulfillmentStartInstructions?.[0]?.shippingStep?.shipByDate;
-      if (!shipByRaw) continue;
-      const shipBy = new Date(shipByRaw);
-      if (isNaN(shipBy.getTime())) continue;
+      const shipBy = extractEbayShipByDate(raw);
+      if (!shipBy) continue;
       await db.execute(sql`
         UPDATE oms.oms_orders
         SET channel_ship_by_date = ${shipBy.toISOString()}

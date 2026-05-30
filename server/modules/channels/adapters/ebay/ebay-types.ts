@@ -275,6 +275,12 @@ export interface EbayOrderLineItem {
   discountedLineItemCost?: EbayAmount;
   total: EbayAmount;
   lineItemFulfillmentStatus: "NOT_STARTED" | "IN_PROGRESS" | "FULFILLED";
+  lineItemFulfillmentInstructions?: {
+    shipByDate?: string;
+    guaranteedDelivery?: boolean;
+    maxEstimatedDeliveryDate?: string;
+    minEstimatedDeliveryDate?: string;
+  };
 }
 
 // ---------------------------------------------------------------------------

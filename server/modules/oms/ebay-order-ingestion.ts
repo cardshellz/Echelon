@@ -26,6 +26,7 @@ import {
   recordWebhookReceived,
 } from "./webhook-inbox.service";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
+import { extractEbayShipByDate } from "./ebay-shipby";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -78,9 +79,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
   const address = shipTo?.contactAddress;
   const pricingSummary = ebayOrder.pricingSummary;
 
-  const fulfillmentInstruction = ebayOrder.fulfillmentStartInstructions?.[0];
-  const channelShipByRaw = fulfillmentInstruction?.shipByDate;
-  const channelShipByDate = channelShipByRaw ? new Date(channelShipByRaw) : null;
+  const channelShipByDate = extractEbayShipByDate(ebayOrder);
 
   const lineItems: LineItemData[] = (ebayOrder.lineItems || []).map((item) => {
     // lineItemCost = total product cost for this line (unit price × qty)
