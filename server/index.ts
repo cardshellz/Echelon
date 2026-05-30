@@ -964,6 +964,38 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       if (shipmentFix.rows.length > 0) {
         console.warn(`[Data Repair] Cancelled ${shipmentFix.rows.length} orphaned planned/queued shipment(s) on shipped/cancelled orders`);
       }
+      // Zombie orders: active warehouse_status but no pending shippable items.
+      // These get stuck in the pick queue forever because nothing triggers
+      // their status transition.
+      const zombieFix = await db.execute(sql`
+        UPDATE wms.orders o
+        SET warehouse_status = CASE
+              WHEN NOT EXISTS (
+                SELECT 1 FROM wms.order_items ai WHERE ai.order_id = o.id
+              ) THEN 'cancelled'
+              WHEN EXISTS (
+                SELECT 1 FROM wms.order_items ai
+                WHERE ai.order_id = o.id
+                  AND ai.status NOT IN ('cancelled')
+              ) THEN 'completed'
+              ELSE 'cancelled'
+            END,
+            completed_at = COALESCE(o.completed_at, NOW()),
+            updated_at = NOW()
+        WHERE o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+          AND NOT EXISTS (
+            SELECT 1 FROM wms.order_items oi
+            WHERE oi.order_id = o.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(oi.quantity, 0) > 0
+              AND oi.status NOT IN ('cancelled', 'completed', 'short')
+          )
+        RETURNING o.id, o.order_number, o.warehouse_status
+      `);
+      if (zombieFix.rows.length > 0) {
+        console.warn(`[Data Repair] Transitioned ${zombieFix.rows.length} zombie order(s) with no pending items:`,
+          (zombieFix.rows as any[]).map((r: any) => `${r.order_number}→${r.warehouse_status}`).join(', '));
+      }
     } catch (err: any) {
       console.warn("[Data Repair] Shipped-order cleanup error:", err?.message);
     }

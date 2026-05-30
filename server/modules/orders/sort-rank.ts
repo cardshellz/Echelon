@@ -1,30 +1,29 @@
 /**
  * Sort rank — flattens the pick queue's multi-field sort order into a
  * single lexicographically-sortable string, so downstream systems
- * (ShipStation) that can only sort by one field produce the same order
- * Echelon's picker sees.
+ * (ShipStation customField1) that can only sort by one field produce
+ * the same order Echelon's picker sees.
  *
  * Format: H-B-PPPP-SSSSSS-AAAAAAAAAA  (22 chars total)
- *   H          1 char   "1" if NOT on hold, "0" if held
- *   B          1 char   "1" if priority >= 9999 (bumped), "0" otherwise
- *   PPPP       4 chars  priority 0000-9999, zero-padded
- *   SSSSSS     6 chars  SLA deadline: 999999 - days_since_epoch(sla_due_at)
- *                       higher = earlier deadline = more urgent
- *   AAAAAAAAAA 10 chars age component: 9999999999 - unix_seconds(placed_at)
- *                       higher = older order
+ *   H          1 char   "0" if NOT on hold, "1" if held
+ *   B          1 char   "0" if priority >= 9999 (bumped), "1" otherwise
+ *   PPPP       4 chars  9999 - priority, zero-padded (lower = higher pri)
+ *   SSSSSS     6 chars  SLA deadline: days_since_epoch(sla_due_at)
+ *                       lower = earlier deadline = more urgent
+ *   AAAAAAAAAA 10 chars age: unix_seconds(placed_at)
+ *                       lower = older order = ships first (FIFO)
  *
- * Sort DESC on this string = same ranking as the picker queue's SQL order.
- *
- * Safety: all fields are zero-padded to fixed width. Lexical string sort
- * equals numeric sort. No floating-point, no overflow concerns within
- * any realistic lifetime.
+ * Sort ASC on this string = correct priority ordering. ShipStation sorts
+ * customField1 ASC by default; pick queue ORDER BY sort_rank ASC matches.
  */
 
-const HOLD_BIT_NOT_HELD = "1";
-const HOLD_BIT_HELD = "0";
-const BUMP_BIT_BUMPED = "1";
-const BUMP_BIT_NORMAL = "0";
+const HOLD_BIT_NOT_HELD = "0";
+const HOLD_BIT_HELD = "1";
+const BUMP_BIT_BUMPED = "0";
+const BUMP_BIT_NORMAL = "1";
 const BUMP_THRESHOLD = 9999;
+
+const PRIORITY_MAX = 9999;
 
 const SLA_WIDTH = 6;
 const SLA_MAX = 999999;
@@ -49,35 +48,34 @@ export interface SortRankInput {
 }
 
 export function computeSortRank(input: SortRankInput): string {
-  const priority = Math.max(0, Math.min(BUMP_THRESHOLD, Math.floor(input.priority ?? 0)));
+  const priority = Math.max(0, Math.min(PRIORITY_MAX, Math.floor(input.priority ?? 0)));
   const isHeld = input.onHold === true || input.onHold === 1;
   const isBumped = priority >= BUMP_THRESHOLD;
 
   const H = isHeld ? HOLD_BIT_HELD : HOLD_BIT_NOT_HELD;
   const B = isBumped ? BUMP_BIT_BUMPED : BUMP_BIT_NORMAL;
-  const P = pad(priority, 4);
+  const P = pad(PRIORITY_MAX - priority, 4);
 
-  // SLA component: earlier deadline = more urgent = larger S component.
-  // Encodes the deadline as absolute days-since-epoch so orders sharing the
-  // same SLA deadline get identical S values regardless of sync time. Within
-  // the same deadline, the age component (A) breaks ties by FIFO.
-  let slaComponent = 0;
+  // SLA component: earlier deadline = fewer days from epoch = lower value
+  // = sorts first in ASC. Orders sharing the same deadline get identical S
+  // values; the age component (A) breaks ties by FIFO.
+  let slaComponent = SLA_MAX;
   if (input.slaDueAt) {
     const slaDate = input.slaDueAt instanceof Date ? input.slaDueAt : new Date(input.slaDueAt);
     if (!isNaN(slaDate.getTime())) {
       const daysSinceEpoch = Math.floor((slaDate.getTime() - SLA_EPOCH_MS) / 86400000);
-      slaComponent = Math.max(0, SLA_MAX - Math.max(0, daysSinceEpoch));
+      slaComponent = Math.max(0, daysSinceEpoch);
     }
   }
   const S = pad(Math.min(SLA_MAX, slaComponent), SLA_WIDTH);
 
-  // Age component: older = higher. Stored once at sync, never recomputed.
+  // Age component: older = lower unix timestamp = lower value = sorts first
+  // in ASC (FIFO). Orders with no placed date get AGE_MAX (sort last).
   let ageComponent = AGE_MAX;
   if (input.orderPlacedAt) {
     const placed = input.orderPlacedAt instanceof Date ? input.orderPlacedAt : new Date(input.orderPlacedAt);
     if (!isNaN(placed.getTime())) {
-      const unixSeconds = Math.floor(placed.getTime() / 1000);
-      ageComponent = Math.max(0, AGE_MAX - unixSeconds);
+      ageComponent = Math.floor(placed.getTime() / 1000);
     }
   }
   const A = pad(Math.min(AGE_MAX, ageComponent), AGE_WIDTH);

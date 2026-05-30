@@ -763,10 +763,15 @@ export class WmsSyncService {
                  FROM wms.order_items pending_items
                  WHERE pending_items.order_id = w.id
                    AND COALESCE(pending_items.requires_shipping, 1) <> 0
+                   AND COALESCE(pending_items.quantity, 0) > 0
                    AND COALESCE(pending_items.quantity, 0) > COALESCE(pending_items.fulfilled_quantity, 0)
                    AND pending_items.status NOT IN ('cancelled', 'completed')
                ) THEN 'ready'
-               ELSE w.warehouse_status
+               WHEN (
+                 SELECT COUNT(*) FROM wms.order_items all_items
+                 WHERE all_items.order_id = w.id
+               ) = 0 THEN 'cancelled'
+               ELSE 'completed'
              END,
              item_count = agg.item_count,
              unit_count = agg.unit_count,

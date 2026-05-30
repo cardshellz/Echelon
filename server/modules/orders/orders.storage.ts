@@ -354,6 +354,7 @@ export const orderMethods: IOrderStorage = {
               SELECT 1 FROM wms.order_items oi
               WHERE oi.order_id = o.id
                 AND COALESCE(oi.requires_shipping, 1) <> 0
+                AND COALESCE(oi.quantity, 0) > 0
                 AND oi.status NOT IN ('cancelled', 'completed', 'short')
             )
           )
@@ -364,7 +365,7 @@ export const orderMethods: IOrderStorage = {
         -- sort_rank is the single source of truth (flattened composite of
         -- hold/bump/priority/SLA/age). Built by computeSortRank() and
         -- pushed to ShipStation customField1 so pick queue == ship queue.
-        o.sort_rank DESC NULLS LAST,
+        o.sort_rank ASC NULLS LAST,
         -- Fallback only if sort_rank somehow unset (shouldn't happen):
         COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
@@ -980,12 +981,16 @@ export const orderMethods: IOrderStorage = {
     const itemCount = items.length;
     const unitCount = items.reduce((sum, item) => sum + item.quantity, 0);
 
-    const allShippableDone = shippableItems.length > 0 &&
+    const allShippableDone = shippableItems.length === 0 ||
       shippableItems.every(item => item.status === "completed" || item.status === "short");
     const hasShortItems = shippableItems.some(item => item.status === "short");
+    const allItemsCancelled = items.length > 0 && items.every(item => item.status === "cancelled");
 
     const updates: any = { pickedCount, itemCount, unitCount };
-    if (allShippableDone) {
+    if (allItemsCancelled) {
+      updates.warehouseStatus = "cancelled" as OrderStatus;
+      updates.completedAt = new Date();
+    } else if (allShippableDone) {
       if (hasShortItems) {
         updates.warehouseStatus = "exception" as OrderStatus;
         updates.exceptionAt = new Date();
