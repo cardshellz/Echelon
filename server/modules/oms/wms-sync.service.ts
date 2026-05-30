@@ -757,7 +757,7 @@ export class WmsSyncService {
     await db.execute(sql`
       UPDATE wms.orders w
          SET warehouse_status = CASE
-               WHEN w.warehouse_status IN ('cancelled') THEN w.warehouse_status
+               WHEN w.warehouse_status IN ('cancelled', 'shipped') THEN w.warehouse_status
                WHEN EXISTS (
                  SELECT 1
                  FROM wms.order_items pending_items
@@ -786,6 +786,16 @@ export class WmsSyncService {
     `);
 
     if (shippableShipmentItems.length === 0) {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+
+    // Re-check: never create or push shipments for terminal orders.
+    const [freshWmsState] = await db
+      .select({ warehouseStatus: wmsOrders.warehouseStatus })
+      .from(wmsOrders)
+      .where(eq(wmsOrders.id, wmsOrderId))
+      .limit(1);
+    if (freshWmsState?.warehouseStatus === "shipped" || freshWmsState?.warehouseStatus === "cancelled") {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
 

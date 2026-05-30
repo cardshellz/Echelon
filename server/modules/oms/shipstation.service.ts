@@ -2329,7 +2329,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
             status = 'completed',
             picked_quantity = quantity,
             fulfilled_quantity = quantity
-          WHERE wms_order_id = ${wmsOrderId}
+          WHERE order_id = ${wmsOrderId}
             AND status NOT IN ('completed', 'short', 'cancelled')
         `);
       }
@@ -2394,7 +2394,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
               status = 'completed',
               picked_quantity = quantity,
               fulfilled_quantity = quantity
-            WHERE wms_order_id = ${wmsOrderId}
+            WHERE order_id = ${wmsOrderId}
               AND status NOT IN ('completed', 'short', 'cancelled')
           `);
 

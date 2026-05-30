@@ -930,6 +930,45 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     logSchedulerDisabled("scheduler", "OMS WMS reconciliation", "OMS_WMS_RECONCILE_DISABLED");
   }
 
+  // One-time data repair: shipped orders whose items were never completed
+  // (caused by wms_order_id column-name bug in SHIP_NOTIFY legacy paths).
+  // Also cancels orphaned planned/queued shipments for shipped orders so
+  // they don't get re-pushed to ShipStation.
+  setTimeout(async () => {
+    try {
+      const itemFix = await db.execute(sql`
+        UPDATE wms.order_items oi SET
+          status = 'completed',
+          fulfilled_quantity = oi.quantity,
+          picked_quantity = GREATEST(oi.picked_quantity, oi.quantity)
+        FROM wms.orders o
+        WHERE o.id = oi.order_id
+          AND o.warehouse_status IN ('shipped', 'cancelled')
+          AND oi.status NOT IN ('completed', 'short', 'cancelled')
+        RETURNING oi.id
+      `);
+      if (itemFix.rows.length > 0) {
+        console.warn(`[Data Repair] Completed ${itemFix.rows.length} orphaned item(s) on shipped/cancelled orders`);
+      }
+      const shipmentFix = await db.execute(sql`
+        UPDATE wms.outbound_shipments os SET
+          status = 'cancelled',
+          cancelled_at = COALESCE(os.cancelled_at, NOW()),
+          updated_at = NOW()
+        FROM wms.orders o
+        WHERE o.id = os.order_id
+          AND o.warehouse_status IN ('shipped', 'cancelled')
+          AND os.status IN ('planned', 'queued')
+        RETURNING os.id, os.order_id
+      `);
+      if (shipmentFix.rows.length > 0) {
+        console.warn(`[Data Repair] Cancelled ${shipmentFix.rows.length} orphaned planned/queued shipment(s) on shipped/cancelled orders`);
+      }
+    } catch (err: any) {
+      console.warn("[Data Repair] Shipped-order cleanup error:", err?.message);
+    }
+  }, 12_000);
+
   // One-time sort_rank recompute for active orders (formula changed from
   // relative-to-sync-time SLA to absolute-deadline encoding).
   setTimeout(async () => {
