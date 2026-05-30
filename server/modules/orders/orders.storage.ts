@@ -137,7 +137,12 @@ async function recomputeSortRank(orderId: number): Promise<string | null> {
   return rank;
 }
 
-export async function recomputeAllActiveSortRanks(): Promise<number> {
+export interface SortRankRecomputeResult {
+  updated: number;
+  orderIds: number[];
+}
+
+export async function recomputeAllActiveSortRanksDetailed(): Promise<SortRankRecomputeResult> {
   const activeOrders = await db
     .select({
       id: orders.id,
@@ -145,6 +150,7 @@ export async function recomputeAllActiveSortRanks(): Promise<number> {
       onHold: orders.onHold,
       slaDueAt: orders.slaDueAt,
       orderPlacedAt: orders.orderPlacedAt,
+      sortRank: orders.sortRank,
     })
     .from(orders)
     .where(
@@ -155,7 +161,7 @@ export async function recomputeAllActiveSortRanks(): Promise<number> {
         "ready_to_ship",
       ]),
     );
-  let updated = 0;
+  const orderIds: number[] = [];
   for (const row of activeOrders) {
     const rank = computeSortRank({
       priority: row.priority,
@@ -163,10 +169,16 @@ export async function recomputeAllActiveSortRanks(): Promise<number> {
       slaDueAt: row.slaDueAt as any,
       orderPlacedAt: row.orderPlacedAt as any,
     });
+    if (row.sortRank === rank) continue;
     await db.update(orders).set({ sortRank: rank }).where(eq(orders.id, row.id));
-    updated++;
+    orderIds.push(row.id);
   }
-  return updated;
+  return { updated: orderIds.length, orderIds };
+}
+
+export async function recomputeAllActiveSortRanks(): Promise<number> {
+  const result = await recomputeAllActiveSortRanksDetailed();
+  return result.updated;
 }
 
 export interface IOrderStorage {

@@ -7,7 +7,10 @@ import { requirePermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";
 import { db } from "../../db";
-import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.worker";
+import {
+  enqueueShipStationHoldSyncRetry,
+  enqueueShipStationSortRankSyncRetry,
+} from "../oms/webhook-retry.worker";
 import Papa from "papaparse";
 
 export function registerPickingRoutes(app: Express) {
@@ -36,6 +39,29 @@ export function registerPickingRoutes(app: Express) {
       .catch((err: any) => {
         console.warn(
           `[${context}] immediate ShipStation ${mode} sync failed for order ${orderId}; retry queued:`,
+          err?.message ?? err,
+        );
+      });
+  };
+  const queueShipStationSortRankSync = async (
+    orderId: number,
+    context: string,
+  ) => {
+    await enqueueShipStationSortRankSyncRetry(db, orderId, context);
+
+    const { shipStation } = app.locals.services || {};
+    if (
+      !shipStation?.isConfigured?.() ||
+      typeof shipStation.updateSortRank !== "function"
+    ) {
+      return;
+    }
+
+    void shipStation
+      .updateSortRank(orderId)
+      .catch((err: any) => {
+        console.warn(
+          `[${context}] immediate ShipStation sort-rank sync failed for order ${orderId}; retry queued:`,
           err?.message ?? err,
         );
       });
@@ -357,6 +383,7 @@ export function registerPickingRoutes(app: Express) {
 
       // Local WMS state is authoritative; ShipStation sync is retried durably.
       await queueShipStationHoldSync(id, "hold", "Hold");
+      await queueShipStationSortRankSync(id, "HoldSortRank");
       
       // Log the hold action (non-blocking)
       storage.createPickingLog({
@@ -397,6 +424,7 @@ export function registerPickingRoutes(app: Express) {
 
       // Local WMS state is authoritative; ShipStation sync is retried durably.
       await queueShipStationHoldSync(id, "release", "ReleaseHold");
+      await queueShipStationSortRankSync(id, "ReleaseHoldSortRank");
       
       // Log the unhold action (non-blocking)
       storage.createPickingLog({
@@ -443,15 +471,8 @@ export function registerPickingRoutes(app: Express) {
 
       const label = priority === "reset" ? "reset to SLA priority" : (priority >= 9999 ? "bumped to top" : priority < 0 ? "held" : `set to ${priority}`);
 
-      // Push updated sort_rank to ShipStation (non-blocking).
-      (async () => {
-        try {
-          const { shipStation } = req.app.locals.services || {};
-          if (shipStation?.isConfigured()) await shipStation.updateSortRank(id);
-        } catch (err: any) {
-          console.warn(`[Priority] ShipStation sort_rank update failed for order ${id}:`, err.message);
-        }
-      })();
+      // Local WMS sort_rank is authoritative; ShipStation customField1 sync is retried durably.
+      await queueShipStationSortRankSync(id, "PrioritySortRank");
 
       // Log the priority change (non-blocking)
       storage.createPickingLog({

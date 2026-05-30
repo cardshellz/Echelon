@@ -10,6 +10,14 @@ const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
   resolve(__dirname, "../../webhook-retry.worker.ts"),
   "utf8",
 );
+const ORDER_STORAGE_SRC = readFileSync(
+  resolve(__dirname, "../../../orders/orders.storage.ts"),
+  "utf8",
+);
+const SERVER_INDEX_SRC = readFileSync(
+  resolve(__dirname, "../../../..", "index.ts"),
+  "utf8",
+);
 
 describe("ShipStation WMS hold/release sync", () => {
   it("makes restorefromhold the final ShipStation write for release", () => {
@@ -35,5 +43,21 @@ describe("ShipStation WMS hold/release sync", () => {
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/dispatchShipStationHoldSyncRetry/);
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/FROM wms\.orders/);
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/Number\(orderRow\.on_hold\) === 1 \? "hold" : "release"/);
+  });
+
+  it("routes sort-rank refreshes through a durable retry topic", () => {
+    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/enqueueShipStationSortRankSyncRetry/);
+    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/topic: "shipstation_sort_rank_sync"/);
+    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/dispatchShipStationSortRankSyncRetry/);
+    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/updateSortRank\(wmsOrderId\)/);
+  });
+
+  it("queues ShipStation sync after startup sort-rank recompute changes active WMS rows", () => {
+    expect(ORDER_STORAGE_SRC).toMatch(/export async function recomputeAllActiveSortRanksDetailed/);
+    expect(ORDER_STORAGE_SRC).toMatch(/if \(row\.sortRank === rank\) continue/);
+    expect(SERVER_INDEX_SRC).toMatch(/recomputeAllActiveSortRanksDetailed/);
+    expect(SERVER_INDEX_SRC).toMatch(
+      /enqueueShipStationSortRankSyncRetry\(\s*db,\s*orderId,\s*"startup sort_rank recompute"/,
+    );
   });
 });

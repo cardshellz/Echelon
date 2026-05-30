@@ -2912,15 +2912,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   async function updateSortRankForShipmentRows(
     wmsOrderId: number,
     shipmentRows: WmsShipmentShipStationRow[],
-  ): Promise<void> {
+  ): Promise<{ touched: number }> {
     const sortRank = await getWmsOrderSortRank(wmsOrderId);
-    if (!sortRank) return;
+    if (!sortRank) return { touched: 0 };
 
+    let touched = 0;
     for (const row of shipmentRows) {
       const ssOrderId = Number(row.shipstation_order_id);
       if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) continue;
       await updateShipStationCustomField1(ssOrderId, sortRank);
+      touched += 1;
     }
+    return { touched };
   }
 
   async function updateSortRankForShipmentRowsBestEffort(
@@ -2943,14 +2946,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
    * ShipStation pointers live on wms.outbound_shipments; do not read the
    * legacy OMS header-level ShipStation id here.
    */
-  async function updateSortRank(wmsOrderId: number): Promise<void> {
-    if (!isConfigured()) return;
-    try {
-      const shipmentRows = await getActiveWmsShipmentShipStationRows(wmsOrderId);
-      await updateSortRankForShipmentRows(wmsOrderId, shipmentRows);
-    } catch (err: any) {
-      console.error(`[ShipStation] updateSortRank failed for WMS order ${wmsOrderId}:`, err.message);
-    }
+  async function updateSortRank(wmsOrderId: number): Promise<{ touched: number }> {
+    if (!isConfigured()) return { touched: 0 };
+    const shipmentRows = await getActiveWmsShipmentShipStationRows(wmsOrderId);
+    return updateSortRankForShipmentRows(wmsOrderId, shipmentRows);
   }
 
   async function syncWmsOrderShipStationHoldState(

@@ -58,12 +58,14 @@ vi.mock("../../../wms/create-shipment", () => ({
 import {
   enqueueShipStationRetry,
   enqueueShipStationHoldSyncRetry,
+  enqueueShipStationSortRankSyncRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueOmsWmsSyncRetry,
   enqueueWmsShipmentCreateRetry,
   requeueDeadWebhookRetry,
   dispatchShipStationRetry,
   dispatchShipStationHoldSyncRetry,
+  dispatchShipStationSortRankSyncRetry,
   dispatchShipStationShipmentPushRetry,
   dispatchOmsWmsSyncRetry,
   dispatchWmsShipmentCreateRetry,
@@ -99,6 +101,7 @@ function makeDb(opts: {
   shipStationService?: {
     processShipNotify: (url: string) => Promise<number>;
     pushShipment?: (shipmentId: number) => Promise<unknown>;
+    updateSortRank?: (wmsOrderId: number) => Promise<{ touched: number }>;
     syncWmsOrderShipStationHoldState?: (
       wmsOrderId: number,
       mode: "hold" | "release",
@@ -585,6 +588,44 @@ describe("enqueueShipStationHoldSyncRetry", () => {
   });
 });
 
+describe("enqueueShipStationSortRankSyncRetry", () => {
+  it("inserts an immediately due internal ShipStation sort-rank sync row", async () => {
+    const { db, inserts } = makeDb();
+
+    await enqueueShipStationSortRankSyncRetry(db, 202589, "manual repair");
+
+    expect(inserts).toHaveLength(1);
+    const row = inserts[0]!.values;
+    expect(row.provider).toBe("internal");
+    expect(row.topic).toBe("shipstation_sort_rank_sync");
+    expect(row.payload).toEqual({ wmsOrderId: 202589 });
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBe("manual repair");
+    expect(row.nextRetryAt).toBeInstanceOf(Date);
+  });
+
+  it("does not enqueue duplicate pending sort-rank sync rows for the same WMS order", async () => {
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [{ id: 42 }] }],
+    });
+
+    await enqueueShipStationSortRankSyncRetry(db, 202589, "operator retry");
+
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("rejects invalid WMS order ids", async () => {
+    const { db, inserts } = makeDb();
+
+    await expect(enqueueShipStationSortRankSyncRetry(db, 0, "bad")).rejects.toThrow(
+      /positive integer/,
+    );
+
+    expect(inserts).toHaveLength(0);
+  });
+});
+
 describe("requeueDeadWebhookRetry", () => {
   it("resets a dead retry row to pending", async () => {
     const { db } = makeDb();
@@ -728,6 +769,135 @@ describe("dispatchShipStationHoldSyncRetry", () => {
 
     expect(outcome).toBe("pending");
     expect(updates[0]!.set.lastError).toMatch(/hold sync service not available/);
+  });
+});
+
+describe("dispatchShipStationSortRankSyncRetry", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("pushes the current WMS sort_rank into active ShipStation orders", async () => {
+    const updateSortRank = vi.fn(async () => ({ touched: 2 }));
+    const { db, updates } = makeDb({
+      shipStationService: {
+        processShipNotify: async () => 1,
+        updateSortRank,
+      },
+      executeRows: [{
+        rows: [{
+          id: 202589,
+          order_number: "#57981",
+          sort_rank: "0-1-9849-000876-1716767831",
+        }],
+      }],
+    });
+
+    const outcome = await dispatchShipStationSortRankSyncRetry(db, {
+      id: 801,
+      provider: "internal",
+      topic: "shipstation_sort_rank_sync",
+      payload: { wmsOrderId: 202589 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("success");
+    expect(updateSortRank).toHaveBeenCalledWith(202589);
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("keeps the row pending when the ShipStation service is not wired", async () => {
+    const { db, updates } = makeDb({
+      shipStationService: { processShipNotify: async () => 1 },
+    });
+
+    const outcome = await dispatchShipStationSortRankSyncRetry(db, {
+      id: 802,
+      provider: "internal",
+      topic: "shipstation_sort_rank_sync",
+      payload: { wmsOrderId: 202589 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.status).toBeUndefined();
+    expect(updates[0]!.set.lastError).toMatch(/sort-rank sync service not available/);
+  });
+
+  it("records a retry failure when the WMS row has no sort_rank", async () => {
+    const updateSortRank = vi.fn(async () => ({ touched: 0 }));
+    const { db, updates } = makeDb({
+      shipStationService: {
+        processShipNotify: async () => 1,
+        updateSortRank,
+      },
+      executeRows: [{ rows: [{ id: 202589, order_number: "#57981", sort_rank: null }] }],
+    });
+
+    const outcome = await dispatchShipStationSortRankSyncRetry(db, {
+      id: 803,
+      provider: "internal",
+      topic: "shipstation_sort_rank_sync",
+      payload: { wmsOrderId: 202589 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updateSortRank).not.toHaveBeenCalled();
+    expect(updates[0]!.set.status).toBe("pending");
+    expect(updates[0]!.set.lastError).toMatch(/has no sort_rank/);
+  });
+
+  it("retries when ShipStation updateSortRank throws", async () => {
+    const updateSortRank = vi.fn(async () => {
+      throw new Error("ShipStation unavailable");
+    });
+    const { db, updates } = makeDb({
+      shipStationService: {
+        processShipNotify: async () => 1,
+        updateSortRank,
+      },
+      executeRows: [{
+        rows: [{
+          id: 202589,
+          order_number: "#57981",
+          sort_rank: "0-1-9849-000876-1716767831",
+        }],
+      }],
+    });
+
+    const outcome = await dispatchShipStationSortRankSyncRetry(db, {
+      id: 804,
+      provider: "internal",
+      topic: "shipstation_sort_rank_sync",
+      payload: { wmsOrderId: 202589 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.status).toBe("pending");
+    expect(updates[0]!.set.lastError).toBe("ShipStation unavailable");
+  });
+
+  it("dead-letters malformed payloads", async () => {
+    const { db, updates } = makeDb();
+
+    const outcome = await dispatchShipStationSortRankSyncRetry(db, {
+      id: 805,
+      provider: "internal",
+      topic: "shipstation_sort_rank_sync",
+      payload: { wmsOrderId: 0 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("malformed");
+    expect(updates[0]!.set.status).toBe("dead");
+    expect(updates[0]!.set.lastError).toMatch(/missing or invalid/);
   });
 });
 
