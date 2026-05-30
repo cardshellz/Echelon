@@ -554,17 +554,18 @@ export class WmsSyncService {
   }
 
   private async cancelExistingWmsOrderForFinalOmsOrder(omsOrderId: number): Promise<void> {
-    await db.execute(sql`
-      UPDATE wms.orders
-         SET warehouse_status = 'cancelled',
-             cancelled_at = COALESCE(cancelled_at, NOW()),
-             updated_at = NOW()
+    const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+    const rows: any = await db.execute(sql`
+      SELECT id FROM wms.orders
        WHERE (
                (source IN ('oms', 'ebay') AND oms_fulfillment_order_id = ${String(omsOrderId)})
             OR (source = 'shopify'        AND source_table_id        = ${String(omsOrderId)})
              )
          AND warehouse_status NOT IN ('cancelled', 'shipped')
     `);
+    for (const row of rows?.rows ?? []) {
+      await cancelWmsOrder(db, row.id, "oms_final_state_cancel");
+    }
   }
 
   private async reconcileExistingWmsOrderLines(

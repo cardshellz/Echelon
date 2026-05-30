@@ -270,10 +270,8 @@ export async function pollEbayOrders(
                   LIMIT 1
                 `);
                 if (wmsOrder.rows.length > 0) {
-                  await db.execute(sql`
-                    UPDATE wms.orders SET warehouse_status = 'cancelled', cancelled_at = NOW()
-                    WHERE id = ${wmsOrder.rows[0].id} AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
-                  `);
+                  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+                  await cancelWmsOrder(db, wmsOrder.rows[0].id, "ebay_cancel");
                 }
               } catch (e: any) {
                 console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);

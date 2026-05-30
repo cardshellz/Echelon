@@ -60,15 +60,8 @@ export async function applyChannelFulfillment(
     console.warn(
       `${LOG_PREFIX} WMS order ${wmsOrderId} has no shipment rows — marking order directly`,
     );
-    await db.execute(sql`
-      UPDATE wms.orders SET
-        warehouse_status = CASE
-          WHEN warehouse_status NOT IN ('shipped', 'cancelled') THEN 'shipped'
-          ELSE warehouse_status
-        END,
-        updated_at = NOW()
-      WHERE id = ${wmsOrderId}
-    `);
+    const { markOrderShipped } = await import("../orders/order-status-core");
+    await markOrderShipped(db, wmsOrderId, "channel_fulfillment_no_shipments");
     return { processed: true, shipmentsMarked: 0 };
   }
 
