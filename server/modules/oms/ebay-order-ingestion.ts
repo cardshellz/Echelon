@@ -271,7 +271,7 @@ export async function pollEbayOrders(
                 `);
                 if (wmsOrder.rows.length > 0) {
                   const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
-                  await cancelWmsOrder(db, wmsOrder.rows[0].id, "ebay_cancel");
+                  await cancelWmsOrder(db, Number(wmsOrder.rows[0].id), "ebay_cancel");
                 }
               } catch (e: any) {
                 console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
