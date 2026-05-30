@@ -3032,24 +3032,29 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       finalFinancialStatus === "refunded" ||
       finalFinancialStatus === "voided"
     ) {
-      console.warn(
-        `[ShipStation Push] WMS order ${orderRow.id} is ${orderRow.warehouse_status}/${orderRow.financial_status} but shipment ${shipmentId} is pushable — proceeding`,
+      throw new ShipStationPushError(
+        `WMS order ${orderRow.id} is ${orderRow.warehouse_status}/${orderRow.financial_status} — refusing to push cancelled/refunded order to ShipStation`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "order.warehouse_status",
+          value: orderRow.warehouse_status,
+        },
       );
     }
 
-    // ─── 3. Load items (WMS only, joined to order_items for pricing) ─
-    // Keep this as a separate raw query instead of an inline drizzle select
-    // expression. Production diagnostics on #57215 showed the inline aggregate
-    // arriving as 0 even while direct SQL returned the correct non-shipping
-    // donation total. The validator needs this value to reconcile ShipStation
-    // shipments that only push shippable lines while the WMS order total also
-    // includes donations, memberships, or other non-shipping items.
     const omsBlocker = await getOmsFinalOrderBlockerForShipmentPush(
       orderRow.oms_fulfillment_order_id,
     );
     if (omsBlocker.blocked) {
-      console.warn(
-        `[ShipStation Push] OMS order ${orderRow.oms_fulfillment_order_id} is ${omsBlocker.reason} but WMS shipment ${shipmentId} is pushable — proceeding (WMS is source of truth for fulfillment)`,
+      throw new ShipStationPushError(
+        `OMS order ${orderRow.oms_fulfillment_order_id} is ${omsBlocker.reason} — refusing to push cancelled/refunded order to ShipStation`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "oms.status",
+          value: omsBlocker.reason,
+        },
       );
     }
 

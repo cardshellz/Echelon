@@ -494,8 +494,16 @@ export class WmsSyncService {
 
       // 8. Push to ShipStation via WMS-owned pushShipment path.
       // Push failures never block the sync — reconcile retries.
+      // Recheck OMS status: a cancellation webhook may have arrived
+      // between step 5 (WMS order creation) and now.
       if (this.services.shipStation?.isConfigured()) {
         if (shipmentIdForPush !== null) {
+          const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
+          if (recheckOms && this.isFinalOrCancelledOmsOrder(recheckOms)) {
+            console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping SS push, cancelling WMS`);
+            await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
+            return newWmsOrder.id;
+          }
           try {
             await this.services.shipStation.pushShipment(shipmentIdForPush);
             console.log(
@@ -574,8 +582,10 @@ export class WmsSyncService {
          SET warehouse_status = 'cancelled',
              cancelled_at = COALESCE(cancelled_at, NOW()),
              updated_at = NOW()
-       WHERE source = 'oms'
-         AND oms_fulfillment_order_id = ${String(omsOrderId)}
+       WHERE (
+               (source IN ('oms', 'ebay') AND oms_fulfillment_order_id = ${String(omsOrderId)})
+            OR (source = 'shopify'        AND source_table_id        = ${String(omsOrderId)})
+             )
          AND warehouse_status NOT IN ('cancelled', 'shipped')
     `);
   }

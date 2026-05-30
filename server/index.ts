@@ -884,6 +884,41 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         if (result.rows.length > 0) {
           console.warn(`[OMS<->WMS Reconcile] Corrected ${result.rows.length} divergent order(s):`,
             result.rows.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", "));
+
+          // For orders just marked cancelled, also cancel any active SS
+          // shipments. Without this, the order is gone from the pick queue
+          // but still active in ShipStation.
+          const cancelledIds = (result.rows as any[])
+            .filter((r: any) => r.oms_status === "cancelled")
+            .map((r: any) => r.id);
+          if (cancelledIds.length > 0) {
+            try {
+              const ssRows: any = await db.execute(sql`
+                SELECT os.id AS shipment_id, os.shipstation_order_id
+                FROM wms.outbound_shipments os
+                WHERE os.order_id = ANY(${cancelledIds})
+                  AND os.shipstation_order_id IS NOT NULL
+                  AND os.status NOT IN ('cancelled', 'voided', 'returned', 'lost')
+              `);
+              const ss = (services as any).shipStation;
+              if (ss?.isConfigured() && ssRows.rows.length > 0) {
+                for (const row of ssRows.rows) {
+                  try {
+                    await ss.cancelOrder(row.shipstation_order_id);
+                    await db.execute(sql`
+                      UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
+                      WHERE id = ${row.shipment_id}
+                    `);
+                    console.log(`[OMS<->WMS Reconcile] Cancelled SS order ${row.shipstation_order_id} for shipment ${row.shipment_id}`);
+                  } catch (ssErr: any) {
+                    console.warn(`[OMS<->WMS Reconcile] Failed to cancel SS order ${row.shipstation_order_id}: ${ssErr?.message}`);
+                  }
+                }
+              }
+            } catch (err: any) {
+              console.warn("[OMS<->WMS Reconcile] SS cascade error:", err?.message);
+            }
+          }
         }
       } catch (err: any) {
         console.warn("[OMS<->WMS Reconcile] Sweep error:", err?.message);
