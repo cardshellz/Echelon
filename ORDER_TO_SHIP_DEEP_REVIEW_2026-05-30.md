@@ -422,11 +422,29 @@ Interim hotfixes that hold until C3/C4 land; do not build new divergent logic he
    shipment terminal; add a terminal guard to the cascade SELECT. Make `cancelled` non-re-derivable
    in `deriveWmsFromShipments`.
 2. **D-PENDING:** fix/remove `FulfillmentService.createShipment`'s invalid `"pending"` write.
-2b. **Observability foundation (E1/E3/E4 scaffolding, no behavior change):** add one structured
-    JSON logger, a correlation-context helper `{ oms_order_id, wms_order_id, shipment_id,
-    channel_event_id, engine_ref }`, and the namespaced error-code + class (`transient` /
-    `permanent` / `fatal`) types. Cheap infra that every later core/phase builds on; also lets
-    Phase 0's spam fix log the terminal condition once instead of looping WARNs (D-LOGLEVEL).
+2b. **Observability foundation (E1/E3/E4 + crash handlers; additive, no business-logic change).**
+    New module `server/platform/observability/` (4 files), reusing what exists:
+    - `log-context.ts` — `AsyncLocalStorage` carrying `{ correlationId, oms_order_id, wms_order_id,
+      shipment_id, channel_event_id, engine_ref }`; `runWithContext / bindContext / getContext`. ALS
+      means **no rewrite of the 1,632 call-site signatures** — the logger reads ambient context.
+    - `logger.ts` — one zero-dependency structured JSON logger (no pino/winston dep); auto-merges
+      ALS context; level discipline (E4). Refactor existing `infrastructure/auditLogger.ts` to
+      delegate to it (keep its API; gains correlation).
+    - `errors.ts` — one `AppError { code, message, context, class: transient|permanent|fatal,
+      httpStatus? }` + `classify(unknownErr)`; the 15 existing ad-hoc `*Error` classes extend it
+      over time (E1).
+    - `report-error.ts` — single sink `reportError(err, ctx?)`: classify → structured-log →
+      `permanent` ⇒ `requires_review`/dead-letter + alert, `fatal` ⇒ alert; **reuse the existing
+      `OMS_OPS_ALERT_WEBHOOK_URL`** transport.
+    Wiring in `index.ts`: `process.on('unhandledRejection'|'uncaughtException')` → `reportError`
+    (closes the silent-crash gap); a per-request ALS-context middleware (correlationId from
+    `x-request-id` or generated); rewrite the global error handler (`index.ts:679`) from bare
+    `console.error` → `reportError` + structured response. Small migration: a `platform_dead_letter`
+    table (or reuse the retry-queue exhausted state). **Decisions:** zero-dep logger (not pino),
+    ALS (not signature threading), reuse the ops-alert webhook. **Not** a mass `console.*` rewrite —
+    that is incremental, hottest paths (the order→ship cores) first, folded into each later phase as
+    those cores are built (D-LOGSTRUCT). Lets Phase 0's spam fix log the terminal condition once
+    instead of looping WARNs (D-LOGLEVEL).
 
 ### Phase 1 — C9 ShippingEngine port + C4 Order-status core + C3 Shipment core (kills duplicates, spam, zombies; decouples the engine)
 3. **C9 (D-NOENGINE) — do this FIRST so C3/C5/C8 build against the port, not `ss.*`:** define the
