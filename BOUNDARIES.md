@@ -141,6 +141,38 @@ If we build and own it → published interface, one owner, no swap.
 
 ---
 
+## Source of truth — sole-writer matrix
+
+**OMS owns the ORDER. WMS owns FULFILLMENT** (warehouse state + shipments + physical inventory).
+**The shipping engine EXECUTES shipments but owns no truth.** Exactly one module writes each table;
+every cross-boundary change is a **request through the owner's interface — in both directions —
+never a direct write.**
+
+| State | Sole writer | Others may |
+|-------|-------------|------------|
+| `oms.oms_orders`, `oms_order_lines`, `oms_order_events` | **OMS** | read; request status change / append events via OMS interface |
+| `wms.orders.warehouse_status` (+ picker, on_hold, completed_at), `wms.order_items` | **WMS** | read; request via WMS interface |
+| `wms.outbound_shipments` + `outbound_shipment_items` (shipment lifecycle) | **WMS** | read; request create/cancel via WMS shipment interface |
+| `inventory.inventory_levels`, `inventory_transactions` | **WMS** (`inventoryCore` only) | read via `atpService`; mutate via `inventoryCore` |
+| `channels.*` | **Channel Sync** | read |
+| products / variants | **Catalog** | read |
+| POs / receiving / vendors | **Procurement** | hand off via `inventoryCore.receiveInventory()` |
+| external shipping-engine order (e.g. ShipStation) | **none** — executor only; truth = `wms.outbound_shipments` | command via the `ShippingEngine` port |
+
+Note: `outbound_shipments` is a **WMS** table — WMS *is* the rightful owner and writer of
+shipments. The violations to eliminate are (a) other systems (OMS/channels/routes) writing
+`wms.*` directly, and (b) the reverse leak where WMS/reconcilers/engine code write `oms_orders`
+directly.
+
+**Directional contract:**
+- **OMS → WMS:** reserve + create/cancel shipment via WMS interfaces. OMS never writes `wms.*`.
+- **WMS → OMS:** shipment shipped/cancelled → WMS calls an OMS interface so **OMS** transitions
+  `oms_orders.status`. WMS/reconcilers never write `oms_orders` directly.
+- **WMS → engine / engine → WMS:** command via the port; inbound events are normalized and applied
+  by WMS to `wms.outbound_shipments`.
+
+---
+
 ## Handoff Points
 
 ```

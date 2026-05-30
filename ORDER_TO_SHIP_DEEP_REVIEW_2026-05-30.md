@@ -52,6 +52,47 @@ instead of closing the hole.
 
 ---
 
+## 0.1 Source-of-truth ownership — the writer matrix
+
+The one-line rule: **OMS owns the ORDER. WMS owns FULFILLMENT** (warehouse state + shipments +
+physical inventory). **The shipping engine EXECUTES shipments but owns no truth.** Exactly one
+module writes each table; every cross-boundary change is a **request through the owner's interface
+— in both directions — never a direct write.**
+
+| State (table / columns) | Sole writer | Others may… | Foreign writers TODAY (violation) |
+|---|---|---|---|
+| `oms.oms_orders` (status, financial_status, cancel, tracking) | **OMS** | read; request via OMS interface | `index.ts` reconciler, `shipstation.service.ts` |
+| `oms.oms_order_lines` | **OMS** | read | — |
+| `oms.oms_order_events` (append-only) | **OMS** | append via OMS event API | `shipstation.service.ts` |
+| `wms.orders.warehouse_status` (+ picker, on_hold, completed_at) | **WMS** | read; request via WMS interface | **21 files**: `oms/*`, `channels/`, `inventory/`, `procurement/`, `shopify.routes`, `index.ts`, `diagnostics` |
+| `wms.order_items` (pick/fulfilled qty, status) | **WMS** | read | `oms-webhooks.ts` |
+| `wms.outbound_shipments` + `_items` (shipment lifecycle) | **WMS** (create/update C3; status via rollup) | read; request create/cancel via WMS shipment interface | **9 files**: `oms/*`, `shopify.routes`, `shipstation-sweeper`, `fulfillment-push` |
+| `inventory.inventory_levels` / `inventory_transactions` | **WMS** (`inventoryCore` only) | read via `atpService`; mutate via `inventoryCore` | dropship `reserved_qty` direct write (S2-E1) |
+| `wms.returns`, `wms.allocation_exceptions`, picking/replen | **WMS** | read | — |
+| `channels.*` | **Channel Sync** | read | — |
+| products / variants (SKU→variant) | **Catalog** | read | — |
+| POs / receiving / vendors | **Procurement** | hand off via `inventoryCore.receiveInventory()` | — |
+| external ShipStation order | **none — engine is an executor, not a source of truth** | command via C9; truth lives in `wms.outbound_shipments` | direct `ss.*` everywhere |
+
+**Important correction:** `outbound_shipments` is in the `wms.*` schema — **WMS is the rightful
+owner of shipments**, so WMS writing shipments is *correct and required*. The defects are
+(a) *foreign* modules writing `wms.outbound_shipments`/`wms.orders` directly, and (b) the reverse
+leak where reconcilers/`shipstation.service` write `oms.oms_orders` directly.
+
+**Directional contract (both ways go through interfaces):**
+- **OMS → WMS:** "fulfill this order" = reserve (C2) + create shipment (C3); "cancel this order's
+  fulfillment" = a WMS cancel interface (C8 calls WMS). OMS never writes `wms.*` directly.
+- **WMS → OMS:** shipment shipped/cancelled = WMS calls an OMS `applyFulfillmentEvent` interface so
+  **OMS** transitions its own `oms_orders.status`. WMS/reconcilers never write `oms_orders`
+  directly. *(This is the most-violated direction today and the main source of OMS/WMS status
+  drift.)*
+- **WMS → engine:** command via C9; **engine → WMS:** normalized `ShipmentEvent` applied by C5.
+
+This matrix is the acceptance criterion for the boundary-enforcement work (`D-BOUNDARY`): after the
+cores land, a grep for foreign writers of each owned table must return **only** the owning module.
+
+---
+
 ## 1. End-to-end lifecycle map (what actually happens)
 
 ### Stage 1 — Channel intake → OMS (`oms.service.ts:ingestOrder`)
