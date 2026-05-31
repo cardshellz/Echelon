@@ -53,7 +53,7 @@ describe("ShipStation WMS hold/release sync", () => {
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/enqueueShipStationSortRankSyncRetry/);
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/topic: "shipstation_sort_rank_sync"/);
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/dispatchShipStationSortRankSyncRetry/);
-    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/updateSortRank\(wmsOrderId\)/);
+    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/updateSortRank!?\(wmsOrderId\)/);
   });
 
   it("queues ShipStation sync after startup sort-rank recompute changes active WMS rows", () => {

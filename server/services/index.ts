@@ -250,6 +250,7 @@ export function createServices(db: any) {
     inventoryCore: inventoryCore as any,
     reservation,
     fulfillmentRouter,
+    shippingEngine,
     shipStation,
     omsService: oms,
   });

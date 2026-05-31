@@ -11,6 +11,8 @@ import {
   enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
 } from "../oms/webhook-retry.worker";
+import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
+import { sql } from "drizzle-orm";
 import Papa from "papaparse";
 
 export function registerPickingRoutes(app: Express) {
@@ -26,22 +28,38 @@ export function registerPickingRoutes(app: Express) {
   ) => {
     await enqueueShipStationHoldSyncRetry(db, orderId, mode, context);
 
-    const { shipStation } = app.locals.services || {};
-    if (
-      !shipStation?.isConfigured?.() ||
-      typeof shipStation.syncWmsOrderShipStationHoldState !== "function"
-    ) {
-      return;
-    }
+    const { shippingEngine } = app.locals.services || {} as any;
+    if (!shippingEngine?.isConfigured?.()) return;
 
-    void shipStation
-      .syncWmsOrderShipStationHoldState(orderId, mode)
-      .catch((err: any) => {
-        console.warn(
-          `[${context}] immediate ShipStation ${mode} sync failed for order ${orderId}; retry queued:`,
-          err?.message ?? err,
-        );
-      });
+    void (async () => {
+      const rows = await db.execute(sql`
+        SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
+               shipstation_order_id, shipstation_order_key
+        FROM wms.outbound_shipments
+        WHERE order_id = ${orderId}
+          AND COALESCE(engine_order_ref, shipstation_order_id::text) IS NOT NULL
+          AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
+        ORDER BY id
+      `);
+      for (const row of rows.rows ?? []) {
+        const ref = engineRefFromRow(row as any);
+        if (!ref) continue;
+        try {
+          if (mode === "hold") {
+            await shippingEngine.hold(ref);
+          } else {
+            await shippingEngine.releaseHold(ref);
+          }
+        } catch (err: any) {
+          console.warn(`[${context}] engine ${mode} failed for ref ${ref.engineOrderRef}: ${err?.message}`);
+        }
+      }
+    })().catch((err: any) => {
+      console.warn(
+        `[${context}] immediate engine ${mode} sync failed for order ${orderId}; retry queued:`,
+        err?.message ?? err,
+      );
+    });
   };
   const queueShipStationSortRankSync = async (
     orderId: number,
@@ -49,22 +67,38 @@ export function registerPickingRoutes(app: Express) {
   ) => {
     await enqueueShipStationSortRankSyncRetry(db, orderId, context);
 
-    const { shipStation } = app.locals.services || {};
-    if (
-      !shipStation?.isConfigured?.() ||
-      typeof shipStation.updateSortRank !== "function"
-    ) {
-      return;
-    }
+    const { shippingEngine } = app.locals.services || {} as any;
+    if (!shippingEngine?.isConfigured?.()) return;
 
-    void shipStation
-      .updateSortRank(orderId)
-      .catch((err: any) => {
-        console.warn(
-          `[${context}] immediate ShipStation sort-rank sync failed for order ${orderId}; retry queued:`,
-          err?.message ?? err,
-        );
-      });
+    void (async () => {
+      const [order] = await db.select({ sortRank: orders.sortRank })
+        .from(orders).where(sql`${orders.id} = ${orderId}`).limit(1);
+      if (!order?.sortRank) return;
+
+      const rows = await db.execute(sql`
+        SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
+               shipstation_order_id, shipstation_order_key
+        FROM wms.outbound_shipments
+        WHERE order_id = ${orderId}
+          AND COALESCE(engine_order_ref, shipstation_order_id::text) IS NOT NULL
+          AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
+        ORDER BY id
+      `);
+      for (const row of rows.rows ?? []) {
+        const ref = engineRefFromRow(row as any);
+        if (!ref) continue;
+        try {
+          await shippingEngine.updatePriority(ref, order.sortRank);
+        } catch (err: any) {
+          console.warn(`[${context}] engine updatePriority failed for ref ${ref.engineOrderRef}: ${err?.message}`);
+        }
+      }
+    })().catch((err: any) => {
+      console.warn(
+        `[${context}] immediate engine sort-rank sync failed for order ${orderId}; retry queued:`,
+        err?.message ?? err,
+      );
+    });
   };
 
   // ===== PICKING QUEUE API =====

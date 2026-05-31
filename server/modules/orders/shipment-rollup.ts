@@ -39,6 +39,8 @@ import {
   type ShipmentStatus,
   type WmsWarehouseStatus,
 } from "@shared/enums/order-status";
+import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
+import type { EngineRef } from "../shipping/types";
 
 // ─── Public types ────────────────────────────────────────────────────
 
@@ -106,7 +108,11 @@ interface CurrentShipmentRow {
   carrier: string | null;
   tracking_url: string | null;
   shopify_fulfillment_id: string | null;
+  shipping_engine: string | null;
+  engine_order_ref: string | null;
+  engine_shipment_ref: string | null;
   shipstation_order_id: number | null;
+  shipstation_order_key: string | null;
 }
 
 /**
@@ -120,7 +126,9 @@ async function loadShipment(
 ): Promise<CurrentShipmentRow> {
   const result: any = await db.execute(sql`
     SELECT id, order_id, status, tracking_number, carrier, tracking_url,
-           shopify_fulfillment_id, shipstation_order_id
+           shopify_fulfillment_id,
+           shipping_engine, engine_order_ref, engine_shipment_ref,
+           shipstation_order_id, shipstation_order_key
     FROM wms.outbound_shipments
     WHERE id = ${shipmentId}
     LIMIT 1
@@ -348,6 +356,7 @@ export async function markShipmentCancelled(
   reason: string = "operator_cancel",
   opts: {
     now?: Date;
+    engineCancel?: (ref: EngineRef) => Promise<void>;
     shipstation?: {
       removeFromList?: (shipstationOrderId: number) => Promise<void>;
     };
@@ -366,26 +375,27 @@ export async function markShipmentCancelled(
     ? reason.slice(0, 200)
     : "operator_cancel";
 
-  // ShipStation-side removal (§6 Commit 19). Only when the shipment
-  // was already pushed (queued = pushed-but-not-labeled, labeled =
-  // pushed-and-labeled) AND we have the SS order id. Pre-push states
-  // (planned) never touched SS so there is nothing to remove. Post-
-  // ship/post-void states are not handled here — those have their own
-  // flows (markShipmentVoided, etc). Failure is non-blocking.
-  const ssOrderId = current.shipstation_order_id;
+  // Engine-side removal: cancel the order in the shipping engine when
+  // the shipment was already pushed (queued/labeled) and has an engine
+  // ref. Pre-push states (planned) never touched the engine. Failure
+  // is non-blocking — reconcile catches drift.
+  const ref = engineRefFromRow(current as any);
   if (
     (current.status === "queued" || current.status === "labeled") &&
-    typeof ssOrderId === "number" &&
-    Number.isInteger(ssOrderId) &&
-    ssOrderId > 0 &&
-    typeof opts.shipstation?.removeFromList === "function"
+    ref
   ) {
-    try {
-      await opts.shipstation.removeFromList(ssOrderId);
-    } catch (err: any) {
-      console.error(
-        `[markShipmentCancelled] ShipStation removeFromList failed for shipment ${shipmentId} (ss_order_id=${ssOrderId}): ${err?.message ?? err}`,
-      );
+    const cancelFn = opts.engineCancel
+      ?? (opts.shipstation?.removeFromList
+        ? async (r: EngineRef) => { await opts.shipstation!.removeFromList!(Number(r.engineOrderRef)); }
+        : null);
+    if (cancelFn) {
+      try {
+        await cancelFn(ref);
+      } catch (err: any) {
+        console.error(
+          `[markShipmentCancelled] engine cancel failed for shipment ${shipmentId} (ref=${ref.engineOrderRef}): ${err?.message ?? err}`,
+        );
+      }
     }
   }
 

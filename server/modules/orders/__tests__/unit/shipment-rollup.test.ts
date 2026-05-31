@@ -770,7 +770,7 @@ describe("markShipmentCancelled", () => {
     expect(mock.getCallCount()).toBe(2);
     expect(removeFromList).toHaveBeenCalledTimes(1);
     expect(errSpy).toHaveBeenCalledOnce();
-    expect(errSpy.mock.calls[0][0]).toContain("removeFromList failed");
+    expect(errSpy.mock.calls[0][0]).toContain("engine cancel failed");
     errSpy.mockRestore();
   });
 
