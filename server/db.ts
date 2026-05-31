@@ -488,7 +488,9 @@ export async function runStartupMigrations(): Promise<void> {
     // 5. ShipStation integration columns on oms_orders
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_id INTEGER`);
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
-    console.log("Checked ShipStation columns on oms_orders");
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipping_engine VARCHAR(30)`);
+    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS engine_order_ref VARCHAR(200)`);
+    console.log("Checked shipping engine columns on oms_orders");
 
     // 6. eBay listing control columns
     await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);

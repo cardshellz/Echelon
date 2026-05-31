@@ -476,7 +476,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     reservation: services.reservation,
     fulfillmentRouter: services.fulfillmentRouter,
     slaMonitor: services.slaMonitor,
-  }, services.shipStation, services.wmsSync);
+  }, services.shipStation, services.wmsSync, services.shippingEngine);
 
   // Wire fulfillment push into ShipStation service for tracking push on ship notify
   (db as any).__fulfillmentPush = services.fulfillmentPush;
@@ -1442,6 +1442,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           SELECT w.id AS wms_id, w.order_number AS wms_order_number,
                  w.warehouse_status, w.completed_at, w.tracking_number,
                  o.id AS oms_id, o.status AS oms_status,
+                 o.shipping_engine, o.engine_order_ref,
                  o.shipstation_order_id, o.shipstation_reconciled_at,
                  o.tracking_carrier
           FROM wms.orders w
@@ -1451,7 +1452,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               OR (w.oms_fulfillment_order_id LIKE 'gid://shopify/Order/%'
                     AND o.external_order_id = w.oms_fulfillment_order_id)
           )
-          WHERE o.shipstation_order_id IS NOT NULL
+          WHERE COALESCE(o.engine_order_ref, o.shipstation_order_id::text) IS NOT NULL
             AND w.warehouse_status IN ('shipped', 'cancelled')
             AND (o.shipstation_reconciled_at IS NULL OR o.shipstation_reconciled_at < w.completed_at)
           ORDER BY w.updated_at DESC
@@ -1464,7 +1465,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         let skippedCancelled = 0;
         for (const row of rows.rows) {
           try {
-            const v1Ref = toEngineRef(Number(row.shipstation_order_id));
+            const v1Ref = engineRefFromRow(row) ?? toEngineRef(Number(row.shipstation_order_id));
             if (row.warehouse_status === 'shipped') {
               await services.shippingEngine.markShipped(v1Ref, {
                 shipDate: row.completed_at || new Date(),

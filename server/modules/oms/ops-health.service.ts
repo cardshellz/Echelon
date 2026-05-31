@@ -371,7 +371,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         JOIN wms.orders wo ON wo.id = os.order_id
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
-          AND os.shipstation_order_id IS NULL
+          AND os.engine_order_ref IS NULL
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -401,7 +401,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         JOIN wms.orders wo ON wo.id = os.order_id
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
-          AND os.shipstation_order_id IS NULL
+          AND os.engine_order_ref IS NULL
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
