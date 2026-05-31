@@ -1,31 +1,33 @@
 /**
- * Unit tests — reconcile v2 (shipstation-outbound-shipments sweep).
+ * Unit tests — reconcile v2 (engine-based outbound-shipments sweep).
  *
  * Plan §6 Commit 35: the V2 reconcile reads wms.outbound_shipments
  * instead of the legacy wms.orders ↔ oms.oms_orders JOIN.  Each test
  * stubs the three external surfaces:
  *
  *   1. db.execute          — SQL queries + updates
- *   2. ss.getOrderById     — ShipStation order state
- *   3. ss.getShipments     — ShipStation shipment details (void detection)
+ *   2. engine.getState     — Engine order state (status, tracking, carrier)
+ *   3. engine.getShipments — Canonical shipment events (shipped/voided/etc.)
  *
  * plus the shipment-rollup helpers dispatched via `dispatchShipmentEvent`
  * and `recomputeOrderStatusFromShipments`.
  *
  * Because the reconcile lives inside server/index.ts (an IIFE-wrapped
  * block, not a standalone module), we test by exercising the same code
- * path in isolation: each test builds a fake `db`, `ss`, and calls the
- * same dispatch → recompute → OMS-update sequence the production code
- * uses, verifying call counts and arguments.
+ * path in isolation: each test builds a fake `db`, `engine`, and calls the
+ * same derive → dispatch → recompute → OMS-update sequence the production
+ * code uses, verifying call counts and arguments.
  *
  * Coding-standards compliance:
  *   - Rule #2  (determinism): all timestamps injected, no Date.now()
- *   - Rule #5  (errors): SS API throws → no last_reconciled_at stamp
+ *   - Rule #5  (errors): engine API throws → no last_reconciled_at stamp
  *   - Rule #6  (idempotency): shipped+shipped → no markShipmentShipped call
  *   - Rule #14 (test isolation): every mock created per-test, no shared state
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { deriveReconcileEvent } from "../../../shipping/reconcile-derive";
+import type { EngineOrderState, CanonicalShipmentEvent } from "../../../shipping/types";
 
 // ─── Helpers under test (replicated from server/index.ts reconcile) ─────
 
@@ -38,53 +40,36 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  */
 async function reconcileOneShipment(
   db: any,
-  ss: any,
+  engine: any,
   row: {
     shipment_id: number;
     order_id: number;
-    shipstation_order_id: number;
     wms_shipment_status: string;
     tracking_number: string | null;
     carrier: string | null;
   },
+  ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string },
   dispatchShipmentEvent: typeof import("../../orders/shipment-rollup").dispatchShipmentEvent,
   recomputeOrderStatusFromShipments: typeof import("../../orders/shipment-rollup").recomputeOrderStatusFromShipments,
 ) {
   const shipmentId = row.shipment_id;
-  const ssOrderId = Number(row.shipstation_order_id);
 
-  // 1. Fetch SS order state
-  const ssOrder = await ss.getOrderById(ssOrderId);
-  if (!ssOrder) {
+  // 1. Fetch engine order state + shipments
+  const engineState: EngineOrderState | null = await engine.getState(ref);
+  if (!engineState) {
     return { stamped: false, event: null };
   }
 
-  let event: { kind: string; [key: string]: any } | null = null;
+  const canonicalShipments: CanonicalShipmentEvent[] = await engine.getShipments(ref);
 
-  // 2. Detect voided labels first (voidDate beats orderStatus)
-  if (row.wms_shipment_status !== "voided") {
-    const ssShipments = await ss.getShipments(ssOrderId);
-    const hasVoidedLabel = ssShipments.some((s: any) => s.voidDate != null);
-    if (hasVoidedLabel) {
-      event = { kind: "voided", reason: "ss_label_void" };
-    }
-  }
-
-  // 3. Detect shipped / cancelled from order status
-  if (!event) {
-    if (ssOrder.orderStatus === "shipped" && row.wms_shipment_status !== "shipped") {
-      const ssShipments = await ss.getShipments(ssOrderId);
-      const latest = ssShipments[ssShipments.length - 1];
-      event = {
-        kind: "shipped",
-        trackingNumber: latest?.trackingNumber || row.tracking_number || "",
-        carrier: latest?.carrierCode || row.carrier || "other",
-        shipDate: latest?.shipDate ? new Date(latest.shipDate) : new Date(),
-      };
-    } else if (ssOrder.orderStatus === "cancelled" && row.wms_shipment_status !== "cancelled") {
-      event = { kind: "cancelled", reason: "ss_cancelled" };
-    }
-  }
+  // 2. Derive reconcile event from canonical types
+  let event: { kind: string; [key: string]: any } | null = deriveReconcileEvent({
+    engineState,
+    currentWmsShipmentStatus: row.wms_shipment_status,
+    currentTrackingNumber: row.tracking_number,
+    currentCarrier: row.carrier,
+    shipments: canonicalShipments,
+  });
 
   if (!event) {
     // No divergence — stamp to prove we checked
@@ -92,14 +77,14 @@ async function reconcileOneShipment(
     return { stamped: true, event: null };
   }
 
-  // 4. Dispatch via shipment-rollup helpers
+  // 3. Dispatch via shipment-rollup helpers
   const { wmsOrderId, changed } = await dispatchShipmentEvent(db, shipmentId, event as any);
 
   if (changed) {
-    // 5. Recompute order-level warehouse_status
+    // 4. Recompute order-level warehouse_status
     await recomputeOrderStatusFromShipments(db, row.order_id);
 
-    // 6. Update OMS derived fields (inline)
+    // 5. Update OMS derived fields (inline)
     if (event.kind === "shipped") {
       await db.execute("oms_update_shipped", {
         orderId: row.order_id,
@@ -113,7 +98,7 @@ async function reconcileOneShipment(
     // voided: no OMS state change by design
   }
 
-  // 7. Stamp last_reconciled_at
+  // 6. Stamp last_reconciled_at
   await db.execute("stamp_reconciled", { shipmentId });
 
   return { stamped: true, event };
@@ -127,24 +112,27 @@ function makeDb() {
   };
 }
 
-function makeSs(overrides: {
-  orderById?: any;
-  shipments?: any[];
-  getOrderByIdThrows?: boolean;
+function makeEngine(overrides: {
+  state?: EngineOrderState | null;
+  shipments?: CanonicalShipmentEvent[];
+  getStateThrows?: boolean;
 } = {}) {
   return {
     isConfigured: () => true,
-    getOrderById: overrides.getOrderByIdThrows
-      ? vi.fn().mockRejectedValue(new Error("SS API down"))
-      : vi.fn().mockResolvedValue(overrides.orderById ?? null),
+    getState: overrides.getStateThrows
+      ? vi.fn().mockRejectedValue(new Error("Engine API down"))
+      : vi.fn().mockResolvedValue(overrides.state ?? null),
     getShipments: vi.fn().mockResolvedValue(overrides.shipments ?? []),
   };
+}
+
+function makeRef(engineOrderRef = "9999") {
+  return { engine: "shipstation", engineOrderRef, engineShipmentRef: undefined };
 }
 
 function makeRow(overrides: Partial<{
   shipment_id: number;
   order_id: number;
-  shipstation_order_id: number;
   wms_shipment_status: string;
   tracking_number: string | null;
   carrier: string | null;
@@ -152,7 +140,6 @@ function makeRow(overrides: Partial<{
   return {
     shipment_id: overrides.shipment_id ?? 100,
     order_id: overrides.order_id ?? 1,
-    shipstation_order_id: overrides.shipstation_order_id ?? 9999,
     wms_shipment_status: overrides.wms_shipment_status ?? "queued",
     tracking_number: overrides.tracking_number ?? null,
     carrier: overrides.carrier ?? null,
@@ -184,15 +171,15 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   // ── Happy paths ──────────────────────────────────────────────────────
 
-  it("queued → SS shipped → dispatches markShipmentShipped + stamps", async () => {
-    const ss = makeSs({
-      orderById: { orderStatus: "shipped" },
-      shipments: [{ trackingNumber: "1Z999", carrierCode: "ups", shipDate: "2025-01-15" }],
+  it("queued → engine shipped → dispatches markShipmentShipped + stamps", async () => {
+    const engine = makeEngine({
+      state: { status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date("2025-01-15") },
+      shipments: [{ kind: "shipped", trackingNumber: "1Z999", carrierRaw: "ups", shipDate: new Date("2025-01-15"), items: [] }],
     });
 
     const result = await reconcileOneShipment(
-      db, ss, makeRow({ wms_shipment_status: "queued" }),
-      dispatch as any, recompute,
+      db, engine, makeRow({ wms_shipment_status: "queued" }),
+      makeRef(), dispatch as any, recompute,
     );
 
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -203,12 +190,15 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     expect(result.event?.kind).toBe("shipped");
   });
 
-  it("labeled → SS cancelled → dispatches markShipmentCancelled + stamps", async () => {
-    const ss = makeSs({ orderById: { orderStatus: "cancelled" } });
+  it("labeled → engine cancelled → dispatches markShipmentCancelled + stamps", async () => {
+    const engine = makeEngine({
+      state: { status: "cancelled", trackingNumber: null, carrier: null, shipDate: null },
+      shipments: [],
+    });
 
     const result = await reconcileOneShipment(
-      db, ss, makeRow({ wms_shipment_status: "labeled" }),
-      dispatch as any, recompute,
+      db, engine, makeRow({ wms_shipment_status: "labeled" }),
+      makeRef(), dispatch as any, recompute,
     );
 
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -218,15 +208,15 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     expect(result.event?.kind).toBe("cancelled");
   });
 
-  it("queued → SS voided (voidDate) → dispatches markShipmentVoided + stamps", async () => {
-    const ss = makeSs({
-      orderById: { orderStatus: "awaiting_shipment" },
-      shipments: [{ voidDate: "2025-01-16", trackingNumber: "1Z999" }],
+  it("queued → engine voided (all shipments voided) → dispatches markShipmentVoided + stamps", async () => {
+    const engine = makeEngine({
+      state: { status: "awaiting_shipment", trackingNumber: null, carrier: null, shipDate: null },
+      shipments: [{ kind: "voided", voidedAt: new Date("2025-01-16"), items: [] }],
     });
 
     const result = await reconcileOneShipment(
-      db, ss, makeRow({ wms_shipment_status: "queued" }),
-      dispatch as any, recompute,
+      db, engine, makeRow({ wms_shipment_status: "queued" }),
+      makeRef(), dispatch as any, recompute,
     );
 
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -240,12 +230,15 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   // ── Idempotency ──────────────────────────────────────────────────────
 
-  it("shipped → SS shipped (idempotent) → no dispatch but stamps", async () => {
-    const ss = makeSs({ orderById: { orderStatus: "shipped" } });
+  it("shipped → engine shipped (idempotent) → no dispatch but stamps", async () => {
+    const engine = makeEngine({
+      state: { status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date() },
+      shipments: [{ kind: "shipped", trackingNumber: "1Z999", carrierRaw: "ups", shipDate: new Date(), items: [] }],
+    });
 
     const result = await reconcileOneShipment(
-      db, ss, makeRow({ wms_shipment_status: "shipped" }),
-      dispatch as any, recompute,
+      db, engine, makeRow({ wms_shipment_status: "shipped" }),
+      makeRef(), dispatch as any, recompute,
     );
 
     expect(dispatch).not.toHaveBeenCalled();
@@ -254,12 +247,15 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     expect(result.event).toBeNull();
   });
 
-  it("queued → SS awaiting_shipment (no divergence) → no dispatch but stamps", async () => {
-    const ss = makeSs({ orderById: { orderStatus: "awaiting_shipment" } });
+  it("queued → engine awaiting_shipment (no divergence) → no dispatch but stamps", async () => {
+    const engine = makeEngine({
+      state: { status: "awaiting_shipment", trackingNumber: null, carrier: null, shipDate: null },
+      shipments: [],
+    });
 
     const result = await reconcileOneShipment(
-      db, ss, makeRow({ wms_shipment_status: "queued" }),
-      dispatch as any, recompute,
+      db, engine, makeRow({ wms_shipment_status: "queued" }),
+      makeRef(), dispatch as any, recompute,
     );
 
     expect(dispatch).not.toHaveBeenCalled();
@@ -269,16 +265,16 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   // ── dispatchShipmentEvent returns changed=false ──────────────────────
 
-  it("SS shipped but dispatch says changed=false → stamps but no recompute/OMS", async () => {
-    const ss = makeSs({
-      orderById: { orderStatus: "shipped" },
-      shipments: [{ trackingNumber: "1Z999", carrierCode: "ups", shipDate: "2025-01-15" }],
+  it("engine shipped but dispatch says changed=false → stamps but no recompute/OMS", async () => {
+    const engine = makeEngine({
+      state: { status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date("2025-01-15") },
+      shipments: [{ kind: "shipped", trackingNumber: "1Z999", carrierRaw: "ups", shipDate: new Date("2025-01-15"), items: [] }],
     });
     const noChangeDispatch = makeDispatch({ wmsOrderId: 1, changed: false });
 
     await reconcileOneShipment(
-      db, ss, makeRow({ wms_shipment_status: "queued" }),
-      noChangeDispatch as any, recompute,
+      db, engine, makeRow({ wms_shipment_status: "queued" }),
+      makeRef(), noChangeDispatch as any, recompute,
     );
 
     expect(noChangeDispatch).toHaveBeenCalledTimes(1);
@@ -286,30 +282,28 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     expect(db.execute).toHaveBeenCalledWith("stamp_reconciled", { shipmentId: 100 });
   });
 
-  // ── SS API errors ────────────────────────────────────────────────────
+  // ── Engine API errors ────────────────────────────────────────────────
 
-  it("SS getOrderById throws → skip + DON'T stamp last_reconciled_at", async () => {
-    const ss = makeSs({ getOrderByIdThrows: true });
+  it("engine getState throws → skip + DON'T stamp last_reconciled_at", async () => {
+    const engine = makeEngine({ getStateThrows: true });
 
     await expect(
       reconcileOneShipment(
-        db, ss, makeRow(),
-        dispatch as any, recompute,
+        db, engine, makeRow(),
+        makeRef(), dispatch as any, recompute,
       ),
-    ).rejects.toThrow("SS API down");
+    ).rejects.toThrow("Engine API down");
 
     expect(dispatch).not.toHaveBeenCalled();
-    // The outer catch in production catches this; here we verify the
-    // rejection propagates so the caller can skip the stamp.
     expect(db.execute).not.toHaveBeenCalledWith("stamp_reconciled", expect.any(Object));
   });
 
-  it("SS getOrderById returns null → skip + don't stamp", async () => {
-    const ss = makeSs({ orderById: null });
+  it("engine getState returns null → skip + don't stamp", async () => {
+    const engine = makeEngine({ state: null });
 
     const result = await reconcileOneShipment(
-      db, ss, makeRow(),
-      dispatch as any, recompute,
+      db, engine, makeRow(),
+      makeRef(), dispatch as any, recompute,
     );
 
     expect(result.stamped).toBe(false);
@@ -317,17 +311,17 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     expect(db.execute).not.toHaveBeenCalled();
   });
 
-  it("SS getShipments throws → propagate (no stamp)", async () => {
-    const ss = {
+  it("engine getShipments throws → propagate (no stamp)", async () => {
+    const engine = {
       isConfigured: () => true,
-      getOrderById: vi.fn().mockResolvedValue({ orderStatus: "shipped" }),
+      getState: vi.fn().mockResolvedValue({ status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date() }),
       getShipments: vi.fn().mockRejectedValue(new Error("shipments API down")),
     };
 
     await expect(
       reconcileOneShipment(
-        db, ss, makeRow({ wms_shipment_status: "queued" }),
-        dispatch as any, recompute,
+        db, engine, makeRow({ wms_shipment_status: "queued" }),
+        makeRef(), dispatch as any, recompute,
       ),
     ).rejects.toThrow("shipments API down");
 
@@ -342,24 +336,23 @@ describe("reconcile-v2 :: batch behaviour", () => {
     const dispatch = makeDispatch({ wmsOrderId: 1, changed: true });
     const recompute = makeRecompute();
 
-    const ss = {
+    const engine = {
       isConfigured: () => true,
-      getOrderById: vi.fn()
-        .mockResolvedValueOnce({ orderStatus: "shipped" })
-        .mockResolvedValueOnce({ orderStatus: "awaiting_shipment" }),
+      getState: vi.fn()
+        .mockResolvedValueOnce({ status: "shipped", trackingNumber: "1Z_A", carrier: "ups", shipDate: new Date("2025-01-15") })
+        .mockResolvedValueOnce({ status: "awaiting_shipment", trackingNumber: null, carrier: null, shipDate: null }),
       getShipments: vi.fn()
-        .mockResolvedValueOnce([])                                           // row 1 void check
-        .mockResolvedValueOnce([{ trackingNumber: "1Z_A", carrierCode: "ups", shipDate: "2025-01-15" }])  // row 1 shipped
-        .mockResolvedValueOnce([]),                                          // row 2 void check
+        .mockResolvedValueOnce([{ kind: "shipped", trackingNumber: "1Z_A", carrierRaw: "ups", shipDate: new Date("2025-01-15"), items: [] }])
+        .mockResolvedValueOnce([]),
     };
 
     const rows = [
       makeRow({ shipment_id: 100, wms_shipment_status: "queued" }),
-      makeRow({ shipment_id: 101, wms_shipment_status: "queued", shipstation_order_id: 9998 }),
+      makeRow({ shipment_id: 101, wms_shipment_status: "queued" }),
     ];
 
     for (const row of rows) {
-      await reconcileOneShipment(db, ss, row, dispatch as any, recompute);
+      await reconcileOneShipment(db, engine, row, makeRef(), dispatch as any, recompute);
     }
 
     // Row 1: shipped detected → dispatch + stamp
