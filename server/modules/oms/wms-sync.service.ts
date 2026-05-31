@@ -312,180 +312,161 @@ export class WmsSyncService {
         });
       }
 
-      // 5. Create WMS order (writes to orders + order_items)
+      // ── C2 Atomic pipeline: steps 5 + 5b + 6 run in one transaction ──
+      // Order creation, shipment creation, and inventory reservation are
+      // wrapped in a single DB transaction so a crash mid-pipeline never
+      // leaves the order in a partially-written state (e.g. order created
+      // but no shipment, or shipment created but inventory not reserved).
+      // External calls (routing, ShipStation push) happen AFTER the tx
+      // commits — they are idempotent and retried by the reconcile sweep.
       const { ordersStorage } = await import("../orders");
-      const newWmsOrder = await ordersStorage.createOrderWithItems(wmsOrderData, wmsLineItems);
 
-      console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
+      const txResult = await db.transaction(async (tx: any) => {
+        // 5. Create WMS order (writes to orders + order_items)
+        const newWmsOrder = await ordersStorage.createOrderWithItems(wmsOrderData, wmsLineItems, tx);
 
-      // 5b. Create a planned wms.outbound_shipments row with per-item
-      // rows. Failure is non-fatal so a broken shipment insert never
-      // blocks order sync (the hourly reconcile sweep will retry).
-      let shipmentIdForPush: number | null = null;
-      if (hasShippableItems) {
-        // §6 Commit 14: routing by combined_role.
-        //
-        // `combined_group_id` + `combined_role` live on the WMS
-        // `orders` row (not on oms_orders). In the normal first-sync
-        // flow they're NULL and we fall through to the
-        // parent/standalone branch — behavior matches C8. They're
-        // only non-null here if combining ran before this sync
-        // re-fired (rare but legal: retries, backfill sweeps, manual
-        // re-syncs), in which case we must NOT create a second
-        // SS-facing shipment for the child and must link to the
-        // parent instead.
-        const combinedRole =
-          (newWmsOrder as any).combinedRole ?? null;
-        const combinedGroupId =
-          (newWmsOrder as any).combinedGroupId ?? null;
+        console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
 
-        if (combinedRole === "child" && combinedGroupId != null) {
-          // ── Combined child: link to parent's shipment ─────────────
-          // Per plan §6 C14, children do NOT push independently —
-          // parent's push covers the physical shipment. So we leave
-          // `shipmentIdForPush = null` regardless of outcome; Group
-          // H reconcile keeps the child's state in lockstep with the
-          // parent's.
-          try {
-            const parentResult = await db.execute<{ id: number }>(sql`
-              SELECT id
-                FROM wms.orders
-               WHERE combined_group_id = ${combinedGroupId}
-                 AND combined_role = 'parent'
-               LIMIT 1
-            `);
-            const parentWmsOrderId = parentResult.rows?.[0]?.id
-              ? Number(parentResult.rows[0].id)
-              : null;
+        // 5b. Create a planned wms.outbound_shipments row with per-item
+        // rows. Failure is non-fatal so a broken shipment insert never
+        // blocks order sync (the hourly reconcile sweep will retry).
+        let shipmentIdForPush: number | null = null;
+        if (hasShippableItems) {
+          // §6 Commit 14: routing by combined_role.
+          const combinedRole =
+            (newWmsOrder as any).combinedRole ?? null;
+          const combinedGroupId =
+            (newWmsOrder as any).combinedGroupId ?? null;
 
-            if (!parentWmsOrderId) {
-              // Race: the parent WMS row isn't there yet. Not fatal
-              // — reconcile (Group H / C15) retries once the parent
-              // lands. Log loudly so ops can spot runaway groups.
-              console.warn(
-                `[WMS Sync] Combined child order ${newWmsOrder.id} (group ${combinedGroupId}) has no parent WMS order yet — skipping shipment link (reconcile will retry)`,
-              );
-            } else {
-              // Fetch the child's own wms.order_items (not the
-              // parent's) — per-order finance / Shopify fulfillment
-              // semantics require the child's own items on the
-              // child's shipment row.
-              const childItems = (await db
-                .select({
-                  id: wmsOrderItems.id,
-                  quantity: wmsOrderItems.quantity,
-                  productVariantId: wmsOrderItems.productId,
-                  requiresShipping: wmsOrderItems.requiresShipping,
-                })
-                .from(wmsOrderItems)
-                .where(eq(wmsOrderItems.orderId, newWmsOrder.id)))
-                .filter((i: any) => i.requiresShipping !== 0);
+          if (combinedRole === "child" && combinedGroupId != null) {
+            // ── Combined child: link to parent's shipment ─────────────
+            try {
+              const parentResult = await tx.execute(sql`
+                SELECT id
+                  FROM wms.orders
+                 WHERE combined_group_id = ${combinedGroupId}
+                   AND combined_role = 'parent'
+                 LIMIT 1
+              `);
+              const parentWmsOrderId = parentResult.rows?.[0]?.id
+                ? Number(parentResult.rows[0].id)
+                : null;
 
-              const { shipmentId, created } =
-                await linkChildToParentShipment(
-                  db as any,
-                  newWmsOrder.id,
-                  parentWmsOrderId,
-                  omsOrder.channelId ?? null,
-                  childItems.map((i) => ({
-                    id: i.id,
-                    quantity: i.quantity ?? 0,
-                    productVariantId: i.productVariantId ?? null,
-                  })),
+              if (!parentWmsOrderId) {
+                console.warn(
+                  `[WMS Sync] Combined child order ${newWmsOrder.id} (group ${combinedGroupId}) has no parent WMS order yet — skipping shipment link (reconcile will retry)`,
                 );
-              console.log(
-                `[WMS Sync] Linked combined-child order ${newWmsOrder.id} to parent ${parentWmsOrderId}'s shipment ${shipmentId} (created=${created}); parent owns the SS push`,
-              );
-            }
-          } catch (err: any) {
-            if (err instanceof ChildWithoutParentShipmentError) {
-              // Parent WMS row exists but has no shipment yet —
-              // another race window. Let reconcile retry.
-              console.warn(
-                `[WMS Sync] Combined child order ${newWmsOrder.id} parent (${err.parentWmsOrderId}) has no shipment yet — reconcile will retry: ${err.message}`,
-              );
-            } else {
-              console.error(
-                `[WMS Sync] Failed to link combined-child order ${newWmsOrder.id} to parent shipment: ${err.message}`,
-              );
-            }
-            // Non-fatal in either case.
-          }
-          // Explicit: children never drive an independent SS push.
-          // Parent's push is the one that creates the SS order; pushing
-          // the child would duplicate it.
-          shipmentIdForPush = null;
-        } else {
-          // ── Parent or standalone: create own shipment (C8 path) ──
-          try {
-            // createOrderWithItems does not return per-item ids, so we
-            // query them back keyed on oms_order_line_id — the sync
-            // path guarantees a 1:1 pairing between omsLines and the
-            // just-inserted wms.order_items rows.
-            const insertedItems = await db
-              .select({
-                id: wmsOrderItems.id,
-                omsOrderLineId: wmsOrderItems.omsOrderLineId,
-                productVariantId: wmsOrderItems.productId,
-              })
-              .from(wmsOrderItems)
-              .where(eq(wmsOrderItems.orderId, newWmsOrder.id));
+              } else {
+                const childItems = (await tx
+                  .select({
+                    id: wmsOrderItems.id,
+                    quantity: wmsOrderItems.quantity,
+                    productVariantId: wmsOrderItems.productId,
+                    requiresShipping: wmsOrderItems.requiresShipping,
+                  })
+                  .from(wmsOrderItems)
+                  .where(eq(wmsOrderItems.orderId, newWmsOrder.id)))
+                  .filter((i: any) => i.requiresShipping !== 0);
 
-            const itemsByOmsLineId = new Map<number, { id: number; productVariantId: number | null }>();
-            for (const row of insertedItems) {
-              if (row.omsOrderLineId != null) {
-                itemsByOmsLineId.set(row.omsOrderLineId, {
-                  id: row.id,
-                  productVariantId: row.productVariantId ?? null,
-                });
+                const { shipmentId, created } =
+                  await linkChildToParentShipment(
+                    tx as any,
+                    newWmsOrder.id,
+                    parentWmsOrderId,
+                    omsOrder.channelId ?? null,
+                    childItems.map((i: any) => ({
+                      id: i.id,
+                      quantity: i.quantity ?? 0,
+                      productVariantId: i.productVariantId ?? null,
+                    })),
+                  );
+                console.log(
+                  `[WMS Sync] Linked combined-child order ${newWmsOrder.id} to parent ${parentWmsOrderId}'s shipment ${shipmentId} (created=${created}); parent owns the SS push`,
+                );
+              }
+            } catch (err: any) {
+              if (err instanceof ChildWithoutParentShipmentError) {
+                console.warn(
+                  `[WMS Sync] Combined child order ${newWmsOrder.id} parent (${err.parentWmsOrderId}) has no shipment yet — reconcile will retry: ${err.message}`,
+                );
+              } else {
+                console.error(
+                  `[WMS Sync] Failed to link combined-child order ${newWmsOrder.id} to parent shipment: ${err.message}`,
+                );
               }
             }
+            shipmentIdForPush = null;
+          } else {
+            // ── Parent or standalone: create own shipment (C8 path) ──
+            try {
+              const insertedItems = await tx
+                .select({
+                  id: wmsOrderItems.id,
+                  omsOrderLineId: wmsOrderItems.omsOrderLineId,
+                  productVariantId: wmsOrderItems.productId,
+                })
+                .from(wmsOrderItems)
+                .where(eq(wmsOrderItems.orderId, newWmsOrder.id));
 
-            const shipmentItemInputs = omsLines
-              .filter((line) => line.requiresShipping !== false)
-              .map((line) => {
-                const item = itemsByOmsLineId.get(line.id);
-                return item != null
-                  ? {
-                      id: item.id,
-                      quantity: line.quantity ?? 0,
-                      productVariantId: item.productVariantId,
-                    }
-                  : null;
-              })
-              .filter((x): x is { id: number; quantity: number; productVariantId: number | null } => x !== null);
+              const itemsByOmsLineId = new Map<number, { id: number; productVariantId: number | null }>();
+              for (const row of insertedItems) {
+                if (row.omsOrderLineId != null) {
+                  itemsByOmsLineId.set(row.omsOrderLineId, {
+                    id: row.id,
+                    productVariantId: row.productVariantId ?? null,
+                  });
+                }
+              }
 
-            const { shipmentId, created } = await createShipmentForOrder(
-              db as any,
-              newWmsOrder.id,
-              omsOrder.channelId,
-              shipmentItemInputs,
-            );
-            shipmentIdForPush = shipmentId;
-            console.log(
-              `[WMS Sync] ${created ? "Created" : "Reused"} shipment ${shipmentId} for WMS order ${newWmsOrder.id}`,
-            );
+              const shipmentItemInputs = omsLines
+                .filter((line) => line.requiresShipping !== false)
+                .map((line) => {
+                  const item = itemsByOmsLineId.get(line.id);
+                  return item != null
+                    ? {
+                        id: item.id,
+                        quantity: line.quantity ?? 0,
+                        productVariantId: item.productVariantId,
+                      }
+                    : null;
+                })
+                .filter((x): x is { id: number; quantity: number; productVariantId: number | null } => x !== null);
+
+              const { shipmentId, created } = await createShipmentForOrder(
+                tx as any,
+                newWmsOrder.id,
+                omsOrder.channelId,
+                shipmentItemInputs,
+                { useXactLock: true },
+              );
+              shipmentIdForPush = shipmentId;
+              console.log(
+                `[WMS Sync] ${created ? "Created" : "Reused"} shipment ${shipmentId} for WMS order ${newWmsOrder.id}`,
+              );
+            } catch (err: any) {
+              console.error(
+                `[WMS Sync] Failed to create shipment for WMS order ${newWmsOrder.id}: ${err.message}`,
+              );
+            }
+          }
+        }
+
+        // 6. Reserve inventory
+        if (warehouseStatus === "ready") {
+          try {
+            const reserveResult = await this.services.reservation.reserveOrder(newWmsOrder.id, undefined, tx);
+            if (reserveResult.failed.length > 0) {
+              console.warn(`[WMS Sync] Inventory reservation partial failure for order ${newWmsOrder.id}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
+            }
           } catch (err: any) {
-            console.error(
-              `[WMS Sync] Failed to create shipment for WMS order ${newWmsOrder.id}: ${err.message}`,
-            );
-            // Non-fatal: order synced, shipment creation can be retried
-            // by the reconcile sweep (Group H). Don't block the sync.
+            console.error(`[WMS Sync] Inventory reservation error for order ${newWmsOrder.id}: ${err.message}`);
           }
         }
-      }
 
-      // 6. Reserve inventory
-      if (warehouseStatus === "ready") {
-        try {
-          const reserveResult = await this.services.reservation.reserveOrder(newWmsOrder.id);
-          if (reserveResult.failed.length > 0) {
-            console.warn(`[WMS Sync] Inventory reservation partial failure for order ${newWmsOrder.id}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
-          }
-        } catch (err: any) {
-          console.error(`[WMS Sync] Inventory reservation error for order ${newWmsOrder.id}: ${err.message}`);
-        }
-      }
+        return { newWmsOrder, shipmentIdForPush };
+      });
+
+      const { newWmsOrder, shipmentIdForPush } = txResult;
 
       // 7. Route to warehouse (if routing service exists)
       try {

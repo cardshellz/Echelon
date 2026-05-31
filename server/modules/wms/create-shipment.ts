@@ -200,6 +200,7 @@ export async function createShipmentForOrder(
   wmsOrderId: number,
   channelId: number | null,
   orderItems: ReadonlyArray<CreateShipmentInput>,
+  options?: { useXactLock?: boolean },
 ): Promise<CreateShipmentResult> {
   if (!Number.isInteger(wmsOrderId) || wmsOrderId <= 0) {
     throw new Error(
@@ -248,9 +249,17 @@ export async function createShipmentForOrder(
   }
 
   // Advisory lock keyed on order_id prevents two concurrent callers
-  // from both passing the probe and both inserting. The lock is
-  // session-level and released at the end of this function.
+  // from both passing the probe and both inserting.
   // Key space: 918406 (C3 shipment core) + order_id.
+  //
+  // When running inside a caller-provided transaction (useXactLock),
+  // use pg_advisory_xact_lock which auto-releases on commit/rollback.
+  // Otherwise use session-level pg_advisory_lock with explicit unlock.
+  if (options?.useXactLock) {
+    await db.execute(sql`SELECT pg_advisory_xact_lock(918406, ${wmsOrderId})`);
+    return createShipmentForOrderLocked(db, wmsOrderId, channelId, normalizedOrderItems);
+  }
+
   await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
 
   try {

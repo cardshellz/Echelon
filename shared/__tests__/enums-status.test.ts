@@ -34,10 +34,11 @@ describe("enum value sets", () => {
     ]);
   });
 
-  it("WMS_WAREHOUSE_STATUS_VALUES is the 12-element union", () => {
-    // Includes the new `partially_shipped` state (plan §4.7).
+  it("WMS_WAREHOUSE_STATUS_VALUES is the 14-element union", () => {
     expect(WMS_WAREHOUSE_STATUS_VALUES).toContain("partially_shipped");
-    expect(WMS_WAREHOUSE_STATUS_VALUES.length).toBe(12);
+    expect(WMS_WAREHOUSE_STATUS_VALUES).toContain("in_progress");
+    expect(WMS_WAREHOUSE_STATUS_VALUES).toContain("completed");
+    expect(WMS_WAREHOUSE_STATUS_VALUES.length).toBe(14);
   });
 
   it("SHIPMENT_STATUS_VALUES is the 9-element union", () => {
@@ -109,7 +110,7 @@ describe("isShipmentShipped / isShipmentOpen — partition coverage", () => {
   });
 });
 
-describe("deriveOmsFromWms — exhaustive 12-value table", () => {
+describe("deriveOmsFromWms — exhaustive 14-value table", () => {
   const table: ReadonlyArray<[WmsWarehouseStatus, OmsOrderStatus | null]> = [
     ["ready", null],
     ["picking", null],
@@ -123,6 +124,8 @@ describe("deriveOmsFromWms — exhaustive 12-value table", () => {
     ["exception", null],
     ["cancelled", "cancelled"],
     ["awaiting_3pl", null],
+    ["in_progress", null],
+    ["completed", null],
   ];
 
   for (const [input, expected] of table) {
