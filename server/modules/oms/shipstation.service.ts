@@ -1498,26 +1498,71 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   async function applyShipmentQuantitiesToWmsOrderItems(items: any[]): Promise<void> {
-    for (const item of items) {
-      const orderItemId = Number(item.order_item_id);
-      const qty = Number(item.qty);
-      if (!Number.isInteger(orderItemId) || orderItemId <= 0) continue;
-      if (!Number.isInteger(qty) || qty <= 0) continue;
+    // D-FULLQTY: Derive fulfilled_quantity from the total across all
+    // active shipment items rather than adding incrementally. This makes
+    // the operation idempotent — replaying the same SHIP_NOTIFY produces
+    // the same result instead of double-counting.
+    const orderItemIds = items
+      .map((item) => Number(item.order_item_id))
+      .filter((id) => Number.isInteger(id) && id > 0);
 
+    if (orderItemIds.length === 0) return;
+
+    const uniqueIds = [...new Set(orderItemIds)];
+
+    for (const orderItemId of uniqueIds) {
       await db.execute(sql`
-        UPDATE wms.order_items
-        SET fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}),
-            picked_quantity = LEAST(quantity, GREATEST(COALESCE(picked_quantity, 0), COALESCE(fulfilled_quantity, 0) + ${qty})),
+        UPDATE wms.order_items oi
+        SET fulfilled_quantity = LEAST(
+              oi.quantity,
+              COALESCE((
+                SELECT SUM(osi.qty)
+                FROM wms.outbound_shipment_items osi
+                JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+                WHERE osi.order_item_id = oi.id
+                  AND os.status IN ('shipped', 'labeled', 'queued')
+              ), 0)
+            ),
+            picked_quantity = LEAST(
+              oi.quantity,
+              GREATEST(
+                COALESCE(oi.picked_quantity, 0),
+                COALESCE((
+                  SELECT SUM(osi.qty)
+                  FROM wms.outbound_shipment_items osi
+                  JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+                  WHERE osi.order_item_id = oi.id
+                    AND os.status IN ('shipped', 'labeled', 'queued')
+                ), 0)
+              )
+            ),
             status = CASE
-              WHEN LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}) >= quantity THEN 'completed'
-              ELSE status
+              WHEN LEAST(
+                oi.quantity,
+                COALESCE((
+                  SELECT SUM(osi.qty)
+                  FROM wms.outbound_shipment_items osi
+                  JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+                  WHERE osi.order_item_id = oi.id
+                    AND os.status IN ('shipped', 'labeled', 'queued')
+                ), 0)
+              ) >= oi.quantity THEN 'completed'
+              ELSE oi.status
             END,
             picked_at = CASE
-              WHEN LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}) >= quantity
-                   AND picked_at IS NULL THEN NOW()
-              ELSE picked_at
+              WHEN LEAST(
+                oi.quantity,
+                COALESCE((
+                  SELECT SUM(osi.qty)
+                  FROM wms.outbound_shipment_items osi
+                  JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+                  WHERE osi.order_item_id = oi.id
+                    AND os.status IN ('shipped', 'labeled', 'queued')
+                ), 0)
+              ) >= oi.quantity AND oi.picked_at IS NULL THEN NOW()
+              ELSE oi.picked_at
             END
-        WHERE id = ${orderItemId}
+        WHERE oi.id = ${orderItemId}
       `);
     }
   }
@@ -2172,11 +2217,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       details.reason = event.reason ?? null;
     }
 
-    await db.insert(omsOrderEvents).values({
-      orderId: omsOrderId,
-      eventType,
-      details,
-    });
+    try {
+      await db.insert(omsOrderEvents).values({
+        orderId: omsOrderId,
+        eventType,
+        details,
+      });
+    } catch (err: any) {
+      if (err?.code === "23505" && String(err?.constraint ?? "").includes("shipment_dedup")) {
+        console.log(
+          `[ShipStation Webhook V2] Dedup: event ${eventType} for OMS order ${omsOrderId} shipment ${meta.wmsShipmentId} already recorded`,
+        );
+        return;
+      }
+      throw err;
+    }
   }
 
   /**
@@ -2613,10 +2668,51 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     if (v2Result.processed) {
       return { processed: true };
     }
-    if (!v2Result.fallback) {
-      return { processed: false };
+    if (v2Result.fallback) {
+      const legacyResult = await processShipNotifyLegacy(shipment);
+      if (legacyResult.processed) {
+        return legacyResult;
+      }
     }
-    return processShipNotifyLegacy(shipment);
+
+    // D-NOMATCH: Both V2 and legacy paths failed to match this
+    // shipment. Log a structured warning so ops can investigate.
+    // Previously this was silent — the webhook returned 200 and
+    // ShipStation would not retry, stranding the shipment.
+    console.error(
+      JSON.stringify({
+        level: "error",
+        action: "ship_notify_no_match",
+        outcome: "unmatched",
+        ss_shipment_id: shipment.shipmentId ?? null,
+        ss_order_id: shipment.orderId ?? null,
+        ss_order_key: shipment.orderKey ?? null,
+        tracking: shipment.trackingNumber ?? null,
+        carrier: shipment.carrierCode ?? null,
+        v2_fallback: v2Result.fallback,
+      }),
+    );
+
+    try {
+      await db.insert(omsOrderEvents).values({
+        orderId: 0,
+        eventType: "ship_notify_no_match",
+        details: {
+          ssShipmentId: shipment.shipmentId ?? null,
+          ssOrderId: shipment.orderId ?? null,
+          ssOrderKey: shipment.orderKey ?? null,
+          trackingNumber: shipment.trackingNumber ?? null,
+          carrierCode: shipment.carrierCode ?? null,
+          requiresReview: true,
+        },
+      });
+    } catch (deadLetterErr: any) {
+      console.error(
+        `[ShipStation Webhook] Failed to persist no-match dead letter for SS shipment ${shipment.shipmentId}: ${deadLetterErr?.message}`,
+      );
+    }
+
+    return { processed: false };
   }
 
   async function processShipNotify(resourceUrl: string): Promise<number> {
