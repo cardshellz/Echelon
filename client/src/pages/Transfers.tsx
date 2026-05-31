@@ -222,7 +222,7 @@ export default function Transfers() {
       }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (transferResult: any) => {
       playSoundWithHaptic("success", "classic", true);
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/transfers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
