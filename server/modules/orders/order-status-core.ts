@@ -44,36 +44,44 @@ const TERMINAL_STATES: ReadonlySet<WmsWarehouseStatus> = new Set([
 
 const TRANSITION_MATRIX: Record<WmsWarehouseStatus, ReadonlySet<WmsWarehouseStatus>> = {
   ready: new Set(["on_hold", "exception", "awaiting_3pl"]),
+  in_progress: new Set(["ready", "on_hold", "exception"]),
   picking: new Set(["ready"]),
   picked: new Set(["picking"]),
   packing: new Set(["picked"]),
   packed: new Set(["packing"]),
-  ready_to_ship: new Set([
-    "ready", "picking", "picked", "packing", "packed",
+  completed: new Set([
+    "ready", "in_progress", "picking", "picked", "packing", "packed",
+    "ready_to_ship", "partially_shipped",
     "on_hold", "exception", "awaiting_3pl",
   ]),
+  ready_to_ship: new Set([
+    "ready", "in_progress", "picking", "picked", "packing", "packed",
+    "completed", "on_hold", "exception", "awaiting_3pl",
+  ]),
   partially_shipped: new Set([
-    "ready", "picking", "picked", "packing", "packed",
-    "ready_to_ship", "on_hold", "exception", "awaiting_3pl",
+    "ready", "in_progress", "picking", "picked", "packing", "packed",
+    "completed", "ready_to_ship",
+    "on_hold", "exception", "awaiting_3pl",
   ]),
   shipped: new Set([
-    "ready", "picking", "picked", "packing", "packed",
-    "ready_to_ship", "partially_shipped",
+    "ready", "in_progress", "picking", "picked", "packing", "packed",
+    "completed", "ready_to_ship", "partially_shipped",
     "on_hold", "exception", "awaiting_3pl",
     "cancelled", // truth wins: engine says shipped
   ]),
   on_hold: new Set([
-    "ready", "picking", "picked", "packing", "packed",
-    "ready_to_ship", "partially_shipped",
+    "ready", "in_progress", "picking", "picked", "packing", "packed",
+    "completed", "ready_to_ship", "partially_shipped",
     "exception", "awaiting_3pl",
   ]),
   exception: new Set([
-    "ready", "picking", "picked", "packing", "packed",
-    "ready_to_ship", "on_hold", "awaiting_3pl",
+    "ready", "in_progress", "picking", "picked", "packing", "packed",
+    "completed", "ready_to_ship",
+    "on_hold", "awaiting_3pl",
   ]),
   cancelled: new Set([
-    "ready", "picking", "picked", "packing", "packed",
-    "ready_to_ship", "partially_shipped",
+    "ready", "in_progress", "picking", "picked", "packing", "packed",
+    "completed", "ready_to_ship", "partially_shipped",
     "on_hold", "exception", "awaiting_3pl",
   ]),
   awaiting_3pl: new Set(["ready", "on_hold"]),
@@ -210,8 +218,8 @@ export async function cancelOrder(
 ): Promise<TransitionResult> {
   return transitionOrderStatus(db, orderId, {
     from: [
-      "ready", "picking", "picked", "packing", "packed",
-      "ready_to_ship", "partially_shipped",
+      "ready", "in_progress", "picking", "picked", "packing", "packed",
+      "completed", "ready_to_ship", "partially_shipped",
       "on_hold", "exception", "awaiting_3pl",
     ],
     to: "cancelled",
@@ -231,12 +239,33 @@ export async function markOrderShipped(
 ): Promise<TransitionResult> {
   return transitionOrderStatus(db, orderId, {
     from: [
-      "ready", "picking", "picked", "packing", "packed",
-      "ready_to_ship", "partially_shipped",
+      "ready", "in_progress", "picking", "picked", "packing", "packed",
+      "completed", "ready_to_ship", "partially_shipped",
       "on_hold", "exception", "awaiting_3pl",
       "cancelled", // truth wins
     ],
     to: "shipped",
+    reason,
+    setCompletedAt: true,
+  });
+}
+
+/**
+ * Convenience: transition to completed with standard guards.
+ * Used by self-heal paths when all shippable items are done.
+ */
+export async function completeOrder(
+  db: any,
+  orderId: number,
+  reason: string,
+): Promise<TransitionResult> {
+  return transitionOrderStatus(db, orderId, {
+    from: [
+      "ready", "in_progress", "picking", "picked", "packing", "packed",
+      "ready_to_ship", "partially_shipped",
+      "on_hold", "exception", "awaiting_3pl",
+    ],
+    to: "completed",
     reason,
     setCompletedAt: true,
   });

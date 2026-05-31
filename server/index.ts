@@ -33,6 +33,7 @@ import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
+import { cancelOrder, markOrderShipped, completeOrder } from "./modules/orders/order-status-core";
 import {
   deriveShipStationShipmentReconcileEvent,
   filterShipmentsForShipStationOrder,
@@ -883,39 +884,32 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   if (!schedulersDisabled("OMS_WMS_RECONCILE_DISABLED")) {
     const runOmsWmsReconcile = async () => {
       try {
-        const result = await db.execute(sql`
-          UPDATE wms.orders w
-          SET warehouse_status = CASE
-                WHEN oms.status = 'cancelled' THEN 'cancelled'
-                WHEN oms.status = 'shipped'   THEN 'shipped'
-                ELSE w.warehouse_status
-              END,
-              assigned_picker_id = NULL,
-              cancelled_at = CASE WHEN oms.status = 'cancelled' THEN COALESCE(w.cancelled_at, NOW()) ELSE w.cancelled_at END,
-              updated_at = NOW()
-          FROM oms.oms_orders oms
-          WHERE (
+        const divergent: any = await db.execute(sql`
+          SELECT w.id, w.order_number, oms.status AS oms_status
+          FROM wms.orders w
+          JOIN oms.oms_orders oms ON (
                   (w.source = 'oms'     AND w.oms_fulfillment_order_id = oms.id::text)
               OR  (w.source = 'shopify' AND w.source_table_id = oms.id::text)
                 )
-            AND oms.status IN ('cancelled', 'shipped', 'refunded')
-            -- Include post-pick states (ready_to_ship/completed): a fully picked
-            -- order whose OMS parent is already shipped/cancelled but whose WMS
-            -- row never advanced will otherwise stay stuck in the pick/done
-            -- queue forever. Only the cancelled/shipped CASE branches mutate
-            -- warehouse_status, so this is a safe forward-only correction.
+          WHERE oms.status IN ('cancelled', 'shipped', 'refunded')
             AND w.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'completed')
-          RETURNING w.id, w.order_number, oms.status AS oms_status
         `);
-        if (result.rows.length > 0) {
-          console.warn(`[OMS<->WMS Reconcile] Corrected ${result.rows.length} divergent order(s):`,
-            result.rows.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", "));
+        const corrected: any[] = [];
+        for (const row of divergent.rows as any[]) {
+          const transResult = row.oms_status === "shipped"
+            ? await markOrderShipped(db, row.id, "oms_wms_reconcile")
+            : await cancelOrder(db, row.id, "oms_wms_reconcile");
+          if (transResult.transitioned) {
+            await db.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${row.id}`);
+            corrected.push(row);
+          }
+        }
+        if (corrected.length > 0) {
+          console.warn(`[OMS<->WMS Reconcile] Corrected ${corrected.length} divergent order(s):`,
+            corrected.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", "));
 
-          // For orders just marked cancelled, also cancel any active SS
-          // shipments. Without this, the order is gone from the pick queue
-          // but still active in ShipStation.
-          const cancelledIds = (result.rows as any[])
-            .filter((r: any) => r.oms_status === "cancelled")
+          const cancelledIds = corrected
+            .filter((r: any) => r.oms_status !== "shipped")
             .map((r: any) => r.id);
           if (cancelledIds.length > 0) {
             try {
@@ -1006,21 +1000,20 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Zombie orders: active warehouse_status but no pending shippable items.
       // These get stuck in the pick queue forever because nothing triggers
       // their status transition.
-      const zombieFix = await db.execute(sql`
-        UPDATE wms.orders o
-        SET warehouse_status = CASE
-              WHEN NOT EXISTS (
-                SELECT 1 FROM wms.order_items ai WHERE ai.order_id = o.id
-              ) THEN 'cancelled'
-              WHEN EXISTS (
-                SELECT 1 FROM wms.order_items ai
-                WHERE ai.order_id = o.id
-                  AND ai.status NOT IN ('cancelled')
-              ) THEN 'completed'
-              ELSE 'cancelled'
-            END,
-            completed_at = COALESCE(o.completed_at, NOW()),
-            updated_at = NOW()
+      const zombieCandidates: any = await db.execute(sql`
+        SELECT o.id, o.order_number,
+          CASE
+            WHEN NOT EXISTS (
+              SELECT 1 FROM wms.order_items ai WHERE ai.order_id = o.id
+            ) THEN 'cancelled'
+            WHEN EXISTS (
+              SELECT 1 FROM wms.order_items ai
+              WHERE ai.order_id = o.id
+                AND ai.status NOT IN ('cancelled')
+            ) THEN 'completed'
+            ELSE 'cancelled'
+          END AS target_status
+        FROM wms.orders o
         WHERE o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
           AND NOT EXISTS (
             SELECT 1 FROM wms.order_items oi
@@ -1029,11 +1022,19 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               AND COALESCE(oi.quantity, 0) > 0
               AND oi.status NOT IN ('cancelled', 'completed', 'short')
           )
-        RETURNING o.id, o.order_number, o.warehouse_status
       `);
-      if (zombieFix.rows.length > 0) {
-        console.warn(`[Data Repair] Transitioned ${zombieFix.rows.length} zombie order(s) with no pending items:`,
-          (zombieFix.rows as any[]).map((r: any) => `${r.order_number}→${r.warehouse_status}`).join(', '));
+      const zombieFixed: string[] = [];
+      for (const row of zombieCandidates.rows as any[]) {
+        const result = row.target_status === "cancelled"
+          ? await cancelOrder(db, row.id, "zombie_data_repair")
+          : await completeOrder(db, row.id, "zombie_data_repair");
+        if (result.transitioned) {
+          zombieFixed.push(`${row.order_number}→${row.target_status}`);
+        }
+      }
+      if (zombieFixed.length > 0) {
+        console.warn(`[Data Repair] Transitioned ${zombieFixed.length} zombie order(s) with no pending items:`,
+          zombieFixed.join(', '));
       }
     } catch (err: any) {
       console.warn("[Data Repair] Shipped-order cleanup error:", err?.message);

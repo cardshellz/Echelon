@@ -22,6 +22,7 @@ import {
   transitionOrderStatus,
   cancelOrder,
   markOrderShipped,
+  completeOrder,
 } from "../../order-status-core";
 import {
   createShipStationEngine,
@@ -168,8 +169,8 @@ describe("D-SPAM regression: cancel↔ready_to_ship oscillation", () => {
 
   it("the only exit from cancelled is shipped (truth wins)", () => {
     const ALL_STATES: WmsWarehouseStatus[] = [
-      "ready", "picking", "picked", "packing", "packed",
-      "ready_to_ship", "partially_shipped", "shipped",
+      "ready", "in_progress", "picking", "picked", "packing", "packed",
+      "completed", "ready_to_ship", "partially_shipped", "shipped",
       "on_hold", "exception", "cancelled", "awaiting_3pl",
     ];
 
@@ -192,15 +193,19 @@ describe("D-SPAM regression: cancel↔ready_to_ship oscillation", () => {
 describe("D-ZOMBIE regression: stuck mixed-cancelled orders", () => {
   it("allows in_progress states to reach shipped", () => {
     expect(isTransitionAllowed("ready", "shipped")).toBe(true);
+    expect(isTransitionAllowed("in_progress", "shipped")).toBe(true);
     expect(isTransitionAllowed("ready_to_ship", "shipped")).toBe(true);
     expect(isTransitionAllowed("partially_shipped", "shipped")).toBe(true);
     expect(isTransitionAllowed("picking", "shipped")).toBe(true);
+    expect(isTransitionAllowed("completed", "shipped")).toBe(true);
   });
 
   it("allows in_progress states to reach cancelled", () => {
+    expect(isTransitionAllowed("in_progress", "cancelled")).toBe(true);
     expect(isTransitionAllowed("picking", "cancelled")).toBe(true);
     expect(isTransitionAllowed("picked", "cancelled")).toBe(true);
     expect(isTransitionAllowed("packing", "cancelled")).toBe(true);
+    expect(isTransitionAllowed("completed", "cancelled")).toBe(true);
   });
 
   it("allows exception to reach shipped (after resolution)", () => {
@@ -223,14 +228,16 @@ describe("D-PINGPONG regression: reconciler status fight", () => {
   });
 
   it("once cancelled, reconciler cannot revert to in_progress", () => {
+    expect(isTransitionAllowed("cancelled", "in_progress")).toBe(false);
     expect(isTransitionAllowed("cancelled", "picking")).toBe(false);
     expect(isTransitionAllowed("cancelled", "on_hold")).toBe(false);
+    expect(isTransitionAllowed("cancelled", "completed")).toBe(false);
   });
 
   it("once shipped, reconciler cannot revert to any non-terminal state", () => {
     const nonTerminal: WmsWarehouseStatus[] = [
-      "ready", "picking", "picked", "packing", "packed",
-      "ready_to_ship", "partially_shipped", "on_hold",
+      "ready", "in_progress", "picking", "picked", "packing", "packed",
+      "completed", "ready_to_ship", "partially_shipped", "on_hold",
       "exception", "awaiting_3pl",
     ];
     for (const state of nonTerminal) {
@@ -330,8 +337,8 @@ describe("D-DUP regression: duplicate shipment prevention", () => {
 describe("Terminal state completeness", () => {
   it("every non-terminal state can reach both shipped and cancelled", () => {
     const nonTerminal: WmsWarehouseStatus[] = [
-      "ready", "picking", "picked", "packing", "packed",
-      "ready_to_ship", "partially_shipped",
+      "ready", "in_progress", "picking", "picked", "packing", "packed",
+      "completed", "ready_to_ship", "partially_shipped",
       "on_hold", "exception", "awaiting_3pl",
     ];
 
@@ -345,12 +352,148 @@ describe("Terminal state completeness", () => {
 
   it("shipped and cancelled are the only terminal states", () => {
     const ALL_STATES: WmsWarehouseStatus[] = [
-      "ready", "picking", "picked", "packing", "packed",
-      "ready_to_ship", "partially_shipped", "shipped",
+      "ready", "in_progress", "picking", "picked", "packing", "packed",
+      "completed", "ready_to_ship", "partially_shipped", "shipped",
       "on_hold", "exception", "cancelled", "awaiting_3pl",
     ];
 
     const terminals = ALL_STATES.filter(isTerminalStatus);
     expect(terminals).toEqual(["shipped", "cancelled"]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════
+// C4 Phase 2: in_progress and completed coverage
+// Verifies the transition matrix covers legacy DB statuses that are
+// actively written (in_progress by pick-claim, completed by self-heal).
+// ═════════════════════════════════════════════════════════════════════
+
+describe("C4 Phase 2: in_progress and completed transitions", () => {
+  it("in_progress can reach cancelled (reconciler, cancel webhook)", () => {
+    expect(isTransitionAllowed("in_progress", "cancelled")).toBe(true);
+  });
+
+  it("in_progress can reach shipped (reconciler, ship notify)", () => {
+    expect(isTransitionAllowed("in_progress", "shipped")).toBe(true);
+  });
+
+  it("in_progress can reach completed (self-heal all items done)", () => {
+    expect(isTransitionAllowed("in_progress", "completed")).toBe(true);
+  });
+
+  it("in_progress can reach exception (self-heal with shorts)", () => {
+    expect(isTransitionAllowed("in_progress", "exception")).toBe(true);
+  });
+
+  it("completed can reach cancelled (zombie repair)", () => {
+    expect(isTransitionAllowed("completed", "cancelled")).toBe(true);
+  });
+
+  it("completed can reach shipped (reconciler, ship notify)", () => {
+    expect(isTransitionAllowed("completed", "shipped")).toBe(true);
+  });
+
+  it("cancelOrder includes in_progress and completed in from-states", async () => {
+    const dbInProgress = mockDb("in_progress");
+    const r1 = await cancelOrder(dbInProgress, 1, "test");
+    expect(r1.transitioned).toBe(true);
+
+    const dbCompleted = mockDb("completed");
+    const r2 = await cancelOrder(dbCompleted, 2, "test");
+    expect(r2.transitioned).toBe(true);
+  });
+
+  it("markOrderShipped includes in_progress and completed in from-states", async () => {
+    const dbInProgress = mockDb("in_progress");
+    const r1 = await markOrderShipped(dbInProgress, 1, "test");
+    expect(r1.transitioned).toBe(true);
+
+    const dbCompleted = mockDb("completed");
+    const r2 = await markOrderShipped(dbCompleted, 2, "test");
+    expect(r2.transitioned).toBe(true);
+  });
+
+  it("completeOrder transitions from in_progress", async () => {
+    const db = mockDb("in_progress");
+    const result = await completeOrder(db, 1, "test");
+    expect(result.transitioned).toBe(true);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════
+// Structural: migrated writers use C4 (not raw SQL)
+// ═════════════════════════════════════════════════════════════════════
+
+describe("Migrated writers use C4 functions", () => {
+  it("OMS↔WMS reconciler uses cancelOrder/markOrderShipped (not raw UPDATE)", async () => {
+    const { readFileSync } = await import("fs");
+    const { resolve } = await import("path");
+    const src = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
+    const reconcilerStart = src.indexOf("OMS<->WMS reconciliation");
+    const reconcilerEnd = src.indexOf("One-time data repair", reconcilerStart);
+    const block = src.slice(reconcilerStart, reconcilerEnd);
+
+    expect(block).toContain("markOrderShipped(db,");
+    expect(block).toContain("cancelOrder(db,");
+    expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
+  });
+
+  it("zombie data repair uses cancelOrder/completeOrder (not raw UPDATE)", async () => {
+    const { readFileSync } = await import("fs");
+    const { resolve } = await import("path");
+    const src = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
+    const zombieStart = src.indexOf("Zombie orders:");
+    const zombieEnd = src.indexOf("} catch", zombieStart);
+    const block = src.slice(zombieStart, zombieEnd);
+
+    expect(block).toContain("cancelOrder(db,");
+    expect(block).toContain("completeOrder(db,");
+    expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
+  });
+
+  it("OMS_FINAL_WMS_ACTIVE uses cancelOrder/markOrderShipped (not raw UPDATE)", async () => {
+    const { readFileSync } = await import("fs");
+    const { resolve } = await import("path");
+    const src = readFileSync(
+      resolve(__dirname, "../../../oms/oms-flow-reconciliation.service.ts"),
+      "utf-8",
+    );
+    const blockStart = src.indexOf('input.code === "OMS_FINAL_WMS_ACTIVE"');
+    const blockEnd = src.indexOf('input.code === "WMS_FINAL_OMS_OPEN"', blockStart);
+    const block = src.slice(blockStart, blockEnd);
+
+    expect(block).toContain("cancelOrder(");
+    expect(block).toContain("markOrderShipped(");
+    expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
+  });
+
+  it("self-heal writers in orders.storage.ts use C4 (not raw UPDATE warehouse_status)", async () => {
+    const { readFileSync } = await import("fs");
+    const { resolve } = await import("path");
+    const src = readFileSync(
+      resolve(__dirname, "../../orders.storage.ts"),
+      "utf-8",
+    );
+    const selfHealStart = src.indexOf("Self-heal: auto-complete orders with zero shippable");
+    const selfHealEnd = src.indexOf("Self-heal: if shipments exist", selfHealStart);
+    const block = src.slice(selfHealStart, selfHealEnd);
+
+    expect(block).toContain("completeOrder(db,");
+    expect(block).not.toContain("SET warehouse_status = 'completed'");
+  });
+
+  it("transitionStuckOrder uses transitionOrderStatus (not raw UPDATE)", async () => {
+    const { readFileSync } = await import("fs");
+    const { resolve } = await import("path");
+    const src = readFileSync(
+      resolve(__dirname, "../../orders.storage.ts"),
+      "utf-8",
+    );
+    const methodStart = src.indexOf("async transitionStuckOrder");
+    const methodEnd = src.indexOf("},", methodStart);
+    const block = src.slice(methodStart, methodEnd);
+
+    expect(block).toContain("transitionOrderStatus(db,");
+    expect(block).not.toContain("UPDATE wms.orders");
   });
 });
