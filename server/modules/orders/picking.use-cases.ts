@@ -947,6 +947,28 @@ export class PickingUseCases {
 
     if (status === "completed" && beforeItem.status !== "completed") {
       const atomicResult = await this.db.transaction(async (tx: any) => {
+        // D-PICKGUARD: Lock the parent order row AND re-check its status
+        // before deducting inventory. Without this, a concurrent cancel
+        // could set the order to 'cancelled' while we deduct stock.
+        const lockedOrder = await tx.execute(sql`
+          SELECT warehouse_status, on_hold
+          FROM wms.orders
+          WHERE id = ${beforeItem.orderId}
+          FOR UPDATE
+        `);
+
+        if (!lockedOrder.rows?.length) {
+          throw new IntegrityError(`Order ${beforeItem.orderId} not found`);
+        }
+
+        const orderState = lockedOrder.rows[0];
+        const blockedStatuses = ["cancelled", "shipped"];
+        if (blockedStatuses.includes(orderState.warehouse_status)) {
+          throw new IntegrityError(
+            `Cannot pick item ${itemId}: order ${beforeItem.orderId} is ${orderState.warehouse_status}`,
+          );
+        }
+
         // Lock the item row before moving inventory so concurrent scanner taps
         // cannot both deduct the same physical stock. The inventory use case is
         // bound to this same transaction below, so the item update and ledgered
@@ -999,12 +1021,18 @@ export class PickingUseCases {
           });
         }
 
+        // D-LEDGER: Only mark item completed when deduction succeeded.
+        // If deduction failed, leave the item in its current status so
+        // it stays in the pick queue for retry. Setting 'completed'
+        // without a ledger row creates an orphan that never ships.
         const updates: Record<string, any> = {
-          status,
-          pickedAt: new Date(),
+          status: deductResult.success ? status : beforeItem.status,
+          pickedAt: deductResult.success ? new Date() : beforeItem.pickedAt,
         };
-        if (pickedQuantity !== undefined) updates.pickedQuantity = pickedQuantity;
-        if (shortReason !== undefined) updates.shortReason = shortReason;
+        if (deductResult.success) {
+          if (pickedQuantity !== undefined) updates.pickedQuantity = pickedQuantity;
+          if (shortReason !== undefined) updates.shortReason = shortReason;
+        }
 
         const [updatedItem] = await tx
           .update(orderItems)
