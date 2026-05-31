@@ -1501,16 +1501,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     const runShipStationReconcile = async () => {
       if (process.env.RECONCILE_V2 === "true") {
         await runShipStationReconcileV2();
-        
-        // Also run the ShipStation queue sweeper. It is review-only against
-        // ShipStation so manual replacement labels, reships, and splits remain
-        // authoritative external state for reconciliation.
-        const apiKey = process.env.SHIPSTATION_API_KEY;
-        const apiSecret = process.env.SHIPSTATION_API_SECRET;
-        if (apiKey && apiSecret) {
-          const { sweepShipStationQueue } = await import("./modules/oms/shipstation-sweeper");
-          await sweepShipStationQueue(apiKey, apiSecret).catch(e => console.warn("[ShipStation Sweeper] error:", e.message));
-        }
+
+        // Run the engine queue sweeper (review-only — flags stranded orders).
+        const engine = services.shippingEngine;
+        await engine?.sweepQueue?.().catch((e: any) => console.warn("[Engine Sweeper] error:", e.message));
       } else {
         await runShipStationReconcileV1();
       }
