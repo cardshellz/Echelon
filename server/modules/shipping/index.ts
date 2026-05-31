@@ -26,3 +26,5 @@ export {
   fromEngineRef,
   engineRefFromRow,
 } from "./adapters/shipstation.adapter";
+export { deriveReconcileEvent } from "./reconcile-derive";
+export type { ReconcileEvent } from "./reconcile-derive";

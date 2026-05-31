@@ -34,12 +34,8 @@ import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelOrder, markOrderShipped, completeOrder } from "./modules/orders/order-status-core";
-import {
-  deriveShipStationShipmentReconcileEvent,
-  filterShipmentsForShipStationOrder,
-  selectActionableShipStationShipments,
-} from "./modules/oms/shipstation-reconcile-state";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
+import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
 import { pool as dbPool } from "./db";
@@ -812,38 +808,48 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   if (!schedulersDisabled("EBAY_FULFILLMENT_RECONCILE_DISABLED")) {
     const runEbayReconcile = async () => {
       try {
-        // Find eBay OMS orders stuck in "confirmed" for > 2 hours
+        const engine = services.shippingEngine;
+        if (!engine?.isConfigured()) return;
+
+        // Find eBay OMS orders stuck in "confirmed" for > 2 hours,
+        // joining through WMS to get engine columns from outbound_shipments.
         const stuckOrders = await db.execute(sql`
-          SELECT o.id, o.external_order_id, o.external_order_number, o.shipstation_order_id
+          SELECT DISTINCT ON (o.id)
+                 o.id, o.external_order_id, o.external_order_number,
+                 o.shipstation_order_id AS oms_shipstation_order_id,
+                 os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
+                 os.shipstation_order_id, os.shipstation_order_key
           FROM oms.oms_orders o
+          LEFT JOIN wms.orders w ON w.oms_fulfillment_order_id = o.id::text
+          LEFT JOIN wms.outbound_shipments os ON os.order_id = w.id
+            AND os.status NOT IN ('cancelled', 'voided')
           WHERE o.channel_id = 67
             AND o.status = 'confirmed'
             AND o.created_at < NOW() - INTERVAL '2 hours'
+          ORDER BY o.id, os.engine_order_ref NULLS LAST
           LIMIT 50
         `);
         if (stuckOrders.rows.length === 0) return;
 
-        console.log(`[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking ShipStation...`);
-        // @ts-ignore
-        const ss = services.shipStation;
-        if (!ss?.isConfigured()) return;
+        console.log(`[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking engine...`);
 
         for (const order of stuckOrders.rows) {
           try {
-            let ssOrder = null;
-            if (order.shipstation_order_id) {
-              ssOrder = await ss.getOrderById(Number(order.shipstation_order_id));
-            } else {
-              const baseNumber = String(order.external_order_number || order.external_order_id || "");
-              ssOrder = await ss.getOrderByNumber(`EB-${baseNumber}`)
-                || await ss.getOrderByNumber(baseNumber);
+            let ref = engineRefFromRow(order);
+            if (!ref && order.oms_shipstation_order_id) {
+              ref = toEngineRef(Number(order.oms_shipstation_order_id));
             }
-            if (ssOrder && ssOrder.orderStatus === "shipped") {
-              const shipment = ssOrder;
+            if (!ref) {
+              console.warn(`[eBay Reconcile] No engine ref for OMS order ${order.id} — skipping`);
+              continue;
+            }
+
+            const engineState = await engine.getState(ref);
+            if (engineState && engineState.status === "shipped") {
               await db.execute(sql`
                 UPDATE oms.oms_orders SET status = 'shipped',
-                  tracking_number = ${shipment.trackingNumber || null},
-                  tracking_carrier = ${shipment.carrierCode || null},
+                  tracking_number = ${engineState.trackingNumber || null},
+                  tracking_carrier = ${engineState.carrier || null},
                   shipped_at = NOW(),
                   updated_at = NOW()
                 WHERE id = ${order.id}
@@ -1144,8 +1150,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     // ── V2: shipment-based reconcile ────────────────────────────────────
     const runShipStationReconcileV2 = async () => {
       try {
-        const ss = (services as any).shipStation;
-        if (!ss?.isConfigured()) return;
+        const engine = services.shippingEngine;
+        if (!engine?.isConfigured()) return;
 
         // Select active shipments that have been pushed to ShipStation and
         // haven't been checked recently. last_reconciled_at IS NULL rows
@@ -1178,83 +1184,49 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
         for (const row of rows.rows) {
           const shipmentId: number = row.shipment_id;
-          const ssOrderId: number = Number(row.shipstation_order_id);
+          const ref = engineRefFromRow(row);
           try {
-            // 1. Fetch SS order state
-            const ssOrder = await ss.getOrderById(ssOrderId);
-            if (!ssOrder) {
+            if (!ref) {
               console.warn(
-                `[ShipStation Reconcile V2] SS order ${ssOrderId} not found (shipment=${shipmentId}) — skipping`,
+                `[Reconcile V2] No engine ref for shipment ${shipmentId} — skipping`,
               );
               continue;
             }
 
-            const ssShipments = await ss.getShipments(ssOrderId, {
-              orderNumber: row.order_number,
-            });
-            const currentOrderShipments = filterShipmentsForShipStationOrder(
-              ssShipments,
-              ssOrderId,
-            );
-
-            let event: { kind: string; [key: string]: any } | null = null;
-
-            if (
-              ssShipments.length > 0 &&
-              typeof ss.processShipmentNotification === "function"
-            ) {
-              let processedFromService = 0;
-              const actionableShipments =
-                selectActionableShipStationShipments(ssShipments);
-              for (const ssShipment of actionableShipments) {
-                const result = await ss.processShipmentNotification(ssShipment);
-                if (result?.processed) {
-                  processedFromService++;
-                  if (ssShipment.voidDate != null) {
-                    markedVoided++;
-                  } else {
-                    markedShipped++;
-                  }
-                }
-              }
-              if (processedFromService > 0) {
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
-                continue;
-              }
+            // 1. Fetch engine order state + shipments
+            const engineState = await engine.getState(ref);
+            if (!engineState) {
+              console.warn(
+                `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}) — skipping`,
+              );
+              continue;
             }
 
-            event = deriveShipStationShipmentReconcileEvent({
-              ssOrderStatus: ssOrder.orderStatus,
-              currentWmsShipmentStatus: row.wms_shipment_status,
-              currentTrackingNumber: row.tracking_number,
-              currentCarrier: row.carrier,
-              shipments: currentOrderShipments,
-            });
+            const canonicalShipments = await engine.getShipments(ref);
 
-            // 3. Push WMS shipped status outward when SS has drifted.
-            // Cancellation is intentionally not mirrored from WMS to SS here:
-            // cancelled/voided SS records must be learned from SS webhooks or
-            // explicit customer-cancel flows, not broad scheduled inference.
+            // 2. Derive reconcile event from canonical types
+            let event: { kind: string; [key: string]: any } | null =
+              deriveReconcileEvent({
+                engineState,
+                currentWmsShipmentStatus: row.wms_shipment_status,
+                currentTrackingNumber: row.tracking_number,
+                currentCarrier: row.carrier,
+                shipments: canonicalShipments,
+              });
+
+            // 3. Push WMS shipped/cancelled status outward when engine has drifted.
             if (!event) {
               if (
-                ssOrder.orderStatus !== "shipped" &&
+                engineState.status !== "shipped" &&
                 row.wms_shipment_status === "shipped"
               ) {
-                // Outbound Sync: Push shipped status to engine if it drifted
-                const shipRef = engineRefFromRow(row);
-                if (shipRef) {
-                  await services.shippingEngine.markShipped(shipRef, {
-                    shipDate: new Date(),
-                    trackingNumber: row.tracking_number || "",
-                    carrierCode: row.carrier || "other",
-                    notifyCustomer: false,
-                  });
-                }
-                console.log(`[ShipStation Reconcile V2] Outbound sync: marked engine order ${ssOrderId} shipped`);
+                await engine.markShipped(ref, {
+                  shipDate: new Date(),
+                  trackingNumber: row.tracking_number || "",
+                  carrierCode: row.carrier || "other",
+                  notifyCustomer: false,
+                });
+                console.log(`[Reconcile V2] Outbound sync: marked engine order ${ref.engineOrderRef} shipped`);
                 markedShipped++;
 
                 await db.execute(sql`
@@ -1264,12 +1236,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 `);
                 continue;
               } else if (
-                ssOrder.orderStatus !== "cancelled" &&
+                engineState.status !== "cancelled" &&
                 row.wms_shipment_status === "cancelled"
               ) {
-                // Outbound Sync: Push cancelled status to engine if it drifted
-                const cxlRef = engineRefFromRow(row);
-                const cancelResult = cxlRef ? await services.shippingEngine.cancel(cxlRef) : { alreadyInState: false };
+                const cancelResult = await engine.cancel(ref);
                 if (cancelResult?.alreadyInState) {
                   await db.execute(sql`
                     UPDATE wms.outbound_shipments
@@ -1277,10 +1247,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                     WHERE id = ${shipmentId}
                       AND status NOT IN ('shipped', 'returned', 'lost')
                   `);
-                  console.log(`[ShipStation Reconcile V2] Outbound sync: engine order ${ssOrderId} already terminal — recorded shipped`);
+                  console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already terminal — recorded shipped`);
                   markedShipped++;
                 } else {
-                  console.log(`[ShipStation Reconcile V2] Outbound sync: cancelled engine order ${ssOrderId}`);
+                  console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef}`);
                   markedCancelled++;
                   await db.execute(sql`
                     UPDATE wms.outbound_shipments
@@ -1410,10 +1380,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                           : "voided_via_shipstation"},
                       ${JSON.stringify({
                         wmsShipmentId: shipmentId,
-                        ssOrderId,
+                        engineOrderRef: ref.engineOrderRef,
                         ...(event.kind === "shipped"
                           ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
-                          : { reason: event.reason }),
+                          : { reason: (event as any).reason }),
                       })}::jsonb,
                       NOW()
                     )
@@ -1438,7 +1408,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             await new Promise(r => setTimeout(r, 1000));
           } catch (err: any) {
             console.warn(
-              `[ShipStation Reconcile V2] Failed to reconcile order ${row.order_id} / ssOrder ${ssOrderId}:`,
+              `[Reconcile V2] Failed to reconcile order ${row.order_id} / engineRef ${ref?.engineOrderRef}:`,
               err?.message,
             );
             const errMsg = String(err?.message || err).slice(0, 255);
@@ -1466,8 +1436,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     // ── V1: legacy order-based reconcile (fallback) ─────────────────────
     const runShipStationReconcileV1 = async () => {
       try {
-        const ss = (services as any).shipStation;
-        if (!ss?.isConfigured()) return;
+        if (!services.shippingEngine?.isConfigured()) return;
 
         const rows: any = await db.execute(sql`
           SELECT w.id AS wms_id, w.order_number AS wms_order_number,
