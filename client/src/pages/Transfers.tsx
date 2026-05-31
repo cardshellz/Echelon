@@ -708,8 +708,11 @@ export default function Transfers() {
                     value={locationSearch}
                     onChange={(e) => {
                       setLocationSearch(e.target.value);
-                      const match = actionableLocations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
-                      if (match) setFromLocationId(match.id);
+                      // Do NOT auto-select on an exact code match — that picked
+                      // the bin literally coded "FLOOR" and suppressed the
+                      // dropdown, hiding FLOOR-01..FLOOR-06. Clear any prior
+                      // pick so the list stays open for an explicit choice.
+                      if (fromLocationId) setFromLocationId(null);
                     }}
                     placeholder="Search bin location..."
                     className="pl-10"
@@ -839,8 +842,10 @@ export default function Transfers() {
                     value={destLocationSearch}
                     onChange={(e) => {
                       setDestLocationSearch(e.target.value);
-                      const match = locations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
-                      if (match && match.id !== fromLocationId) setToLocationId(match.id);
+                      // Do NOT auto-select on an exact code match (see source
+                      // bin above) — keep the dropdown open so sub-locations
+                      // like FLOOR-06 remain selectable.
+                      if (toLocationId) setToLocationId(null);
                     }}
                     placeholder="Search destination..."
                     className="pl-10"
