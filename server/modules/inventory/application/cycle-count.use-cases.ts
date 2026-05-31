@@ -32,6 +32,7 @@ type DrizzleDb = {
 };
 
 import { InventoryUseCases } from "./inventory.use-cases";
+import { validateWarehouseLocationIntegrity } from "../../warehouse/location-integrity";
 
 type ChannelSync = {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
@@ -101,6 +102,25 @@ export interface ApprovalAdjustment {
   type: string | null;
   qtyChange: number;
   locationId: number;
+}
+
+function formatLocationLabel(location: any): string {
+  const code = typeof location?.code === "string" && location.code.trim()
+    ? location.code.trim().toUpperCase()
+    : `id=${location?.id ?? "unknown"}`;
+  const warehouse = location?.warehouseId == null ? "warehouse=unassigned" : `warehouse=${location.warehouseId}`;
+  return `${code} (${warehouse})`;
+}
+
+function formatCycleCountScope(cycleCount: any): string {
+  const parts: string[] = [];
+  if (cycleCount?.warehouseId) parts.push(`warehouse=${cycleCount.warehouseId}`);
+  if (cycleCount?.locationCodes) parts.push(`locationCodes=${cycleCount.locationCodes}`);
+  if (cycleCount?.zoneFilter) parts.push(`zone=${cycleCount.zoneFilter}`);
+  if (cycleCount?.aisleFilter) parts.push(`aisle=${cycleCount.aisleFilter}`);
+  if (cycleCount?.locationTypeFilter) parts.push(`locationTypes=${cycleCount.locationTypeFilter}`);
+  if (cycleCount?.binTypeFilter) parts.push(`binTypes=${cycleCount.binTypeFilter}`);
+  return parts.length > 0 ? parts.join(", ") : "all locations";
 }
 
 export interface ApproveResult {
@@ -581,6 +601,24 @@ export class CycleCountUseCases {
     if ((cycleCount as any).locationCodes) {
       const codes = (cycleCount as any).locationCodes.split(",").map((c: string) => c.trim().toUpperCase());
       locations = locations.filter((l: any) => codes.includes(l.code.toUpperCase()));
+    }
+    if (locations.length === 0) {
+      throw new CycleCountError(`No warehouse locations match cycle count scope: ${formatCycleCountScope(cycleCount)}`, 404);
+    }
+
+    const invalidLocationMessages: string[] = [];
+    for (const location of locations) {
+      try {
+        validateWarehouseLocationIntegrity(location);
+      } catch (error: any) {
+        invalidLocationMessages.push(`${formatLocationLabel(location)}: ${error.message}`);
+      }
+    }
+    if (invalidLocationMessages.length > 0) {
+      throw new CycleCountError(
+        `Cannot initialize cycle count because ${invalidLocationMessages.length} warehouse location(s) have invalid metadata: ${invalidLocationMessages.join("; ")}`,
+        409,
+      );
     }
 
     // Snapshot current inventory for each location
