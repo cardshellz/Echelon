@@ -1,9 +1,13 @@
 name: CI
 
-# Phase 0, item 0 of ORDER_TO_SHIP_DEEP_REVIEW_2026-05-30.md — the test gate.
-# Runs on every PR and on pushes to main. To make this a true *gate*, enable
-# branch protection in GitHub repo settings → Branches → require the
-# "Typecheck + unit tests" status check to pass before merge.
+# Runs on every PR and on pushes to main. Enable branch protection in
+# GitHub repo settings → Branches → require "Typecheck + unit tests"
+# status check to pass before merge.
+#
+# Integration tests are NOT included here. They need a fully-bootstrapped
+# Postgres with all named schemas (channels, catalog, warehouse, inventory,
+# oms, wms, etc.) and 168+ migration files applied. Run them locally against
+# the dev database: ECHELON_TEST_DATABASE_URL=... npm run test:integration
 
 on:
   pull_request:
@@ -15,7 +19,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Blocking gate: typecheck + the unit suite. No DB required.
   check-and-unit:
     name: Typecheck + unit tests
     runs-on: ubuntu-latest
@@ -30,38 +33,3 @@ jobs:
         run: npm run check
       - name: Unit tests
         run: npm run test:unit
-
-  # Integration suite against a real Postgres. NON-BLOCKING for now
-  # (continue-on-error) because test/setup-integration.ts hardcodes
-  # ssl:{rejectUnauthorized:false}, which a plain CI Postgres rejects.
-  # Make ssl conditional on the connection string, then flip this job to
-  # blocking (Phase 0/1 follow-up, per the plan).
-  integration:
-    name: Integration tests (non-blocking until SSL setup fix)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: testpassword
-          POSTGRES_DB: echelon_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U test -d echelon_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      ECHELON_TEST_DATABASE_URL: postgres://test:testpassword@localhost:5432/echelon_test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
-      - name: Integration tests
-        run: npm run test:integration
