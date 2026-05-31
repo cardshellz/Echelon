@@ -336,7 +336,13 @@ describe("oms-flow-reconciliation.service", () => {
     const tx = {
       execute: vi
         .fn()
-        .mockResolvedValueOnce(sampleRows([{ id: 20 }]))
+        // 1. SELECT oms status join
+        .mockResolvedValueOnce(sampleRows([{ status: "cancelled", financial_status: null }]))
+        // 2. C4 transitionOrderStatus UPDATE
+        .mockResolvedValueOnce(sampleRows([{ new_status: "cancelled" }]))
+        // 3. UPDATE assigned_picker_id = NULL
+        .mockResolvedValueOnce(sampleRows([]))
+        // 4. INSERT oms_order_events
         .mockResolvedValueOnce(sampleRows([])),
     };
     const db = {
@@ -356,7 +362,7 @@ describe("oms-flow-reconciliation.service", () => {
       omsOrderId: 10,
       wmsOrderId: 20,
     });
-    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(tx.execute).toHaveBeenCalledTimes(4);
   });
 
   it("remediates shipped shipment/OMS-open drift from the shipment row", async () => {
