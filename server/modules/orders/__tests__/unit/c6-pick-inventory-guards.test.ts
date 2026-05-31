@@ -139,7 +139,9 @@ describe("D-QGUARD: recordShipment DB-level dedup", () => {
     expect(sql).toContain("CREATE UNIQUE INDEX");
     expect(sql).toContain("uq_inventory_transactions_ship_dedup");
     expect(sql).toContain("transaction_type = 'ship'");
-    expect(sql).toContain("reference_id IS NOT NULL");
+    // Corrected key: scoped to real shipment-backed rows (shipment_id column),
+    // not the reference_id fallback which legitimately repeats for partial ships.
+    expect(sql).toContain("shipment_id IS NOT NULL");
     expect(sql).toContain("order_item_id IS NOT NULL");
   });
 });
