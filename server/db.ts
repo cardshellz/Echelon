@@ -490,7 +490,15 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipping_engine VARCHAR(30)`);
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS engine_order_ref VARCHAR(200)`);
+    await client.query(`UPDATE oms.oms_orders SET shipping_engine = 'shipstation', engine_order_ref = shipstation_order_id::text WHERE shipstation_order_id IS NOT NULL AND shipping_engine IS NULL`);
     console.log("Checked shipping engine columns on oms_orders");
+
+    // 5b. Engine-agnostic columns on outbound_shipments (mirrors migration 0573)
+    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS shipping_engine VARCHAR(30)`);
+    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS engine_order_ref VARCHAR(200)`);
+    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS engine_shipment_ref VARCHAR(200)`);
+    await client.query(`UPDATE wms.outbound_shipments SET shipping_engine = 'shipstation', engine_order_ref = shipstation_order_id::text, engine_shipment_ref = shipstation_order_key WHERE shipstation_order_id IS NOT NULL AND shipping_engine IS NULL`);
+    console.log("Checked shipping engine columns on outbound_shipments");
 
     // 6. eBay listing control columns
     await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);
