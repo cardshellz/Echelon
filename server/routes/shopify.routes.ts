@@ -290,16 +290,29 @@ export async function handleShopifyFulfillmentCreate(
   const channelId = wmsOrderRow.channel_id ?? null;
   const safeTrackingNumber = trackingNumber.length > 0 ? trackingNumber : null;
 
-  await db.execute(sql`
-    INSERT INTO wms.outbound_shipments
-      (order_id, channel_id, status, source,
-       shopify_fulfillment_id, tracking_number, carrier, tracking_url,
-       shipped_at, created_at, updated_at)
-    VALUES
-      (${wmsOrderId}, ${channelId}, 'shipped', 'shopify_external_fulfillment',
-       ${fulfillmentGid}, ${safeTrackingNumber}, ${carrier}, ${trackingUrl},
-       ${safeShipDate}, ${now}, ${now})
-  `);
+  await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
+  try {
+    const existingExternal: any = await db.execute(sql`
+      SELECT id FROM wms.outbound_shipments
+      WHERE order_id = ${wmsOrderId}
+        AND shopify_fulfillment_id = ${fulfillmentGid}
+      LIMIT 1
+    `);
+    if (!existingExternal?.rows?.[0]) {
+      await db.execute(sql`
+        INSERT INTO wms.outbound_shipments
+          (order_id, channel_id, status, source,
+           shopify_fulfillment_id, tracking_number, carrier, tracking_url,
+           shipped_at, created_at, updated_at)
+        VALUES
+          (${wmsOrderId}, ${channelId}, 'shipped', 'shopify_external_fulfillment',
+           ${fulfillmentGid}, ${safeTrackingNumber}, ${carrier}, ${trackingUrl},
+           ${safeShipDate}, ${now}, ${now})
+      `);
+    }
+  } finally {
+    await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
+  }
 
   await recomputeOrderStatusFromShipments(db, wmsOrderId, { now });
 
@@ -502,16 +515,29 @@ export async function handleShopifyFulfillmentUpdate(
         const wmsOrderId = wmsOrderRow.id as number;
         const channelId = wmsOrderRow.channel_id ?? null;
 
-        await db.execute(sql`
-          INSERT INTO wms.outbound_shipments
-            (order_id, channel_id, status, source,
-             shopify_fulfillment_id, tracking_number, carrier, tracking_url,
-             shipped_at, created_at, updated_at)
-          VALUES
-            (${wmsOrderId}, ${channelId}, 'shipped', 'shopify_external_fulfillment',
-             ${fulfillmentGid}, ${trackingNumberRaw}, ${carrier}, ${trackingUrl},
-             ${safeShipDate}, ${now}, ${now})
-        `);
+        await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
+        try {
+          const existingExtFul: any = await db.execute(sql`
+            SELECT id FROM wms.outbound_shipments
+            WHERE order_id = ${wmsOrderId}
+              AND shopify_fulfillment_id = ${fulfillmentGid}
+            LIMIT 1
+          `);
+          if (!existingExtFul?.rows?.[0]) {
+            await db.execute(sql`
+              INSERT INTO wms.outbound_shipments
+                (order_id, channel_id, status, source,
+                 shopify_fulfillment_id, tracking_number, carrier, tracking_url,
+                 shipped_at, created_at, updated_at)
+              VALUES
+                (${wmsOrderId}, ${channelId}, 'shipped', 'shopify_external_fulfillment',
+                 ${fulfillmentGid}, ${trackingNumberRaw}, ${carrier}, ${trackingUrl},
+                 ${safeShipDate}, ${now}, ${now})
+            `);
+          }
+        } finally {
+          await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
+        }
 
         await recomputeOrderStatusFromShipments(db, wmsOrderId, { now });
 
