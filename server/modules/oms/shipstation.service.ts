@@ -1780,9 +1780,25 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           new Error("fulfillment push service not available on db.__fulfillmentPush"),
         );
       } catch (enqueueErr: any) {
+        // D-ENQFAIL: Service unavailable AND retry enqueue failed.
         console.error(
           `[ShipStation Webhook V2] retry enqueue failed for shipment ${shipmentId}: ${enqueueErr?.message ?? enqueueErr}`,
         );
+        try {
+          await db.insert(omsOrderEvents).values({
+            orderId: 0,
+            eventType: "fulfillment_push_enqueue_failed",
+            details: {
+              wmsShipmentId: shipmentId,
+              pushError: "fulfillment push service not available",
+              enqueueError: enqueueErr?.message ?? String(enqueueErr),
+              channel: "shopify",
+              requiresReview: true,
+            },
+          });
+        } catch (_dlErr) {
+          // Last resort — the structured log above is our only trace
+        }
       }
       return;
     }
@@ -1809,9 +1825,26 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         );
         await enqueueShopifyFulfillmentRetry(db, shipmentId, pushErr);
       } catch (enqueueErr: any) {
+        // D-ENQFAIL: Both the push and the retry enqueue failed.
+        // Persist a dead-letter OMS event so ops can find and remediate.
         console.error(
           `[ShipStation Webhook V2] retry enqueue failed for shipment ${shipmentId}: ${enqueueErr?.message ?? enqueueErr}`,
         );
+        try {
+          await db.insert(omsOrderEvents).values({
+            orderId: 0,
+            eventType: "fulfillment_push_enqueue_failed",
+            details: {
+              wmsShipmentId: shipmentId,
+              pushError: pushErr?.message ?? String(pushErr),
+              enqueueError: enqueueErr?.message ?? String(enqueueErr),
+              channel: "shopify",
+              requiresReview: true,
+            },
+          });
+        } catch (_dlErr) {
+          // Last resort — the structured log above is our only trace
+        }
       }
     }
   }
@@ -1837,9 +1870,24 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         `[ShipStation Webhook] Enqueued delayed tracking push retry for order ${omsOrderId}${shipmentId ? `, shipment ${shipmentId}` : ""}: ${message}`,
       );
     } catch (retryErr: any) {
+      // D-ENQFAIL: Tracking push enqueue failed — persist dead-letter.
       console.error(
         `[ShipStation Webhook] Failed to enqueue delayed tracking push retry for order ${omsOrderId}: ${retryErr?.message ?? retryErr}`,
       );
+      try {
+        await db.insert(omsOrderEvents).values({
+          orderId: omsOrderId,
+          eventType: "fulfillment_push_enqueue_failed",
+          details: {
+            wmsShipmentId: shipmentId,
+            enqueueError: retryErr?.message ?? String(retryErr),
+            channel: "non-shopify",
+            requiresReview: true,
+          },
+        });
+      } catch (_dlErr) {
+        // Last resort — the structured log above is our only trace
+      }
     }
   }
 
@@ -1882,9 +1930,24 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         console.log(`[ShipStation Webhook V2] Enqueued delayed tracking push for order ${omsOrderId}, shipment ${shipmentId}`);
       }
     } catch (pushErr: any) {
+      // D-ENQFAIL: Tracking push enqueue failed — persist dead-letter.
       console.error(
         `[ShipStation Webhook V2] Failed to enqueue tracking push for order ${omsOrderId}: ${pushErr.message}`,
       );
+      try {
+        await db.insert(omsOrderEvents).values({
+          orderId: omsOrderId,
+          eventType: "fulfillment_push_enqueue_failed",
+          details: {
+            wmsShipmentId: shipmentId,
+            enqueueError: pushErr?.message ?? String(pushErr),
+            channel: "non-shopify",
+            requiresReview: true,
+          },
+        });
+      } catch (_dlErr) {
+        // Last resort — the structured log above is our only trace
+      }
     }
   }
 

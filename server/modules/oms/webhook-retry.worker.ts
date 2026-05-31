@@ -279,18 +279,23 @@ export async function enqueueShopifyFulfillmentRetry(
     return;
   }
 
-  await insertWebhookRetryQueueRow(dbArg, {
-    provider: "internal",
-    topic: "shopify_fulfillment_push",
-    payload: { shipmentId },
-    attempts: 0,
-    status: "pending",
-    lastError: message || null,
-    // First retry ~5 minutes out (matches enqueueShipStationRetry).
-    // Worker's exponential backoff (2^attempts minutes) takes over
-    // on subsequent failures via recordRetryFailure.
-    nextRetryAt: new Date(Date.now() + 5 * 60_000),
-  });
+  try {
+    await insertWebhookRetryQueueRow(dbArg, {
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId },
+      attempts: 0,
+      status: "pending",
+      lastError: message || null,
+      nextRetryAt: new Date(Date.now() + 5 * 60_000),
+    });
+  } catch (err: any) {
+    // D-RETRYDEDUP: Unique index catches race between concurrent enqueues
+    if (err?.code === "23505" && String(err?.constraint ?? "").includes("pending_dedup")) {
+      return;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -333,15 +338,22 @@ export async function enqueueDelayedTrackingPush(
     return;
   }
 
-  await insertWebhookRetryQueueRow(dbArg, {
-    provider: "internal",
-    topic: "delayed_tracking_push",
-    payload: shipmentId ? { orderId, shipmentId } : { orderId },
-    attempts: 0,
-    status: "pending",
-    // 5-minute initial delay
-    nextRetryAt: new Date(Date.now() + 5 * 60_000),
-  });
+  try {
+    await insertWebhookRetryQueueRow(dbArg, {
+      provider: "internal",
+      topic: "delayed_tracking_push",
+      payload: shipmentId ? { orderId, shipmentId } : { orderId },
+      attempts: 0,
+      status: "pending",
+      nextRetryAt: new Date(Date.now() + 5 * 60_000),
+    });
+  } catch (err: any) {
+    // D-RETRYDEDUP: Unique index catches race between concurrent enqueues
+    if (err?.code === "23505" && String(err?.constraint ?? "").includes("pending_dedup")) {
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function enqueueOmsWmsSyncRetry(
