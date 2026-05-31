@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { cancelOrder, markOrderShipped } from "../orders/order-status-core";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueDelayedTrackingPush,
@@ -997,40 +998,30 @@ export async function remediateOmsFlowIssue(
     const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
     const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
     const updated = await withOptionalTransaction(db, async (tx) => {
-      const result = await tx.execute(sql`
-        UPDATE wms.orders wo
-        SET warehouse_status = CASE
-              WHEN oo.status = 'cancelled' THEN 'cancelled'
-              WHEN oo.status = 'shipped' THEN 'shipped'
-              WHEN oo.status = 'refunded' THEN 'cancelled'
-              WHEN oo.financial_status = 'refunded' THEN 'cancelled'
-              ELSE wo.warehouse_status
-            END,
-            assigned_picker_id = CASE
-              WHEN oo.status IN ('cancelled', 'refunded') OR oo.financial_status = 'refunded' THEN NULL
-              ELSE wo.assigned_picker_id
-            END,
-            cancelled_at = CASE
-              WHEN oo.status IN ('cancelled', 'refunded') OR oo.financial_status = 'refunded' THEN COALESCE(wo.cancelled_at, NOW())
-              ELSE wo.cancelled_at
-            END,
-            updated_at = NOW()
+      const omsResult: any = await tx.execute(sql`
+        SELECT oo.status, oo.financial_status
         FROM oms.oms_orders oo
-        WHERE wo.id = ${wmsOrderId}
-          AND oo.id = ${omsOrderId}
-          AND (
-               (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-            OR (wo.source_table_id = oo.id::text)
-          )
-          AND (
-               oo.status IN ('cancelled', 'shipped', 'refunded')
-            OR oo.financial_status = 'refunded'
-          )
-          AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
-        RETURNING wo.id
+        JOIN wms.orders wo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE oo.id = ${omsOrderId}
+          AND wo.id = ${wmsOrderId}
+          AND (oo.status IN ('cancelled', 'shipped', 'refunded') OR oo.financial_status = 'refunded')
+        LIMIT 1
       `);
+      const omsRow = omsResult?.rows?.[0];
+      if (!omsRow) return false;
 
-      if (rows(result).length > 0) {
+      const isCancelled = omsRow.status === "cancelled" || omsRow.status === "refunded" || omsRow.financial_status === "refunded";
+      const transResult = isCancelled
+        ? await cancelOrder(tx, wmsOrderId, `oms_flow_reconcile_${omsRow.status}`)
+        : await markOrderShipped(tx, wmsOrderId, "oms_flow_reconcile_shipped");
+
+      if (transResult.transitioned) {
+        if (isCancelled) {
+          await tx.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${wmsOrderId}`);
+        }
         await tx.execute(sql`
           INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
           VALUES (
@@ -1041,7 +1032,7 @@ export async function remediateOmsFlowIssue(
           )
         `);
       }
-      return rows(result).length > 0;
+      return transResult.transitioned;
     });
 
     return {

@@ -14,6 +14,8 @@ import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
+import { transitionOrderStatus, completeOrder } from "./order-status-core";
+import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -671,18 +673,23 @@ export const orderMethods: IOrderStorage = {
           shippableItems.every(i => i.status === "completed" || i.status === "short");
         if (allShippableDone) {
           const hasShort = shippableItems.some(i => i.status === "short");
-          const fixedStatus = hasShort ? "exception" : "completed";
+          const fixedStatus: WmsWarehouseStatus = hasShort ? "exception" : "completed";
           try {
-            await db.execute(
-              sql`UPDATE wms.orders SET warehouse_status = ${fixedStatus}, completed_at = NOW() WHERE id = ${order.id}`
-            );
-            const nonShippablePending = items.filter(i => i.requiresShipping !== 1 && i.status === "pending");
-            for (const item of nonShippablePending) {
-              await db.execute(sql`UPDATE wms.order_items SET status = 'completed' WHERE id = ${item.id}`);
-              item.status = "completed";
+            const result = await transitionOrderStatus(db, order.id, {
+              from: ["in_progress" as WmsWarehouseStatus],
+              to: fixedStatus,
+              reason: "self_heal_all_items_done",
+              setCompletedAt: true,
+            });
+            if (result.transitioned) {
+              const nonShippablePending = items.filter(i => i.requiresShipping !== 1 && i.status === "pending");
+              for (const item of nonShippablePending) {
+                await db.execute(sql`UPDATE wms.order_items SET status = 'completed' WHERE id = ${item.id}`);
+                item.status = "completed";
+              }
+              order.warehouseStatus = fixedStatus;
+              order.completedAt = new Date();
             }
-            order.warehouseStatus = fixedStatus;
-            order.completedAt = new Date();
           } catch (err) {
             console.error(`[PickQueue] Failed to auto-fix order ${order.orderNumber}:`, err);
           }
@@ -697,14 +704,14 @@ export const orderMethods: IOrderStorage = {
         );
         if (pendingShippable.length === 0) {
           try {
-            await db.execute(
-              sql`UPDATE wms.orders SET warehouse_status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = ${order.id}`,
-            );
-            order.warehouseStatus = "completed";
-            order.completedAt = new Date();
-            console.log(
-              `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): zero shippable items → completed`,
-            );
+            const result = await completeOrder(db, order.id, "self_heal_zero_shippable");
+            if (result.transitioned) {
+              order.warehouseStatus = "completed";
+              order.completedAt = new Date();
+              console.log(
+                `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): zero shippable items → completed`,
+              );
+            }
           } catch (err) {
             console.error(`[PickQueue] Failed to auto-complete zero-item order ${order.orderNumber}:`, err);
           }
@@ -1537,11 +1544,12 @@ export const orderMethods: IOrderStorage = {
   },
 
   async transitionStuckOrder(orderId: number, newStatus: string): Promise<void> {
-    await db.execute(sql`
-      UPDATE wms.orders
-      SET warehouse_status = ${newStatus}, completed_at = NOW()
-      WHERE id = ${orderId}
-    `);
+    await transitionOrderStatus(db, orderId, {
+      from: ["in_progress" as WmsWarehouseStatus],
+      to: newStatus as WmsWarehouseStatus,
+      reason: "fix_stuck_in_progress",
+      setCompletedAt: true,
+    });
   },
 
   async completeNonShippableItems(orderId: number): Promise<void> {

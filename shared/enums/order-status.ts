@@ -30,10 +30,12 @@ export type OmsOrderStatus = (typeof OMS_ORDER_STATUS_VALUES)[number];
 
 export const WMS_WAREHOUSE_STATUS_VALUES = [
   "ready",
+  "in_progress",
   "picking",
   "picked",
   "packing",
   "packed",
+  "completed",
   "ready_to_ship",
   "partially_shipped",
   "shipped",
@@ -135,10 +137,12 @@ export function deriveOmsFromWms(
     case "cancelled":
       return "cancelled";
     case "ready":
+    case "in_progress":
     case "picking":
     case "picked":
     case "packing":
     case "packed":
+    case "completed":
     case "ready_to_ship":
     case "on_hold":
     case "exception":
