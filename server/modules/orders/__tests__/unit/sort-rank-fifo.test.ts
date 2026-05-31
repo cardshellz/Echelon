@@ -54,7 +54,7 @@ describe("computeSortRank — DESC ordering (higher = higher priority)", () => {
       slaDueAt: SLA_DEADLINE,
       orderPlacedAt: SAME_DAY_EVENING,
     }).split("-");
-    expect(earlyParts[3]).toBe(lateParts[3]);
+    expect(earlyParts[2]).toBe(lateParts[2]);
   });
 
   it("earlier SLA deadline produces higher S component (more urgent, sorts first)", () => {
@@ -65,17 +65,33 @@ describe("computeSortRank — DESC ordering (higher = higher priority)", () => {
       onHold: false,
       slaDueAt: urgentSla,
       orderPlacedAt: SAME_DAY_MORNING,
-    }).split("-")[3];
+    }).split("-")[2];
     const relaxed = computeSortRank({
       priority: 100,
       onHold: false,
       slaDueAt: relaxedSla,
       orderPlacedAt: SAME_DAY_MORNING,
-    }).split("-")[3];
+    }).split("-")[2];
     expect(Number(urgent) > Number(relaxed)).toBe(true);
   });
 
-  it("expedited order sorts before standard — higher sort_rank even when placed later", () => {
+  it("earlier SLA deadline sorts before higher priority when both are not bumped", () => {
+    const urgentStandard = computeSortRank({
+      priority: 100,
+      onHold: false,
+      slaDueAt: new Date("2025-06-02T17:00:00Z"),
+      orderPlacedAt: SAME_DAY_AFTERNOON,
+    });
+    const relaxedExpedited = computeSortRank({
+      priority: 300,
+      onHold: false,
+      slaDueAt: new Date("2025-06-05T17:00:00Z"),
+      orderPlacedAt: SAME_DAY_MORNING,
+    });
+    expect(urgentStandard > relaxedExpedited).toBe(true);
+  });
+
+  it("higher priority breaks ties when SLA deadline matches", () => {
     const standard = computeSortRank({
       priority: 100,
       onHold: false,
