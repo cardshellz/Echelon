@@ -845,14 +845,11 @@ export function createFulfillmentPushService(
     // Shopify fulfillments. We only consult the shipment row for this
     // check — none of the downstream queries fire when the row says we
     // already pushed.
-    // D-PUSHIDEM: FOR UPDATE serializes concurrent pushes to the same
-    // shipment, closing the TOCTOU window where two callers both see
-    // NULL and both call Shopify.
     const idempotencyResult: any = await db.execute(sql`
       SELECT shopify_fulfillment_id
       FROM wms.outbound_shipments
       WHERE id = ${shipmentId}
-      FOR UPDATE
+      LIMIT 1
     `);
     const existingFulfillmentId: string | null =
       idempotencyResult?.rows?.[0]?.shopify_fulfillment_id ?? null;
@@ -1327,12 +1324,26 @@ export function createFulfillmentPushService(
     }
 
     // ---- 10. Persist Fulfillment.id back to WMS -----------------------
-    await db.execute(sql`
+    // D-PUSHIDEM: Conditional UPDATE — only writes if no concurrent caller
+    // already persisted a fulfillment ID. If rowCount is 0, another caller
+    // won the race; we skip the audit event and return their result.
+    const persistResult: any = await db.execute(sql`
       UPDATE wms.outbound_shipments
          SET shopify_fulfillment_id = ${fulfillmentGid},
              updated_at = NOW()
        WHERE id = ${shipmentId}
+         AND (shopify_fulfillment_id IS NULL OR shopify_fulfillment_id = '')
     `);
+
+    const persistRowCount = persistResult?.rowCount ?? null;
+    if (persistRowCount === 0) {
+      const recheck: any = await db.execute(sql`
+        SELECT shopify_fulfillment_id FROM wms.outbound_shipments WHERE id = ${shipmentId} LIMIT 1
+      `);
+      const existingId = recheck?.rows?.[0]?.shopify_fulfillment_id ?? fulfillmentGid;
+      incr("shopify_push_concurrent_skip", 1, { shipmentId });
+      return { shopifyFulfillmentId: existingId, alreadyPushed: true };
+    }
 
     // D-PUSHAUDIT: Record successful Shopify push in OMS event trail.
     const omsId = parseInt(String(order.oms_fulfillment_order_id ?? ""), 10);
@@ -1340,7 +1351,7 @@ export function createFulfillmentPushService(
       try {
         await db.insert(omsOrderEvents).values({
           orderId: omsId,
-          eventType: "fulfillment_pushed",
+          eventType: "shopify_fulfillment_pushed",
           details: {
             provider: "shopify",
             shopifyFulfillmentId: fulfillmentGid,
@@ -1351,7 +1362,7 @@ export function createFulfillmentPushService(
         });
       } catch (auditErr: any) {
         console.warn(
-          `[pushShopifyFulfillment] Failed to record fulfillment_pushed event for OMS order ${omsId}: ${auditErr?.message}`,
+          `[pushShopifyFulfillment] Failed to record shopify_fulfillment_pushed event for OMS order ${omsId}: ${auditErr?.message}`,
         );
       }
     }

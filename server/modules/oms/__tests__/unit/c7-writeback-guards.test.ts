@@ -81,7 +81,7 @@ describe("D-ENQFAIL: dead-letter on enqueue failure", () => {
 // ─── D-PUSHAUDIT structural checks ───────────────────────────────
 
 describe("D-PUSHAUDIT: OMS event on successful Shopify push", () => {
-  it("records fulfillment_pushed event after persisting shopify_fulfillment_id", () => {
+  it("records shopify_fulfillment_pushed event after persisting shopify_fulfillment_id", () => {
     const pushFnStart = FULFILLMENT_PUSH_SRC.indexOf(
       "async function pushSingleShipmentFulfillment",
     );
@@ -90,11 +90,24 @@ describe("D-PUSHAUDIT: OMS event on successful Shopify push", () => {
       pushFnStart + 10,
     );
     const fnBlock = FULFILLMENT_PUSH_SRC.substring(pushFnStart, pushFnEnd);
-    expect(fnBlock).toContain("fulfillment_pushed");
+    expect(fnBlock).toContain("shopify_fulfillment_pushed");
     expect(fnBlock).toContain("shopifyFulfillmentId");
     expect(fnBlock).toContain("wmsShipmentId");
     expect(fnBlock).toContain("trackingNumber");
     expect(fnBlock).toContain("carrier");
+  });
+
+  it("uses event type matching what reconcilers and ops-health query for", () => {
+    const pushFnStart = FULFILLMENT_PUSH_SRC.indexOf(
+      "async function pushSingleShipmentFulfillment",
+    );
+    const pushFnEnd = FULFILLMENT_PUSH_SRC.indexOf(
+      "async function",
+      pushFnStart + 10,
+    );
+    const fnBlock = FULFILLMENT_PUSH_SRC.substring(pushFnStart, pushFnEnd);
+    expect(fnBlock).toContain("shopify_fulfillment_pushed");
+    expect(fnBlock).not.toMatch(/eventType:\s*"fulfillment_pushed"/);
   });
 
   it("resolves OMS order id from oms_fulfillment_order_id", () => {
@@ -117,14 +130,23 @@ describe("D-PUSHAUDIT: OMS event on successful Shopify push", () => {
 
 // ─── D-PUSHIDEM structural checks ────────────────────────────────
 
-describe("D-PUSHIDEM: FOR UPDATE on idempotency check", () => {
-  it("uses FOR UPDATE on the shipment row idempotency check", () => {
-    const idempBlock = FULFILLMENT_PUSH_SRC.substring(
-      FULFILLMENT_PUSH_SRC.indexOf("Idempotency check (D1)"),
-      FULFILLMENT_PUSH_SRC.indexOf("shopify_push_attempted"),
+describe("D-PUSHIDEM: conditional UPDATE serializes concurrent pushes", () => {
+  it("uses conditional UPDATE with NULL guard when persisting fulfillment ID", () => {
+    const persistBlock = FULFILLMENT_PUSH_SRC.substring(
+      FULFILLMENT_PUSH_SRC.indexOf("D-PUSHIDEM"),
+      FULFILLMENT_PUSH_SRC.indexOf("D-PUSHAUDIT"),
     );
-    expect(idempBlock).toContain("FOR UPDATE");
-    expect(idempBlock).toContain("shopify_fulfillment_id");
+    expect(persistBlock).toContain("shopify_fulfillment_id IS NULL");
+    expect(persistBlock).toContain("rowCount");
+  });
+
+  it("returns idempotent skip when concurrent caller wins", () => {
+    const persistBlock = FULFILLMENT_PUSH_SRC.substring(
+      FULFILLMENT_PUSH_SRC.indexOf("D-PUSHIDEM"),
+      FULFILLMENT_PUSH_SRC.indexOf("D-PUSHAUDIT"),
+    );
+    expect(persistBlock).toContain("shopify_push_concurrent_skip");
+    expect(persistBlock).toContain("alreadyPushed: true");
   });
 });
 
