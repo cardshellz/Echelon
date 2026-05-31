@@ -4,12 +4,12 @@
  * (ShipStation customField1) that can only sort by one field produce
  * the same order Echelon's picker sees.
  *
- * Format: H-B-PPPP-SSSSSS-AAAAAAAAAA  (22 chars total)
+ * Format: H-B-SSSSSS-PPPP-AAAAAAAAAA
  *   H          1 char   "1" if NOT on hold, "0" if held
  *   B          1 char   "1" if priority >= 9999 (bumped), "0" otherwise
- *   PPPP       4 chars  priority 0000-9999, zero-padded
  *   SSSSSS     6 chars  SLA deadline: 999999 - days_since_epoch(sla_due_at)
  *                       higher = earlier deadline = more urgent
+ *   PPPP       4 chars  priority 0000-9999, zero-padded
  *   AAAAAAAAAA 10 chars age: 9999999999 - unix_seconds(placed_at)
  *                       higher = older order = ships first (FIFO)
  *
@@ -80,7 +80,7 @@ export function computeSortRank(input: SortRankInput): string {
   }
   const A = pad(Math.min(AGE_MAX, ageComponent), AGE_WIDTH);
 
-  return `${H}-${B}-${P}-${S}-${A}`;
+  return `${H}-${B}-${S}-${P}-${A}`;
 }
 
 // ---------------------------------------------------------------------------

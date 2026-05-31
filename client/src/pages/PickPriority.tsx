@@ -6,7 +6,7 @@
 //   3. SLA default fallback days
 //
 // A live preview at the top shows the resulting composite sort_rank string
-// for a sample order, computed client-side using the same H-B-PPPP-SSSSSS-AAAAAAAAAA
+// for a sample order, computed client-side using the same H-B-SSSSSS-PPPP-AAAAAAAAAA
 // format as server/modules/orders/sort-rank.ts. Useful for reasoning about
 // how changes to each input move an order up or down the queue.
 //
@@ -102,7 +102,7 @@ function computeSortRankPreview(params: {
   const ageComponent = Math.max(0, AGE_MAX - unixSeconds);
   const A = pad(Math.min(AGE_MAX, ageComponent), AGE_WIDTH);
 
-  return `${H}-${B}-${P}-${S}-${A}`;
+  return `${H}-${B}-${S}-${P}-${A}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -487,11 +487,11 @@ export default function PickPriority() {
           <pre className="text-xs font-mono bg-muted/50 p-3 rounded-md overflow-x-auto whitespace-pre">
 {`H           1 = not held, 0 = held (bottom)
 B           1 = bumped (priority \u2265 9999), 0 = normal
-PPPP        shipping_base + plan_modifier (0\u20139999)
 SSSSSS      SLA urgency (higher = more urgent)
+PPPP        shipping_base + plan_modifier (0\u20139999)
 AAAAAAAAAA  inverse unix seconds of order_placed_at (older = higher)
 
-Format: H-B-PPPP-SSSSSS-AAAAAAAAAA
+Format: H-B-SSSSSS-PPPP-AAAAAAAAAA
 Sort DESC on this string = pick queue order.`}
           </pre>
         </CardContent>
