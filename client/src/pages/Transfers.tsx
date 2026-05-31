@@ -268,6 +268,17 @@ export default function Transfers() {
         setReservationPrompt({ payload: variables, ...error.context });
         return;
       }
+      // Fallback: if a cached client bundle routes through apiRequest's
+      // throwIfResNotOk, the error message is "409: {json}" — parse it.
+      if (error?.message?.includes("TRANSFER_BLOCKED_BY_RESERVATION")) {
+        try {
+          const body = JSON.parse(error.message.replace(/^\d+:\s*/, ""));
+          if (body.context) {
+            setReservationPrompt({ payload: variables, ...body.context });
+            return;
+          }
+        } catch { /* fall through to generic toast */ }
+      }
       playSoundWithHaptic("error", "classic", true);
       toast({ title: "Transfer Failed", description: error.message, variant: "destructive" });
     }

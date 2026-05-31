@@ -227,6 +227,27 @@ export function registerOmsRoutes(app: Express) {
   });
 
   // -----------------------------------------------------------------------
+  // POST /api/oms/shipments/:id/push — manual WMS shipment push to engine
+  // -----------------------------------------------------------------------
+  app.post("/api/oms/shipments/:id/push", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const shipmentId = Number(req.params.id);
+      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+        return res.status(400).json({ error: "Invalid shipment ID" });
+      }
+      const ss = getShipStation(req);
+      if (!ss || !ss.isConfigured()) {
+        return res.status(503).json({ error: "ShipStation not configured" });
+      }
+      const result = await ss.pushShipment(shipmentId);
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      console.error("[OMS Routes] Push shipment error:", err);
+      res.status(err.httpStatus || 500).json({ error: err.message, code: err.code });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // POST /api/oms/orders/:id/push-to-shipstation — manual ShipStation push
   // -----------------------------------------------------------------------
   app.post("/api/oms/orders/:id/push-to-shipstation", requireAuth, async (req: Request, res: Response) => {
