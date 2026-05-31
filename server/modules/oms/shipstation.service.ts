@@ -1008,14 +1008,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         return existing.rows[0];
       }
 
+      const ssOrderKey = shipment.orderKey || parent.shipstation_order_key;
       const inserted: any = await db.execute(sql`
         INSERT INTO wms.outbound_shipments
           (order_id, channel_id, external_fulfillment_id, source, status,
-           shipstation_order_id, shipstation_order_key, created_at, updated_at)
+           shipstation_order_id, shipstation_order_key,
+           shipping_engine, engine_order_ref, engine_shipment_ref,
+           created_at, updated_at)
         VALUES
           (${orderId}, ${parent.channel_id}, ${externalFulfillmentId},
            ${SHIPSTATION_SPLIT_SOURCE}, 'queued',
-           ${shipment.orderId}, ${shipment.orderKey || parent.shipstation_order_key},
+           ${shipment.orderId}, ${ssOrderKey},
+           'shipstation', ${String(shipment.orderId)}, ${ssOrderKey},
            NOW(), NOW())
         RETURNING id, order_id, status, shipstation_order_id
       `);
@@ -1374,11 +1378,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           const inserted: any = await db.execute(sql`
             INSERT INTO wms.outbound_shipments
               (order_id, channel_id, external_fulfillment_id, source, status,
-               shipstation_order_id, shipstation_order_key, created_at, updated_at)
+               shipstation_order_id, shipstation_order_key,
+               shipping_engine, engine_order_ref, engine_shipment_ref,
+               created_at, updated_at)
             VALUES
               (${wmsOrderId}, ${wmsOrder.channel_id}, ${externalFulfillmentId},
                ${SHIPSTATION_COMBINED_CHILD_SOURCE}, 'queued',
-               ${shipment.orderId}, ${shipment.orderKey}, NOW(), NOW())
+               ${shipment.orderId}, ${shipment.orderKey},
+               'shipstation', ${String(shipment.orderId)}, ${shipment.orderKey},
+               NOW(), NOW())
             RETURNING id, order_id, status, shipstation_order_id
           `);
           shipmentRow = inserted?.rows?.[0] ?? null;
@@ -3476,12 +3484,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       payload,
     );
 
-    // ─── 7. Mark shipment queued + persist SS pointers ──────────────
+    // ─── 7. Mark shipment queued + persist engine refs ────────────────
+    // Write both the legacy SS columns (back-compat) and the engine-
+    // agnostic triple (C9) in a single atomic UPDATE.
     const now = new Date();
     await db.execute(sql`
       UPDATE wms.outbound_shipments
       SET shipstation_order_id = ${result.orderId},
           shipstation_order_key = ${orderKey},
+          shipping_engine = 'shipstation',
+          engine_order_ref = ${String(result.orderId)},
+          engine_shipment_ref = ${orderKey},
           status = 'queued',
           voided_at = NULL,
           voided_reason = NULL,
@@ -3514,6 +3527,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     markAsShipped,
     cancelOrder,
     updateSortRank,
+    updateSortRankSingle: updateShipStationCustomField1,
     syncWmsOrderShipStationHoldState,
   };
 }

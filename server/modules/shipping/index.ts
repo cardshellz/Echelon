@@ -24,4 +24,5 @@ export {
   createShipStationEngine,
   toEngineRef,
   fromEngineRef,
+  engineRefFromRow,
 } from "./adapters/shipstation.adapter";

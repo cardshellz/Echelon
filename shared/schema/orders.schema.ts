@@ -432,10 +432,16 @@ export const outboundShipments = wmsSchema.table("outbound_shipments", {
   dunnageCostCents: bigint("dunnage_cost_cents", { mode: "number" }).default(0), // Packaging materials
   // totalShippingCostCents computed column added via migration
 
-  // ===== SHIPSTATION ↔ SHOPIFY LINKAGE =====
-  // Canonical pointers to the shipment's external-system counterparts.
-  // Added by migration 060 (§4.3). Populated by Group C (SS push) and
-  // Group E (Shopify fulfillment push) respectively.
+  // ===== SHIPPING ENGINE (C9) =====
+  // Engine-agnostic triple: identifies this shipment in the external
+  // shipping engine. Populated by the ShippingEngine adapter on push.
+  shippingEngine: varchar("shipping_engine", { length: 30 }),
+  engineOrderRef: varchar("engine_order_ref", { length: 200 }),
+  engineShipmentRef: varchar("engine_shipment_ref", { length: 200 }),
+
+  // ===== LEGACY ENGINE REFS (back-compat shadow) =====
+  // Kept during migration; the adapter writes both the triple above
+  // AND these columns so existing queries continue working.
   shipstationOrderId: integer("shipstation_order_id"),
   shipstationOrderKey: varchar("shipstation_order_key", { length: 100 }),
   shopifyFulfillmentId: varchar("shopify_fulfillment_id", { length: 100 }),

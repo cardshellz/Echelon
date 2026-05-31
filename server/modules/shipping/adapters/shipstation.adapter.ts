@@ -52,6 +52,30 @@ export function fromEngineRef(ref: EngineRef): number {
   return id;
 }
 
+/**
+ * Build an EngineRef from a DB row that may have the new engine columns
+ * or only the legacy shipstation_order_id. Returns null if no ref found.
+ */
+export function engineRefFromRow(row: {
+  shipping_engine?: string | null;
+  engine_order_ref?: string | null;
+  engine_shipment_ref?: string | null;
+  shipstation_order_id?: number | null;
+  shipstation_order_key?: string | null;
+}): EngineRef | null {
+  if (row.shipping_engine && row.engine_order_ref) {
+    return {
+      engine: row.shipping_engine,
+      engineOrderRef: row.engine_order_ref,
+      engineShipmentRef: row.engine_shipment_ref ?? undefined,
+    };
+  }
+  if (row.shipstation_order_id != null && row.shipstation_order_id > 0) {
+    return toEngineRef(row.shipstation_order_id, row.shipstation_order_key);
+  }
+  return null;
+}
+
 export type ShipStationServiceHandle = {
   isConfigured(): boolean;
   pushShipment(shipmentId: number): Promise<{ shipstationOrderId: number; orderKey: string }>;
@@ -68,6 +92,7 @@ export type ShipStationServiceHandle = {
     },
   ): Promise<{ alreadyInState: boolean }>;
   updateSortRank(wmsOrderId: number): Promise<{ touched: number }>;
+  updateSortRankSingle(shipstationOrderId: number, sortRank: string): Promise<void>;
   getOrderById(shipstationOrderId: number): Promise<any | null>;
   getShipments(orderId: number, opts?: { orderNumber?: string }): Promise<any[]>;
   processShipNotify(resourceUrl: string): Promise<number>;
@@ -126,17 +151,11 @@ export function createShipStationEngine(
       return ss.markAsShipped(ssOrderId, opts);
     },
 
-    async updatePriority(engineRef: EngineRef, _sortRank: string): Promise<void> {
-      // updateSortRank works by wmsOrderId, not by SS order ID.
-      // In Phase 1, callers continue using ss.updateSortRank directly
-      // for WMS-order-scoped updates. This is a placeholder until C3
-      // stores the engineRef per-shipment and the adapter can update
-      // each engine order individually.
+    async updatePriority(engineRef: EngineRef, sortRank: string): Promise<void> {
       const ssOrderId = fromEngineRef(engineRef);
       const ssOrder = await ss.getOrderById(ssOrderId);
       if (!ssOrder) return;
-      // No direct single-order sort rank update in current service.
-      // The existing service does a batch update via updateSortRank(wmsOrderId).
+      await ss.updateSortRankSingle(ssOrderId, sortRank);
     },
 
     async getState(engineRef: EngineRef): Promise<EngineOrderState | null> {

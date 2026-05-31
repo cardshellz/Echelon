@@ -56,6 +56,7 @@ import { recordReceivingReconciliationFailure } from "../modules/procurement/po-
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createShipStationService } from "../modules/oms/shipstation.service";
+import { createShipStationEngine } from "../modules/shipping";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -241,6 +242,9 @@ export function createServices(db: any) {
   // ShipStation — order push + webhook integration
   const shipStation = createShipStationService(db, inventoryCore as any);
 
+  // C9 ShippingEngine — engine-agnostic port over ShipStation (adapter #1)
+  const shippingEngine = createShipStationEngine(shipStation);
+
   // WMS Sync — bridges OMS → WMS for fulfillment
   const wmsSync = new WmsSyncService({
     inventoryCore: inventoryCore as any,
@@ -284,6 +288,7 @@ export function createServices(db: any) {
     oms,
     fulfillmentPush,
     shipStation,
+    shippingEngine,
     wmsSync,
     syncRecovery,
   };
