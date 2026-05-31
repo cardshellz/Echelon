@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X } from "lucide-react";
+import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X, AlertTriangle } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { format } from "date-fns";
 import { playSoundWithHaptic } from "@/lib/sounds";
@@ -247,13 +247,13 @@ export default function Transfers() {
         } catch {
           toast({ title: "Transfer Complete", description: "Inventory moved, but failed to update cycle count. Sync manually." });
         }
-      } else if (result?.reservedMoved > 0) {
+      } else if (transferResult?.reservedMoved > 0) {
         toast({
           title: "Transfer Complete",
           description:
-            `Inventory moved. ${result.reservedMoved} reserved unit(s) followed the stock` +
-            (result.orderItemsRepointed > 0
-              ? `; ${result.orderItemsRepointed} pending order line(s) re-pointed to the new bin.`
+            `Inventory moved. ${transferResult.reservedMoved} reserved unit(s) followed the stock` +
+            (transferResult.orderItemsRepointed > 0
+              ? `; ${transferResult.orderItemsRepointed} pending order line(s) re-pointed to the new bin.`
               : "."),
         });
       } else {
