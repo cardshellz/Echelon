@@ -221,7 +221,7 @@ export interface IOrderStorage {
   getOrderById(id: number): Promise<Order | undefined>;
   getOrdersWithItems(status?: OrderStatus[]): Promise<(Order & { items: OrderItem[] })[]>;
   getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]>;
-  createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order>;
+  createOrderWithItems(order: InsertOrder, items: InsertOrderItem[], txOverride?: any): Promise<Order>;
   claimOrder(orderId: number, pickerId: string): Promise<Order | null>;
   releaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
   forceReleaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
@@ -764,7 +764,7 @@ export const orderMethods: IOrderStorage = {
     })) as any;
   },
 
-  async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order> {
+  async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[], txOverride?: any): Promise<Order> {
     const create = async (tx: any): Promise<Order> => {
       await lockWmsOrderCreate(tx, order);
 
@@ -804,6 +804,10 @@ export const orderMethods: IOrderStorage = {
 
       return newOrder;
     };
+
+    if (txOverride) {
+      return create(txOverride);
+    }
 
     if (typeof db.transaction === "function") {
       return db.transaction(create);

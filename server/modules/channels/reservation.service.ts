@@ -93,7 +93,10 @@ class ReservationService {
     orderId: number,
     orderItemId: number,
     userId?: string,
+    dbOverride?: any,
   ): Promise<ReserveForOrderResult> {
+    const dbh = dbOverride ?? this.db;
+
     if (orderQty <= 0) {
       return { reserved: 0, shortfall: 0 };
     }
@@ -132,7 +135,7 @@ class ReservationService {
     }
 
     // Step 3: Find the variant's assigned bin from product_locations
-    const [assignment] = await this.db
+    const [assignment] = await dbh
       .select({
         warehouseLocationId: productLocations.warehouseLocationId,
       })
@@ -152,7 +155,7 @@ class ReservationService {
     // for this variant. ATP already confirmed stock exists, so there must
     // be an inventory_levels row somewhere (e.g. received but not yet slotted).
     if (!reserveLocationId) {
-      const [fallbackLevel] = await this.db
+      const [fallbackLevel] = await dbh
         .select({
           warehouseLocationId: inventoryLevels.warehouseLocationId,
         })
@@ -186,7 +189,7 @@ class ReservationService {
       orderId,
       orderItemId,
       userId,
-    });
+    }, dbOverride);
 
     if (!success) {
       // Should not happen since core no longer checks bin-level stock,
@@ -216,7 +219,8 @@ class ReservationService {
    * Items that cannot be reserved (variant not found, zero ATP) are
    * recorded in the `failed` array -- they never block other items.
    */
-  async reserveOrder(orderId: number, userId?: string): Promise<ReservationResult> {
+  async reserveOrder(orderId: number, userId?: string, dbOverride?: any): Promise<ReservationResult> {
+    const dbh = dbOverride ?? this.db;
     const result: ReservationResult = {
       orderId,
       reserved: 0,
@@ -225,7 +229,7 @@ class ReservationService {
     };
 
     // Fetch all line items for this order
-    const items = await this.db
+    const items = await dbh
       .select()
       .from(orderItems)
       .where(eq(orderItems.orderId, orderId));
@@ -235,7 +239,7 @@ class ReservationService {
     for (const item of items) {
       try {
         // 1. Resolve product variant by SKU
-        const [variant] = await this.db
+        const [variant] = await dbh
           .select()
           .from(productVariants)
           .where(eq(productVariants.sku, item.sku))
@@ -258,6 +262,7 @@ class ReservationService {
           orderId,
           item.id,
           userId,
+          dbOverride,
         );
 
         if (res.reserved > 0) {

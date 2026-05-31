@@ -453,10 +453,10 @@ export class InventoryUseCases {
     orderId: number;
     orderItemId: number;
     userId?: string;
-  }): Promise<boolean> {
+  }, txOverride?: any): Promise<boolean> {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
-    const result = await this.db.transaction(async (tx) => {
+    const doWork = async (tx: any) => {
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
@@ -490,7 +490,11 @@ export class InventoryUseCases {
       }, tx);
 
       return true;
-    });
+    };
+
+    const result = txOverride
+      ? await doWork(txOverride)
+      : await this.db.transaction(doWork);
 
     this.triggerNotifyChange(params.productVariantId, "reserve");
     return result;
