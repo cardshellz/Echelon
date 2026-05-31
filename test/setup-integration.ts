@@ -66,39 +66,20 @@ let migrationsRan = false;
  * we drop all test-relevant tables and recreate them from the schema definition.
  */
 async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promise<void> {
-  // Drop tables in dependency order (children first)
-  const dropOrder = [
-    "allocation_audit_log",
-    "channel_product_allocation",
-    "channel_product_lines",
-    "source_lock_config",
-    "channel_reservations",
-    "channel_sync_log",
-    "channel_asset_overrides",
-    "channel_variant_overrides",
-    "channel_listings",
-    "channel_pricing",
-    "channel_product_overrides",
-    "channel_feeds",
-    "channel_connections",
-    "partner_profiles",
-    "channels",
-    "product_line_products",
-    "product_lines",
-    "product_assets",
-    "product_variants",
-    "products",
-  ];
-
-  for (const table of dropOrder) {
-    try {
-      await testDb.execute(sql.raw(`DROP TABLE IF EXISTS "${table}" CASCADE`));
-    } catch { /* ignore */ }
-  }
-
-  // Use drizzle-kit introspection to generate DDL — but that's complex.
-  // Instead, use raw DDL that exactly matches the Drizzle schema.
-  // This is auto-generated from catalog.schema.ts + channels.schema.ts
+  // Drop all test tables in a single statement to handle cross-FK deps
+  await testDb.execute(sql.raw(`
+    DROP TABLE IF EXISTS
+      "allocation_audit_log", "channel_product_allocation",
+      "channel_product_lines", "source_lock_config",
+      "channel_reservations", "channel_sync_log",
+      "channel_asset_overrides", "channel_variant_overrides",
+      "channel_listings", "channel_pricing",
+      "channel_product_overrides", "channel_feeds",
+      "channel_connections", "partner_profiles", "channels",
+      "product_line_products", "product_lines", "product_assets",
+      "product_variants", "products"
+    CASCADE
+  `));
 
   // --- channels (base table, no schema-specific deps) ---
   await testDb.execute(sql.raw(`
@@ -122,7 +103,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- products ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "products" (
+    CREATE TABLE IF NOT EXISTS "products" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "sku" varchar(100),
       "name" text NOT NULL,
@@ -155,7 +136,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- product_variants ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "product_variants" (
+    CREATE TABLE IF NOT EXISTS "product_variants" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "product_id" integer NOT NULL REFERENCES "products"("id"),
       "sku" varchar(100),
@@ -196,7 +177,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- product_lines ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "product_lines" (
+    CREATE TABLE IF NOT EXISTS "product_lines" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "code" varchar(50) NOT NULL UNIQUE,
       "name" varchar(100) NOT NULL,
@@ -210,7 +191,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- product_line_products ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "product_line_products" (
+    CREATE TABLE IF NOT EXISTS "product_line_products" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "product_line_id" integer NOT NULL REFERENCES "product_lines"("id") ON DELETE CASCADE,
       "product_id" integer NOT NULL REFERENCES "products"("id") ON DELETE CASCADE,
@@ -220,7 +201,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- product_assets ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "product_assets" (
+    CREATE TABLE IF NOT EXISTS "product_assets" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "product_id" integer NOT NULL REFERENCES "products"("id") ON DELETE CASCADE,
       "url" text NOT NULL,
@@ -234,7 +215,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- source_lock_config ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "source_lock_config" (
+    CREATE TABLE IF NOT EXISTS "source_lock_config" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "channel_id" integer NOT NULL REFERENCES "channels"("id") ON DELETE CASCADE,
       "field_type" varchar(30) NOT NULL,
@@ -249,7 +230,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- channel_reservations ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "channel_reservations" (
+    CREATE TABLE IF NOT EXISTS "channel_reservations" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "channel_id" integer NOT NULL REFERENCES "channels"("id") ON DELETE CASCADE,
       "product_variant_id" integer REFERENCES "product_variants"("id") ON DELETE CASCADE,
@@ -265,7 +246,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- channel_product_lines ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "channel_product_lines" (
+    CREATE TABLE IF NOT EXISTS "channel_product_lines" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "channel_id" integer NOT NULL REFERENCES "channels"("id") ON DELETE CASCADE,
       "product_line_id" integer NOT NULL REFERENCES "product_lines"("id") ON DELETE CASCADE,
@@ -276,7 +257,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- channel_product_allocation ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "channel_product_allocation" (
+    CREATE TABLE IF NOT EXISTS "channel_product_allocation" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "channel_id" integer NOT NULL REFERENCES "channels"("id") ON DELETE CASCADE,
       "product_id" integer NOT NULL REFERENCES "products"("id") ON DELETE CASCADE,
@@ -291,7 +272,7 @@ async function bootstrapMissingTables(testDb: ReturnType<typeof drizzle>): Promi
 
   // --- allocation_audit_log ---
   await testDb.execute(sql.raw(`
-    CREATE TABLE "allocation_audit_log" (
+    CREATE TABLE IF NOT EXISTS "allocation_audit_log" (
       "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       "product_id" integer REFERENCES "products"("id"),
       "product_variant_id" integer REFERENCES "product_variants"("id"),

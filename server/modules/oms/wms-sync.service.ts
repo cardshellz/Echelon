@@ -570,6 +570,31 @@ export class WmsSyncService {
          AND warehouse_status NOT IN ('cancelled', 'shipped')
     `);
     for (const row of rows?.rows ?? []) {
+      // D-SYNCANCEL: Release inventory reservation before transitioning
+      // to cancelled. Without this, reserved units leak permanently.
+      try {
+        await this.services.reservation.releaseOrderReservation(
+          row.id,
+          "oms_final_state_cancel",
+        );
+      } catch (releaseErr: any) {
+        console.error(
+          `[WMS Sync] Failed to release reservation for WMS order ${row.id} during OMS cancel: ${releaseErr?.message}`,
+        );
+        try {
+          await db.insert(omsOrderEvents).values({
+            orderId: omsOrderId,
+            eventType: "cancel_release_failed",
+            details: {
+              wmsOrderId: row.id,
+              error: releaseErr?.message ?? String(releaseErr),
+              requiresReview: true,
+            },
+          });
+        } catch (_dlErr) {
+          // Structured log above is our trace
+        }
+      }
       await cancelWmsOrder(db, row.id, "oms_final_state_cancel");
     }
   }

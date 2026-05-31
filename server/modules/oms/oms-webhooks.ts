@@ -767,6 +767,21 @@ export async function applyShopifyRefundCascade(
         `${logPrefix} restock helper failed for wmsOrder=${wmsOrderId} ` +
           `(refund_external_id=${refundExternalId}): ${restockError}`,
       );
+      // D-REFUNDREL: Persist dead-letter so ops can find unreleased inventory.
+      try {
+        await db.insert(omsOrderEvents).values({
+          orderId: omsOrderId,
+          eventType: "refund_restock_failed",
+          details: {
+            wmsOrderId,
+            refundExternalId,
+            error: restockError,
+            requiresReview: true,
+          },
+        });
+      } catch (_dlErr) {
+        // Structured log above is our trace
+      }
     }
   }
 
@@ -1704,6 +1719,7 @@ export function registerOmsWebhooks(
       }
 
       const now = new Date();
+      let cancelCascadeDetails: Record<string, any> | undefined;
 
       // Update OMS order
       await db
@@ -1733,7 +1749,22 @@ export function registerOmsWebhooks(
             await wmsServices.reservation.releaseOrderReservation(wmsOrderId, "Order cancelled in Shopify");
             console.log(`${LOG_PREFIX} Released reservations for cancelled order ${shopifyOrder.name}`);
           } catch (e: any) {
+            // D-CANCELREL: Release failed — persist dead-letter so ops can find and remediate.
             console.error(`${LOG_PREFIX} Failed to release reservations for ${shopifyOrder.name}: ${e.message}`);
+            try {
+              await db.insert(omsOrderEvents).values({
+                orderId: existing.id,
+                eventType: "cancel_release_failed",
+                details: {
+                  wmsOrderId,
+                  error: e?.message ?? String(e),
+                  orderName: shopifyOrder.name,
+                  requiresReview: true,
+                },
+              });
+            } catch (_dlErr) {
+              // Structured log above is our trace
+            }
           }
 
           // Per Plan §6 Commit 28: cascade through the C19 per-shipment
@@ -1770,6 +1801,11 @@ export function registerOmsWebhooks(
           );
 
           if (cascade.hadShipments) {
+            cancelCascadeDetails = {
+              wmsOrderId,
+              shipmentOutcomes: cascade.cascadeResults,
+              rollupChanged: cascade.rollupChanged,
+            };
             console.log(
               `${LOG_PREFIX} cancel cascade for order ${shopifyOrder.name}: ${JSON.stringify(cascade.cascadeResults)}`,
             );
@@ -1779,11 +1815,12 @@ export function registerOmsWebhooks(
             // shipped (fulfillment is a fact) or already cancelled (idempotent).
             const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
             await cancelWmsOrder(db, wmsOrderId, "shopify_cancel_webhook");
+            cancelCascadeDetails = { wmsOrderId, noShipments: true };
           }
         }
       }
 
-      // Log event
+      // D-CANCELEVENT: Log event with cascade outcome details.
       await db.insert(omsOrderEvents).values({
         orderId: existing.id,
         eventType: "cancelled",
@@ -1791,6 +1828,7 @@ export function registerOmsWebhooks(
           source: "shopify_webhook",
           reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
           cancelledAt: now.toISOString(),
+          ...cancelCascadeDetails,
         },
       });
 
