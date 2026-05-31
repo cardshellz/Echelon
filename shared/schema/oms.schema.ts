@@ -85,9 +85,13 @@ export const omsOrders = omsSchema.table("oms_orders", {
   cancelledAt: timestamp("cancelled_at"),
   refundedAt: timestamp("refunded_at"),
 
-  // ShipStation integration
+  // ShipStation integration (legacy — use engine columns for new code)
   shipstationOrderId: integer("shipstation_order_id"),
   shipstationOrderKey: varchar("shipstation_order_key", { length: 100 }),
+
+  // Engine-agnostic shipping reference
+  shippingEngine: varchar("shipping_engine", { length: 30 }),
+  engineOrderRef: varchar("engine_order_ref", { length: 200 }),
 
   // Member enrichment (historical snapshot for analytics)
   memberTier: varchar("member_tier", { length: 50 }), // Tier at time of order

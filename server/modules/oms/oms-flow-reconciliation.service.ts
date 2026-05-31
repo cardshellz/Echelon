@@ -383,7 +383,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         JOIN wms.orders wo ON wo.id = os.order_id
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
-          AND os.shipstation_order_id IS NULL
+          AND os.engine_order_ref IS NULL
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -414,7 +414,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         JOIN wms.orders wo ON wo.id = os.order_id
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
-          AND os.shipstation_order_id IS NULL
+          AND os.engine_order_ref IS NULL
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -925,7 +925,7 @@ export async function remediateOmsFlowIssue(
       JOIN wms.orders wo ON wo.id = os.order_id
       WHERE os.id = ${shipmentId}
         AND os.status IN ('planned', 'queued')
-        AND os.shipstation_order_id IS NULL
+        AND os.engine_order_ref IS NULL
         AND os.created_at < NOW() - INTERVAL '15 minutes'
         AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
         AND EXISTS (

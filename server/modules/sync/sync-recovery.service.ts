@@ -181,7 +181,7 @@ export class SyncRecoveryService {
         SELECT id
         FROM wms.outbound_shipments
         WHERE status = 'planned'
-          AND shipstation_order_id IS NULL
+          AND engine_order_ref IS NULL
         ORDER BY created_at ASC
         LIMIT ${shipmentLimit}
       `);

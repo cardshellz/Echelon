@@ -473,6 +473,7 @@ async function applyRefundLineAdjustmentsToWms(
     adjustments: ShopifyRefundLineAdjustment[];
     now: Date;
     shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
+    shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> };
   },
 ): Promise<{ adjustedLines: number; heldShipments: number }> {
   let adjustedLines = 0;
@@ -520,7 +521,9 @@ async function applyRefundLineAdjustmentsToWms(
 
   const holdResult: any = await db.execute(sql`
     WITH affected_shipments AS (
-      SELECT DISTINCT os.id, os.shipstation_order_id, os.status
+      SELECT DISTINCT os.id, os.shipstation_order_id,
+             os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
+             os.shipstation_order_key, os.status
       FROM wms.outbound_shipments os
       JOIN wms.outbound_shipment_items si ON si.shipment_id = os.id
       JOIN wms.order_items wi ON wi.id = si.order_item_id
@@ -542,26 +545,42 @@ async function applyRefundLineAdjustmentsToWms(
       FROM affected_shipments af
       WHERE os.id = af.id
         AND os.status IN ('queued', 'labeled', 'shipped')
-      RETURNING os.id, af.shipstation_order_id, af.status AS previous_status
+      RETURNING os.id, af.shipstation_order_id, af.shipping_engine,
+                af.engine_order_ref, af.engine_shipment_ref,
+                af.shipstation_order_key, af.status AS previous_status
     )
     SELECT * FROM held
   `);
-  const heldRows: Array<{ id: number; shipstation_order_id: number | null; previous_status: string }> = holdResult?.rows ?? [];
+  const heldRows: Array<{
+    id: number;
+    shipstation_order_id: number | null;
+    shipping_engine: string | null;
+    engine_order_ref: string | null;
+    engine_shipment_ref: string | null;
+    shipstation_order_key: string | null;
+    previous_status: string;
+  }> = holdResult?.rows ?? [];
   for (const row of heldRows) {
-    if (
-      row.previous_status === "queued" &&
-      typeof row.shipstation_order_id === "number" &&
-      Number.isInteger(row.shipstation_order_id) &&
-      row.shipstation_order_id > 0 &&
-      args.shipstation
-    ) {
-      try {
+    if (row.previous_status !== "queued") continue;
+    const hasEngineRef = row.engine_order_ref || (row.shipstation_order_id && row.shipstation_order_id > 0);
+    if (!hasEngineRef) continue;
+
+    try {
+      if (args.shippingEngine) {
+        const { engineRefFromRow } = await import("../shipping");
+        const ref = engineRefFromRow(row);
+        if (ref) await args.shippingEngine.cancel(ref);
+      } else if (
+        args.shipstation &&
+        typeof row.shipstation_order_id === "number" &&
+        row.shipstation_order_id > 0
+      ) {
         await args.shipstation.cancelOrder(row.shipstation_order_id);
-      } catch (err: any) {
-        console.error(
-          `[applyRefundLineAdjustmentsToWms] ShipStation cancel failed for held shipment ${row.id}: ${err?.message ?? err}`,
-        );
       }
+    } catch (err: any) {
+      console.error(
+        `[applyRefundLineAdjustmentsToWms] Engine cancel failed for held shipment ${row.id}: ${err?.message ?? err}`,
+      );
     }
   }
 
@@ -597,6 +616,7 @@ export async function applyShopifyRefundCascade(
       },
     ) => Promise<void>;
     shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
+    shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> };
   },
   opts: {
     channelId: number;
@@ -677,6 +697,7 @@ export async function applyShopifyRefundCascade(
     adjustments: lineAdjustments,
     now,
     shipstation: helpers.shipstation,
+    shippingEngine: helpers.shippingEngine,
   });
 
   // ── 5. Idempotency check (do this before shipment resolution to
@@ -1019,6 +1040,7 @@ export function registerOmsWebhooks(
   wmsServices: WmsServices | null,
   shipStationService: ShipStationService | null,
   wmsSyncService?: any, // WmsSyncService - will be set from server/index.ts
+  shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> } | null,
 ) {
   const webhookLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
@@ -2087,6 +2109,7 @@ export function registerOmsWebhooks(
                   },
                 }
               : undefined,
+            shippingEngine: shippingEngine ?? undefined,
           },
           { channelId, now, logPrefix: LOG_PREFIX },
         );

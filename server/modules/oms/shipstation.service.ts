@@ -774,12 +774,14 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       payload,
     );
 
-    // Update oms_orders with ShipStation mapping
+    // Update oms_orders with ShipStation mapping + engine-agnostic refs
     await db
       .update(omsOrders)
       .set({
         shipstationOrderId: result.orderId,
         shipstationOrderKey: orderKey,
+        shippingEngine: "shipstation",
+        engineOrderRef: String(result.orderId),
         updatedAt: new Date(),
       })
       .where(eq(omsOrders.id, omsOrder.id));

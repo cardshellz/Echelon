@@ -144,7 +144,7 @@ describe("D-NOENGINE: reconciler cancel/markShipped uses engine", () => {
   it("V1 reconciler uses engine.markShipped and engine.cancel", () => {
     const v1Block = indexSrc.substring(
       indexSrc.indexOf("V1: legacy order-based reconcile"),
-      indexSrc.indexOf("V1: legacy order-based reconcile") + 2000,
+      indexSrc.indexOf("V1: legacy order-based reconcile") + 2500,
     );
     expect(v1Block).toContain("shippingEngine.markShipped(v1Ref");
     expect(v1Block).toContain("shippingEngine.cancel(v1Ref)");
