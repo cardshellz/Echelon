@@ -733,6 +733,10 @@ function resolveShipStationService(dbArg: any): RetryShipStationService | null {
   return null;
 }
 
+function resolveShippingEngine(dbArg: any): any | null {
+  return dbArg?.__shippingEngine ?? null;
+}
+
 /**
  * Resolve the in-process Shopify fulfillment push service. Same pattern
  * as `resolveShipStationService` but reads the `__fulfillmentPush`
@@ -967,21 +971,26 @@ export async function dispatchShipStationShipmentPushRetry(
     return "malformed";
   }
 
-  const shipStationService = resolveShipStationService(dbArg);
-  if (!shipStationService || typeof shipStationService.pushShipment !== "function") {
+  const eng = resolveShippingEngine(dbArg);
+  const ssSvc = resolveShipStationService(dbArg);
+  if (!eng && (!ssSvc || typeof ssSvc.pushShipment !== "function")) {
     await keepPending(
       dbArg,
       item.id,
-      "ShipStation shipment push service not available on db.__shipStationService",
+      "shipping engine not available on db.__shippingEngine",
     );
     console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) deferred - ShipStation push service unavailable`,
+      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) deferred - engine unavailable`,
     );
     return "pending";
   }
 
   try {
-    await shipStationService.pushShipment(shipmentId);
+    if (eng) {
+      await eng.upsertShipment({ shipmentId } as any);
+    } else {
+      await ssSvc!.pushShipment!(shipmentId);
+    }
     await markRowSuccess(dbArg, item);
     console.log(
       `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) succeeded`,
@@ -1033,18 +1042,16 @@ export async function dispatchShipStationHoldSyncRetry(
     return "malformed";
   }
 
-  const shipStationService = resolveShipStationService(dbArg);
-  if (
-    !shipStationService ||
-    typeof shipStationService.syncWmsOrderShipStationHoldState !== "function"
-  ) {
+  const eng = resolveShippingEngine(dbArg);
+  const ssSvc = resolveShipStationService(dbArg);
+  if (!eng && (!ssSvc || typeof ssSvc.syncWmsOrderShipStationHoldState !== "function")) {
     await keepPending(
       dbArg,
       item.id,
-      "ShipStation hold sync service not available on db.__shipStationService",
+      "shipping engine not available for hold sync",
     );
     console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) deferred - ShipStation hold sync service unavailable`,
+      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) deferred - engine unavailable`,
     );
     return "pending";
   }
@@ -1060,7 +1067,7 @@ export async function dispatchShipStationHoldSyncRetry(
     await markRowDead(
       dbArg,
       item,
-      `WMS order ${wmsOrderId} not found for ShipStation hold sync`,
+      `WMS order ${wmsOrderId} not found for hold sync`,
     );
     console.error(
       `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found`,
@@ -1071,11 +1078,30 @@ export async function dispatchShipStationHoldSyncRetry(
   const mode: "hold" | "release" = Number(orderRow.on_hold) === 1 ? "hold" : "release";
 
   try {
-    const result =
-      await shipStationService.syncWmsOrderShipStationHoldState(wmsOrderId, mode);
+    let touched = 0;
+    if (eng) {
+      const { engineRefFromRow } = await import("../shipping/adapters/shipstation.adapter");
+      const shipments = await dbArg.execute(sql`
+        SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
+               shipstation_order_id, shipstation_order_key
+        FROM wms.outbound_shipments
+        WHERE order_id = ${wmsOrderId}
+          AND COALESCE(engine_order_ref, shipstation_order_id::text) IS NOT NULL
+          AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
+      `);
+      for (const row of shipments.rows ?? []) {
+        const ref = engineRefFromRow(row as any);
+        if (!ref) continue;
+        if (mode === "hold") { await eng.hold(ref); } else { await eng.releaseHold(ref); }
+        touched++;
+      }
+    } else {
+      const result = await ssSvc!.syncWmsOrderShipStationHoldState!(wmsOrderId, mode);
+      touched = result?.touched ?? 0;
+    }
     await markRowSuccess(dbArg, item);
     console.log(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}, touched=${result?.touched ?? 0}) succeeded`,
+      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}, touched=${touched}) succeeded`,
     );
     return "success";
   } catch (err: any) {
@@ -1121,18 +1147,16 @@ export async function dispatchShipStationSortRankSyncRetry(
     return "malformed";
   }
 
-  const shipStationService = resolveShipStationService(dbArg);
-  if (
-    !shipStationService ||
-    typeof shipStationService.updateSortRank !== "function"
-  ) {
+  const eng2 = resolveShippingEngine(dbArg);
+  const ssSvc2 = resolveShipStationService(dbArg);
+  if (!eng2 && (!ssSvc2 || typeof ssSvc2.updateSortRank !== "function")) {
     await keepPending(
       dbArg,
       item.id,
-      "ShipStation sort-rank sync service not available on db.__shipStationService",
+      "shipping engine not available for sort-rank sync",
     );
     console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) deferred - ShipStation sort-rank sync service unavailable`,
+      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) deferred - engine unavailable`,
     );
     return "pending";
   }
@@ -1148,7 +1172,7 @@ export async function dispatchShipStationSortRankSyncRetry(
     await markRowDead(
       dbArg,
       item,
-      `WMS order ${wmsOrderId} not found for ShipStation sort-rank sync`,
+      `WMS order ${wmsOrderId} not found for sort-rank sync`,
     );
     console.error(
       `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found`,
@@ -1176,10 +1200,30 @@ export async function dispatchShipStationSortRankSyncRetry(
   }
 
   try {
-    const result = await shipStationService.updateSortRank(wmsOrderId);
+    let touched2 = 0;
+    if (eng2) {
+      const { engineRefFromRow } = await import("../shipping/adapters/shipstation.adapter");
+      const shipments = await dbArg.execute(sql`
+        SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
+               shipstation_order_id, shipstation_order_key
+        FROM wms.outbound_shipments
+        WHERE order_id = ${wmsOrderId}
+          AND COALESCE(engine_order_ref, shipstation_order_id::text) IS NOT NULL
+          AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
+      `);
+      for (const row of shipments.rows ?? []) {
+        const ref = engineRefFromRow(row as any);
+        if (!ref) continue;
+        await eng2.updatePriority(ref, orderRow.sort_rank);
+        touched2++;
+      }
+    } else {
+      const result = await ssSvc2!.updateSortRank!(wmsOrderId);
+      touched2 = result?.touched ?? 0;
+    }
     await markRowSuccess(dbArg, item);
     console.log(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}, touched=${result?.touched ?? 0}) succeeded`,
+      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}, touched=${touched2}) succeeded`,
     );
     return "success";
   } catch (err: any) {
@@ -1627,20 +1671,20 @@ export async function dispatchShipStationRetry(
     return "malformed";
   }
 
-  const shipStationService = resolveShipStationService(dbArg);
+  const engine = resolveShippingEngine(dbArg);
+  const shipStationService = engine ?? resolveShipStationService(dbArg);
   if (!shipStationService) {
-    // Service not wired — treat as transient failure so the next tick retries.
     const { status } = await recordRetryFailure(
       dbArg,
       item,
-      "shipStation service not available on db.__shipStationService"
+      "shipping engine not available on db.__shippingEngine"
     );
-    console.warn(`${LOG_PREFIX} Item ${item.id} deferred — SS service unavailable (status=${status})`);
+    console.warn(`${LOG_PREFIX} Item ${item.id} deferred — engine unavailable (status=${status})`);
     return status;
   }
 
   try {
-    await shipStationService.processShipNotify(resourceUrl);
+    await (engine ? engine.processWebhook(resourceUrl) : shipStationService.processShipNotify(resourceUrl));
     await markRowSuccess(dbArg, item);
     console.log(`${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) succeeded`);
     return "success";

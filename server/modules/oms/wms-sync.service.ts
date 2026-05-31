@@ -76,6 +76,7 @@ interface WmsSyncServices {
   inventoryCore: any;
   reservation: any;
   fulfillmentRouter: any;
+  shippingEngine?: import("../shipping/engine").ShippingEngine;
   shipStation?: any;
   omsService?: any;
 }
@@ -479,16 +480,21 @@ export class WmsSyncService {
       // Push failures never block the sync — reconcile retries.
       // Recheck OMS status: a cancellation webhook may have arrived
       // between step 5 (WMS order creation) and now.
-      if (this.services.shipStation?.isConfigured()) {
+      const engine = this.services.shippingEngine ?? this.services.shipStation;
+      if (engine?.isConfigured?.()) {
         if (shipmentIdForPush !== null) {
           const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
           if (recheckOms && this.isFinalOrCancelledOmsOrder(recheckOms)) {
-            console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping SS push, cancelling WMS`);
+            console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping engine push, cancelling WMS`);
             await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
             return newWmsOrder.id;
           }
           try {
-            await this.services.shipStation.pushShipment(shipmentIdForPush);
+            if (this.services.shippingEngine) {
+              await this.services.shippingEngine.upsertShipment({ shipmentId: shipmentIdForPush } as any);
+            } else {
+              await this.services.shipStation.pushShipment(shipmentIdForPush);
+            }
             console.log(
               `[WMS Sync] Pushed shipment ${shipmentIdForPush} to ShipStation via pushShipment`,
             );
@@ -1291,7 +1297,8 @@ export class WmsSyncService {
       // Only push 'planned' — 'queued'/'labeled' shipments are already in SS
       // and re-pushing would overwrite the SS order (undoing any SS-side
       // splits the operator made).
-      if (this.services.shipStation?.isConfigured()) {
+      const repushEngine = this.services.shippingEngine ?? this.services.shipStation;
+      if (repushEngine?.isConfigured?.()) {
         try {
           const activeShipments = await db.execute<{ id: number }>(sql`
             SELECT id FROM wms.outbound_shipments
@@ -1301,8 +1308,12 @@ export class WmsSyncService {
           `);
           for (const shipment of activeShipments.rows ?? []) {
             try {
-              await this.services.shipStation.pushShipment(shipment.id);
-              console.log(`${LOG} Re-pushed shipment ${shipment.id} to ShipStation after item edit`);
+              if (this.services.shippingEngine) {
+                await this.services.shippingEngine.upsertShipment({ shipmentId: shipment.id } as any);
+              } else {
+                await this.services.shipStation.pushShipment(shipment.id);
+              }
+              console.log(`${LOG} Re-pushed shipment ${shipment.id} to engine after item edit`);
             } catch (pushErr: any) {
               await enqueueShipStationShipmentPushRetry(
                 db,

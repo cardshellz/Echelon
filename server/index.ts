@@ -451,7 +451,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
     try {
       console.log(`[ShipStation Webhook] Received SHIP_NOTIFY`);
-      const processed = await services.shipStation.processShipNotify(resource_url);
+      const processed = await services.shippingEngine.processWebhook(resource_url);
       console.log(`[ShipStation Webhook] Processed ${processed} shipment(s)`);
 
       return res.status(200).json({ status: "ok", processed });
@@ -921,7 +921,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                        os.shipstation_order_key
                 FROM wms.outbound_shipments os
                 WHERE os.order_id = ANY(${cancelledIds})
-                  AND os.shipstation_order_id IS NOT NULL
+                  AND COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
                   AND os.status NOT IN ('cancelled', 'shipped', 'voided', 'returned', 'lost')
               `);
               const engine = services.shippingEngine;
@@ -1056,6 +1056,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             os.order_id,
             os.status,
             os.shipstation_order_id,
+            os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
+            os.shipstation_order_key,
             ROW_NUMBER() OVER (
               PARTITION BY os.order_id
               ORDER BY CASE os.status
@@ -1071,9 +1073,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           FROM wms.outbound_shipments os
           WHERE os.status NOT IN ('voided', 'cancelled')
         )
-        SELECT id, order_id, status, shipstation_order_id,
+        SELECT id, order_id, status,
                shipping_engine, engine_order_ref, engine_shipment_ref,
-               shipstation_order_key
+               shipstation_order_id, shipstation_order_key
         FROM ranked
         WHERE rn > 1
       `);
@@ -1158,7 +1160,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                  w.oms_fulfillment_order_id AS oms_id
           FROM wms.outbound_shipments os
           JOIN wms.orders w ON w.id = os.order_id
-          WHERE os.shipstation_order_id IS NOT NULL
+          WHERE COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
             AND os.status IN ('queued', 'labeled', 'shipped')
             AND (
               os.last_reconciled_at IS NULL

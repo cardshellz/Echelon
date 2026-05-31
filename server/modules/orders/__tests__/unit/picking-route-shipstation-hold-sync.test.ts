@@ -16,7 +16,9 @@ describe("picking routes ShipStation hold sync", () => {
     expect(PICKING_ROUTES_SRC).toMatch(/queueShipStationHoldSync\(id, "release", "ReleaseHold"\)/);
     expect(PICKING_ROUTES_SRC).toMatch(/queueShipStationSortRankSync\(id, "ReleaseHoldSortRank"\)/);
     expect(PICKING_ROUTES_SRC).toMatch(/queueShipStationSortRankSync\(id, "PrioritySortRank"\)/);
-    expect(PICKING_ROUTES_SRC).toMatch(/syncWmsOrderShipStationHoldState\(orderId, mode\)/);
+    expect(PICKING_ROUTES_SRC).toMatch(/shippingEngine\.hold\(ref\)/);
+    expect(PICKING_ROUTES_SRC).toMatch(/shippingEngine\.releaseHold\(ref\)/);
+    expect(PICKING_ROUTES_SRC).toMatch(/engineRefFromRow/);
     expect(PICKING_ROUTES_SRC).not.toMatch(/oms\.shipstation_order_id/);
   });
 });

@@ -87,6 +87,13 @@ export interface ShippingEngine {
   normalizeWebhook(rawPayload: unknown): Promise<CanonicalShipmentEvent[]>;
 
   /**
+   * Process a webhook notification end-to-end (fetch resource, apply
+   * state changes, write DB). Returns the number of shipments processed.
+   * Phase 3: delegates to the engine service's internal processing.
+   */
+  processWebhook(resourceUrl: string): Promise<number>;
+
+  /**
    * Register a webhook endpoint with the engine.
    */
   registerWebhook(targetUrl: string): Promise<void>;

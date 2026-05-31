@@ -204,6 +204,10 @@ export function createShipStationEngine(
       });
     },
 
+    async processWebhook(resourceUrl: string): Promise<number> {
+      return ss.processShipNotify(resourceUrl);
+    },
+
     async normalizeWebhook(rawPayload: unknown): Promise<CanonicalShipmentEvent[]> {
       // Phase 1: the existing processShipNotify handles the full
       // webhook lifecycle (fetch resource URL, process each shipment,

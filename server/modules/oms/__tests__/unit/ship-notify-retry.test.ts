@@ -768,7 +768,7 @@ describe("dispatchShipStationHoldSyncRetry", () => {
     });
 
     expect(outcome).toBe("pending");
-    expect(updates[0]!.set.lastError).toMatch(/hold sync service not available/);
+    expect(updates[0]!.set.lastError).toMatch(/engine not available for hold sync/);
   });
 });
 
@@ -826,7 +826,7 @@ describe("dispatchShipStationSortRankSyncRetry", () => {
 
     expect(outcome).toBe("pending");
     expect(updates[0]!.set.status).toBeUndefined();
-    expect(updates[0]!.set.lastError).toMatch(/sort-rank sync service not available/);
+    expect(updates[0]!.set.lastError).toMatch(/engine not available for sort-rank sync/);
   });
 
   it("records a retry failure when the WMS row has no sort_rank", async () => {
@@ -1214,7 +1214,7 @@ describe("dispatchShipStationShipmentPushRetry", () => {
     });
 
     expect(outcome).toBe("pending");
-    expect(updates[0]!.set.lastError).toMatch(/ShipStation shipment push service not available/);
+    expect(updates[0]!.set.lastError).toMatch(/shipping engine not available/);
     expect(updates[0]!.set.status).toBeUndefined();
   });
 
@@ -1369,7 +1369,7 @@ describe("dispatchShipStationRetry :: service not wired", () => {
     expect(outcome).toBe("pending");
     expect(updates[0]!.set.status).toBe("pending");
     expect(updates[0]!.set.attempts).toBe(1);
-    expect(String(updates[0]!.set.lastError)).toMatch(/shipStation service not available/i);
+    expect(String(updates[0]!.set.lastError)).toMatch(/shipping engine not available/i);
   });
 });
 
