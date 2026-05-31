@@ -452,7 +452,10 @@ describe("handleShopifyFulfillmentUpdate — shipment not found", () => {
     const db = makeDb([
       { rows: [] }, // shipment lookup miss
       { rows: [{ id: 8000, channel_id: 36 }] }, // wms.orders lookup
+      { rows: [] }, // pg_advisory_lock
+      { rows: [] }, // dedup probe
       { rows: [] }, // INSERT external shipment
+      { rows: [] }, // pg_advisory_unlock
       { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
       { rows: [{ status: "shipped" }] },
       { rows: [] },
@@ -466,9 +469,9 @@ describe("handleShopifyFulfillmentUpdate — shipment not found", () => {
 
     expect(result.status).toBe(200);
     expect(result.body.outcome).toBe("external_shipment_created");
-    expect(db.execute).toHaveBeenCalledTimes(6);
+    expect(db.execute).toHaveBeenCalledTimes(9);
 
-    const insertCall = db.calls[2];
+    const insertCall = db.calls[4];
     expect(insertCall.sqlText).toContain("INSERT INTO wms.outbound_shipments");
     expect(insertCall.sqlText).toContain("'shopify_external_fulfillment'");
     expect(insertCall.sqlText).toContain("'shipped'");

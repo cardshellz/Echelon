@@ -318,17 +318,23 @@ describe("handleShopifyFulfillmentCreate — path B (external fulfillment)", () 
     // Scripted responses:
     //   1. lookup shipment by shopify_fulfillment_id → none
     //   2. lookup wms.orders by oms_fulfillment_order_id → found
-    //   3. INSERT new wms.outbound_shipments row
-    //   4. recomputeOrderStatusFromShipments: SELECT order
-    //   5. recomputeOrderStatusFromShipments: SELECT shipments
-    //   6. recomputeOrderStatusFromShipments: UPDATE order
+    //   3. pg_advisory_lock
+    //   4. dedup probe (SELECT by shopify_fulfillment_id for this order) → none
+    //   5. INSERT new wms.outbound_shipments row
+    //   6. pg_advisory_unlock
+    //   7. recomputeOrderStatusFromShipments: SELECT order
+    //   8. recomputeOrderStatusFromShipments: SELECT shipments
+    //   9. recomputeOrderStatusFromShipments: UPDATE order
     const db = makeDb([
       { rows: [] }, // 1
       { rows: [{ id: 8000, channel_id: 36 }] }, // 2
-      { rows: [] }, // 3 INSERT
-      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] }, // 4
-      { rows: [{ status: "shipped" }] }, // 5
-      { rows: [] }, // 6
+      { rows: [] }, // 3 lock
+      { rows: [] }, // 4 dedup probe
+      { rows: [] }, // 5 INSERT
+      { rows: [] }, // 6 unlock
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] }, // 7
+      { rows: [{ status: "shipped" }] }, // 8
+      { rows: [] }, // 9
     ]);
     const omsSvc = makeOmsSvc();
 
@@ -339,12 +345,10 @@ describe("handleShopifyFulfillmentCreate — path B (external fulfillment)", () 
 
     expect(result.status).toBe(200);
     expect(result.body.outcome).toBe("external_shipment_created");
-    expect(db.execute).toHaveBeenCalledTimes(6);
+    expect(db.execute).toHaveBeenCalledTimes(9);
 
-    // Inspect the INSERT to confirm source + status. Drizzle's `sql`
-    // template stitches the literal text together; we just need to
-    // confirm the marker fragments are present.
-    const insertCall = db.calls[2];
+    // Inspect the INSERT to confirm source + status.
+    const insertCall = db.calls[4];
     expect(insertCall.sqlText).toContain("INSERT INTO wms.outbound_shipments");
     expect(insertCall.sqlText).toContain("'shipped'");
     expect(insertCall.sqlText).toContain("'shopify_external_fulfillment'");
@@ -364,7 +368,10 @@ describe("handleShopifyFulfillmentCreate — path B (external fulfillment)", () 
     const db = makeDb([
       { rows: [] }, // shipment lookup miss
       { rows: [{ id: 8000, channel_id: 36 }] }, // wms.orders lookup
+      { rows: [] }, // lock
+      { rows: [] }, // dedup probe
       { rows: [] }, // INSERT
+      { rows: [] }, // unlock
       { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
       { rows: [{ status: "shipped" }] },
       { rows: [] },

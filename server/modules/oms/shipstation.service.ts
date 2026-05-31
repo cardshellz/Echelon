@@ -980,18 +980,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       throw new Error("ShipStation split shipment is missing orderId");
     }
 
-    const externalFulfillmentId = `shipstation_shipment:${shipment.shipmentId}`;
-    const existing: any = await db.execute(sql`
-      SELECT id, order_id, status, shipstation_order_id
-      FROM wms.outbound_shipments
-      WHERE external_fulfillment_id = ${externalFulfillmentId}
-         OR shipstation_order_id = ${shipment.orderId}
-      LIMIT 1
-    `);
-    if (existing?.rows?.[0]) {
-      return existing.rows[0];
-    }
-
     const parentResult: any = await db.execute(sql`
       SELECT id, order_id, channel_id, status, shipstation_order_id, shipstation_order_key
       FROM wms.outbound_shipments
@@ -1005,25 +993,43 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       );
     }
 
-    const inserted: any = await db.execute(sql`
-      INSERT INTO wms.outbound_shipments
-        (order_id, channel_id, external_fulfillment_id, source, status,
-         shipstation_order_id, shipstation_order_key, created_at, updated_at)
-      VALUES
-        (${parent.order_id}, ${parent.channel_id}, ${externalFulfillmentId},
-         ${SHIPSTATION_SPLIT_SOURCE}, 'queued',
-         ${shipment.orderId}, ${shipment.orderKey || parent.shipstation_order_key},
-         NOW(), NOW())
-      RETURNING id, order_id, status, shipstation_order_id
-    `);
+    const orderId = parent.order_id;
+    await db.execute(sql`SELECT pg_advisory_lock(918406, ${orderId})`);
+    try {
+      const externalFulfillmentId = `shipstation_shipment:${shipment.shipmentId}`;
+      const existing: any = await db.execute(sql`
+        SELECT id, order_id, status, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE external_fulfillment_id = ${externalFulfillmentId}
+           OR shipstation_order_id = ${shipment.orderId}
+        LIMIT 1
+      `);
+      if (existing?.rows?.[0]) {
+        return existing.rows[0];
+      }
 
-    const row = inserted?.rows?.[0];
-    if (!row) {
-      throw new Error(
-        `Failed to create WMS split shipment for ShipStation shipment ${shipment.shipmentId}`,
-      );
+      const inserted: any = await db.execute(sql`
+        INSERT INTO wms.outbound_shipments
+          (order_id, channel_id, external_fulfillment_id, source, status,
+           shipstation_order_id, shipstation_order_key, created_at, updated_at)
+        VALUES
+          (${orderId}, ${parent.channel_id}, ${externalFulfillmentId},
+           ${SHIPSTATION_SPLIT_SOURCE}, 'queued',
+           ${shipment.orderId}, ${shipment.orderKey || parent.shipstation_order_key},
+           NOW(), NOW())
+        RETURNING id, order_id, status, shipstation_order_id
+      `);
+
+      const row = inserted?.rows?.[0];
+      if (!row) {
+        throw new Error(
+          `Failed to create WMS split shipment for ShipStation shipment ${shipment.shipmentId}`,
+        );
+      }
+      return row;
+    } finally {
+      await db.execute(sql`SELECT pg_advisory_unlock(918406, ${orderId})`);
     }
-    return row;
   }
 
   async function syncShipmentItemsFromShipStation(
@@ -1348,31 +1354,37 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           );
         }
 
-        const externalFulfillmentId =
-          `shipstation_combined:${shipment.shipmentId}:order:${wmsOrderId}`;
-        const existingSynthetic: any = await db.execute(sql`
-          SELECT id, order_id, status, shipstation_order_id
-          FROM wms.outbound_shipments
-          WHERE external_fulfillment_id = ${externalFulfillmentId}
-          LIMIT 1
-        `);
-        shipmentRow = existingSynthetic?.rows?.[0] ?? null;
-        if (shipmentRow) {
-          groups.push({ row: shipmentRow, sourceShipmentItemIds: groupSourceIds });
-          continue;
-        }
+        await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
+        try {
+          const externalFulfillmentId =
+            `shipstation_combined:${shipment.shipmentId}:order:${wmsOrderId}`;
+          const existingSynthetic: any = await db.execute(sql`
+            SELECT id, order_id, status, shipstation_order_id
+            FROM wms.outbound_shipments
+            WHERE external_fulfillment_id = ${externalFulfillmentId}
+            LIMIT 1
+          `);
+          shipmentRow = existingSynthetic?.rows?.[0] ?? null;
+          if (shipmentRow) {
+            groups.push({ row: shipmentRow, sourceShipmentItemIds: groupSourceIds });
+            await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
+            continue;
+          }
 
-        const inserted: any = await db.execute(sql`
-          INSERT INTO wms.outbound_shipments
-            (order_id, channel_id, external_fulfillment_id, source, status,
-             shipstation_order_id, shipstation_order_key, created_at, updated_at)
-          VALUES
-            (${wmsOrderId}, ${wmsOrder.channel_id}, ${externalFulfillmentId},
-             ${SHIPSTATION_COMBINED_CHILD_SOURCE}, 'queued',
-             ${shipment.orderId}, ${shipment.orderKey}, NOW(), NOW())
-          RETURNING id, order_id, status, shipstation_order_id
-        `);
-        shipmentRow = inserted?.rows?.[0] ?? null;
+          const inserted: any = await db.execute(sql`
+            INSERT INTO wms.outbound_shipments
+              (order_id, channel_id, external_fulfillment_id, source, status,
+               shipstation_order_id, shipstation_order_key, created_at, updated_at)
+            VALUES
+              (${wmsOrderId}, ${wmsOrder.channel_id}, ${externalFulfillmentId},
+               ${SHIPSTATION_COMBINED_CHILD_SOURCE}, 'queued',
+               ${shipment.orderId}, ${shipment.orderKey}, NOW(), NOW())
+            RETURNING id, order_id, status, shipstation_order_id
+          `);
+          shipmentRow = inserted?.rows?.[0] ?? null;
+        } finally {
+          await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
+        }
       }
 
       if (shipmentRow) {
