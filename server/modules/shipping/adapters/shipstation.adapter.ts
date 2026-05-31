@@ -221,5 +221,15 @@ export function createShipStationEngine(
     async registerWebhook(targetUrl: string): Promise<void> {
       await ss.registerWebhook(targetUrl);
     },
+
+    async sweepQueue(): Promise<void> {
+      const apiKey = process.env.SHIPSTATION_API_KEY;
+      const apiSecret = process.env.SHIPSTATION_API_SECRET;
+      if (!apiKey || !apiSecret) return;
+      const { sweepShipStationQueue } = await import(
+        "../../oms/shipstation-sweeper"
+      );
+      await sweepShipStationQueue(apiKey, apiSecret);
+    },
   };
 }

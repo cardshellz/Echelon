@@ -97,4 +97,10 @@ export interface ShippingEngine {
    * Register a webhook endpoint with the engine.
    */
   registerWebhook(targetUrl: string): Promise<void>;
+
+  /**
+   * Run maintenance sweep on the engine's queue. Flags stranded orders
+   * for review. Optional — engines without queues omit this.
+   */
+  sweepQueue?(): Promise<void>;
 }
