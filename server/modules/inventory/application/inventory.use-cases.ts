@@ -571,9 +571,20 @@ export class InventoryUseCases {
     qty: number;
     userId?: string;
     notes?: string;
-  }): Promise<void> {
+    /**
+     * When true, allow the transfer to also move the spillover reserved
+     * allocation (and re-point eligible pending order lines) from source to
+     * destination. Default false: a transfer that would consume reserved stock
+     * is rejected with a TRANSFER_BLOCKED_BY_RESERVATION error so reservations
+     * never silently follow stock around.
+     */
+    moveReserved?: boolean;
+  }): Promise<{ reservedMoved: number; orderItemsRepointed: number }> {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
+
+    let reservedMoved = 0;
+    let orderItemsRepointed = 0;
 
     await this.db.transaction(async (tx) => {
       const [fromLoc] = await tx
@@ -609,20 +620,112 @@ export class InventoryUseCases {
         throw new Error(`Insufficient on-hand at source: need ${params.qty}, have ${sourceLevel?.variantQty || 0}`);
       }
 
-      // Check that we're not transferring reserved inventory
-      const available = sourceLevel.variantQty - (sourceLevel.reservedQty || 0);
+      // Available = on-hand minus reserved. Moving more than `available` would
+      // strand the reservation (reserved_qty > on-hand at the source), which both
+      // violates the check_reserved_lte_on_hand constraint and would send the
+      // picker to an empty bin. Allowed only when the caller explicitly opts in
+      // to moving the reservation with the stock.
+      const reserved = sourceLevel.reservedQty || 0;
+      const available = sourceLevel.variantQty - reserved;
+
+      let reservedToMove = 0;
       if (available < params.qty) {
-        throw new Error(`Insufficient available at source: need ${params.qty}, have ${available} available (${sourceLevel.reservedQty} reserved)`);
+        if (!params.moveReserved) {
+          const err: any = new Error(
+            `Insufficient available at source: need ${params.qty}, have ${available} available (${reserved} reserved)`,
+          );
+          err.code = "TRANSFER_BLOCKED_BY_RESERVATION";
+          err.context = {
+            needed: params.qty,
+            onHandAtSource: sourceLevel.variantQty,
+            availableAtSource: available,
+            reservedAtSource: reserved,
+            sourceCode: fromLoc.code,
+            destCode: toLoc.code,
+          };
+          throw err;
+        }
+        // Spillover reserved that must follow the stock. Bounded by `reserved`
+        // because qty <= on-hand (checked above): qty - available <= reserved.
+        reservedToMove = params.qty - available;
       }
 
-      const decremented = await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -params.qty }, tx);
+      // Concurrency guard (§9): never pull reserved stock out from under an
+      // in-progress pick. If any live order line for this variant is mid-pick or
+      // already picked at the source bin, refuse and ask the user to finish or
+      // cancel that pick first.
+      if (reservedToMove > 0) {
+        // order_items has no variant FK; it links to a variant by SKU
+        // (catalog.product_variants.sku). Match through that.
+        const conflict = await tx.execute(sql`
+          SELECT oi.id
+          FROM wms.order_items oi
+          JOIN wms.orders o ON o.id = oi.order_id
+          JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
+          WHERE pv.id = ${params.productVariantId}
+            AND UPPER(oi.location) = UPPER(${fromLoc.code})
+            AND oi.requires_shipping = 1
+            AND (oi.picked_quantity > 0 OR oi.status = 'picked')
+            AND o.warehouse_status NOT IN ('shipped', 'cancelled')
+          LIMIT 1
+        `);
+        if (conflict.rows.length > 0) {
+          const err: any = new Error(
+            `Cannot move reserved stock from ${fromLoc.code}: an order at this bin is mid-pick. Complete or cancel that pick before transferring.`,
+          );
+          err.code = "TRANSFER_BLOCKED_BY_ACTIVE_PICK";
+          err.context = { sourceCode: fromLoc.code, variantId: params.productVariantId };
+          throw err;
+        }
+      }
+
+      // Source: decrement on-hand and (if moving) reserved in a SINGLE update so
+      // the row never transiently violates check_reserved_lte_on_hand.
+      await this.storage.adjustInventoryLevel(
+        sourceLevel.id,
+        {
+          variantQty: -params.qty,
+          ...(reservedToMove > 0 ? { reservedQty: -reservedToMove } : {}),
+        },
+        tx,
+      );
 
       const targetLevel = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.toLocationId,
       }, tx);
 
-      await this.storage.adjustInventoryLevel(targetLevel.id, { variantQty: params.qty }, tx);
+      // Destination: increment on-hand and (if moving) reserved together. on-hand
+      // rises by qty >= reservedToMove, so reserved <= on-hand holds.
+      await this.storage.adjustInventoryLevel(
+        targetLevel.id,
+        {
+          variantQty: params.qty,
+          ...(reservedToMove > 0 ? { reservedQty: reservedToMove } : {}),
+        },
+        tx,
+      );
+
+      // Re-point eligible pending order lines so the picker is sent to the new
+      // bin. Only fully un-started lines (picked_quantity = 0, status 'pending')
+      // on live orders are moved; mid-pick lines were rejected above.
+      if (reservedToMove > 0) {
+        const repoint = await tx.execute(sql`
+          UPDATE wms.order_items AS oi
+          SET location = ${toLoc.code}, zone = ${toLoc.zone ?? "U"}
+          FROM wms.orders o, catalog.product_variants pv
+          WHERE oi.order_id = o.id
+            AND UPPER(pv.sku) = UPPER(oi.sku)
+            AND pv.id = ${params.productVariantId}
+            AND UPPER(oi.location) = UPPER(${fromLoc.code})
+            AND oi.requires_shipping = 1
+            AND oi.status = 'pending'
+            AND oi.picked_quantity = 0
+            AND o.warehouse_status NOT IN ('shipped', 'cancelled')
+          RETURNING oi.id
+        `);
+        orderItemsRepointed = repoint.rows.length;
+      }
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
@@ -650,9 +753,34 @@ export class InventoryUseCases {
         notes: params.notes ?? null,
         userId: params.userId ?? null,
       }, tx);
+
+      // Separate ledger row for the reserved movement so a single order's audit
+      // trail explains why its reservation hopped bins.
+      if (reservedToMove > 0) {
+        await this.storage.createInventoryTransaction({
+          productVariantId: params.productVariantId,
+          fromLocationId: params.fromLocationId,
+          toLocationId: params.toLocationId,
+          transactionType: "reserve_move",
+          variantQtyDelta: reservedToMove,
+          variantQtyBefore: reserved,
+          variantQtyAfter: reserved - reservedToMove,
+          sourceState: "reserved",
+          targetState: "reserved",
+          referenceType: "internal",
+          referenceId: null,
+          notes:
+            `Moved ${reservedToMove} reserved unit(s) with stock transfer; ` +
+            `re-pointed ${orderItemsRepointed} pending order line(s)` +
+            (params.notes ? `. ${params.notes}` : ""),
+          userId: params.userId ?? null,
+        }, tx);
+        reservedMoved = reservedToMove;
+      }
     });
 
     this.triggerNotifyChange(params.productVariantId, "transfer");
+    return { reservedMoved, orderItemsRepointed };
   }
 
   // ---------------------------------------------------------------------------
