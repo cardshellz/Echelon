@@ -599,8 +599,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipmentId: "501",
     }));
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
-    expect(sqlText).toMatch(/fulfilled_quantity = LEAST\(quantity, COALESCE\(fulfilled_quantity, 0\) \+/);
-    expect(sqlText).toMatch(/picked_quantity = LEAST\(quantity, GREATEST/);
+    expect(sqlText).toMatch(/fulfilled_quantity = LEAST\(/);
+    expect(sqlText).toMatch(/SUM\(osi\.qty\)/);
+    expect(sqlText).toMatch(/outbound_shipment_items/);
+    expect(sqlText).toMatch(/picked_quantity = LEAST\(/);
     expect(sqlText).toMatch(/warehouse_status = /);
   });
 
