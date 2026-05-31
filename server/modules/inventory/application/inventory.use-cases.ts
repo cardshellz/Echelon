@@ -340,26 +340,33 @@ export class InventoryUseCases {
         });
       }
 
-      await this.storage.createInventoryTransaction({
-        productVariantId: params.productVariantId,
-        fromLocationId: params.warehouseLocationId,
-        transactionType: "ship",
-        variantQtyDelta: -params.qty,
-        variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty - fromOnHand,
-        sourceState: fromOnHand > 0 ? "on_hand" : "picked",
-        targetState: "shipped",
-        orderId: params.orderId,
-        orderItemId: params.orderItemId ?? null,
-        shipmentId:
-          params.shipmentId && Number.isInteger(Number(params.shipmentId))
-            ? Number(params.shipmentId)
-            : null,
-        referenceType: "order",
-        referenceId: params.shipmentId ?? String(params.orderId),
-        userId: params.userId ?? null,
-        notes: fromOnHand > 0 ? `Shipped without pick: ${fromPicked} from picked, ${fromOnHand} from on-hand` : null,
-      }, tx);
+      try {
+        await this.storage.createInventoryTransaction({
+          productVariantId: params.productVariantId,
+          fromLocationId: params.warehouseLocationId,
+          transactionType: "ship",
+          variantQtyDelta: -params.qty,
+          variantQtyBefore: level.variantQty,
+          variantQtyAfter: level.variantQty - fromOnHand,
+          sourceState: fromOnHand > 0 ? "on_hand" : "picked",
+          targetState: "shipped",
+          orderId: params.orderId,
+          orderItemId: params.orderItemId ?? null,
+          shipmentId:
+            params.shipmentId && Number.isInteger(Number(params.shipmentId))
+              ? Number(params.shipmentId)
+              : null,
+          referenceType: "order",
+          referenceId: params.shipmentId ?? String(params.orderId),
+          userId: params.userId ?? null,
+          notes: fromOnHand > 0 ? `Shipped without pick: ${fromPicked} from picked, ${fromOnHand} from on-hand` : null,
+        }, tx);
+      } catch (err: any) {
+        if (err?.code === "23505" && String(err?.constraint ?? "").includes("ship_dedup")) {
+          return;
+        }
+        throw err;
+      }
     });
   }
 
