@@ -18,6 +18,7 @@ function mockSsService(overrides: Partial<ShipStationServiceHandle> = {}): ShipS
     releaseOrderFromHold: vi.fn().mockResolvedValue(undefined),
     markAsShipped: vi.fn().mockResolvedValue({ alreadyInState: false }),
     updateSortRank: vi.fn().mockResolvedValue({ touched: 1 }),
+    updateSortRankSingle: vi.fn().mockResolvedValue(undefined),
     getOrderById: vi.fn().mockResolvedValue({ orderId: 999, orderStatus: "awaiting_shipment" }),
     getShipments: vi.fn().mockResolvedValue([]),
     processShipNotify: vi.fn().mockResolvedValue(1),
