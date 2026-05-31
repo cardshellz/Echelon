@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X } from "lucide-react";
+import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X, AlertTriangle } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { format } from "date-fns";
 import { playSoundWithHaptic } from "@/lib/sounds";
@@ -67,6 +67,21 @@ export default function Transfers() {
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
   const [skuFilter, setSkuFilter] = useState("");
+  // When a transfer is blocked because the source bin holds reserved stock,
+  // we stash the original request + context here to drive a confirm dialog that
+  // re-fires the transfer with moveReserved: true.
+  const [reservationPrompt, setReservationPrompt] = useState<
+    | {
+        payload: { fromLocationId: number; toLocationId: number; variantId: number; quantity: number; notes?: string };
+        needed: number;
+        onHandAtSource: number;
+        availableAtSource: number;
+        reservedAtSource: number;
+        sourceCode: string;
+        destCode: string;
+      }
+    | null
+  >(null);
   const [locationSearch, setLocationSearch] = useState("");
   const [destLocationSearch, setDestLocationSearch] = useState("");
   
@@ -185,11 +200,29 @@ export default function Transfers() {
   });
   
   const transferMutation = useMutation({
-    mutationFn: async (data: { fromLocationId: number; toLocationId: number; variantId: number; quantity: number; notes?: string }) => {
-      const res = await apiRequest("POST", "/api/inventory/transfer", data);
+    mutationFn: async (data: { fromLocationId: number; toLocationId: number; variantId: number; quantity: number; notes?: string; moveReserved?: boolean }) => {
+      // Use fetch directly (not apiRequest) so we can inspect the 409 body and
+      // surface the "move reserved too?" confirm flow instead of a generic error.
+      const res = await fetch("/api/inventory/transfer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (res.status === 409) {
+        const body = await res.json().catch(() => ({} as any));
+        const err: any = new Error(body.error || "Transfer blocked");
+        err.code = body.code;
+        err.context = body.context;
+        throw err;
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `Transfer failed (${res.status})`);
+      }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (transferResult: any) => {
       playSoundWithHaptic("success", "classic", true);
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/transfers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
@@ -214,17 +247,32 @@ export default function Transfers() {
         } catch {
           toast({ title: "Transfer Complete", description: "Inventory moved, but failed to update cycle count. Sync manually." });
         }
+      } else if (transferResult?.reservedMoved > 0) {
+        toast({
+          title: "Transfer Complete",
+          description:
+            `Inventory moved. ${transferResult.reservedMoved} reserved unit(s) followed the stock` +
+            (transferResult.orderItemsRepointed > 0
+              ? `; ${transferResult.orderItemsRepointed} pending order line(s) re-pointed to the new bin.`
+              : "."),
+        });
       } else {
         toast({ title: "Transfer Complete", description: "Inventory moved successfully" });
       }
       resetForm();
     },
-    onError: (error: Error) => {
+    onError: (error: any, variables) => {
+      // Reserved stock blocks the transfer: offer to move the reservation too
+      // (Option A) instead of dead-ending. Re-fires with moveReserved: true.
+      if (error?.code === "TRANSFER_BLOCKED_BY_RESERVATION" && error.context) {
+        setReservationPrompt({ payload: variables, ...error.context });
+        return;
+      }
       playSoundWithHaptic("error", "classic", true);
       toast({ title: "Transfer Failed", description: error.message, variant: "destructive" });
     }
   });
-  
+
   const undoMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await apiRequest("POST", `/api/inventory/transfer/${id}/undo`, {});
@@ -1023,6 +1071,61 @@ export default function Transfers() {
               This is for informational purposes only. To transfer inventory, select a source bin on the transfer form.
             </p>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reserved-stock confirm: offer to move the reservation with the stock
+          (Option A) instead of dead-ending the transfer. */}
+      <Dialog open={!!reservationPrompt} onOpenChange={(open) => { if (!open) setReservationPrompt(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              Reserved stock at {reservationPrompt?.sourceCode}
+            </DialogTitle>
+          </DialogHeader>
+          {reservationPrompt && (
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                You're moving <span className="font-semibold">{reservationPrompt.needed}</span> unit(s) from{" "}
+                <span className="font-semibold">{reservationPrompt.sourceCode}</span> to{" "}
+                <span className="font-semibold">{reservationPrompt.destCode}</span>, but only{" "}
+                <span className="font-semibold">{reservationPrompt.availableAtSource}</span> are free —{" "}
+                <span className="font-semibold">{reservationPrompt.reservedAtSource}</span> are reserved for open orders.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Move the reserved stock too? The reservation (and any waiting orders' pick location) will follow the stock to{" "}
+                <span className="font-semibold">{reservationPrompt.destCode}</span>. Orders already being picked at this bin
+                must be finished or cancelled first.
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  variant="ghost"
+                  onClick={() => setReservationPrompt(null)}
+                  disabled={transferMutation.isPending}
+                  data-testid="button-cancel-move-reserved"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => {
+                    const payload = reservationPrompt.payload;
+                    setReservationPrompt(null);
+                    transferMutation.mutate({ ...payload, moveReserved: true });
+                  }}
+                  disabled={transferMutation.isPending}
+                  data-testid="button-confirm-move-reserved"
+                >
+                  {transferMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  ) : (
+                    <ArrowRight className="h-4 w-4 mr-2" />
+                  )}
+                  Move reserved too
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

@@ -306,12 +306,12 @@ export const inventoryMethods: IInventoryStorage = {
     const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes } = params;
 
     const sourceResult = await tx.execute(sql`
-      SELECT id, variant_qty FROM inventory.inventory_levels 
-      WHERE warehouse_location_id = ${fromLocationId} 
-        AND product_variant_id = ${productVariantId} 
+      SELECT id, variant_qty, reserved_qty FROM inventory.inventory_levels
+      WHERE warehouse_location_id = ${fromLocationId}
+        AND product_variant_id = ${productVariantId}
       FOR UPDATE LIMIT 1
     `);
-    
+
     const sourceLevel = sourceResult.rows && sourceResult.rows.length > 0 ? sourceResult.rows[0] : null;
 
     if (!sourceLevel || sourceLevel.variant_qty < quantity) {
@@ -323,18 +323,33 @@ export const inventoryMethods: IInventoryStorage = {
       throw new Error("Variant not found");
     }
 
+    // If pulling `quantity` on-hand out of the source would leave its reserved_qty
+    // above its remaining on-hand (which violates check_reserved_lte_on_hand), the
+    // spillover reserved must follow the stock. Mirrors the forward move-reserved
+    // path in inventory.use-cases.transfer(); also makes undoTransfer correct when
+    // it reverses a reserve-moved transfer. Bounded by reserved and by quantity.
+    const sourceReserved = Number(sourceLevel.reserved_qty) || 0;
+    const sourceOnHandAfter = Number(sourceLevel.variant_qty) - quantity;
+    let reservedToMove = 0;
+    if (sourceReserved > sourceOnHandAfter) {
+      reservedToMove = Math.min(sourceReserved - sourceOnHandAfter, quantity, sourceReserved);
+    }
+
+    // Source: decrement on-hand and (if needed) reserved in a SINGLE update so the
+    // row never transiently violates check_reserved_lte_on_hand.
     await tx
       .update(inventoryLevels)
       .set({
         variantQty: sql`${inventoryLevels.variantQty} - ${quantity}`,
+        ...(reservedToMove > 0 ? { reservedQty: sql`${inventoryLevels.reservedQty} - ${reservedToMove}` } : {}),
         updatedAt: new Date()
       })
       .where(eq(inventoryLevels.id, sourceLevel.id));
 
     const destResult = await tx.execute(sql`
-      SELECT id FROM inventory.inventory_levels 
-      WHERE warehouse_location_id = ${toLocationId} 
-        AND product_variant_id = ${productVariantId} 
+      SELECT id FROM inventory.inventory_levels
+      WHERE warehouse_location_id = ${toLocationId}
+        AND product_variant_id = ${productVariantId}
       FOR UPDATE LIMIT 1
     `);
     const destLevel = destResult.rows && destResult.rows.length > 0 ? destResult.rows[0] : null;
@@ -344,6 +359,7 @@ export const inventoryMethods: IInventoryStorage = {
         .update(inventoryLevels)
         .set({
           variantQty: sql`${inventoryLevels.variantQty} + ${quantity}`,
+          ...(reservedToMove > 0 ? { reservedQty: sql`${inventoryLevels.reservedQty} + ${reservedToMove}` } : {}),
           updatedAt: new Date()
         })
         .where(eq(inventoryLevels.id, destLevel.id));
@@ -352,11 +368,45 @@ export const inventoryMethods: IInventoryStorage = {
         warehouseLocationId: toLocationId,
         productVariantId: productVariantId,
         variantQty: quantity,
-        reservedQty: 0,
+        reservedQty: reservedToMove,
         pickedQty: 0,
         packedQty: 0,
         backorderQty: 0
       });
+    }
+
+    // Re-point pending, un-started order lines (matched to the variant by SKU —
+    // order_items has no variant FK) so the picker follows the stock to the new
+    // bin. Only when reserved actually moved.
+    let repointed = 0;
+    if (reservedToMove > 0) {
+      const [fromLoc] = await tx
+        .select({ code: warehouseLocations.code })
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, fromLocationId))
+        .limit(1);
+      const [toLoc] = await tx
+        .select({ code: warehouseLocations.code, zone: warehouseLocations.zone })
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, toLocationId))
+        .limit(1);
+      if (fromLoc && toLoc) {
+        const repoint = await tx.execute(sql`
+          UPDATE wms.order_items AS oi
+          SET location = ${toLoc.code}, zone = ${toLoc.zone ?? "U"}
+          FROM wms.orders o, catalog.product_variants pv
+          WHERE oi.order_id = o.id
+            AND UPPER(pv.sku) = UPPER(oi.sku)
+            AND pv.id = ${productVariantId}
+            AND UPPER(oi.location) = UPPER(${fromLoc.code})
+            AND oi.requires_shipping = 1
+            AND oi.status = 'pending'
+            AND oi.picked_quantity = 0
+            AND o.warehouse_status NOT IN ('shipped', 'cancelled')
+          RETURNING oi.id
+        `);
+        repointed = repoint.rows.length;
+      }
     }
 
     const batchId = `TRANSFER-${Date.now()}`;
@@ -374,6 +424,27 @@ export const inventoryMethods: IInventoryStorage = {
       notes: notes || `Transfer by ${userId}`,
       userId
     }).returning();
+
+    // Separate ledger row for the reserved movement, for a complete audit trail.
+    if (reservedToMove > 0) {
+      await tx.insert(inventoryTransactions).values({
+        productVariantId,
+        fromLocationId,
+        toLocationId,
+        transactionType: "reserve_move",
+        variantQtyDelta: reservedToMove,
+        variantQtyBefore: sourceReserved,
+        variantQtyAfter: sourceReserved - reservedToMove,
+        batchId,
+        sourceState: "reserved",
+        targetState: "reserved",
+        notes:
+          `Moved ${reservedToMove} reserved unit(s) with stock transfer; ` +
+          `re-pointed ${repointed} pending order line(s)` +
+          (notes ? `. ${notes}` : ""),
+        userId
+      });
+    }
 
     return transaction[0];
   },

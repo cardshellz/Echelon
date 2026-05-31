@@ -42,6 +42,7 @@ export const transactionTypeEnum = [
   "assemble",     // Smaller units assembled into larger pack (future)
   "replenish",    // Moved from bulk to pick location
   "transfer",     // Moved between locations
+  "reserve_move", // Reserved allocation moved between locations alongside a stock transfer
   "reserve",      // Reserved for order
   "unreserve",    // Reservation released (cancel, short)
   "ship",         // Shipped out

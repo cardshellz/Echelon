@@ -106,7 +106,7 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
-      const { fromLocationId, toLocationId, variantId, quantity, notes } = req.body;
+      const { fromLocationId, toLocationId, variantId, quantity, notes, moveReserved } = req.body;
 
       // Validate required fields exist
       if (!fromLocationId || !toLocationId || !variantId || !quantity) {
@@ -148,13 +148,14 @@ export function registerInventoryRoutes(app: Express) {
         return res.status(400).json({ error: "Variant not found" });
       }
 
-      await inventoryCore.transfer({
+      const transferResult = await inventoryCore.transfer({
         productVariantId: varId,
         fromLocationId: fromLocId,
         toLocationId: toLocId,
         qty,
         userId,
         notes: typeof notes === "string" ? notes : undefined,
+        moveReserved: moveReserved === true,
       });
 
       // Sync to sales channels after transfer (fire-and-forget)
@@ -174,13 +175,23 @@ export function registerInventoryRoutes(app: Express) {
         );
       }
 
-      res.json({ success: true });
-    } catch (error) {
+      res.json({ success: true, ...transferResult });
+    } catch (error: any) {
+      // Reserved stock stands in the way: return a structured 409 so the client
+      // can offer to move the reservation with the stock (Option A confirm flow),
+      // rather than a generic 400. Same for an in-progress pick at the source.
+      if (error?.code === "TRANSFER_BLOCKED_BY_RESERVATION" || error?.code === "TRANSFER_BLOCKED_BY_ACTIVE_PICK") {
+        return res.status(409).json({
+          code: error.code,
+          error: error.message,
+          context: error.context ?? null,
+        });
+      }
       console.error("Transfer error:", error);
       res.status(400).json({ error: String(error) });
     }
   });
-  
+
   // SKU Conversion — move inventory from one variant to another across all locations
   // Atomic: adjust-out old variant, adjust-in new variant, with sku_correction audit trail
   app.post("/api/inventory/convert-sku", requirePermission("inventory", "adjust"), async (req, res) => {
