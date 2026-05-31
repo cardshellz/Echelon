@@ -171,6 +171,7 @@ export default function CycleCounts() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [quickCountOpen, setQuickCountOpen] = useState(false);
   const [quickCountBin, setQuickCountBin] = useState("");
+  const [quickCountWarehouseId, setQuickCountWarehouseId] = useState("");
   const [countDialogOpen, setCountDialogOpen] = useState(false);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [bulkApproveOpen, setBulkApproveOpen] = useState(false);
@@ -261,6 +262,12 @@ export default function CycleCounts() {
     queryKey: ["/api/warehouses"],
   });
 
+  useEffect(() => {
+    if (!quickCountWarehouseId && warehouses.length === 1) {
+      setQuickCountWarehouseId(String(warehouses[0].id));
+    }
+  }, [quickCountWarehouseId, warehouses]);
+
   // SKU search for typeahead
   interface SkuSearchResult {
     sku: string;
@@ -305,12 +312,12 @@ export default function CycleCounts() {
   });
 
   const quickCountMutation = useMutation({
-    mutationFn: async (locationCode: string) => {
+    mutationFn: async (data: { locationCode: string; warehouseId: number }) => {
       const res = await fetch("/api/cycle-counts/quick", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ locationCode }),
+        body: JSON.stringify(data),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed to create quick count" }));
@@ -330,6 +337,13 @@ export default function CycleCounts() {
       toast({ title: "Quick count failed", description: err.message, variant: "destructive" });
     },
   });
+
+  const submitQuickCount = () => {
+    const locationCode = quickCountBin.trim();
+    const warehouseId = Number(quickCountWarehouseId);
+    if (!locationCode || !Number.isInteger(warehouseId) || warehouseId <= 0) return;
+    quickCountMutation.mutate({ locationCode, warehouseId });
+  };
 
   const initializeMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -3271,6 +3285,25 @@ export default function CycleCounts() {
           </DialogHeader>
           <div className="space-y-3">
             <div>
+              <Label className="text-sm">Warehouse *</Label>
+              <Select
+                value={quickCountWarehouseId}
+                onValueChange={setQuickCountWarehouseId}
+                disabled={quickCountMutation.isPending}
+              >
+                <SelectTrigger className="h-10">
+                  <SelectValue placeholder="Select warehouse" />
+                </SelectTrigger>
+                <SelectContent>
+                  {warehouses.map((w) => (
+                    <SelectItem key={w.id} value={String(w.id)}>
+                      {w.code} — {w.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
               <Label className="text-sm">Bin Code *</Label>
               <Input
                 value={quickCountBin}
@@ -3281,7 +3314,7 @@ export default function CycleCounts() {
                 autoFocus
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && quickCountBin.trim()) {
-                    quickCountMutation.mutate(quickCountBin.trim());
+                    submitQuickCount();
                   }
                 }}
               />
@@ -3291,8 +3324,8 @@ export default function CycleCounts() {
             <Button variant="outline" className="flex-1 h-11" onClick={() => { setQuickCountOpen(false); setQuickCountBin(""); }}>Cancel</Button>
             <Button
               className="flex-1 h-11"
-              onClick={() => quickCountMutation.mutate(quickCountBin.trim())}
-              disabled={quickCountMutation.isPending || !quickCountBin.trim()}
+              onClick={submitQuickCount}
+              disabled={quickCountMutation.isPending || !quickCountBin.trim() || !quickCountWarehouseId}
             >
               {quickCountMutation.isPending ? "Creating..." : "Count Bin"}
             </Button>

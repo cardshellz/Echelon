@@ -38,6 +38,17 @@ export function registerSettingsRoutes(app: Express) {
     z.string().nullable()
   );
 
+  const quickCycleCountSchema = z.object({
+    locationCode: z.string().trim().min(1, "locationCode is required"),
+    warehouseId: z.preprocess(
+      (value) => value === "" || value == null ? undefined : Number(value),
+      z.number({
+        required_error: "warehouseId is required",
+        invalid_type_error: "warehouseId must be a positive integer",
+      }).int("warehouseId must be a positive integer").positive("warehouseId is required"),
+    ),
+  });
+
   // Update settings (upsert multiple key-value pairs)
   app.put("/api/settings", requirePermission("settings", "edit"), async (req, res) => {
     try {
@@ -199,15 +210,21 @@ export function registerSettingsRoutes(app: Express) {
   app.post("/api/cycle-counts/quick", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { cycleCount: ccService } = req.app.locals.services;
-      const { locationCode, warehouseId } = req.body;
-      if (!locationCode) return res.status(400).json({ error: "locationCode is required" });
+      const parsed = quickCycleCountSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: parsed.error.errors[0]?.message || "Invalid quick count request",
+          details: parsed.error.errors,
+        });
+      }
 
+      const { locationCode, warehouseId } = parsed.data;
       const code = locationCode.trim().toUpperCase();
       const cc = await ccService.create({
         name: `Quick Count — ${code}`,
         description: `Single-bin quick count for ${code}`,
         locationCodes: code,
-        warehouseId: warehouseId || undefined,
+        warehouseId,
       }, req.session.user?.id);
 
       const initialized = await ccService.initialize(cc.id);
