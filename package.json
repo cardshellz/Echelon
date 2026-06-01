@@ -15,6 +15,7 @@
     "qa:daily-replen-counts": "tsx scripts/create-daily-replen-qa-counts.ts --json",
     "recover:allocation-exceptions": "tsx scripts/recover-allocation-exceptions.ts --json",
     "recover:replen-health": "tsx scripts/recover-replen-health.ts --json",
+    "wms:reconcile-ledger": "tsx scripts/reconcile-inventory-ledger.ts",
     "dropship:dogfood-status": "tsx scripts/dropship-dogfood-status.ts",
     "db:push": "drizzle-kit push",
     "test": "vitest run",

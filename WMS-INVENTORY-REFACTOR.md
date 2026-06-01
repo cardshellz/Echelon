@@ -264,11 +264,24 @@ Partitioned by **layer of authority over `inventory_levels`**, not by feature �
 every feature writes the same five columns, feature-slices would collide. Order:
 measurement first, then authoritative truth, then derived/advisory last.
 
-### Phase 0 — Ground-truth reconciler (read-only) ☐
-Build a harness that replays `inventory_transactions` and diffs against `inventory_levels`
-(on-hand bucket). Output: per-(variant,location) variance report. Zero mutations.
-- **Exit:** reconciler runs in CI + on demand; produces a variance count. Expect non-zero
-  initially (C4 guarantees drift) — that's the baseline we drive to zero.
+### Phase 0 — Ground-truth reconciler (read-only) ☑
+Replays `inventory_transactions` and diffs against `inventory_levels` (on-hand bucket).
+Output: per-(variant,location) variance report. Zero mutations.
+- **Built:**
+  - `server/modules/inventory/reconcile/ledger-replay.ts` — pure, deterministic replay.
+    On-hand conventions derived by reading every `createInventoryTransaction` write site
+    (not docs): `transfer` is the only dual-location on-hand move (from −=δ, to +=δ);
+    single-location types are sign-encoded on COALESCE(from,to); `reserve`/`unreserve`/
+    `reserve_move`/`return` are skipped (no on-hand effect / double-count traps).
+  - `server/modules/inventory/__tests__/unit/ledger-replay.test.ts` — 21 unit tests pinning
+    each convention + variance/trust-gap detection.
+  - `scripts/reconcile-inventory-ledger.ts` — read-only runner (`npm run wms:reconcile-ledger`),
+    flags `--json --limit= --variant=`, exit 1 on any variance (CI-gateable), exit 2 on no DB.
+- **Scope note:** on-hand only. Reserved/picked/packed are not signed-delta-ledgered (C6),
+  so bucket reconciliation is deferred to Phase 1.
+- **Exit:** ✅ reconciler runs on demand + CI-gateable; produces a variance count + total
+  abs drift. **Next action: run against prod to capture the baseline** (expect non-zero —
+  C4 guarantees drift) and record the starting number here.
 
 ### Phase 1 — One guarded write primitive + DB invariants ☐
 - Funnel all 32 write paths through a single guarded mutation (tx + lock + ledger-in-tx).
