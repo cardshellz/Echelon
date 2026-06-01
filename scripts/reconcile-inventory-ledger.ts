@@ -58,7 +58,10 @@ async function main() {
     process.exit(2);
   }
 
-  const pool = new Pool({ connectionString });
+  const pool = new Pool({
+    connectionString,
+    ssl: { rejectUnauthorized: false },
+  });
 
   try {
     const variantFilter = opts.variantId
