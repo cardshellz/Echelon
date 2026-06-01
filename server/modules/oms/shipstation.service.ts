@@ -12,7 +12,6 @@
 
 import { eq, and, sql } from "drizzle-orm";
 import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels, outboundShipments, wmsOrders, outboundShipmentItems, wmsOrderItems } from "@shared/schema";
-import type { OmsOrderWithLines } from "./oms.service";
 import { buildTrackingUrl } from "./tracking-url.util";
 import { isLineSumWithinTolerance } from "@shared/validation/currency";
 import {
@@ -682,127 +681,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   // -------------------------------------------------------------------------
-  // Push an OMS order to ShipStation
+  // REMOVED: pushOrder (legacy OMS-level push to ShipStation)
+  //
+  // pushOrder created a ShipStation order keyed `echelon-oms-<omsOrderId>`,
+  // a DIFFERENT key scheme than the canonical WMS push
+  // (`echelon-wms-shp-<shipmentId>`). Because ShipStation dedups on orderKey,
+  // having both paths meant the same order could be created TWICE in
+  // ShipStation (one per key scheme). It had no remaining live callers — the
+  // manual route now delegates to pushShipment — so it is deleted to
+  // guarantee exactly ONE path to ShipStation. SHIP_NOTIFY still parses
+  // legacy `echelon-oms-<id>` keys for pre-cutover orders (see
+  // parseEchelonOrderKey), but Echelon no longer EMITS them.
   // -------------------------------------------------------------------------
-
-  async function pushOrder(
-    omsOrder: OmsOrderWithLines,
-  ): Promise<{ shipstationOrderId: number; orderKey: string }> {
-    const orderKey = `echelon-oms-${omsOrder.id}`;
-
-    // Fetch sort_rank from the WMS row so packer can sort ShipStation grid
-    // in the same order as the Echelon pick queue. Falls back to empty
-    // string if the WMS row hasn't been created yet (unlikely).
-    let sortRank = "";
-    try {
-      const wmsRow: any = await db.execute(sql`
-        SELECT sort_rank FROM wms.orders
-        WHERE source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrder.id)}
-        LIMIT 1
-      `);
-      sortRank = wmsRow?.rows?.[0]?.sort_rank || "";
-    } catch (err) {
-      console.warn(`[ShipStation] sort_rank lookup failed for order ${omsOrder.id}:`, err);
-    }
-
-    // Resolve ShipStation store/warehouse routing (data-driven, falls back to env/hardcoded)
-    const routing = await resolveShipStationIds(db, {
-      channelId: omsOrder.channelId ?? null,
-      warehouseId: omsOrder.warehouseId ?? null,
-    });
-
-    const isEbay = omsOrder.channelId === EBAY_CHANNEL_ID;
-    const channelName = omsOrder.channelName || "";
-    const externalOrderNumber = omsOrder.externalOrderNumber || omsOrder.externalOrderId;
-    const orderNumber = isEbay ? `EB-${externalOrderNumber}` : externalOrderNumber;
-
-    const payload = {
-      orderNumber,
-      orderKey,
-      orderDate: omsOrder.orderedAt
-        ? new Date(omsOrder.orderedAt).toISOString()
-        : new Date().toISOString(),
-      paymentDate: omsOrder.orderedAt
-        ? new Date(omsOrder.orderedAt).toISOString()
-        : new Date().toISOString(),
-      orderStatus: "awaiting_shipment",
-      customerUsername: omsOrder.customerName || "",
-      customerEmail: omsOrder.customerEmail || "",
-      billTo: {
-        name: omsOrder.customerName || "",
-      },
-      shipTo: {
-        name: omsOrder.shipToName || omsOrder.customerName || "",
-        company: (omsOrder as any).shipToCompany || "",
-        street1: omsOrder.shipToAddress1 || "",
-        street2: omsOrder.shipToAddress2 || "",
-        city: omsOrder.shipToCity || "",
-        state: omsOrder.shipToState || "",
-        postalCode: omsOrder.shipToZip || "",
-        country: omsOrder.shipToCountry || "US",
-        phone: omsOrder.customerPhone || "",
-      },
-      items: (omsOrder.lines || []).map((line) => ({
-        lineItemKey: `oms-line-${line.id}`,
-        sku: line.sku || "",
-        name: line.title || "",
-        quantity: line.quantity,
-        unitPrice: ((line as any).priceCents || 0) / 100,
-        options: [],
-      })),
-      amountPaid: (omsOrder.totalCents || 0) / 100,
-      taxAmount: (omsOrder.taxCents || 0) / 100,
-      shippingAmount: (omsOrder.shippingCents || 0) / 100,
-      internalNotes: `Source: ${channelName || "unknown"} via Echelon OMS`,
-      advancedOptions: {
-        warehouseId: routing.warehouseId,
-        storeId: routing.storeId,
-        source: channelName || "echelon",
-        // customField1 carries the Echelon pick queue sort rank. Packer
-        // sorts ShipStation grid by Custom Field 1 DESC — yields the
-        // same order the picker picks in. 22-char padded string so
-        // ShipStation's text sort matches our numeric sort.
-        customField1: sortRank,
-        customField2: `oms_order_id:${omsOrder.id}|channel:${channelName || "unknown"}`,
-        customField3: `external_id:${omsOrder.externalOrderId}`,
-      },
-    };
-
-    const result = await apiRequest<ShipStationCreateOrderResponse>(
-      "POST",
-      "/orders/createorder",
-      payload,
-    );
-
-    // Update oms_orders with ShipStation mapping + engine-agnostic refs
-    await db
-      .update(omsOrders)
-      .set({
-        shipstationOrderId: result.orderId,
-        shipstationOrderKey: orderKey,
-        shippingEngine: "shipstation",
-        engineOrderRef: String(result.orderId),
-        updatedAt: new Date(),
-      })
-      .where(eq(omsOrders.id, omsOrder.id));
-
-    // Record event
-    await db.insert(omsOrderEvents).values({
-      orderId: omsOrder.id,
-      eventType: "pushed_to_shipstation",
-      details: {
-        shipstationOrderId: result.orderId,
-        orderKey,
-        orderNumber: result.orderNumber,
-      },
-    });
-
-    console.log(
-      `[ShipStation] Pushed OMS order ${omsOrder.id} → SS order ${result.orderId} (key: ${orderKey})`,
-    );
-
-    return { shipstationOrderId: result.orderId, orderKey };
-  }
 
   // -------------------------------------------------------------------------
   // Get shipments for a ShipStation order
@@ -3385,7 +3275,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     validateShipmentForPush(shipmentRow, orderRow, itemRows);
 
     // ─── 5. Build SS payload ────────────────────────────────────────
-    const orderKey = `echelon-wms-shp-${shipmentId}`;
+    // `let` because the sibling-dedup guard (step 6) may adopt an existing
+    // ShipStation order's key when a duplicate full shipment is detected.
+    let orderKey = `echelon-wms-shp-${shipmentId}`;
 
     // eBay keeps the "EB-" prefix convention from pushOrder so packer-
     // facing order numbers stay stable across the flag flip.
@@ -3458,18 +3350,61 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       : null;
 
     if (!ssOrderIdForPayload) {
-      // Re-check for concurrent push that may have set the SS order ID
-      // after our initial SELECT. This closes the race window where two
-      // concurrent pushShipment calls both read shipstation_order_id=NULL,
-      // then both try to create on SS.
-      const freshCheck: any = await db.execute(sql`
-        SELECT shipstation_order_id
+      // One query closes BOTH races in a single round-trip:
+      //
+      //  (a) self    — a concurrent push set THIS shipment's SS order id
+      //      after our initial SELECT. Adopt it so we UPDATE (orderId in
+      //      payload) rather than create a duplicate ShipStation order.
+      //
+      //  (b) sibling — a DUPLICATE full shipment for the same WMS order
+      //      already has a ShipStation order. ShipStation dedups on
+      //      orderKey, and our key is per-shipment (echelon-wms-shp-<id>),
+      //      so two shipment rows would otherwise emit two keys and create
+      //      TWO ShipStation orders. Adopt the sibling's id + key so one WMS
+      //      order maps to exactly one ShipStation order. The advisory lock
+      //      + unique index on wms.orders prevent the duplicate WMS order
+      //      upstream; this is the last-line backstop at the push layer.
+      //      Genuine partial/split shipments are EXEMPT — a real split
+      //      legitimately gets its own ShipStation order per box.
+      //
+      // Self is preferred over siblings (ORDER BY is_self DESC) and is
+      // always adopted; a sibling is only adopted for full shipments.
+      const dedupCheck: any = await db.execute(sql`
+        SELECT id, shipstation_order_id, shipstation_order_key,
+               (id = ${shipmentId}) AS is_self
         FROM wms.outbound_shipments
-        WHERE id = ${shipmentId}
+        WHERE order_id = ${shipmentRow.order_id}
+          AND shipstation_order_id IS NOT NULL
+          AND (id = ${shipmentId} OR status NOT IN ('voided', 'cancelled'))
+        ORDER BY (id = ${shipmentId}) DESC, id
+        LIMIT 1
       `);
-      const freshSsId = Number(freshCheck?.rows?.[0]?.shipstation_order_id ?? 0);
-      if (Number.isInteger(freshSsId) && freshSsId > 0) {
-        ssOrderIdForPayload = freshSsId;
+      const hit = dedupCheck?.rows?.[0];
+      const hitSsId = Number(hit?.shipstation_order_id ?? 0);
+      // pg returns boolean as true / "t" depending on driver/casting.
+      const isSelf =
+        hit?.is_self === true || hit?.is_self === "t" || Number(hit?.id) === shipmentId;
+      if (
+        Number.isInteger(hitSsId) &&
+        hitSsId > 0 &&
+        (isSelf || !orderRow.is_partial_shipment)
+      ) {
+        ssOrderIdForPayload = hitSsId;
+        if (!isSelf) {
+          // Adopt the sibling's orderKey so the existing ShipStation order
+          // keeps its stable identity — don't flip its key to this
+          // duplicate shipment's key (SHIP_NOTIFY parses key → shipmentId).
+          const siblingKey = hit?.shipstation_order_key as string | undefined;
+          if (siblingKey) {
+            orderKey = siblingKey;
+            payload.orderKey = siblingKey;
+          }
+          console.warn(
+            `[ShipStation] Duplicate full shipment for WMS order ${shipmentRow.order_id}: ` +
+              `shipment ${shipmentId} adopting sibling SS order ${hitSsId} ` +
+              `instead of creating a second ShipStation order`,
+          );
+        }
       }
     }
 
@@ -3514,7 +3449,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   return {
-    pushOrder,
     pushShipment,
     getShipments,
     getOrderById,

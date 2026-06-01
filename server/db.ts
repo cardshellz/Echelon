@@ -850,6 +850,60 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP`);
     console.log("Checked OMS Shopify webhook columns (financial_status, cancelled_at, refunded_at)");
 
+    // ─── Migration 0580: Forward Demand Events ──────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS procurement.demand_events (
+        id              SERIAL PRIMARY KEY,
+        name            VARCHAR(255) NOT NULL,
+        event_type      VARCHAR(50)  NOT NULL DEFAULT 'manual_forecast',
+        start_date      DATE NOT NULL,
+        end_date        DATE,
+        status          VARCHAR(20) NOT NULL DEFAULT 'planned',
+        notes           TEXT,
+        created_by      INTEGER,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS procurement.demand_event_lines (
+        id                  SERIAL PRIMARY KEY,
+        demand_event_id     INTEGER NOT NULL REFERENCES procurement.demand_events(id) ON DELETE CASCADE,
+        product_id          INTEGER NOT NULL,
+        product_variant_id  INTEGER,
+        expected_pieces     INTEGER NOT NULL CHECK (expected_pieces > 0),
+        confidence          VARCHAR(10) NOT NULL DEFAULT 'medium',
+        notes               TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_events_status_date ON procurement.demand_events (status, start_date)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_product ON procurement.demand_event_lines (product_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_event ON procurement.demand_event_lines (demand_event_id)`);
+    console.log("Checked forward demand events tables (demand_events, demand_event_lines)");
+
+    // ─── WMS order dedup: one active WMS order per OMS fulfillment order ──────────
+    // Advisory lock in syncOmsOrderToWms prevents races at runtime; this index
+    // is the permanent DB-level backstop. Excludes cancelled rows so the index
+    // can be created even when historical duplicates exist (all known dupes are
+    // {shipped, cancelled} pairs).
+    try {
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_orders_oms_fulfillment_active
+          ON wms.orders (oms_fulfillment_order_id)
+          WHERE source = 'oms'
+            AND warehouse_status NOT IN ('cancelled', 'voided')
+            AND oms_fulfillment_order_id IS NOT NULL
+      `);
+      console.log("Checked WMS order dedup unique index (uq_wms_orders_oms_fulfillment_active)");
+    } catch (err: any) {
+      console.error(
+        `[startup-migration] Could not create uq_wms_orders_oms_fulfillment_active ` +
+          `(likely duplicate active WMS orders for same OMS order — needs manual reconciliation): ${err.message}`,
+      );
+    }
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

@@ -323,6 +323,48 @@ export class WmsSyncService {
       const { ordersStorage } = await import("../orders");
 
       const txResult = await db.transaction(async (tx: any) => {
+        // ── C2.0 Concurrency guard (per-OMS-order serialization) ──────
+        // Without this, two concurrent invocations of syncOmsOrderToWms
+        // for the SAME OMS order (duplicate Shopify webhook, or webhook
+        // racing the reconcile sweep) BOTH pass the step-1 "already
+        // synced?" check above, BOTH insert a wms.orders row, each gets
+        // its own outbound_shipments row, and each pushes its own
+        // ShipStation order with a distinct echelon-wms-shp-<id> key →
+        // duplicate (or triplicate) SS orders. There is no unique
+        // constraint on oms_fulfillment_order_id to catch this at the DB.
+        //
+        // The advisory xact lock (key space 918407 = OMS→WMS order sync,
+        // distinct from 918406 used by createShipmentForOrder) makes the
+        // losing caller block here until the winner commits, then the
+        // recheck below finds the winner's row and returns it WITHOUT
+        // creating a duplicate. Auto-released on commit/rollback.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(918407, ${omsOrderId})`);
+
+        // Authoritative existence recheck under the lock. Mirrors the
+        // step-1 fast-path query; this is the one that actually prevents
+        // the duplicate when two syncs race.
+        const racedWmsOrder = await tx
+          .select({ id: wmsOrders.id })
+          .from(wmsOrders)
+          .where(
+            and(
+              eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
+              eq(wmsOrders.source, 'oms'),
+            ),
+          )
+          .orderBy(sql`
+            CASE
+              WHEN ${wmsOrders.warehouseStatus} = 'cancelled' THEN 2
+              WHEN ${wmsOrders.warehouseStatus} = 'shipped' THEN 1
+              ELSE 0
+            END,
+            ${wmsOrders.id}
+          `)
+          .limit(1);
+        if (racedWmsOrder.length > 0) {
+          return { racedExistingWmsOrderId: Number(racedWmsOrder[0].id) };
+        }
+
         // 5. Create WMS order (writes to orders + order_items)
         const newWmsOrder = await ordersStorage.createOrderWithItems(wmsOrderData, wmsLineItems, tx);
 
@@ -467,7 +509,30 @@ export class WmsSyncService {
         return { newWmsOrder, shipmentIdForPush };
       });
 
-      const { newWmsOrder, shipmentIdForPush } = txResult;
+      // Concurrency guard tripped: another sync of this same OMS order
+      // won the race and already created the WMS order. Reconcile any
+      // missing lines against the winner's row and return it — do NOT
+      // create a second order or push a second ShipStation order.
+      if ((txResult as any).racedExistingWmsOrderId) {
+        const racedId = Number((txResult as any).racedExistingWmsOrderId);
+        console.warn(
+          `[WMS Sync] Concurrent sync race for OMS order ${omsOrderId} — WMS order ${racedId} already created by a parallel sync; reconciling instead of creating a duplicate`,
+        );
+        try {
+          await this.reconcileExistingWmsOrderLines(omsOrderId, racedId);
+        } catch (err: any) {
+          console.error(
+            `[WMS Sync] Reconcile after race for OMS order ${omsOrderId} (WMS ${racedId}) failed: ${err.message}`,
+          );
+        }
+        return racedId;
+      }
+
+      // Past the race guard: txResult is the create-path variant.
+      const { newWmsOrder, shipmentIdForPush } = txResult as {
+        newWmsOrder: { id: number };
+        shipmentIdForPush: number | null;
+      };
 
       // 7. Route to warehouse (if routing service exists)
       try {

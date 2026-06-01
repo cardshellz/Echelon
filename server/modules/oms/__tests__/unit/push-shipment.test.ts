@@ -719,6 +719,205 @@ describe("pushShipment :: happy path", () => {
   });
 });
 
+// ─── SS-order-level dedup across sibling shipments ─────────────────────
+// A duplicate full shipment for the same WMS order must NOT create a second
+// ShipStation order. pushShipment adopts the sibling shipment's SS order id
+// + orderKey so one WMS order maps to exactly one ShipStation order.
+describe("pushShipment :: sibling-shipment dedup", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  // SQL-aware mock: select() is counter-based (shipment, order, items);
+  // execute() branches on SQL text so we can return a sibling row for the
+  // dedup probe specifically.
+  function sqlTextOf(query: any): string {
+    const chunks: unknown[] = query?.queryChunks ?? [];
+    return chunks
+      .map((c) => {
+        if (typeof c === "string") return c;
+        if (c && typeof c === "object" && Array.isArray((c as any).value)) {
+          return (c as any).value.join("");
+        }
+        return "";
+      })
+      .join("");
+  }
+
+  function makeSqlAwareDb(opts: {
+    shipment: WmsShipmentRow;
+    order: WmsOrderRow;
+    items: WmsShipmentItemRow[];
+    sibling: {
+      id: number;
+      shipstation_order_id: number;
+      shipstation_order_key: string;
+    } | null;
+    // full shipment by default (not partial)
+    orderShippableQty?: number;
+    shipmentShippableQty?: number;
+  }) {
+    let selectCount = 0;
+    const select = vi.fn(() => {
+      const chainable: any = {
+        from: () => chainable,
+        innerJoin: () => chainable,
+        where: () => chainable,
+        limit: () => chainable,
+        orderBy: () => chainable,
+        then: (resolve: any) => {
+          selectCount += 1;
+          if (selectCount === 1) return resolve([opts.shipment]);
+          if (selectCount === 2) return resolve([opts.order]);
+          return resolve(opts.items);
+        },
+      };
+      return chainable;
+    });
+
+    const execute = vi.fn(async (query: any) => {
+      const text = sqlTextOf(query);
+      if (text.includes("non_shipping_total_cents")) {
+        return { rows: [{ non_shipping_total_cents: 0 }] };
+      }
+      if (text.includes("order_shippable_qty")) {
+        return {
+          rows: [
+            {
+              order_shippable_qty: opts.orderShippableQty ?? 2,
+              shipment_shippable_qty: opts.shipmentShippableQty ?? 2,
+            },
+          ],
+        };
+      }
+      // The dedup probe — identified by the is_self computed column.
+      if (text.includes("is_self")) {
+        return { rows: opts.sibling ? [{ ...opts.sibling, is_self: false }] : [] };
+      }
+      // routing lookups, UPDATE, recompute reads → empty
+      return { rows: [] };
+    });
+
+    return { db: { execute, select }, execute, select };
+  }
+
+  it("adopts a sibling shipment's SS order id + key instead of creating a second SS order", async () => {
+    // Two shipment rows for WMS order 42 (a sync race that slipped past the
+    // upstream guards). Sibling shipment 8000 already created SS order 777.
+    const shipmentRow = okShipment({ id: 9001, order_id: 42, status: "planned" });
+    const orderRow = okOrder({ id: 42, oms_fulfillment_order_id: null });
+    const items = [okItem()];
+
+    const mock = makeSqlAwareDb({
+      shipment: shipmentRow,
+      order: orderRow,
+      items,
+      sibling: {
+        id: 8000,
+        shipstation_order_id: 777,
+        shipstation_order_key: "echelon-wms-shp-8000",
+      },
+    });
+
+    const fetchMock = mockFetchOnceOk({
+      orderId: 777,
+      orderNumber: orderRow.order_number,
+      orderKey: "echelon-wms-shp-8000",
+      orderStatus: "awaiting_shipment",
+    });
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db as any);
+    const result = await svc.pushShipment(shipmentRow.id);
+
+    // SS push must carry the sibling's orderId (an UPDATE, not a CREATE)
+    // and the sibling's stable orderKey.
+    const [, init] = fetchMock.mock.calls[0] as any;
+    const payload = JSON.parse(init.body);
+    expect(payload.orderId).toBe(777);
+    expect(payload.orderKey).toBe("echelon-wms-shp-8000");
+    expect(result.shipstationOrderId).toBe(777);
+    expect(result.orderKey).toBe("echelon-wms-shp-8000");
+  });
+
+  it("creates a new SS order when no sibling exists (no false dedup)", async () => {
+    const shipmentRow = okShipment({ id: 9002, order_id: 43, status: "planned" });
+    const orderRow = okOrder({ id: 43, oms_fulfillment_order_id: null });
+    const items = [okItem()];
+
+    const mock = makeSqlAwareDb({
+      shipment: shipmentRow,
+      order: orderRow,
+      items,
+      sibling: null,
+    });
+
+    const fetchMock = mockFetchOnceOk({
+      orderId: 888,
+      orderNumber: orderRow.order_number,
+      orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+      orderStatus: "awaiting_shipment",
+    });
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db as any);
+    const result = await svc.pushShipment(shipmentRow.id);
+
+    const [, init] = fetchMock.mock.calls[0] as any;
+    const payload = JSON.parse(init.body);
+    // No sibling → CREATE: no orderId, own per-shipment key.
+    expect(payload.orderId).toBeUndefined();
+    expect(payload.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
+    expect(result.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
+  });
+
+  it("does NOT collapse a genuine PARTIAL shipment onto a sibling SS order", async () => {
+    // Partial shipment: shipment covers fewer pieces than the order, so it
+    // legitimately gets its OWN ShipStation order even though a sibling
+    // already pushed.
+    const shipmentRow = okShipment({ id: 9003, order_id: 44, status: "planned" });
+    const orderRow = okOrder({ id: 44, oms_fulfillment_order_id: null });
+    const items = [okItem()];
+
+    const mock = makeSqlAwareDb({
+      shipment: shipmentRow,
+      order: orderRow,
+      items,
+      sibling: {
+        id: 8100,
+        shipstation_order_id: 999,
+        shipstation_order_key: "echelon-wms-shp-8100",
+      },
+      orderShippableQty: 5, // order needs 5
+      shipmentShippableQty: 2, // this box only ships 2 → partial
+    });
+
+    const fetchMock = mockFetchOnceOk({
+      orderId: 1010,
+      orderNumber: orderRow.order_number,
+      orderKey: `echelon-wms-shp-${shipmentRow.id}`,
+      orderStatus: "awaiting_shipment",
+    });
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db as any);
+    const result = await svc.pushShipment(shipmentRow.id);
+
+    const [, init] = fetchMock.mock.calls[0] as any;
+    const payload = JSON.parse(init.body);
+    // Partial → must NOT adopt sibling 999; keeps its own key, creates new.
+    expect(payload.orderId).toBeUndefined();
+    expect(payload.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
+    expect(result.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
+  });
+});
+
 describe("ShipStation WMS hold/sort sync", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";

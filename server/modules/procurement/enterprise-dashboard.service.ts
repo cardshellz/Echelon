@@ -359,6 +359,19 @@ async function getForwardDemandSummary(): Promise<ForwardDemandSummary> {
   };
 }
 
+// ─── Resilient wrapper ─────────────────────────────────────────────
+// Each section is independently faulted so one bad query (e.g. missing
+// table before migration runs) doesn't crash the whole dashboard.
+
+async function safe<T>(fn: () => Promise<T>, fallback: T, label: string): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: any) {
+    console.error(`[EnterpriseDashboard] ${label} failed:`, err?.message ?? err);
+    return fallback;
+  }
+}
+
 // ─── Main aggregator ───────────────────────────────────────────────
 
 export async function getEnterpriseDashboard(): Promise<EnterpriseDashboard> {
@@ -371,13 +384,13 @@ export async function getEnterpriseDashboard(): Promise<EnterpriseDashboard> {
     webhookHealth,
     forwardDemand,
   ] = await Promise.all([
-    getOrderPipeline(),
-    getShipmentHealth(),
-    getInventoryHealth(),
-    getProcurementPipeline(),
-    getFinancialKpis(),
-    getWebhookHealth(),
-    getForwardDemandSummary(),
+    safe(getOrderPipeline, { total: 0, byStatus: {}, stuckOrders: 0, avgAgeHours: 0, oldestUnshippedHours: 0 }, "orderPipeline"),
+    safe(getShipmentHealth, { total: 0, byStatus: {}, unpushed: 0, requiresReview: 0, onHold: 0, shippedToday: 0, shippedThisWeek: 0 }, "shipmentHealth"),
+    safe(getInventoryHealth, { totalSkus: 0, totalOnHand: 0, totalReserved: 0, totalAvailable: 0, lowStockSkus: 0, outOfStockSkus: 0, overstockSkus: 0, negativeInventory: 0 }, "inventoryHealth"),
+    safe(getProcurementPipeline, { openPoCount: 0, openPoValue: 0, draftPoCount: 0, overduePoCount: 0, inTransitShipments: 0, expectedReceiptsNext30Days: 0 }, "procurementPipeline"),
+    safe(getFinancialKpis, { inventoryValueCents: 0, openPoValueCents: 0, pendingApCents: 0, revenueToday: 0, ordersToday: 0, ordersThisWeek: 0 }, "financialKpis"),
+    safe(getWebhookHealth, { pendingRetries: 0, deadLetters: 0, failedInbox: 0, staleRetries: 0 }, "webhookHealth"),
+    safe(getForwardDemandSummary, { activeEvents: 0, plannedEvents: 0, totalForwardDemandPieces: 0, productsWithForwardDemand: 0 }, "forwardDemand"),
   ]);
 
   return {

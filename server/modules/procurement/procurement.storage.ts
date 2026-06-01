@@ -1327,14 +1327,14 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(on_order.on_order_pieces, 0)::bigint AS on_order_pieces,
         COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
         on_order.earliest_expected,
-        COALESCE(fwd.forward_demand_pieces, 0)::bigint AS forward_demand_pieces,
-        COALESCE(fwd.forward_demand_raw_pieces, 0)::bigint AS forward_demand_raw_pieces,
-        COALESCE(fwd.forward_demand_event_count, 0)::int AS forward_demand_event_count,
         (SELECT MAX(it2.created_at)
          FROM inventory.inventory_transactions it2
          JOIN catalog.product_variants pv2 ON pv2.id = it2.product_variant_id
          WHERE pv2.product_id = p.id
-           AND it2.transaction_type = 'receipt') AS last_received_at
+           AND it2.transaction_type = 'receipt') AS last_received_at,
+        COALESCE(fwd.weighted_pieces, 0)::bigint AS forward_demand_pieces,
+        COALESCE(fwd.raw_pieces, 0)::bigint AS forward_demand_raw_pieces,
+        COALESCE(fwd.event_count, 0)::int AS forward_demand_event_count
       FROM catalog.products p
       LEFT JOIN (
         SELECT pv.product_id,
@@ -1564,23 +1564,22 @@ export const procurementMethods: IProcurementStorage = {
         GROUP BY pv.product_id
       ) on_order ON on_order.product_id = p.id
       LEFT JOIN (
-        SELECT
-          del.product_id,
-          SUM(
-            CASE del.confidence
-              WHEN 'high'   THEN del.expected_pieces
-              WHEN 'medium' THEN CEIL(del.expected_pieces * 0.7)
-              WHEN 'low'    THEN CEIL(del.expected_pieces * 0.4)
-              ELSE 0
-            END
-          )::bigint AS forward_demand_pieces,
-          SUM(del.expected_pieces)::bigint AS forward_demand_raw_pieces,
-          COUNT(DISTINCT de.id)::int AS forward_demand_event_count
+        SELECT del.product_id,
+               SUM(
+                 CASE del.confidence
+                   WHEN 'high'   THEN del.expected_pieces
+                   WHEN 'medium' THEN CEIL(del.expected_pieces * 0.7)
+                   WHEN 'low'    THEN CEIL(del.expected_pieces * 0.4)
+                   ELSE 0
+                 END
+               ) AS weighted_pieces,
+               SUM(del.expected_pieces) AS raw_pieces,
+               COUNT(DISTINCT de.id) AS event_count
         FROM procurement.demand_event_lines del
         JOIN procurement.demand_events de ON de.id = del.demand_event_id
         WHERE de.status IN ('planned', 'active')
-          AND de.start_date >= CURRENT_DATE
-          AND de.start_date <= CURRENT_DATE + MAKE_INTERVAL(days => ${normalizedLookbackDays + 90})
+          AND de.start_date <= CURRENT_DATE + INTERVAL '90 days'
+          AND (de.end_date IS NULL OR de.end_date >= CURRENT_DATE)
         GROUP BY del.product_id
       ) fwd ON fwd.product_id = p.id
       WHERE p.is_active = true
