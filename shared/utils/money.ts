@@ -175,6 +175,28 @@ export function millsToCents(mills: number): number {
 }
 
 /**
+ * Allocate a total per-pack cost (in mills) down to a single base unit.
+ *   perUnitMills(100000, 100) -> 1000   ($10.00 case / 100 = $0.10/unit)
+ *   perUnitMills(100000, 3)   -> 33333  ($10.00 / 3, half-up)
+ *
+ * Used when a multi-unit pack (case/box) is broken into base units and each
+ * base-unit lot must inherit the per-unit cost — NOT the whole-pack cost.
+ * Integer half-up; throws on non-integer / non-positive inputs.
+ */
+export function perUnitMills(totalMills: number, unitsPerPack: number): number {
+  if (!Number.isInteger(totalMills) || !Number.isInteger(unitsPerPack)) {
+    throw new RangeError("perUnitMills requires integer inputs");
+  }
+  if (unitsPerPack <= 0) {
+    throw new RangeError("perUnitMills requires a positive unitsPerPack");
+  }
+  if (totalMills < 0) {
+    throw new RangeError("perUnitMills requires a non-negative totalMills");
+  }
+  return roundHalfUp(totalMills, unitsPerPack);
+}
+
+/**
  * Convert cents to mills — exact, no rounding. 1 cent = 100 mills.
  */
 export function centsToMills(cents: number): number {

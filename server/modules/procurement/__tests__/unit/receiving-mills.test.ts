@@ -3,6 +3,7 @@ import {
   ReceivingService,
   __testing__,
 } from "../../receiving.service";
+import { millsToCents, centsToMills, perUnitMills } from "@shared/utils/money";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for the mills (4-decimal per-unit cost) contract on
@@ -109,6 +110,38 @@ describe("resolveReceivingLineCost — priority", () => {
       storage as any,
     );
     expect(out).toEqual({ cents: 123, mills: 12300 });
+  });
+});
+
+// ─── Case-break per-unit cost contract ───────────────────────────────
+// Regression guard for the auto-break COGS bug: when a multi-unit case is
+// broken into base units on receive, each base-unit lot must inherit the
+// PER-UNIT cost, not the whole-case cost. Previously the code stamped the
+// full case cost on every base unit, overstating base-unit COGS by a factor
+// of unitsPerVariant. The fix computes millsToCents(perUnitMills(caseMills,
+// unitsPerVariant)). (See receiving.service.ts auto-break loop.)
+describe("case-break per-unit cost (auto-break COGS)", () => {
+  it("$10.00 case of 100 -> $0.10/base unit, NOT $10.00", () => {
+    // resolveReceivingLineCost returns the case cost: 100000 mills / 1000¢
+    const caseMills = 100000;
+    const unitsPerVariant = 100;
+    const baseUnitCents = millsToCents(perUnitMills(caseMills, unitsPerVariant));
+    expect(baseUnitCents).toBe(10); // $0.10, not $10.00 (1000¢)
+  });
+
+  it("cheap case still divides correctly", () => {
+    // $0.56 case of 100 -> $0.0056/unit -> rounds to 1¢ (lots are cents-only)
+    const caseMills = 5600;
+    const baseUnitCents = millsToCents(perUnitMills(caseMills, 100));
+    expect(baseUnitCents).toBe(1);
+  });
+
+  it("derives from cents-only source via mills for accuracy", () => {
+    // No mills available: 1299¢ case / 12 -> centsToMills then perUnit
+    const caseCents = 1299;
+    const baseUnitCents = millsToCents(perUnitMills(centsToMills(caseCents), 12));
+    // 129900 mills / 12 = 10825 mills -> millsToCents = 108¢ ($1.0825 -> $1.08)
+    expect(baseUnitCents).toBe(108);
   });
 });
 

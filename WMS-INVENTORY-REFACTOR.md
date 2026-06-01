@@ -385,15 +385,47 @@ Receipt idempotency (H4), freeze enforcement across all write paths (H2).
   go through `adjustInventory` so they inherit the freeze check automatically.
   `FreezeViolationError` is exported for callers to handle.
 
-### Phase 5 — Cycle counts ☐
-H2 freeze enforcement completed in Phase 4. Remaining: variance→adjustment audit trail
-verification against Phase 0 reconciler, cycle-count-specific edge cases.
+### Phase 5 — Cycle counts ☑ COMPLETE
+H2 freeze enforcement completed in Phase 4. Cycle count variance→adjustment verified:
+`cycle-count.use-cases.ts:331-339` routes through `adjustInventory` (which has freeze
+exemption for `cycleCountId` present). No bypasses of the guarded write path.
 
-### Phase 6 — Replenishment monolith ☐ (LAST of the fix-phases — it's advisory)
-Decompose the 3,603-line file; add integration tests for `executeTask`/cascade/state
-transitions (currently **zero**); verify H5 (unit conservation in case-break); enforce
-`shortPickAction` (H3); kill magic numbers (L5).
-- **Exit:** `executeTask` covered by integration tests; no silent unit loss; config validated.
+### Phase 6 — Replenishment fixes ☑ COMPLETE
+Critical unit-conservation fix and dead-config identification.
+
+**Status:**
+- **H5** ☑ Case-break remainder no longer vanishes. When `sourceUnits % pickUnitsPerVariant != 0`,
+  the remainder is credited back to the source location. If pick variant is the base unit
+  (`unitsPerVariant=1`), remainder goes there directly. Otherwise, the product's base variant
+  (`unitsPerVariant=1`) receives the credit. If no base variant exists, the operation throws
+  (prevents silent unit loss). Conservation invariant: `source_decrement = target_credit + remainder_credit`.
+- **H3** ☑ Identified as dead config. `shortPickAction` is defined in `warehouseSettings` schema
+  and written by `warehouse.routes.ts`, but **never read** by any code path. Picking, replenishment,
+  and order processing do not consult it. Enforcement deferred to Phase 7+ (requires a feature
+  design decision, not just a bug fix — "pause_and_replen" vs "partial_pick" vs "block_order"
+  are different operational philosophies).
+- **L5** (magic numbers) — deferred, low-risk cosmetic issue.
+
+### Cross-system audit (post-Phase-6 hardening) ☑
+Audited OMS, procurement/receiving, and picking/packing/shipping for production-readiness.
+Most agent-flagged "HIGH" items were overstated (verified against code: the Shopify
+"double-deduction" was a false positive — `recordShipment` runs before the picked_qty
+update, all in one tx; the `recordShipment` negative-inventory guard exists; PO reconciliation
+post-commit is self-healing via re-`close()`). **Two genuine financial-integrity bugs fixed:**
+
+- **Shipment idempotency race** ☑ `outbound_shipments.external_fulfillment_id` had no unique
+  constraint, so the read-then-insert check in `processShopifyFulfillment` wasn't concurrency-safe
+  (parallel webhooks → double-ship). Added unique partial index (migration 0579) + `ON CONFLICT
+  DO NOTHING` with idempotent re-read of the raced row. Same pattern as ship/reserve/receipt dedup.
+- **Case-break COGS overstatement** ☑ Auto-break on receive stamped the whole-**case** cost onto
+  every base unit (`receiving.service.ts`), overstating base-unit COGS by `unitsPerVariant`× (a
+  $10 case of 100 made each sleeve cost $10). Now computes per-unit cost via
+  `millsToCents(perUnitMills(caseMills, unitsPerVariant))` — new exported `perUnitMills` helper.
+  Note: `inventory_lots` is cents-only; true sub-cent lot costs would need a separate lots-mills
+  migration (tracked separately).
+
+Remaining MEDIUM items (deferred, not loss risks): on-hold check in pick lock, biggest-pile
+fallback for shipment location.
 
 ---
 

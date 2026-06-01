@@ -1202,10 +1202,29 @@ export class ReplenishmentUseCases {
         }
 
         const breakNotes = `Case break: ${executableTask.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
-          (remainder > 0 ? ` (${remainder} base units remainder)` : "");
+          (remainder > 0 ? ` (${remainder} base units remainder credited back to source)` : "");
 
-        // Decrement source variant via inventoryUseCases.adjustInventory()
-        // (routes through audit trail, lot tracking, negative guards, and notifyChange)
+        if (remainder > 0 && pickVariant.unitsPerVariant > 1) {
+          // The source units don't divide evenly into pick units. Find the
+          // product's base variant (unitsPerVariant=1) to credit the remainder.
+          const baseVariantRows = await tx.execute(sql`
+            SELECT id, name, sku, units_per_variant
+            FROM catalog.product_variants
+            WHERE product_id = ${pickVariant.productId}
+              AND units_per_variant = 1
+              AND is_active = true
+            LIMIT 1
+          `);
+          const baseVariant = (baseVariantRows.rows as any[])[0];
+          if (!baseVariant) {
+            throw new Error(
+              `Case break produces ${remainder} indivisible base units (no base-unit variant found for product ${pickVariant.productId}). ` +
+              `Create a variant with unitsPerVariant=1, or choose a divisible break quantity.`,
+            );
+          }
+        }
+
+        // Decrement source variant
         await invTx.adjustInventory({
           productVariantId: sourceVariant.id,
           warehouseLocationId: executableTask.fromLocationId,
@@ -1214,16 +1233,47 @@ export class ReplenishmentUseCases {
           userId: userId ?? undefined,
         });
 
-        // Increment target variant via inventoryUseCases.adjustInventory()
-        // (routes through audit trail, lot tracking, and notifyChange)
+        // Increment target variant
         await invTx.adjustInventory({
           productVariantId: pickVariant.id,
           warehouseLocationId: executableTask.toLocationId,
           qtyDelta: pickVariantUnits,
           reason: `Replen case-break to pick location` +
-            (remainder > 0 ? ` (${remainder} base units lost in conversion)` : ""),
+            (remainder > 0 ? ` (${remainder} base units remainder credited back to source)` : ""),
           userId: userId ?? undefined,
         });
+
+        // Credit remainder back to source — conservation of units.
+        // If breaking 1 case of 12 into packs of 10, the 2 leftover base
+        // units stay at the source as the smallest sellable variant.
+        if (remainder > 0) {
+          if (pickVariant.unitsPerVariant === 1) {
+            // Pick variant IS the base unit — credit directly
+            await invTx.adjustInventory({
+              productVariantId: pickVariant.id,
+              warehouseLocationId: executableTask.fromLocationId,
+              qtyDelta: remainder,
+              reason: `Case-break remainder: ${remainder} x ${pickVariant.name} at source`,
+              userId: userId ?? undefined,
+            });
+          } else {
+            // Remainder can't form complete pick units — credit as base variant
+            const baseVariantRows = await tx.execute(sql`
+              SELECT id, name FROM catalog.product_variants
+              WHERE product_id = ${pickVariant.productId}
+                AND units_per_variant = 1 AND is_active = true
+              LIMIT 1
+            `);
+            const baseVariant = (baseVariantRows.rows as any[])[0];
+            await invTx.adjustInventory({
+              productVariantId: baseVariant.id,
+              warehouseLocationId: executableTask.fromLocationId,
+              qtyDelta: remainder,
+              reason: `Case-break remainder: ${remainder} base units credited as ${baseVariant.name}`,
+              userId: userId ?? undefined,
+            });
+          }
+        }
 
         moved = baseUnitsFromSource;
       } else {
