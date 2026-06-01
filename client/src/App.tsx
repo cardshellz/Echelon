@@ -76,6 +76,8 @@ import SyncLogPage from "@/pages/SyncLogPage";
 import OmsOrders from "@/pages/OmsOrders";
 import VendorList from "@/pages/VendorList";
 import VendorDetail from "@/pages/VendorDetail";
+import EnterpriseDashboard from "@/pages/EnterpriseDashboard";
+import DemandPlanner from "@/pages/DemandPlanner";
 import NotFound from "@/pages/not-found";
 
 function ProtectedRoute({ 
@@ -349,6 +351,12 @@ function Router() {
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/enterprise">
+          <ProtectedRoute component={EnterpriseDashboard} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/demand-planner">
+          <ProtectedRoute component={DemandPlanner} allowedRoles={["admin", "lead"]} />
         </Route>
         {/* New-PO editor routes (Spec A). MUST be registered before
             /purchase-orders/:id so wouter does not match 'new' as an :id. */}
