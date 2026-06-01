@@ -327,19 +327,25 @@ Output: per-(variant,location) variance report. Zero mutations.
   - DB constraints (unique variant+location, non-negative qty, ledger immutability) live in prod.
 
 ### Phase 2 — Money integrity ☑ COMPLETE
-- **C3 resolved:** `0074_integer_money_cents.sql` already converted all `double precision`
-  cost columns to `integer` across catalog, inventory, and procurement schemas (the earlier
-  audit draft was wrong in claiming it only fixed `product_variants` — re-verified against
-  the actual migration, which has 33 ALTER statements).
+- **C3 — verified against the LIVE DATABASE** (not just migration files):
+  - **4 `double precision` columns still in prod** (actual floating-point money):
+    `oms.order_item_costs.{unit_cost_cents, total_cost_cents}`,
+    `oms.order_item_financials.{avg_selling_price_cents, avg_unit_cost_cents}`.
+    These were missed by migration 0074. Fixed → `bigint` with `round()`.
+  - **6 `numeric` columns** on `inventory.inventory_lots` and `inventory.order_line_costs`
+    and `inventory.cost_adjustment_log` — exact decimal (not floating point), but
+    code treats them as integer cents via `Number()`. Fixed → `bigint`.
+  - **~20 `integer` columns** that 0074 converted from `double precision` to `integer`,
+    but the Drizzle schema declares `bigint`. Safe widening cast, but should match.
+    Fixed → `bigint`.
 - **No data corruption in 0074:** each column converts from its own value via
   `round(col::numeric)`, not from `standard_cost_cents`. The "corruption" claim was
   already disproven in the C3 finding notes but lingered in the Phase 2 scope.
-- **Schema-vs-DB alignment:** Drizzle schema declares `bigint`, migration 0074 converted
-  to `integer`. Migration `0576_align_money_columns_bigint.sql` upgrades all money columns
-  to `bigint` to match. Safe metadata-only operation (no table rewrite).
-- **Exit criteria MET:** no `double precision` in any cost column; schema matches DB;
-  money utility layer (`shared/utils/money.ts`) uses integer mills/cents throughout with
-  explicit half-up rounding; boundary validation via `shared/validation/currency.ts`.
+- Migration `0576_align_money_columns_bigint.sql` fixes all three categories.
+- **Exit criteria MET:** no `double precision` or `numeric` in any cost column; schema
+  matches DB; money utility layer (`shared/utils/money.ts`) uses integer mills/cents
+  throughout with explicit half-up rounding; boundary validation via
+  `shared/validation/currency.ts`.
 
 ### Phase 3 — Reservations ☐
 Fix H1 (fallback bin → fail loud / require assignment), M1/M2 (idempotency + unique key),

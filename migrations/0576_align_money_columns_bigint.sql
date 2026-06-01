@@ -1,13 +1,36 @@
--- Phase 2: Align DB column types with Drizzle schema.
+-- Phase 2: Fix all money column type violations found by querying the live DB.
 --
--- Migration 0074 converted cost columns from double precision to integer.
--- The Drizzle schema later declared them as bigint. The mismatch is safe
--- (integer → bigint is a widening cast, reads work fine), but a type audit
--- should leave no drift between schema and DB. Upgrade all money columns
--- to bigint to match the schema declarations.
+-- Three categories of violations:
 --
--- This is a safe, metadata-only operation on Postgres — integer → bigint
--- does not rewrite the table.
+-- 1. DOUBLE PRECISION (actual floating-point money — DANGEROUS):
+--    oms.order_item_costs.{unit_cost_cents, total_cost_cents}
+--    oms.order_item_financials.{avg_selling_price_cents, avg_unit_cost_cents}
+--    These violate CLAUDE.md §4 ("never floating point for money").
+--
+-- 2. INTEGER → BIGINT alignment:
+--    Migration 0074 converted columns to integer, but the Drizzle schema
+--    declares bigint. Safe in practice (widening cast), but should match.
+--
+-- 3. NUMERIC → BIGINT alignment (inventory_lots cost columns):
+--    numeric is exact-decimal (not floating point), so not a correctness
+--    issue, but the raw-SQL code treats them as integer cents via Number().
+--    Converting to bigint makes them consistent with the rest of the system.
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 1. FIX DOUBLE PRECISION → BIGINT (the real violations)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE oms.order_item_costs
+  ALTER COLUMN unit_cost_cents TYPE bigint USING round(unit_cost_cents::numeric),
+  ALTER COLUMN total_cost_cents TYPE bigint USING round(total_cost_cents::numeric);
+
+ALTER TABLE oms.order_item_financials
+  ALTER COLUMN avg_selling_price_cents TYPE bigint USING round(avg_selling_price_cents::numeric),
+  ALTER COLUMN avg_unit_cost_cents TYPE bigint USING round(avg_unit_cost_cents::numeric);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 2. ALIGN INTEGER → BIGINT (to match Drizzle schema declarations)
+-- ═══════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE catalog.product_variants
   ALTER COLUMN standard_cost_cents TYPE bigint,
@@ -50,3 +73,23 @@ ALTER TABLE procurement.landed_cost_snapshots
 ALTER TABLE procurement.vendor_invoice_lines
   ALTER COLUMN unit_cost_cents TYPE bigint,
   ALTER COLUMN line_total_cents TYPE bigint;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 3. ALIGN NUMERIC → BIGINT (inventory_lots landed cost columns)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE inventory.inventory_lots
+  ALTER COLUMN po_unit_cost_cents TYPE bigint USING round(po_unit_cost_cents::numeric),
+  ALTER COLUMN landed_cost_cents TYPE bigint USING round(landed_cost_cents::numeric),
+  ALTER COLUMN total_unit_cost_cents TYPE bigint USING round(total_unit_cost_cents::numeric);
+
+-- inventory.order_line_costs — also numeric in DB, schema says bigint
+ALTER TABLE inventory.order_line_costs
+  ALTER COLUMN unit_cost_cents TYPE bigint USING round(unit_cost_cents::numeric),
+  ALTER COLUMN total_cost_cents TYPE bigint USING round(total_cost_cents::numeric);
+
+-- inventory.cost_adjustment_log — numeric in DB
+ALTER TABLE inventory.cost_adjustment_log
+  ALTER COLUMN old_cost_cents TYPE bigint USING round(old_cost_cents::numeric),
+  ALTER COLUMN new_cost_cents TYPE bigint USING round(new_cost_cents::numeric),
+  ALTER COLUMN delta_cents TYPE bigint USING round(delta_cents::numeric);
