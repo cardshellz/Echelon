@@ -4,7 +4,7 @@ import type { InventoryLotService } from "../lots.service";
 import type { COGSService } from "../cogs.service";
 import { warehouses, warehouseLocations, channelConnections } from "../../../storage/base";
 import { eq, and } from "drizzle-orm";
-import type { InventoryLevel } from "../../../../shared/schema";
+import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction } from "../../../../shared/schema";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
 
@@ -1071,6 +1071,14 @@ export class InventoryUseCases {
     }
 
     return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // LEDGER — direct transaction logging
+  // ---------------------------------------------------------------------------
+
+  async logTransaction(txn: InsertInventoryTransaction): Promise<InventoryTransaction> {
+    return this.storage.createInventoryTransaction(txn);
   }
 
   // ---------------------------------------------------------------------------

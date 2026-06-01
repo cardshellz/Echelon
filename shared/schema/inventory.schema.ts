@@ -159,6 +159,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   isImplicit: integer("is_implicit").notNull().default(0), // 1 = auto-generated, 0 = explicit scan
   userId: varchar("user_id", { length: 100 }), // Who performed the action
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  voidedAt: timestamp("voided_at"),
 });
 
 export const insertInventoryTransactionSchema = createInsertSchema(inventoryTransactions).omit({

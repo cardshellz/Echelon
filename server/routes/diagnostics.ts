@@ -23,14 +23,17 @@ export function registerDiagnosticsRoutes(app: Express) {
       // Delete duplicates where shopify_order_id differs only by gid:// prefix
       // Keep the EARLIEST created row
       
-      // First: delete inventory_transactions that reference order_items
+      // Soft-delete inventory_transactions that reference duplicate order_items
+      // (C5: ledger rows are immutable — void instead of delete)
       const transactionsResult = await db.execute(sql`
-        DELETE FROM inventory.inventory_transactions
-        WHERE order_item_id IN (
+        UPDATE inventory.inventory_transactions
+        SET voided_at = NOW()
+        WHERE voided_at IS NULL
+          AND order_item_id IN (
           SELECT oi.id FROM wms.order_items oi
           WHERE oi.order_id IN (
             SELECT id FROM (
-              SELECT 
+              SELECT
                 id,
                 REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '') as normalized_id,
                 ROW_NUMBER() OVER (
