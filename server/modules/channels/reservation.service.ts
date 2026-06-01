@@ -1,4 +1,4 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, isNull } from "drizzle-orm";
 import {
   orders,
   orderItems,
@@ -6,6 +6,7 @@ import {
   inventoryTransactions,
   productVariants,
   productLocations,
+  warehouseLocations,
 } from "@shared/schema";
 import type { VariantAtp } from "../inventory/atp.service";
 
@@ -134,33 +135,49 @@ class ReservationService {
       return { reserved: 0, shortfall };
     }
 
-    // Step 3: Find the variant's assigned bin from product_locations
+    // Step 3: Find the variant's assigned bin from product_locations,
+    // excluding frozen locations (cycle_count_freeze_id IS NOT NULL).
     const [assignment] = await dbh
       .select({
         warehouseLocationId: productLocations.warehouseLocationId,
       })
       .from(productLocations)
+      .innerJoin(
+        warehouseLocations,
+        eq(warehouseLocations.id, productLocations.warehouseLocationId),
+      )
       .where(
         and(
           eq(productLocations.productVariantId, variantId),
           eq(productLocations.status, "active"),
+          isNull(warehouseLocations.cycleCountFreezeId),
         ),
       )
-      .orderBy(productLocations.isPrimary) // isPrimary=1 sorts first (descending would be better but 1 > 0)
+      .orderBy(sql`${productLocations.isPrimary} DESC`)
       .limit(1);
 
     let reserveLocationId = assignment?.warehouseLocationId ?? null;
 
-    // Fallback: if no product_locations row, find ANY inventory_levels row
-    // for this variant. ATP already confirmed stock exists, so there must
-    // be an inventory_levels row somewhere (e.g. received but not yet slotted).
+    // Fallback: if no product_locations row, find an inventory_levels row
+    // for this variant at an unfrozen location. ATP confirmed stock exists
+    // somewhere (e.g. received but not yet slotted).
     if (!reserveLocationId) {
       const [fallbackLevel] = await dbh
         .select({
           warehouseLocationId: inventoryLevels.warehouseLocationId,
         })
         .from(inventoryLevels)
-        .where(eq(inventoryLevels.productVariantId, variantId))
+        .innerJoin(
+          warehouseLocations,
+          eq(warehouseLocations.id, inventoryLevels.warehouseLocationId),
+        )
+        .where(
+          and(
+            eq(inventoryLevels.productVariantId, variantId),
+            sql`${inventoryLevels.variantQty} > 0`,
+            isNull(warehouseLocations.cycleCountFreezeId),
+          ),
+        )
         .orderBy(sql`${inventoryLevels.variantQty} DESC`)
         .limit(1);
 
@@ -489,18 +506,14 @@ class ReservationService {
 
     result.released = excess;
 
-    try {
-      await this.db.insert(inventoryTransactions).values({
-        productVariantId,
-        fromLocationId: warehouseLocationId,
-        transactionType: "unreserve",
-        variantQtyDelta: -excess,
-        notes: `Orphaned reservation released: inventory count dropped below reserved amount`,
-        userId: userId || null,
-      });
-    } catch (err: any) {
-      console.warn(`[RESERVATION] Failed to log orphaned-release transaction for variant=${productVariantId}:`, err.message);
-    }
+    await this.db.insert(inventoryTransactions).values({
+      productVariantId,
+      fromLocationId: warehouseLocationId,
+      transactionType: "unreserve",
+      variantQtyDelta: -excess,
+      notes: `Orphaned reservation released: inventory count dropped below reserved amount`,
+      userId: userId || null,
+    });
 
     // 3. Find affected orders: distinct orders that had reserves at this location
     const reserveTxns = await this.db
@@ -578,17 +591,34 @@ class ReservationService {
             );
           } else {
             result.failed++;
-            console.warn(
-              `[RESERVATION] No ATP available for variant ${productVariantId} ` +
-                `(order ${orderId}) — order stays partially unreserved`,
+            console.error(
+              JSON.stringify({
+                level: "ERROR",
+                action: "reallocate_orphaned_reservation",
+                outcome: "requires_review",
+                productVariantId,
+                orderId,
+                orderItemId: item.id,
+                sku: item.sku,
+                warehouseLocationId,
+                message: "No ATP available — order stays partially unreserved and needs manual attention",
+              }),
             );
           }
         }
       } catch (err) {
         result.failed++;
         console.error(
-          `[RESERVATION] Re-allocation failed for order ${orderId}:`,
-          err instanceof Error ? err.message : err,
+          JSON.stringify({
+            level: "ERROR",
+            action: "reallocate_orphaned_reservation",
+            outcome: "requires_review",
+            productVariantId,
+            orderId,
+            warehouseLocationId,
+            error: err instanceof Error ? err.message : String(err),
+            message: "Re-allocation threw — order needs manual review",
+          }),
         );
       }
     }

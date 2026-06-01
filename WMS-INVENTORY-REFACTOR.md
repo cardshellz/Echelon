@@ -347,10 +347,28 @@ Output: per-(variant,location) variance report. Zero mutations.
   throughout with explicit half-up rounding; boundary validation via
   `shared/validation/currency.ts`.
 
-### Phase 3 — Reservations ☐
+### Phase 3 — Reservations ☑ COMPLETE
 Fix H1 (fallback bin → fail loud / require assignment), M1/M2 (idempotency + unique key),
 M3 (guarantee or alert on orphan reallocation), M8 (decide backorder in ATP).
 - **Exit:** reserve/release idempotent under replay; no silent fallback; orphan path alerts.
+
+**Status:**
+- **H1** ☑ Reservation bin selection now excludes frozen locations (`cycleCountFreezeId IS NOT NULL`).
+  Both the primary `product_locations` lookup and the fallback `inventory_levels` lookup join
+  `warehouse_locations` and filter `WHERE cycle_count_freeze_id IS NULL`. Fallback also filters
+  `variant_qty > 0`. Sort order fixed: `isPrimary DESC` (was ascending). New partial index
+  `idx_warehouse_locations_unfrozen` added.
+- **M1/M2** ☑ Reservation idempotency: `reserveForOrder` now checks for existing reserve row
+  BEFORE mutating `reservedQty` (prevents double-increment). Unique partial index
+  `uq_inventory_transactions_reserve_dedup` on `(order_id, order_item_id) WHERE transaction_type='reserve'
+  AND voided_at IS NULL` mirrors the ship dedup pattern (migration 0570). Migration 0577 auto-voids
+  duplicate historical rows before creating the index. Application catches 23505 as belt-and-suspenders.
+- **M3** ☑ Orphan reallocation failures now log structured `requires_review` errors (JSON with
+  `outcome: "requires_review"`) instead of `console.warn`. The audit-log insert is no longer
+  swallowed in a try/catch — it propagates as a real error.
+- **M8** ☑ By design. ATP = `onHand - reserved - picked - packed`. `backorderQty` represents
+  expected inbound (PO arrivals) — not yet on-hand. Including it would risk overselling on
+  undelivered POs. `getTotalBaseUnits()` already surfaces backorder for visibility.
 
 ### Phase 4 — Receipts + lots ☐
 Receipt idempotency (H4), receive freeze-check (H2), over/under variance, FIFO lot integrity.

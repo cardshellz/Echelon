@@ -464,6 +464,22 @@ export class InventoryUseCases {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
     const doWork = async (tx: any) => {
+      // Idempotency: check if this order item already has a reserve row.
+      // The DB has a unique partial index (uq_inventory_transactions_reserve_dedup)
+      // as a safety net, but checking first avoids double-incrementing reservedQty.
+      const existingReserve = await tx.execute(sql`
+        SELECT id
+        FROM inventory.inventory_transactions
+        WHERE transaction_type = 'reserve'
+          AND order_id = ${params.orderId}
+          AND order_item_id = ${params.orderItemId}
+          AND voided_at IS NULL
+        LIMIT 1
+      `);
+      if (existingReserve.rows.length > 0) {
+        return true;
+      }
+
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
@@ -480,21 +496,29 @@ export class InventoryUseCases {
         });
       }
 
-      await this.storage.createInventoryTransaction({
-        productVariantId: params.productVariantId,
-        toLocationId: params.warehouseLocationId,
-        transactionType: "reserve",
-        variantQtyDelta: 0,
-        variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty,
-        sourceState: "on_hand",
-        targetState: "committed",
-        orderId: params.orderId,
-        orderItemId: params.orderItemId,
-        referenceType: "order",
-        referenceId: String(params.orderId),
-        userId: params.userId ?? null,
-      }, tx);
+      try {
+        await this.storage.createInventoryTransaction({
+          productVariantId: params.productVariantId,
+          toLocationId: params.warehouseLocationId,
+          transactionType: "reserve",
+          variantQtyDelta: 0,
+          variantQtyBefore: level.variantQty,
+          variantQtyAfter: level.variantQty,
+          sourceState: "on_hand",
+          targetState: "committed",
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          referenceType: "order",
+          referenceId: String(params.orderId),
+          userId: params.userId ?? null,
+        }, tx);
+      } catch (err: any) {
+        // Belt-and-suspenders: if the unique index catches a race, treat as success
+        if (err?.code === "23505" && String(err?.constraint ?? "").includes("reserve_dedup")) {
+          return true;
+        }
+        throw err;
+      }
 
       return true;
     };
