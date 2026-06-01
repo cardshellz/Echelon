@@ -65,7 +65,7 @@ async function main() {
 
   try {
     const variantFilter = opts.variantId
-      ? `WHERE product_variant_id = ${opts.variantId}`
+      ? `AND product_variant_id = ${opts.variantId}`
       : "";
 
     // 1. Stream the ledger and replay it. We pull only the columns replay needs.
@@ -78,6 +78,7 @@ async function main() {
               from_location_id   AS "fromLocationId",
               to_location_id     AS "toLocationId"
          FROM inventory.inventory_transactions
+         WHERE voided_at IS NULL
          ${variantFilter}
          ORDER BY id ASC`,
     );
@@ -98,7 +99,7 @@ async function main() {
               warehouse_location_id AS "warehouseLocationId",
               variant_qty           AS "variantQty"
          FROM inventory.inventory_levels
-         ${variantFilter}`,
+         WHERE 1=1 ${variantFilter}`,
     );
 
     const levels: LevelRow[] = levelsRes.rows.map((r) => ({

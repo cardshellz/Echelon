@@ -243,6 +243,21 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_warehouse_location_id ON inventory_levels(warehouse_location_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_pv_wl ON inventory_levels(product_variant_id, warehouse_location_id)`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_levels_variant_location ON inventory_levels(product_variant_id, warehouse_location_id)`);
+    // Phase 1: ledger immutability (C5) — soft-delete column for inventory_transactions.
+    await client.query(`ALTER TABLE inventory.inventory_transactions ADD COLUMN IF NOT EXISTS voided_at timestamptz DEFAULT NULL`);
+    // Phase 1: forward-only on-hand guard (C2). NOT VALID so existing negative
+    // drift is preserved for the reconciler to correct via ledgered adjustments.
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'chk_variant_qty_non_negative'
+        ) THEN
+          ALTER TABLE inventory.inventory_levels
+            ADD CONSTRAINT chk_variant_qty_non_negative CHECK (variant_qty >= 0) NOT VALID;
+        END IF;
+      END $$;
+    `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_order_id ON picking_logs(order_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_sku ON picking_logs(sku)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_timestamp ON picking_logs(timestamp)`);

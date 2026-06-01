@@ -42,6 +42,14 @@ interface InventoryCore {
     inboundShipmentId?: number;
     costProvisional?: number;
   }, tx?: any): Promise<void>;
+  adjustInventory(params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    qtyDelta: number;
+    reason: string;
+    userId?: string;
+  }): Promise<{ orphanedQty: number }>;
+  withTx(tx: any): InventoryCore;
 }
 
 interface ChannelSync {
@@ -634,25 +642,17 @@ export class ReceivingService {
               receivingOrderId: orderId,
             }, tx);
 
-            // Deduct the case variant inventory to avoid double-counting in ATP
-            // The base units are now the sellable quantity; the case is empty
-            const check = await tx.execute(sql`
-              SELECT variant_qty FROM inventory.inventory_levels
-              WHERE product_variant_id = ${line.productVariantId}
-                AND warehouse_location_id = ${line.putawayLocationId}
-              FOR UPDATE
-            `);
-            const currentQty = check.rows.length ? Number(check.rows[0].variant_qty) : 0;
-            if (currentQty < line.receivedQty) {
-              throw new ReceivingReconciliationError(`Negative Inventory Guard: Cannot break case variant ${line.productVariantId}. Requires ${line.receivedQty}, has ${currentQty}.`);
-            }
-            await tx.execute(sql`
-              UPDATE inventory.inventory_levels
-              SET variant_qty = variant_qty - ${line.receivedQty},
-                  updated_at = NOW()
-              WHERE product_variant_id = ${line.productVariantId}
-                AND warehouse_location_id = ${line.putawayLocationId}
-            `);
+            // Deduct the case variant inventory to avoid double-counting in ATP.
+            // Uses the guarded adjustInventory path so the deduction is ledgered
+            // (fixes C4: unledgered case-break was the largest source of drift).
+            const txCore = this.inventoryCore.withTx(tx);
+            await txCore.adjustInventory({
+              productVariantId: line.productVariantId,
+              warehouseLocationId: line.putawayLocationId,
+              qtyDelta: -line.receivedQty,
+              reason: `Case-break deduction: ${line.receivedQty}× ${variant.sku} → ${totalUnits}× ${baseVariant.sku}`,
+              userId: userId || undefined,
+            });
             receivedVariantIds.add(baseVariant.id);
           }
         }
