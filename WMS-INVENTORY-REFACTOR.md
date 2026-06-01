@@ -1,12 +1,84 @@
-# WMS Inventory Refactor — Trust Restoration Plan
+# WMS Inventory — Trust → Enterprise Roadmap
 
-> Companion to `BOUNDARIES.md` / `SYSTEM.md` / `WMS_ARCHITECTURE.md`. This is the
-> authoritative tracking doc for making the WMS inventory subsystem **trustworthy** —
-> i.e. provably correct under a financial audit. Same contract as `CLAUDE.md`.
+> Companion to `BOUNDARIES.md` / `SYSTEM.md` / `WMS_ARCHITECTURE.md`. Authoritative
+> tracking doc for taking the WMS inventory subsystem from "functional but untrusted" to
+> **enterprise-grade**. Same contract as `CLAUDE.md`.
+>
+> Two arcs: **Phases 0–6 restore trust** (provable correctness), **Phases 7–9+ build the
+> enterprise capability layer** (visibility, exceptions, operational intelligence). The
+> strategic framing is in "Strategic assessment" below; the bug-level evidence is in §2.
 >
 > Status legend: ☐ not started · ◐ in progress · ☑ done
 > Evidence legend: **[VERIFIED]** = confirmed by reading the cited code directly ·
-> **[REPORTED]** = surfaced by survey, not yet independently confirmed.
+> **[REPORTED]** = surfaced by survey, not yet independently confirmed · *(inferred)* =
+> strategic judgment, not a specific code cite.
+
+---
+
+## Strategic assessment — where this WMS stands vs. enterprise-grade
+
+This section is the **planning frame**: not a bug list (that's §2) but an honest
+current-state → enterprise-target read per domain. Grounded in the six-agent code audit;
+items not confirmed in code are marked *(inferred)*.
+
+### Headline
+
+A **functional single-warehouse WMS engine with a strong transactional core** (atomic
+writes, an audit ledger, real `FOR UPDATE` concurrency) wrapped in a **thin operational
+shell**. The verbs exist (receive / pick / move / count); what's missing is the layer of
+**trust, visibility, and operational control** that separates "tracks inventory" from
+"runs the operation." The untrust the team feels is real, and it's concentrated in
+*integrity guarantees and operations* — not in basic functionality.
+
+### Maturity (1 = spreadsheet, 5 = Manhattan/Blue Yonder)
+
+| Dimension | Level | Note |
+|---|---|---|
+| Core transactional engine | ~3.5 | Solid bones — keep it |
+| Data-integrity guarantees | ~2 | Works by convention, not DB enforcement |
+| Operational tooling (visibility, exceptions, labor, waves) | ~1.5 | Mostly absent |
+| **Overall** | **early-stage WMS, strong core / thin shell** | Closer to enterprise than a rebuild, but a real gap |
+
+### Capability scorecard
+
+| Capability | State | Gap to enterprise |
+|---|---|---|
+| Data integrity / trust | ⚠️ Weak | DB doesn't enforce its own rules (negatives, dup rows, over-reserve all possible); no way to *prove* inventory correct. Foundation for everything else. |
+| Receiving & putaway | ✅ Basic | No directed putaway, no license-plate/pallet (LPN) tracking, no ASN / inbound appointments |
+| Slotting & storage | ⚠️ Thin | No velocity-based slotting; reservation falls back to "biggest pile" when unslotted (H1) |
+| Picking | ✅ Core | No wave/batch planning; pick-path opt not wired; `shortPickAction` is dead config (H3); no zone pick-and-pass |
+| Replenishment | 🔴 Fragile | 3,603-line untested monolith that can lose units (H5); over-built logic, under-built trust |
+| Cycle counting | ✅ Decent | Count→adjust solid, but "frozen" locations not actually protected (H2) |
+| Returns | ⚠️ Partial | Logic exists but hits the `logTransaction` crash (C7); no disposition workflow (restock/refurb/scrap) |
+| Lot / serial / expiry | ⚠️ Half-built | FIFO lots + cost layers exist (good); no serial tracking; expiry stored but not enforced |
+| Labor & productivity | ❌ Absent | No productivity tracking, task interleaving, or labor standards |
+| Order orchestration / waves | ❌ Absent | No wave mgmt / batching strategy / priority orchestration beyond a sort rank |
+| Multi-warehouse / network | ⚠️ Schema-ready | Tables support it; routing/allocation logic to *run* a network is thin *(inferred)* |
+| Observability / alerting | 🔴 Major gap | Fire-and-forget failures (channel sync, replen) fail silently; no stuck-order / drift dashboards |
+| Reporting / analytics | ❌ Mostly absent | No valuation, aging, shrinkage, or throughput reporting *(inferred)* |
+| Idempotency / resilience | ⚠️ Inconsistent | Some paths replay-safe, many not; dup webhooks can double-reserve or crash (M1/M2) |
+
+### The four missing pillars (the strategic answer)
+
+Beneath the individual bugs, four foundational capabilities are absent. These — not the
+bug list — are what "enterprise-grade" requires:
+
+1. **Provable accuracy.** Always be able to answer "is inventory correct, and prove it."
+   Today the ledger has holes (C4) and the DB permits impossible states (C1/C2). Until this
+   exists, every other feature sits on sand. → addressed by **Phases 0–2**.
+2. **Operational visibility.** Failures are currently silent. Enterprise WMS surfaces every
+   stuck order / sync failure / drift to a human via alert + work queue. → new **Phase 7**.
+3. **Exception management.** Warehouses run on exceptions (short picks, damaged receipts,
+   stuck replens). Each needs an explicit workflow + queue, not a swallowed warning.
+   → new **Phase 8**.
+4. **Operational intelligence.** Waves, slotting, labor, directed putaway, network routing —
+   the logic that makes a warehouse *efficient*, not just *functional*. → new **Phase 9+**.
+
+### Sequencing principle
+
+**Earn the right to build features.** Trust first (Phases 0–2), then visibility + exceptions
+(Phases 7–8), then operational intelligence (9+). Fancy capability built before the numbers
+are trustworthy just produces confident wrong answers faster.
 
 ---
 
@@ -231,11 +303,45 @@ Receipt idempotency (H4), receive freeze-check (H2), over/under variance, FIFO l
 Enforce `cycleCountFreezeId` across transfer/receive/break/adjust (H2). Variance→adjustment
 already atomic — verify against Phase 0 reconciler.
 
-### Phase 6 — Replenishment monolith ☐ (LAST — it's advisory)
+### Phase 6 — Replenishment monolith ☐ (LAST of the fix-phases — it's advisory)
 Decompose the 3,603-line file; add integration tests for `executeTask`/cascade/state
 transitions (currently **zero**); verify H5 (unit conservation in case-break); enforce
 `shortPickAction` (H3); kill magic numbers (L5).
 - **Exit:** `executeTask` covered by integration tests; no silent unit loss; config validated.
+
+---
+
+> **Phases 0–6 restore trust.** Phases 7+ build the enterprise capability layer on top.
+> Do not start 7+ until the numbers are provably correct — see "Sequencing principle".
+
+### Phase 7 — Operational visibility ☐ (Pillar 2)
+Kill silent failures and give operators eyes on the system.
+- Replace fire-and-forget `.catch(() => {})` on channel sync / replen checks with a durable
+  retry + dead-letter path (the C9 webhook-inbox pattern is the template).
+- Dashboards/queries for: stuck orders, reconciler drift rate (from Phase 0), unreserved
+  shortfalls, replen tasks blocked > N hours, sync-failure backlog.
+- Alerting on the above crossing thresholds.
+- **Exit:** every financial-path failure is visible in a queue or alert; no swallowed errors
+  on inventory-affecting paths.
+
+### Phase 8 — Exception management ☐ (Pillar 3)
+Turn ad-hoc warnings into explicit operator workflows + queues.
+- First-class exception types with disposition workflows: short pick, damaged/over/under
+  receipt, mismatch, stuck replen, orphaned reservation, returns disposition
+  (restock / refurb / scrap).
+- Each exception is a worked item with owner, state, and resolution audit — not a log line.
+- **Exit:** the common warehouse exceptions each have a queue and a closed-loop resolution.
+
+### Phase 9+ — Operational intelligence ☐ (Pillar 4)
+The efficiency layer. Sequence by ops value; each is its own initiative, not a sub-task.
+- **Wave / batch management** — order batching + release strategy beyond sort rank.
+- **Slotting** — velocity-based bin placement; removes the H1 "biggest pile" fallback need.
+- **Directed putaway + LPN** — system tells receivers where to put stock; pallet/license-plate.
+- **Labor management** — productivity tracking, task interleaving, standards.
+- **Multi-node routing** — turn the multi-warehouse schema into real network allocation.
+- **Serial / expiry enforcement** — extend the existing lot layer.
+- **Reporting/analytics** — valuation, aging, shrinkage, throughput.
+- **Exit:** per-initiative; not gated as one block.
 
 ---
 
