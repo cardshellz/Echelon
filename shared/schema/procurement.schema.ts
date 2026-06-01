@@ -1271,3 +1271,59 @@ export const insertPoExceptionSchema = createInsertSchema(poExceptions).omit({
 
 export type InsertPoException = z.infer<typeof insertPoExceptionSchema>;
 export type PoException = typeof poExceptions.$inferSelect;
+
+// ============================================================================
+// FORWARD DEMAND EVENTS (Phase 7A)
+// ============================================================================
+
+export const demandEventTypeEnum = [
+  "drop", "preorder", "promotion", "wholesale", "seasonal", "manual_forecast",
+] as const;
+export type DemandEventType = typeof demandEventTypeEnum[number];
+
+export const demandEventStatusEnum = ["planned", "active", "completed", "cancelled"] as const;
+export type DemandEventStatus = typeof demandEventStatusEnum[number];
+
+export const demandEventConfidenceEnum = ["high", "medium", "low"] as const;
+export type DemandEventConfidence = typeof demandEventConfidenceEnum[number];
+
+export const demandEvents = procurementSchema.table("demand_events", {
+  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+  name: varchar("name", { length: 255 }).notNull(),
+  eventType: varchar("event_type", { length: 50 }).notNull().default("manual_forecast"),
+  startDate: date("start_date").notNull(),
+  endDate: date("end_date"),
+  status: varchar("status", { length: 20 }).notNull().default("planned"),
+  notes: text("notes"),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const demandEventLines = procurementSchema.table("demand_event_lines", {
+  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+  demandEventId: integer("demand_event_id").notNull().references(() => demandEvents.id, { onDelete: "cascade" }),
+  productId: integer("product_id").notNull(),
+  productVariantId: integer("product_variant_id"),
+  expectedPieces: integer("expected_pieces").notNull(),
+  confidence: varchar("confidence", { length: 10 }).notNull().default("medium"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const insertDemandEventSchema = createInsertSchema(demandEvents).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertDemandEvent = z.infer<typeof insertDemandEventSchema>;
+export type DemandEvent = typeof demandEvents.$inferSelect;
+
+export const insertDemandEventLineSchema = createInsertSchema(demandEventLines).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertDemandEventLine = z.infer<typeof insertDemandEventLineSchema>;
+export type DemandEventLine = typeof demandEventLines.$inferSelect;

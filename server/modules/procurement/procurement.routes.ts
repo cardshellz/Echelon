@@ -19,6 +19,8 @@ import {
   registerPurchasingRecommendationAdminRoutes,
   registerPurchasingRecommendationRoutes,
 } from "./purchasing-recommendation.routes";
+import { registerDemandEventRoutes } from "./demand-events.routes";
+import { registerEnterpriseDashboardRoutes } from "./enterprise-dashboard.routes";
 
 export function registerPurchasingRoutes(app: Express) {
   // ===== VENDORS API =====
@@ -356,4 +358,8 @@ export function registerPurchasingRoutes(app: Express) {
   registerNotificationRoutes(app);
 
   registerPurchasingRecommendationAdminRoutes(app);
+
+  registerDemandEventRoutes(app);
+
+  registerEnterpriseDashboardRoutes(app);
 }

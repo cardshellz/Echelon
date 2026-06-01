@@ -179,6 +179,9 @@ export interface PurchasingRecommendationRawRow {
   vendor_product_last_purchased_at?: string | Date | null;
   vendor_product_updated_at?: string | Date | null;
   unit_cost_cents?: number | string | null;
+  forward_demand_pieces?: number | string | null;
+  forward_demand_raw_pieces?: number | string | null;
+  forward_demand_event_count?: number | string | null;
 }
 
 export interface PurchasingRecommendationProductMeta {
@@ -312,6 +315,12 @@ export interface PurchasingRecommendationItem {
     demandMixSignal: PurchasingDemandForecastDemandMixSignal;
     demandSuppressionRisk: PurchasingRecommendationDemandSuppressionRisk;
     forecastTrust: PurchasingRecommendationForecastTrustDiagnostics;
+  };
+  forwardDemandBasis: {
+    forwardDemandPieces: number;
+    forwardDemandRawPieces: number;
+    forwardDemandEventCount: number;
+    adjustedReorderPoint: number;
   };
   leadTimeBasis: {
     leadTimeDays: number;
@@ -1527,8 +1536,12 @@ export function generatePurchasingRecommendations(
         ? defaults.safetyStockDays
         : asNumber(row.safety_stock_days);
     const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
+    const forwardDemandPieces = asNumber(row.forward_demand_pieces);
+    const forwardDemandRawPieces = asNumber(row.forward_demand_raw_pieces);
+    const forwardDemandEventCount = asNumber(row.forward_demand_event_count);
+    const adjustedReorderPoint = reorderPoint + forwardDemandPieces;
     const effectiveSupply = available + onOrderPieces;
-    const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
+    const rawOrderQtyPieces = Math.max(0, adjustedReorderPoint - effectiveSupply);
     const orderUomUnits = asPositiveInt(row.order_uom_units, 1);
     const orderUomLevel = asNumber(row.order_uom_level);
     const orderUomSource: PurchasingRecommendationOrderUomSource = asNumber(row.order_uom_units) > 0 ? "variant" : "default_each";
@@ -1541,14 +1554,14 @@ export function generatePurchasingRecommendations(
       avgDailyUsage,
       daysOfSupply,
       leadTimeDays,
-      reorderPoint,
+      reorderPoint: adjustedReorderPoint,
       onOrderPieces,
       effectiveSupply,
     });
     const supplierCycleDiagnostics = buildSupplierCycleDiagnostics({
       available,
       effectiveSupply,
-      reorderPoint,
+      reorderPoint: adjustedReorderPoint,
       onOrderPieces,
       openPoCount,
       earliestExpectedDate: row.earliest_expected ?? null,
@@ -1613,7 +1626,7 @@ export function generatePurchasingRecommendations(
       status,
       available,
       effectiveSupply,
-      reorderPoint,
+      reorderPoint: adjustedReorderPoint,
       avgDailyUsage,
       lookbackDays,
       leadTimeDays,
@@ -1698,7 +1711,7 @@ export function generatePurchasingRecommendations(
       daysOfSupply,
       leadTimeDays,
       safetyStockDays,
-      reorderPoint,
+      reorderPoint: adjustedReorderPoint,
       suggestedOrderQty,
       suggestedOrderPieces,
       recommendedOrderQty: suggestedOrderQty,
@@ -1735,6 +1748,12 @@ export function generatePurchasingRecommendations(
       },
       supplierCycleDiagnostics,
       recommendationCandidateScore,
+      forwardDemandBasis: {
+        forwardDemandPieces,
+        forwardDemandRawPieces,
+        forwardDemandEventCount,
+        adjustedReorderPoint,
+      },
       demandBasis: {
         lookbackDays,
         periodUsagePieces: periodUsage,
@@ -1759,7 +1778,7 @@ export function generatePurchasingRecommendations(
         leadTimeSource,
         safetyStockDays,
         safetyStockSource,
-        reorderPointPieces: reorderPoint,
+        reorderPointPieces: adjustedReorderPoint,
       },
       forecastProvenance: {
         forecastMethod: demandForecast.method,
