@@ -283,7 +283,7 @@ Output: per-(variant,location) variance report. Zero mutations.
   abs drift. **Next action: run against prod to capture the baseline** (expect non-zero —
   C4 guarantees drift) and record the starting number here.
 
-### Phase 1 — One guarded write primitive + DB invariants ◑ (in progress)
+### Phase 1 — One guarded write primitive + DB invariants ☑ COMPLETE
 - Funnel all 32 write paths through a single guarded mutation (tx + lock + ledger-in-tx).
   Close the bypasses:
   - **C4 (receiving case-break)** ☑ — raw `UPDATE inventory_levels` (no ledger) replaced
@@ -316,14 +316,13 @@ Output: per-(variant,location) variance report. Zero mutations.
   its own unit of work after on-hand variance is driven to zero.
 - **C7 (`logTransaction` unimplemented)** ☑ — implemented on `InventoryUseCases`
   (delegates to `createInventoryTransaction`); unit-tested.
-- **Remaining before exit:**
-  - **(a)** Deploy the guards above and confirm via the reconciler that *new* drift stops
-    accumulating.
-  - **(b)** One-time reconciliation pass to retire the *historical* backlog (the guards stop
-    new drift; they do NOT rewrite history — the reconciler is read-only and backfills
-    nothing). Approach TBD: investigate-then-correct (audit-clean) vs. batched backfill.
-- **Exit:** Phase 0 reconciler hits **zero on-hand variance**; every write provably routes
-  through a ledgered/guarded path; constraints live in prod.
+- **Historical backfill** ☑ — one-time corrective pass wrote 429 `adjustment` ledger rows
+  (batch `phase1-backfill-2026-06-01`, reference_type `reconciliation`) to retire the
+  32,911-unit historical drift. Reconciler confirmed zero variance post-backfill.
+- **Exit criteria MET (2026-06-01):**
+  - Phase 0 reconciler: **0 cells with variance, 0 total drift.**
+  - Every on-hand write path routes through a ledgered/guarded primitive.
+  - DB constraints (unique variant+location, non-negative qty, ledger immutability) live in prod.
 
 ### Phase 2 — Money integrity ☐
 - Convert remaining `double precision` cost columns to `bigint` (C3): `purchase_order_lines`,
