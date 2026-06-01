@@ -167,8 +167,20 @@ export class WmsSyncService {
         const reconciled = await this.reconcileExistingWmsOrderLines(omsOrderId, wmsOrderId);
         console.log(
           `[WMS Sync] Order ${omsOrderId} already synced to WMS (id ${wmsOrderId}); ` +
-            `headerRefreshed=${headerRefresh.updated}; reconciled ${reconciled.insertedItems} missing item(s)`,
+            `headerRefreshed=${headerRefresh.updated}; promoted=${headerRefresh.promoted}; reconciled ${reconciled.insertedItems} missing item(s)`,
         );
+
+        if (headerRefresh.promoted) {
+          try {
+            const reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
+            if (reserveResult.failed.length > 0) {
+              console.warn(`[WMS Sync] Reservation partial failure after promotion for order ${wmsOrderId}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
+            }
+          } catch (err: any) {
+            console.error(`[WMS Sync] Reservation error after promotion for order ${wmsOrderId}: ${err.message}`);
+          }
+        }
+
         return wmsOrderId;
       }
 
@@ -673,7 +685,7 @@ export class WmsSyncService {
   private async refreshExistingWmsOrderHeaderFromOms(
     omsOrder: typeof omsOrders.$inferSelect,
     wmsOrderId: number,
-  ): Promise<{ updated: boolean; sortRankChanged: boolean }> {
+  ): Promise<{ updated: boolean; sortRankChanged: boolean; promoted: boolean }> {
     const [wmsOrder] = await db
       .select({
         id: wmsOrders.id,
@@ -691,8 +703,13 @@ export class WmsSyncService {
       .limit(1);
 
     if (!wmsOrder || wmsOrder.warehouseStatus === "cancelled") {
-      return { updated: false, sortRankChanged: false };
+      return { updated: false, sortRankChanged: false, promoted: false };
     }
+
+    // Promote pending → ready when OMS order is now paid
+    const nextWarehouseStatus = this.determineWarehouseStatus(omsOrder);
+    const promoted =
+      wmsOrder.warehouseStatus === "pending" && nextWarehouseStatus === "ready";
 
     const channelShipByDate = (omsOrder as any).channelShipByDate as Date | string | null | undefined;
     const nextSlaDueAt = await resolveSlaDueAt({
@@ -711,17 +728,19 @@ export class WmsSyncService {
     const nextChannelShipByDate = channelShipByDate ? new Date(channelShipByDate as any) : null;
     const sortRankChanged = wmsOrder.sortRank !== nextSortRank;
     const changed =
+      promoted ||
       dateTimeKey(wmsOrder.channelShipByDate) !== dateTimeKey(nextChannelShipByDate) ||
       dateTimeKey(wmsOrder.slaDueAt) !== dateTimeKey(nextSlaDueAt) ||
       sortRankChanged;
 
     if (!changed) {
-      return { updated: false, sortRankChanged: false };
+      return { updated: false, sortRankChanged: false, promoted: false };
     }
 
     await db
       .update(wmsOrders)
       .set({
+        ...(promoted ? { warehouseStatus: "ready" } : {}),
         channelShipByDate: nextChannelShipByDate,
         slaDueAt: nextSlaDueAt,
         slaStatus: slaStatusFor(nextSlaDueAt),
@@ -730,7 +749,13 @@ export class WmsSyncService {
       })
       .where(eq(wmsOrders.id, wmsOrderId));
 
-    if (sortRankChanged && ACTIVE_SORT_RANK_SYNC_STATUSES.has(String(wmsOrder.warehouseStatus))) {
+    if (promoted) {
+      console.log(
+        `[WMS Sync] Promoted WMS order ${wmsOrderId} from pending → ready (OMS financial_status=${omsOrder.financialStatus})`,
+      );
+    }
+
+    if (sortRankChanged && ACTIVE_SORT_RANK_SYNC_STATUSES.has(promoted ? "ready" : String(wmsOrder.warehouseStatus))) {
       await enqueueShipStationSortRankSyncRetry(
         db,
         wmsOrderId,
@@ -738,7 +763,7 @@ export class WmsSyncService {
       );
     }
 
-    return { updated: true, sortRankChanged };
+    return { updated: true, sortRankChanged, promoted };
   }
 
   private async reconcileExistingWmsOrderLines(
