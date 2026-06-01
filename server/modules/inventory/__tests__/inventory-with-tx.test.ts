@@ -82,9 +82,14 @@ describe("InventoryUseCases.withTx", () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
     const { InventoryUseCases } = await import("../application/inventory.use-cases");
 
-    const tx = {};
+    const unfrozenSelectChain = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([{ cycleCountFreezeId: null }]),
+    };
+    const tx = { select: vi.fn(() => unfrozenSelectChain) };
     const rootDb = {
-      select: vi.fn(),
+      select: vi.fn(() => unfrozenSelectChain),
       update: vi.fn(),
       insert: vi.fn(),
       execute: vi.fn(),
