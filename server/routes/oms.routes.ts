@@ -9,6 +9,7 @@ import type { Express, Request, Response } from "express";
 import type { OmsService } from "../modules/oms/oms.service";
 import type { FulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import type { ShipStationService } from "../modules/oms/shipstation.service";
+import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
 import { remediateOmsFlowIssue } from "../modules/oms/oms-flow-reconciliation.service";
@@ -249,22 +250,50 @@ export function registerOmsRoutes(app: Express) {
 
   // -----------------------------------------------------------------------
   // POST /api/oms/orders/:id/push-to-shipstation — manual ShipStation push
+  //
+  // RETIRED legacy path: this used to call the OMS-level pushOrder, which
+  // created a ShipStation order keyed `echelon-oms-<omsOrderId>` — a DIFFERENT key
+  // than the canonical WMS shipment push (`echelon-wms-shp-<shipmentId>`).
+  // Because ShipStation dedups on orderKey, an order could end up duplicated
+  // in ShipStation (one SS order per path). We now delegate to the single
+  // canonical shipment push so there is exactly one SS order per shipment.
   // -----------------------------------------------------------------------
   app.post("/api/oms/orders/:id/push-to-shipstation", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
       const ss = getShipStation(req);
 
       if (!ss || !ss.isConfigured()) {
         return res.status(503).json({ error: "ShipStation not configured" });
       }
 
-      const order = await getOms(req).getOrderById(id);
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
+      // Resolve the canonical (non-voided) WMS shipment for this OMS order.
+      const shipmentLookup = await db.execute(sql`
+        SELECT s.id
+          FROM wms.outbound_shipments s
+          JOIN wms.orders o ON o.id = s.order_id
+         WHERE o.source = 'oms'
+           AND o.oms_fulfillment_order_id = ${String(id)}
+           AND s.status NOT IN ('voided', 'cancelled')
+         ORDER BY s.id
+         LIMIT 1
+      `);
+      const shipmentId = shipmentLookup.rows?.[0]?.id
+        ? Number(shipmentLookup.rows[0].id)
+        : null;
+
+      if (!shipmentId) {
+        return res.status(409).json({
+          error:
+            "No active WMS shipment for this order yet — it must sync to WMS before it can be pushed to ShipStation.",
+          code: "NO_WMS_SHIPMENT",
+        });
       }
 
-      const result = await ss.pushOrder(order);
+      const result = await ss.pushShipment(shipmentId);
       const updated = await getOms(req).getOrderById(id);
 
       res.json({
@@ -274,7 +303,7 @@ export function registerOmsRoutes(app: Express) {
       });
     } catch (err: any) {
       console.error("[OMS Routes] Push to ShipStation error:", err);
-      res.status(500).json({ error: err.message });
+      res.status(err.httpStatus || 500).json({ error: err.message, code: err.code });
     }
   });
 }
