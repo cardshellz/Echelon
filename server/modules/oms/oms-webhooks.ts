@@ -1471,7 +1471,7 @@ export function registerOmsWebhooks(
       const wmsOrderRows = wmsOrders.rows;
 
       if (wmsOrderRows.length > 0) {
-        // Update address/financial fields (non-status)
+        const isPaidNow = shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid";
         await db.execute(sql`
           UPDATE wms.orders SET
             shipping_name = ${nextShipTo.name},
@@ -1483,6 +1483,10 @@ export function registerOmsWebhooks(
             shipping_postal_code = ${nextShipTo.zip},
             shipping_country = ${nextShipTo.country || "US"},
             financial_status = ${shopifyOrder.financial_status || "paid"},
+            warehouse_status = CASE
+              WHEN warehouse_status = 'pending' AND ${isPaidNow} THEN 'ready'
+              ELSE warehouse_status
+            END,
             customer_name = ${nextShipTo.name || existing.customerName || null},
             customer_email = ${shopifyOrder.email || existing.customerEmail || null}
           WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
