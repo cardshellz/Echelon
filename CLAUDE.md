@@ -214,5 +214,8 @@ non-idempotent financial operations · use `allowNegative: true` · commit secre
 - **Money:** confirm the unit (cents vs decimal) of any financial column before computing.
 - **Migrations:** numbered SQL files in `migrations/`; `server/db.ts` has fallback
   startup migrations.
-- **Shipping engine:** currently ShipStation, but the architecture should trend toward
-  an engine-agnostic interface — do not deepen ShipStation coupling without reason.
+- **Shipping engine:** fully engine-agnostic via `shippingEngine.*` interface (C9 complete).
+  ShipStation adapter is the only implementation. Legacy `shipstation_order_id` /
+  `shipstation_order_key` columns remain on `oms.oms_orders` and `wms.outbound_shipments`
+  as back-compat shadow columns with dual-writes. **TODO (post-soak):** drop legacy columns,
+  remove dual-writes in `pushOrder()` / `pushShipment()`, and delete COALESCE fallbacks.
