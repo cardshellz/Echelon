@@ -273,6 +273,24 @@ export async function runStartupMigrations(): Promise<void> {
         ON warehouse.warehouse_locations (id)
         WHERE cycle_count_freeze_id IS NULL
     `);
+    // Shipment dedup — one outbound_shipment per external_fulfillment_id.
+    // Closes the parallel Shopify-fulfillment-webhook race. Wrapped so a
+    // pre-existing duplicate (a real double-ship needing manual review) is
+    // surfaced as a WARNING instead of crashing startup — the formal
+    // migration 0579 RAISES on duplicates for the controlled path.
+    try {
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_outbound_shipments_external_fulfillment_id
+          ON wms.outbound_shipments (external_fulfillment_id)
+          WHERE external_fulfillment_id IS NOT NULL
+      `);
+    } catch (err: any) {
+      console.error(
+        `[startup-migration] Could not create uq_outbound_shipments_external_fulfillment_id ` +
+          `(likely duplicate external_fulfillment_id rows — possible double-ship needing manual ` +
+          `reconciliation): ${err.message}`,
+      );
+    }
     // Phase 4: receipt dedup — one receipt ledger row per (receiving_order, variant, location)
     await client.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_receipt_dedup

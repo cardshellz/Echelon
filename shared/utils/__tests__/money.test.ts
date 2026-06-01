@@ -12,7 +12,34 @@ import {
   millsToCents,
   centsToMills,
   computeLineTotalCentsFromMills,
+  perUnitMills,
 } from "../money";
+
+describe("perUnitMills (case-break per-unit cost)", () => {
+  it("divides a whole-case cost evenly across base units", () => {
+    // $10.00 case (100000 mills) / 100 units = $0.10/unit (1000 mills)
+    expect(perUnitMills(100000, 100)).toBe(1000);
+  });
+
+  it("rounds half-up on indivisible splits", () => {
+    // $10.00 / 3 = 3333.33.. mills -> 33333 (the .33 rounds down)
+    expect(perUnitMills(100000, 3)).toBe(33333);
+    // 100050 / 4 = 25012.5 -> 25013 (tie rounds up)
+    expect(perUnitMills(100050, 4)).toBe(25013);
+  });
+
+  it("handles cheap sub-cent items", () => {
+    // $0.56 case (5600 mills) / 100 = 56 mills ($0.0056/unit)
+    expect(perUnitMills(5600, 100)).toBe(56);
+  });
+
+  it("rejects invalid inputs", () => {
+    expect(() => perUnitMills(1000, 0)).toThrow(RangeError);
+    expect(() => perUnitMills(1000, -2)).toThrow(RangeError);
+    expect(() => perUnitMills(-1, 10)).toThrow(RangeError);
+    expect(() => perUnitMills(1.5, 10)).toThrow(RangeError);
+  });
+});
 
 describe("dollarsToCents (legacy)", () => {
   it("parses whole dollars", () => {

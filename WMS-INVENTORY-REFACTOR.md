@@ -406,6 +406,27 @@ Critical unit-conservation fix and dead-config identification.
   are different operational philosophies).
 - **L5** (magic numbers) — deferred, low-risk cosmetic issue.
 
+### Cross-system audit (post-Phase-6 hardening) ☑
+Audited OMS, procurement/receiving, and picking/packing/shipping for production-readiness.
+Most agent-flagged "HIGH" items were overstated (verified against code: the Shopify
+"double-deduction" was a false positive — `recordShipment` runs before the picked_qty
+update, all in one tx; the `recordShipment` negative-inventory guard exists; PO reconciliation
+post-commit is self-healing via re-`close()`). **Two genuine financial-integrity bugs fixed:**
+
+- **Shipment idempotency race** ☑ `outbound_shipments.external_fulfillment_id` had no unique
+  constraint, so the read-then-insert check in `processShopifyFulfillment` wasn't concurrency-safe
+  (parallel webhooks → double-ship). Added unique partial index (migration 0579) + `ON CONFLICT
+  DO NOTHING` with idempotent re-read of the raced row. Same pattern as ship/reserve/receipt dedup.
+- **Case-break COGS overstatement** ☑ Auto-break on receive stamped the whole-**case** cost onto
+  every base unit (`receiving.service.ts`), overstating base-unit COGS by `unitsPerVariant`× (a
+  $10 case of 100 made each sleeve cost $10). Now computes per-unit cost via
+  `millsToCents(perUnitMills(caseMills, unitsPerVariant))` — new exported `perUnitMills` helper.
+  Note: `inventory_lots` is cents-only; true sub-cent lot costs would need a separate lots-mills
+  migration (tracked separately).
+
+Remaining MEDIUM items (deferred, not loss risks): on-hold check in pick lock, biggest-pile
+fallback for shipment location.
+
 ---
 
 > **Phases 0–6 restore trust.** Phases 7+ build the enterprise capability layer on top.

@@ -319,6 +319,12 @@ class FulfillmentService {
       const internalOrder = order as Order;
 
       // -- Create shipment --
+      // ON CONFLICT DO NOTHING on the unique external_fulfillment_id index
+      // closes the parallel-webhook race: the read-then-insert check above is
+      // not atomic, so two concurrent fulfillment webhooks for the same
+      // fulfillmentId could both pass it. If a competing transaction already
+      // inserted (and committed) this fulfillment, our insert no-ops and we
+      // fall back to returning the existing row — idempotent, no double-ship.
       const [shipment] = await tx
         .insert(outboundShipments)
         .values({
@@ -331,7 +337,25 @@ class FulfillmentService {
           trackingNumber: params.trackingNumber ?? null,
           trackingUrl: params.trackingUrl ?? null,
         } satisfies InsertShipment)
+        .onConflictDoNothing({
+          target: outboundShipments.externalFulfillmentId,
+          targetWhere: sql`external_fulfillment_id IS NOT NULL`,
+        })
         .returning();
+
+      if (!shipment) {
+        // A concurrent webhook won the race and committed first. Re-read and
+        // return that shipment without re-deducting inventory.
+        const [raced] = await tx
+          .select()
+          .from(outboundShipments)
+          .where(eq(outboundShipments.externalFulfillmentId, params.fulfillmentId))
+          .limit(1);
+        return {
+          shipment: (raced ?? null) as Shipment,
+          affectedVariantIds: [] as number[],
+        };
+      }
 
       const createdShipment = shipment as Shipment;
 

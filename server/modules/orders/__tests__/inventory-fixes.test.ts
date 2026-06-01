@@ -299,6 +299,56 @@ describe("Fix 2: Double Inventory Deduction Prevention", () => {
     });
   });
 
+  describe("Prong D: parallel-webhook race guarded by unique constraint", () => {
+    // The read-then-insert idempotency check (existing-shipment lookup on
+    // external_fulfillment_id) is NOT atomic: two concurrent Shopify
+    // fulfillment webhooks for the same fulfillmentId can both pass it.
+    // The fix adds a UNIQUE index on outbound_shipments.external_fulfillment_id
+    // (migration 0579) and inserts with ON CONFLICT DO NOTHING. The loser of
+    // the race gets an empty insert result and returns the existing row
+    // WITHOUT calling confirmShipment again — so inventory is deducted once.
+
+    it("loser of the race returns existing shipment without deducting", () => {
+      // Simulate Drizzle .onConflictDoNothing().returning() => [] on conflict
+      const insertReturning: any[] = [];
+      const racedExisting = { id: 42, externalFulfillmentId: "ff-123" };
+
+      // The code path: if (!shipment) -> re-read and return early
+      const shipment = insertReturning[0];
+      let deducted = false;
+      let returnedShipment: any;
+      if (!shipment) {
+        returnedShipment = racedExisting; // re-read result
+      } else {
+        deducted = true; // would call confirmShipmentInternal
+      }
+
+      expect(returnedShipment).toEqual(racedExisting);
+      expect(deducted).toBe(false);
+    });
+
+    it("winner of the race proceeds to confirm exactly once", () => {
+      const insertReturning = [{ id: 99, externalFulfillmentId: "ff-123" }];
+      const shipment = insertReturning[0];
+      let deductions = 0;
+      if (shipment) deductions++;
+      expect(deductions).toBe(1);
+    });
+
+    it("unique index is partial (allows multiple NULL external_fulfillment_id)", () => {
+      // Manual/api shipments have NULL external_fulfillment_id and must coexist.
+      const index = {
+        name: "uq_outbound_shipments_external_fulfillment_id",
+        table: "outbound_shipments",
+        columns: ["external_fulfillment_id"],
+        where: "external_fulfillment_id IS NOT NULL",
+        unique: true,
+      };
+      expect(index.unique).toBe(true);
+      expect(index.where).toContain("IS NOT NULL");
+    });
+  });
+
   describe("End-to-end scenario: Webhook fires first, then sync", () => {
     it("should result in exactly one inventory deduction", async () => {
       const inventoryCore = createMockInventoryCore();

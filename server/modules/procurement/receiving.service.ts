@@ -20,6 +20,7 @@ import {
   millsToCents,
   centsToMills,
   dollarsToMills,
+  perUnitMills,
 } from "@shared/utils/money";
 import {
   type ReceivingCloseReconciliation,
@@ -620,17 +621,27 @@ export class ReceivingService {
           const allVariants = await this.storage.getProductVariantsByProductId((variant as any).productId);
           const baseVariant = allVariants.find((v: any) => v.hierarchyLevel === 1);
           if (baseVariant && baseVariant.id !== line.productVariantId) {
-            const totalUnits = line.receivedQty * (variant as any).unitsPerVariant;
-            // Auto-break: child (base) units inherit per-unit cost from the
-            // parent case on a mills basis when available. Per-unit cost at
-            // the base level is (parent mills / unitsPerVariant) — for now
-            // we simply pass through cents unchanged (the parent mills is
-            // the "case" cost, not per-base-unit; inventory_lots tracks
-            // cost per variant, and the child lot gets the same cost basis
-            // as the parent). If/when base-unit mills is desired, compute:
-            //   baseMills = round_half_up(parentMills, unitsPerVariant)
-            // and plumb it through inventoryCore.
+            const unitsPerVariant = (variant as any).unitsPerVariant;
+            const totalUnits = line.receivedQty * unitsPerVariant;
+            // Auto-break: child (base) units inherit the PER-UNIT cost, not
+            // the whole-case cost. `resolveReceivingLineCost` returns the
+            // cost of one case-variant unit (the receiving UOM), so we must
+            // divide by unitsPerVariant to get the per-base-unit cost.
+            // Stamping the case cost on every base unit overstated base-unit
+            // COGS by a factor of unitsPerVariant (a $10 case of 100 sleeves
+            // made each sleeve cost $10 instead of $0.10).
+            //
+            // We divide on a mills basis (4-decimal) for precision, then
+            // collapse to cents because inventory_lots is cents-only today.
             const breakCost = await resolveReceivingLineCost(line, this.storage as any);
+            let baseUnitCostCents: number | undefined;
+            if (typeof breakCost.mills === "number") {
+              baseUnitCostCents = millsToCents(perUnitMills(breakCost.mills, unitsPerVariant));
+            } else if (typeof breakCost.cents === "number") {
+              // No mills available — divide cents via mills to preserve sub-cent
+              // accuracy before the final half-up to cents.
+              baseUnitCostCents = millsToCents(perUnitMills(centsToMills(breakCost.cents), unitsPerVariant));
+            }
             await this.inventoryCore.receiveInventory({
               productVariantId: baseVariant.id,
               warehouseLocationId: line.putawayLocationId,
@@ -638,7 +649,7 @@ export class ReceivingService {
               referenceId: `BREAK-${batchId}-${line.id}`,
               notes: `Auto-break: ${line.receivedQty}× ${variant.sku} → ${totalUnits}× ${baseVariant.sku}`,
               userId: userId || undefined,
-              unitCostCents: breakCost.cents,
+              unitCostCents: baseUnitCostCents,
               receivingOrderId: orderId,
             }, tx);
 
