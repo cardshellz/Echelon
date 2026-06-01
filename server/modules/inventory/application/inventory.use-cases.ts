@@ -8,6 +8,13 @@ import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction }
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
 
+export class FreezeViolationError extends Error {
+  code = "LOCATION_FROZEN";
+  constructor(locationId: number) {
+    super(`Location ${locationId} is frozen for cycle counting — mutation blocked`);
+  }
+}
+
 /** Type wrapper for Drizzle database instance */
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -26,6 +33,18 @@ export class InventoryUseCases {
     private readonly lotService: InventoryLotService | null = null,
     private readonly cogsService: COGSService | null = null,
   ) {}
+
+  private async assertNotFrozen(locationId: number, dbh?: any): Promise<void> {
+    const db = dbh ?? this.db;
+    const [loc] = await db
+      .select({ cycleCountFreezeId: warehouseLocations.cycleCountFreezeId })
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, locationId))
+      .limit(1);
+    if (loc?.cycleCountFreezeId) {
+      throw new FreezeViolationError(locationId);
+    }
+  }
 
   onInventoryChange(cb: (productVariantId: number, triggeredBy: string) => void): void {
     this.onChangeCallbacks.push(cb);
@@ -61,6 +80,26 @@ export class InventoryUseCases {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
     const doWork = async (tx: any) => {
+      await this.assertNotFrozen(params.warehouseLocationId, tx);
+
+      // Receipt idempotency: if this receiving order already has a receipt
+      // row for this variant+location, skip (prevents double-receive on replay).
+      if (params.receivingOrderId) {
+        const existing = await tx.execute(sql`
+          SELECT id
+          FROM inventory.inventory_transactions
+          WHERE transaction_type = 'receipt'
+            AND receiving_order_id = ${params.receivingOrderId}
+            AND product_variant_id = ${params.productVariantId}
+            AND to_location_id = ${params.warehouseLocationId}
+            AND voided_at IS NULL
+          LIMIT 1
+        `);
+        if (existing.rows.length > 0) {
+          return;
+        }
+      }
+
       // 1. Upsert Location Level
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
@@ -93,22 +132,30 @@ export class InventoryUseCases {
       }
 
       // 4. Record Audit
-      await this.storage.createInventoryTransaction({
-        productVariantId: params.productVariantId,
-        toLocationId: params.warehouseLocationId,
-        transactionType: "receipt",
-        variantQtyDelta: params.qty,
-        variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty + params.qty,
-        sourceState: "external",
-        targetState: "on_hand",
-        referenceType: "receiving",
-        referenceId: params.referenceId,
-        notes: params.notes ?? null,
-        userId: params.userId ?? null,
-        unitCostCents: params.unitCostCents ?? null,
-        inventoryLotId: lotId ?? null,
-      }, tx);
+      try {
+        await this.storage.createInventoryTransaction({
+          productVariantId: params.productVariantId,
+          toLocationId: params.warehouseLocationId,
+          transactionType: "receipt",
+          variantQtyDelta: params.qty,
+          variantQtyBefore: level.variantQty,
+          variantQtyAfter: level.variantQty + params.qty,
+          sourceState: "external",
+          targetState: "on_hand",
+          referenceType: "receiving",
+          referenceId: params.referenceId,
+          receivingOrderId: params.receivingOrderId ?? null,
+          notes: params.notes ?? null,
+          userId: params.userId ?? null,
+          unitCostCents: params.unitCostCents ?? null,
+          inventoryLotId: lotId ?? null,
+        }, tx);
+      } catch (err: any) {
+        if (err?.code === "23505" && String(err?.constraint ?? "").includes("receipt_dedup")) {
+          return;
+        }
+        throw err;
+      }
     };
 
     if (externalTx) {
@@ -389,6 +436,11 @@ export class InventoryUseCases {
     let orphanedQty = 0;
 
     await this.db.transaction(async (tx) => {
+      // Cycle-count adjustments are the ONE mutation allowed on frozen bins
+      if (!params.cycleCountId) {
+        await this.assertNotFrozen(params.warehouseLocationId, tx);
+      }
+
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
@@ -624,6 +676,8 @@ export class InventoryUseCases {
 
       if (!fromLoc) throw new Error(`Source location ${params.fromLocationId} not found`);
       if (!toLoc) throw new Error(`Destination location ${params.toLocationId} not found`);
+      if (fromLoc.cycleCountFreezeId) throw new FreezeViolationError(params.fromLocationId);
+      if (toLoc.cycleCountFreezeId) throw new FreezeViolationError(params.toLocationId);
       if (fromLoc.isActive !== 1) throw new Error(`Source location ${fromLoc.code} is inactive`);
       if (toLoc.isActive !== 1) throw new Error(`Destination location ${toLoc.code} is inactive`);
       if (fromLoc.warehouseId == null) throw new Error(`Source location ${fromLoc.code} is not assigned to a warehouse`);

@@ -370,12 +370,24 @@ M3 (guarantee or alert on orphan reallocation), M8 (decide backorder in ATP).
   expected inbound (PO arrivals) — not yet on-hand. Including it would risk overselling on
   undelivered POs. `getTotalBaseUnits()` already surfaces backorder for visibility.
 
-### Phase 4 — Receipts + lots ☐
-Receipt idempotency (H4), receive freeze-check (H2), over/under variance, FIFO lot integrity.
+### Phase 4 — Receipts + freeze enforcement ☑ COMPLETE
+Receipt idempotency (H4), freeze enforcement across all write paths (H2).
 
-### Phase 5 — Cycle counts + freeze enforcement ☐
-Enforce `cycleCountFreezeId` across transfer/receive/break/adjust (H2). Variance→adjustment
-already atomic — verify against Phase 0 reconciler.
+**Status:**
+- **H4** ☑ Receipt idempotency: `receiveInventory` now checks for existing receipt row
+  before mutating (keyed on `receiving_order_id + product_variant_id + to_location_id`).
+  Unique partial index `uq_inventory_transactions_receipt_dedup` added (migration 0578).
+  Belt-and-suspenders 23505 catch. Same pattern as ship (0570) and reserve (0577) dedup.
+- **H2** ☑ Freeze enforcement: `receiveInventory`, `adjustInventory`, and `transfer` now
+  reject mutations on frozen locations (`cycleCountFreezeId IS NOT NULL`). Transfer checks
+  both source and destination. Cycle-count adjustments (`cycleCountId` present) are the one
+  exception — they are the very adjustments made during a count. `breakVariant`/`assembleVariant`
+  go through `adjustInventory` so they inherit the freeze check automatically.
+  `FreezeViolationError` is exported for callers to handle.
+
+### Phase 5 — Cycle counts ☐
+H2 freeze enforcement completed in Phase 4. Remaining: variance→adjustment audit trail
+verification against Phase 0 reconciler, cycle-count-specific edge cases.
 
 ### Phase 6 — Replenishment monolith ☐ (LAST of the fix-phases — it's advisory)
 Decompose the 3,603-line file; add integration tests for `executeTask`/cascade/state
