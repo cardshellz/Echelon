@@ -883,6 +883,27 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_event ON procurement.demand_event_lines (demand_event_id)`);
     console.log("Checked forward demand events tables (demand_events, demand_event_lines)");
 
+    // ─── WMS order dedup: one active WMS order per OMS fulfillment order ──────────
+    // Advisory lock in syncOmsOrderToWms prevents races at runtime; this index
+    // is the permanent DB-level backstop. Excludes cancelled rows so the index
+    // can be created even when historical duplicates exist (all known dupes are
+    // {shipped, cancelled} pairs).
+    try {
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_orders_oms_fulfillment_active
+          ON wms.orders (oms_fulfillment_order_id)
+          WHERE source = 'oms'
+            AND warehouse_status NOT IN ('cancelled', 'voided')
+            AND oms_fulfillment_order_id IS NOT NULL
+      `);
+      console.log("Checked WMS order dedup unique index (uq_wms_orders_oms_fulfillment_active)");
+    } catch (err: any) {
+      console.error(
+        `[startup-migration] Could not create uq_wms_orders_oms_fulfillment_active ` +
+          `(likely duplicate active WMS orders for same OMS order — needs manual reconciliation): ${err.message}`,
+      );
+    }
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

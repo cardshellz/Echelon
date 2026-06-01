@@ -1331,7 +1331,10 @@ export const procurementMethods: IProcurementStorage = {
          FROM inventory.inventory_transactions it2
          JOIN catalog.product_variants pv2 ON pv2.id = it2.product_variant_id
          WHERE pv2.product_id = p.id
-           AND it2.transaction_type = 'receipt') AS last_received_at
+           AND it2.transaction_type = 'receipt') AS last_received_at,
+        COALESCE(fwd.weighted_pieces, 0)::bigint AS forward_demand_pieces,
+        COALESCE(fwd.raw_pieces, 0)::bigint AS forward_demand_raw_pieces,
+        COALESCE(fwd.event_count, 0)::int AS forward_demand_event_count
       FROM catalog.products p
       LEFT JOIN (
         SELECT pv.product_id,
@@ -1560,6 +1563,25 @@ export const procurementMethods: IProcurementStorage = {
           AND pol.status IN ('open', 'partially_received')
         GROUP BY pv.product_id
       ) on_order ON on_order.product_id = p.id
+      LEFT JOIN (
+        SELECT del.product_id,
+               SUM(
+                 CASE del.confidence
+                   WHEN 'high'   THEN del.expected_pieces
+                   WHEN 'medium' THEN CEIL(del.expected_pieces * 0.7)
+                   WHEN 'low'    THEN CEIL(del.expected_pieces * 0.4)
+                   ELSE 0
+                 END
+               ) AS weighted_pieces,
+               SUM(del.expected_pieces) AS raw_pieces,
+               COUNT(DISTINCT de.id) AS event_count
+        FROM procurement.demand_event_lines del
+        JOIN procurement.demand_events de ON de.id = del.demand_event_id
+        WHERE de.status IN ('planned', 'active')
+          AND de.start_date <= CURRENT_DATE + INTERVAL '90 days'
+          AND (de.end_date IS NULL OR de.end_date >= CURRENT_DATE)
+        GROUP BY del.product_id
+      ) fwd ON fwd.product_id = p.id
       WHERE p.is_active = true
       ORDER BY p.sku, p.name
     `);
