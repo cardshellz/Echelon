@@ -104,11 +104,7 @@ export interface IProductStorage {
 
   cascadeSkuRename(variantId: number, oldSku: string, newSku: string): Promise<void>;
 
-  reassignInventoryLevelsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number>;
-
   reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number>;
-
-  createMergeAuditTransaction(targetVariantId: number, sourceSku: string, sourceId: number, movedInventory: number, movedLocations: number): Promise<void>;
 
   searchCatalogProductsWithImage(searchPattern: string, limit: number): Promise<{
     product_id: number;
@@ -475,29 +471,12 @@ export const productMethods: IProductStorage = {
     await db.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
   },
 
-  async reassignInventoryLevelsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number> {
-    const result = await db.update(inventoryLevels)
-      .set({ productVariantId: targetVariantId, updatedAt: new Date() })
-      .where(eq(inventoryLevels.productVariantId, sourceVariantId))
-      .returning();
-    return result.length;
-  },
-
   async reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number> {
     const result = await db.update(productLocations)
       .set({ productVariantId: targetVariantId, updatedAt: new Date() })
       .where(eq(productLocations.productVariantId, sourceVariantId))
       .returning();
     return result.length;
-  },
-
-  async createMergeAuditTransaction(targetVariantId: number, sourceSku: string, sourceId: number, movedInventory: number, movedLocations: number): Promise<void> {
-    await db.insert(inventoryTransactions).values({
-      productVariantId: targetVariantId,
-      transactionType: "adjustment",
-      variantQtyDelta: 0,
-      notes: `Merged from variant ${sourceSku || sourceId} (id=${sourceId}): ${movedInventory} inventory records, ${movedLocations} location assignments`,
-    });
   },
 
   async searchProducts(opts: { q: string; limit: number; includeInactive?: boolean }): Promise<Array<{ id: number }>> {

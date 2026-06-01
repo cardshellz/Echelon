@@ -283,19 +283,47 @@ Output: per-(variant,location) variance report. Zero mutations.
   abs drift. **Next action: run against prod to capture the baseline** (expect non-zero —
   C4 guarantees drift) and record the starting number here.
 
-### Phase 1 — One guarded write primitive + DB invariants ☐
+### Phase 1 — One guarded write primitive + DB invariants ◑ (in progress)
 - Funnel all 32 write paths through a single guarded mutation (tx + lock + ledger-in-tx).
-  Close the bypasses: C4 (receiving case-break), M4 (dropship), M5 (variant reassign),
-  M6 (CSV).
-- Add DB constraints: C1 (unique on variant,location), C2 (qty >= 0), state-machine
-  ordering where columns are live.
-- Remove C5 (ledger delete) — soft-delete or forbid.
-- Decide on C6: add bucket deltas to the ledger so reserved/picked are replayable.
-- Fix C7 (`logTransaction` unimplemented) — add the alias on `InventoryUseCases`. This is a
-  latent runtime crash on returns-restock / CSV / bin-count paths and could be hotfixed
-  ahead of the rest of the phase.
+  Close the bypasses:
+  - **C4 (receiving case-break)** ☑ — raw `UPDATE inventory_levels` (no ledger) replaced
+    with `inventoryCore.withTx(tx).adjustInventory()`; deduction now ledgered atomically.
+  - **M4 (dropship)** ☑ — **finding withdrawn.** The "raw, lock-less write" claim was
+    wrong: `acceptOrderWithClient` does `BEGIN` → `lockInventoryLevelsWithClient`
+    (`SELECT … FOR UPDATE`) → reserve against the locked rows → `COMMIT`. The write is
+    row-locked, transactional, and ledgered, and only touches `reserved_qty` (delta-0
+    `reserve` row the on-hand reconciler skips). No on-hand leak.
+  - **M5 (variant reassign / merge)** ☑ — merge endpoint no longer re-points
+    `product_variant_id` with no ledger and no tx (which also risked a unique-constraint
+    crash when the target already had stock at the same bin). It now routes through
+    `convertSku` (per-location signed `sku_correction` rows, upsert-safe, tx-wrapped).
+    Dead `reassignInventoryLevelsToVariant` / `createMergeAuditTransaction` removed.
+  - **M6 (CSV)** ☑ — each row's level mutation + ledger row are now wrapped in one
+    `db.transaction`, so a partial failure can't leave a level change without an audit row.
+- DB constraints:
+  - **C1 (unique variant,location)** ☑ already enforced by existing
+    `idx_inventory_levels_variant_location` unique index.
+  - **C2 (qty >= 0)** ☑ added as `CHECK … NOT VALID` (blocks new negatives; preserves
+    existing drift for the reconciler to correct via ledgered adjustments).
+- **C5 (ledger delete)** ☑ — `voided_at` soft-delete column; diagnostics endpoint voids
+  instead of `DELETE`; reconciler excludes voided rows.
+- **C6 (bucket deltas)** — **DECISION: defer to a dedicated change.** The ledger records
+  signed `variant_qty_delta` (on-hand) but not signed deltas for reserved/picked/packed/
+  backorder. Making those replayable requires adding bucket-delta columns AND updating every
+  reserve/unreserve/reserve_move/pick/pack writer in the same change — a piecemeal rollout
+  would produce a *partial* bucket-ledger that looks authoritative but isn't, which is worse
+  than none. The Phase 0 on-hand reconciler (the trust instrument) is unaffected. Tracked as
+  its own unit of work after on-hand variance is driven to zero.
+- **C7 (`logTransaction` unimplemented)** ☑ — implemented on `InventoryUseCases`
+  (delegates to `createInventoryTransaction`); unit-tested.
+- **Remaining before exit:**
+  - **(a)** Deploy the guards above and confirm via the reconciler that *new* drift stops
+    accumulating.
+  - **(b)** One-time reconciliation pass to retire the *historical* backlog (the guards stop
+    new drift; they do NOT rewrite history — the reconciler is read-only and backfills
+    nothing). Approach TBD: investigate-then-correct (audit-clean) vs. batched backfill.
 - **Exit:** Phase 0 reconciler hits **zero on-hand variance**; every write provably routes
-  through the primitive; constraints live in prod.
+  through a ledgered/guarded path; constraints live in prod.
 
 ### Phase 2 — Money integrity ☐
 - Convert remaining `double precision` cost columns to `bigint` (C3): `purchase_order_lines`,

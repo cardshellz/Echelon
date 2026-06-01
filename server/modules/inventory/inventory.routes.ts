@@ -430,50 +430,48 @@ export function registerInventoryRoutes(app: Express) {
 
           // Find existing level by variantId (source of truth)
           const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocation.id, variant.id);
-
-          if (existingLevel) {
-            // Calculate delta from current value
-            const currentQty = existingLevel.variantQty || 0;
-            const qtyDelta = targetQty - currentQty;
-
-            await storage.adjustInventoryLevel(existingLevel.id, {
-              variantQty: qtyDelta,
-            });
-          } else {
-            // Create new level - productVariantId is required
-            await storage.upsertInventoryLevel({
-              warehouseLocationId: warehouseLocation.id,
-              productVariantId: variant.id,
-              variantQty: targetQty,
-              reservedQty: 0,
-              pickedQty: 0,
-              packedQty: 0,
-              backorderQty: 0,
-            });
-          }
-
-          // Log the transaction with before/after snapshots
           const variantQtyBefore = existingLevel ? (existingLevel.variantQty || 0) : 0;
           const variantQtyDelta = targetQty - variantQtyBefore;
 
-          // Log with Full WMS fields
-          await storage.createInventoryTransaction({
-            productVariantId: variant?.id,
-            fromLocationId: null,
-            toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
-            transactionType: "csv_upload",
-            reasonId: csvReason?.id,
-            variantQtyDelta,
-            variantQtyBefore,
-            variantQtyAfter: targetQty,
-            batchId,
-            sourceState: "external",
-            targetState: "on_hand",
-            referenceType: "csv_import",
-            referenceId: batchId,
-            notes: `CSV import: Set ${sku} at ${locationCode} to ${targetQty} units (was ${variantQtyBefore})`,
-            userId,
-            isImplicit: 0,
+          // M6 fix: the level mutation and its ledger row must be atomic — a
+          // failure between them would leave a level change with no audit row
+          // (silent on-hand drift). Wrap both in one transaction.
+          await db.transaction(async (tx: any) => {
+            if (existingLevel) {
+              await storage.adjustInventoryLevel(existingLevel.id, {
+                variantQty: variantQtyDelta,
+              }, tx);
+            } else {
+              await storage.upsertInventoryLevel({
+                warehouseLocationId: warehouseLocation.id,
+                productVariantId: variant.id,
+                variantQty: targetQty,
+                reservedQty: 0,
+                pickedQty: 0,
+                packedQty: 0,
+                backorderQty: 0,
+              }, tx);
+            }
+
+            // Log with Full WMS fields
+            await storage.createInventoryTransaction({
+              productVariantId: variant?.id,
+              fromLocationId: null,
+              toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
+              transactionType: "csv_upload",
+              reasonId: csvReason?.id,
+              variantQtyDelta,
+              variantQtyBefore,
+              variantQtyAfter: targetQty,
+              batchId,
+              sourceState: "external",
+              targetState: "on_hand",
+              referenceType: "csv_import",
+              referenceId: batchId,
+              notes: `CSV import: Set ${sku} at ${locationCode} to ${targetQty} units (was ${variantQtyBefore})`,
+              userId,
+              isImplicit: 0,
+            }, tx);
           });
 
           results.push({ row: rowNum, sku, location: locationCode, status: "success", message: `Updated to ${targetQty} units` });
