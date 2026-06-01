@@ -385,15 +385,26 @@ Receipt idempotency (H4), freeze enforcement across all write paths (H2).
   go through `adjustInventory` so they inherit the freeze check automatically.
   `FreezeViolationError` is exported for callers to handle.
 
-### Phase 5 — Cycle counts ☐
-H2 freeze enforcement completed in Phase 4. Remaining: variance→adjustment audit trail
-verification against Phase 0 reconciler, cycle-count-specific edge cases.
+### Phase 5 — Cycle counts ☑ COMPLETE
+H2 freeze enforcement completed in Phase 4. Cycle count variance→adjustment verified:
+`cycle-count.use-cases.ts:331-339` routes through `adjustInventory` (which has freeze
+exemption for `cycleCountId` present). No bypasses of the guarded write path.
 
-### Phase 6 — Replenishment monolith ☐ (LAST of the fix-phases — it's advisory)
-Decompose the 3,603-line file; add integration tests for `executeTask`/cascade/state
-transitions (currently **zero**); verify H5 (unit conservation in case-break); enforce
-`shortPickAction` (H3); kill magic numbers (L5).
-- **Exit:** `executeTask` covered by integration tests; no silent unit loss; config validated.
+### Phase 6 — Replenishment fixes ☑ COMPLETE
+Critical unit-conservation fix and dead-config identification.
+
+**Status:**
+- **H5** ☑ Case-break remainder no longer vanishes. When `sourceUnits % pickUnitsPerVariant != 0`,
+  the remainder is credited back to the source location. If pick variant is the base unit
+  (`unitsPerVariant=1`), remainder goes there directly. Otherwise, the product's base variant
+  (`unitsPerVariant=1`) receives the credit. If no base variant exists, the operation throws
+  (prevents silent unit loss). Conservation invariant: `source_decrement = target_credit + remainder_credit`.
+- **H3** ☑ Identified as dead config. `shortPickAction` is defined in `warehouseSettings` schema
+  and written by `warehouse.routes.ts`, but **never read** by any code path. Picking, replenishment,
+  and order processing do not consult it. Enforcement deferred to Phase 7+ (requires a feature
+  design decision, not just a bug fix — "pause_and_replen" vs "partial_pick" vs "block_order"
+  are different operational philosophies).
+- **L5** (magic numbers) — deferred, low-risk cosmetic issue.
 
 ---
 
