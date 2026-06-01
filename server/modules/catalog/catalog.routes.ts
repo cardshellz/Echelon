@@ -1641,17 +1641,31 @@ export async function registerProductRoutes(app: Express) {
       if (!target) return res.status(404).json({ error: "Target variant not found" });
       if (!source) return res.status(404).json({ error: "Source variant not found" });
 
-      // Move inventory_levels from source to target
-      const movedInventoryCount = await storage.reassignInventoryLevelsToVariant(sourceId, targetId);
+      // Move on-hand from source → target through the guarded, ledgered, tx-wrapped
+      // convertSku use-case (fixes M5: the old reassignInventoryLevelsToVariant
+      // re-pointed product_variant_id with no ledger rows and no transaction, and
+      // would violate the unique(variant,location) constraint when the target
+      // already had stock at the same bin). convertSku writes signed sku_correction
+      // rows per location and upserts into the target safely.
+      const { inventoryCore: mergeCore } = req.app.locals.services;
+      let movedInventoryCount = 0;
+      try {
+        const conv = await mergeCore.convertSku({
+          fromVariantId: sourceId,
+          toVariantId: targetId,
+          notes: `Variant merge: ${source.sku || sourceId} → ${target.sku || targetId}`,
+          userId: req.session.user?.id || "system",
+        });
+        movedInventoryCount = conv.conversions.length;
+      } catch (err: any) {
+        // A merge of a zero-stock source is legitimate — only re-throw real errors.
+        if (!/No inventory found/i.test(String(err?.message))) throw err;
+      }
 
-      // Move product_locations from source to target
+      // Move product_locations (assignment metadata) from source to target
       const movedLocationCount = await storage.reassignProductLocationsToVariant(sourceId, targetId);
 
-      // Log audit transaction
-      await storage.createMergeAuditTransaction(targetId, source.sku || '', sourceId, movedInventoryCount, movedLocationCount);
-
       // Trigger notifyChange for both variants so channel sync picks up the merged inventory
-      const { inventoryCore: mergeCore } = req.app.locals.services;
       if (mergeCore && movedInventoryCount > 0) {
         mergeCore.triggerNotifyChange(sourceId, "variant_merge_source");
         mergeCore.triggerNotifyChange(targetId, "variant_merge_target");
