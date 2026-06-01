@@ -40,7 +40,6 @@ import {
   Crown,
   Map as MapIcon,
   ArrowUpDown,
-  Activity,
   TrendingUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -103,7 +102,6 @@ function isNavHrefActive(pathname: string, currentHref: string, href: string): b
 
 const navStructure: NavEntry[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
-  { label: "Enterprise Ops", icon: Activity, href: "/enterprise", roles: ["admin", "lead"] },
   {
     label: "Procurement",
     icon: ShoppingBag,

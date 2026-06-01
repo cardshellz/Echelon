@@ -76,7 +76,6 @@ import SyncLogPage from "@/pages/SyncLogPage";
 import OmsOrders from "@/pages/OmsOrders";
 import VendorList from "@/pages/VendorList";
 import VendorDetail from "@/pages/VendorDetail";
-import EnterpriseDashboard from "@/pages/EnterpriseDashboard";
 import DemandPlanner from "@/pages/DemandPlanner";
 import NotFound from "@/pages/not-found";
 
@@ -352,9 +351,7 @@ function Router() {
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/enterprise">
-          <ProtectedRoute component={EnterpriseDashboard} allowedRoles={["admin", "lead"]} />
-        </Route>
+        <Route path="/enterprise"><Redirect to="/" /></Route>
         <Route path="/demand-planner">
           <ProtectedRoute component={DemandPlanner} allowedRoles={["admin", "lead"]} />
         </Route>
