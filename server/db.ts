@@ -258,6 +258,21 @@ export async function runStartupMigrations(): Promise<void> {
         END IF;
       END $$;
     `);
+    // Phase 3: reserve dedup — one reserve ledger row per (order_id, order_item_id)
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_reserve_dedup
+        ON inventory.inventory_transactions (order_id, order_item_id)
+        WHERE transaction_type = 'reserve'
+          AND order_id IS NOT NULL
+          AND order_item_id IS NOT NULL
+          AND voided_at IS NULL
+    `);
+    // Phase 3: freeze-aware index for reservation bin lookup
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_warehouse_locations_unfrozen
+        ON warehouse.warehouse_locations (id)
+        WHERE cycle_count_freeze_id IS NULL
+    `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_order_id ON picking_logs(order_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_sku ON picking_logs(sku)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_timestamp ON picking_logs(timestamp)`);
