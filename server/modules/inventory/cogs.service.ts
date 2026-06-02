@@ -916,6 +916,102 @@ export class COGSService {
     return `${prefix}${String(seq).padStart(3, "0")}`;
   }
 
+  // ---------------------------------------------------------------------------
+  // BACKFILL LOT COSTS BY SKU (manual upload)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Backfill zero-cost lots from a user-provided SKU→cost mapping.
+   * For each entry, finds all lots where unitCostCents = 0 for that variant
+   * and stamps the provided cost. Cascades to COGS rows.
+   *
+   * Designed for one-time historical backfill where most inventory was loaded
+   * without POs.
+   */
+  async backfillLotCostsBySku(
+    entries: Array<{ sku: string; unitCostCents: number }>,
+  ): Promise<{
+    processed: number;
+    lotsUpdated: number;
+    cogsRowsUpdated: number;
+    skipped: Array<{ sku: string; reason: string }>;
+  }> {
+    let processed = 0;
+    let lotsUpdated = 0;
+    let cogsRowsUpdated = 0;
+    const skipped: Array<{ sku: string; reason: string }> = [];
+
+    for (const entry of entries) {
+      if (!entry.sku || entry.unitCostCents <= 0) {
+        skipped.push({ sku: entry.sku || "(empty)", reason: "invalid_entry" });
+        continue;
+      }
+
+      const variantResult = await this.db.execute(sql`
+        SELECT id FROM catalog.product_variants
+        WHERE UPPER(sku) = UPPER(${entry.sku})
+        LIMIT 1
+      `);
+      const variant = variantResult.rows?.[0];
+      if (!variant) {
+        skipped.push({ sku: entry.sku, reason: "sku_not_found" });
+        continue;
+      }
+
+      const variantId = variant.id;
+
+      const lotsResult = await this.db.execute(sql`
+        SELECT id, lot_number, COALESCE(landed_cost_cents, 0) AS landed_cost_cents
+        FROM inventory.inventory_lots
+        WHERE product_variant_id = ${variantId}
+          AND (unit_cost_cents = 0 OR unit_cost_cents IS NULL)
+      `);
+      const lots = lotsResult.rows || [];
+
+      if (lots.length === 0) {
+        skipped.push({ sku: entry.sku, reason: "no_zero_cost_lots" });
+        processed++;
+        continue;
+      }
+
+      for (const lot of lots) {
+        const landedAddon = Number(lot.landed_cost_cents) || 0;
+        const newTotal = entry.unitCostCents + landedAddon;
+
+        await this.db.execute(sql`
+          UPDATE inventory.inventory_lots
+          SET unit_cost_cents = ${entry.unitCostCents},
+              po_unit_cost_cents = ${entry.unitCostCents},
+              total_unit_cost_cents = ${newTotal},
+              cost_provisional = 0,
+              cost_source = 'backfill'
+          WHERE id = ${lot.id}
+        `);
+
+        const cascade = await this.cascadeRecostForLot(lot.id, newTotal);
+        cogsRowsUpdated += cascade.rowsUpdated;
+        lotsUpdated++;
+      }
+
+      // Update variant catalog costs so future lots pick this up via the resolver
+      await this.db.execute(sql`
+        UPDATE catalog.product_variants
+        SET last_cost_cents = ${entry.unitCostCents},
+            standard_cost_cents = CASE
+              WHEN standard_cost_cents IS NULL OR standard_cost_cents = 0
+              THEN ${entry.unitCostCents}
+              ELSE standard_cost_cents
+            END,
+            updated_at = NOW()
+        WHERE id = ${variantId}
+      `);
+
+      processed++;
+    }
+
+    return { processed, lotsUpdated, cogsRowsUpdated, skipped };
+  }
+
   withTx(tx: any): COGSService {
     return new COGSService(tx);
   }
