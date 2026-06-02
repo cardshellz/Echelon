@@ -401,7 +401,22 @@ function makeDb(scripted: Array<any>) {
 
   const select = vi.fn(() => chainable);
 
-  const execute = vi.fn(async (_query: any) => {
+  const execute = vi.fn(async (query: any) => {
+    // pushShipment serializes per-shipment with pg_advisory_lock/unlock.
+    // Those are infrastructure, not data — don't consume a scripted response
+    // for them, so the order-based scripts below stay unchanged.
+    let text = "";
+    try {
+      const chunks = (query as any)?.queryChunks;
+      text = Array.isArray(chunks)
+        ? chunks.map((c: any) => (typeof c === "string" ? c : c?.value?.join?.("") ?? "")).join("")
+        : String(query);
+    } catch {
+      text = "";
+    }
+    if (/advisory_(lock|unlock)/i.test(text)) {
+      return { rows: [] };
+    }
     calls.push({ kind: "execute" });
     if (remaining.length === 0) {
       return { rows: [] };
@@ -626,21 +641,23 @@ describe("pushShipment :: happy path", () => {
 
     // Inspect the UPDATE's SQL text: must set status='queued' and must
     // also clear voided_at + voided_reason so stale void state cannot
-    // survive a successful re-label push.
-    // The mock stores execute calls in order; index 4 is the UPDATE after
-    // non-shipping aggregate, shippable-scope aggregate, channel config,
-    // and the pre-flight idempotency re-check.
-    const updateQuery = mock.execute.mock.calls[4][0] as any;
-    const chunks: unknown[] = updateQuery?.queryChunks ?? [];
-    const sqlText = chunks
-      .map((c) => {
-        if (typeof c === "string") return c;
-        if (c && typeof c === "object" && Array.isArray((c as any).value)) {
-          return (c as any).value.join("");
-        }
-        return "";
-      })
-      .join("");
+    // survive a successful re-label push. Find the UPDATE call by content
+    // (robust to the per-shipment advisory lock/unlock execute calls that
+    // wrap the push) rather than a hardcoded index.
+    const sqlTextOf = (q: any): string =>
+      ((q?.queryChunks ?? []) as unknown[])
+        .map((c) => {
+          if (typeof c === "string") return c;
+          if (c && typeof c === "object" && Array.isArray((c as any).value)) {
+            return (c as any).value.join("");
+          }
+          return "";
+        })
+        .join("");
+    const updateCall = mock.execute.mock.calls.find((call) =>
+      sqlTextOf(call[0]).includes("UPDATE wms.outbound_shipments"),
+    );
+    const sqlText = sqlTextOf(updateCall?.[0]);
     expect(sqlText).toContain("UPDATE wms.outbound_shipments");
     expect(sqlText).toContain("status = 'queued'");
     expect(sqlText).toMatch(/voided_at\s*=\s*NULL/);
