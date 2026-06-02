@@ -1,5 +1,6 @@
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { format } from "date-fns";
 import {
   ArrowRight,
   Package,
@@ -26,6 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
+import { DateRangePicker, type DateRangeValue } from "@/components/DateRangePicker";
 
 interface SyncHealth {
   lastSuccessfulSync: string | null;
@@ -57,8 +59,7 @@ interface DashboardData {
     unpushed: number;
     requiresReview: number;
     onHold: number;
-    shippedToday: number;
-    shippedThisWeek: number;
+    shippedInRange: number;
   };
   inventoryHealth: {
     totalSkus: number;
@@ -82,9 +83,9 @@ interface DashboardData {
     inventoryValueCents: number;
     openPoValueCents: number;
     pendingApCents: number;
-    revenueToday: number;
-    ordersToday: number;
-    ordersThisWeek: number;
+    revenueCents: number;
+    orderCount: number;
+    avgOrderValueCents: number;
   };
   webhookHealth: {
     pendingRetries: number;
@@ -194,6 +195,13 @@ export default function Dashboard() {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [alertDismissed, setAlertDismissed] = React.useState(false);
+  const [dateRange, setDateRange] = React.useState<DateRangeValue>({
+    from: new Date(),
+    to: new Date(),
+  });
+
+  const fromStr = format(dateRange.from, "yyyy-MM-dd");
+  const toStr = format(dateRange.to, "yyyy-MM-dd");
 
   const { data: syncHealth } = useQuery<SyncHealth>({
     queryKey: ["/api/sync/health"],
@@ -201,7 +209,12 @@ export default function Dashboard() {
   });
 
   const { data, isLoading } = useQuery<DashboardData>({
-    queryKey: ["/api/enterprise/dashboard"],
+    queryKey: ["/api/enterprise/dashboard", fromStr, toStr],
+    queryFn: async () => {
+      const res = await fetch(`/api/enterprise/dashboard?from=${fromStr}&to=${toStr}`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load dashboard");
+      return res.json();
+    },
     refetchInterval: 60_000,
   });
 
@@ -322,27 +335,27 @@ export default function Dashboard() {
               Issues Detected
             </Badge>
           )}
+          <DateRangePicker value={dateRange} onChange={setDateRange} />
         </div>
       </div>
 
       {/* Top KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-2 md:gap-4">
         <KpiCard
-          title="Orders Today"
-          value={isLoading ? "—" : formatNumber(financialKpis?.ordersToday ?? 0)}
-          subtitle={financialKpis ? `${formatNumber(financialKpis.ordersThisWeek)} this week` : undefined}
+          title="Orders"
+          value={isLoading ? "—" : formatNumber(financialKpis?.orderCount ?? 0)}
+          subtitle={financialKpis?.avgOrderValueCents ? `avg ${formatCents(financialKpis.avgOrderValueCents)}` : undefined}
           icon={ShoppingCart}
           onClick={() => navigate("/orders")}
         />
         <KpiCard
-          title="Revenue Today"
-          value={isLoading ? "—" : formatCents(financialKpis?.revenueToday ?? 0)}
+          title="Revenue"
+          value={isLoading ? "—" : formatCents(financialKpis?.revenueCents ?? 0)}
           icon={DollarSign}
         />
         <KpiCard
-          title="Shipped Today"
-          value={isLoading ? "—" : formatNumber(shipmentHealth?.shippedToday ?? 0)}
-          subtitle={shipmentHealth ? `${formatNumber(shipmentHealth.shippedThisWeek)} this week` : undefined}
+          title="Shipped"
+          value={isLoading ? "—" : formatNumber(shipmentHealth?.shippedInRange ?? 0)}
           icon={Truck}
           onClick={() => navigate("/orders")}
         />
