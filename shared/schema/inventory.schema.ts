@@ -567,6 +567,7 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   // valuation prefers `totalUnitCostCents` (PO + allocated landed) when set.
   poLineId: integer("po_line_id"),
   poUnitCostCents: numeric("po_unit_cost_cents", { precision: 10, scale: 4 }).default("0"),
+  packagingCostCents: numeric("packaging_cost_cents", { precision: 10, scale: 4 }).default("0"),
   landedCostCents: numeric("landed_cost_cents", { precision: 10, scale: 4 }).default("0"),
   totalUnitCostCents: numeric("total_unit_cost_cents", { precision: 10, scale: 4 }).default("0"),
   qtyReceived: integer("qty_received").default(0),

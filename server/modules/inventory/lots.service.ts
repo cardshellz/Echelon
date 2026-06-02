@@ -71,6 +71,8 @@ export class InventoryLotService {
     warehouseLocationId: number;
     qty: number;
     unitCostCents: number;
+    productCostCents?: number;
+    packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     inboundShipmentId?: number;
@@ -86,6 +88,7 @@ export class InventoryLotService {
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
         unitCostCents: params.unitCostCents,
+        packagingCostCents: params.packagingCostCents ?? 0,
         qtyOnHand: params.qty,
         qtyReserved: 0,
         qtyPicked: 0,

@@ -73,6 +73,8 @@ export class InventoryUseCases {
     notes?: string;
     userId?: string;
     unitCostCents?: number;
+    productCostCents?: number;
+    packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     inboundShipmentId?: number;
@@ -120,6 +122,8 @@ export class InventoryUseCases {
           warehouseLocationId: params.warehouseLocationId,
           qty: params.qty,
           unitCostCents: resolved.costCents,
+          productCostCents: params.productCostCents,
+          packagingCostCents: params.packagingCostCents ?? 0,
           receivingOrderId: params.receivingOrderId,
           purchaseOrderId: params.purchaseOrderId,
           inboundShipmentId: params.inboundShipmentId,

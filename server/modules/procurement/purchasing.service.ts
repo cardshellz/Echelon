@@ -248,12 +248,13 @@ export function createPurchasingService(db: any, storage: Storage) {
       resolvedTotalProductCostCents = line.totalProductCostCents as number;
       resolvedPackagingCostCents = Number(line.packagingCostCents) || 0;
       subtotalCents = resolvedTotalProductCostCents + resolvedPackagingCostCents;
-      // Derive per-unit from total / qty (integer math, half-up).
+      // Derive per-unit from subtotal (product + packaging) / qty so the
+      // full cost basis flows through to inventory lots and COGS.
       resolvedUnitCostMills =
         qty > 0
           ? Number(
               signedRoundHalfUpDiv(
-                BigInt(resolvedTotalProductCostCents) * BigInt(100),
+                BigInt(subtotalCents) * BigInt(100),
                 BigInt(qty),
               ),
             )
@@ -262,7 +263,7 @@ export function createPurchasingService(db: any, storage: Storage) {
         qty > 0
           ? Number(
               signedRoundHalfUpDiv(
-                BigInt(resolvedTotalProductCostCents),
+                BigInt(subtotalCents),
                 BigInt(qty),
               ),
             )

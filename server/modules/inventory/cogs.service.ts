@@ -113,6 +113,7 @@ export class COGSService {
     warehouseLocationId: number;
     qtyPieces: number;
     poUnitCostCents?: number;
+    packagingCostCents?: number;
     landedCostCents?: number;
     poLineId?: number;
     inboundShipmentId?: number;
@@ -124,8 +125,9 @@ export class COGSService {
     notes?: string;
   }): Promise<InventoryLot> {
     const poUnitCost = params.poUnitCostCents ?? 0;
+    const packagingCost = params.packagingCostCents ?? 0;
     const landedCost = params.landedCostCents ?? 0;
-    const totalUnitCost = poUnitCost + landedCost;
+    const totalUnitCost = poUnitCost + packagingCost + landedCost;
     const costSource = params.costSource ?? 'manual';
 
     const lotNumber = await this.generateLotNumber();
@@ -145,17 +147,19 @@ export class COGSService {
         inboundShipmentId: params.inboundShipmentId ?? null,
         // COGS columns
         unitCostCents: totalUnitCost,
+        packagingCostCents: packagingCost,
         costProvisional: landedCost === 0 && costSource !== 'manual' ? 1 : 0,
         status: "active",
         notes: params.notes ?? null,
       } as any)
       .returning();
 
-    // Update COGS-specific columns via raw SQL (new columns not in drizzle schema yet)
+    // Update COGS-specific columns via raw SQL
     await this.db.execute(sql`
       UPDATE inventory_lots SET
         po_line_id = ${params.poLineId ?? null},
         po_unit_cost_cents = ${poUnitCost},
+        packaging_cost_cents = ${packagingCost},
         landed_cost_cents = ${landedCost},
         total_unit_cost_cents = ${totalUnitCost},
         qty_received = ${params.qtyPieces},
