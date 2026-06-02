@@ -256,16 +256,9 @@ async function getProcurementPipeline(): Promise<ProcurementPipelineSummary> {
 async function getFinancialKpis(from: Date, to: Date): Promise<FinancialKpis> {
   const [invResult, poResult, apResult, orderResult] = await Promise.all([
     db.execute(sql`
-      SELECT COALESCE(SUM(il.variant_qty * COALESCE(lot_cost.unit_cost_cents, 0)), 0)::bigint AS value
-      FROM inventory.inventory_levels il
-      LEFT JOIN LATERAL (
-        SELECT unit_cost_cents
-        FROM inventory.inventory_lots
-        WHERE product_variant_id = il.product_variant_id
-          AND on_hand_qty > 0
-        ORDER BY created_at DESC
-        LIMIT 1
-      ) lot_cost ON true
+      SELECT COALESCE(SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)), 0)::bigint AS value
+      FROM inventory.inventory_lots il
+      WHERE il.status = 'active' AND il.qty_on_hand > 0
     `),
     db.execute(sql`
       SELECT COALESCE(SUM(total_amount_cents), 0)::bigint AS value
@@ -283,8 +276,8 @@ async function getFinancialKpis(from: Date, to: Date): Promise<FinancialKpis> {
         COUNT(*)::int AS order_count
       FROM wms.orders
       WHERE cancelled_at IS NULL
-        AND order_placed_at >= ${from}
-        AND order_placed_at < ${to}
+        AND COALESCE(order_placed_at, created_at) >= ${from}
+        AND COALESCE(order_placed_at, created_at) < ${to}
     `),
   ]);
 
