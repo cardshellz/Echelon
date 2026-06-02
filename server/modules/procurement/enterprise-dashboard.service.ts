@@ -29,8 +29,7 @@ export interface ShipmentHealthSummary {
   unpushed: number;
   requiresReview: number;
   onHold: number;
-  shippedToday: number;
-  shippedThisWeek: number;
+  shippedInRange: number;
 }
 
 export interface InventoryHealthSummary {
@@ -57,9 +56,9 @@ export interface FinancialKpis {
   inventoryValueCents: number;
   openPoValueCents: number;
   pendingApCents: number;
-  revenueToday: number;
-  ordersToday: number;
-  ordersThisWeek: number;
+  revenueCents: number;
+  orderCount: number;
+  avgOrderValueCents: number;
 }
 
 export interface WebhookHealthSummary {
@@ -141,7 +140,7 @@ async function getOrderPipeline(): Promise<OrderPipelineSummary> {
   };
 }
 
-async function getShipmentHealth(): Promise<ShipmentHealthSummary> {
+async function getShipmentHealth(from: Date, to: Date): Promise<ShipmentHealthSummary> {
   const [statusResult, metricsResult] = await Promise.all([
     db.execute(sql`
       SELECT status::text AS status, COUNT(*)::int AS count
@@ -160,11 +159,8 @@ async function getShipmentHealth(): Promise<ShipmentHealthSummary> {
         COUNT(*) FILTER (WHERE requires_review = true AND voided_at IS NULL)::int AS requires_review,
         COUNT(*) FILTER (WHERE status = 'on_hold' AND voided_at IS NULL)::int AS on_hold,
         COUNT(*) FILTER (
-          WHERE shipped_at >= CURRENT_DATE AND voided_at IS NULL
-        )::int AS shipped_today,
-        COUNT(*) FILTER (
-          WHERE shipped_at >= CURRENT_DATE - INTERVAL '7 days' AND voided_at IS NULL
-        )::int AS shipped_this_week
+          WHERE shipped_at >= ${from} AND shipped_at < ${to} AND voided_at IS NULL
+        )::int AS shipped_in_range
       FROM wms.outbound_shipments
     `),
   ]);
@@ -179,8 +175,7 @@ async function getShipmentHealth(): Promise<ShipmentHealthSummary> {
     unpushed: num(m?.unpushed),
     requiresReview: num(m?.requires_review),
     onHold: num(m?.on_hold),
-    shippedToday: num(m?.shipped_today),
-    shippedThisWeek: num(m?.shipped_this_week),
+    shippedInRange: num(m?.shipped_in_range),
   };
 }
 
@@ -258,7 +253,7 @@ async function getProcurementPipeline(): Promise<ProcurementPipelineSummary> {
   };
 }
 
-async function getFinancialKpis(): Promise<FinancialKpis> {
+async function getFinancialKpis(from: Date, to: Date): Promise<FinancialKpis> {
   const [invResult, poResult, apResult, orderResult] = await Promise.all([
     db.execute(sql`
       SELECT COALESCE(SUM(il.variant_qty * COALESCE(lot_cost.unit_cost_cents, 0)), 0)::bigint AS value
@@ -284,22 +279,25 @@ async function getFinancialKpis(): Promise<FinancialKpis> {
     `),
     db.execute(sql`
       SELECT
-        COALESCE(SUM(CASE WHEN order_placed_at >= CURRENT_DATE THEN amount_paid_cents ELSE 0 END), 0)::bigint AS revenue_today,
-        COUNT(*) FILTER (WHERE order_placed_at >= CURRENT_DATE)::int AS orders_today,
-        COUNT(*) FILTER (WHERE order_placed_at >= CURRENT_DATE - INTERVAL '7 days')::int AS orders_this_week
+        COALESCE(SUM(amount_paid_cents), 0)::bigint AS revenue_cents,
+        COUNT(*)::int AS order_count
       FROM wms.orders
       WHERE cancelled_at IS NULL
+        AND order_placed_at >= ${from}
+        AND order_placed_at < ${to}
     `),
   ]);
 
   const o = orderResult.rows[0] as any;
+  const orderCount = num(o?.order_count);
+  const revenueCents = num(o?.revenue_cents);
   return {
     inventoryValueCents: num((invResult.rows[0] as any)?.value),
     openPoValueCents: num((poResult.rows[0] as any)?.value),
     pendingApCents: num((apResult.rows[0] as any)?.value),
-    revenueToday: num(o?.revenue_today),
-    ordersToday: num(o?.orders_today),
-    ordersThisWeek: num(o?.orders_this_week),
+    revenueCents,
+    orderCount,
+    avgOrderValueCents: orderCount > 0 ? Math.round(revenueCents / orderCount) : 0,
   };
 }
 
@@ -374,7 +372,13 @@ async function safe<T>(fn: () => Promise<T>, fallback: T, label: string): Promis
 
 // ─── Main aggregator ───────────────────────────────────────────────
 
-export async function getEnterpriseDashboard(): Promise<EnterpriseDashboard> {
+export interface DashboardDateRange {
+  from: Date;
+  to: Date;
+}
+
+export async function getEnterpriseDashboard(range: DashboardDateRange): Promise<EnterpriseDashboard> {
+  const { from, to } = range;
   const [
     orderPipeline,
     shipmentHealth,
@@ -385,10 +389,10 @@ export async function getEnterpriseDashboard(): Promise<EnterpriseDashboard> {
     forwardDemand,
   ] = await Promise.all([
     safe(getOrderPipeline, { total: 0, byStatus: {}, stuckOrders: 0, avgAgeHours: 0, oldestUnshippedHours: 0 }, "orderPipeline"),
-    safe(getShipmentHealth, { total: 0, byStatus: {}, unpushed: 0, requiresReview: 0, onHold: 0, shippedToday: 0, shippedThisWeek: 0 }, "shipmentHealth"),
+    safe(() => getShipmentHealth(from, to), { total: 0, byStatus: {}, unpushed: 0, requiresReview: 0, onHold: 0, shippedInRange: 0 }, "shipmentHealth"),
     safe(getInventoryHealth, { totalSkus: 0, totalOnHand: 0, totalReserved: 0, totalAvailable: 0, lowStockSkus: 0, outOfStockSkus: 0, overstockSkus: 0, negativeInventory: 0 }, "inventoryHealth"),
     safe(getProcurementPipeline, { openPoCount: 0, openPoValue: 0, draftPoCount: 0, overduePoCount: 0, inTransitShipments: 0, expectedReceiptsNext30Days: 0 }, "procurementPipeline"),
-    safe(getFinancialKpis, { inventoryValueCents: 0, openPoValueCents: 0, pendingApCents: 0, revenueToday: 0, ordersToday: 0, ordersThisWeek: 0 }, "financialKpis"),
+    safe(() => getFinancialKpis(from, to), { inventoryValueCents: 0, openPoValueCents: 0, pendingApCents: 0, revenueCents: 0, orderCount: 0, avgOrderValueCents: 0 }, "financialKpis"),
     safe(getWebhookHealth, { pendingRetries: 0, deadLetters: 0, failedInbox: 0, staleRetries: 0 }, "webhookHealth"),
     safe(getForwardDemandSummary, { activeEvents: 0, plannedEvents: 0, totalForwardDemandPieces: 0, productsWithForwardDemand: 0 }, "forwardDemand"),
   ]);
